@@ -65,12 +65,17 @@ Traces write to `~/.fermix/traces/YYYY-MM-DD/` as JSONL. See `FermixCore.Trace`.
 ## Commands
 
 ```sh
-mix test                          # All tests
-mix format --check-formatted      # Format check
+mix quality                       # THE gate — must pass before any commit
+mix test --cover                  # Tests + coverage
+mix format --check-formatted      # Formatting
+mix compile --warnings-as-errors  # Zero warnings
 mix credo --strict                # Static analysis
-mix dialyzer                      # Type checking
+mix dialyzer                      # Type checking via typespecs
 mix phx.server                    # Run
 ```
+
+Git pre-commit hook enforces: format → compile (warnings=errors) → credo → test.
+StreamData available for property-based testing. Use it for parsers and data transforms.
 
 ## Key Docs
 
