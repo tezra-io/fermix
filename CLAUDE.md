@@ -51,6 +51,21 @@ If you can't articulate correct behavior as a test, the requirements aren't clea
 
 "Write failing tests for this feature, then make them pass" — not "implement this feature."
 
+## Code Quality Rules (Non-Negotiable)
+
+1. **Keep it linear.** Max two levels of nesting. Flatten `with` chains. Push back on >2 nesting levels.
+2. **Bound every loop.** Explicit max on every iteration — retries, polls, recursion. Define what happens at the cap.
+3. **One function, one job.** 40-60 lines max. Describable in one sentence without "and."
+4. **Know what you own.** Every resource opened gets closed — happy path AND error path. Use `try/after`.
+5. **Narrow your state.** No module globals. Pass dependencies explicitly. Data lives close to its use.
+6. **State your assumptions.** Guard clauses and input validation on every public function. Fail loudly.
+7. **Never swallow errors.** No bare `rescue`. No `{:error, _} -> :ok`. Every failure logged, raised, or returned.
+8. **Surface side effects.** I/O and mutations obvious at call site. Separate pure from effectful.
+9. **One layer of magic.** Readable > elegant. If you can't trace what runs when you call it, simplify.
+10. **Warnings are errors.** `mix credo --strict`, `mix dialyzer`, `mix format --check-formatted` must pass. Zero warnings.
+11. **Read every line.** AI output is not peer-reviewed. Read it all — especially error paths and edge cases.
+12. **Tests first.** Covered in TDD section above.
+
 ## Conventions
 
 - **Formatting:** `mix format` — enforced, no exceptions
