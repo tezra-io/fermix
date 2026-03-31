@@ -40,10 +40,21 @@ fermix/
 └── journals/              # Skill execution logs
 ```
 
+## Test-First Development (Mandatory)
+
+Every feature follows TDD:
+1. **Write failing tests first** — define what correct behavior looks like before writing production code
+2. **Make the tests pass** — implement the minimum code to satisfy the tests
+3. **Refactor** — clean up while tests stay green
+
+If you can't articulate correct behavior as a test, the requirements aren't clear enough to build from. Stop and clarify.
+
+"Write failing tests for this feature, then make them pass" — not "implement this feature."
+
 ## Conventions
 
 - **Formatting:** `mix format` — enforced, no exceptions
-- **Testing:** `mix test` — write tests for all public functions
+- **Testing:** `mix test` — write tests for all public functions, tests come BEFORE implementation
 - **Dialyzer:** `mix dialyzer` — typespecs on all public functions
 - **Credo:** `mix credo --strict` — static analysis
 - **Naming:** snake_case for functions/variables, PascalCase for modules
