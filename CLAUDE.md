@@ -43,6 +43,17 @@ fermix/ (umbrella)
 9. **Minimal indirection.** Readable > elegant. One layer of abstraction.
 10. **Warnings = errors.** `mix credo --strict`, `mix dialyzer`, `mix format --check-formatted` must pass.
 
+## Observability (Every Task)
+
+Every component must emit structured traces. This is not optional.
+- LLM calls → `:telemetry.execute([:fermix, :provider, :call], measurements, metadata)`
+- Tool executions → `:telemetry.execute([:fermix, :tool, :exec], ...)`
+- Channel messages → `:telemetry.execute([:fermix, :channel, :message], ...)`
+- Agent lifecycle → `Trace.record(:agent_event, agent, data)`
+- Errors → always traced before returning `{:error, reason}`
+
+Traces write to `~/.fermix/traces/YYYY-MM-DD/` as JSONL. See `FermixCore.Trace`.
+
 ## Conventions
 
 - `@callback` for all plugin interfaces (providers, channels, tools)
