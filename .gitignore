@@ -1,0 +1,31 @@
+# Elixir
+/_build/
+/deps/
+/*.lock
+
+# Umbrella apps
+/apps/*/deps/
+/apps/*/_build/
+
+# Phoenix
+/apps/fermix_web/priv/static/assets/
+
+# Rustler
+/apps/fermix_nif/native/fermix_nif/target/
+
+# Environment
+.env
+*.secret.exs
+
+# IDE
+.elixir_ls/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+/cover/
+/apps/*/cover/
