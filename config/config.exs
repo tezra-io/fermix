@@ -36,6 +36,14 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+config :fermix_core, :trace,
+  base_dir: Path.expand("~/.fermix/traces")
+
+config :fermix_core, :log,
+  file: Path.expand("~/.fermix/logs/fermix.log"),
+  max_no_bytes: 10_485_760,
+  max_no_files: 5
+
 config :phoenix, :json_library, Jason
 
 import_config "#{config_env()}.exs"

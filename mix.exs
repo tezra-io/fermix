@@ -9,7 +9,6 @@ defmodule Fermix.MixProject do
       deps: deps(),
       aliases: aliases(),
       releases: releases(),
-      preferred_cli_env: [quality: :test],
       dialyzer: [plt_add_apps: [:ex_unit]]
     ]
   end
@@ -20,6 +19,10 @@ defmodule Fermix.MixProject do
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.0", only: [:dev, :test]}
     ]
+  end
+
+  def cli do
+    [preferred_envs: [quality: :test]]
   end
 
   defp aliases do

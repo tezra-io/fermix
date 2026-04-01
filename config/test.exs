@@ -7,6 +7,8 @@ config :fermix_web, FermixWebWeb.Endpoint,
 
 config :logger, level: :warning
 
+config :fermix_core, :log, enabled: false
+
 config :phoenix, :plug_init_mode, :runtime
 
 config :phoenix_live_view,

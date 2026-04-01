@@ -25,8 +25,9 @@ defmodule FermixCore.MixProject do
 
   defp deps do
     [
+      {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
-      {:jason, "~> 1.4"}
+      {:telemetry, "~> 1.0"}
     ]
   end
 end
