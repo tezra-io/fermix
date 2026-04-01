@@ -29,3 +29,4 @@ Thumbs.db
 # Test
 /cover/
 /apps/*/cover/
+erl_crash.dump
