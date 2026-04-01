@@ -9,6 +9,22 @@ config :logger, level: :warning
 
 config :fermix_core, :log, enabled: false
 
+config :fermix_core,
+  providers: [
+    openai: [
+      base_url: "https://api.openai.com/v1",
+      default_model: "gpt-4o-mini",
+      api_key: "test-key"
+    ]
+  ]
+
+config :fermix_channels,
+  telegram: [
+    enabled: false,
+    webhook_path: "/webhook/telegram",
+    bot_token: "test-token"
+  ]
+
 config :phoenix, :plug_init_mode, :runtime
 
 config :phoenix_live_view,

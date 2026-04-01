@@ -24,6 +24,34 @@ config :fermix_web, FermixWebWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
 if config_env() == :prod do
+  config :fermix_core,
+    providers: [
+      openai: [
+        api_key: System.fetch_env!("OPENAI_API_KEY")
+      ]
+    ]
+
+  config :fermix_channels,
+    telegram: [
+      bot_token: System.fetch_env!("TELEGRAM_BOT_TOKEN"),
+      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET")
+    ]
+else
+  config :fermix_core,
+    providers: [
+      openai: [
+        api_key: System.get_env("OPENAI_API_KEY", "")
+      ]
+    ]
+
+  config :fermix_channels,
+    telegram: [
+      bot_token: System.get_env("TELEGRAM_BOT_TOKEN", ""),
+      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET")
+    ]
+end
+
+if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
   # want to use a different value for prod and you most likely don't want
