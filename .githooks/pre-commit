@@ -1,0 +1,6 @@
+#!/bin/sh
+set -e
+mix format --check-formatted
+mix compile --warnings-as-errors
+mix credo --strict
+mix test
