@@ -4,6 +4,7 @@ defmodule FermixCore.Application do
   use Application
   require Logger
 
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Tools.Registry
   alias FermixCore.Trace
 
@@ -13,7 +14,8 @@ defmodule FermixCore.Application do
 
     children = [
       {Trace, trace_opts()},
-      Registry
+      Registry,
+      ConversationStore
     ]
 
     opts = [strategy: :one_for_one, name: FermixCore.Supervisor]
