@@ -150,7 +150,9 @@ defmodule FermixCore.Tools.ShellTest do
       handler_id,
       [:fermix, :tool, :exec],
       fn event, measurements, metadata, _config ->
-        send(test_pid, {:telemetry, event, measurements, metadata})
+        if metadata.tool == "shell" do
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end
       end,
       nil
     )
