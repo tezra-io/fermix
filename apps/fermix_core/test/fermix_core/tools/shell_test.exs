@@ -119,11 +119,10 @@ defmodule FermixCore.Tools.ShellTest do
 
       Shell.execute(%{"command" => "exit 1"}, @context)
 
-      assert_receive {:telemetry, [:fermix, :tool, :exec], measurements, metadata}
+      assert_receive {:telemetry, [:fermix, :tool, :exec], measurements,
+                      %{tool: "shell", agent: "test_agent", success: false} = metadata}
+
       assert is_integer(measurements.duration_ms)
-      assert metadata.tool == "shell"
-      assert metadata.agent == "test_agent"
-      assert metadata.success == false
 
       :telemetry.detach(handler_id)
     end
