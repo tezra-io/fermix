@@ -4,6 +4,7 @@ defmodule FermixCore.Application do
   use Application
   require Logger
 
+  alias FermixCore.Tools.Registry
   alias FermixCore.Trace
 
   @impl true
@@ -11,7 +12,8 @@ defmodule FermixCore.Application do
     setup_file_logger()
 
     children = [
-      {Trace, trace_opts()}
+      {Trace, trace_opts()},
+      Registry
     ]
 
     opts = [strategy: :one_for_one, name: FermixCore.Supervisor]
