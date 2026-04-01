@@ -20,8 +20,10 @@ defmodule FermixWebWeb.Router do
     get "/", PageController, :home
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", FermixWebWeb do
-  #   pipe_through :api
-  # end
+  scope "/", FermixWebWeb do
+    pipe_through :api
+
+    get "/health", HealthController, :index
+    post "/webhook/telegram", WebhookController, :telegram
+  end
 end
