@@ -36,6 +36,23 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+config :fermix_core,
+  providers: [
+    openai: [
+      base_url: "https://api.openai.com/v1",
+      default_model: "gpt-4o-mini",
+      default_temperature: 0.7
+    ]
+  ],
+  max_conversation_history: 50,
+  context_window_limit: 120_000
+
+config :fermix_channels,
+  telegram: [
+    enabled: true,
+    webhook_path: "/webhook/telegram"
+  ]
+
 config :fermix_core, :trace,
   base_dir: Path.expand("~/.fermix/traces")
 
