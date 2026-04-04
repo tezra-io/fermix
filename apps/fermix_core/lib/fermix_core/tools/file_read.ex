@@ -61,46 +61,52 @@ defmodule FermixCore.Tools.FileRead do
   end
 
   defp do_execute(args) do
-    path = Map.fetch!(args, "path")
-    offset = Map.get(args, "offset", 1)
-    limit = Map.get(args, "limit")
+    with {:ok, path} <- Map.fetch(args, "path") do
+      offset = Map.get(args, "offset", 1)
+      limit = Map.get(args, "limit")
 
-    with :ok <- validate_path(path),
-         {:ok, content} <- File.read(path) do
-      lines = String.split(content, "\n")
-      sliced = slice_lines(lines, offset, limit)
-      {:ok, Tool.success(Enum.join(sliced, "\n"))}
+      with :ok <- validate_path(path),
+           {:ok, content} <- File.read(path) do
+        lines = String.split(content, "\n")
+        sliced = slice_lines(lines, offset, limit)
+        {:ok, Tool.success(Enum.join(sliced, "\n"))}
+      else
+        {:error, :enoent} ->
+          {:ok, Tool.error("File not found: #{path}")}
+
+        {:error, :eisdir} ->
+          {:ok, Tool.error("Path is a directory: #{path}")}
+
+        {:error, reason} when is_binary(reason) ->
+          {:ok, Tool.error(reason)}
+
+        {:error, reason} ->
+          {:ok, Tool.error("Failed to read file: #{inspect(reason)}")}
+      end
     else
-      {:error, :enoent} ->
-        {:ok, Tool.error("File not found: #{path}")}
-
-      {:error, :eisdir} ->
-        {:ok, Tool.error("Path is a directory: #{path}")}
-
-      {:error, reason} when is_binary(reason) ->
-        {:ok, Tool.error(reason)}
-
-      {:error, reason} ->
-        {:ok, Tool.error("Failed to read file: #{inspect(reason)}")}
+      :error -> {:ok, Tool.error("Missing required parameter: path")}
     end
   end
 
   defp validate_path(path) when is_binary(path) and byte_size(path) > 0 do
-    if path_traversal?(path) do
-      {:error, "Path traversal is not allowed"}
-    else
-      :ok
+    cond do
+      String.contains?(path, "\0") ->
+        {:error, "Path contains null bytes"}
+
+      has_traversal_component?(path) ->
+        {:error, "Path traversal is not allowed"}
+
+      true ->
+        :ok
     end
   end
 
   defp validate_path(_), do: {:error, "Path must be a non-empty string"}
 
-  defp path_traversal?(path) do
+  defp has_traversal_component?(path) do
     path
-    |> Path.expand()
     |> Path.split()
     |> Enum.any?(&(&1 == ".."))
-    |> Kernel.or(String.contains?(path, ".."))
   end
 
   defp slice_lines(lines, offset, nil), do: Enum.drop(lines, offset - 1)

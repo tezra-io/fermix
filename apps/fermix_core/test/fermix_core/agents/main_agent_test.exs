@@ -87,6 +87,10 @@ defmodule FermixCore.Agents.MainAgentTest do
     registry_name = :"test_registry_#{suffix}"
     conv_name = :"test_conv_#{suffix}"
     agent_name = :"test_main_agent_#{suffix}"
+    task_sup_name = :"test_task_sup_#{suffix}"
+
+    {:ok, _} =
+      start_supervised({Task.Supervisor, name: task_sup_name}, id: :test_task_sup)
 
     {:ok, _} = start_supervised({Registry, [name: registry_name]}, id: :test_registry)
     {:ok, _} = start_supervised({ConversationStore, [name: conv_name]}, id: :test_conv)
@@ -98,7 +102,8 @@ defmodule FermixCore.Agents.MainAgentTest do
            name: agent_name,
            provider: MockProvider,
            registry: registry_name,
-           conversation_store: conv_name
+           conversation_store: conv_name,
+           task_supervisor: task_sup_name
          ]},
         id: :test_main_agent
       )

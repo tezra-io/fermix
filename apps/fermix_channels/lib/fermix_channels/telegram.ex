@@ -71,60 +71,93 @@ defmodule FermixChannels.Telegram do
   @impl true
   @spec verify_webhook(Plug.Conn.t()) :: :ok | {:error, term()}
   def verify_webhook(conn) do
-    {:ok, config} = FermixCore.Config.channel(:telegram)
-    expected = Keyword.fetch!(config, :webhook_secret)
+    with {:ok, config} <- FermixCore.Config.channel(:telegram),
+         expected when is_binary(expected) and expected != "" <-
+           Keyword.get(config, :webhook_secret) do
+      verify_token(conn, expected)
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :not_configured}
+    end
+  end
 
+  defp verify_token(conn, expected) do
     case Plug.Conn.get_req_header(conn, "x-telegram-bot-api-secret-token") do
-      [^expected] -> :ok
-      [_wrong] -> {:error, :invalid_token}
-      [] -> {:error, :missing_token}
+      [provided] when is_binary(provided) ->
+        if Plug.Crypto.secure_compare(provided, expected) do
+          :ok
+        else
+          {:error, :invalid_token}
+        end
+
+      [] ->
+        {:error, :missing_token}
+
+      _ ->
+        {:error, :invalid_token}
     end
   end
 
   @impl true
-  @spec start_typing(String.t()) :: :ok
+  @spec start_typing(String.t()) :: :ok | {:error, term()}
   def start_typing(chat_id, opts \\ []) do
-    token = get_bot_token()
-    url = "#{@bot_api_base}/bot#{token}/sendChatAction"
-    body = %{chat_id: chat_id, action: "typing"}
+    with {:ok, token} <- get_bot_token() do
+      url = "#{@bot_api_base}/bot#{token}/sendChatAction"
+      body = %{chat_id: chat_id, action: "typing"}
 
-    Req.new(url: url, method: :post, json: body)
-    |> Req.merge(req_options(opts))
-    |> Req.request!()
+      case Req.new(url: url, method: :post, json: body)
+           |> Req.merge(req_options(opts))
+           |> Req.request() do
+        {:ok, _} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
 
-    :ok
+  @spec build_agent_messages([FermixChannels.Channel.message()]) :: [map()]
+  def build_agent_messages(messages) do
+    Enum.map(messages, fn msg ->
+      %{
+        content: msg.content,
+        sender: msg.sender,
+        channel: msg.channel,
+        chat_id: msg.chat_id,
+        reply_fn: fn text -> send_message(msg.chat_id, text) end
+      }
+    end)
   end
 
   # -- Internals --
 
   defp post_send_message(chat_id, text, opts) do
-    token = get_bot_token()
-    url = "#{@bot_api_base}/bot#{token}/sendMessage"
+    with {:ok, token} <- get_bot_token() do
+      url = "#{@bot_api_base}/bot#{token}/sendMessage"
 
-    body =
-      %{
-        chat_id: chat_id,
-        text: text,
-        parse_mode: Keyword.get(opts, :parse_mode, "MarkdownV2")
-      }
-      |> maybe_put_reply_to(opts)
+      body =
+        %{
+          chat_id: chat_id,
+          text: text,
+          parse_mode: Keyword.get(opts, :parse_mode, "MarkdownV2")
+        }
+        |> maybe_put_reply_to(opts)
 
-    result =
-      Req.new(url: url, method: :post, json: body)
-      |> Req.merge(req_options(opts))
-      |> Req.request()
+      result =
+        Req.new(url: url, method: :post, json: body)
+        |> Req.merge(req_options(opts))
+        |> Req.request()
 
-    case result do
-      {:ok, %{status: 200}} ->
-        :ok
+      case result do
+        {:ok, %{status: 200}} ->
+          :ok
 
-      {:ok, %{status: status, body: response}} ->
-        Logger.error("Telegram sendMessage failed: #{status} - #{inspect(response)}")
-        {:error, "Telegram API error: #{status}"}
+        {:ok, %{status: status, body: response}} ->
+          Logger.error("Telegram sendMessage failed: #{status} - #{inspect(response)}")
+          {:error, "Telegram API error: #{status}"}
 
-      {:error, reason} ->
-        Logger.error("Telegram request failed: #{inspect(reason)}")
-        {:error, reason}
+        {:error, reason} ->
+          Logger.error("Telegram request failed: #{inspect(reason)}")
+          {:error, reason}
+      end
     end
   end
 
@@ -136,8 +169,8 @@ defmodule FermixChannels.Telegram do
   end
 
   defp parse_message(msg) do
-    chat_id = to_string(msg["chat"]["id"])
-    sender = msg["from"]["username"] || msg["from"]["first_name"] || "unknown"
+    chat_id = msg |> get_in(["chat", "id"]) |> to_string()
+    sender = get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
     content = msg["text"] || msg["caption"] || ""
 
     message = %{
@@ -173,8 +206,12 @@ defmodule FermixChannels.Telegram do
   end
 
   defp get_bot_token do
-    {:ok, config} = FermixCore.Config.channel(:telegram)
-    Keyword.fetch!(config, :bot_token)
+    with {:ok, config} <- FermixCore.Config.channel(:telegram),
+         {:ok, token} when is_binary(token) and token != "" <- Keyword.fetch(config, :bot_token) do
+      {:ok, token}
+    else
+      _ -> {:error, :not_configured}
+    end
   end
 
   defp req_options(opts) do

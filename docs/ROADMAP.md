@@ -50,7 +50,20 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 
 ---
 
-## Milestone 3: Full Channel Coverage
+## Milestone 3: Onboarding & Channel Coverage
+
+**Goal:** First-run onboarding experience + support for all major messaging platforms.
+
+### Onboarding
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **CLI onboarding wizard** | Interactive `fermix setup` — walks through API keys, provider selection, channel config, workspace init | P0 | New | N/A | M |
+| **LiveView onboarding** | Browser-based first-run setup at localhost:4000/setup — same flow as CLI but visual | P1 | New | N/A | M |
+| **Config validation** | Validate all config on startup, surface clear errors for missing/invalid keys | P0 | New | N/A | S |
+| **Health check endpoint** | /health with provider connectivity, channel status, memory backend health | P1 | New | N/A | S |
+
+### Channels
 
 **Goal:** Support all major messaging platforms that RustyClaw supports.
 
@@ -177,7 +190,7 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 | **web_fetch** | HTTP fetch + content extraction | P0 | Rewrite | `src/tools/web_fetch.rs` | M |
 | **web_search_tool** | DuckDuckGo/web search | P1 | Rewrite | `src/tools/web_search_tool.rs` | M |
 | **http_request** | Generic HTTP client tool | P1 | Rewrite | `src/tools/http_request.rs` | M |
-| **browser** | CDP browser automation (screenshots, clicks, forms) | P1 | Rewrite | `src/tools/browser.rs` | L |
+| **browser** | Browser automation via [agent-browser](https://github.com/vercel-labs/agent-browser) CLI — native Rust, accessibility tree snapshots with refs, no Playwright dependency | P1 | New | N/A | M |
 | **browser_open** | Open URLs in user's browser | P2 | Rewrite | `src/tools/browser_open.rs` | S |
 
 ### Delegation & Orchestration Tools
