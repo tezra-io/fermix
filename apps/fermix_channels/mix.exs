@@ -18,6 +18,7 @@ defmodule FermixChannels.MixProject do
 
   def application do
     [
+      mod: {FermixChannels.Application, []},
       extra_applications: [:logger]
     ]
   end

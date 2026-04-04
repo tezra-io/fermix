@@ -5,6 +5,7 @@ defmodule FermixCore.Application do
   require Logger
 
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
   alias FermixCore.Tools.Registry
@@ -13,20 +14,54 @@ defmodule FermixCore.Application do
   @impl true
   def start(_type, _args) do
     setup_file_logger()
+    Trace.TelemetryHandler.attach()
 
-    children = [
-      {Trace, trace_opts()},
-      Registry,
-      ConversationStore,
-      Store,
-      MainAgent
-    ]
+    children =
+      [
+        {Task.Supervisor, name: FermixCore.TaskSupervisor},
+        {Trace, trace_opts()},
+        maybe_token_manager(),
+        Registry,
+        ConversationStore,
+        Store,
+        MainAgent
+      ]
+      |> List.flatten()
 
-    opts = [strategy: :one_for_one, name: FermixCore.Supervisor]
+    opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
-      Trace.TelemetryHandler.attach()
+      register_tools()
       {:ok, pid}
+    end
+  end
+
+  defp register_tools do
+    tools = [
+      FermixCore.Tools.Shell,
+      FermixCore.Tools.FileRead,
+      FermixCore.Tools.FileWrite,
+      FermixCore.Tools.MemoryStore,
+      FermixCore.Tools.MemoryRecall,
+      FermixCore.Tools.Browser
+    ]
+
+    Enum.each(tools, fn tool ->
+      case Registry.register(tool) do
+        :ok -> :ok
+        {:error, :already_registered} -> :ok
+      end
+    end)
+  end
+
+  defp maybe_token_manager do
+    providers = Application.get_env(:fermix_core, :providers, [])
+    openai = Keyword.get(providers, :openai, [])
+
+    if Keyword.get(openai, :auth_mode) == :oauth do
+      [TokenManager]
+    else
+      []
     end
   end
 

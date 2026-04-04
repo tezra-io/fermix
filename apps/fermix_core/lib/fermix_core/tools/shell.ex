@@ -64,15 +64,18 @@ defmodule FermixCore.Tools.Shell do
   end
 
   defp do_execute(args) do
-    command = Map.fetch!(args, "command")
-    working_dir = Map.get(args, "working_dir", File.cwd!())
-    timeout = Map.get(args, "timeout_ms", @default_timeout_ms)
+    with {:ok, command} <- Map.fetch(args, "command") do
+      working_dir = Map.get(args, "working_dir", File.cwd!())
+      timeout = Map.get(args, "timeout_ms", @default_timeout_ms)
 
-    with :ok <- validate_command(command),
-         :ok <- validate_working_dir(working_dir) do
-      run_command(command, working_dir, timeout)
+      with :ok <- validate_command(command),
+           :ok <- validate_working_dir(working_dir) do
+        run_command(command, working_dir, timeout)
+      else
+        {:error, reason} -> {:ok, Tool.error(reason)}
+      end
     else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+      :error -> {:ok, Tool.error("Missing required parameter: command")}
     end
   end
 

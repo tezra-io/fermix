@@ -39,7 +39,8 @@ defmodule FermixCore.Memory.ConversationStore do
 
   def get_history(key, opts) when is_list(opts) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:get_history, key, @max_messages_default})
+    limit = Keyword.get(opts, :limit)
+    GenServer.call(server, {:get_history, key, limit})
   end
 
   def get_history(key, limit) when is_integer(limit) and limit > 0 do
@@ -97,7 +98,11 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   @impl true
-  def handle_call({:get_history, key, limit}, _from, state) do
+  def handle_call({:get_history, key, nil}, from, state) do
+    handle_call({:get_history, key, state.max_messages}, from, state)
+  end
+
+  def handle_call({:get_history, key, limit}, _from, state) when is_integer(limit) do
     messages =
       state.conversations
       |> Map.get(key, [])

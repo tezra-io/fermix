@@ -300,6 +300,96 @@ defmodule FermixCore.Providers.OpenAITest do
     end
   end
 
+  # -- chat/2: OAuth auth_mode --
+
+  describe "chat/2 OAuth auth_mode" do
+    test "uses token from TokenManager when auth_mode is :oauth" do
+      # Start a TokenManager with a known token
+      dir = Path.join(System.tmp_dir!(), "fermix_oauth_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      auth_path = Path.join(dir, "auth.json")
+
+      File.write!(
+        auth_path,
+        Jason.encode!(%{
+          "tokens" => %{"access_token" => "oauth_test_token", "refresh_token" => "r"},
+          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+        })
+      )
+
+      tm_name = :"tm_oauth_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {FermixCore.Auth.TokenManager,
+         name: tm_name, fermix_auth_path: auth_path, codex_auth_path: Path.join(dir, "nope.json")},
+        id: :test_tm
+      )
+
+      responses_body = %{
+        "output_text" => "from oauth",
+        "output" => [],
+        "model" => "gpt-4o-mini",
+        "usage" => %{"input_tokens" => 10, "output_tokens" => 20}
+      }
+
+      Req.Test.stub(:openai, fn conn ->
+        [auth] = Plug.Conn.get_req_header(conn, "authorization")
+        send(self(), {:auth_header, auth})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(responses_body))
+      end)
+
+      assert {:ok, resp} =
+               OpenAI.chat(
+                 [%{role: "user", content: "hi"}],
+                 auth_mode: :oauth,
+                 token_server: tm_name,
+                 responses_url: "http://localhost/responses",
+                 req_options: [plug: {Req.Test, :openai}]
+               )
+
+      assert resp.content == "from oauth"
+      assert resp.usage.prompt_tokens == 10
+      assert resp.usage.completion_tokens == 20
+      assert resp.tool_calls == []
+      assert_received {:auth_header, "Bearer oauth_test_token"}
+
+      File.rm_rf!(dir)
+    end
+
+    test "returns error when TokenManager has no token" do
+      tm_name = :"tm_empty_#{System.unique_integer([:positive])}"
+
+      dir =
+        Path.join(System.tmp_dir!(), "fermix_oauth_empty_#{System.unique_integer([:positive])}")
+
+      start_supervised!(
+        {FermixCore.Auth.TokenManager,
+         name: tm_name,
+         fermix_auth_path: Path.join(dir, "a.json"),
+         codex_auth_path: Path.join(dir, "b.json")},
+        id: :test_tm_empty
+      )
+
+      assert {:error, :no_token} =
+               OpenAI.chat(
+                 [%{role: "user", content: "hi"}],
+                 auth_mode: :oauth,
+                 token_server: tm_name,
+                 req_options: [plug: {Req.Test, :openai}]
+               )
+    end
+
+    test "defaults to :api_key mode" do
+      stub_openai(self(), 200, success_body("default mode"))
+
+      assert {:ok, resp} = chat([%{role: "user", content: "hi"}])
+      assert resp.content == "default mode"
+    end
+  end
+
   # -- chat/2: config --
 
   describe "chat/2 config" do

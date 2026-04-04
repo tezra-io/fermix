@@ -54,7 +54,8 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     sync(server)
 
-    [entry] = read_entries(dir, :tool_exec)
+    entries = read_entries(dir, :tool_exec)
+    entry = Enum.find(entries, &(&1["agent"] == "main" and &1["tool"] == "shell"))
     assert entry["type"] == "tool_exec"
     assert entry["tool"] == "shell"
     assert entry["success"] == true
@@ -99,7 +100,8 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     sync(server)
 
-    [entry] = read_entries(dir, :tool_exec)
+    entries = read_entries(dir, :tool_exec)
+    entry = Enum.find(entries, &(&1["tool"] == "http"))
     assert entry["agent"] == "unknown"
   end
 end

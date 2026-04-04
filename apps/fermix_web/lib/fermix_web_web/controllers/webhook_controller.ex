@@ -6,11 +6,15 @@ defmodule FermixWebWeb.WebhookController do
   alias FermixChannels.Telegram
   alias FermixCore.Agents.MainAgent
 
+  @auth_errors [:invalid_token, :missing_token, :not_configured]
+
   @spec telegram(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def telegram(conn, params) do
     with :ok <- Telegram.verify_webhook(conn),
          {:ok, messages} <- Telegram.parse_webhook(params) do
-      forward_messages(messages)
+      messages
+      |> Telegram.build_agent_messages()
+      |> Enum.each(&MainAgent.handle_message/1)
 
       :telemetry.execute(
         [:fermix, :channel, :webhook],
@@ -20,6 +24,13 @@ defmodule FermixWebWeb.WebhookController do
 
       json(conn, %{ok: true})
     else
+      {:error, reason} when reason in @auth_errors ->
+        Logger.error("Telegram webhook auth failed: #{inspect(reason)}")
+
+        conn
+        |> put_status(401)
+        |> json(%{error: "Unauthorized"})
+
       {:error, reason} ->
         Logger.error("Telegram webhook failed: #{inspect(reason)}")
 
@@ -27,23 +38,5 @@ defmodule FermixWebWeb.WebhookController do
         |> put_status(400)
         |> json(%{error: "Invalid webhook"})
     end
-  end
-
-  defp forward_messages(messages) do
-    Enum.each(messages, fn msg ->
-      reply_fn = fn text ->
-        Telegram.send_message(msg.chat_id, text)
-      end
-
-      agent_msg = %{
-        content: msg.content,
-        sender: msg.sender,
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        reply_fn: reply_fn
-      }
-
-      MainAgent.handle_message(agent_msg)
-    end)
   end
 end

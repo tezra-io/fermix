@@ -61,42 +61,46 @@ defmodule FermixCore.Tools.FileWrite do
   end
 
   defp do_execute(args) do
-    path = Map.fetch!(args, "path")
-    content = Map.fetch!(args, "content")
-    mkdir = Map.get(args, "mkdir", true)
-
-    with :ok <- validate_path(path) do
-      if mkdir do
-        path |> Path.dirname() |> File.mkdir_p!()
-      end
-
-      case File.write(path, content) do
-        :ok ->
-          {:ok, Tool.success("Wrote #{byte_size(content)} bytes to #{path}")}
-
-        {:error, reason} ->
-          {:ok, Tool.error("Failed to write file: #{inspect(reason)}")}
-      end
+    with {:ok, path} <- Map.fetch(args, "path"),
+         {:ok, content} <- Map.fetch(args, "content"),
+         :ok <- validate_path(path),
+         :ok <- maybe_mkdir(Map.get(args, "mkdir", true), path),
+         :ok <- File.write(path, content) do
+      {:ok, Tool.success("Wrote #{byte_size(content)} bytes to #{path}")}
     else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+      :error -> {:ok, Tool.error("Missing required parameters: path and content")}
+      {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
+      {:error, reason} -> {:ok, Tool.error("Failed to write file: #{inspect(reason)}")}
+    end
+  end
+
+  defp maybe_mkdir(false, _path), do: :ok
+
+  defp maybe_mkdir(true, path) do
+    case path |> Path.dirname() |> File.mkdir_p() do
+      :ok -> :ok
+      {:error, reason} -> {:error, "Failed to create directories: #{inspect(reason)}"}
     end
   end
 
   defp validate_path(path) when is_binary(path) and byte_size(path) > 0 do
-    if path_traversal?(path) do
-      {:error, "Path traversal is not allowed"}
-    else
-      :ok
+    cond do
+      String.contains?(path, "\0") ->
+        {:error, "Path contains null bytes"}
+
+      has_traversal_component?(path) ->
+        {:error, "Path traversal is not allowed"}
+
+      true ->
+        :ok
     end
   end
 
   defp validate_path(_), do: {:error, "Path must be a non-empty string"}
 
-  defp path_traversal?(path) do
+  defp has_traversal_component?(path) do
     path
-    |> Path.expand()
     |> Path.split()
     |> Enum.any?(&(&1 == ".."))
-    |> Kernel.or(String.contains?(path, ".."))
   end
 end

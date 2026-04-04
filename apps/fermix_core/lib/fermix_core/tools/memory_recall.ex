@@ -54,28 +54,35 @@ defmodule FermixCore.Tools.MemoryRecall do
   end
 
   defp do_execute(%{"key" => key}, context) do
-    conv_key = Map.fetch!(context, :conversation_key)
-    server = Map.get(context, :memory_store, Store)
+    case Map.fetch(context, :conversation_key) do
+      {:ok, conv_key} ->
+        server = Map.get(context, :memory_store, Store)
 
-    case Store.recall(conv_key, key, server: server) do
-      {:ok, value} -> {:ok, Tool.success(value)}
-      {:error, :not_found} -> {:ok, Tool.error("No memory found for key: #{key}")}
+        case Store.recall(conv_key, key, server: server) do
+          {:ok, value} -> {:ok, Tool.success(value)}
+          {:error, :not_found} -> {:ok, Tool.error("No memory found for key: #{key}")}
+        end
+
+      :error ->
+        {:ok, Tool.error("Missing conversation context")}
     end
   end
 
   defp do_execute(_args, context) do
-    conv_key = Map.fetch!(context, :conversation_key)
-    server = Map.get(context, :memory_store, Store)
+    case Map.fetch(context, :conversation_key) do
+      {:ok, conv_key} -> recall_all(conv_key, context)
+      :error -> {:ok, Tool.error("Missing conversation context")}
+    end
+  end
 
+  defp recall_all(conv_key, context) do
+    server = Map.get(context, :memory_store, Store)
     memories = Store.recall_all(conv_key, server: server)
 
     if map_size(memories) == 0 do
       {:ok, Tool.success("No memories stored for this conversation.")}
     else
-      output =
-        memories
-        |> Enum.map_join("\n", fn {k, v} -> "#{k}: #{v}" end)
-
+      output = Enum.map_join(memories, "\n", fn {k, v} -> "#{k}: #{v}" end)
       {:ok, Tool.success(output)}
     end
   end
