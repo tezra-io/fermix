@@ -59,12 +59,14 @@ defmodule FermixCore.Tools.MemoryStore do
   end
 
   defp do_execute(args, context) do
-    key = Map.fetch!(args, "key")
-    value = Map.fetch!(args, "value")
-    conv_key = Map.fetch!(context, :conversation_key)
-    server = Map.get(context, :memory_store, Store)
-
-    Store.store(conv_key, key, value, server: server)
-    {:ok, Tool.success("Stored memory: #{key} = #{value}")}
+    with {:ok, key} <- Map.fetch(args, "key"),
+         {:ok, value} <- Map.fetch(args, "value"),
+         {:ok, conv_key} <- Map.fetch(context, :conversation_key) do
+      server = Map.get(context, :memory_store, Store)
+      Store.store(conv_key, key, value, server: server)
+      {:ok, Tool.success("Stored memory: #{key} = #{value}")}
+    else
+      :error -> {:ok, Tool.error("Missing required parameters: key and value")}
+    end
   end
 end

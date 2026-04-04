@@ -39,6 +39,7 @@ config :logger, :default_formatter,
 config :fermix_core,
   providers: [
     openai: [
+      auth_mode: :api_key,
       base_url: "https://api.openai.com/v1",
       default_model: "gpt-4o-mini",
       default_temperature: 0.7

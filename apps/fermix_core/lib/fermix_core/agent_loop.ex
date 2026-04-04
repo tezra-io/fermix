@@ -13,6 +13,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Tools.Registry
 
   @max_iterations 25
+  @max_context_messages 100
 
   @type loop_opts :: [
           messages: [map()],
@@ -54,6 +55,7 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp do_loop(state) do
+    state = %{state | messages: truncate_messages(state.messages)}
     start = System.monotonic_time(:millisecond)
 
     case call_provider(state) do
@@ -149,6 +151,14 @@ defmodule FermixCore.AgentLoop do
     end
   rescue
     e -> "Error: tool raised #{Exception.message(e)}"
+  end
+
+  defp truncate_messages(messages) when length(messages) <= @max_context_messages, do: messages
+
+  defp truncate_messages(messages) do
+    {system, rest} = Enum.split_while(messages, fn msg -> msg.role == "system" end)
+    keep = @max_context_messages - length(system)
+    system ++ Enum.take(rest, -keep)
   end
 
   defp emit_telemetry(iteration, duration_ms, has_tool_calls) do

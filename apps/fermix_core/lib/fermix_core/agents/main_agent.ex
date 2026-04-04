@@ -59,7 +59,8 @@ defmodule FermixCore.Agents.MainAgent do
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       registry: Keyword.get(opts, :registry, Registry),
-      conversation_store: Keyword.get(opts, :conversation_store, ConversationStore)
+      conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
+      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
     }
 
     {:ok, state}
@@ -70,7 +71,10 @@ defmodule FermixCore.Agents.MainAgent do
     Logger.info("Main Agent received message from #{msg.channel}/#{msg.chat_id}")
 
     task_state = state
-    Task.start(fn -> process_message(msg, task_state) end)
+
+    Task.Supervisor.start_child(state.task_supervisor, fn ->
+      process_message(msg, task_state)
+    end)
 
     {:noreply, state}
   end

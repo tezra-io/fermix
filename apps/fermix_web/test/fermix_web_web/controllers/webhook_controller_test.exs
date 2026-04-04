@@ -39,15 +39,15 @@ defmodule FermixWebWeb.WebhookControllerTest do
       assert json_response(conn, 200) == %{"ok" => true}
     end
 
-    test "returns 400 when secret token is missing", %{conn: conn} do
+    test "returns 401 when secret token is missing", %{conn: conn} do
       payload = telegram_message_payload("hello")
 
       conn = post(conn, ~p"/webhook/telegram", payload)
 
-      assert json_response(conn, 400)["error"] == "Invalid webhook"
+      assert json_response(conn, 401)["error"] == "Unauthorized"
     end
 
-    test "returns 400 when secret token is wrong", %{conn: conn} do
+    test "returns 401 when secret token is wrong", %{conn: conn} do
       payload = telegram_message_payload("hello")
 
       conn =
@@ -55,7 +55,25 @@ defmodule FermixWebWeb.WebhookControllerTest do
         |> put_req_header("x-telegram-bot-api-secret-token", "wrong_token")
         |> post(~p"/webhook/telegram", payload)
 
-      assert json_response(conn, 400)["error"] == "Invalid webhook"
+      assert json_response(conn, 401)["error"] == "Unauthorized"
+    end
+
+    test "handles channel post without from field", %{conn: conn} do
+      payload = %{
+        "update_id" => 123_456,
+        "message" => %{
+          "message_id" => 789,
+          "chat" => %{"id" => 42},
+          "text" => "channel post"
+        }
+      }
+
+      conn =
+        conn
+        |> put_req_header("x-telegram-bot-api-secret-token", @webhook_secret)
+        |> post(~p"/webhook/telegram", payload)
+
+      assert json_response(conn, 200) == %{"ok" => true}
     end
 
     test "emits telemetry event on valid message", %{conn: conn} do

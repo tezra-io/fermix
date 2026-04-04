@@ -1,7 +1,7 @@
 # Elixir
 /_build/
 /deps/
-/*.lock
+# No lock file exclusion — mix.lock must be committed for reproducible builds
 
 # Umbrella apps
 /apps/*/deps/

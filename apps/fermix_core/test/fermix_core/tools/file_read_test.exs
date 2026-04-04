@@ -109,6 +109,24 @@ defmodule FermixCore.Tools.FileReadTest do
       assert result.success == false
       assert result.error =~ "traversal"
     end
+
+    test "returns error for relative path traversal" do
+      assert {:ok, result} = FileRead.execute(%{"path" => "../../etc/passwd"}, @context)
+      assert result.success == false
+      assert result.error =~ "traversal"
+    end
+
+    test "returns error for null bytes in path" do
+      assert {:ok, result} = FileRead.execute(%{"path" => "/tmp/test\0.txt"}, @context)
+      assert result.success == false
+      assert result.error =~ "null bytes"
+    end
+
+    test "returns error for missing path parameter" do
+      assert {:ok, result} = FileRead.execute(%{}, @context)
+      assert result.success == false
+      assert result.error =~ "Missing"
+    end
   end
 
   describe "telemetry" do

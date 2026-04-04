@@ -301,8 +301,6 @@ defmodule FermixCore.AgentLoopTest do
       assert meta2.has_tool_calls == false
 
       :telemetry.detach(handler_id)
-    after
-      :telemetry.detach("test-agent-iteration-#{System.unique_integer()}")
     end
   end
 

@@ -89,6 +89,26 @@ defmodule FermixCore.Tools.ShellTest do
     end
   end
 
+  describe "execute/2 - input validation" do
+    test "returns error for missing command parameter" do
+      assert {:ok, result} = Shell.execute(%{}, @context)
+      assert result.success == false
+      assert result.error =~ "Missing"
+    end
+
+    test "handles commands with special characters" do
+      assert {:ok, result} = Shell.execute(%{"command" => "echo 'hello world'"}, @context)
+      assert result.success == true
+      assert String.trim(result.output) == "hello world"
+    end
+
+    test "handles commands with pipes" do
+      assert {:ok, result} = Shell.execute(%{"command" => "echo hello | tr 'h' 'H'"}, @context)
+      assert result.success == true
+      assert String.trim(result.output) == "Hello"
+    end
+  end
+
   describe "execute/2 - timeout" do
     test "returns error when command exceeds timeout" do
       args = %{"command" => "sleep 10", "timeout_ms" => 200}

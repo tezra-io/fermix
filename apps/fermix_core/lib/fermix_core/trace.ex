@@ -8,6 +8,8 @@ defmodule FermixCore.Trace do
 
   use GenServer
 
+  require Logger
+
   @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error]
 
   @type trace_type :: :llm_call | :tool_exec | :agent_event | :channel_msg | :error
@@ -38,9 +40,16 @@ defmodule FermixCore.Trace do
   @impl true
   def handle_cast({:record, type, agent, data}, state) do
     entry = build_entry(type, agent, data)
-    {handle, state} = ensure_handle(state, type)
-    IO.write(handle, Jason.encode!(entry) <> "\n")
-    {:noreply, state}
+
+    case ensure_handle(state, type) do
+      {:ok, handle, state} ->
+        IO.write(handle, Jason.encode!(entry) <> "\n")
+        {:noreply, state}
+
+      {:error, reason, state} ->
+        Logger.warning("Trace write failed for #{type}: #{inspect(reason)}")
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -69,21 +78,28 @@ defmodule FermixCore.Trace do
 
     case Map.fetch(state.handles, key) do
       {:ok, handle} ->
-        {handle, state}
+        {:ok, handle, state}
 
       :error ->
         state = close_stale_handles(state, today)
-        handle = open_trace_file(state.base_dir, today, type)
-        {handle, put_in(state, [:handles, key], handle)}
+
+        case open_trace_file(state.base_dir, today, type) do
+          {:ok, handle} ->
+            {:ok, handle, put_in(state, [:handles, key], handle)}
+
+          {:error, reason} ->
+            {:error, reason, state}
+        end
     end
   end
 
   defp open_trace_file(base_dir, date, type) do
     dir = Path.join(base_dir, Date.to_iso8601(date))
-    File.mkdir_p!(dir)
-    path = Path.join(dir, "#{type}.jsonl")
-    {:ok, handle} = File.open(path, [:append, :utf8])
-    handle
+
+    with :ok <- File.mkdir_p(dir),
+         {:ok, handle} <- File.open(Path.join(dir, "#{type}.jsonl"), [:append, :utf8]) do
+      {:ok, handle}
+    end
   end
 
   defp close_stale_handles(state, today) do

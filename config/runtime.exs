@@ -23,32 +23,49 @@ end
 config :fermix_web, FermixWebWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-if config_env() == :prod do
-  config :fermix_core,
-    providers: [
-      openai: [
-        api_key: System.fetch_env!("OPENAI_API_KEY")
-      ]
-    ]
+# Merge runtime config with compile-time config to preserve base_url, default_model, etc.
+existing_providers = Application.get_env(:fermix_core, :providers, [])
+existing_openai = Keyword.get(existing_providers, :openai, [])
 
-  config :fermix_channels,
-    telegram: [
+existing_telegram = Application.get_env(:fermix_channels, :telegram, [])
+
+openai_auth_mode =
+  if System.get_env("OPENAI_AUTH_MODE") == "oauth", do: :oauth, else: :api_key
+
+if config_env() == :prod do
+  merged_openai =
+    Keyword.merge(existing_openai,
+      auth_mode: openai_auth_mode,
+      api_key: if(openai_auth_mode == :api_key, do: System.fetch_env!("OPENAI_API_KEY"), else: "")
+    )
+
+  config :fermix_core,
+    providers: Keyword.put(existing_providers, :openai, merged_openai)
+
+  merged_telegram =
+    Keyword.merge(existing_telegram,
       bot_token: System.fetch_env!("TELEGRAM_BOT_TOKEN"),
       webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET")
-    ]
-else
-  config :fermix_core,
-    providers: [
-      openai: [
-        api_key: System.get_env("OPENAI_API_KEY", "")
-      ]
-    ]
+    )
 
-  config :fermix_channels,
-    telegram: [
+  config :fermix_channels, telegram: merged_telegram
+else
+  merged_openai =
+    Keyword.merge(existing_openai,
+      auth_mode: openai_auth_mode,
+      api_key: System.get_env("OPENAI_API_KEY", "")
+    )
+
+  config :fermix_core,
+    providers: Keyword.put(existing_providers, :openai, merged_openai)
+
+  merged_telegram =
+    Keyword.merge(existing_telegram,
       bot_token: System.get_env("TELEGRAM_BOT_TOKEN", ""),
       webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET")
-    ]
+    )
+
+  config :fermix_channels, telegram: merged_telegram
 end
 
 if config_env() == :prod do
