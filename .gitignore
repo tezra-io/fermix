@@ -30,3 +30,6 @@ Thumbs.db
 /cover/
 /apps/*/cover/
 erl_crash.dump
+
+#docs
+/docs/

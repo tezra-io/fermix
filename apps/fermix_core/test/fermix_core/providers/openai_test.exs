@@ -7,7 +7,7 @@ defmodule FermixCore.Providers.OpenAITest do
 
   defp success_body(content, opts \\ []) do
     tool_calls = Keyword.get(opts, :tool_calls, [])
-    model = Keyword.get(opts, :model, "gpt-4o-mini")
+    model = Keyword.get(opts, :model, "gpt-5.4-mini")
 
     %{
       "choices" => [
@@ -41,6 +41,7 @@ defmodule FermixCore.Providers.OpenAITest do
       opts
       |> Keyword.put_new(:req_options, plug: {Req.Test, :openai})
       |> Keyword.put_new(:api_key, "test-key")
+      |> Keyword.put_new(:auth_mode, :api_key)
 
     OpenAI.chat(messages, opts)
   end
@@ -51,8 +52,8 @@ defmodule FermixCore.Providers.OpenAITest do
     test "returns a list of model names" do
       assert {:ok, models} = OpenAI.models()
       assert is_list(models)
-      assert "gpt-4o" in models
-      assert "gpt-4o-mini" in models
+      assert "gpt-5.4" in models
+      assert "gpt-5.4" in models
       assert Enum.all?(models, &is_binary/1)
     end
   end
@@ -106,13 +107,13 @@ defmodule FermixCore.Providers.OpenAITest do
       assert msg["tool_calls"] == tc
     end
 
-    test "uses default model gpt-4o-mini" do
+    test "uses default model gpt-5.4-mini" do
       stub_openai(self(), 200, success_body("hi"))
 
       {:ok, _resp} = chat([%{role: "user", content: "hi"}])
 
       assert_received {:openai_request, body}
-      assert body["model"] == "gpt-4o-mini"
+      assert body["model"] == "gpt-5.4-mini"
     end
 
     test "respects model option" do
@@ -200,7 +201,7 @@ defmodule FermixCore.Providers.OpenAITest do
 
     test "returns empty content when null in response" do
       body = %{
-        "choices" => [%{"message" => %{"content" => nil}, "model" => "gpt-4o-mini"}],
+        "choices" => [%{"message" => %{"content" => nil}, "model" => "gpt-5.4-mini"}],
         "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 2, "total_tokens" => 3}
       }
 
@@ -266,7 +267,7 @@ defmodule FermixCore.Providers.OpenAITest do
       assert is_integer(measurements.duration_ms)
       assert measurements.duration_ms >= 0
       assert metadata.provider == :openai
-      assert metadata.model == "gpt-4o-mini"
+      assert metadata.model == "gpt-5.4-mini"
       assert metadata.status == :ok
       assert is_map(metadata.tokens)
 
@@ -328,7 +329,7 @@ defmodule FermixCore.Providers.OpenAITest do
       responses_body = %{
         "output_text" => "from oauth",
         "output" => [],
-        "model" => "gpt-4o-mini",
+        "model" => "gpt-5.4-mini",
         "usage" => %{"input_tokens" => 10, "output_tokens" => 20}
       }
 
