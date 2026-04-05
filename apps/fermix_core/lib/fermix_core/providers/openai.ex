@@ -12,8 +12,22 @@ defmodule FermixCore.Providers.OpenAI do
 
   @base_url "https://api.openai.com/v1"
   @responses_url "https://chatgpt.com/backend-api/codex/responses"
-  @default_model "gpt-4o-mini"
-  @default_temperature 0.7
+
+  @doc false
+  @spec default_model() :: String.t()
+  def default_model do
+    case FermixCore.Config.provider(:openai) do
+      {:ok, config} -> Keyword.get(config, :default_model, "gpt-4o")
+      _ -> "gpt-4o"
+    end
+  end
+
+  defp default_temperature do
+    case FermixCore.Config.provider(:openai) do
+      {:ok, config} -> Keyword.get(config, :default_temperature, 0.7)
+      _ -> 0.7
+    end
+  end
 
   @impl true
   @spec chat([FermixCore.Providers.Provider.chat_message()], keyword()) ::
@@ -36,14 +50,14 @@ defmodule FermixCore.Providers.OpenAI do
   @impl true
   @spec models() :: {:ok, [String.t()]}
   def models do
-    {:ok, ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"]}
+    {:ok, ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"]}
   end
 
   # --- Chat Completions (api_key mode) ---
 
   defp do_completions_chat(messages, key, opts, req_options) do
-    model = Keyword.get(opts, :model, @default_model)
-    temperature = Keyword.get(opts, :temperature, @default_temperature)
+    model = Keyword.get(opts, :model, default_model())
+    temperature = Keyword.get(opts, :temperature, default_temperature())
     tools = Keyword.get(opts, :tools)
     url = Keyword.get(opts, :base_url, base_url())
 
@@ -112,7 +126,7 @@ defmodule FermixCore.Providers.OpenAI do
   # --- Responses API (oauth mode) ---
 
   defp do_responses_chat(messages, key, opts, req_options) do
-    model = Keyword.get(opts, :model, @default_model)
+    model = Keyword.get(opts, :model, default_model())
     url = Keyword.get(opts, :responses_url, responses_url())
     {instructions, input} = build_responses_input(messages)
     account_id = decode_jwt_account_id(key)
@@ -122,7 +136,7 @@ defmodule FermixCore.Providers.OpenAI do
       input: input,
       instructions: instructions,
       store: false,
-      stream: false
+      stream: true
     }
 
     headers =
@@ -193,6 +207,29 @@ defmodule FermixCore.Providers.OpenAI do
     {:error, reason}
   end
 
+  defp parse_responses_body(body, model) when is_binary(body) do
+    events = parse_sse_events(body)
+    {text, completed} = extract_from_events(events)
+
+    usage =
+      case completed do
+        %{"usage" => u} -> u
+        _ -> %{}
+      end
+
+    {:ok,
+     %{
+       content: text || "",
+       tool_calls: [],
+       usage: %{
+         prompt_tokens: usage["input_tokens"] || 0,
+         completion_tokens: usage["output_tokens"] || 0,
+         total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0)
+       },
+       model: (completed && completed["model"]) || model
+     }}
+  end
+
   defp parse_responses_body(body, model) when is_map(body) do
     text = extract_responses_text(body)
     usage = body["usage"] || %{}
@@ -210,14 +247,53 @@ defmodule FermixCore.Providers.OpenAI do
      }}
   end
 
-  defp parse_responses_body(body, model) when is_binary(body) do
-    case Jason.decode(body) do
-      {:ok, decoded} -> parse_responses_body(decoded, model)
-      {:error, _} -> {:error, "Failed to parse Codex response"}
-    end
+  defp parse_responses_body(_body, _model), do: {:error, "Unexpected Codex response format"}
+
+  defp parse_sse_events(body) do
+    body
+    |> String.split("\n\n", trim: true)
+    |> Enum.flat_map(fn chunk ->
+      chunk
+      |> String.split("\n", trim: true)
+      |> Enum.filter(&String.starts_with?(&1, "data: "))
+      |> Enum.flat_map(fn "data: " <> data ->
+        case data do
+          "[DONE]" -> []
+          json ->
+            case Jason.decode(json) do
+              {:ok, event} -> [event]
+              _ -> []
+            end
+        end
+      end)
+    end)
   end
 
-  defp parse_responses_body(_body, _model), do: {:error, "Unexpected Codex response format"}
+  defp extract_from_events(events) do
+    {deltas, completed_response} =
+      Enum.reduce(events, {"", nil}, fn
+        %{"type" => "response.output_text.delta", "delta" => d}, {acc, c} ->
+          {acc <> d, c}
+
+        %{"type" => t} = e, {acc, nil} when t in ["response.completed", "response.done"] ->
+          {acc, e["response"]}
+
+        _, acc ->
+          acc
+      end)
+
+    text =
+      if deltas != "" do
+        deltas
+      else
+        case completed_response do
+          %{} -> extract_responses_text(completed_response)
+          _ -> nil
+        end
+      end
+
+    {text, completed_response}
+  end
 
   defp extract_responses_text(%{"output_text" => text}) when is_binary(text) and text != "" do
     text

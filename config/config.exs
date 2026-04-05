@@ -39,9 +39,9 @@ config :logger, :default_formatter,
 config :fermix_core,
   providers: [
     openai: [
-      auth_mode: :api_key,
+      auth_mode: :oauth,
       base_url: "https://api.openai.com/v1",
-      default_model: "gpt-4o-mini",
+      default_model: "gpt-5.4-mini",
       default_temperature: 0.7
     ]
   ],
@@ -51,7 +51,9 @@ config :fermix_core,
 config :fermix_channels,
   telegram: [
     enabled: true,
-    webhook_path: "/webhook/telegram"
+    mode: :webhook,
+    webhook_path: "/webhook/telegram",
+    allowed_user_ids: []
   ]
 
 config :fermix_core, :trace,

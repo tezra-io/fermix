@@ -11,7 +11,7 @@ defmodule FermixChannels.TelegramTest do
         "message_id" => 42,
         "text" => "hello bot",
         "chat" => %{"id" => 123_456},
-        "from" => %{"username" => "alice", "first_name" => "Alice"}
+        "from" => %{"id" => 111, "username" => "alice", "first_name" => "Alice"}
       }
     }
 
@@ -150,6 +150,99 @@ defmodule FermixChannels.TelegramTest do
     end
   end
 
+  # -- parse_update/1 --
+
+  describe "parse_update/1" do
+    test "parses a message update into standard message" do
+      update = %{
+        "message" => %{
+          "message_id" => 42,
+          "text" => "hello",
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.content == "hello"
+      assert msg.sender == "alice"
+      assert msg.chat_id == "123"
+    end
+
+    test "returns {:ok, []} for unauthorized user" do
+      Application.put_env(:fermix_channels, :telegram,
+        bot_token: "test-bot-token",
+        webhook_secret: "test-secret",
+        allowed_user_ids: [999]
+      )
+
+      update = %{
+        "message" => %{
+          "message_id" => 1,
+          "text" => "hi",
+          "chat" => %{"id" => 1},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, []} = Telegram.parse_update(update)
+    end
+
+    test "returns {:ok, []} for non-message updates" do
+      assert {:ok, []} = Telegram.parse_update(%{"callback_query" => %{}})
+    end
+  end
+
+  # -- allowed_user_ids --
+
+  describe "allowed_user_ids filtering" do
+    test "allows message when user ID is in allow-list" do
+      Application.put_env(:fermix_channels, :telegram,
+        bot_token: "test-bot-token",
+        webhook_secret: "test-secret",
+        allowed_user_ids: [111]
+      )
+
+      payload = message_payload()
+      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert msg.sender == "alice"
+    end
+
+    test "silently drops message when user ID is not in allow-list" do
+      Application.put_env(:fermix_channels, :telegram,
+        bot_token: "test-bot-token",
+        webhook_secret: "test-secret",
+        allowed_user_ids: [999]
+      )
+
+      payload = message_payload()
+      assert {:ok, []} = Telegram.parse_webhook(payload)
+    end
+
+    test "allows all messages when allowed_user_ids is empty list" do
+      Application.put_env(:fermix_channels, :telegram,
+        bot_token: "test-bot-token",
+        webhook_secret: "test-secret",
+        allowed_user_ids: []
+      )
+
+      payload = message_payload()
+      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert msg.sender == "alice"
+    end
+
+    test "allows all messages when allowed_user_ids is not configured" do
+      Application.put_env(:fermix_channels, :telegram,
+        bot_token: "test-bot-token",
+        webhook_secret: "test-secret"
+      )
+
+      payload = message_payload()
+      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert msg.sender == "alice"
+    end
+  end
+
   # -- send_message/3 --
 
   describe "send_message/3" do
@@ -164,13 +257,13 @@ defmodule FermixChannels.TelegramTest do
       assert body["text"] == "hello"
     end
 
-    test "defaults to MarkdownV2 parse_mode" do
+    test "sends without parse_mode by default" do
       stub_telegram(self(), 200, %{"ok" => true})
 
       :ok = send_msg("123", "hello")
 
       assert_received {:telegram_request, _path, body}
-      assert body["parse_mode"] == "MarkdownV2"
+      refute Map.has_key?(body, "parse_mode")
     end
 
     test "respects parse_mode option" do

@@ -38,7 +38,7 @@ defmodule FermixCore.AgentLoop do
       messages: Keyword.fetch!(opts, :messages),
       tools: Keyword.get(opts, :tools, []),
       provider: Keyword.get(opts, :provider, OpenAI),
-      model: Keyword.get(opts, :model, "gpt-4o-mini"),
+      model: Keyword.get(opts, :model, OpenAI.default_model()),
       temp: Keyword.get(opts, :temperature, 0.7),
       max_iter: Keyword.get(opts, :max_iterations, @max_iterations),
       context: Keyword.get(opts, :context, %{}),

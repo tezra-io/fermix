@@ -19,19 +19,7 @@ defmodule FermixChannels.Telegram do
   @impl true
   @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
   def parse_webhook(params) do
-    result =
-      cond do
-        Map.has_key?(params, "message") ->
-          parse_message(params["message"])
-
-        Map.has_key?(params, "edited_message") ->
-          parse_message(params["edited_message"])
-
-        true ->
-          {:ok, []}
-      end
-
-    with {:ok, messages} when messages != [] <- result do
+    with {:ok, messages} when messages != [] <- parse_update(params) do
       :telemetry.execute(
         [:fermix, :channel, :message],
         %{count: length(messages)},
@@ -39,6 +27,20 @@ defmodule FermixChannels.Telegram do
       )
 
       {:ok, messages}
+    end
+  end
+
+  @spec parse_update(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
+  def parse_update(update) do
+    cond do
+      Map.has_key?(update, "message") ->
+        parse_message(update["message"])
+
+      Map.has_key?(update, "edited_message") ->
+        parse_message(update["edited_message"])
+
+      true ->
+        {:ok, []}
     end
   end
 
@@ -77,7 +79,7 @@ defmodule FermixChannels.Telegram do
       verify_token(conn, expected)
     else
       {:error, reason} -> {:error, reason}
-      _ -> {:error, :not_configured}
+      _ -> :ok
     end
   end
 
@@ -134,11 +136,8 @@ defmodule FermixChannels.Telegram do
       url = "#{@bot_api_base}/bot#{token}/sendMessage"
 
       body =
-        %{
-          chat_id: chat_id,
-          text: text,
-          parse_mode: Keyword.get(opts, :parse_mode, "MarkdownV2")
-        }
+        %{chat_id: chat_id, text: text}
+        |> maybe_put_parse_mode(opts)
         |> maybe_put_reply_to(opts)
 
       result =
@@ -161,6 +160,13 @@ defmodule FermixChannels.Telegram do
     end
   end
 
+  defp maybe_put_parse_mode(body, opts) do
+    case Keyword.get(opts, :parse_mode) do
+      nil -> body
+      mode -> Map.put(body, :parse_mode, mode)
+    end
+  end
+
   defp maybe_put_reply_to(body, opts) do
     case Keyword.get(opts, :reply_to) do
       nil -> body
@@ -169,21 +175,37 @@ defmodule FermixChannels.Telegram do
   end
 
   defp parse_message(msg) do
-    chat_id = msg |> get_in(["chat", "id"]) |> to_string()
-    sender = get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
-    content = msg["text"] || msg["caption"] || ""
+    user_id = get_in(msg, ["from", "id"])
 
-    message = %{
-      id: to_string(msg["message_id"]),
-      content: content,
-      sender: sender,
-      channel: "telegram",
-      chat_id: chat_id,
-      reply_target: chat_id,
-      thread_ts: nil
-    }
+    if authorized_user?(user_id) do
+      chat_id = msg |> get_in(["chat", "id"]) |> to_string()
+      sender = get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
+      content = msg["text"] || msg["caption"] || ""
 
-    {:ok, [message]}
+      message = %{
+        id: to_string(msg["message_id"]),
+        content: content,
+        sender: sender,
+        channel: "telegram",
+        chat_id: chat_id,
+        reply_target: chat_id,
+        thread_ts: nil
+      }
+
+      {:ok, [message]}
+    else
+      {:ok, []}
+    end
+  end
+
+  defp authorized_user?(user_id) do
+    allowed =
+      case FermixCore.Config.channel(:telegram) do
+        {:ok, config} -> Keyword.get(config, :allowed_user_ids, [])
+        _ -> []
+      end
+
+    allowed == [] or user_id in allowed
   end
 
   defp split_message(text) when is_binary(text) do
@@ -205,7 +227,9 @@ defmodule FermixChannels.Telegram do
     end
   end
 
-  defp get_bot_token do
+  @doc false
+  @spec get_bot_token() :: {:ok, String.t()} | {:error, :not_configured}
+  def get_bot_token do
     with {:ok, config} <- FermixCore.Config.channel(:telegram),
          {:ok, token} when is_binary(token) and token != "" <- Keyword.fetch(config, :bot_token) do
       {:ok, token}

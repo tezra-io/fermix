@@ -13,7 +13,7 @@ config :fermix_core,
   providers: [
     openai: [
       base_url: "https://api.openai.com/v1",
-      default_model: "gpt-4o-mini",
+      default_model: "gpt-5.4-mini",
       api_key: "test-key"
     ]
   ]
@@ -21,8 +21,10 @@ config :fermix_core,
 config :fermix_channels,
   telegram: [
     enabled: false,
+    mode: :webhook,
     webhook_path: "/webhook/telegram",
-    bot_token: "test-token"
+    bot_token: "test-token",
+    allowed_user_ids: []
   ]
 
 config :phoenix, :plug_init_mode, :runtime

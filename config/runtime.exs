@@ -30,7 +30,7 @@ existing_openai = Keyword.get(existing_providers, :openai, [])
 existing_telegram = Application.get_env(:fermix_channels, :telegram, [])
 
 openai_auth_mode =
-  if System.get_env("OPENAI_AUTH_MODE") == "oauth", do: :oauth, else: :api_key
+  if System.get_env("OPENAI_AUTH_MODE") == "api_key", do: :api_key, else: :oauth
 
 if config_env() == :prod do
   merged_openai =
@@ -42,10 +42,25 @@ if config_env() == :prod do
   config :fermix_core,
     providers: Keyword.put(existing_providers, :openai, merged_openai)
 
+  telegram_mode =
+    case System.get_env("TELEGRAM_MODE") do
+      "polling" -> :polling
+      _ -> :webhook
+    end
+
+  allowed_user_ids =
+    case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
+      nil -> []
+      "" -> []
+      ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
+    end
+
   merged_telegram =
     Keyword.merge(existing_telegram,
       bot_token: System.fetch_env!("TELEGRAM_BOT_TOKEN"),
-      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET")
+      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
+      allowed_user_ids: allowed_user_ids,
+      mode: telegram_mode
     )
 
   config :fermix_channels, telegram: merged_telegram
@@ -59,10 +74,25 @@ else
   config :fermix_core,
     providers: Keyword.put(existing_providers, :openai, merged_openai)
 
+  telegram_mode =
+    case System.get_env("TELEGRAM_MODE") do
+      "polling" -> :polling
+      _ -> :webhook
+    end
+
+  allowed_user_ids =
+    case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
+      nil -> []
+      "" -> []
+      ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
+    end
+
   merged_telegram =
     Keyword.merge(existing_telegram,
       bot_token: System.get_env("TELEGRAM_BOT_TOKEN", ""),
-      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET")
+      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
+      allowed_user_ids: allowed_user_ids,
+      mode: telegram_mode
     )
 
   config :fermix_channels, telegram: merged_telegram
