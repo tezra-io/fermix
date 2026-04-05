@@ -6,12 +6,12 @@ defmodule FermixCore.ConfigTest do
   describe "provider/1" do
     test "returns provider config when configured" do
       Application.put_env(:fermix_core, :providers,
-        openai: [base_url: "https://api.openai.com/v1", default_model: "gpt-4o-mini"]
+        openai: [base_url: "https://api.openai.com/v1", default_model: "gpt-5.4-mini"]
       )
 
       assert {:ok, config} = Config.provider(:openai)
       assert config[:base_url] == "https://api.openai.com/v1"
-      assert config[:default_model] == "gpt-4o-mini"
+      assert config[:default_model] == "gpt-5.4-mini"
     after
       Application.delete_env(:fermix_core, :providers)
     end
