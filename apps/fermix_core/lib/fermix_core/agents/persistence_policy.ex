@@ -6,6 +6,8 @@ defmodule FermixCore.Agents.PersistencePolicy do
   are explicitly disabled in M2.
   """
 
+  alias FermixCore.Agents.LifecycleTelemetry
+
   @skill_terminal_statuses [:completed, :failed, :timed_out, :crashed]
 
   @type skill_terminal_status :: :completed | :failed | :timed_out | :crashed
@@ -239,10 +241,11 @@ defmodule FermixCore.Agents.PersistencePolicy do
   end
 
   defp emit_journal_write(entry, path, markdown) do
-    :telemetry.execute(
-      [:fermix, :skill, :journal_write],
-      %{bytes: byte_size(markdown)},
-      %{skill: entry.skill, session_id: entry.session_id, path: path}
+    LifecycleTelemetry.skill_journal_write(
+      entry.skill,
+      entry.session_id,
+      path,
+      byte_size(markdown)
     )
   end
 

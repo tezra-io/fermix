@@ -655,22 +655,37 @@ Every new component must emit structured telemetry. This is not optional.
 
 | Event | Measurements | Metadata |
 |-------|-------------|----------|
-| `[:fermix, :agent, :start]` | — | `%{name, role, session_id, parent}` |
-| `[:fermix, :agent, :stop]` | `%{duration_ms}` | `%{name, role, session_id, reason}` |
-| `[:fermix, :agent, :task_start]` | — | `%{name, session_id, task_summary}` |
-| `[:fermix, :agent, :task_complete]` | `%{duration_ms, iterations}` | `%{name, session_id, success}` |
-| `[:fermix, :skill, :invoke]` | `%{duration_ms}` | `%{skill, task_summary, success, parent_session}` |
+| `[:fermix, :agent, :start]` | — | `%{name, role, session_id, parent, parent_session}` |
+| `[:fermix, :agent, :stop]` | `%{duration_ms}` | `%{name, role, session_id, reason, parent, parent_session}` |
+| `[:fermix, :agent, :task_start]` | — | `%{name, role, session_id, task_summary, parent, parent_session}` |
+| `[:fermix, :agent, :task_complete]` | `%{duration_ms, iterations}` | `%{name, role, session_id, success, parent, parent_session}` |
+| `[:fermix, :skill, :invoke]` | `%{duration_ms}` | `%{skill, session_id, task_summary, success, parent, parent_session}` |
 | `[:fermix, :skill, :journal_write]` | `%{bytes}` | `%{skill, session_id, path}` |
 | `[:fermix, :supervisor, :spawn]` | — | `%{name, persistent, parent}` |
 | `[:fermix, :supervisor, :exit]` | — | `%{name, reason, was_monitored}` |
 
 ### Trace records
 
-All events write to `~/.fermix/traces/YYYY-MM-DD/agent_event.jsonl` via existing `Trace.record/3`.
+Lifecycle events write to `~/.fermix/traces/YYYY-MM-DD/agent_event.jsonl` via `Trace.record/3`.
+Each record must include a concrete `event` field with one of:
+
+- `agent_start`
+- `agent_task_start`
+- `agent_task_complete`
+- `agent_stop`
+- `skill_invoke`
+- `skill_journal_write`
+
+The top-level Trace `agent` field is derived from `name` for agent events and `skill` for skill events.
 
 ### Correlation
 
-`session_id` (UUID per agent invocation) is the correlation key. Parent → child linked by `parent_session` in skill invocation events. This enables reconstructing the full delegation tree from trace files.
+`session_id` (UUID per agent invocation) is the correlation key for the delegated skill lifecycle.
+Parent → child linkage is recorded via `parent_session` on delegated child lifecycle events and the matching `skill_invoke` event. This enables reconstructing the delegation chain from trace files.
+
+### Current acceptance coverage
+
+Until full `AgentServer`/`invoke_skill` runtime delegation lands, acceptance coverage drives the lifecycle telemetry seam directly and verifies the resulting `agent_event.jsonl` records end to end.
 
 ---
 
@@ -747,8 +762,9 @@ and `SkillRegistry.load(name)` returns a valid AgentDefinition.
 ### AC-10: Telemetry emitted for full delegation lifecycle
 
 Given a skill invocation,
-then telemetry events are emitted for: agent start, task start, task complete, agent stop, skill invoke, journal write,
-all with correct session_id correlation.
+then telemetry events are emitted for: skill invoke, agent start, task start, journal write, task complete, agent stop,
+their trace records use the concrete `event` names above,
+and all records share the delegated skill `session_id` with `parent_session` linking back to the caller.
 
 ---
 

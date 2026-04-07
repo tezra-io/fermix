@@ -6,14 +6,16 @@ defmodule FermixCore.Trace.TelemetryHandler do
   - `[:fermix, :provider, :call]` → `:llm_call`
   - `[:fermix, :tool, :exec]` → `:tool_exec`
   - `[:fermix, :channel, :message]` → `:channel_msg`
+  - M2 lifecycle events → `:agent_event`
   """
 
+  alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Trace
 
-  @events [
-    {[:fermix, :provider, :call], :llm_call},
-    {[:fermix, :tool, :exec], :tool_exec},
-    {[:fermix, :channel, :message], :channel_msg}
+  @core_events [
+    %{event: [:fermix, :provider, :call], trace_type: :llm_call, agent_field: :agent},
+    %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent},
+    %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent}
   ]
 
   @spec attach(keyword()) :: :ok
@@ -22,7 +24,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
     prefix = Keyword.get(opts, :handler_prefix, "fermix")
     config = %{trace_server: server}
 
-    for {event, _type} <- @events do
+    for %{event: event} <- event_definitions() do
       handler_id = "#{prefix}-#{Enum.join(event, "-")}"
 
       case :telemetry.attach(handler_id, event, &handle_event/4, config) do
@@ -40,7 +42,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   @spec detach(String.t()) :: :ok
   def detach(prefix \\ "fermix") do
-    for {event, _type} <- @events do
+    for %{event: event} <- event_definitions() do
       handler_id = "#{prefix}-#{Enum.join(event, "-")}"
       :telemetry.detach(handler_id)
     end
@@ -50,13 +52,47 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   @spec handle_event([atom()], map(), map(), map()) :: :ok
   def handle_event(event, measurements, metadata, %{trace_server: server}) do
-    type = event_to_type(event)
-    agent = Map.get(metadata, :agent, "unknown") |> to_string()
-    data = Map.merge(measurements, Map.delete(metadata, :agent))
-    Trace.record(type, agent, data, server: server)
+    config = event_config(event)
+    {agent, data} = build_trace_payload(config, measurements, metadata)
+    Trace.record(config.trace_type, agent, data, server: server)
   end
 
-  for {event, type} <- @events do
-    defp event_to_type(unquote(event)), do: unquote(type)
+  defp event_definitions do
+    @core_events ++ LifecycleTelemetry.trace_event_definitions()
   end
+
+  defp event_config(event) do
+    Enum.find(event_definitions(), fn definition -> definition.event == event end) ||
+      raise ArgumentError, "unhandled telemetry event: #{inspect(event)}"
+  end
+
+  defp build_trace_payload(%{agent_field: agent_field} = config, measurements, metadata) do
+    agent =
+      metadata
+      |> Map.get(agent_field, "unknown")
+      |> to_string()
+
+    data =
+      measurements
+      |> Map.merge(sanitize_metadata(metadata, agent_field))
+      |> maybe_put_trace_event(config)
+
+    {agent, data}
+  end
+
+  # Core events already expose `:agent` directly, so we drop the duplicate once
+  # it has been promoted to the Trace row's top-level `agent` field.
+  defp sanitize_metadata(metadata, :agent), do: Map.delete(metadata, :agent)
+
+  # Lifecycle events derive the Trace row's top-level `agent` from `:name` or
+  # `:skill`, but intentionally keep that original field in the payload. TEZ-316
+  # consumers and acceptance tests rely on both the normalized `agent` and the
+  # lifecycle-specific metadata key being present.
+  defp sanitize_metadata(metadata, _agent_field), do: metadata
+
+  defp maybe_put_trace_event(data, %{trace_event: trace_event}) when is_binary(trace_event) do
+    Map.put(data, :event, trace_event)
+  end
+
+  defp maybe_put_trace_event(data, _config), do: data
 end
