@@ -179,7 +179,10 @@ defmodule FermixChannels.Telegram do
 
     if authorized_user?(user_id) do
       chat_id = msg |> get_in(["chat", "id"]) |> to_string()
-      sender = get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
+
+      sender =
+        get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
+
       content = msg["text"] || msg["caption"] || ""
 
       message = %{

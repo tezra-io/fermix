@@ -119,5 +119,4 @@ defmodule FermixChannels.Telegram.Poller do
 
     %{state | offset: max_id + 1}
   end
-
 end
