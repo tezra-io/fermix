@@ -2,6 +2,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Tools.Registry
 
@@ -25,6 +26,10 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     def get_calls do
       Agent.get(@calls, & &1)
+    end
+
+    def reset_calls do
+      Agent.update(@calls, fn _ -> [] end)
     end
 
     def cleanup do
@@ -80,19 +85,49 @@ defmodule FermixCore.Agents.MainAgentTest do
     ConversationStore.list_conversations(server: conv_store)
   end
 
+  defp write_skill(skills_dir, name, body \\ "You are helpful.") do
+    skill_dir = Path.join(skills_dir, name)
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      """
+      ---
+      name: #{name}
+      model: gpt-5.4-mini
+      capabilities: ["code"]
+      allowed_tools: ["file_read"]
+      max_iterations: 12
+      ---
+      #{body}
+      """
+    )
+  end
+
   setup do
     :ok = MockProvider.init()
 
     suffix = System.unique_integer([:positive])
     registry_name = :"test_registry_#{suffix}"
+    skill_registry_name = :"test_skill_registry_#{suffix}"
     conv_name = :"test_conv_#{suffix}"
     agent_name = :"test_main_agent_#{suffix}"
     task_sup_name = :"test_task_sup_#{suffix}"
+    skills_dir = Path.join(System.tmp_dir!(), "fermix-skills-#{suffix}")
+
+    File.mkdir_p!(skills_dir)
 
     {:ok, _} =
       start_supervised({Task.Supervisor, name: task_sup_name}, id: :test_task_sup)
 
     {:ok, _} = start_supervised({Registry, [name: registry_name]}, id: :test_registry)
+
+    {:ok, _} =
+      start_supervised(
+        {SkillRegistry, [name: skill_registry_name, skills_dir: skills_dir]},
+        id: :test_skill_registry
+      )
+
     {:ok, _} = start_supervised({ConversationStore, [name: conv_name]}, id: :test_conv)
 
     {:ok, _} =
@@ -102,15 +137,25 @@ defmodule FermixCore.Agents.MainAgentTest do
            name: agent_name,
            provider: MockProvider,
            registry: registry_name,
+           skill_registry: skill_registry_name,
            conversation_store: conv_name,
            task_supervisor: task_sup_name
          ]},
         id: :test_main_agent
       )
 
-    on_exit(fn -> MockProvider.cleanup() end)
+    on_exit(fn ->
+      MockProvider.cleanup()
+      File.rm_rf!(skills_dir)
+    end)
 
-    %{agent: agent_name, registry: registry_name, conv_store: conv_name}
+    %{
+      agent: agent_name,
+      registry: registry_name,
+      skill_registry: skill_registry_name,
+      conv_store: conv_name,
+      skills_dir: skills_dir
+    }
   end
 
   # -- Client API --
@@ -201,6 +246,41 @@ defmodule FermixCore.Agents.MainAgentTest do
       # Clean up the Task
       assert_receive {:reply, _}, 5_000
     end
+
+    test "keeps the skill list static until reload_skills/1 is called", %{
+      agent: agent,
+      skills_dir: skills_dir
+    } do
+      MockProvider.set_responses([
+        mock_response("first"),
+        mock_response("second"),
+        mock_response("third")
+      ])
+
+      MainAgent.handle_message(make_message("hello"), agent)
+      assert_receive {:reply, "first"}, 5_000
+
+      [{messages_before, _opts}] = MockProvider.get_calls()
+      refute hd(messages_before).content =~ "coding-skill"
+
+      write_skill(skills_dir, "coding-skill")
+      MockProvider.reset_calls()
+
+      MainAgent.handle_message(make_message("hello again"), agent)
+      assert_receive {:reply, "second"}, 5_000
+
+      [{messages_without_reload, _opts}] = MockProvider.get_calls()
+      refute hd(messages_without_reload).content =~ "coding-skill"
+
+      assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
+      MockProvider.reset_calls()
+
+      MainAgent.handle_message(make_message("after reload"), agent)
+      assert_receive {:reply, "third"}, 5_000
+
+      [{messages_after_reload, _opts}] = MockProvider.get_calls()
+      assert hd(messages_after_reload).content =~ "coding-skill"
+    end
   end
 
   # -- Telemetry --
@@ -264,7 +344,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   describe "message validation" do
     test "rejects messages missing required fields", %{agent: agent} do
       assert_raise FunctionClauseError, fn ->
-        MainAgent.handle_message(%{content: "hi"}, agent)
+        apply(MainAgent, :handle_message, [%{content: "hi"}, agent])
       end
     end
 

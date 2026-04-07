@@ -5,6 +5,7 @@ defmodule FermixCore.Application do
   require Logger
 
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
@@ -21,6 +22,7 @@ defmodule FermixCore.Application do
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Trace, trace_opts()},
         maybe_token_manager(),
+        SkillRegistry,
         Registry,
         ConversationStore,
         Store,
