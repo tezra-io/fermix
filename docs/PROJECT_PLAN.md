@@ -28,6 +28,11 @@ Fermix is a ground-up Elixir/Phoenix multi-agent AI platform. It replaces RustyC
 - Hub-and-spoke: persistent Main Agent + ephemeral skill workers
 - Rustler NIFs only where Rust genuinely outperforms (crypto, tokenization)
 
+**M2 ownership model:**
+- `FermixCore.Agents.MainAgent` remains the channel-facing GenServer and direct `FermixCore.Application` child
+- `AgentServer` is introduced for supervised skill workers spawned behind `MainAgent`
+- Existing MainAgent/webhook tests remain anchored on `handle_message/2`; new M2 coverage expands around `AgentSupervisor`, `AgentServer`, and `invoke_skill`
+
 **What Fermix is NOT:**
 - A fork of RustyClaw (clean repo, selective port)
 - A Rust project with Elixir bolted on
@@ -117,6 +122,8 @@ graph TB
     PROV --> TOK
 ```
 
+For M2, `MainAgent` remains the direct application child and channel ingress. The `MA --> SUP` edge above represents delegation/spawn flow for skill workers, not ownership of MainAgent by `AgentSupervisor`.
+
 ---
 
 ## 3. Port vs Rewrite Matrix
@@ -125,8 +132,8 @@ graph TB
 
 | Component | Source | Effort | Notes |
 |-----------|--------|--------|-------|
-| AgentServer | `elixir/.../agent_server.ex` | Low | Port + fix run_task (TEZ-146) |
-| AgentSupervisor | `elixir/.../agent_supervisor.ex` | Low | Direct port |
+| AgentServer | `elixir/.../agent_server.ex` | Low | Port for delegated skill-worker lifecycle + fix run_task (TEZ-146) |
+| AgentSupervisor | `elixir/.../agent_supervisor.ex` | Low | Port for `:temporary` skill workers; MainAgent stays under Application |
 | AgentDefinition | `elixir/.../agent_definition.ex` | Low | Add `role` field |
 | AgentCoordinator | `elixir/.../agent_coordinator.ex` | Low | Capability matching + ACL |
 | BtwRouter | `elixir/.../btw_router.ex` | Low | Side-channel routing |
@@ -193,7 +200,7 @@ fermix/
 │   │       │   │   ├── agent_supervisor.ex    # Ported
 │   │       │   │   ├── agent_definition.ex    # Ported + role field
 │   │       │   │   ├── agent_coordinator.ex   # Ported
-│   │       │   │   ├── main_agent.ex          # New: Main Agent lifecycle
+│   │       │   │   ├── main_agent.ex          # Existing: channel-facing MainAgent with delegation hooks
 │   │       │   │   └── skill_registry.ex      # New: Template loader
 │   │       │   ├── providers/
 │   │       │   │   ├── provider.ex            # Behaviour
@@ -548,7 +555,7 @@ The orchestration layer is the most mature part of RustyClaw's Elixir code. Port
 | Module | Source | Changes Needed |
 |--------|--------|----------------|
 | AgentServer | `agent_server.ex` | Fix run_task (call provider directly instead of RustBridge) |
-| AgentSupervisor | `agent_supervisor.ex` | `:permanent` for Main Agent, `:temporary` for skills |
+| AgentSupervisor | `agent_supervisor.ex` | Supervise `:temporary` skill workers; MainAgent stays under Application |
 | AgentDefinition | `agent_definition.ex` | Add `role: :main \| :sub` field |
 | AgentCoordinator | `agent_coordinator.ex` | Capability matching — port as-is |
 | BtwRouter | `btw_router.ex` | Add `resolve_main_agent/0` |
@@ -556,7 +563,9 @@ The orchestration layer is the most mature part of RustyClaw's Elixir code. Port
 | ResourceLock | `resource_lock.ex` | Port as-is |
 | MessageProvenance | `message_provenance.ex` | Port as-is |
 
-### Main Agent (New)
+### Main Agent (Existing, enhanced in M2)
+
+MainAgent remains the channel-facing GenServer in M2. It owns message ingress, conversation assembly, and reply delivery, while delegated skill execution runs in `AgentServer` processes supervised separately. As in the current repo, `handle_message/2` continues to hand each inbound request off to a `Task.Supervisor` child; that request task is where `AgentLoop` and any `invoke_skill` wait/monitoring run.
 
 ```elixir
 defmodule FermixCore.Agents.MainAgent do
@@ -564,11 +573,24 @@ defmodule FermixCore.Agents.MainAgent do
 
   # Started by Application supervisor with :permanent restart
   # Receives all inbound messages
+  # Hands each request to a Task.Supervisor child for agent-loop execution
   # Delegates to skill agents when needed
   # Maintains conversation state per chat
-  # Receives cron results and skill completions
+  # Owns the channel-facing contract while request tasks wait on skill completions
 
-  def handle_message(channel_message) do
+  def handle_message(channel_message, server \\ __MODULE__) do
+    GenServer.cast(server, {:handle_message, channel_message})
+  end
+
+  def handle_cast({:handle_message, channel_message}, state) do
+    Task.Supervisor.start_child(state.task_supervisor, fn ->
+      process_message(channel_message, state)
+    end)
+
+    {:noreply, state}
+  end
+
+  defp process_message(channel_message, state) do
     conversation_key = build_conversation_key(channel_message)
     history = ConversationStore.get_history(conversation_key)
 
@@ -580,15 +602,13 @@ defmodule FermixCore.Agents.MainAgent do
       system_prompt: build_system_prompt()
     )
 
-    # Send response back via channel
-    channel = ChannelRegistry.get(channel_message.channel)
-    channel.send_message(channel_message.reply_target, result.response)
-
-    # Store in conversation history
-    ConversationStore.add_message(conversation_key, "assistant", result.response)
+    # Request task, not the GenServer mailbox, waits for any delegated skill work
+    channel_message.reply_fn.(result.response)
   end
 end
 ```
+
+Any `invoke_skill` calls therefore block inside `process_message/2`'s request task, while the MainAgent GenServer remains responsive to new inbound messages.
 
 ### Agent Loop (Core — New)
 
@@ -773,12 +793,15 @@ end
 
 ### Phase 2: Multi-Agent + More Channels (Weeks 4-6)
 
-**Goal:** Main Agent can delegate to skill agents. WhatsApp + Discord added.
+**Goal:** MainAgent remains the channel-facing process while delegating to supervised skill agents; journals land in M2. WhatsApp + Discord added.
 
-- [ ] Port AgentServer, AgentSupervisor, AgentDefinition from RustyClaw
-- [ ] Main Agent with `:permanent` restart
-- [ ] SkillRegistry + skill templates
-- [ ] invoke_skill tool
+- [ ] Port AgentDefinition first, then SkillRegistry + skill templates
+- [ ] Port AgentServer for delegated skill-worker lifecycle
+- [ ] Add AgentSupervisor for `:temporary` skill workers before MainAgent in the Application tree
+- [ ] Keep MainAgent as the direct Application child with `:permanent` restart
+- [ ] Add invoke_skill tool + MainAgent integration
+- [ ] Add skill journals for delegated runs
+- [ ] Add parallel skill execution + AgentCoordinator after the core invoke_skill path is stable
 - [ ] WhatsApp channel
 - [ ] Discord channel
 - [ ] OpenAI provider
@@ -786,7 +809,7 @@ end
 - [ ] Rustler NIF setup (HMAC, token counting)
 
 **Effort:** ~2-3 weeks  
-**Result:** Multi-agent orchestration working
+**Result:** MainAgent-led multi-agent orchestration working
 
 ### Phase 3: Memory + Hermes (Weeks 7-8)
 
@@ -811,7 +834,6 @@ end
 - [ ] LiveView dashboard (agents, memory, logs)
 - [ ] Phoenix Channels (WebSocket chat)
 - [ ] Cron scheduler
-- [ ] Skill journals
 
 **Effort:** ~2 weeks  
 **Result:** Production-ready with monitoring
@@ -839,7 +861,7 @@ end
 | Phase | Duration | Key Deliverable |
 |-------|----------|-----------------|
 | Phase 1: Foundation | 2-3 weeks | Single-agent Telegram bot |
-| Phase 2: Multi-Agent | 2-3 weeks | Skill delegation working |
+| Phase 2: Multi-Agent | 2-3 weeks | MainAgent-led skill delegation + journals working |
 | Phase 3: Memory | 2 weeks | Three-tier memory + Hermes |
 | Phase 4: Security | 2 weeks | Production security + dashboard |
 | Phase 5: Parity | 3-4 weeks | Full RustyClaw replacement |
