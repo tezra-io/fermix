@@ -1,6 +1,6 @@
 # Fermix Roadmap — Post-MVP Features
 
-**Last Updated:** 2026-04-05  
+**Last Updated:** 2026-04-07
 **Status:** Planning
 
 This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent Telegram bot with basic tools).
@@ -28,13 +28,19 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 
 **Goal:** Main Agent can delegate to ephemeral skill agents with supervision, journals, and parallel execution.
 
+**Ownership model for M2:** `MainAgent` remains the channel-facing GenServer started directly by `FermixCore.Application`; `AgentServer` is introduced for supervised skill workers.
+
+**Implementation order for M2:** `AgentDefinition` + `SkillRegistry` foundation → `AgentServer` lifecycle → `AgentSupervisor` + application wiring → `invoke_skill` + MainAgent integration → journals / parallel execution / AgentCoordinator.
+
+**Test boundary for M2:** keep existing MainAgent/webhook coverage anchored on `MainAgent.handle_message/2`; add new tests for `AgentSupervisor` restart semantics, `AgentServer` lifecycle, and `invoke_skill` delegation/message-flow regressions.
+
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
-| **AgentServer port** | Port AgentServer GenServer with parent/child tracking | P0 | Port | `elixir/agent_server.ex` | M |
-| **AgentSupervisor port** | Port DynamicSupervisor with `:permanent` for Main Agent, `:temporary` for skills | P0 | Port | `elixir/agent_supervisor.ex` | S |
+| **AgentServer port** | Port AgentServer GenServer for delegated skill worker lifecycle, parent/child tracking | P0 | Port | `elixir/agent_server.ex` | M |
+| **AgentSupervisor port** | Port DynamicSupervisor for `:temporary` skill workers; keep MainAgent under application supervision | P0 | Port | `elixir/agent_supervisor.ex` | S |
 | **AgentDefinition port** | Port with `role: :main \| :sub` field added | P0 | Port | `elixir/agent_definition.ex` | S |
 | **AgentCoordinator port** | Port capability matching + ACL | P1 | Port | `elixir/agent_coordinator.ex` | S |
-| **Main Agent lifecycle** | New: persistent Main Agent that receives all messages | P0 | New | `docs/MAIN_AGENT_DESIGN.md` | M |
+| **Main Agent lifecycle** | Enhance the existing persistent MainAgent with delegation hooks while keeping it as the channel-facing GenServer for AgentServer-backed skills | P0 | Hybrid | `docs/MAIN_AGENT_DESIGN.md` | M |
 | **Skill templates** | YAML+MD skill definition files loaded from filesystem | P0 | New | `docs/OPTION_B_ORCHESTRATION_DESIGN.md` | M |
 | **SkillRegistry** | Load skill templates from `~/.fermix/skills/` | P0 | New | `docs/OPTION_B_ORCHESTRATION_DESIGN.md` | S |
 | **invoke_skill tool** | Tool for Main Agent to spawn ephemeral skill agents | P0 | New | `docs/OPTION_B_ORCHESTRATION_DESIGN.md` | M |
@@ -414,4 +420,3 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 - `docs/hermes-memory-design.md` — Hermes memory extraction (RustyClaw reference)
 - `/Users/sujshe/projects/rustyclaw/` — RustyClaw reference implementation
 - `/Users/sujshe/.openclaw/workspace/AGENTS.md` — OpenClaw agent behavior patterns
-
