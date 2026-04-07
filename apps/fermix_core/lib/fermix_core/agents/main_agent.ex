@@ -14,6 +14,7 @@ defmodule FermixCore.Agents.MainAgent do
   require Logger
 
   alias FermixCore.AgentLoop
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Tools.Registry
 
@@ -50,15 +51,24 @@ defmodule FermixCore.Agents.MainAgent do
     GenServer.cast(server, {:handle_message, msg})
   end
 
+  @spec reload_skills(GenServer.server()) :: {:ok, [String.t()]} | {:error, term()}
+  def reload_skills(server \\ __MODULE__) do
+    GenServer.call(server, :reload_skills)
+  end
+
   # --- GenServer Callbacks ---
 
   @impl true
   def init(opts) do
     Logger.info("Main Agent started")
 
+    skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
+
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       registry: Keyword.get(opts, :registry, Registry),
+      skill_registry: skill_registry,
+      available_skills: load_available_skills(skill_registry),
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
     }
@@ -79,6 +89,17 @@ defmodule FermixCore.Agents.MainAgent do
     {:noreply, state}
   end
 
+  @impl true
+  def handle_call(:reload_skills, _from, state) do
+    case reload_available_skills(state.skill_registry) do
+      {:ok, available_skills} ->
+        {:reply, {:ok, available_skills}, %{state | available_skills: available_skills}}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
   # --- Internals ---
 
   defp process_message(msg, state) do
@@ -87,7 +108,7 @@ defmodule FermixCore.Agents.MainAgent do
 
     history = ConversationStore.get_history(conversation_key, server: state.conversation_store)
 
-    system_message = %{role: "system", content: system_prompt()}
+    system_message = %{role: "system", content: system_prompt(state.available_skills)}
     user_message = %{role: "user", content: msg.content}
     messages = [system_message] ++ history ++ [user_message]
 
@@ -151,11 +172,40 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
-  defp system_prompt do
+  defp system_prompt(available_skills) do
+    skill_catalog =
+      case available_skills do
+        [] -> "Available skills snapshot: none loaded."
+        skills -> "Available skills snapshot: #{Enum.join(skills, ", ")}."
+      end
+
     """
     You are a helpful AI assistant with access to tools.
     You can execute shell commands, read and write files, and store/recall memories.
+    Skills are discovered from a cached registry snapshot and only change after an explicit reload.
+    #{skill_catalog}
     When you need to perform an action, use the appropriate tool. Think step by step.\
     """
+  end
+
+  defp load_available_skills(skill_registry) do
+    case safe_skill_registry_call(fn -> SkillRegistry.list(skill_registry) end) do
+      {:ok, skills} -> skills
+      {:error, _reason} -> []
+    end
+  end
+
+  defp reload_available_skills(skill_registry) do
+    case safe_skill_registry_call(fn -> SkillRegistry.reload(skill_registry) end) do
+      {:ok, {:ok, skills}} -> {:ok, skills}
+      {:ok, {:error, reason}} -> {:error, reason}
+      {:error, reason} -> {:error, {:skill_registry_unavailable, reason}}
+    end
+  end
+
+  defp safe_skill_registry_call(fun) do
+    {:ok, fun.()}
+  catch
+    :exit, reason -> {:error, reason}
   end
 end

@@ -317,16 +317,17 @@ Always verify your work by running relevant tests before returning.
 ```
 
 **API:**
-- `load(skill_name)` — returns `{:ok, AgentDefinition.t()}` or `{:error, reason}`
+- `load(skill_name)` — returns `{:ok, AgentDefinition.t()}` or `{:error, {:unknown_skill, skill_name}}`
 - `list()` — returns sorted list of available skill names
 - `list_detailed()` — returns `[AgentDefinition.t()]` with full definitions
-- `reload()` — clears cache, re-reads filesystem
+- `reload()` — re-reads the filesystem and replaces the in-memory snapshot on success
 
 **Behaviors:**
 - Reads YAML frontmatter, parses into AgentDefinition with `role: :sub`, `persistent: false`
 - Markdown body becomes `system_prompt`
 - Validates name format, required fields
-- Caches parsed definitions (invalidated on `reload()`)
+- `list/0` and `load/1` read only from the current in-memory snapshot
+- Newly added, removed, or edited skill directories are invisible until `reload/0` succeeds
 - Creates `~/.fermix/skills/` directory at startup if missing
 - Ships with 2-3 built-in skill templates (see section 5.8)
 
@@ -860,13 +861,20 @@ Multi-skill concurrency and capability matching.
 - Keeps `reply_fn`, conversation-history assembly, and channel ingress outside the generic AgentServer abstraction.
 - Lets M2 introduce AgentServer where it provides immediate value first: supervised, ephemeral skill workers.
 
-### OQ-2: How does the LLM know which skills are available?
+### Decision-2: MainAgent sees a cached skill snapshot until explicit reload
 
-**Option A:** List all skills in Main Agent's system prompt (static, updated on reload).
-**Option B:** Provide a `list_skills` tool that the LLM can call to discover skills dynamically.
-**Option C:** Both — system prompt has a summary, tool provides details.
+`MainAgent` does not watch `~/.fermix/skills/` continuously. It snapshots the sorted skill list from `SkillRegistry` at startup and uses that snapshot in its system prompt.
 
-**Recommendation:** Option A for now. Skill list is small (2-3 built-in + user-defined). Simpler. Add Option B if skill count grows.
+**Reload contract:**
+- `SkillRegistry.reload/0` refreshes the registry snapshot from disk
+- `MainAgent.reload_skills/0` is the supported runtime entrypoint for refreshing what the LLM sees; it reloads the registry, then swaps in the new skill snapshot for future messages
+- A skill directory created on disk after startup is not visible to the LLM until `MainAgent.reload_skills/0` succeeds
+- Unknown skill names remain hard failures at the registry boundary: `SkillRegistry.load/1` returns `{:error, {:unknown_skill, name}}`
+
+**Rationale:**
+- Keeps the discovery contract deterministic for tests and delegation
+- Avoids implicit filesystem watches or per-message rescans
+- Lets docs, prompt behavior, and future `invoke_skill` validation share one source of truth
 
 ### OQ-3: Skill agent timeout — how long?
 
