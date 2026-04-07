@@ -13,7 +13,7 @@
 Fermix today is a single-agent system. One MainAgent GenServer handles every inbound message, runs the same agent loop with the same system prompt and the same tools, regardless of what the user asked for. There is no way to:
 
 - Delegate specialized work (coding, research, summarization) to a purpose-built sub-agent
-- Run multiple tasks in parallel (e.g., fix two files simultaneously)
+- Run safe parallel tasks when repo state and mutation boundaries allow it
 - Scope tool access per task (a research agent shouldn't have `shell`)
 - Isolate memory/state between concurrent tasks
 - Track provenance of who did what across a delegation chain
@@ -37,14 +37,16 @@ Fermix today is a single-agent system. One MainAgent GenServer handles every inb
 | SkillRegistry: filesystem loader with validation | P0 | New |
 | `invoke_skill` tool: Main Agent spawns ephemeral skill agents | P0 | New |
 | Skill journals: Markdown per-instance in `~/.fermix/journals/` | P1 | New |
-| Parallel skill execution with supervision | P1 | New |
+| Parallel skill execution policy + safe fanout with supervision | P1 | New |
+| Repo isolation boundary contract for same-repo mutating work (`git worktree` or remote execution) | P1 | New |
 
 ### Non-Goals (explicitly deferred)
 
 | Feature | Reason | Milestone |
 |---------|--------|-----------|
-| Git worktree isolation for parallel skills | P2, complexity | M2 future or M7 |
+| Shared-checkout same-repo parallel code writing | Explicitly forbidden until repo isolation exists | Not allowed in M2 |
 | ResourceLock (priority-based ETS locking) | P2, no parallel contention yet | M2 future |
+| Automatic merge/reconcile flow for isolated parallel coding branches | Useful after repo isolation exists | M2 future |
 | BtwRouter (`/btw` side-channel) | P2, convenience feature | M2 future |
 | MessageProvenance (trace chains) | P2, useful but not blocking | M2 future |
 | TraceStore (ETS-backed distributed tracing) | P2, current file tracing sufficient | M2 future |
@@ -169,17 +171,17 @@ Telegram → MainAgent.handle_message()
 - Skill has no direct access to user's channel — it returns text to Main Agent
 - Main Agent decides how to present the result (may summarize, may pass through)
 
-### Flow 3: Parallel skill execution
+### Flow 3: Safe parallel skill execution
 
-User asks for work that can be parallelized. Main Agent invokes multiple skills concurrently.
+User asks for work that can be parallelized safely. Main Agent invokes multiple skills concurrently only when repo isolation and mutation rules allow it.
 
 ```
-User: "Update the README and fix the dialyzer warnings"
+User: "Review the auth refactor in fermix and update the README in the docs repo"
 
 MainAgent → AgentLoop.run()
   → LLM calls invoke_skill with parallel: true (or multiple invoke_skill calls):
-      Skill A: coding-skill, task: "Update README"
-      Skill B: coding-skill, task: "Fix dialyzer warnings"
+      Skill A: review-skill, task: "Review auth refactor in fermix"
+      Skill B: coding-skill, task: "Update README in docs repo"
   → Both spawned under AgentSupervisor
   → Both run concurrently via separate AgentServer processes
   → Results collected as they complete
@@ -193,6 +195,7 @@ MainAgent → AgentLoop.run()
 - The in-flight request task / `invoke_skill` call monitors spawned skill pids and collects results
 - If one fails, the other continues (independent supervision)
 - Results returned to Main Agent's request task in completion order
+- Same-repo mutating tasks are never spawned in parallel from the same checkout; they require a per-skill isolation boundary or must run sequentially
 
 ### Flow 4: Skill failure and recovery
 
@@ -431,7 +434,7 @@ Fixed 1 test failure. Root cause: test used wrong config key path.
 
 **Strategies:**
 - `:first_match` — return first skill with all required capabilities (default)
-- `:all_matches` — return all matching skills (for parallel fanout)
+- `:all_matches` — return all matching skills (for safe parallel fanout, subject to the repo isolation policy)
 
 **Usage:** The invoke_skill tool can optionally use AgentCoordinator to auto-select a skill based on capabilities rather than requiring the LLM to name a specific skill. This is additive — explicit skill naming always works.
 
@@ -453,6 +456,37 @@ Ship with these templates to make M2 immediately useful:
 - Capabilities: `["code", "review"]`
 - Tools: `["shell", "file_read"]`
 - System prompt: focused on code review, finding issues, no modifications
+
+### 5.9 Parallel Skill Safety Policy
+
+Parallel execution is **not** a blanket permission in M2. Before spawning multiple skills, the coordinator or caller must classify each task by:
+
+- Whether it mutates state or is read-only
+- Which repo or workspace it targets
+- Whether the target repo is already isolated from sibling workers
+
+This policy follows the same grouping principle as RustyClaw's batch processor: different repos can fan out, same-repo tasks stay sequential unless an explicit worktree strategy is active.
+
+| Case | Allowed in parallel? | Requirement |
+|------|----------------------|-------------|
+| Different repos, mutating or read-only | Yes | Each skill works against its own repo root; no shared checkout writes |
+| No repo / external-only work (research, summarization, API inspection) | Yes | Normal task isolation only |
+| Same repo, all read-only tasks | Yes | All tasks run against the same pinned snapshot/HEAD and do not write |
+| Same repo, one mutating task plus one review/read-only task | Only with isolation | The read-only task must use its own snapshot or isolated checkout; otherwise its output can be invalidated by concurrent writes |
+| Same repo, multiple mutating tasks | No in a shared checkout | Allowed only when every mutating skill has its own isolated repo boundary |
+| Repo overlap is unknown or file ownership is ambiguous | No | Treat as unsafe and serialize until isolation is explicit |
+
+**Required isolation strategy for same-repo mutating fanout:**
+
+- Preferred local strategy: create a dedicated `git worktree` per mutating skill, on its own branch, and reconcile results afterward
+- Acceptable alternative: dispatch the skill to a remote execution boundary (container, VM, or remote worker) that gives it an independent checkout and returns a patch, branch, or artifact for merge/review
+- Without one of those boundaries, same-repo mutating tasks must be serialized or rejected with an explicit reason
+
+**Implications for review output:**
+
+- Review, audit, and summarization skills are only trustworthy when they read a stable snapshot
+- A review running against a moving shared checkout is unsafe, even if the reviewer itself is read-only
+- If a mutating sibling is active in the same repo and no snapshot boundary exists, the review must wait or run in its own isolated checkout
 
 ---
 
@@ -629,15 +663,29 @@ when the skill's LLM attempts to call `shell`,
 then the tool call fails with "tool not available",
 and the skill can only execute `file_read`.
 
-### AC-3: Parallel skill execution
+### AC-3: Safe parallel skill execution
 
 Given two invoke_skill calls in the same agent loop iteration,
-when both skills are spawned,
-then they run concurrently under AgentSupervisor,
+when they target different repos or are both read-only against the same pinned repo snapshot,
+then they may run concurrently under AgentSupervisor,
 both complete independently,
 and the in-flight Main Agent request task receives both results.
 
-### AC-4: Skill failure doesn't crash Main Agent
+### AC-4: Mixed same-repo mutating + read-only work requires isolation
+
+Given one mutating coding task and one review/read-only task targeting the same repo,
+when the read-only task does not have its own pinned snapshot or isolated checkout,
+then the system does not run them concurrently from a shared checkout,
+and instead serializes or rejects the batch with an explicit "repo isolation required" reason.
+
+### AC-5: Same-repo multiple mutating tasks require isolation
+
+Given two coding tasks targeting the same repo,
+when no `git worktree` or remote execution boundary is configured for them,
+then the system does not run them in parallel from a shared checkout,
+and instead serializes or rejects the batch with an explicit "repo isolation required" reason.
+
+### AC-6: Skill failure doesn't crash Main Agent
 
 Given a skill that crashes during execution,
 when the crash occurs,
@@ -645,28 +693,28 @@ then the in-flight request receives an error result (not a crash),
 the skill process is cleaned up,
 and Main Agent continues operating normally.
 
-### AC-5: Skill journal written on completion
+### AC-7: Skill journal written on completion
 
 Given a successful skill invocation,
 when the skill completes,
 then a Markdown journal file exists at `~/.fermix/journals/<skill-name>/<timestamp>.md`,
 containing task, duration, status, execution summary, and result.
 
-### AC-6: Main Agent survives restart
+### AC-8: Main Agent survives restart
 
 Given a running Main Agent,
 when the Main Agent process is killed and restarted by the application supervisor,
 then ConversationStore history remains intact,
 and Main Agent resumes accepting messages with the same channel-facing contract.
 
-### AC-7: SkillRegistry lists and loads templates
+### AC-9: SkillRegistry lists and loads templates
 
 Given skill templates in `~/.fermix/skills/`,
 when `SkillRegistry.list()` is called,
 then it returns all valid skill names,
 and `SkillRegistry.load(name)` returns a valid AgentDefinition.
 
-### AC-8: Telemetry emitted for full delegation lifecycle
+### AC-10: Telemetry emitted for full delegation lifecycle
 
 Given a skill invocation,
 then telemetry events are emitted for: agent start, task start, task complete, agent stop, skill invoke, journal write,
@@ -784,14 +832,18 @@ Persistence and auditability.
 - Directory creation, file naming, Markdown formatting
 - Tests: journal content, failure journals, concurrent writes
 
-### Slice 6: Parallel execution + AgentCoordinator (P1)
+### Slice 6: Parallel execution policy + AgentCoordinator (P1)
 
 Multi-skill concurrency and capability matching.
 
-- Parallel skill spawning from invoke_skill (or batch variant)
+- Classify batches by repo target and mutation mode before spawning
+- Parallel skill spawning from invoke_skill (or batch variant) only for safe cases
+- Block or serialize same-repo mutating batches unless an isolation boundary is configured
+- Define the isolation boundary contract for same-repo mutating work:
+  `git worktree` per skill locally, or a remote execution environment with a separate checkout
 - AgentCoordinator: capability matching, delegation ACL
 - Result collection from multiple concurrent skills
-- Tests: parallel execution, coordinator matching, ACL enforcement
+- Tests: safe parallel execution, blocked unsafe same-repo writes, coordinator matching, ACL enforcement
 
 ---
 
@@ -854,6 +906,8 @@ AgentLoop currently has a fixed signature. Adding `allowed_tools`, `model`, `tem
 - `docs/PROJECT_PLAN.md` — Overall architecture, Phase 2 section
 - RustyClaw `docs/MAIN_AGENT_DESIGN.md` — Hub-and-spoke pattern, memory tiers, skill journals
 - RustyClaw `docs/OPTION_B_ORCHESTRATION_DESIGN.md` — Skill orchestration via Elixir
+- RustyClaw `elixir/rustyclaw_orchestrator/lib/rustyclaw_orchestrator/plugins/git_worktree.ex` — Local repo isolation via worktrees
+- RustyClaw `elixir/rustyclaw_orchestrator/lib/rustyclaw_orchestrator/plugins/batch_processor.ex` — Repo-grouped fanout policy (same repo sequential unless isolated)
 - RustyClaw `elixir/rustyclaw_orchestrator/lib/rustyclaw_orchestrator/agent_server.ex` — Port reference
 - RustyClaw `elixir/rustyclaw_orchestrator/lib/rustyclaw_orchestrator/agent_supervisor.ex` — Port reference
 - RustyClaw `elixir/rustyclaw_orchestrator/lib/rustyclaw_orchestrator/agent_definition.ex` — Port reference

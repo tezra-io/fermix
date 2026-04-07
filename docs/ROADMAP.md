@@ -26,11 +26,11 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 
 ## Milestone 2: Multi-Agent Orchestration
 
-**Goal:** Main Agent can delegate to ephemeral skill agents with supervision, journals, and parallel execution.
+**Goal:** Main Agent can delegate to ephemeral skill agents with supervision, journals, and safe parallel execution.
 
 **Ownership model for M2:** `MainAgent` remains the channel-facing GenServer started directly by `FermixCore.Application`; `AgentServer` is introduced for supervised skill workers.
 
-**Implementation order for M2:** `AgentDefinition` + `SkillRegistry` foundation → `AgentServer` lifecycle → `AgentSupervisor` + application wiring → `invoke_skill` + MainAgent integration → journals / parallel execution / AgentCoordinator.
+**Implementation order for M2:** `AgentDefinition` + `SkillRegistry` foundation → `AgentServer` lifecycle → `AgentSupervisor` + application wiring → `invoke_skill` + MainAgent integration → journals / safe parallel execution policy / AgentCoordinator. Same-repo parallel code-writing stays disabled until an isolation boundary (`git worktree` or remote execution) exists.
 
 **Test boundary for M2:** keep existing MainAgent/webhook coverage anchored on `MainAgent.handle_message/2`; add new tests for `AgentSupervisor` restart semantics, `AgentServer` lifecycle, and `invoke_skill` delegation/message-flow regressions.
 
@@ -45,8 +45,8 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 | **SkillRegistry** | Load skill templates from `~/.fermix/skills/` | P0 | New | `docs/OPTION_B_ORCHESTRATION_DESIGN.md` | S |
 | **invoke_skill tool** | Tool for Main Agent to spawn ephemeral skill agents | P0 | New | `docs/OPTION_B_ORCHESTRATION_DESIGN.md` | M |
 | **Skill journals** | Markdown journals per skill instance in `~/.fermix/journals/` | P1 | New | `docs/MAIN_AGENT_DESIGN.md` | M |
-| **Parallel skill execution** | Spawn multiple skills concurrently with supervision | P1 | New | `docs/MAIN_AGENT_DESIGN.md` | L |
-| **Git worktree isolation** | Isolate parallel coding skills in git worktrees | P2 | New | `docs/MAIN_AGENT_DESIGN.md` | M |
+| **Safe parallel skill execution** | Spawn multiple skills concurrently only for safe cases: different repos, external-only work, or same-repo read-only tasks on a pinned snapshot. Same-repo mixed mutating + read-only work requires isolation. | P1 | New | `docs/MAIN_AGENT_DESIGN.md` | L |
+| **Repo isolation boundary** | Required before enabling same-repo parallel code-writing; default local strategy is `git worktree`, remote execution is an acceptable alternative | P1 | New | `docs/MAIN_AGENT_DESIGN.md` | M |
 | **ResourceLock port** | Port resource locking for coordinated access | P2 | Port | `elixir/resource_lock.ex` | S |
 | **BtwRouter port** | Port side-channel routing (`/btw` commands) | P2 | Port | `elixir/btw_router.ex` | S |
 | **MessageProvenance port** | Port message tracking/tracing | P2 | Port | `elixir/message_provenance.ex` | S |

@@ -793,7 +793,7 @@ end
 
 ### Phase 2: Multi-Agent + More Channels (Weeks 4-6)
 
-**Goal:** MainAgent remains the channel-facing process while delegating to supervised skill agents; journals land in M2. WhatsApp + Discord added.
+**Goal:** MainAgent remains the channel-facing process while delegating to supervised skill agents; journals and safe parallel fanout land in M2. WhatsApp + Discord added.
 
 - [ ] Port AgentDefinition first, then SkillRegistry + skill templates
 - [ ] Port AgentServer for delegated skill-worker lifecycle
@@ -801,7 +801,8 @@ end
 - [ ] Keep MainAgent as the direct Application child with `:permanent` restart
 - [ ] Add invoke_skill tool + MainAgent integration
 - [ ] Add skill journals for delegated runs
-- [ ] Add parallel skill execution + AgentCoordinator after the core invoke_skill path is stable
+- [ ] Add safe parallel skill execution policy + AgentCoordinator after the core invoke_skill path is stable
+- [ ] Do not allow same-repo parallel code-writing from a shared checkout; require `git worktree` isolation or a remote execution boundary before enabling it
 - [ ] WhatsApp channel
 - [ ] Discord channel
 - [ ] OpenAI provider
