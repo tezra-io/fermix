@@ -76,6 +76,20 @@ defmodule FermixCore.Tools.RegistryTest do
     end
   end
 
+  describe "find_tool/3 with allowlist" do
+    test "finds a registered tool when it is allowed", %{registry: registry} do
+      :ok = Registry.register(registry, ToolA)
+
+      assert {:ok, ToolA} = Registry.find_tool(registry, "tool_a", ["tool_a"])
+    end
+
+    test "returns not_allowed when tool is registered but excluded", %{registry: registry} do
+      :ok = Registry.register(registry, ToolA)
+
+      assert {:error, :not_allowed} = Registry.find_tool(registry, "tool_a", ["tool_b"])
+    end
+  end
+
   describe "all_tools_for_llm/1" do
     test "returns empty list when no tools registered", %{registry: registry} do
       assert Registry.all_tools_for_llm(registry) == []
@@ -88,6 +102,14 @@ defmodule FermixCore.Tools.RegistryTest do
       assert formatted.type == "function"
       assert formatted.function.name == "tool_a"
       assert formatted.function.description == "Tool A for testing"
+    end
+
+    test "filters tools to the allowlist", %{registry: registry} do
+      :ok = Registry.register(registry, ToolA)
+      :ok = Registry.register(registry, ToolB)
+
+      assert [formatted] = Registry.all_tools_for_llm(registry, ["tool_b"])
+      assert formatted.function.name == "tool_b"
     end
   end
 end

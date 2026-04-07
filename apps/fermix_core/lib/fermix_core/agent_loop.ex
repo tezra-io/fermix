@@ -18,6 +18,7 @@ defmodule FermixCore.AgentLoop do
   @type loop_opts :: [
           messages: [map()],
           tools: [map()],
+          allowed_tools: [String.t()] | nil,
           provider: module(),
           model: String.t(),
           temperature: float(),
@@ -34,9 +35,12 @@ defmodule FermixCore.AgentLoop do
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
   def run(opts) do
+    allowed_tools = Keyword.get(opts, :allowed_tools)
+
     state = %{
       messages: Keyword.fetch!(opts, :messages),
-      tools: Keyword.get(opts, :tools, []),
+      tools: filter_tools_for_llm(Keyword.get(opts, :tools, []), allowed_tools),
+      allowed_tools: allowed_tools,
       provider: Keyword.get(opts, :provider, OpenAI),
       model: Keyword.get(opts, :model, OpenAI.default_model()),
       temp: Keyword.get(opts, :temperature, 0.7),
@@ -92,7 +96,13 @@ defmodule FermixCore.AgentLoop do
   defp handle_response(response, duration_ms, state) do
     emit_telemetry(state.iteration + 1, duration_ms, true)
 
-    tool_results = execute_tool_calls(response.tool_calls, state.context, state.registry)
+    tool_results =
+      execute_tool_calls(
+        response.tool_calls,
+        state.context,
+        state.registry,
+        state.allowed_tools
+      )
 
     assistant_message = %{
       role: "assistant",
@@ -113,14 +123,17 @@ defmodule FermixCore.AgentLoop do
     })
   end
 
-  defp execute_tool_calls(tool_calls, context, registry) do
+  defp execute_tool_calls(tool_calls, context, registry, allowed_tools) do
     Enum.map(tool_calls, fn tool_call ->
       function = tool_call["function"]
 
       result =
         case parse_arguments(function["arguments"]) do
-          {:ok, arguments} -> execute_tool(registry, function["name"], arguments, context)
-          {:error, reason} -> reason
+          {:ok, arguments} ->
+            execute_tool(registry, function["name"], arguments, context, allowed_tools)
+
+          {:error, reason} ->
+            reason
         end
 
       {tool_call["id"], result}
@@ -137,9 +150,10 @@ defmodule FermixCore.AgentLoop do
   defp parse_arguments(args) when is_map(args), do: {:ok, args}
   defp parse_arguments(_), do: {:ok, %{}}
 
-  defp execute_tool(registry, name, arguments, context) do
-    case Registry.find_tool(registry, name) do
+  defp execute_tool(registry, name, arguments, context, allowed_tools) do
+    case Registry.find_tool(registry, name, allowed_tools) do
       {:ok, tool_module} -> run_tool(tool_module, arguments, context)
+      {:error, :not_allowed} -> "Error: Tool '#{name}' not available"
       :error -> "Error: Tool '#{name}' not found"
     end
   end
@@ -160,6 +174,21 @@ defmodule FermixCore.AgentLoop do
     keep = @max_context_messages - length(system)
     system ++ Enum.take(rest, -keep)
   end
+
+  defp filter_tools_for_llm(tools, nil), do: tools
+
+  defp filter_tools_for_llm(tools, allowed_tools) when is_list(allowed_tools) do
+    Enum.filter(tools, fn tool ->
+      case tool_name_for_llm(tool) do
+        {:ok, name} -> name in allowed_tools
+        :error -> false
+      end
+    end)
+  end
+
+  defp tool_name_for_llm(%{function: %{name: name}}) when is_binary(name), do: {:ok, name}
+  defp tool_name_for_llm(%{"function" => %{"name" => name}}) when is_binary(name), do: {:ok, name}
+  defp tool_name_for_llm(_tool), do: :error
 
   defp emit_telemetry(iteration, duration_ms, has_tool_calls) do
     :telemetry.execute(
