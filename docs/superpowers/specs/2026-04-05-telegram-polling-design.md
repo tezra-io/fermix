@@ -2,11 +2,19 @@
 
 ## Summary
 
-Add long-polling support to Telegram channel alongside existing webhook mode. A config toggle (`mode: :polling` or `:webhook`) determines which is active. Polling removes the need for a public HTTPS URL, making local development straightforward.
+Telegram long-polling support is already implemented alongside webhook mode. This document now records the implemented baseline so future work starts from the current repo state instead of re-implementing existing pieces.
+
+## Implemented Baseline
+
+- `FermixChannels.Telegram.Poller` already exists and long-polls Telegram's `getUpdates` API.
+- `FermixChannels.Telegram.parse_update/1` already exists as the shared update parser used by both webhook handling and the poller.
+- `FermixChannels.Application` already conditionally starts the poller when `telegram.mode == :polling` and the channel is enabled.
+- The `telegram.mode` config toggle is already present in compile-time config, test config, and `TELEGRAM_MODE` runtime parsing.
+- Targeted tests for `Telegram.parse_update/1` and `FermixChannels.Telegram.Poller` already exist.
 
 ## Architecture
 
-### New Module: `FermixChannels.Telegram.Poller`
+### Implemented Module: `FermixChannels.Telegram.Poller`
 
 A GenServer that long-polls Telegram's `getUpdates` API endpoint.
 
@@ -41,8 +49,8 @@ Poller GenServer
   |-- Regular loop: GET getUpdates?offset=N&timeout=30&allowed_updates=["message"]
   |-- On success:
   |     |-- For each update:
-  |     |     |-- parse_message/1 (reuses existing Telegram function)
-  |     |     |-- authorized_user?/1 check (already in parse_message)
+  |     |     |-- Telegram.parse_update/1
+  |     |     |-- authorized_user?/1 filtering via Telegram.parse_update/1 internals
   |     |     |-- build_agent_messages/1
   |     |     |-- MainAgent.handle_message/1
   |     |-- Advance offset to max(update_id) + 1
@@ -87,31 +95,36 @@ children =
 
 ### Existing Code Reuse
 
-These functions in `FermixChannels.Telegram` are already extracted and reusable:
-- `parse_message/1` — extracts message fields from Telegram update
-- `authorized_user?/1` — checks user ID allow-list
+These functions in `FermixChannels.Telegram` are part of the implemented baseline:
+- `parse_update/1` — public shared parser used by webhook handling and the poller
+- `parse_webhook/1` — delegates to `parse_update/1` and emits inbound telemetry
 - `build_agent_messages/1` — wraps parsed messages with reply_fn
 - `send_message/3` — sends outbound messages via Bot API
-
-The poller calls `parse_message/1` directly (it's currently private, will need to be made accessible or extracted).
+- `parse_message/1` and `authorized_user?/1` remain internal helpers behind `parse_update/1`
 
 ### Files
 
-| Action | File |
-|--------|------|
-| Create | `apps/fermix_channels/lib/fermix_channels/telegram/poller.ex` |
-| Create | `apps/fermix_channels/test/fermix_channels/telegram/poller_test.exs` |
-| Modify | `apps/fermix_channels/lib/fermix_channels/telegram.ex` — expose `parse_message/1` for poller |
-| Modify | `apps/fermix_channels/lib/fermix_channels/application.ex` — conditional poller startup |
-| Modify | `config/config.exs` — add `mode: :webhook` default |
-| Modify | `config/test.exs` — add `mode: :webhook` |
-| Modify | `config/runtime.exs` — parse `TELEGRAM_MODE` env var |
+| Status | File | Notes |
+|--------|------|-------|
+| Implemented | `apps/fermix_channels/lib/fermix_channels/telegram/poller.ex` | Poller with startup backlog drain and regular long-poll loop |
+| Implemented | `apps/fermix_channels/test/fermix_channels/telegram/poller_test.exs` | Poller coverage for startup probe, backlog drop, offset handling, and retry behavior |
+| Implemented | `apps/fermix_channels/lib/fermix_channels/telegram.ex` | Shared `parse_update/1`, webhook delegation, and agent message building |
+| Implemented | `apps/fermix_channels/test/fermix_channels/telegram_test.exs` | Parser coverage for webhook and shared update parsing |
+| Implemented | `apps/fermix_channels/lib/fermix_channels/application.ex` | Conditional poller startup in polling mode |
+| Implemented | `config/config.exs` | Default `mode: :webhook` |
+| Implemented | `config/test.exs` | Test default `mode: :webhook` |
+| Implemented | `config/runtime.exs` | `TELEGRAM_MODE` runtime parsing |
 
 ### Testing
 
 - Poller GenServer starts and stops cleanly
-- Processes updates through parse_message and MainAgent
+- Processes updates through `Telegram.parse_update/1`, `build_agent_messages/1`, and `MainAgent`
 - Advances offset correctly
 - Retries on error with backoff
-- Ignores updates from unauthorized users (via existing filter)
+- Ignores updates from unauthorized users (via `Telegram.parse_update/1` filtering)
 - Does not start when mode is `:webhook`
+
+## Remaining Work
+
+- No baseline implementation work remains in this design doc.
+- Any future polling changes should be additive and should build on the existing poller, shared parser, and config wiring rather than re-implementing them.
