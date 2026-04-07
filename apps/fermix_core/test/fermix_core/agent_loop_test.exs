@@ -11,7 +11,10 @@ defmodule FermixCore.AgentLoopTest do
     @behaviour FermixCore.Providers.Provider
 
     @impl true
-    def chat(_messages, _opts) do
+    def chat(messages, opts) do
+      calls = Process.get(:mock_calls, [])
+      Process.put(:mock_calls, calls ++ [{messages, opts}])
+
       responses = Process.get(:mock_responses, [])
 
       case responses do
@@ -57,6 +60,23 @@ defmodule FermixCore.AgentLoopTest do
     def execute(_args, _ctx), do: {:error, "tool exploded"}
   end
 
+  defmodule SpyTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "spy_tool"
+    @impl true
+    def description, do: "Reports if it ran"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    @impl true
+    def execute(_args, _ctx) do
+      send(self(), :spy_tool_executed)
+      {:ok, Tool.success("spy ran")}
+    end
+  end
+
   # -- Helpers --
 
   defp mock_response(content, opts \\ []) do
@@ -81,6 +101,11 @@ defmodule FermixCore.AgentLoopTest do
 
   defp set_mock_responses(responses) do
     Process.put(:mock_responses, responses)
+    Process.put(:mock_calls, [])
+  end
+
+  defp mock_calls do
+    Process.get(:mock_calls, [])
   end
 
   defp run_loop(opts) do
@@ -135,6 +160,28 @@ defmodule FermixCore.AgentLoopTest do
       assert result.response == "Done!"
       assert result.iterations == 2
       assert result.total_tokens == 20
+    end
+
+    test "executes allowed tools when allowlist permits them", %{registry: registry} do
+      :ok = Registry.register(registry, EchoTool)
+
+      set_mock_responses([
+        mock_response("", tool_calls: [tool_call("call_1", "echo", %{"text" => "hi"})]),
+        mock_response("Done!")
+      ])
+
+      assert {:ok, result} =
+               run_loop(
+                 tools: Registry.all_tools_for_llm(registry),
+                 allowed_tools: ["echo"],
+                 registry: registry
+               )
+
+      assert result.response == "Done!"
+
+      [{_messages, first_opts}, {second_messages, _second_opts}] = mock_calls()
+      assert Enum.map(first_opts[:tools], & &1.function.name) == ["echo"]
+      assert Enum.any?(second_messages, &(&1.role == "tool" and &1.content == "Echo: hi"))
     end
   end
 
@@ -203,6 +250,34 @@ defmodule FermixCore.AgentLoopTest do
 
       assert {:ok, result} = run_loop(tools: [], registry: registry)
       assert result.response == "Handled missing tool"
+    end
+
+    test "blocks disallowed tool calls without executing them", %{registry: registry} do
+      :ok = Registry.register(registry, EchoTool)
+      :ok = Registry.register(registry, SpyTool)
+
+      set_mock_responses([
+        mock_response("", tool_calls: [tool_call("call_1", "spy_tool", %{})]),
+        mock_response("Handled blocked tool")
+      ])
+
+      assert {:ok, result} =
+               run_loop(
+                 tools: Registry.all_tools_for_llm(registry),
+                 allowed_tools: ["echo"],
+                 registry: registry
+               )
+
+      assert result.response == "Handled blocked tool"
+      refute_received :spy_tool_executed
+
+      [{_messages, first_opts}, {second_messages, _second_opts}] = mock_calls()
+      assert Enum.map(first_opts[:tools], & &1.function.name) == ["echo"]
+
+      assert Enum.any?(
+               second_messages,
+               &(&1.role == "tool" and &1.content == "Error: Tool 'spy_tool' not available")
+             )
     end
   end
 

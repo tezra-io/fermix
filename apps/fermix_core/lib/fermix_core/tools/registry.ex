@@ -33,9 +33,22 @@ defmodule FermixCore.Tools.Registry do
     GenServer.call(server, :all_tools_for_llm)
   end
 
+  @spec all_tools_for_llm(GenServer.server(), [String.t()] | nil) :: [map()]
+  def all_tools_for_llm(server, allowed_tools)
+      when is_list(allowed_tools) or is_nil(allowed_tools) do
+    GenServer.call(server, {:all_tools_for_llm, allowed_tools})
+  end
+
   @spec find_tool(GenServer.server(), String.t()) :: {:ok, module()} | :error
   def find_tool(server \\ __MODULE__, name) when is_binary(name) do
     GenServer.call(server, {:find_tool, name})
+  end
+
+  @spec find_tool(GenServer.server(), String.t(), [String.t()] | nil) ::
+          {:ok, module()} | {:error, :not_allowed} | :error
+  def find_tool(server, name, allowed_tools)
+      when is_binary(name) and (is_list(allowed_tools) or is_nil(allowed_tools)) do
+    GenServer.call(server, {:find_tool, name, allowed_tools})
   end
 
   # --- Server Callbacks ---
@@ -63,6 +76,15 @@ defmodule FermixCore.Tools.Registry do
     {:reply, formatted, tools}
   end
 
+  def handle_call({:all_tools_for_llm, allowed_tools}, _from, tools) do
+    formatted =
+      tools
+      |> Enum.filter(&tool_allowed?(&1, allowed_tools))
+      |> Enum.map(&Tool.format_for_llm/1)
+
+    {:reply, formatted, tools}
+  end
+
   def handle_call({:find_tool, name}, _from, tools) do
     result =
       case Enum.find(tools, fn tool -> tool.name() == name end) do
@@ -72,4 +94,24 @@ defmodule FermixCore.Tools.Registry do
 
     {:reply, result, tools}
   end
+
+  def handle_call({:find_tool, name, allowed_tools}, _from, tools) do
+    result =
+      case Enum.find(tools, fn tool -> tool.name() == name end) do
+        nil ->
+          :error
+
+        tool ->
+          if tool_allowed?(tool, allowed_tools) do
+            {:ok, tool}
+          else
+            {:error, :not_allowed}
+          end
+      end
+
+    {:reply, result, tools}
+  end
+
+  defp tool_allowed?(_tool, nil), do: true
+  defp tool_allowed?(tool, allowed_tools), do: tool.name() in allowed_tools
 end

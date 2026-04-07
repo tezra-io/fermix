@@ -50,7 +50,7 @@ Fermix today is a single-agent system. One MainAgent GenServer handles every inb
 | TraceStore (ETS-backed distributed tracing) | P2, current file tracing sufficient | M2 future |
 | Multiple providers per agent | Requires provider registry (M8+ scope) | Later |
 | Memory isolation between agents | Requires advanced memory (M4) | M4 |
-| Security policy enforcement on tool access | Requires security milestone | M5 |
+| Formal security policy and audit logging on tool access | Requires security milestone | M5 |
 | Cron-triggered skill invocation | Requires cron scheduler | M6 |
 
 ---
@@ -113,7 +113,7 @@ Telegram webhook → WebhookController → Telegram.parse_webhook()
 2. **One Main Agent.** All channels route to the same Main Agent instance.
 3. **OpenAI is the only provider.** Sub-agents will also use OpenAI until provider registry exists.
 4. **SQLite not yet available.** Memory is ETS + in-memory. M4 adds persistence.
-5. **No security policy.** Tool access is unrestricted until M5. Skill templates declare `allowed_tools` as documentation/intent, but enforcement is best-effort until M5.
+5. **No formal security policy/audit yet.** Skill-agent `allowed_tools` are enforced at runtime in M2, but broader policy evaluation and audit logging remain M5 work.
 6. **Skills directory must exist.** `~/.fermix/skills/` and `~/.fermix/journals/` created at startup if missing.
 
 ---
@@ -564,11 +564,11 @@ Persistent `AgentServer` snapshots are **not part of M2** under this ownership m
 
 ## 8. Security / Trust Boundaries
 
-**M2 has no formal security enforcement** — that's M5. However, M2 establishes the *structure* that M5 will enforce:
+**M2 does not include a full security policy engine or audit system** — that's M5. However, M2 does enforce skill tool allowlists at runtime and establishes the structure that M5 will extend:
 
 ### Trust boundary: Main Agent → Skill Agent
 
-- Skill's `allowed_tools` field declares intent. In M2, the Tool Registry filters tools passed to the skill's AgentLoop to only those in `allowed_tools`. This is a soft boundary — no audit, no policy engine.
+- Skill's `allowed_tools` field is enforced at runtime. AgentLoop exposes only allowlisted tool schemas to the provider, and Tool Registry rejects lookups outside that allowlist with a predictable "tool not available" failure. This is a bounded runtime ACL, not a full policy engine or audit system.
 - Skill cannot access Main Agent's conversation history (it gets only the task + context strings passed via invoke_skill).
 - Skill cannot send messages directly to the user's channel — it returns text to Main Agent, which decides what to send.
 - Skill cannot spawn further sub-agents in M2 scope (invoke_skill is not in any skill's default `allowed_tools`). Recursive delegation is a future consideration.
@@ -707,7 +707,7 @@ Application wiring       ← depends on AgentSupervisor + MainAgent
 | Dependency | Status | Notes |
 |------------|--------|-------|
 | AgentLoop | Exists | Needs minor changes: accept filtered tool list, accept definition-sourced model/temperature |
-| Tools.Registry | Exists | No changes needed — already supports dynamic lookup |
+| Tools.Registry | Exists | Add allowlist-aware lookup/filter helpers used by skill-agent runtime enforcement |
 | ConversationStore | Exists | Skill agents don't use it (they get task text, not chat history) |
 | Trace | Exists | Add new event types for agent lifecycle |
 | OpenAI provider | Exists | Used by both Main Agent and skill agents |
