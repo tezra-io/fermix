@@ -208,65 +208,67 @@ defmodule FermixCore.Providers.OpenAI do
   end
 
   defp parse_responses_body(body, model) when is_binary(body) do
-    events = parse_sse_events(body)
-    {text, completed} = extract_from_events(events)
-
-    usage =
-      case completed do
-        %{"usage" => u} -> u
-        _ -> %{}
-      end
-
-    {:ok,
-     %{
-       content: text || "",
-       tool_calls: [],
-       usage: %{
-         prompt_tokens: usage["input_tokens"] || 0,
-         completion_tokens: usage["output_tokens"] || 0,
-         total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0)
-       },
-       model: (completed && completed["model"]) || model
-     }}
+    body
+    |> parse_sse_response()
+    |> build_responses_result(model)
   end
 
   defp parse_responses_body(body, model) when is_map(body) do
-    text = extract_responses_text(body)
-    usage = body["usage"] || %{}
-
-    {:ok,
-     %{
-       content: text || "",
-       tool_calls: [],
-       usage: %{
-         prompt_tokens: usage["input_tokens"] || 0,
-         completion_tokens: usage["output_tokens"] || 0,
-         total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0)
-       },
-       model: body["model"] || model
-     }}
+    body
+    |> parse_map_response()
+    |> build_responses_result(model)
   end
 
   defp parse_responses_body(_body, _model), do: {:error, "Unexpected Codex response format"}
 
+  defp parse_sse_response(body) do
+    events = parse_sse_events(body)
+    {text, completed} = extract_from_events(events)
+
+    {text, extract_responses_usage(completed), completed && completed["model"]}
+  end
+
+  defp parse_map_response(body) do
+    {extract_responses_text(body), body["usage"] || %{}, body["model"]}
+  end
+
+  defp build_responses_result({text, usage, parsed_model}, fallback_model) do
+    {:ok,
+     %{
+       content: text || "",
+       tool_calls: [],
+       usage: %{
+         prompt_tokens: usage["input_tokens"] || 0,
+         completion_tokens: usage["output_tokens"] || 0,
+         total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0)
+       },
+       model: parsed_model || fallback_model
+     }}
+  end
+
+  defp extract_responses_usage(%{"usage" => usage}), do: usage
+  defp extract_responses_usage(_), do: %{}
+
   defp parse_sse_events(body) do
     body
     |> String.split("\n\n", trim: true)
-    |> Enum.flat_map(fn chunk ->
-      chunk
-      |> String.split("\n", trim: true)
-      |> Enum.filter(&String.starts_with?(&1, "data: "))
-      |> Enum.flat_map(fn "data: " <> data ->
-        case data do
-          "[DONE]" -> []
-          json ->
-            case Jason.decode(json) do
-              {:ok, event} -> [event]
-              _ -> []
-            end
-        end
-      end)
-    end)
+    |> Enum.flat_map(&parse_sse_chunk/1)
+  end
+
+  defp parse_sse_chunk(chunk) do
+    chunk
+    |> String.split("\n", trim: true)
+    |> Enum.filter(&String.starts_with?(&1, "data: "))
+    |> Enum.flat_map(&decode_sse_line/1)
+  end
+
+  defp decode_sse_line("data: [DONE]"), do: []
+
+  defp decode_sse_line("data: " <> json) do
+    case Jason.decode(json) do
+      {:ok, event} -> [event]
+      _ -> []
+    end
   end
 
   defp extract_from_events(events) do
