@@ -424,6 +424,14 @@ Fixed 1 test failure. Root cause: test used wrong config key path.
 
 **Written by:** invoke_skill tool after skill agent completes (or fails). Journal captures what happened regardless of outcome.
 
+#### Skill Journal Persistence Contract
+
+- **When writes are mandatory:** `invoke_skill` must attempt exactly one journal write after every terminal skill outcome: `completed`, `failed`, `timed_out`, or `crashed`. Returning the final tool result happens only after that write attempt finishes.
+- **Mandatory vs best-effort:** Journal persistence is mandatory in M2. A skill run without a journal file is treated as a failed invocation, not a soft warning.
+- **Failure handling:** If the skill reaches a terminal state but the journal write fails, `invoke_skill` returns `{:error, {:journal_write_failed, terminal_status, reason}}`. The original terminal status is preserved in the error tuple so callers can distinguish "skill failed" from "skill succeeded but audit persistence failed".
+- **Retention:** M2 does not prune or compact skill journals automatically. Journal files remain on disk until an operator removes them manually.
+- **Mutation model:** One Markdown file is written per invocation. Later invocations do not append to or overwrite an earlier journal.
+
 ### 5.7 AgentCoordinator (P1)
 
 **Responsibility:** Matches required capabilities to available skills. Enforces delegation ACL.
@@ -542,6 +550,13 @@ invoke_skill tool called
 
 Persistent `AgentServer` snapshots are **not part of M2** under this ownership model. Crash recovery for the current Main Agent relies on its direct application supervision plus the existing separate `ConversationStore` process, which already owns chat history outside the `MainAgent` process.
 
+#### Snapshot Persistence Contract
+
+- **When writes are mandatory:** Never in M2. No runtime component should rely on snapshot persistence for correctness or crash recovery in this milestone.
+- **Mandatory vs best-effort:** Persistent snapshot writes and restores are disabled, not best-effort.
+- **Failure handling:** Any explicit attempt to persist or restore an agent snapshot fails closed with `{:error, :snapshot_persistence_disabled}`.
+- **Retention:** None. Because snapshot files must not be written in M2, there is nothing to prune or restore later.
+
 ---
 
 ## 7. Failure Modes and Recovery Behavior
@@ -594,6 +609,20 @@ Persistent `AgentServer` snapshots are **not part of M2** under this ownership m
 **Detection:** `max_iterations` limit in AgentLoop (from AgentDefinition).
 **Recovery:** AgentLoop returns with truncated result after hitting limit. invoke_skill returns partial result.
 **Impact:** Bounded by design. No system-level runaway.
+
+### F8: Skill journal write fails
+
+**Cause:** Filesystem permission issue, directory creation failure, disk-full condition, or similar local write error.
+**Detection:** Journal writer returns `{:error, {:journal_write_failed, terminal_status, reason}}`.
+**Recovery:** `invoke_skill` returns that error instead of silently succeeding. The skill output is not considered committed until the mandatory journal write succeeds.
+**Impact:** The skill may have produced a terminal result, but the invocation is surfaced as failed because the audit record is missing.
+
+### F9: Snapshot persistence requested in M2
+
+**Cause:** Code attempts to persist or restore an `AgentServer` snapshot even though M2 does not support it.
+**Detection:** Snapshot persistence call returns `{:error, :snapshot_persistence_disabled}`.
+**Recovery:** Caller must fall back to the documented M2 recovery path: supervision restart plus `ConversationStore`, with no snapshot restore.
+**Impact:** No snapshot file is written or loaded. Crash recovery behavior stays explicit and bounded.
 
 ---
 
