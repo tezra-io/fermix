@@ -6,6 +6,13 @@ defmodule FermixCore.Agents.MainAgent do
   runs the agent loop in a non-blocking Task, and sends responses
   back via the message's reply_fn callback.
 
+  Same-conversation requests are single-flight. Each conversation keeps at most
+  one active request task plus one pending replacement. If a newer message
+  arrives while that conversation already has work in flight, the active task is
+  canceled, the pending slot is replaced with the newest message, and only that
+  newest message is started once the older task exits. Different conversations
+  continue independently.
+
   Started by Application supervisor with :permanent restart.
   """
 
@@ -24,6 +31,25 @@ defmodule FermixCore.Agents.MainAgent do
           channel: String.t(),
           chat_id: String.t(),
           reply_fn: (String.t() -> any())
+        }
+
+  @type conversation_key :: {channel :: String.t(), chat_id :: String.t()}
+
+  @type pending_request :: %{
+          request_id: pos_integer(),
+          message: channel_message()
+        }
+
+  @type active_request :: %{
+          request_id: pos_integer(),
+          pid: pid(),
+          monitor_ref: reference()
+        }
+
+  @type conversation_runtime :: %{
+          next_request_id: non_neg_integer(),
+          active: active_request() | nil,
+          pending: pending_request() | nil
         }
 
   # --- Client API ---
@@ -70,7 +96,9 @@ defmodule FermixCore.Agents.MainAgent do
       skill_registry: skill_registry,
       available_skills: load_available_skills(skill_registry),
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
-      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
+      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+      conversations: %{},
+      task_refs: %{}
     }
 
     {:ok, state}
@@ -78,13 +106,17 @@ defmodule FermixCore.Agents.MainAgent do
 
   @impl true
   def handle_cast({:handle_message, msg}, state) do
-    Logger.info("Main Agent received message from #{msg.channel}/#{msg.chat_id}")
+    conversation_key = conversation_key(msg)
+    state = enqueue_latest_message(conversation_key, msg, state)
 
-    task_state = state
+    Logger.info(
+      "Main Agent received message from #{msg.channel}/#{msg.chat_id} and queued latest request"
+    )
 
-    Task.Supervisor.start_child(state.task_supervisor, fn ->
-      process_message(msg, task_state)
-    end)
+    state =
+      state
+      |> maybe_cancel_active_request(conversation_key)
+      |> maybe_start_next_request(conversation_key)
 
     {:noreply, state}
   end
@@ -100,11 +132,182 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
+    case Map.pop(state.task_refs, ref) do
+      {nil, _task_refs} ->
+        {:noreply, state}
+
+      {conversation_key, task_refs} ->
+        state =
+          state
+          |> Map.put(:task_refs, task_refs)
+          |> clear_active_request(conversation_key, ref, reason)
+          |> maybe_start_next_request(conversation_key)
+
+        {:noreply, state}
+    end
+  end
+
   # --- Internals ---
+
+  defp conversation_key(%{channel: channel, chat_id: chat_id}), do: {channel, chat_id}
+
+  defp empty_conversation_runtime do
+    %{next_request_id: 0, active: nil, pending: nil}
+  end
+
+  defp enqueue_latest_message(conversation_key, msg, state) do
+    conversation =
+      state.conversations
+      |> Map.get(conversation_key, empty_conversation_runtime())
+      |> Map.update!(:next_request_id, &(&1 + 1))
+
+    pending = %{request_id: conversation.next_request_id, message: msg}
+
+    put_conversation_runtime(state, conversation_key, %{conversation | pending: pending})
+  end
+
+  defp maybe_cancel_active_request(state, conversation_key) do
+    case get_in(state, [:conversations, conversation_key, :active]) do
+      nil ->
+        state
+
+      %{pid: pid, request_id: request_id} ->
+        Logger.info(
+          "Canceling in-flight Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}"
+        )
+
+        case Task.Supervisor.terminate_child(state.task_supervisor, pid) do
+          :ok ->
+            state
+
+          {:error, :not_found} ->
+            state
+
+          {:error, reason} ->
+            Logger.warning(
+              "Failed to cancel Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
+            )
+
+            state
+        end
+    end
+  end
+
+  defp maybe_start_next_request(state, conversation_key) do
+    case Map.get(state.conversations, conversation_key, empty_conversation_runtime()) do
+      %{active: nil, pending: pending_request} = conversation when not is_nil(pending_request) ->
+        start_pending_request(state, conversation_key, conversation, pending_request)
+
+      _conversation ->
+        state
+    end
+  end
+
+  defp start_pending_request(
+         state,
+         conversation_key,
+         conversation,
+         %{request_id: request_id, message: msg}
+       ) do
+    task_state = task_runtime_state(state)
+
+    case Task.Supervisor.start_child(state.task_supervisor, fn ->
+           process_message(msg, task_state)
+         end) do
+      {:ok, pid} ->
+        mark_request_started(state, conversation_key, conversation, request_id, pid)
+
+      {:error, reason} ->
+        handle_request_start_error(
+          state,
+          conversation_key,
+          conversation,
+          request_id,
+          msg,
+          reason
+        )
+    end
+  end
+
+  defp mark_request_started(state, conversation_key, conversation, request_id, pid) do
+    monitor_ref = Process.monitor(pid)
+
+    Logger.info(
+      "Starting Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}"
+    )
+
+    conversation = %{
+      conversation
+      | active: %{request_id: request_id, pid: pid, monitor_ref: monitor_ref},
+        pending: nil
+    }
+
+    state
+    |> put_conversation_runtime(conversation_key, conversation)
+    |> update_in([:task_refs], &Map.put(&1, monitor_ref, conversation_key))
+  end
+
+  defp handle_request_start_error(
+         state,
+         conversation_key,
+         conversation,
+         request_id,
+         msg,
+         reason
+       ) do
+    Logger.error(
+      "Failed to start Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
+    )
+
+    send_reply_async(msg.reply_fn, "Sorry, I encountered an error processing your message.")
+
+    state
+    |> put_conversation_runtime(conversation_key, %{conversation | pending: nil})
+  end
+
+  defp send_reply_async(reply_fn, response) do
+    spawn(fn -> reply_fn.(response) end)
+    :ok
+  end
+
+  defp clear_active_request(state, conversation_key, monitor_ref, reason) do
+    case Map.get(state.conversations, conversation_key) do
+      %{active: %{monitor_ref: ^monitor_ref, request_id: request_id}} = conversation ->
+        Logger.info(
+          "Main Agent request #{request_id} exited for #{format_conversation_key(conversation_key)} with reason #{inspect(reason)}"
+        )
+
+        put_conversation_runtime(state, conversation_key, %{conversation | active: nil})
+
+      _conversation ->
+        state
+    end
+  end
+
+  defp put_conversation_runtime(state, conversation_key, %{active: nil, pending: nil}) do
+    update_in(state.conversations, &Map.delete(&1, conversation_key))
+  end
+
+  defp put_conversation_runtime(state, conversation_key, conversation_runtime) do
+    update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
+  end
+
+  defp task_runtime_state(state) do
+    %{
+      provider: state.provider,
+      registry: state.registry,
+      available_skills: state.available_skills,
+      conversation_store: state.conversation_store
+    }
+  end
+
+  defp format_conversation_key({channel, chat_id}), do: "#{channel}/#{chat_id}"
 
   defp process_message(msg, state) do
     start = System.monotonic_time(:millisecond)
-    conversation_key = {msg.channel, msg.chat_id}
+    conversation_key = conversation_key(msg)
 
     history = ConversationStore.get_history(conversation_key, server: state.conversation_store)
 

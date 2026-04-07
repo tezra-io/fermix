@@ -13,10 +13,12 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     @responses :main_agent_mock_responses
     @calls :main_agent_mock_calls
+    @test_pid :main_agent_mock_test_pid
 
-    def init do
+    def init(test_pid \\ self()) do
       {:ok, _} = Agent.start_link(fn -> [] end, name: @responses)
       {:ok, _} = Agent.start_link(fn -> [] end, name: @calls)
+      {:ok, _} = Agent.start_link(fn -> test_pid end, name: @test_pid)
       :ok
     end
 
@@ -33,7 +35,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     def cleanup do
-      for name <- [@responses, @calls] do
+      for name <- [@responses, @calls, @test_pid] do
         if Process.whereis(name), do: Agent.stop(name)
       end
     end
@@ -42,14 +44,101 @@ defmodule FermixCore.Agents.MainAgentTest do
     def chat(messages, opts) do
       Agent.update(@calls, fn calls -> calls ++ [{messages, opts}] end)
 
+      user_content =
+        messages
+        |> Enum.reverse()
+        |> Enum.find_value(fn
+          %{role: "user", content: content} -> content
+          _ -> nil
+        end)
+
+      test_pid = Agent.get(@test_pid, & &1)
+      send(test_pid, {:mock_provider_called, user_content, self(), messages, opts})
+
       Agent.get_and_update(@responses, fn
-        [next | rest] -> {next, rest}
-        [] -> {{:error, "No mock responses left"}, []}
+        [{:block, tag, next} | rest] ->
+          send(test_pid, {:mock_provider_blocked, tag, self()})
+
+          result =
+            receive do
+              {:continue, ^tag} -> next
+            end
+
+          {result, rest}
+
+        [next | rest] ->
+          {next, rest}
+
+        [] ->
+          {{:error, "No mock responses left"}, []}
       end)
     end
 
     @impl true
     def models, do: {:ok, ["mock-model"]}
+  end
+
+  defmodule ControlledProvider do
+    @behaviour FermixCore.Providers.Provider
+
+    @state :main_agent_controlled_provider
+
+    def init(test_pid \\ self()) do
+      cleanup()
+
+      {:ok, _} =
+        Agent.start_link(
+          fn -> %{calls: [], plans: %{}, test_pid: test_pid} end,
+          name: @state
+        )
+
+      :ok
+    end
+
+    def set_plans(plans) when is_map(plans) do
+      Agent.update(@state, fn state -> %{state | plans: plans, calls: []} end)
+    end
+
+    def get_calls do
+      Agent.get(@state, & &1.calls)
+    end
+
+    def cleanup do
+      if Process.whereis(@state), do: Agent.stop(@state)
+    end
+
+    @impl true
+    def chat(messages, opts) do
+      user_content =
+        messages
+        |> Enum.reverse()
+        |> Enum.find_value(fn
+          %{role: "user", content: content} -> content
+          _ -> nil
+        end)
+
+      {plan, test_pid} =
+        Agent.get_and_update(@state, fn state ->
+          updated_calls = state.calls ++ [{user_content, messages, opts}]
+          plan = Map.fetch!(state.plans, user_content)
+          {{plan, state.test_pid}, %{state | calls: updated_calls}}
+        end)
+
+      send(test_pid, {:controlled_provider_called, user_content, self(), messages, opts})
+
+      case plan do
+        {:block, response} ->
+          receive do
+            {:continue, ^user_content} -> response
+          end
+
+        response ->
+          response
+      end
+    end
+
+    @impl true
+    def models, do: {:ok, ["controlled-model"]}
   end
 
   # -- Helpers --
@@ -154,7 +243,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       registry: registry_name,
       skill_registry: skill_registry_name,
       conv_store: conv_name,
-      skills_dir: skills_dir
+      skills_dir: skills_dir,
+      task_supervisor: task_sup_name
     }
   end
 
@@ -237,6 +327,46 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert error_msg =~ "error"
     end
 
+    test "clears pending state and replies when request task cannot start", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store
+    } do
+      agent_name = :"start_error_main_agent_#{System.unique_integer([:positive])}"
+      task_sup_name = :"start_error_task_sup_#{System.unique_integer([:positive])}"
+      chat_id = "chat_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {Task.Supervisor, [name: task_sup_name, max_children: 0]},
+          id: task_sup_name
+        )
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_sup_name
+           ]},
+          id: agent_name
+        )
+
+      MainAgent.handle_message(make_message("Hello", chat_id: chat_id), agent_name)
+
+      assert_receive {:reply, error_msg}, 5_000
+      assert error_msg =~ "error"
+
+      state = :sys.get_state(agent_name)
+
+      refute Map.has_key?(state.conversations, {"telegram", chat_id})
+      assert state.task_refs == %{}
+    end
+
     test "is non-blocking — returns :ok before processing completes", %{agent: agent} do
       MockProvider.set_responses([mock_response("OK")])
 
@@ -280,6 +410,182 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       [{messages_after_reload, _opts}] = MockProvider.get_calls()
       assert hd(messages_after_reload).content =~ "coding-skill"
+    end
+
+    test "supersedes an in-flight request with the newest same-conversation message", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      test_pid = self()
+      chat_id = "chat_#{System.unique_integer([:positive])}"
+      agent_name = :"controlled_main_agent_#{System.unique_integer([:positive])}"
+
+      :ok = ControlledProvider.init(test_pid)
+
+      on_exit(fn ->
+        ControlledProvider.cleanup()
+      end)
+
+      ControlledProvider.set_plans(%{
+        "first" => {:block, mock_response("stale reply")},
+        "second" => mock_response("fresh reply")
+      })
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: ControlledProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor
+           ]},
+          id: agent_name
+        )
+
+      first_msg =
+        make_message("first",
+          chat_id: chat_id,
+          reply_fn: fn response ->
+            send(test_pid, {:reply, :first, response})
+          end
+        )
+
+      second_msg =
+        make_message("second",
+          chat_id: chat_id,
+          reply_fn: fn response ->
+            send(test_pid, {:reply, :second, response})
+          end
+        )
+
+      MainAgent.handle_message(first_msg, agent_name)
+
+      assert_receive {:controlled_provider_called, "first", first_pid, first_messages, _opts},
+                     5_000
+
+      assert Enum.map(Enum.filter(first_messages, &(&1.role == "user")), & &1.content) == [
+               "first"
+             ]
+
+      first_ref = Process.monitor(first_pid)
+
+      MainAgent.handle_message(second_msg, agent_name)
+
+      assert_receive {:DOWN, ^first_ref, :process, ^first_pid, reason}, 5_000
+      refute reason == :normal
+
+      assert_receive {:controlled_provider_called, "second", _second_pid, second_messages, _opts},
+                     5_000
+
+      assert Enum.map(Enum.filter(second_messages, &(&1.role == "user")), & &1.content) == [
+               "second"
+             ]
+
+      assert_receive {:reply, :second, "fresh reply"}, 5_000
+      refute_receive {:reply, :first, _response}, 200
+
+      flush_conv_store(conv_store)
+
+      assert ConversationStore.get_history({"telegram", chat_id}, server: conv_store)
+             |> Enum.map(&{&1.role, &1.content}) == [
+               {"user", "second"},
+               {"assistant", "fresh reply"}
+             ]
+
+      assert Enum.map(ControlledProvider.get_calls(), fn {content, _messages, _opts} ->
+               content
+             end) == [
+               "first",
+               "second"
+             ]
+    end
+
+    test "keeps different conversations independent while one chat has blocked work", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      test_pid = self()
+      agent_name = :"controlled_main_agent_#{System.unique_integer([:positive])}"
+      first_chat_id = "chat_#{System.unique_integer([:positive])}"
+      second_chat_id = "chat_#{System.unique_integer([:positive])}"
+
+      :ok = ControlledProvider.init(test_pid)
+
+      on_exit(fn ->
+        ControlledProvider.cleanup()
+      end)
+
+      ControlledProvider.set_plans(%{
+        "blocked" => {:block, mock_response("chat one reply")},
+        "other" => mock_response("chat two reply")
+      })
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: ControlledProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor
+           ]},
+          id: agent_name
+        )
+
+      blocked_msg =
+        make_message("blocked",
+          chat_id: first_chat_id,
+          reply_fn: fn response ->
+            send(test_pid, {:reply, :blocked, response})
+          end
+        )
+
+      other_msg =
+        make_message("other",
+          chat_id: second_chat_id,
+          reply_fn: fn response ->
+            send(test_pid, {:reply, :other, response})
+          end
+        )
+
+      MainAgent.handle_message(blocked_msg, agent_name)
+
+      assert_receive {:controlled_provider_called, "blocked", blocked_pid, _messages, _opts},
+                     5_000
+
+      assert Process.alive?(blocked_pid)
+
+      MainAgent.handle_message(other_msg, agent_name)
+
+      assert_receive {:controlled_provider_called, "other", _other_pid, _messages, _opts}, 5_000
+      assert_receive {:reply, :other, "chat two reply"}, 5_000
+      assert Process.alive?(blocked_pid)
+
+      send(blocked_pid, {:continue, "blocked"})
+      assert_receive {:reply, :blocked, "chat one reply"}, 5_000
+
+      flush_conv_store(conv_store)
+
+      assert ConversationStore.get_history({"telegram", second_chat_id}, server: conv_store)
+             |> Enum.map(&{&1.role, &1.content}) == [
+               {"user", "other"},
+               {"assistant", "chat two reply"}
+             ]
+
+      assert ConversationStore.get_history({"telegram", first_chat_id}, server: conv_store)
+             |> Enum.map(&{&1.role, &1.content}) == [
+               {"user", "blocked"},
+               {"assistant", "chat one reply"}
+             ]
     end
   end
 
