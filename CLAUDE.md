@@ -11,16 +11,16 @@ Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, R
 
 ```
 fermix/ (umbrella)
-├── apps/fermix_core/       # Agents, providers, tools, memory, security
-├── apps/fermix_channels/   # Telegram, WhatsApp, Discord, Signal
-├── apps/fermix_web/        # Phoenix: webhooks, REST, WebSocket, LiveView
+├── apps/fermix_core/       # Agents, providers, tools, memory
+├── apps/fermix_channels/   # Telegram (only channel implemented so far)
+├── apps/fermix_web/        # Phoenix: webhooks, health, LiveView
 └── apps/fermix_nif/        # Rustler: HMAC-SHA256, tiktoken
 ```
 
 - One BEAM VM, no HTTP bridge. Everything is OTP-supervised.
-- Persistent Main Agent (GenServer, `:permanent`) + ephemeral skill agents (`:temporary`)
+- Persistent Main Agent (GenServer, `:permanent`) with single-flight per conversation
 - Agent loop: LLM call → parse tool calls → execute → loop until done
-- Providers via Req. Channels are webhook controllers. Memory is three-tier.
+- Providers via Req. Memory is in-memory (ConversationStore GenServer + ETS Store).
 
 ## Test-First (Mandatory)
 
@@ -81,4 +81,6 @@ StreamData available for property-based testing. Use it for parsers and data tra
 
 - `docs/PROJECT_PLAN.md` — Full plan with phases
 - `docs/PHASE1_TASKS.md` — 16 tasks with implementation code
-- `docs/ROADMAP.md` — Post-MVP feature roadmap
+- `docs/ROADMAP.md` — Post-MVP feature roadmap (M2-M9)
+- `docs/MILESTONE_2_MULTI_AGENT_ORCHESTRATION.md` — M2 design (partially implemented)
+- `docs/MILESTONE_3_ONBOARDING_CHANNEL_COVERAGE.md` — M3 design (draft)
