@@ -21,6 +21,8 @@ defmodule FermixCore.Agents.MainAgent do
   require Logger
 
   alias FermixCore.AgentLoop
+  alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Tools.Registry
@@ -93,10 +95,12 @@ defmodule FermixCore.Agents.MainAgent do
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       registry: Keyword.get(opts, :registry, Registry),
+      agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
       skill_registry: skill_registry,
       available_skills: load_available_skills(skill_registry),
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+      journal_base_dir: Keyword.get(opts, :journal_base_dir),
       conversations: %{},
       task_refs: %{}
     }
@@ -124,8 +128,8 @@ defmodule FermixCore.Agents.MainAgent do
   @impl true
   def handle_call(:reload_skills, _from, state) do
     case reload_available_skills(state.skill_registry) do
-      {:ok, available_skills} ->
-        {:reply, {:ok, available_skills}, %{state | available_skills: available_skills}}
+      {:ok, names, available_skills} ->
+        {:reply, {:ok, names}, %{state | available_skills: available_skills}}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -298,8 +302,12 @@ defmodule FermixCore.Agents.MainAgent do
     %{
       provider: state.provider,
       registry: state.registry,
+      skill_registry: state.skill_registry,
+      agent_supervisor: state.agent_supervisor,
       available_skills: state.available_skills,
-      conversation_store: state.conversation_store
+      conversation_store: state.conversation_store,
+      task_supervisor: state.task_supervisor,
+      journal_base_dir: state.journal_base_dir
     }
   end
 
@@ -319,7 +327,14 @@ defmodule FermixCore.Agents.MainAgent do
 
     context = %{
       agent_name: "main",
-      conversation_key: conversation_key
+      conversation_key: conversation_key,
+      session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
+      registry: state.registry,
+      provider: state.provider,
+      skill_registry: state.skill_registry,
+      agent_supervisor: state.agent_supervisor,
+      task_supervisor: state.task_supervisor,
+      journal_base_dir: state.journal_base_dir
     }
 
     case AgentLoop.run(
@@ -378,32 +393,59 @@ defmodule FermixCore.Agents.MainAgent do
   defp system_prompt(available_skills) do
     skill_catalog =
       case available_skills do
-        [] -> "Available skills snapshot: none loaded."
-        skills -> "Available skills snapshot: #{Enum.join(skills, ", ")}."
+        [] ->
+          "Available skills snapshot: none loaded."
+
+        skills ->
+          "Available skills snapshot:\n#{Enum.map_join(skills, "\n", &format_skill_summary/1)}"
       end
 
     """
     You are a helpful AI assistant with access to tools.
     You can execute shell commands, read and write files, and store/recall memories.
     Skills are discovered from a cached registry snapshot and only change after an explicit reload.
+    Use the `invoke_skill` tool when a specialized skill is a better fit than handling the work directly.
     #{skill_catalog}
     When you need to perform an action, use the appropriate tool. Think step by step.\
     """
   end
 
   defp load_available_skills(skill_registry) do
-    case safe_skill_registry_call(fn -> SkillRegistry.list(skill_registry) end) do
+    case safe_skill_registry_call(fn -> SkillRegistry.list_detailed(skill_registry) end) do
       {:ok, skills} -> skills
       {:error, _reason} -> []
     end
   end
 
   defp reload_available_skills(skill_registry) do
-    case safe_skill_registry_call(fn -> SkillRegistry.reload(skill_registry) end) do
-      {:ok, {:ok, skills}} -> {:ok, skills}
-      {:ok, {:error, reason}} -> {:error, reason}
-      {:error, reason} -> {:error, {:skill_registry_unavailable, reason}}
+    with {:ok, {:ok, names}} <-
+           safe_skill_registry_call(fn -> SkillRegistry.reload(skill_registry) end),
+         {:ok, skills} <-
+           safe_skill_registry_call(fn -> SkillRegistry.list_detailed(skill_registry) end) do
+      {:ok, names, skills}
+    else
+      {:ok, {:error, reason}} ->
+        {:error, reason}
+
+      {:error, reason} ->
+        {:error, {:skill_registry_unavailable, reason}}
     end
+  end
+
+  defp format_skill_summary(%AgentDefinition{} = skill) do
+    capabilities =
+      case skill.capabilities do
+        [] -> "capabilities: none declared"
+        list -> "capabilities: #{Enum.join(list, ", ")}"
+      end
+
+    tools =
+      case skill.allowed_tools do
+        [] -> "tools: none declared"
+        list -> "tools: #{Enum.join(list, ", ")}"
+      end
+
+    "- #{skill.name}: #{capabilities}; #{tools}"
   end
 
   defp safe_skill_registry_call(fun) do

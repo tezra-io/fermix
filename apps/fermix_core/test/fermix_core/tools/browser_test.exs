@@ -103,8 +103,9 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
-  @tag :integration
   describe "execute/2 - integration (requires agent-browser)" do
+    @describetag :integration
+
     test "snapshot returns output" do
       assert {:ok, result} = Browser.execute(%{"action" => "snapshot"}, @context)
       assert result.success == true or result.success == false

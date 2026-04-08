@@ -146,7 +146,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
 
   test "rejects non-tuple conversation key", %{store: store} do
     assert_raise FunctionClauseError, fn ->
-      ConversationStore.add_message("bad_key", "user", "hi", server: store)
+      apply(ConversationStore, :add_message, ["bad_key", "user", "hi", [server: store]])
     end
   end
 

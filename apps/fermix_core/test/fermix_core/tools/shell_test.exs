@@ -140,7 +140,7 @@ defmodule FermixCore.Tools.ShellTest do
       Shell.execute(%{"command" => "exit 1"}, @context)
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], measurements,
-                      %{tool: "shell", agent: "test_agent", success: false} = metadata}
+                      %{tool: "shell", agent: "test_agent", success: false}}
 
       assert is_integer(measurements.duration_ms)
 
