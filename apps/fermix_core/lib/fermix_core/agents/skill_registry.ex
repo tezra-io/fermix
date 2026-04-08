@@ -3,12 +3,13 @@ defmodule FermixCore.Agents.SkillRegistry do
   Filesystem-backed registry for discovered skills.
 
   The registry holds an in-memory snapshot of `~/.fermix/skills/`. New, removed,
-  or changed skills do not affect callers until `reload/1` is called. Discovery
-  fails fast on the first invalid skill file during init or reload, and a failed
-  reload preserves the previous snapshot.
+  or changed skills do not affect callers until `reload/1` is called. Invalid
+  skill files are skipped with warnings so one malformed template does not take
+  down the whole runtime.
   """
 
   use GenServer
+  require Logger
 
   alias FermixCore.Agents.AgentDefinition
 
@@ -48,14 +49,10 @@ defmodule FermixCore.Agents.SkillRegistry do
   def init(opts) do
     skills_dir = Keyword.get(opts, :skills_dir, default_skills_dir())
     File.mkdir_p!(skills_dir)
-
-    case discover(skills_dir) do
-      {:ok, definitions} ->
-        {:ok, %{skills_dir: skills_dir, definitions: definitions}}
-
-      {:error, reason} ->
-        {:stop, reason}
-    end
+    maybe_seed_default_skills(skills_dir, opts)
+    {definitions, errors} = discover(skills_dir)
+    log_discovery_errors(errors)
+    {:ok, %{skills_dir: skills_dir, definitions: definitions}}
   end
 
   @impl true
@@ -83,13 +80,9 @@ defmodule FermixCore.Agents.SkillRegistry do
   end
 
   def handle_call(:reload, _from, state) do
-    case discover(state.skills_dir) do
-      {:ok, definitions} ->
-        {:reply, {:ok, snapshot_names(definitions)}, %{state | definitions: definitions}}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
+    {definitions, errors} = discover(state.skills_dir)
+    log_discovery_errors(errors)
+    {:reply, {:ok, snapshot_names(definitions)}, %{state | definitions: definitions}}
   end
 
   defp discover(skills_dir) do
@@ -97,15 +90,16 @@ defmodule FermixCore.Agents.SkillRegistry do
     |> Path.join("*/SKILL.md")
     |> Path.wildcard()
     |> Enum.sort()
-    |> Enum.reduce_while({:ok, %{}}, fn path, {:ok, definitions} ->
+    |> Enum.reduce({%{}, []}, fn path, {definitions, errors} ->
       case load_definition(path) do
         {:ok, definition} ->
-          {:cont, {:ok, Map.put(definitions, definition.name, definition)}}
+          {Map.put(definitions, definition.name, definition), errors}
 
         {:error, reason} ->
-          {:halt, {:error, reason}}
+          {definitions, [reason | errors]}
       end
     end)
+    |> then(fn {definitions, errors} -> {definitions, Enum.reverse(errors)} end)
   end
 
   defp load_definition(path) do
@@ -212,5 +206,52 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   defp default_skills_dir do
     Path.join(System.user_home!(), ".fermix/skills")
+  end
+
+  defp maybe_seed_default_skills(skills_dir, opts) do
+    if should_seed_default_skills?(skills_dir, opts) and directory_empty?(skills_dir) do
+      seed_default_skills(skills_dir)
+    end
+  end
+
+  defp bundled_skills_dir do
+    :fermix_core
+    |> :code.priv_dir()
+    |> to_string()
+    |> Path.join("skills")
+  end
+
+  defp should_seed_default_skills?(skills_dir, opts) do
+    Keyword.get(
+      opts,
+      :seed_defaults,
+      Path.expand(skills_dir) == Path.expand(default_skills_dir())
+    )
+  end
+
+  defp seed_default_skills(skills_dir) do
+    bundled_skills_dir()
+    |> Path.join("*")
+    |> Path.wildcard()
+    |> Enum.reject(&File.exists?(Path.join(skills_dir, Path.basename(&1))))
+    |> Enum.each(fn source_dir ->
+      File.cp_r!(source_dir, Path.join(skills_dir, Path.basename(source_dir)))
+    end)
+  end
+
+  defp directory_empty?(path) do
+    case File.ls(path) do
+      {:ok, []} -> true
+      {:ok, _entries} -> false
+      {:error, _reason} -> true
+    end
+  end
+
+  defp log_discovery_errors([]), do: :ok
+
+  defp log_discovery_errors(errors) do
+    Enum.each(errors, fn error ->
+      Logger.warning("Skipping invalid skill during discovery: #{inspect(error)}")
+    end)
   end
 end

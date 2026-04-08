@@ -30,7 +30,8 @@ defmodule FermixCore.Agents.SkillRegistryTest do
 
     registry =
       start_supervised!(
-        {SkillRegistry, name: :"skill_registry_#{suffix}", skills_dir: skills_dir}
+        {SkillRegistry,
+         name: :"skill_registry_#{suffix}", skills_dir: skills_dir, seed_defaults: false}
       )
 
     on_exit(fn -> File.rm_rf!(skills_dir) end)
@@ -73,7 +74,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert definition.timeout_seconds == 120
     end
 
-    test "preserves the previous snapshot when reload fails on an invalid skill file", %{
+    test "skips invalid skills during reload instead of failing the whole snapshot", %{
       registry: registry,
       skills_dir: skills_dir
     } do
@@ -86,12 +87,12 @@ defmodule FermixCore.Agents.SkillRegistryTest do
 
       File.write!(Path.join([skills_dir, "coding-skill", "SKILL.md"]), "not valid frontmatter")
 
-      assert {:error, {:invalid_skill, "coding-skill", :missing_frontmatter}} =
-               SkillRegistry.reload(registry)
+      assert {:ok, []} = SkillRegistry.reload(registry)
 
-      assert SkillRegistry.list(registry) == ["coding-skill"]
-      assert {:ok, definition} = SkillRegistry.load(registry, "coding-skill")
-      assert definition.system_prompt == "You write code."
+      assert SkillRegistry.list(registry) == []
+
+      assert {:error, {:unknown_skill, "coding-skill"}} =
+               SkillRegistry.load(registry, "coding-skill")
     end
 
     test "removes deleted skills from the snapshot on reload", %{
@@ -111,6 +112,23 @@ defmodule FermixCore.Agents.SkillRegistryTest do
 
       assert SkillRegistry.list(registry) == ["coding-skill"]
       assert {:error, {:unknown_skill, "ops-skill"}} = SkillRegistry.load(registry, "ops-skill")
+    end
+  end
+
+  describe "seeded defaults" do
+    test "can seed bundled skill templates into an empty directory", %{skills_dir: skills_dir} do
+      seeded_registry =
+        start_supervised!(
+          {SkillRegistry,
+           name: :"seeded_skill_registry_#{System.unique_integer([:positive])}",
+           skills_dir: skills_dir,
+           seed_defaults: true},
+          id: :"seeded_skill_registry_child_#{System.unique_integer([:positive])}"
+        )
+
+      assert "coding-skill" in SkillRegistry.list(seeded_registry)
+      assert "research-skill" in SkillRegistry.list(seeded_registry)
+      assert "review-skill" in SkillRegistry.list(seeded_registry)
     end
   end
 end

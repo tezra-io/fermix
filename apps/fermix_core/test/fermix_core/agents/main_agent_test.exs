@@ -1,9 +1,11 @@
 defmodule FermixCore.Agents.MainAgentTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Tools.InvokeSkill
   alias FermixCore.Tools.Registry
 
   # -- Mock provider backed by named Agent for cross-process access --
@@ -169,6 +171,14 @@ defmodule FermixCore.Agents.MainAgentTest do
     }
   end
 
+  defp tool_call(id, name, arguments) do
+    %{
+      "id" => id,
+      "type" => "function",
+      "function" => %{"name" => name, "arguments" => Jason.encode!(arguments)}
+    }
+  end
+
   defp flush_conv_store(conv_store) do
     # Synchronous call ensures all prior casts have been processed
     ConversationStore.list_conversations(server: conv_store)
@@ -202,7 +212,9 @@ defmodule FermixCore.Agents.MainAgentTest do
     conv_name = :"test_conv_#{suffix}"
     agent_name = :"test_main_agent_#{suffix}"
     task_sup_name = :"test_task_sup_#{suffix}"
+    agent_supervisor_name = :"test_agent_supervisor_#{suffix}"
     skills_dir = Path.join(System.tmp_dir!(), "fermix-skills-#{suffix}")
+    journal_dir = Path.join(System.tmp_dir!(), "fermix-journals-#{suffix}")
 
     File.mkdir_p!(skills_dir)
 
@@ -213,11 +225,17 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     {:ok, _} =
       start_supervised(
-        {SkillRegistry, [name: skill_registry_name, skills_dir: skills_dir]},
+        {SkillRegistry,
+         [name: skill_registry_name, skills_dir: skills_dir, seed_defaults: false]},
         id: :test_skill_registry
       )
 
     {:ok, _} = start_supervised({ConversationStore, [name: conv_name]}, id: :test_conv)
+
+    {:ok, _} =
+      start_supervised({AgentSupervisor, [name: agent_supervisor_name]},
+        id: :test_agent_supervisor
+      )
 
     {:ok, _} =
       start_supervised(
@@ -226,9 +244,11 @@ defmodule FermixCore.Agents.MainAgentTest do
            name: agent_name,
            provider: MockProvider,
            registry: registry_name,
+           agent_supervisor: agent_supervisor_name,
            skill_registry: skill_registry_name,
            conversation_store: conv_name,
-           task_supervisor: task_sup_name
+           task_supervisor: task_sup_name,
+           journal_base_dir: journal_dir
          ]},
         id: :test_main_agent
       )
@@ -236,6 +256,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     on_exit(fn ->
       MockProvider.cleanup()
       File.rm_rf!(skills_dir)
+      File.rm_rf!(journal_dir)
     end)
 
     %{
@@ -244,7 +265,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       skill_registry: skill_registry_name,
       conv_store: conv_name,
       skills_dir: skills_dir,
-      task_supervisor: task_sup_name
+      task_supervisor: task_sup_name,
+      agent_supervisor: agent_supervisor_name,
+      journal_dir: journal_dir
     }
   end
 
@@ -410,6 +433,56 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       [{messages_after_reload, _opts}] = MockProvider.get_calls()
       assert hd(messages_after_reload).content =~ "coding-skill"
+      assert hd(messages_after_reload).content =~ "capabilities: code"
+      assert hd(messages_after_reload).content =~ "tools: file_read"
+    end
+
+    test "delegates through invoke_skill when the LLM requests a skill", %{
+      agent: agent,
+      registry: registry,
+      skills_dir: skills_dir,
+      journal_dir: journal_dir
+    } do
+      write_skill(skills_dir, "coding-skill", "You solve code tasks.")
+      assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
+      assert :ok = Registry.register(registry, InvokeSkill)
+
+      MockProvider.set_responses([
+        mock_response("",
+          tool_calls: [
+            tool_call("call_1", "invoke_skill", %{
+              "skill" => "coding-skill",
+              "task" => "Inspect the README"
+            })
+          ]
+        ),
+        mock_response("Inspected the README and found the issue."),
+        mock_response("Done. The coding skill inspected the README and found the issue.")
+      ])
+
+      MainAgent.handle_message(make_message("Use the coding skill."), agent)
+
+      assert_receive {:reply, "Done. The coding skill inspected the README and found the issue."},
+                     5_000
+
+      journal_path =
+        Path.join([journal_dir, "coding-skill"])
+        |> Path.join("*.md")
+        |> Path.wildcard()
+        |> List.first()
+
+      assert is_binary(journal_path)
+      assert File.read!(journal_path) =~ "**Status:** completed"
+
+      calls = MockProvider.get_calls()
+      assert length(calls) == 3
+
+      {_main_messages, main_opts} = hd(calls)
+      assert Enum.any?(main_opts[:tools], &(&1.function.name == "invoke_skill"))
+
+      {skill_messages, skill_opts} = Enum.at(calls, 1)
+      assert hd(skill_messages).content == "You solve code tasks."
+      assert skill_opts[:model] == "gpt-5.4-mini"
     end
 
     test "supersedes an in-flight request with the newest same-conversation message", %{

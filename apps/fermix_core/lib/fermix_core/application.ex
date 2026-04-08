@@ -4,6 +4,7 @@ defmodule FermixCore.Application do
   use Application
   require Logger
 
+  alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
@@ -26,6 +27,7 @@ defmodule FermixCore.Application do
         Registry,
         ConversationStore,
         Store,
+        AgentSupervisor,
         MainAgent
       ]
       |> List.flatten()
@@ -45,7 +47,8 @@ defmodule FermixCore.Application do
       FermixCore.Tools.FileWrite,
       FermixCore.Tools.MemoryStore,
       FermixCore.Tools.MemoryRecall,
-      FermixCore.Tools.Browser
+      FermixCore.Tools.Browser,
+      FermixCore.Tools.InvokeSkill
     ]
 
     Enum.each(tools, fn tool ->
