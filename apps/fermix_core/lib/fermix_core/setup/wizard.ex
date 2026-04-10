@@ -81,7 +81,7 @@ defmodule FermixCore.Setup.Wizard do
   defp enabled_channels(snapshot) do
     telegram = snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:telegram, [])
 
-    if Keyword.get(telegram, :enabled, false), do: [:telegram], else: []
+    if Keyword.get(telegram, :enabled, true) != false, do: [:telegram], else: []
   end
 
   defp missing_component?(state, component) do
