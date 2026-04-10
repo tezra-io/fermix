@@ -23,7 +23,9 @@ defmodule FermixWebWeb.Router do
   scope "/", FermixWebWeb do
     pipe_through :api
 
-    get "/health", HealthController, :index
+    get "/health", HealthController, :ready
+    get "/health/live", HealthController, :live
+    get "/health/ready", HealthController, :ready
     post "/webhook/telegram", WebhookController, :telegram
   end
 end

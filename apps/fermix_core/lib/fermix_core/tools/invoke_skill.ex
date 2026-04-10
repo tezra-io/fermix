@@ -14,8 +14,6 @@ defmodule FermixCore.Tools.InvokeSkill do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Tools.Tool
 
-  @default_timeout_seconds 300
-
   @impl true
   def name, do: "invoke_skill"
 
@@ -73,7 +71,7 @@ defmodule FermixCore.Tools.InvokeSkill do
             task_context: task_context,
             tool_context: Map.delete(context, :agent_name)
           },
-          definition.timeout_seconds || @default_timeout_seconds
+          definition.timeout_seconds
         )
 
       finalize_invocation(
