@@ -59,13 +59,18 @@ defmodule FermixCore.Readiness do
   defp telegram_failure do
     case Config.channel(:telegram) do
       {:ok, config} when is_list(config) ->
-        if present?(Keyword.get(config, :bot_token)) do
-          nil
-        else
-          %{
-            component: "channel:telegram",
-            action: "Set TELEGRAM_BOT_TOKEN."
-          }
+        cond do
+          Keyword.get(config, :enabled, true) == false ->
+            nil
+
+          present?(Keyword.get(config, :bot_token)) ->
+            nil
+
+          true ->
+            %{
+              component: "channel:telegram",
+              action: "Set TELEGRAM_BOT_TOKEN."
+            }
         end
 
       _ ->

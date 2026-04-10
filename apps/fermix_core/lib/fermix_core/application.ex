@@ -10,6 +10,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
+  alias FermixCore.Setup.BootReport
   alias FermixCore.Tools.Registry
   alias FermixCore.Trace
 
@@ -27,6 +28,7 @@ defmodule FermixCore.Application do
         Registry,
         ConversationStore,
         Store,
+        BootReport,
         AgentSupervisor,
         MainAgent
       ]
@@ -91,8 +93,8 @@ defmodule FermixCore.Application do
                max_no_bytes: max_bytes,
                max_no_files: max_files
              },
-             formatter:
-               {:logger_formatter, %{template: [:time, ~c" ", :level, ~c" ", :msg, ~c"\n"]}}
+             formatter: {:logger_formatter, %{template: [:time, ~c" ", :level, ~c" ", :msg, ~c"
+"]}}
            }) do
         :ok -> :ok
         {:error, {:already_exist, _}} -> :ok
