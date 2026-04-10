@@ -15,7 +15,7 @@ defmodule FermixCore.Agents.AgentSupervisor do
     DynamicSupervisor.start_link(__MODULE__, :ok, name: name)
   end
 
-  @spec spawn_agent(DynamicSupervisor.supervisor(), AgentDefinition.t(), keyword()) ::
+  @spec spawn_agent(Supervisor.supervisor(), AgentDefinition.t(), keyword()) ::
           {:ok, pid(), String.t()} | {:error, term()}
   def spawn_agent(supervisor \\ __MODULE__, %AgentDefinition{} = definition, opts \\ []) do
     session_id = Keyword.get(opts, :session_id, generate_session_id())
@@ -47,7 +47,7 @@ defmodule FermixCore.Agents.AgentSupervisor do
     end
   end
 
-  @spec stop_agent(DynamicSupervisor.supervisor(), pid() | String.t(), term()) ::
+  @spec stop_agent(Supervisor.supervisor(), pid() | String.t(), term()) ::
           :ok | {:error, term()}
   def stop_agent(supervisor \\ __MODULE__, name_or_pid, reason \\ :normal)
 
@@ -67,7 +67,7 @@ defmodule FermixCore.Agents.AgentSupervisor do
     end
   end
 
-  @spec list_agents(DynamicSupervisor.supervisor()) :: [map()]
+  @spec list_agents(Supervisor.supervisor()) :: [map()]
   def list_agents(supervisor \\ __MODULE__) do
     supervisor
     |> DynamicSupervisor.which_children()
@@ -80,7 +80,7 @@ defmodule FermixCore.Agents.AgentSupervisor do
     |> Enum.sort_by(&{&1.name, &1.session_id})
   end
 
-  @spec find_agent(DynamicSupervisor.supervisor(), String.t()) :: pid() | nil
+  @spec find_agent(Supervisor.supervisor(), String.t()) :: pid() | nil
   def find_agent(supervisor \\ __MODULE__, name) when is_binary(name) do
     Enum.find_value(list_agents(supervisor), fn
       %{name: ^name, pid: pid} -> pid
