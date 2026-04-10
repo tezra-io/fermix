@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+dirty=$(git status --porcelain)
+
+if [ -n "$dirty" ]; then
+  echo "pre-push: refusing to push with a dirty worktree." >&2
+  echo "Commit, stash, or discard local changes first." >&2
+  echo >&2
+  echo "$dirty" >&2
+  exit 1
+fi

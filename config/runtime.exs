@@ -23,20 +23,57 @@ end
 config :fermix_web, FermixWebWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+persisted_setup =
+  if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
+       function_exported?(FermixCore.Setup.ConfigStore, :load_runtime_config, 0) do
+    case FermixCore.Setup.ConfigStore.load_runtime_config() do
+      {:ok, config} ->
+        config
+
+      {:error, _reason} ->
+        %{fermix_core: [providers: [openai: []]], fermix_channels: [telegram: []], fermix_web: []}
+    end
+  else
+    %{fermix_core: [providers: [openai: []]], fermix_channels: [telegram: []], fermix_web: []}
+  end
+
 # Merge runtime config with compile-time config to preserve base_url, default_model, etc.
 existing_providers = Application.get_env(:fermix_core, :providers, [])
-existing_openai = Keyword.get(existing_providers, :openai, [])
 
-existing_telegram = Application.get_env(:fermix_channels, :telegram, [])
+existing_openai =
+  existing_providers
+  |> Keyword.get(:openai, [])
+  |> Keyword.merge(
+    persisted_setup
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:providers, [])
+    |> Keyword.get(:openai, [])
+  )
+
+existing_telegram =
+  Application.get_env(:fermix_channels, :telegram, [])
+  |> Keyword.merge(
+    persisted_setup
+    |> Map.get(:fermix_channels, [])
+    |> Keyword.get(:telegram, [])
+  )
 
 openai_auth_mode =
-  if System.get_env("OPENAI_AUTH_MODE") == "api_key", do: :api_key, else: :oauth
+  case System.get_env("OPENAI_AUTH_MODE") do
+    "api_key" -> :api_key
+    "oauth" -> :oauth
+    _ -> Keyword.get(existing_openai, :auth_mode, :oauth)
+  end
 
 if config_env() == :prod do
   merged_openai =
     Keyword.merge(existing_openai,
       auth_mode: openai_auth_mode,
-      api_key: if(openai_auth_mode == :api_key, do: System.get_env("OPENAI_API_KEY", ""), else: "")
+      api_key:
+        if(openai_auth_mode == :api_key,
+          do: System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, ""),
+          else: ""
+        )
     )
 
   config :fermix_core,
@@ -45,19 +82,20 @@ if config_env() == :prod do
   telegram_mode =
     case System.get_env("TELEGRAM_MODE") do
       "polling" -> :polling
-      _ -> :webhook
+      "webhook" -> :webhook
+      _ -> Keyword.get(existing_telegram, :mode, :webhook)
     end
 
   allowed_user_ids =
     case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
-      nil -> []
+      nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
       "" -> []
       ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
     end
 
   merged_telegram =
     Keyword.merge(existing_telegram,
-      bot_token: System.get_env("TELEGRAM_BOT_TOKEN", ""),
+      bot_token: System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, ""),
       webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
       allowed_user_ids: allowed_user_ids,
       mode: telegram_mode
@@ -68,7 +106,7 @@ else
   merged_openai =
     Keyword.merge(existing_openai,
       auth_mode: openai_auth_mode,
-      api_key: System.get_env("OPENAI_API_KEY", "")
+      api_key: System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
     )
 
   config :fermix_core,
@@ -77,19 +115,20 @@ else
   telegram_mode =
     case System.get_env("TELEGRAM_MODE") do
       "polling" -> :polling
-      _ -> :webhook
+      "webhook" -> :webhook
+      _ -> Keyword.get(existing_telegram, :mode, :webhook)
     end
 
   allowed_user_ids =
     case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
-      nil -> []
+      nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
       "" -> []
       ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
     end
 
   merged_telegram =
     Keyword.merge(existing_telegram,
-      bot_token: System.get_env("TELEGRAM_BOT_TOKEN", ""),
+      bot_token: System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, ""),
       webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
       allowed_user_ids: allowed_user_ids,
       mode: telegram_mode
