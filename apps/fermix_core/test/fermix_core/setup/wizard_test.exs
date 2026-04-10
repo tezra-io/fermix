@@ -37,6 +37,19 @@ defmodule FermixCore.Setup.WizardTest do
            end)
   end
 
+  test "report treats telegram channel as enabled when enabled flag is unset" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+    report = Wizard.report()
+
+    assert report.status == :ready
+    assert report.wizard.enabled_channels == [:telegram]
+  end
+
   test "save_answers persists config, creates workspace directories, and updates readiness" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 
