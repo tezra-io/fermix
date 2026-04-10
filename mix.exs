@@ -9,7 +9,7 @@ defmodule Fermix.MixProject do
       deps: deps(),
       aliases: aliases(),
       releases: releases(),
-      dialyzer: [plt_add_apps: [:ex_unit]]
+      dialyzer: [plt_add_apps: [:ex_unit, :mix]]
     ]
   end
 
