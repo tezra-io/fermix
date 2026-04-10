@@ -57,7 +57,8 @@ defmodule FermixCore.Agents.AgentDefinition do
          :ok <- validate_name(name),
          {:ok, system_prompt} <- fetch_required_string(attrs, "system_prompt"),
          {:ok, role} <- parse_role(get(attrs, "role", :sub)),
-         {:ok, persistent} <- parse_persistent(get(attrs, "persistent", role == :main), role),
+         {:ok, persistent} <-
+           parse_persistent(get(attrs, "persistent", default_persistent(role)), role),
          {:ok, max_iterations} <- parse_positive_integer(get(attrs, "max_iterations", 25)),
          {:ok, timeout_seconds} <- parse_positive_integer(get(attrs, "timeout_seconds", 300)),
          {:ok, temperature} <- parse_optional_float(get(attrs, "temperature")) do
@@ -91,7 +92,7 @@ defmodule FermixCore.Agents.AgentDefinition do
           ArgumentError -> nil
         end
 
-      if is_atom(atom_key) and Map.has_key?(attrs, atom_key) do
+      if Map.has_key?(attrs, atom_key) do
         Map.get(attrs, atom_key)
       else
         default
@@ -133,8 +134,13 @@ defmodule FermixCore.Agents.AgentDefinition do
   defp parse_role("sub"), do: {:ok, :sub}
   defp parse_role(role), do: {:error, {:invalid_role, role}}
 
-  defp parse_persistent(value, :main) when value in [true, "true"], do: {:ok, true}
-  defp parse_persistent(value, :sub) when value in [false, "false"], do: {:ok, false}
+  defp default_persistent(:main), do: true
+  defp default_persistent(:sub), do: false
+
+  defp parse_persistent(true, :main), do: {:ok, true}
+  defp parse_persistent("true", :main), do: {:ok, true}
+  defp parse_persistent(false, :sub), do: {:ok, false}
+  defp parse_persistent("false", :sub), do: {:ok, false}
   defp parse_persistent(value, role), do: {:error, {:invalid_persistent, role, value}}
 
   defp parse_positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}

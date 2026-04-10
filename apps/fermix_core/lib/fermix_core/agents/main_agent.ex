@@ -188,13 +188,6 @@ defmodule FermixCore.Agents.MainAgent do
 
           {:error, :not_found} ->
             state
-
-          {:error, reason} ->
-            Logger.warning(
-              "Failed to cancel Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
-            )
-
-            state
         end
     end
   end

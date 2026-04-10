@@ -287,7 +287,6 @@ defmodule FermixCore.Agents.AgentServer do
     case Task.Supervisor.terminate_child(task_supervisor, pid) do
       :ok -> :ok
       {:error, :not_found} -> :ok
-      {:error, _reason} -> Process.exit(pid, :kill)
     end
 
     %{state | pending_task: nil}

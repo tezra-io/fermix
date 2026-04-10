@@ -36,7 +36,7 @@ if config_env() == :prod do
   merged_openai =
     Keyword.merge(existing_openai,
       auth_mode: openai_auth_mode,
-      api_key: if(openai_auth_mode == :api_key, do: System.fetch_env!("OPENAI_API_KEY"), else: "")
+      api_key: if(openai_auth_mode == :api_key, do: System.get_env("OPENAI_API_KEY", ""), else: "")
     )
 
   config :fermix_core,
@@ -57,7 +57,7 @@ if config_env() == :prod do
 
   merged_telegram =
     Keyword.merge(existing_telegram,
-      bot_token: System.fetch_env!("TELEGRAM_BOT_TOKEN"),
+      bot_token: System.get_env("TELEGRAM_BOT_TOKEN", ""),
       webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
       allowed_user_ids: allowed_user_ids,
       mode: telegram_mode
