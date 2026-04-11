@@ -19,6 +19,16 @@ defmodule FermixCore.Setup.BootReport do
   @spec refresh() :: state()
   def refresh, do: GenServer.call(__MODULE__, :refresh)
 
+  @spec refresh_if_started() :: state() | nil
+  def refresh_if_started do
+    case Process.whereis(__MODULE__) do
+      nil -> nil
+      pid -> GenServer.call(pid, :refresh)
+    end
+  catch
+    :exit, _reason -> nil
+  end
+
   @impl true
   def init(:ok), do: {:ok, Wizard.report()}
 

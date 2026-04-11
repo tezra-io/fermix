@@ -4,7 +4,7 @@ defmodule FermixWebWeb.PageController do
   alias FermixCore.Setup.BootReport
 
   def home(conn, _params) do
-    case BootReport.refresh() do
+    case BootReport.current() do
       %{status: :ready} -> render(conn, :home)
       _report -> redirect(conn, to: ~p"/setup")
     end

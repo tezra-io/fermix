@@ -1,6 +1,8 @@
 defmodule FermixWebWeb.HealthControllerTest do
   use FermixWebWeb.ConnCase
 
+  alias FermixCore.Setup.BootReport
+
   setup do
     providers = Application.get_env(:fermix_core, :providers)
     telegram = Application.get_env(:fermix_channels, :telegram)
@@ -8,6 +10,7 @@ defmodule FermixWebWeb.HealthControllerTest do
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
       restore_env(:fermix_channels, :telegram, telegram)
+      BootReport.refresh()
     end)
 
     :ok
@@ -29,6 +32,7 @@ defmodule FermixWebWeb.HealthControllerTest do
     test "returns setup_required with actionable readiness failures", %{conn: conn} do
       Application.put_env(:fermix_core, :providers, [])
       Application.delete_env(:fermix_channels, :telegram)
+      BootReport.refresh()
 
       conn = get(conn, ~p"/health/ready")
       body = json_response(conn, 503)
@@ -52,6 +56,7 @@ defmodule FermixWebWeb.HealthControllerTest do
     test "aliases readiness", %{conn: conn} do
       Application.put_env(:fermix_core, :providers, [])
       Application.delete_env(:fermix_channels, :telegram)
+      BootReport.refresh()
 
       conn = get(conn, ~p"/health")
       body = json_response(conn, 503)

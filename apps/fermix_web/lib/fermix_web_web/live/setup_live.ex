@@ -5,7 +5,7 @@ defmodule FermixWebWeb.SetupLive do
 
   @impl true
   def mount(_params, _session, socket) do
-    report = BootReport.refresh()
+    report = BootReport.current()
 
     {:ok,
      assign(socket,

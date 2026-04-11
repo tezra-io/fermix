@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.Wizard do
   """
 
   alias FermixCore.Readiness
+  alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.WizardState
 
@@ -56,7 +57,7 @@ defmodule FermixCore.Setup.Wizard do
 
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot) do
-      {:ok, report()}
+      {:ok, BootReport.refresh_if_started() || report()}
     end
   end
 
