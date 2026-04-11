@@ -60,7 +60,7 @@ defmodule FermixCore.Readiness do
     case Config.channel(:telegram) do
       {:ok, config} when is_list(config) ->
         cond do
-          Keyword.get(config, :enabled, true) == false ->
+          not telegram_enabled?(config) ->
             nil
 
           present?(Keyword.get(config, :bot_token)) ->
@@ -79,6 +79,10 @@ defmodule FermixCore.Readiness do
           action: "Set TELEGRAM_BOT_TOKEN."
         }
     end
+  end
+
+  defp telegram_enabled?(config) do
+    Keyword.get(config, :enabled, true) != false
   end
 
   defp openai_configured?(config) do

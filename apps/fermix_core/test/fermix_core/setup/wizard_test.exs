@@ -5,8 +5,8 @@ defmodule FermixCore.Setup.WizardTest do
   alias FermixCore.Setup.Wizard
 
   setup do
-    providers = Application.get_env(:fermix_core, :providers)
-    telegram = Application.get_env(:fermix_channels, :telegram)
+    providers = Application.fetch_env(:fermix_core, :providers)
+    telegram = Application.fetch_env(:fermix_channels, :telegram)
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -50,6 +50,23 @@ defmodule FermixCore.Setup.WizardTest do
     assert report.wizard.enabled_channels == [:telegram]
   end
 
+  test "report treats disabled telegram channel as optional and hidden" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+    report = Wizard.report()
+
+    assert report.status == :ready
+    assert report.wizard.enabled_channels == []
+
+    refute Enum.any?(report.failures, fn failure ->
+             failure.component == "channel:telegram"
+           end)
+  end
+
   test "save_answers persists config, creates workspace directories, and updates readiness" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 
@@ -83,6 +100,6 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :allowed_user_ids) == []
   end
 
-  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
-  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+  defp restore_env(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 end
