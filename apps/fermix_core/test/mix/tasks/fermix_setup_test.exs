@@ -4,8 +4,8 @@ defmodule Mix.Tasks.Fermix.SetupTest do
   alias FermixCore.Setup.ConfigStore
 
   setup do
-    providers = Application.get_env(:fermix_core, :providers)
-    telegram = Application.get_env(:fermix_channels, :telegram)
+    providers = Application.fetch_env(:fermix_core, :providers)
+    telegram = Application.fetch_env(:fermix_channels, :telegram)
     fermix_home = System.get_env("FERMIX_HOME")
     shell = Mix.shell()
 
@@ -51,6 +51,6 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert_received {:mix_shell, :info, ["All required setup checks are satisfied."]}
   end
 
-  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
-  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+  defp restore_env(app, key, :error), do: Application.delete_env(app, key)
+  defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 end
