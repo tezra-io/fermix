@@ -18,20 +18,30 @@ defmodule Mix.Tasks.Fermix.Setup do
 
     {opts, _argv, invalid} = OptionParser.parse(args, strict: @switches)
 
-    if invalid != [] do
-      Mix.raise("invalid options: #{inspect(invalid)}")
+    raise_on_invalid_options(invalid)
+
+    report = load_report()
+    maybe_save_answers(report, opts)
+  end
+
+  defp raise_on_invalid_options([]), do: :ok
+
+  defp raise_on_invalid_options(invalid) do
+    Mix.raise("invalid options: #{inspect(invalid)}")
+  end
+
+  defp load_report do
+    case ConfigStore.load_runtime_config() do
+      {:ok, snapshot} ->
+        :ok = ConfigStore.apply_snapshot(snapshot)
+        Wizard.report()
+
+      {:error, reason} ->
+        Mix.raise("failed to load setup snapshot: #{inspect(reason)}")
     end
+  end
 
-    report =
-      case ConfigStore.load_runtime_config() do
-        {:ok, snapshot} ->
-          :ok = ConfigStore.apply_snapshot(snapshot)
-          Wizard.report()
-
-        {:error, reason} ->
-          Mix.raise("failed to load setup snapshot: #{inspect(reason)}")
-      end
-
+  defp maybe_save_answers(report, opts) do
     cond do
       opts[:print_state] ->
         print_report(report)
