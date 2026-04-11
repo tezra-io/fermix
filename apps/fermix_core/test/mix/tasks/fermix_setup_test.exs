@@ -2,6 +2,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Setup.ConfigStore
+  alias Mix.Tasks.Fermix.Setup, as: SetupTask
 
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
@@ -45,7 +46,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     Application.delete_env(:fermix_channels, :telegram)
 
     Mix.Task.reenable("fermix.setup")
-    Mix.Tasks.Fermix.Setup.run(["--print-state"])
+    SetupTask.run(["--print-state"])
 
     assert_received {:mix_shell, :info, ["status: ready"]}
     assert_received {:mix_shell, :info, ["All required setup checks are satisfied."]}
