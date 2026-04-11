@@ -53,6 +53,8 @@ defmodule FermixCore.Setup.WizardTest do
   test "save_answers persists config, creates workspace directories, and updates readiness" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+
     System.put_env("FERMIX_HOME", tmp_home)
     Application.put_env(:fermix_core, :providers, [])
     Application.delete_env(:fermix_channels, :telegram)

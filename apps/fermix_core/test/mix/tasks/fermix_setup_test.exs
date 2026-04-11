@@ -30,6 +30,8 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
 
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+
     System.put_env("FERMIX_HOME", tmp_home)
 
     :ok =
