@@ -23,7 +23,7 @@ defmodule FermixWebWeb.HealthController do
   end
 
   defp readiness_payload do
-    BootReport.refresh()
+    BootReport.current()
     |> Map.take([:status, :failures, :config_path, :restart_required?])
     |> Map.put(:app, "fermix")
     |> Map.put(:version, "0.1.0")
