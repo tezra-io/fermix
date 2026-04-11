@@ -65,77 +65,46 @@ openai_auth_mode =
     _ -> Keyword.get(existing_openai, :auth_mode, :oauth)
   end
 
-if config_env() == :prod do
-  merged_openai =
-    Keyword.merge(existing_openai,
-      auth_mode: openai_auth_mode,
-      api_key:
-        if(openai_auth_mode == :api_key,
-          do: System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, ""),
-          else: ""
-        )
-    )
+openai_api_key =
+  if config_env() == :prod and openai_auth_mode != :api_key do
+    ""
+  else
+    System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
+  end
 
-  config :fermix_core,
-    providers: Keyword.put(existing_providers, :openai, merged_openai)
+merged_openai =
+  Keyword.merge(existing_openai,
+    auth_mode: openai_auth_mode,
+    api_key: openai_api_key
+  )
 
-  telegram_mode =
-    case System.get_env("TELEGRAM_MODE") do
-      "polling" -> :polling
-      "webhook" -> :webhook
-      _ -> Keyword.get(existing_telegram, :mode, :webhook)
-    end
+config :fermix_core,
+  providers: Keyword.put(existing_providers, :openai, merged_openai)
 
-  allowed_user_ids =
-    case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
-      nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
-      "" -> []
-      ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
-    end
+telegram_mode =
+  case System.get_env("TELEGRAM_MODE") do
+    "polling" -> :polling
+    "webhook" -> :webhook
+    _ -> Keyword.get(existing_telegram, :mode, :webhook)
+  end
 
-  merged_telegram =
-    Keyword.merge(existing_telegram,
-      bot_token: System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, ""),
-      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
-      allowed_user_ids: allowed_user_ids,
-      mode: telegram_mode
-    )
+allowed_user_ids =
+  case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
+    nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
+    "" -> []
+    ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
+  end
 
-  config :fermix_channels, telegram: merged_telegram
-else
-  merged_openai =
-    Keyword.merge(existing_openai,
-      auth_mode: openai_auth_mode,
-      api_key: System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
-    )
+merged_telegram =
+  Keyword.merge(existing_telegram,
+    bot_token:
+      System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, ""),
+    webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
+    allowed_user_ids: allowed_user_ids,
+    mode: telegram_mode
+  )
 
-  config :fermix_core,
-    providers: Keyword.put(existing_providers, :openai, merged_openai)
-
-  telegram_mode =
-    case System.get_env("TELEGRAM_MODE") do
-      "polling" -> :polling
-      "webhook" -> :webhook
-      _ -> Keyword.get(existing_telegram, :mode, :webhook)
-    end
-
-  allowed_user_ids =
-    case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
-      nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
-      "" -> []
-      ids -> ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
-    end
-
-  merged_telegram =
-    Keyword.merge(existing_telegram,
-      bot_token: System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, ""),
-      webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
-      allowed_user_ids: allowed_user_ids,
-      mode: telegram_mode
-    )
-
-  config :fermix_channels, telegram: merged_telegram
-end
+config :fermix_channels, telegram: merged_telegram
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.
