@@ -2,8 +2,9 @@ defmodule FermixCore.Auth.TokenManager do
   @moduledoc """
   Manages OAuth tokens for LLM providers.
 
-  Reads initial tokens from `~/.codex/auth.json`, caches the access token,
-  auto-refreshes before expiry, and persists refreshed tokens to `~/.fermix/auth.json`.
+  Reads initial tokens from `~/.fermix/auth.json` (preferred) or `~/.codex/auth.json`.
+  When bootstrapping from codex, immediately refreshes to fork an independent token chain
+  so the two processes never collide on the same refresh token.
   """
 
   use GenServer
@@ -54,10 +55,16 @@ defmodule FermixCore.Auth.TokenManager do
     }
 
     case load_tokens(fermix_path, codex_path) do
-      {:ok, tokens} ->
+      {:ok, tokens, :fermix} ->
         state = apply_tokens(state, tokens)
         Logger.info("TokenManager: loaded tokens, expires #{inspect(state.expires_at)}")
         {:ok, schedule_refresh(state)}
+
+      {:ok, tokens, :codex} ->
+        state = apply_tokens(state, tokens)
+        Logger.info("TokenManager: bootstrapping from codex, forking token chain")
+        send(self(), :fork_refresh)
+        {:ok, state}
 
       {:error, reason} ->
         Logger.warning("TokenManager: no tokens found — #{inspect(reason)}")
@@ -82,6 +89,20 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   @impl true
+  # Temporary: remove codex bootstrap + fork once M3 onboarding persists tokens directly
+  def handle_info(:fork_refresh, state) do
+    case do_refresh(state) do
+      {:ok, state} ->
+        Logger.info("TokenManager: forked own token chain from codex")
+        {:noreply, state}
+
+      {:error, reason, state} ->
+        Logger.error("TokenManager: fork refresh failed — #{inspect(reason)}")
+        timer = Process.send_after(self(), :fork_refresh, @retry_backoff_ms)
+        {:noreply, %{state | refresh_timer: timer}}
+    end
+  end
+
   def handle_info(:refresh, state) do
     case do_refresh(state) do
       {:ok, state} ->
@@ -205,8 +226,15 @@ defmodule FermixCore.Auth.TokenManager do
 
   defp load_tokens(fermix_path, codex_path) do
     case read_fermix_auth(fermix_path) do
-      {:ok, _} = ok -> ok
-      {:error, _} -> read_codex_auth(codex_path)
+      {:ok, tokens} -> {:ok, tokens, :fermix}
+      {:error, _} -> load_from_codex(codex_path)
+    end
+  end
+
+  defp load_from_codex(codex_path) do
+    case read_codex_auth(codex_path) do
+      {:ok, tokens} -> {:ok, tokens, :codex}
+      {:error, _} = err -> err
     end
   end
 
