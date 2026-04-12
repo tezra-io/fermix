@@ -22,9 +22,25 @@ defmodule FermixCore.Auth.TokenManagerTest do
     "#{header}.#{payload}.fake_signature"
   end
 
+  def noop_plug(conn), do: Plug.Conn.send_resp(conn, 500, "test-noop")
+
+  def fork_success_plug(conn) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(
+      200,
+      Jason.encode!(%{
+        "access_token" => "fermix_own_at",
+        "refresh_token" => "fermix_own_rt",
+        "expires_in" => 3600
+      })
+    )
+  end
+
   defp start_manager(opts) do
     name = :"tm_#{System.unique_integer([:positive])}"
     opts = Keyword.put(opts, :name, name)
+    opts = Keyword.put_new(opts, :req_options, plug: &__MODULE__.noop_plug/1)
     start_supervised!({TokenManager, opts})
     name
   end
@@ -107,6 +123,63 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: codex_path)
       assert {:ok, "fermix_wins"} = TokenManager.get_token(name)
+
+      File.rm_rf!(dir)
+    end
+  end
+
+  describe "codex bootstrap — fork token chain" do
+    test "immediately refreshes to fork own chain when loaded from codex" do
+      dir = tmp_dir()
+      exp = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
+      jwt = make_jwt_with_exp(exp)
+
+      codex_path =
+        write_auth_file(dir, "codex_auth.json", %{
+          "auth_mode" => "chatgpt",
+          "tokens" => %{"access_token" => jwt, "refresh_token" => "codex_rt"}
+        })
+
+      fermix_path = Path.join(dir, "fermix_auth.json")
+
+      name =
+        start_manager(
+          fermix_auth_path: fermix_path,
+          codex_auth_path: codex_path,
+          req_options: [plug: &__MODULE__.fork_success_plug/1]
+        )
+
+      # Wait for the fork_refresh to complete
+      Process.sleep(200)
+
+      assert {:ok, "fermix_own_at"} = TokenManager.get_token(name)
+
+      # Verify it persisted to fermix path
+      assert {:ok, raw} = File.read(fermix_path)
+      assert {:ok, data} = Jason.decode(raw)
+      assert data["tokens"]["refresh_token"] == "fermix_own_rt"
+
+      File.rm_rf!(dir)
+    end
+
+    test "does not fork when loaded from fermix file" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "tokens" => %{"access_token" => "already_own", "refresh_token" => "own_rt"},
+          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+        })
+
+      name =
+        start_manager(
+          fermix_auth_path: fermix_path,
+          codex_auth_path: Path.join(dir, "x")
+        )
+
+      # No fork_refresh should fire — token stays as loaded
+      Process.sleep(200)
+      assert {:ok, "already_own"} = TokenManager.get_token(name)
 
       File.rm_rf!(dir)
     end
