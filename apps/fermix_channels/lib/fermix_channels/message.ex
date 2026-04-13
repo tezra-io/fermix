@@ -15,9 +15,12 @@ defmodule FermixChannels.Message do
     :chat_id,
     :reply_target,
     :thread_ts,
+    thread_scope: :root,
     metadata: %{},
     attachments: []
   ]
+
+  @type thread_scope :: :root | :thread
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -27,7 +30,13 @@ defmodule FermixChannels.Message do
           chat_id: String.t(),
           reply_target: String.t(),
           thread_ts: String.t() | nil,
+          thread_scope: thread_scope(),
           metadata: map(),
           attachments: [map()]
         }
+
+  @spec new!(map()) :: t()
+  def new!(attrs) when is_map(attrs) do
+    struct!(__MODULE__, attrs)
+  end
 end
