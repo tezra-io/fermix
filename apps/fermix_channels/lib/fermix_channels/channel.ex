@@ -7,26 +7,24 @@ defmodule FermixChannels.Channel do
   send outbound messages, and optionally verify webhook authenticity.
   """
 
-  @type message :: %{
-          id: String.t(),
-          content: String.t(),
-          sender: String.t(),
-          channel: String.t(),
-          chat_id: String.t(),
-          reply_target: String.t(),
-          thread_ts: String.t() | nil
-        }
+  @type message :: FermixChannels.Message.t()
 
   @type send_opts :: [
           reply_to: String.t(),
-          parse_mode: String.t()
+          parse_mode: String.t(),
+          message_thread_id: integer()
         ]
+
+  @type reply_fn :: (String.t() -> :ok | {:error, term()})
 
   @doc "Parse a webhook payload into messages"
   @callback parse_webhook(map()) :: {:ok, [message()]} | {:error, term()}
 
   @doc "Send a message to a chat"
   @callback send_message(String.t(), String.t(), send_opts()) :: :ok | {:error, term()}
+
+  @doc "Build a reply function for a normalized inbound message"
+  @callback build_reply(message()) :: reply_fn()
 
   @doc "Verify webhook authenticity (HMAC, token, etc.)"
   @callback verify_webhook(Plug.Conn.t()) :: :ok | {:error, term()}

@@ -22,5 +22,32 @@ defmodule FermixChannels.MessageTest do
       assert message.metadata == %{raw: %{"message_id" => 42}}
       assert message.attachments == [%{type: :photo, file_id: "abc"}]
     end
+
+    test "derives thread scope from thread_ts" do
+      root_message =
+        Message.new!(%{
+          id: "42",
+          content: "hello",
+          sender: "ada",
+          channel: "telegram",
+          chat_id: "-1001",
+          reply_target: "-1001",
+          thread_ts: nil
+        })
+
+      thread_message =
+        Message.new!(%{
+          id: "43",
+          content: "hello thread",
+          sender: "ada",
+          channel: "telegram",
+          chat_id: "-1001",
+          reply_target: "-1001",
+          thread_ts: 99
+        })
+
+      assert root_message.thread_scope == :root
+      assert thread_message.thread_scope == :thread
+    end
   end
 end

@@ -1,6 +1,7 @@
 defmodule FermixChannels.TelegramTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Message
   alias FermixChannels.Telegram
 
   # -- fixtures --
@@ -49,7 +50,8 @@ defmodule FermixChannels.TelegramTest do
   setup do
     Application.put_env(:fermix_channels, :telegram,
       bot_token: "test-bot-token",
-      webhook_secret: "test-secret"
+      webhook_secret: "test-secret",
+      req_options: [plug: {Req.Test, :telegram}]
     )
 
     on_exit(fn ->
@@ -71,6 +73,14 @@ defmodule FermixChannels.TelegramTest do
       assert msg.chat_id == "123456"
       assert msg.reply_target == "123456"
       assert msg.thread_ts == nil
+    end
+
+    test "preserves Telegram message_thread_id as an integer thread id" do
+      payload = put_in(message_payload(), ["message", "message_thread_id"], 456)
+
+      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert msg.thread_ts == 456
+      assert msg.thread_scope == :thread
     end
 
     test "parses edited_message" do
@@ -284,6 +294,15 @@ defmodule FermixChannels.TelegramTest do
       assert body["reply_to_message_id"] == "42"
     end
 
+    test "includes integer message_thread_id when given" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      :ok = send_msg("123", "thread reply", message_thread_id: 456)
+
+      assert_received {:telegram_request, _path, body}
+      assert body["message_thread_id"] == 456
+    end
+
     test "omits reply_to_message_id when not given" do
       stub_telegram(self(), 200, %{"ok" => true})
 
@@ -330,6 +349,52 @@ defmodule FermixChannels.TelegramTest do
 
       assert {:error, _reason} =
                send_msg("123", "hello")
+    end
+  end
+
+  # -- build_reply/1 --
+
+  describe "build_reply/1" do
+    test "requires a normalized message struct" do
+      assert_raise FunctionClauseError, fn ->
+        apply(Telegram, :build_reply, [%{reply_target: "123", thread_ts: nil}])
+      end
+    end
+
+    test "returns a reply function for normalized messages" do
+      message =
+        Message.new!(%{
+          id: "42",
+          content: "hello",
+          sender: "alice",
+          channel: "telegram",
+          chat_id: "123",
+          reply_target: "123",
+          thread_ts: 456
+        })
+
+      assert is_function(Telegram.build_reply(message), 1)
+    end
+
+    test "builds threaded replies with integer message_thread_id" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      message =
+        Message.new!(%{
+          id: "42",
+          content: "hello",
+          sender: "alice",
+          channel: "telegram",
+          chat_id: "123",
+          reply_target: "123",
+          thread_ts: 456
+        })
+
+      reply = Telegram.build_reply(message)
+
+      assert :ok = reply.("thread reply")
+      assert_received {:telegram_request, _path, body}
+      assert body["message_thread_id"] == 456
     end
   end
 
