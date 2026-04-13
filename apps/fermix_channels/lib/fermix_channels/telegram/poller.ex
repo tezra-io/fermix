@@ -10,13 +10,14 @@ defmodule FermixChannels.Telegram.Poller do
     updates are dropped, and only updates that arrive after the startup probe are processed.
 
   Reuses Telegram.parse_update/1 for message parsing and
-  MainAgent.handle_message/1 for dispatch.
+  FermixChannels.Dispatcher for delivery.
   """
 
   use GenServer
 
   require Logger
 
+  alias FermixChannels.Dispatcher
   alias FermixChannels.Telegram
   alias FermixCore.Agents.MainAgent
 
@@ -138,9 +139,11 @@ defmodule FermixChannels.Telegram.Poller do
             %{channel: :telegram, direction: :inbound}
           )
 
-          messages
-          |> Telegram.build_agent_messages()
-          |> Enum.each(&MainAgent.handle_message/1)
+          Dispatcher.dispatch(messages,
+            channel: Telegram,
+            agent: MainAgent,
+            agent_server: MainAgent
+          )
 
         _ ->
           :ok

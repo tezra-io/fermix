@@ -21,6 +21,7 @@ defmodule FermixChannels.Message do
   ]
 
   @type thread_scope :: :root | :thread
+  @type thread_id :: String.t() | integer()
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -29,7 +30,7 @@ defmodule FermixChannels.Message do
           channel: String.t(),
           chat_id: String.t(),
           reply_target: String.t(),
-          thread_ts: String.t() | nil,
+          thread_ts: thread_id() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [map()]
@@ -37,6 +38,12 @@ defmodule FermixChannels.Message do
 
   @spec new!(map()) :: t()
   def new!(attrs) when is_map(attrs) do
-    struct!(__MODULE__, attrs)
+    attrs
+    |> Map.put(:thread_scope, thread_scope(attrs))
+    |> then(&struct!(__MODULE__, &1))
   end
+
+  defp thread_scope(%{thread_ts: nil}), do: :root
+  defp thread_scope(%{thread_ts: _thread_ts}), do: :thread
+  defp thread_scope(_attrs), do: :root
 end

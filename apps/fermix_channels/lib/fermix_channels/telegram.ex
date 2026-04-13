@@ -11,6 +11,8 @@ defmodule FermixChannels.Telegram do
 
   require Logger
 
+  alias FermixChannels.Message
+
   @bot_api_base "https://api.telegram.org"
   @max_message_length 4096
 
@@ -71,6 +73,14 @@ defmodule FermixChannels.Telegram do
   end
 
   @impl true
+  @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
+  def build_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+    opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
+
+    fn text -> send_message(reply_target, text, opts) end
+  end
+
+  @impl true
   @spec verify_webhook(Plug.Conn.t()) :: :ok | {:error, term()}
   def verify_webhook(conn) do
     with {:ok, config} <- FermixCore.Config.channel(:telegram),
@@ -116,19 +126,6 @@ defmodule FermixChannels.Telegram do
     end
   end
 
-  @spec build_agent_messages([FermixChannels.Channel.message()]) :: [map()]
-  def build_agent_messages(messages) do
-    Enum.map(messages, fn msg ->
-      %{
-        content: msg.content,
-        sender: msg.sender,
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        reply_fn: fn text -> send_message(msg.chat_id, text) end
-      }
-    end)
-  end
-
   # -- Internals --
 
   defp post_send_message(chat_id, text, opts) do
@@ -139,6 +136,7 @@ defmodule FermixChannels.Telegram do
         %{chat_id: chat_id, text: text}
         |> maybe_put_parse_mode(opts)
         |> maybe_put_reply_to(opts)
+        |> maybe_put_message_thread_id(opts)
 
       result =
         Req.new(url: url, method: :post, json: body)
@@ -174,6 +172,13 @@ defmodule FermixChannels.Telegram do
     end
   end
 
+  defp maybe_put_message_thread_id(body, opts) do
+    case Keyword.get(opts, :message_thread_id) do
+      nil -> body
+      thread_id -> Map.put(body, :message_thread_id, thread_id)
+    end
+  end
+
   defp parse_message(msg) do
     user_id = get_in(msg, ["from", "id"])
 
@@ -185,15 +190,16 @@ defmodule FermixChannels.Telegram do
 
       content = msg["text"] || msg["caption"] || ""
 
-      message = %{
-        id: to_string(msg["message_id"]),
-        content: content,
-        sender: sender,
-        channel: "telegram",
-        chat_id: chat_id,
-        reply_target: chat_id,
-        thread_ts: nil
-      }
+      message =
+        Message.new!(%{
+          id: to_string(msg["message_id"]),
+          content: content,
+          sender: sender,
+          channel: "telegram",
+          chat_id: chat_id,
+          reply_target: chat_id,
+          thread_ts: msg["message_thread_id"]
+        })
 
       {:ok, [message]}
     else
@@ -242,9 +248,15 @@ defmodule FermixChannels.Telegram do
   end
 
   defp req_options(opts) do
-    case Keyword.get(opts, :req_options) do
-      nil -> []
-      req_opts -> req_opts
+    case Keyword.fetch(opts, :req_options) do
+      {:ok, req_opts} ->
+        req_opts
+
+      :error ->
+        case FermixCore.Config.channel(:telegram) do
+          {:ok, config} -> Keyword.get(config, :req_options, [])
+          _error -> []
+        end
     end
   end
 end
