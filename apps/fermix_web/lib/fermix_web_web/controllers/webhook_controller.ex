@@ -3,6 +3,7 @@ defmodule FermixWebWeb.WebhookController do
 
   require Logger
 
+  alias FermixChannels.Dispatcher
   alias FermixChannels.Telegram
   alias FermixCore.Agents.MainAgent
 
@@ -12,9 +13,11 @@ defmodule FermixWebWeb.WebhookController do
   def telegram(conn, params) do
     with :ok <- Telegram.verify_webhook(conn),
          {:ok, messages} <- Telegram.parse_webhook(params) do
-      messages
-      |> Telegram.build_agent_messages()
-      |> Enum.each(&MainAgent.handle_message/1)
+      Dispatcher.dispatch(messages,
+        channel: Telegram,
+        agent: MainAgent,
+        agent_server: MainAgent
+      )
 
       :telemetry.execute(
         [:fermix, :channel, :webhook],

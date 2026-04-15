@@ -2,7 +2,7 @@ defmodule FermixChannels.Dispatcher do
   @moduledoc """
   Routes normalized inbound messages to the configured agent.
 
-  Attaches a `reply_fn` to each message so the agent can reply without
+  Builds an agent runtime message with a `reply_fn` so the agent can reply without
   knowing which channel it's talking to.
   """
 
@@ -18,18 +18,23 @@ defmodule FermixChannels.Dispatcher do
 
     Enum.each(messages, fn message ->
       reply_fn = build_reply_fn(channel, message)
-      agent_message = Map.put(message, :reply_fn, reply_fn)
+
+      agent_message =
+        message
+        |> Map.from_struct()
+        |> Map.put(:reply_fn, reply_fn)
+
       agent.handle_message(agent_message, agent_server)
     end)
 
     :ok
   end
 
-  defp build_reply_fn(channel, %Message{reply_target: target, thread_ts: thread_ts}) do
-    fn text ->
-      send_opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
+  defp build_reply_fn(channel, %Message{} = message) do
+    reply_fn = channel.build_reply(message)
 
-      case channel.send_message(target, text, send_opts) do
+    fn text ->
+      case reply_fn.(text) do
         :ok ->
           :ok
 
