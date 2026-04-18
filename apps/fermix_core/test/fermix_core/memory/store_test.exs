@@ -37,6 +37,28 @@ defmodule FermixCore.Memory.StoreTest do
       assert {:ok, "value_a"} = Store.recall(conv_a, "key", server: store)
       assert {:ok, "value_b"} = Store.recall(conv_b, "key", server: store)
     end
+
+    test "isolates memories across thread-aware conversation keys", %{store: store} do
+      root_key = {"discord", "channel_1", :root}
+      thread_key = {"discord", "channel_1", "message_1"}
+
+      Store.store(root_key, "topic", "root", server: store)
+      Store.store(thread_key, "topic", "thread", server: store)
+
+      assert {:ok, "root"} = Store.recall(root_key, "topic", server: store)
+      assert {:ok, "thread"} = Store.recall(thread_key, "topic", server: store)
+    end
+
+    test "keeps legacy and thread-aware root keys in separate namespaces", %{store: store} do
+      legacy_key = {"telegram", "chat_1"}
+      root_key = {"telegram", "chat_1", :root}
+
+      Store.store(legacy_key, "topic", "legacy", server: store)
+      Store.store(root_key, "topic", "root", server: store)
+
+      assert {:ok, "legacy"} = Store.recall(legacy_key, "topic", server: store)
+      assert {:ok, "root"} = Store.recall(root_key, "topic", server: store)
+    end
   end
 
   describe "recall_all/2" do

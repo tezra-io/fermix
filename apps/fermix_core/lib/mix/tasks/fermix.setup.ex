@@ -10,7 +10,17 @@ defmodule Mix.Tasks.Fermix.Setup do
 
   @shortdoc "Shared Fermix setup entrypoint"
 
-  @switches [openai_api_key: :string, telegram_bot_token: :string, print_state: :boolean]
+  @switches [
+    openai_api_key: :string,
+    telegram_bot_token: :string,
+    whatsapp_access_token: :string,
+    whatsapp_phone_number_id: :string,
+    whatsapp_verify_token: :string,
+    whatsapp_app_secret: :string,
+    discord_bot_token: :string,
+    discord_bot_user_id: :string,
+    print_state: :boolean
+  ]
 
   @impl true
   def run(args) do
@@ -80,6 +90,12 @@ defmodule Mix.Tasks.Fermix.Setup do
     []
     |> put_opt(:openai_api_key, opts[:openai_api_key])
     |> put_opt(:telegram_bot_token, opts[:telegram_bot_token])
+    |> put_opt(:whatsapp_access_token, opts[:whatsapp_access_token])
+    |> put_opt(:whatsapp_phone_number_id, opts[:whatsapp_phone_number_id])
+    |> put_opt(:whatsapp_verify_token, opts[:whatsapp_verify_token])
+    |> put_opt(:whatsapp_app_secret, opts[:whatsapp_app_secret])
+    |> put_opt(:discord_bot_token, opts[:discord_bot_token])
+    |> put_opt(:discord_bot_user_id, opts[:discord_bot_user_id])
   end
 
   defp put_opt(keyword, _key, nil), do: keyword

@@ -29,7 +29,8 @@ defmodule FermixChannels.MixProject do
       {:fermix_nif, in_umbrella: true},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
-      {:plug, "~> 1.16"}
+      {:plug, "~> 1.16"},
+      {:websockex, "~> 0.4"}
     ]
   end
 end

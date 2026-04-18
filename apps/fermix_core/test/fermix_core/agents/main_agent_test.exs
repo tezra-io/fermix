@@ -38,7 +38,17 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     def cleanup do
       for name <- [@responses, @calls, @test_pid] do
-        if Process.whereis(name), do: Agent.stop(name)
+        case Process.whereis(name) do
+          nil ->
+            :ok
+
+          _pid ->
+            try do
+              Agent.stop(name)
+            catch
+              :exit, _reason -> :ok
+            end
+        end
       end
     end
 
@@ -159,7 +169,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   defp make_message(content, opts \\ []) do
     test_pid = self()
 
-    %{
+    message = %{
       content: content,
       sender: Keyword.get(opts, :sender, "user123"),
       channel: Keyword.get(opts, :channel, "telegram"),
@@ -169,6 +179,10 @@ defmodule FermixCore.Agents.MainAgentTest do
           send(test_pid, {:reply, response})
         end)
     }
+
+    opts
+    |> Keyword.take([:thread_ts, :thread_scope])
+    |> Enum.into(message)
   end
 
   defp tool_call(id, name, arguments) do
@@ -296,7 +310,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "I'm fine"}, 5_000
       flush_conv_store(conv_store)
 
-      history = ConversationStore.get_history({"telegram", chat_id}, server: conv_store)
+      history = ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store)
       assert length(history) == 2
       [user_msg, assistant_msg] = history
       assert user_msg.role == "user"
@@ -310,7 +324,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       conv_store: conv_store
     } do
       chat_id = "chat_#{System.unique_integer([:positive])}"
-      conv_key = {"telegram", chat_id}
+      conv_key = {"telegram", chat_id, :root}
 
       # Pre-populate conversation history
       ConversationStore.add_message(conv_key, "user", "First question", server: conv_store)
@@ -350,6 +364,34 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert error_msg =~ "error"
     end
 
+    test "uses thread-aware conversation identity", %{
+      agent: agent,
+      conv_store: conv_store
+    } do
+      chat_id = "chat_#{System.unique_integer([:positive])}"
+
+      ConversationStore.add_message(
+        {"telegram", chat_id, 456},
+        "user",
+        "Thread history",
+        server: conv_store
+      )
+
+      flush_conv_store(conv_store)
+      MockProvider.set_responses([mock_response("Thread answer")])
+
+      msg = make_message("Thread follow-up", chat_id: chat_id, thread_ts: 456)
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, "Thread answer"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+
+      assert Enum.any?(messages, &(&1.content == "Thread history"))
+      assert ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store) == []
+      assert ConversationStore.get_history({"telegram", chat_id, 456}, server: conv_store) != []
+    end
+
     test "clears pending state and replies when request task cannot start", %{
       registry: registry,
       skill_registry: skill_registry,
@@ -386,7 +428,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       state = :sys.get_state(agent_name)
 
-      refute Map.has_key?(state.conversations, {"telegram", chat_id})
+      refute Map.has_key?(state.conversations, {"telegram", chat_id, :root})
       assert state.task_refs == %{}
     end
 
@@ -564,7 +606,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       flush_conv_store(conv_store)
 
-      assert ConversationStore.get_history({"telegram", chat_id}, server: conv_store)
+      assert ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store)
              |> Enum.map(&{&1.role, &1.content}) == [
                {"user", "second"},
                {"assistant", "fresh reply"}
@@ -648,13 +690,15 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       flush_conv_store(conv_store)
 
-      assert ConversationStore.get_history({"telegram", second_chat_id}, server: conv_store)
+      assert ConversationStore.get_history({"telegram", second_chat_id, :root},
+               server: conv_store
+             )
              |> Enum.map(&{&1.role, &1.content}) == [
                {"user", "other"},
                {"assistant", "chat two reply"}
              ]
 
-      assert ConversationStore.get_history({"telegram", first_chat_id}, server: conv_store)
+      assert ConversationStore.get_history({"telegram", first_chat_id, :root}, server: conv_store)
              |> Enum.map(&{&1.role, &1.content}) == [
                {"user", "blocked"},
                {"assistant", "chat one reply"}
