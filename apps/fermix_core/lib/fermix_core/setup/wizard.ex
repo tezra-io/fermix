@@ -8,7 +8,15 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.WizardState
 
-  @type answer :: {:openai_api_key, String.t()} | {:telegram_bot_token, String.t()}
+  @type answer ::
+          {:openai_api_key, String.t()}
+          | {:telegram_bot_token, String.t()}
+          | {:whatsapp_access_token, String.t()}
+          | {:whatsapp_phone_number_id, String.t()}
+          | {:whatsapp_verify_token, String.t()}
+          | {:whatsapp_app_secret, String.t()}
+          | {:discord_bot_token, String.t()}
+          | {:discord_bot_user_id, String.t()}
   @type report :: %{
           status: Readiness.status(),
           failures: [Readiness.failure()],
@@ -43,6 +51,36 @@ defmodule FermixCore.Setup.Wizard do
         key: :telegram_bot_token,
         label: "Telegram bot token",
         required?: missing_component?(state, "channel:telegram")
+      },
+      %{
+        key: :whatsapp_access_token,
+        label: "WhatsApp access token",
+        required?: missing_component?(state, "channel:whatsapp")
+      },
+      %{
+        key: :whatsapp_phone_number_id,
+        label: "WhatsApp phone number ID",
+        required?: missing_component?(state, "channel:whatsapp")
+      },
+      %{
+        key: :whatsapp_verify_token,
+        label: "WhatsApp verify token",
+        required?: missing_component?(state, "channel:whatsapp")
+      },
+      %{
+        key: :whatsapp_app_secret,
+        label: "WhatsApp app secret",
+        required?: missing_component?(state, "channel:whatsapp")
+      },
+      %{
+        key: :discord_bot_token,
+        label: "Discord bot token",
+        required?: missing_component?(state, "channel:discord")
+      },
+      %{
+        key: :discord_bot_user_id,
+        label: "Discord bot user ID",
+        required?: missing_component?(state, "channel:discord")
       }
     ]
     |> Enum.filter(& &1.required?)
@@ -54,6 +92,8 @@ defmodule FermixCore.Setup.Wizard do
       state.config_snapshot
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
+      |> put_whatsapp_config(answers)
+      |> put_discord_config(answers)
 
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot) do
@@ -75,18 +115,28 @@ defmodule FermixCore.Setup.Wizard do
     cond do
       Enum.any?(failures, &(&1.component == "provider:openai")) -> :provider
       Enum.any?(failures, &(&1.component == "channel:telegram")) -> :channel
+      Enum.any?(failures, &(&1.component == "channel:whatsapp")) -> :channel
+      Enum.any?(failures, &(&1.component == "channel:discord")) -> :channel
       true -> :review
     end
   end
 
   defp enabled_channels(snapshot) do
-    telegram = snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:telegram, [])
+    channels = Map.get(snapshot, :fermix_channels, [])
 
-    if telegram_enabled?(telegram), do: [:telegram], else: []
+    []
+    |> put_enabled_channel(:telegram, Keyword.get(channels, :telegram, []), true)
+    |> put_enabled_channel(:whatsapp, Keyword.get(channels, :whatsapp, []), false)
+    |> put_enabled_channel(:discord, Keyword.get(channels, :discord, []), false)
+    |> Enum.reverse()
   end
 
-  defp telegram_enabled?(config) do
-    Keyword.get(config, :enabled, true) != false
+  defp put_enabled_channel(channels, name, config, default) do
+    if Keyword.get(config, :enabled, default) == true do
+      [name | channels]
+    else
+      channels
+    end
   end
 
   defp missing_component?(state, component) do
@@ -122,6 +172,8 @@ defmodule FermixCore.Setup.Wizard do
   defp put_telegram_bot_token(snapshot, ""), do: snapshot
 
   defp put_telegram_bot_token(snapshot, bot_token) do
+    channels = Map.get(snapshot, :fermix_channels, [])
+
     telegram =
       snapshot
       |> Map.get(:fermix_channels, [])
@@ -131,6 +183,51 @@ defmodule FermixCore.Setup.Wizard do
       |> Keyword.put(:bot_token, bot_token)
       |> Keyword.put_new(:allowed_user_ids, [])
 
-    Map.put(snapshot, :fermix_channels, telegram: telegram)
+    Map.put(snapshot, :fermix_channels, Keyword.put(channels, :telegram, telegram))
+  end
+
+  defp put_whatsapp_config(snapshot, answers) do
+    values =
+      [
+        access_token: Keyword.get(answers, :whatsapp_access_token),
+        phone_number_id: Keyword.get(answers, :whatsapp_phone_number_id),
+        verify_token: Keyword.get(answers, :whatsapp_verify_token),
+        app_secret: Keyword.get(answers, :whatsapp_app_secret)
+      ]
+      |> reject_blank_values()
+
+    put_channel_config(snapshot, :whatsapp, values, :webhook)
+  end
+
+  defp put_discord_config(snapshot, answers) do
+    values =
+      [
+        bot_token: Keyword.get(answers, :discord_bot_token),
+        bot_user_id: Keyword.get(answers, :discord_bot_user_id)
+      ]
+      |> reject_blank_values()
+
+    put_channel_config(snapshot, :discord, values, :gateway)
+  end
+
+  defp put_channel_config(snapshot, _channel, [], _mode), do: snapshot
+
+  defp put_channel_config(snapshot, channel, values, mode) do
+    existing_channels = Map.get(snapshot, :fermix_channels, [])
+
+    config =
+      existing_channels
+      |> Keyword.get(channel, [])
+      |> Keyword.put(:enabled, true)
+      |> Keyword.put_new(:mode, mode)
+      |> Keyword.merge(values)
+
+    Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
+  end
+
+  defp reject_blank_values(values) do
+    Enum.reject(values, fn {_key, value} ->
+      value in [nil, ""]
+    end)
   end
 end

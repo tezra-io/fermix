@@ -126,7 +126,7 @@ defmodule FermixWebWeb.IntegrationTest do
       assert_receive {:reply, "Hello from the integration test!"}, 5_000
 
       # Verify conversation was stored
-      history = ConversationStore.get_history({"telegram", "42"}, server: cs)
+      history = ConversationStore.get_history({"telegram", "42", :root}, server: cs)
       assert length(history) == 2
 
       roles = Enum.map(history, & &1.role)
@@ -165,7 +165,7 @@ defmodule FermixWebWeb.IntegrationTest do
 
       assert_receive {:reply, "The command output was captured."}, 10_000
 
-      history = ConversationStore.get_history({"telegram", "99"}, server: cs)
+      history = ConversationStore.get_history({"telegram", "99", :root}, server: cs)
       assert length(history) == 2
     end
 

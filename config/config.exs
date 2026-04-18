@@ -54,6 +54,17 @@ config :fermix_channels,
     mode: :webhook,
     webhook_path: "/webhook/telegram",
     allowed_user_ids: []
+  ],
+  whatsapp: [
+    enabled: false,
+    mode: :webhook,
+    webhook_path: "/webhook/whatsapp",
+    allowed_sender_ids: []
+  ],
+  discord: [
+    enabled: false,
+    mode: :gateway,
+    allowed_user_ids: []
   ]
 
 config :fermix_core, :trace,

@@ -7,11 +7,15 @@ defmodule FermixCore.Setup.WizardTest do
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
+    whatsapp = Application.fetch_env(:fermix_channels, :whatsapp)
+    discord = Application.fetch_env(:fermix_channels, :discord)
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
       restore_env(:fermix_channels, :telegram, telegram)
+      restore_env(:fermix_channels, :whatsapp, whatsapp)
+      restore_env(:fermix_channels, :discord, discord)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -67,6 +71,25 @@ defmodule FermixCore.Setup.WizardTest do
            end)
   end
 
+  test "report surfaces enabled whatsapp and discord channel failures" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    Application.put_env(:fermix_channels, :whatsapp, enabled: true, mode: :webhook)
+    Application.put_env(:fermix_channels, :discord, enabled: true, mode: :gateway)
+
+    report = Wizard.report()
+
+    assert report.status == :setup_required
+    assert :whatsapp in report.wizard.enabled_channels
+    assert :discord in report.wizard.enabled_channels
+
+    assert Enum.any?(report.failures, &(&1.component == "channel:whatsapp"))
+    assert Enum.any?(report.failures, &(&1.component == "channel:discord"))
+  end
+
   test "save_answers persists config, creates workspace directories, and updates readiness" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 
@@ -98,6 +121,51 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :mode) == :webhook
     assert Keyword.get(telegram, :bot_token) == "bot-token"
     assert Keyword.get(telegram, :allowed_user_ids) == []
+  end
+
+  test "save_answers persists whatsapp and discord setup answers" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    Application.put_env(:fermix_channels, :whatsapp, enabled: true)
+    Application.put_env(:fermix_channels, :discord, enabled: true)
+
+    {:ok, report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        whatsapp_access_token: "wa-token",
+        whatsapp_phone_number_id: "123456789",
+        whatsapp_verify_token: "verify-token",
+        whatsapp_app_secret: "app-secret",
+        discord_bot_token: "discord-token",
+        discord_bot_user_id: "999"
+      )
+
+    assert report.status == :ready
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    whatsapp = Keyword.get(persisted.fermix_channels, :whatsapp, [])
+    discord = Keyword.get(persisted.fermix_channels, :discord, [])
+
+    assert Keyword.get(whatsapp, :enabled) == true
+    assert Keyword.get(whatsapp, :mode) == :webhook
+    assert Keyword.get(whatsapp, :access_token) == "wa-token"
+    assert Keyword.get(whatsapp, :phone_number_id) == "123456789"
+    assert Keyword.get(whatsapp, :verify_token) == "verify-token"
+    assert Keyword.get(whatsapp, :app_secret) == "app-secret"
+
+    assert Keyword.get(discord, :enabled) == true
+    assert Keyword.get(discord, :mode) == :gateway
+    assert Keyword.get(discord, :bot_token) == "discord-token"
+    assert Keyword.get(discord, :bot_user_id) == "999"
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)

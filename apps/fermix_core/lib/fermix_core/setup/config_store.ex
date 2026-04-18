@@ -29,7 +29,11 @@ defmodule FermixCore.Setup.ConfigStore do
             |> Keyword.get(:openai, [])
         ]
       ],
-      fermix_channels: [telegram: Application.get_env(:fermix_channels, :telegram, [])],
+      fermix_channels: [
+        telegram: Application.get_env(:fermix_channels, :telegram, []),
+        whatsapp: Application.get_env(:fermix_channels, :whatsapp, []),
+        discord: Application.get_env(:fermix_channels, :discord, [])
+      ],
       fermix_web: []
     }
     |> persistable_snapshot()
@@ -64,7 +68,9 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Keyword.get(:openai, [])
     )
 
-    apply_telegram_config(Keyword.get(persisted.fermix_channels, :telegram, []))
+    apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
+    apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
+    apply_channel_config(:discord, Keyword.get(persisted.fermix_channels, :discord, []))
   end
 
   @spec persistable_snapshot(runtime_config()) :: runtime_config()
@@ -85,7 +91,17 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:telegram, [])
-          |> normalize_telegram()
+          |> normalize_telegram(),
+        whatsapp:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:whatsapp, [])
+          |> normalize_whatsapp(),
+        discord:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:discord, [])
+          |> normalize_discord()
       ],
       fermix_web: []
     }
@@ -108,7 +124,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp empty_runtime_config do
     %{
       fermix_core: [providers: [openai: []]],
-      fermix_channels: [telegram: []],
+      fermix_channels: [telegram: [], whatsapp: [], discord: []],
       fermix_web: []
     }
   end
@@ -121,12 +137,12 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
-  defp apply_telegram_config(telegram_config) do
-    merged_telegram =
-      Application.get_env(:fermix_channels, :telegram, [])
-      |> Keyword.merge(telegram_config)
+  defp apply_channel_config(channel, channel_config) do
+    merged =
+      Application.get_env(:fermix_channels, channel, [])
+      |> Keyword.merge(channel_config)
 
-    Application.put_env(:fermix_channels, :telegram, merged_telegram)
+    Application.put_env(:fermix_channels, channel, merged)
     :ok
   end
 
@@ -137,12 +153,14 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Keyword.get(:providers, [])
       |> Keyword.get(:openai, [])
 
-    telegram = snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:telegram, [])
+    channels = Map.get(snapshot, :fermix_channels, [])
 
     [
       "# Managed by mix fermix.setup",
       render_section(["fermix_core", "providers", "openai"], openai),
-      render_section(["fermix_channels", "telegram"], telegram)
+      render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
+      render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
+      render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, []))
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
@@ -217,7 +235,9 @@ defmodule FermixCore.Setup.ConfigStore do
         ]
       ],
       fermix_channels: [
-        telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"]))
+        telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
+        whatsapp: normalize_whatsapp(get_in(document, ["fermix_channels", "whatsapp"])),
+        discord: normalize_discord(get_in(document, ["fermix_channels", "discord"]))
       ],
       fermix_web: []
     }
@@ -282,6 +302,45 @@ defmodule FermixCore.Setup.ConfigStore do
     )
   end
 
+  defp normalize_whatsapp(nil), do: []
+
+  defp normalize_whatsapp(config) do
+    []
+    |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
+    |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_if_present(
+      :access_token,
+      normalize_string(lookup(config, "access_token", :access_token))
+    )
+    |> put_if_present(
+      :phone_number_id,
+      normalize_string(lookup(config, "phone_number_id", :phone_number_id))
+    )
+    |> put_if_present(
+      :verify_token,
+      normalize_string(lookup(config, "verify_token", :verify_token))
+    )
+    |> put_if_present(:app_secret, normalize_string(lookup(config, "app_secret", :app_secret)))
+    |> Keyword.put(
+      :allowed_sender_ids,
+      normalize_ids(lookup(config, "allowed_sender_ids", :allowed_sender_ids) || [])
+    )
+  end
+
+  defp normalize_discord(nil), do: []
+
+  defp normalize_discord(config) do
+    []
+    |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
+    |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
+    |> put_if_present(:bot_user_id, normalize_string(lookup(config, "bot_user_id", :bot_user_id)))
+    |> Keyword.put(
+      :allowed_user_ids,
+      normalize_ids(lookup(config, "allowed_user_ids", :allowed_user_ids) || [])
+    )
+  end
+
   defp normalize_auth_mode(:api_key), do: :api_key
   defp normalize_auth_mode(:oauth), do: :oauth
   defp normalize_auth_mode("api_key"), do: :api_key
@@ -290,8 +349,10 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_mode(:polling), do: :polling
   defp normalize_mode(:webhook), do: :webhook
+  defp normalize_mode(:gateway), do: :gateway
   defp normalize_mode("polling"), do: :polling
   defp normalize_mode("webhook"), do: :webhook
+  defp normalize_mode("gateway"), do: :gateway
   defp normalize_mode(_value), do: nil
 
   defp normalize_string(value) when is_binary(value) do

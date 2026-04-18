@@ -1,14 +1,15 @@
 defmodule FermixCore.Memory.ConversationStore do
   @moduledoc """
-  Stores conversation history per chat.
+  Stores conversation history per chat/thread.
 
-  Each conversation is keyed by {channel, chat_id}.
+  Each conversation is keyed by {channel, chat_id, thread_scope}.
   Maintains a rolling window of messages with automatic compaction.
   """
 
   use GenServer
 
-  @type conversation_key :: {channel :: String.t(), chat_id :: String.t()}
+  @type thread_scope :: :root | String.t() | integer()
+  @type conversation_key :: {channel :: String.t(), chat_id :: String.t(), thread_scope()}
   @type message :: %{
           role: String.t(),
           content: String.t(),
@@ -27,7 +28,7 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   @spec add_message(conversation_key(), String.t(), String.t(), keyword()) :: :ok
-  def add_message({channel, chat_id} = key, role, content, opts \\ [])
+  def add_message({channel, chat_id, _thread_scope} = key, role, content, opts \\ [])
       when is_binary(channel) and is_binary(chat_id) and
              is_binary(role) and is_binary(content) do
     server = Keyword.get(opts, :server, __MODULE__)
@@ -54,7 +55,7 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   @spec clear(conversation_key(), keyword()) :: :ok
-  def clear({channel, chat_id} = key, opts \\ [])
+  def clear({channel, chat_id, _thread_scope} = key, opts \\ [])
       when is_binary(channel) and is_binary(chat_id) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.cast(server, {:clear, key})
@@ -74,7 +75,7 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   @impl true
-  def handle_cast({:add_message, {channel, chat_id} = key, role, content}, state) do
+  def handle_cast({:add_message, {channel, chat_id, _thread_scope} = key, role, content}, state) do
     message = %{
       role: role,
       content: content,

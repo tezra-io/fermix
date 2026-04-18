@@ -4,13 +4,19 @@ defmodule FermixCore.Memory.Store do
 
   Each memory is keyed by {conversation_key, key} and stores a value
   with a timestamp. Designed for agent fact storage during conversations.
+
+  The M3 runtime uses `{channel, chat_id, thread_scope}` keys for thread-aware
+  conversations. `{channel, chat_id}` remains supported as a legacy namespace
+  for existing tool contexts and callers; the store does not normalize between
+  the two arities.
   """
 
   use GenServer
 
   @table :fermix_memory
 
-  @type conversation_key :: {String.t(), String.t()}
+  @type thread_scope :: :root | String.t() | integer()
+  @type conversation_key :: {String.t(), String.t()} | {String.t(), String.t(), thread_scope()}
 
   # --- Client API ---
 
@@ -21,31 +27,35 @@ defmodule FermixCore.Memory.Store do
   end
 
   @spec store(conversation_key(), String.t(), String.t(), keyword()) :: :ok
-  def store({channel, chat_id} = conv_key, key, value, opts \\ [])
-      when is_binary(channel) and is_binary(chat_id) and
-             is_binary(key) and is_binary(value) do
+  def store(conv_key, key, value, opts \\ [])
+      when is_binary(key) and is_binary(value) do
+    assert_conversation_key!(conv_key)
+
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:store, conv_key, key, value})
   end
 
   @spec recall(conversation_key(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, :not_found}
-  def recall({channel, chat_id} = conv_key, key, opts \\ [])
-      when is_binary(channel) and is_binary(chat_id) and is_binary(key) do
+  def recall(conv_key, key, opts \\ []) when is_binary(key) do
+    assert_conversation_key!(conv_key)
+
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:recall, conv_key, key})
   end
 
   @spec recall_all(conversation_key(), keyword()) :: %{String.t() => String.t()}
-  def recall_all({channel, chat_id} = conv_key, opts \\ [])
-      when is_binary(channel) and is_binary(chat_id) do
+  def recall_all(conv_key, opts \\ []) do
+    assert_conversation_key!(conv_key)
+
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:recall_all, conv_key})
   end
 
   @spec delete(conversation_key(), String.t(), keyword()) :: :ok
-  def delete({channel, chat_id} = conv_key, key, opts \\ [])
-      when is_binary(channel) and is_binary(chat_id) and is_binary(key) do
+  def delete(conv_key, key, opts \\ []) when is_binary(key) do
+    assert_conversation_key!(conv_key)
+
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:delete, conv_key, key})
   end
@@ -88,5 +98,15 @@ defmodule FermixCore.Memory.Store do
   def handle_call({:delete, conv_key, key}, _from, state) do
     :ets.delete(state.table, {conv_key, key})
     {:reply, :ok, state}
+  end
+
+  defp assert_conversation_key!({channel, chat_id})
+       when is_binary(channel) and is_binary(chat_id) do
+    :ok
+  end
+
+  defp assert_conversation_key!({channel, chat_id, _thread_scope})
+       when is_binary(channel) and is_binary(chat_id) do
+    :ok
   end
 end

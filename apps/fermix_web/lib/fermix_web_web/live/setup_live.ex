@@ -46,7 +46,21 @@ defmodule FermixWebWeb.SetupLive do
             </div>
             <div>
               <dt class="text-sm text-base-content/60">Telegram</dt>
-              <dd class="mt-1">{configured_label(telegram_config(@wizard.config_snapshot))}</dd>
+              <dd class="mt-1">
+                {configured_label(channel_config(@wizard.config_snapshot, :telegram))}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-sm text-base-content/60">WhatsApp</dt>
+              <dd class="mt-1">
+                {configured_label(channel_config(@wizard.config_snapshot, :whatsapp))}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-sm text-base-content/60">Discord</dt>
+              <dd class="mt-1">
+                {configured_label(channel_config(@wizard.config_snapshot, :discord))}
+              </dd>
             </div>
             <div class="sm:col-span-2">
               <dt class="text-sm text-base-content/60">Persisted config path</dt>
@@ -94,6 +108,7 @@ defmodule FermixWebWeb.SetupLive do
     Enum.any?(config, fn
       {:api_key, value} -> present?(value)
       {:bot_token, value} -> present?(value)
+      {:access_token, value} -> present?(value)
       _ -> false
     end)
   end
@@ -105,8 +120,8 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(:openai, [])
   end
 
-  defp telegram_config(snapshot) do
-    snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(:telegram, [])
+  defp channel_config(snapshot, channel) do
+    snapshot |> Map.get(:fermix_channels, []) |> Keyword.get(channel, [])
   end
 
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
