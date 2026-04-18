@@ -3,8 +3,8 @@ defmodule FermixCore.Memory.ConversationStoreTest do
 
   alias FermixCore.Memory.ConversationStore
 
-  @key {"telegram", "chat_123"}
-  @key2 {"discord", "chat_456"}
+  @key {"telegram", "chat_123", :root}
+  @key2 {"discord", "chat_456", :root}
 
   setup do
     name = :"conv_store_#{System.unique_integer([:positive])}"
@@ -35,7 +35,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
   end
 
   test "returns empty list for unknown conversation", %{store: store} do
-    assert [] == ConversationStore.get_history({"unknown", "key"}, server: store)
+    assert [] == ConversationStore.get_history({"unknown", "key", :root}, server: store)
   end
 
   test "isolates conversations by key", %{store: store} do

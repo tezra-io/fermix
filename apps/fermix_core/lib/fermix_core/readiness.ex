@@ -28,7 +28,11 @@ defmodule FermixCore.Readiness do
 
   @spec report() :: report()
   def report do
-    failures = Enum.reject([openai_failure(), telegram_failure()], &is_nil/1)
+    failures =
+      Enum.reject(
+        [openai_failure(), telegram_failure(), whatsapp_failure(), discord_failure()],
+        &is_nil/1
+      )
 
     %{
       status: status_for(failures),
@@ -81,8 +85,53 @@ defmodule FermixCore.Readiness do
     end
   end
 
+  defp whatsapp_failure do
+    case Config.channel(:whatsapp) do
+      {:ok, config} when is_list(config) ->
+        cond do
+          not channel_enabled?(config, false) ->
+            nil
+
+          configured?(config, [:access_token, :phone_number_id, :verify_token, :app_secret]) ->
+            nil
+
+          true ->
+            %{
+              component: "channel:whatsapp",
+              action:
+                "Set WHATSAPP_ACCESS_TOKEN, WHATSAPP_PHONE_NUMBER_ID, WHATSAPP_VERIFY_TOKEN, and WHATSAPP_APP_SECRET."
+            }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp discord_failure do
+    case Config.channel(:discord) do
+      {:ok, config} when is_list(config) ->
+        cond do
+          not channel_enabled?(config, false) ->
+            nil
+
+          configured?(config, [:bot_token, :bot_user_id]) ->
+            nil
+
+          true ->
+            %{
+              component: "channel:discord",
+              action: "Set DISCORD_BOT_TOKEN and DISCORD_BOT_USER_ID."
+            }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
   defp telegram_enabled?(config) do
-    Keyword.get(config, :enabled, true) != false
+    channel_enabled?(config, true)
   end
 
   defp openai_configured?(config) do
@@ -94,6 +143,14 @@ defmodule FermixCore.Readiness do
       [:oauth_credentials, :credentials, :client_id, :access_token],
       &present?(Keyword.get(config, &1))
     )
+  end
+
+  defp configured?(config, keys) do
+    Enum.all?(keys, &present?(Keyword.get(config, &1)))
+  end
+
+  defp channel_enabled?(config, default) do
+    Keyword.get(config, :enabled, default) == true
   end
 
   defp present?(value) when is_binary(value), do: value != ""

@@ -31,10 +31,18 @@ persisted_setup =
         config
 
       {:error, _reason} ->
-        %{fermix_core: [providers: [openai: []]], fermix_channels: [telegram: []], fermix_web: []}
+        %{
+          fermix_core: [providers: [openai: []]],
+          fermix_channels: [telegram: [], whatsapp: [], discord: []],
+          fermix_web: []
+        }
     end
   else
-    %{fermix_core: [providers: [openai: []]], fermix_channels: [telegram: []], fermix_web: []}
+    %{
+      fermix_core: [providers: [openai: []]],
+      fermix_channels: [telegram: [], whatsapp: [], discord: []],
+      fermix_web: []
+    }
   end
 
 # Merge runtime config with compile-time config to preserve base_url, default_model, etc.
@@ -56,6 +64,22 @@ existing_telegram =
     persisted_setup
     |> Map.get(:fermix_channels, [])
     |> Keyword.get(:telegram, [])
+  )
+
+existing_whatsapp =
+  Application.get_env(:fermix_channels, :whatsapp, [])
+  |> Keyword.merge(
+    persisted_setup
+    |> Map.get(:fermix_channels, [])
+    |> Keyword.get(:whatsapp, [])
+  )
+
+existing_discord =
+  Application.get_env(:fermix_channels, :discord, [])
+  |> Keyword.merge(
+    persisted_setup
+    |> Map.get(:fermix_channels, [])
+    |> Keyword.get(:discord, [])
   )
 
 openai_auth_mode =
@@ -105,6 +129,60 @@ merged_telegram =
   )
 
 config :fermix_channels, telegram: merged_telegram
+
+whatsapp_mode =
+  case System.get_env("WHATSAPP_MODE") do
+    "webhook" -> :webhook
+    _ -> Keyword.get(existing_whatsapp, :mode, :webhook)
+  end
+
+whatsapp_allowed_sender_ids =
+  case System.get_env("WHATSAPP_ALLOWED_SENDER_IDS") do
+    nil -> Keyword.get(existing_whatsapp, :allowed_sender_ids, [])
+    "" -> []
+    ids -> ids |> String.split(",") |> Enum.map(&String.trim/1)
+  end
+
+merged_whatsapp =
+  Keyword.merge(existing_whatsapp,
+    access_token:
+      System.get_env("WHATSAPP_ACCESS_TOKEN") || Keyword.get(existing_whatsapp, :access_token, ""),
+    phone_number_id:
+      System.get_env("WHATSAPP_PHONE_NUMBER_ID") ||
+        Keyword.get(existing_whatsapp, :phone_number_id, ""),
+    verify_token:
+      System.get_env("WHATSAPP_VERIFY_TOKEN") || Keyword.get(existing_whatsapp, :verify_token, ""),
+    app_secret:
+      System.get_env("WHATSAPP_APP_SECRET") || Keyword.get(existing_whatsapp, :app_secret, ""),
+    allowed_sender_ids: whatsapp_allowed_sender_ids,
+    mode: whatsapp_mode
+  )
+
+config :fermix_channels, whatsapp: merged_whatsapp
+
+discord_mode =
+  case System.get_env("DISCORD_MODE") do
+    "gateway" -> :gateway
+    _ -> Keyword.get(existing_discord, :mode, :gateway)
+  end
+
+discord_allowed_user_ids =
+  case System.get_env("DISCORD_ALLOWED_USER_IDS") do
+    nil -> Keyword.get(existing_discord, :allowed_user_ids, [])
+    "" -> []
+    ids -> ids |> String.split(",") |> Enum.map(&String.trim/1)
+  end
+
+merged_discord =
+  Keyword.merge(existing_discord,
+    bot_token: System.get_env("DISCORD_BOT_TOKEN") || Keyword.get(existing_discord, :bot_token, ""),
+    bot_user_id:
+      System.get_env("DISCORD_BOT_USER_ID") || Keyword.get(existing_discord, :bot_user_id, ""),
+    allowed_user_ids: discord_allowed_user_ids,
+    mode: discord_mode
+  )
+
+config :fermix_channels, discord: merged_discord
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.

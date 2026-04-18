@@ -13,6 +13,12 @@ defmodule FermixCore.Agents.MainAgent do
   newest message is started once the older task exits. Different conversations
   continue independently.
 
+  Conversation identity is `{channel, chat_id, thread_scope}`. `thread_ts` is
+  the canonical threaded-conversation identifier when present. `thread_scope` is
+  accepted only as a fallback conversation-key segment for direct callers that
+  do not provide `thread_ts`; channel adapters should put platform thread IDs in
+  `thread_ts`.
+
   Started by Application supervisor with :permanent restart.
   """
 
@@ -27,15 +33,23 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Tools.Registry
 
+  @type thread_scope :: :root | String.t() | integer()
+
   @type channel_message :: %{
-          content: String.t(),
-          sender: String.t(),
-          channel: String.t(),
-          chat_id: String.t(),
-          reply_fn: (String.t() -> any())
+          :content => String.t(),
+          :sender => String.t(),
+          :channel => String.t(),
+          :chat_id => String.t(),
+          :reply_fn => (String.t() -> any()),
+          optional(:thread_ts) => String.t() | integer() | nil,
+          optional(:thread_scope) => thread_scope() | nil
         }
 
-  @type conversation_key :: {channel :: String.t(), chat_id :: String.t()}
+  @type conversation_key :: {
+          channel :: String.t(),
+          chat_id :: String.t(),
+          thread_scope()
+        }
 
   @type pending_request :: %{
           request_id: pos_integer(),
@@ -155,7 +169,17 @@ defmodule FermixCore.Agents.MainAgent do
 
   # --- Internals ---
 
-  defp conversation_key(%{channel: channel, chat_id: chat_id}), do: {channel, chat_id}
+  defp conversation_key(%{channel: channel, chat_id: chat_id} = msg) do
+    {channel, chat_id, thread_scope(msg)}
+  end
+
+  defp thread_scope(%{thread_ts: thread_ts}) when not is_nil(thread_ts), do: thread_ts
+
+  defp thread_scope(%{thread_scope: thread_scope})
+       when thread_scope == :root or is_binary(thread_scope) or is_integer(thread_scope),
+       do: thread_scope
+
+  defp thread_scope(_msg), do: :root
 
   defp empty_conversation_runtime do
     %{next_request_id: 0, active: nil, pending: nil}
@@ -258,14 +282,14 @@ defmodule FermixCore.Agents.MainAgent do
       "Failed to start Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
     )
 
-    send_reply_async(msg.reply_fn, "Sorry, I encountered an error processing your message.")
+    send_reply_async(msg, "Sorry, I encountered an error processing your message.")
 
     state
     |> put_conversation_runtime(conversation_key, %{conversation | pending: nil})
   end
 
-  defp send_reply_async(reply_fn, response) do
-    spawn(fn -> reply_fn.(response) end)
+  defp send_reply_async(msg, response) do
+    spawn(fn -> deliver_reply(msg, response) end)
     :ok
   end
 
@@ -304,7 +328,11 @@ defmodule FermixCore.Agents.MainAgent do
     }
   end
 
-  defp format_conversation_key({channel, chat_id}), do: "#{channel}/#{chat_id}"
+  defp format_conversation_key({channel, chat_id, :root}), do: "#{channel}/#{chat_id}"
+
+  defp format_conversation_key({channel, chat_id, thread_scope}) do
+    "#{channel}/#{chat_id}/#{inspect(thread_scope)}"
+  end
 
   defp process_message(msg, state) do
     start = System.monotonic_time(:millisecond)
@@ -368,7 +396,7 @@ defmodule FermixCore.Agents.MainAgent do
           "Agent loop completed in #{result.iterations} iterations, #{result.total_tokens} tokens"
         )
 
-        msg.reply_fn.(result.response)
+        deliver_reply(msg, result.response)
 
       {:error, reason} ->
         Logger.error("Agent loop failed: #{inspect(reason)}")
@@ -379,7 +407,28 @@ defmodule FermixCore.Agents.MainAgent do
           %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
         )
 
-        msg.reply_fn.("Sorry, I encountered an error processing your message.")
+        deliver_reply(msg, "Sorry, I encountered an error processing your message.")
+    end
+  end
+
+  defp deliver_reply(msg, response) do
+    case msg.reply_fn.(response) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.error("Main Agent reply delivery failed: #{inspect(reason)}")
+
+        :telemetry.execute(
+          [:fermix, :agent, :reply_error],
+          %{count: 1},
+          %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
+        )
+
+        error
+
+      _other ->
+        :ok
     end
   end
 

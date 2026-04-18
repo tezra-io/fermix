@@ -7,8 +7,17 @@ defmodule FermixChannels.Application do
 
   @impl true
   def start(_type, _args) do
-    config = Application.get_env(:fermix_channels, :telegram, [])
-    children = polling_children(config, Readiness.report())
+    readiness = Readiness.report()
+
+    children =
+      []
+      |> Kernel.++(
+        polling_children(Application.get_env(:fermix_channels, :telegram, []), readiness)
+      )
+      |> Kernel.++(
+        gateway_children(Application.get_env(:fermix_channels, :discord, []), readiness)
+      )
+
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
   end
@@ -24,4 +33,16 @@ defmodule FermixChannels.Application do
   end
 
   def polling_children(config, _readiness_report) when is_list(config), do: []
+
+  @doc false
+  @spec gateway_children(keyword(), Readiness.report()) :: [{FermixChannels.Discord.Gateway, []}]
+  def gateway_children(config, %{status: :ready}) when is_list(config) do
+    if config[:mode] == :gateway and config[:enabled] == true do
+      [{FermixChannels.Discord.Gateway, []}]
+    else
+      []
+    end
+  end
+
+  def gateway_children(config, _readiness_report) when is_list(config), do: []
 end

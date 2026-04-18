@@ -4,6 +4,10 @@ defmodule FermixChannels.Message do
 
   Every channel adapter parses platform-specific payloads into this struct,
   giving the agent a uniform interface regardless of source.
+
+  `thread_scope` is a root/thread presence marker derived from `thread_ts`.
+  The actual platform thread identifier lives in `thread_ts`, and that value is
+  what the shared runtime uses for thread-aware conversation identity.
   """
 
   @enforce_keys [:id, :content, :sender, :channel, :chat_id, :reply_target]
