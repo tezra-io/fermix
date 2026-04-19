@@ -10,13 +10,13 @@ defmodule FermixChannels.Dispatcher do
 
   alias FermixChannels.Message
 
-  @spec dispatch([Message.t()], keyword()) :: :ok
+  @spec dispatch([Message.t()], keyword()) :: :ok | {:error, term()}
   def dispatch(messages, opts) when is_list(messages) do
     channel = Keyword.fetch!(opts, :channel)
     agent = Keyword.fetch!(opts, :agent)
     agent_server = Keyword.fetch!(opts, :agent_server)
 
-    Enum.each(messages, fn message ->
+    Enum.reduce_while(messages, :ok, fn message, :ok ->
       reply_fn = build_reply_fn(channel, message)
 
       agent_message =
@@ -24,10 +24,19 @@ defmodule FermixChannels.Dispatcher do
         |> Map.from_struct()
         |> Map.put(:reply_fn, reply_fn)
 
-      agent.handle_message(agent_message, agent_server)
-    end)
+      case agent.handle_message(agent_message, agent_server) do
+        :ok ->
+          {:cont, :ok}
 
-    :ok
+        {:error, reason} = error ->
+          Logger.error("Dispatcher agent delivery failed: #{inspect(reason)}")
+          {:halt, error}
+
+        other ->
+          Logger.error("Dispatcher agent delivery returned unexpected result: #{inspect(other)}")
+          {:halt, {:error, {:unexpected_agent_result, other}}}
+      end
+    end)
   end
 
   defp build_reply_fn(channel, %Message{} = message) do

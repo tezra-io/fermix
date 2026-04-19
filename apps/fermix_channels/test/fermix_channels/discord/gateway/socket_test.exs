@@ -65,6 +65,56 @@ defmodule FermixChannels.Discord.Gateway.SocketTest do
     assert message.content == "hello socket"
   end
 
+  test "resumes an invalidated session when Discord marks it resumable" do
+    state = %{socket_state(self()) | session_id: "session-1", sequence: 42}
+    invalid_session = Jason.encode!(%{op: 9, d: true})
+
+    assert {:close, state} = Socket.handle_frame({:text, invalid_session}, state)
+    assert state.session_id == "session-1"
+    assert state.sequence == 42
+
+    hello = Jason.encode!(%{op: 10, d: %{heartbeat_interval: 30_000}})
+
+    assert {:reply, {:text, resume}, state} = Socket.handle_frame({:text, hello}, state)
+
+    assert Jason.decode!(resume) == %{
+             "op" => 6,
+             "d" => %{
+               "token" => "discord-bot-token",
+               "session_id" => "session-1",
+               "seq" => 42
+             }
+           }
+
+    assert is_reference(state.heartbeat_ref)
+    Process.cancel_timer(state.heartbeat_ref)
+  end
+
+  test "clears invalidated sessions that Discord does not allow resuming" do
+    state = %{socket_state(self()) | session_id: "session-1", sequence: 42}
+    invalid_session = Jason.encode!(%{op: 9, d: false})
+
+    assert {:close, state} = Socket.handle_frame({:text, invalid_session}, state)
+    assert state.session_id == nil
+    assert state.sequence == nil
+
+    hello = Jason.encode!(%{op: 10, d: %{heartbeat_interval: 30_000}})
+
+    assert {:reply, {:text, identify}, state} = Socket.handle_frame({:text, hello}, state)
+
+    assert Jason.decode!(identify) == %{
+             "op" => 2,
+             "d" => %{
+               "token" => "discord-bot-token",
+               "intents" => 37_377,
+               "properties" => %{"os" => "linux", "browser" => "fermix", "device" => "fermix"}
+             }
+           }
+
+    assert is_reference(state.heartbeat_ref)
+    Process.cancel_timer(state.heartbeat_ref)
+  end
+
   test "sends heartbeat frames with the latest sequence" do
     state = %{socket_state(self()) | sequence: 42, heartbeat_interval_ms: 30_000}
 
