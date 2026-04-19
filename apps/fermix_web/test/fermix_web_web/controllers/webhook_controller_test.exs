@@ -1,6 +1,8 @@
 defmodule FermixWebWeb.WebhookControllerTest do
   use FermixWebWeb.ConnCase
 
+  alias FermixWebWeb.WebhookController
+
   @webhook_secret "test_webhook_secret_token"
   @whatsapp_app_secret "test-whatsapp-secret"
   @webhook_body_limit_bytes 1_000_000
@@ -164,6 +166,14 @@ defmodule FermixWebWeb.WebhookControllerTest do
         |> put_req_header("x-hub-signature-256", signature)
         |> post(~p"/webhook/whatsapp", body)
       end
+    end
+  end
+
+  describe "webhook_error_response/3" do
+    test "maps unsupported transport errors to invalid webhook responses", %{conn: conn} do
+      conn = WebhookController.webhook_error_response(conn, "Discord", :unsupported_transport)
+
+      assert json_response(conn, 400) == %{"error" => "Invalid webhook"}
     end
   end
 

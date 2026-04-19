@@ -47,6 +47,7 @@ defmodule FermixChannels.Telegram do
   end
 
   @impl true
+  @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(chat_id, text, opts \\ []) do

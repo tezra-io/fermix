@@ -136,6 +136,7 @@ whatsapp_mode =
     _ -> Keyword.get(existing_whatsapp, :mode, :webhook)
   end
 
+# WhatsApp keeps its own sender allowlist key. Do not fall back to allowed_user_ids.
 whatsapp_allowed_sender_ids =
   case System.get_env("WHATSAPP_ALLOWED_SENDER_IDS") do
     nil -> Keyword.get(existing_whatsapp, :allowed_sender_ids, [])

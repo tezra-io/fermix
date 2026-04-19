@@ -104,6 +104,16 @@ defmodule FermixChannels.WhatsAppTest do
 
       assert {:ok, []} = WhatsApp.parse_webhook(payload("blocked"))
     end
+
+    test "does not fall back to allowed_user_ids when sender allowlist is unset" do
+      Application.put_env(:fermix_channels, :whatsapp,
+        enabled: true,
+        allowed_user_ids: ["19999999999"]
+      )
+
+      assert {:ok, [message]} = WhatsApp.parse_webhook(payload("hello from whatsapp"))
+      assert message.chat_id == "15551234567"
+    end
   end
 
   describe "dispatch and reply" do
