@@ -7,12 +7,21 @@ defmodule FermixChannels.Discord.Gateway.Socket do
   """
 
   use WebSockex
+  import Bitwise
 
   require Logger
 
   alias FermixChannels.Discord.Gateway
 
-  @identify_intents 37_377
+  @guilds_intent 1 <<< 0
+  @guild_messages_intent 1 <<< 9
+  @direct_messages_intent 1 <<< 12
+  @message_content_intent 1 <<< 15
+
+  # Discord DM ingress needs guild context for app mentions, guild/direct message
+  # events, and message content so Fermix can read the prompt text.
+  @identify_intents @guilds_intent ||| @guild_messages_intent ||| @direct_messages_intent |||
+                      @message_content_intent
 
   @spec start_link(String.t(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(url, state, opts \\ []) when is_binary(url) and is_map(state) do
@@ -58,7 +67,7 @@ defmodule FermixChannels.Discord.Gateway.Socket do
       |> Map.put(:heartbeat_interval_ms, interval)
       |> schedule_heartbeat()
 
-    {:reply, identify_frame(state.token), state}
+    {:reply, session_start_frame(state), state}
   end
 
   defp handle_gateway_event(%{"op" => 0, "t" => "READY", "d" => data}, state)
@@ -75,8 +84,16 @@ defmodule FermixChannels.Discord.Gateway.Socket do
     {:reply, heartbeat_frame(state.sequence), state}
   end
 
-  defp handle_gateway_event(%{"op" => op}, state) when op in [7, 9] do
+  defp handle_gateway_event(%{"op" => 7}, state) do
     {:close, state}
+  end
+
+  defp handle_gateway_event(%{"op" => 9, "d" => true}, state) do
+    {:close, state}
+  end
+
+  defp handle_gateway_event(%{"op" => 9}, state) do
+    {:close, clear_session(state)}
   end
 
   defp handle_gateway_event(_event, state), do: {:ok, state}
@@ -103,6 +120,14 @@ defmodule FermixChannels.Discord.Gateway.Socket do
 
   defp cancel_heartbeat(state), do: state
 
+  defp session_start_frame(state) do
+    if resumable_session?(state) do
+      resume_frame(state)
+    else
+      identify_frame(state.token)
+    end
+  end
+
   defp identify_frame(token) do
     {:text,
      Jason.encode!(%{
@@ -115,7 +140,32 @@ defmodule FermixChannels.Discord.Gateway.Socket do
      })}
   end
 
+  defp resume_frame(%{token: token, session_id: session_id, sequence: sequence}) do
+    {:text,
+     Jason.encode!(%{
+       op: 6,
+       d: %{
+         token: token,
+         session_id: session_id,
+         seq: sequence
+       }
+     })}
+  end
+
   defp heartbeat_frame(sequence) do
     {:text, Jason.encode!(%{op: 1, d: sequence})}
+  end
+
+  defp resumable_session?(%{session_id: session_id, sequence: sequence})
+       when is_binary(session_id) and session_id != "" and is_integer(sequence) do
+    true
+  end
+
+  defp resumable_session?(_state), do: false
+
+  defp clear_session(state) do
+    state
+    |> Map.put(:session_id, nil)
+    |> Map.put(:sequence, nil)
   end
 end
