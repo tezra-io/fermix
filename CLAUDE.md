@@ -56,7 +56,8 @@ mix format --check-formatted
 - `docs/PHASE1_TASKS.md` — 16 tasks with implementation code
 - `docs/ROADMAP.md` — Post-MVP feature roadmap (M2-M9)
 - `docs/MILESTONE_2_MULTI_AGENT_ORCHESTRATION.md` — M2 design (partially implemented)
-- `docs/MILESTONE_3_ONBOARDING_CHANNEL_COVERAGE.md` — M3 design (draft)
+- `docs/MILESTONE_3_ONBOARDING_CHANNEL_COVERAGE.md` — M3 design (shipped)
+- `docs/MILESTONE_4_ADVANCED_MEMORY.md` — M4 design (draft)
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
