@@ -9,6 +9,8 @@ defmodule FermixCore.Setup.WizardTest do
     telegram = Application.fetch_env(:fermix_channels, :telegram)
     whatsapp = Application.fetch_env(:fermix_channels, :whatsapp)
     discord = Application.fetch_env(:fermix_channels, :discord)
+    slack = Application.fetch_env(:fermix_channels, :slack)
+    signal = Application.fetch_env(:fermix_channels, :signal)
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -16,6 +18,8 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :telegram, telegram)
       restore_env(:fermix_channels, :whatsapp, whatsapp)
       restore_env(:fermix_channels, :discord, discord)
+      restore_env(:fermix_channels, :slack, slack)
+      restore_env(:fermix_channels, :signal, signal)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -71,7 +75,7 @@ defmodule FermixCore.Setup.WizardTest do
            end)
   end
 
-  test "report surfaces enabled whatsapp and discord channel failures" do
+  test "report surfaces enabled whatsapp, discord, slack, and signal channel failures" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]
     )
@@ -79,15 +83,21 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :telegram, enabled: false)
     Application.put_env(:fermix_channels, :whatsapp, enabled: true, mode: :webhook)
     Application.put_env(:fermix_channels, :discord, enabled: true, mode: :gateway)
+    Application.put_env(:fermix_channels, :slack, enabled: true, mode: :webhook)
+    Application.put_env(:fermix_channels, :signal, enabled: true, mode: :subprocess)
 
     report = Wizard.report()
 
     assert report.status == :setup_required
     assert :whatsapp in report.wizard.enabled_channels
     assert :discord in report.wizard.enabled_channels
+    assert :slack in report.wizard.enabled_channels
+    assert :signal in report.wizard.enabled_channels
 
     assert Enum.any?(report.failures, &(&1.component == "channel:whatsapp"))
     assert Enum.any?(report.failures, &(&1.component == "channel:discord"))
+    assert Enum.any?(report.failures, &(&1.component == "channel:slack"))
+    assert Enum.any?(report.failures, &(&1.component == "channel:signal"))
   end
 
   test "save_answers persists config, creates workspace directories, and updates readiness" do
@@ -166,6 +176,45 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(discord, :mode) == :gateway
     assert Keyword.get(discord, :bot_token) == "discord-token"
     assert Keyword.get(discord, :bot_user_id) == "999"
+  end
+
+  test "save_answers persists slack and signal setup answers" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    Application.put_env(:fermix_channels, :slack, enabled: true)
+    Application.put_env(:fermix_channels, :signal, enabled: true)
+
+    {:ok, report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        slack_bot_token: "xoxb-test-token",
+        slack_signing_secret: "slack-signing-secret",
+        signal_account: "+15550001111"
+      )
+
+    assert report.status == :ready
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    slack = Keyword.get(persisted.fermix_channels, :slack, [])
+    signal = Keyword.get(persisted.fermix_channels, :signal, [])
+
+    assert Keyword.get(slack, :enabled) == true
+    assert Keyword.get(slack, :mode) == :webhook
+    assert Keyword.get(slack, :bot_token) == "xoxb-test-token"
+    assert Keyword.get(slack, :signing_secret) == "slack-signing-secret"
+
+    assert Keyword.get(signal, :enabled) == true
+    assert Keyword.get(signal, :mode) == :subprocess
+    assert Keyword.get(signal, :account) == "+15550001111"
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)

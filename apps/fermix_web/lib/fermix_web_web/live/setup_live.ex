@@ -62,6 +62,18 @@ defmodule FermixWebWeb.SetupLive do
                 {configured_label(channel_config(@wizard.config_snapshot, :discord))}
               </dd>
             </div>
+            <div>
+              <dt class="text-sm text-base-content/60">Slack</dt>
+              <dd class="mt-1">
+                {configured_label(channel_config(@wizard.config_snapshot, :slack))}
+              </dd>
+            </div>
+            <div>
+              <dt class="text-sm text-base-content/60">Signal</dt>
+              <dd class="mt-1">
+                {configured_label(channel_config(@wizard.config_snapshot, :signal))}
+              </dd>
+            </div>
             <div class="sm:col-span-2">
               <dt class="text-sm text-base-content/60">Persisted config path</dt>
               <dd class="mt-1 font-mono text-sm">{@report.config_path}</dd>
@@ -108,7 +120,9 @@ defmodule FermixWebWeb.SetupLive do
     Enum.any?(config, fn
       {:api_key, value} -> present?(value)
       {:bot_token, value} -> present?(value)
+      {:signing_secret, value} -> present?(value)
       {:access_token, value} -> present?(value)
+      {:account, value} -> present?(value)
       _ -> false
     end)
   end
