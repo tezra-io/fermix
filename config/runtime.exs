@@ -151,13 +151,6 @@ config :fermix_core,
          file: System.get_env("FERMIX_LOG_FILE") || Path.join(workspace_paths.logs, "fermix.log")
        )
 
-telegram_mode =
-  case System.get_env("TELEGRAM_MODE") do
-    "polling" -> :polling
-    "webhook" -> :webhook
-    _ -> Keyword.get(existing_telegram, :mode, :webhook)
-  end
-
 allowed_user_ids =
   case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
     nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
@@ -169,9 +162,7 @@ merged_telegram =
   Keyword.merge(existing_telegram,
     bot_token:
       System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, ""),
-    webhook_secret: System.get_env("TELEGRAM_WEBHOOK_SECRET"),
-    allowed_user_ids: allowed_user_ids,
-    mode: telegram_mode
+    allowed_user_ids: allowed_user_ids
   )
 
 config :fermix_channels, telegram: merged_telegram

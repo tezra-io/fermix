@@ -5,7 +5,6 @@ defmodule FermixWebWeb.WebhookController do
 
   alias FermixChannels.Dispatcher
   alias FermixChannels.Slack
-  alias FermixChannels.Telegram
   alias FermixChannels.WhatsApp
   alias FermixCore.Agents.MainAgent
 
@@ -20,29 +19,6 @@ defmodule FermixWebWeb.WebhookController do
     :stale_timestamp
   ]
   @invalid_webhook_errors [:unsupported_transport, :invalid_webhook_payload]
-
-  @spec telegram(Plug.Conn.t(), map()) :: Plug.Conn.t()
-  def telegram(conn, params) do
-    with :ok <- Telegram.verify_webhook(conn),
-         {:ok, messages} <- Telegram.parse_webhook(params),
-         :ok <-
-           Dispatcher.dispatch(messages,
-             channel: Telegram,
-             agent: MainAgent,
-             agent_server: MainAgent
-           ) do
-      :telemetry.execute(
-        [:fermix, :channel, :webhook],
-        %{count: length(messages)},
-        %{channel: :telegram}
-      )
-
-      json(conn, %{ok: true})
-    else
-      {:error, reason} ->
-        webhook_error_response(conn, "Telegram webhook", reason)
-    end
-  end
 
   @spec whatsapp_verify(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def whatsapp_verify(conn, params) do

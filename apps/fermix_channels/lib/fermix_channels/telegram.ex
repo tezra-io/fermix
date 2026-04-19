@@ -19,18 +19,8 @@ defmodule FermixChannels.Telegram do
   # -- Behaviour Callbacks --
 
   @impl true
-  @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
-  def parse_webhook(params) do
-    with {:ok, messages} when messages != [] <- parse_update(params) do
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: length(messages)},
-        %{channel: :telegram, direction: :inbound}
-      )
-
-      {:ok, messages}
-    end
-  end
+  @spec parse_webhook(map()) :: {:error, :unsupported_transport}
+  def parse_webhook(_params), do: {:error, :unsupported_transport}
 
   @spec parse_update(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
   def parse_update(update) do
@@ -82,34 +72,8 @@ defmodule FermixChannels.Telegram do
   end
 
   @impl true
-  @spec verify_webhook(Plug.Conn.t()) :: :ok | {:error, term()}
-  def verify_webhook(conn) do
-    with {:ok, config} <- FermixCore.Config.channel(:telegram),
-         expected when is_binary(expected) and expected != "" <-
-           Keyword.get(config, :webhook_secret) do
-      verify_token(conn, expected)
-    else
-      {:error, reason} -> {:error, reason}
-      _ -> :ok
-    end
-  end
-
-  defp verify_token(conn, expected) do
-    case Plug.Conn.get_req_header(conn, "x-telegram-bot-api-secret-token") do
-      [provided] when is_binary(provided) ->
-        if Plug.Crypto.secure_compare(provided, expected) do
-          :ok
-        else
-          {:error, :invalid_token}
-        end
-
-      [] ->
-        {:error, :missing_token}
-
-      _ ->
-        {:error, :invalid_token}
-    end
-  end
+  @spec verify_webhook(Plug.Conn.t()) :: {:error, :unsupported_transport}
+  def verify_webhook(_conn), do: {:error, :unsupported_transport}
 
   @impl true
   @spec start_typing(String.t()) :: :ok | {:error, term()}

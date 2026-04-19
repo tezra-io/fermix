@@ -13,8 +13,6 @@ defmodule FermixWebWeb.IntegrationTest do
 
   @moduletag :integration
 
-  @webhook_secret "test_integration_secret"
-
   defmodule MockProvider do
     @moduledoc false
     @behaviour FermixCore.Providers.Provider
@@ -75,10 +73,7 @@ defmodule FermixWebWeb.IntegrationTest do
   end
 
   setup do
-    Application.put_env(:fermix_channels, :telegram,
-      bot_token: "test_bot_token",
-      webhook_secret: @webhook_secret
-    )
+    Application.put_env(:fermix_channels, :telegram, bot_token: "test_bot_token")
 
     # Start test-scoped GenServers
     conversation_store =
@@ -169,13 +164,11 @@ defmodule FermixWebWeb.IntegrationTest do
       assert length(history) == 2
     end
 
-    test "webhook endpoint triggers full pipeline", %{
+    test "telegram webhook route is removed (polling only)", %{
       conn: conn,
       conversation_store: _cs,
       registry: _reg
     } do
-      # This test only verifies the webhook HTTP layer returns 200
-      # since MainAgent runs asynchronously
       payload = %{
         "update_id" => 123_456,
         "message" => %{
@@ -186,12 +179,9 @@ defmodule FermixWebWeb.IntegrationTest do
         }
       }
 
-      conn =
-        conn
-        |> put_req_header("x-telegram-bot-api-secret-token", @webhook_secret)
-        |> post(~p"/webhook/telegram", payload)
+      conn = post(conn, ~p"/webhook/telegram", payload)
 
-      assert json_response(conn, 200) == %{"ok" => true}
+      assert conn.status == 404
     end
   end
 end

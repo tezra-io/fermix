@@ -27,7 +27,6 @@ defmodule FermixWebWeb.Router do
     get "/health", HealthController, :ready
     get "/health/live", HealthController, :live
     get "/health/ready", HealthController, :ready
-    post "/webhook/telegram", WebhookController, :telegram
     get "/webhook/whatsapp", WebhookController, :whatsapp_verify
     post "/webhook/whatsapp", WebhookController, :whatsapp
     post "/webhook/slack", WebhookController, :slack
