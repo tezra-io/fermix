@@ -1,6 +1,8 @@
 defmodule FermixWebWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :fermix_web
 
+  @request_body_limit_bytes 1_000_000
+
   # The session will be stored in the cookie and signed,
   # this means its contents can be read but not tampered with.
   # Set :encryption_salt if you would also like to encrypt it.
@@ -38,9 +40,12 @@ defmodule FermixWebWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # Webhook/control endpoints only accept small request payloads. Keeping the
+  # parser limit explicit also bounds CacheBodyReader's raw-body cache in memory.
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
+    length: @request_body_limit_bytes,
     json_decoder: Phoenix.json_library(),
     body_reader: {FermixWebWeb.CacheBodyReader, :read_body, []}
 

@@ -1,6 +1,9 @@
 defmodule FermixWebWeb.CacheBodyReader do
   @moduledoc """
   Plug body reader that caches raw request bodies for signed webhook checks.
+
+  The cached body is bounded by the `Plug.Parsers :length` configured in
+  `FermixWebWeb.Endpoint`, so signature verification cannot grow unbounded.
   """
 
   @spec read_body(Plug.Conn.t(), keyword()) ::
