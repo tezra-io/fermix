@@ -12,7 +12,6 @@ defmodule FermixChannels.Telegram.PollerTest do
 
     Application.put_env(:fermix_channels, :telegram,
       bot_token: "test-bot-token",
-      webhook_secret: "test-secret",
       allowed_user_ids: []
     )
 
