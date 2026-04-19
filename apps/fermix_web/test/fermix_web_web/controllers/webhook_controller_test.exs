@@ -3,6 +3,7 @@ defmodule FermixWebWeb.WebhookControllerTest do
 
   @webhook_secret "test_webhook_secret_token"
   @whatsapp_app_secret "test-whatsapp-secret"
+  @webhook_body_limit_bytes 1_000_000
 
   setup do
     Application.put_env(:fermix_channels, :telegram,
@@ -148,6 +149,21 @@ defmodule FermixWebWeb.WebhookControllerTest do
         |> post(~p"/webhook/whatsapp", Jason.encode!(whatsapp_message_payload("hello")))
 
       assert json_response(conn, 401)["error"] == "Unauthorized"
+    end
+
+    test "returns 413 when payload exceeds the parser body limit", %{conn: conn} do
+      body =
+        whatsapp_message_payload(String.duplicate("a", @webhook_body_limit_bytes))
+        |> Jason.encode!()
+
+      signature = whatsapp_signature(body)
+
+      assert_error_sent 413, fn ->
+        conn
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("x-hub-signature-256", signature)
+        |> post(~p"/webhook/whatsapp", body)
+      end
     end
   end
 
