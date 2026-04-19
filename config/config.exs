@@ -48,6 +48,10 @@ config :fermix_core,
   max_conversation_history: 50,
   context_window_limit: 120_000
 
+config :fermix_core, :transcription,
+  backend: FermixCore.Transcription.OpenAI,
+  model: "whisper-1"
+
 config :fermix_channels,
   telegram: [
     enabled: true,
@@ -79,8 +83,7 @@ config :fermix_channels,
     allowed_sender_ids: []
   ]
 
-config :fermix_core, :trace,
-  base_dir: Path.expand("~/.fermix/traces")
+config :fermix_core, :trace, base_dir: Path.expand("~/.fermix/traces")
 
 config :fermix_core, :log,
   file: Path.expand("~/.fermix/logs/fermix.log"),

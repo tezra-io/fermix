@@ -1,0 +1,96 @@
+defmodule FermixCore.HealthTest do
+  use ExUnit.Case, async: false
+
+  alias FermixCore.Health
+  alias FermixCore.Setup.ConfigStore
+
+  setup do
+    providers = Application.get_env(:fermix_core, :providers)
+    telegram = Application.get_env(:fermix_channels, :telegram)
+    whatsapp = Application.get_env(:fermix_channels, :whatsapp)
+    discord = Application.get_env(:fermix_channels, :discord)
+    slack = Application.get_env(:fermix_channels, :slack)
+    signal = Application.get_env(:fermix_channels, :signal)
+    fermix_home = System.get_env("FERMIX_HOME")
+
+    on_exit(fn ->
+      restore_env(:fermix_core, :providers, providers)
+      restore_env(:fermix_channels, :telegram, telegram)
+      restore_env(:fermix_channels, :whatsapp, whatsapp)
+      restore_env(:fermix_channels, :discord, discord)
+      restore_env(:fermix_channels, :slack, slack)
+      restore_env(:fermix_channels, :signal, signal)
+
+      case fermix_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+    end)
+
+    :ok
+  end
+
+  test "reports config, provider, channel, and memory status and marks missing long-running channels degraded" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-health-#{System.unique_integer([:positive])}")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram,
+      enabled: true,
+      mode: :webhook,
+      bot_token: "bot"
+    )
+
+    Application.put_env(:fermix_channels, :whatsapp, enabled: false, mode: :webhook)
+    Application.put_env(:fermix_channels, :discord, enabled: false, mode: :gateway)
+    Application.put_env(:fermix_channels, :slack, enabled: false, mode: :webhook)
+
+    Application.put_env(:fermix_channels, :signal,
+      enabled: true,
+      mode: :subprocess,
+      account: "+15550001111"
+    )
+
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        }
+      )
+
+    assert report.status == :degraded
+    assert report.config.path == Path.join(tmp_home, "config.toml")
+    assert report.config.home == tmp_home
+
+    assert report.config.workspace == %{
+             skills: Path.join(tmp_home, "skills"),
+             journals: Path.join(tmp_home, "journals"),
+             traces: Path.join(tmp_home, "traces"),
+             logs: Path.join(tmp_home, "logs")
+           }
+
+    assert [%{name: "openai", status: :ready, auth_mode: :api_key}] = report.providers
+
+    assert Enum.any?(report.channels, fn channel ->
+             channel.name == "telegram" and channel.status == :ready and
+               channel.mode == :webhook and channel.process_alive == nil
+           end)
+
+    assert Enum.any?(report.channels, fn channel ->
+             channel.name == "signal" and channel.status == :degraded and
+               channel.mode == :subprocess and channel.process_alive == false
+           end)
+
+    assert report.memory.conversation_store == :ready
+    assert report.memory.store == :ready
+  end
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+end

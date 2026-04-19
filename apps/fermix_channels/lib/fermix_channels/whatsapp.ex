@@ -3,8 +3,8 @@ defmodule FermixChannels.WhatsApp do
   WhatsApp Cloud API channel integration.
 
   Handles Cloud API webhook verification/parsing and text replies via the Graph
-  API. Media messages are kept as attachment metadata for later transcription
-  without attempting media download in the channel adapter.
+  API. Media messages are normalized into attachment metadata and can be
+  downloaded on demand for the shared transcription pipeline.
   """
 
   @behaviour FermixChannels.Channel
@@ -82,6 +82,18 @@ defmodule FermixChannels.WhatsApp do
   @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
   def build_reply(%Message{reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, []) end
+  end
+
+  @impl true
+  @spec download_attachment(FermixChannels.Channel.message(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def download_attachment(_message, attachment) when is_map(attachment) do
+    with {:ok, access_token} <- fetch_config_value(:access_token),
+         {:ok, media_url} <- media_url(attachment, access_token),
+         {:ok, body} <- download_media(media_url, access_token),
+         {:ok, path} <- write_temp_file(body, attachment) do
+      {:ok, path}
+    end
   end
 
   @impl true
@@ -223,6 +235,105 @@ defmodule FermixChannels.WhatsApp do
          req_options: req_options(opts)
        }}
     end
+  end
+
+  defp media_url(attachment, access_token) do
+    case attachment_value(attachment, :url) do
+      url when is_binary(url) and url != "" ->
+        {:ok, url}
+
+      _ ->
+        resolve_media_url(attachment_value(attachment, :file_id), access_token)
+    end
+  end
+
+  defp resolve_media_url(file_id, access_token) when is_binary(file_id) and file_id != "" do
+    url = "#{@graph_api_base}/#{graph_version()}/#{file_id}"
+
+    result =
+      Req.new(url: url, method: :get)
+      |> Req.Request.put_header("authorization", "Bearer #{access_token}")
+      |> Req.merge(req_options([]))
+      |> Req.request()
+
+    case result do
+      {:ok, %{status: 200, body: %{"url" => media_url}}} when is_binary(media_url) ->
+        {:ok, media_url}
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("WhatsApp media lookup failed: #{status} - #{inspect(body)}")
+        {:error, "WhatsApp media lookup error: #{status}"}
+
+      {:error, reason} ->
+        Logger.error("WhatsApp media lookup request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp resolve_media_url(_missing_file_id, _access_token),
+    do: {:error, :missing_attachment_reference}
+
+  defp download_media(url, access_token) do
+    result =
+      Req.new(url: url, method: :get)
+      |> Req.Request.put_header("authorization", "Bearer #{access_token}")
+      |> Req.merge(req_options([]))
+      |> Req.request()
+
+    case result do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        {:ok, body}
+
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, IO.iodata_to_binary(body)}
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("WhatsApp media download failed: #{status} - #{inspect(body)}")
+        {:error, "WhatsApp media download error: #{status}"}
+
+      {:error, reason} ->
+        Logger.error("WhatsApp media download request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp write_temp_file(body, attachment) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-whatsapp-#{System.unique_integer([:positive])}#{attachment_extension(attachment)}"
+      )
+
+    case File.write(path, body) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp attachment_extension(attachment) do
+    attachment
+    |> attachment_value(:mime_type)
+    |> normalize_extension()
+  end
+
+  defp normalize_extension(nil), do: ".bin"
+
+  defp normalize_extension(mime_type) when is_binary(mime_type) do
+    mime_type
+    |> String.split(";", parts: 2)
+    |> hd()
+    |> String.split("/", parts: 2)
+    |> case do
+      [_type, subtype] when subtype != "" ->
+        "." <> String.replace(subtype, ~r/[^a-zA-Z0-9]+/, "_")
+
+      _ ->
+        ".bin"
+    end
+  end
+
+  defp attachment_value(attachment, key) when is_map(attachment) do
+    Map.get(attachment, key) || Map.get(attachment, Atom.to_string(key))
   end
 
   defp fetch_config_value(key) do
