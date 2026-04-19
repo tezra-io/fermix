@@ -30,7 +30,14 @@ defmodule FermixCore.Readiness do
   def report do
     failures =
       Enum.reject(
-        [openai_failure(), telegram_failure(), whatsapp_failure(), discord_failure()],
+        [
+          openai_failure(),
+          telegram_failure(),
+          whatsapp_failure(),
+          discord_failure(),
+          slack_failure(),
+          signal_failure()
+        ],
         &is_nil/1
       )
 
@@ -122,6 +129,50 @@ defmodule FermixCore.Readiness do
             %{
               component: "channel:discord",
               action: "Set DISCORD_BOT_TOKEN and DISCORD_BOT_USER_ID."
+            }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp slack_failure do
+    case Config.channel(:slack) do
+      {:ok, config} when is_list(config) ->
+        cond do
+          not channel_enabled?(config, false) ->
+            nil
+
+          configured?(config, [:bot_token, :signing_secret]) ->
+            nil
+
+          true ->
+            %{
+              component: "channel:slack",
+              action: "Set SLACK_BOT_TOKEN and SLACK_SIGNING_SECRET."
+            }
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp signal_failure do
+    case Config.channel(:signal) do
+      {:ok, config} when is_list(config) ->
+        cond do
+          not channel_enabled?(config, false) ->
+            nil
+
+          configured?(config, [:account]) ->
+            nil
+
+          true ->
+            %{
+              component: "channel:signal",
+              action: "Set SIGNAL_ACCOUNT."
             }
         end
 

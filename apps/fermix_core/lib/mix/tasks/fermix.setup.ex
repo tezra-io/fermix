@@ -19,6 +19,9 @@ defmodule Mix.Tasks.Fermix.Setup do
     whatsapp_app_secret: :string,
     discord_bot_token: :string,
     discord_bot_user_id: :string,
+    slack_bot_token: :string,
+    slack_signing_secret: :string,
+    signal_account: :string,
     print_state: :boolean
   ]
 
@@ -96,6 +99,9 @@ defmodule Mix.Tasks.Fermix.Setup do
     |> put_opt(:whatsapp_app_secret, opts[:whatsapp_app_secret])
     |> put_opt(:discord_bot_token, opts[:discord_bot_token])
     |> put_opt(:discord_bot_user_id, opts[:discord_bot_user_id])
+    |> put_opt(:slack_bot_token, opts[:slack_bot_token])
+    |> put_opt(:slack_signing_secret, opts[:slack_signing_secret])
+    |> put_opt(:signal_account, opts[:signal_account])
   end
 
   defp put_opt(keyword, _key, nil), do: keyword

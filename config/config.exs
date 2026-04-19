@@ -66,6 +66,17 @@ config :fermix_channels,
     enabled: false,
     mode: :gateway,
     allowed_user_ids: []
+  ],
+  slack: [
+    enabled: false,
+    mode: :webhook,
+    allowed_user_ids: []
+  ],
+  signal: [
+    enabled: false,
+    mode: :subprocess,
+    # Signal allowlists sender phone numbers only; it does not use allowed_user_ids.
+    allowed_sender_ids: []
   ]
 
 config :fermix_core, :trace,

@@ -33,14 +33,14 @@ persisted_setup =
       {:error, _reason} ->
         %{
           fermix_core: [providers: [openai: []]],
-          fermix_channels: [telegram: [], whatsapp: [], discord: []],
+          fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
           fermix_web: []
         }
     end
   else
     %{
       fermix_core: [providers: [openai: []]],
-      fermix_channels: [telegram: [], whatsapp: [], discord: []],
+      fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
     }
   end
@@ -80,6 +80,22 @@ existing_discord =
     persisted_setup
     |> Map.get(:fermix_channels, [])
     |> Keyword.get(:discord, [])
+  )
+
+existing_slack =
+  Application.get_env(:fermix_channels, :slack, [])
+  |> Keyword.merge(
+    persisted_setup
+    |> Map.get(:fermix_channels, [])
+    |> Keyword.get(:slack, [])
+  )
+
+existing_signal =
+  Application.get_env(:fermix_channels, :signal, [])
+  |> Keyword.merge(
+    persisted_setup
+    |> Map.get(:fermix_channels, [])
+    |> Keyword.get(:signal, [])
   )
 
 openai_auth_mode =
@@ -184,6 +200,54 @@ merged_discord =
   )
 
 config :fermix_channels, discord: merged_discord
+
+slack_mode =
+  case System.get_env("SLACK_MODE") do
+    "webhook" -> :webhook
+    _ -> Keyword.get(existing_slack, :mode, :webhook)
+  end
+
+slack_allowed_user_ids =
+  case System.get_env("SLACK_ALLOWED_USER_IDS") do
+    nil -> Keyword.get(existing_slack, :allowed_user_ids, [])
+    "" -> []
+    ids -> ids |> String.split(",") |> Enum.map(&String.trim/1)
+  end
+
+merged_slack =
+  Keyword.merge(existing_slack,
+    bot_token: System.get_env("SLACK_BOT_TOKEN") || Keyword.get(existing_slack, :bot_token, ""),
+    signing_secret:
+      System.get_env("SLACK_SIGNING_SECRET") ||
+        Keyword.get(existing_slack, :signing_secret, ""),
+    allowed_user_ids: slack_allowed_user_ids,
+    mode: slack_mode
+  )
+
+config :fermix_channels, slack: merged_slack
+
+signal_mode =
+  case System.get_env("SIGNAL_MODE") do
+    "subprocess" -> :subprocess
+    _ -> Keyword.get(existing_signal, :mode, :subprocess)
+  end
+
+signal_allowed_sender_ids =
+  case System.get_env("SIGNAL_ALLOWED_SENDER_IDS") do
+    nil -> Keyword.get(existing_signal, :allowed_sender_ids, [])
+    "" -> []
+    ids -> ids |> String.split(",") |> Enum.map(&String.trim/1)
+  end
+
+merged_signal =
+  Keyword.merge(existing_signal,
+    account: System.get_env("SIGNAL_ACCOUNT") || Keyword.get(existing_signal, :account, ""),
+    cli_path: System.get_env("SIGNAL_CLI_PATH") || Keyword.get(existing_signal, :cli_path, ""),
+    allowed_sender_ids: signal_allowed_sender_ids,
+    mode: signal_mode
+  )
+
+config :fermix_channels, signal: merged_signal
 
 if config_env() == :prod do
   # The secret key base is used to sign/encrypt cookies and other secrets.

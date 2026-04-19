@@ -17,6 +17,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:whatsapp_app_secret, String.t()}
           | {:discord_bot_token, String.t()}
           | {:discord_bot_user_id, String.t()}
+          | {:slack_bot_token, String.t()}
+          | {:slack_signing_secret, String.t()}
+          | {:signal_account, String.t()}
   @type report :: %{
           status: Readiness.status(),
           failures: [Readiness.failure()],
@@ -81,6 +84,21 @@ defmodule FermixCore.Setup.Wizard do
         key: :discord_bot_user_id,
         label: "Discord bot user ID",
         required?: missing_component?(state, "channel:discord")
+      },
+      %{
+        key: :slack_bot_token,
+        label: "Slack bot token",
+        required?: missing_component?(state, "channel:slack")
+      },
+      %{
+        key: :slack_signing_secret,
+        label: "Slack signing secret",
+        required?: missing_component?(state, "channel:slack")
+      },
+      %{
+        key: :signal_account,
+        label: "Signal account",
+        required?: missing_component?(state, "channel:signal")
       }
     ]
     |> Enum.filter(& &1.required?)
@@ -94,6 +112,8 @@ defmodule FermixCore.Setup.Wizard do
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
+      |> put_slack_config(answers)
+      |> put_signal_config(answers)
 
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot) do
@@ -117,6 +137,8 @@ defmodule FermixCore.Setup.Wizard do
       Enum.any?(failures, &(&1.component == "channel:telegram")) -> :channel
       Enum.any?(failures, &(&1.component == "channel:whatsapp")) -> :channel
       Enum.any?(failures, &(&1.component == "channel:discord")) -> :channel
+      Enum.any?(failures, &(&1.component == "channel:slack")) -> :channel
+      Enum.any?(failures, &(&1.component == "channel:signal")) -> :channel
       true -> :review
     end
   end
@@ -128,6 +150,8 @@ defmodule FermixCore.Setup.Wizard do
     |> put_enabled_channel(:telegram, Keyword.get(channels, :telegram, []), true)
     |> put_enabled_channel(:whatsapp, Keyword.get(channels, :whatsapp, []), false)
     |> put_enabled_channel(:discord, Keyword.get(channels, :discord, []), false)
+    |> put_enabled_channel(:slack, Keyword.get(channels, :slack, []), false)
+    |> put_enabled_channel(:signal, Keyword.get(channels, :signal, []), false)
     |> Enum.reverse()
   end
 
@@ -208,6 +232,27 @@ defmodule FermixCore.Setup.Wizard do
       |> reject_blank_values()
 
     put_channel_config(snapshot, :discord, values, :gateway)
+  end
+
+  defp put_slack_config(snapshot, answers) do
+    values =
+      [
+        bot_token: Keyword.get(answers, :slack_bot_token),
+        signing_secret: Keyword.get(answers, :slack_signing_secret)
+      ]
+      |> reject_blank_values()
+
+    put_channel_config(snapshot, :slack, values, :webhook)
+  end
+
+  defp put_signal_config(snapshot, answers) do
+    values =
+      [
+        account: Keyword.get(answers, :signal_account)
+      ]
+      |> reject_blank_values()
+
+    put_channel_config(snapshot, :signal, values, :subprocess)
   end
 
   defp put_channel_config(snapshot, _channel, [], _mode), do: snapshot

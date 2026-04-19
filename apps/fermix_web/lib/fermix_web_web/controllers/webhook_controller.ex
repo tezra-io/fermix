@@ -4,6 +4,7 @@ defmodule FermixWebWeb.WebhookController do
   require Logger
 
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Slack
   alias FermixChannels.Telegram
   alias FermixChannels.WhatsApp
   alias FermixCore.Agents.MainAgent
@@ -13,8 +14,10 @@ defmodule FermixWebWeb.WebhookController do
     :invalid_token,
     :missing_raw_body,
     :missing_signature,
+    :missing_timestamp,
     :missing_token,
-    :not_configured
+    :not_configured,
+    :stale_timestamp
   ]
   @invalid_webhook_errors [:unsupported_transport]
 
@@ -75,6 +78,25 @@ defmodule FermixWebWeb.WebhookController do
     end
   end
 
+  @spec slack(Plug.Conn.t(), map()) :: Plug.Conn.t()
+  def slack(conn, params) do
+    with :ok <- Slack.verify_webhook(conn) do
+      case Slack.url_verification_challenge(params) do
+        {:ok, challenge} ->
+          json(conn, %{challenge: challenge})
+
+        :ignore ->
+          dispatch_slack_webhook(conn, params)
+
+        {:error, reason} ->
+          webhook_error_response(conn, "Slack webhook", reason)
+      end
+    else
+      {:error, reason} ->
+        webhook_error_response(conn, "Slack webhook", reason)
+    end
+  end
+
   @doc false
   @spec webhook_error_response(Plug.Conn.t(), String.t(), term()) :: Plug.Conn.t()
   def webhook_error_response(conn, label, reason)
@@ -100,6 +122,27 @@ defmodule FermixWebWeb.WebhookController do
         conn
         |> put_status(400)
         |> json(%{error: "Invalid webhook"})
+    end
+  end
+
+  defp dispatch_slack_webhook(conn, params) do
+    with {:ok, messages} <- Slack.parse_webhook(params) do
+      Dispatcher.dispatch(messages,
+        channel: Slack,
+        agent: MainAgent,
+        agent_server: MainAgent
+      )
+
+      :telemetry.execute(
+        [:fermix, :channel, :webhook],
+        %{count: length(messages)},
+        %{channel: :slack}
+      )
+
+      json(conn, %{ok: true})
+    else
+      {:error, reason} ->
+        webhook_error_response(conn, "Slack webhook", reason)
     end
   end
 end
