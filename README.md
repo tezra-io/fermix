@@ -19,6 +19,7 @@ One BEAM VM. Everything is OTP-supervised. No HTTP bridges between components.
 - Elixir >= 1.17
 - Erlang/OTP >= 28
 - Git
+- `signal-cli` on `PATH` or `SIGNAL_CLI_PATH` configured if Signal is enabled
 
 ## Setup
 
@@ -73,6 +74,7 @@ Common channel/provider overrides:
 | `SLACK_BOT_TOKEN` | If Slack is enabled | Slack bot token |
 | `SLACK_SIGNING_SECRET` | If Slack is enabled | Slack request signing secret |
 | `SIGNAL_ACCOUNT` | If Signal is enabled | Signal phone/account identifier |
+| `SIGNAL_CLI_PATH` | No | Override the `signal-cli` executable path for Signal ingress/replies |
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
