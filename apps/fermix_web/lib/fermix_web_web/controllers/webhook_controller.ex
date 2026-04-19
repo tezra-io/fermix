@@ -16,6 +16,7 @@ defmodule FermixWebWeb.WebhookController do
     :missing_token,
     :not_configured
   ]
+  @invalid_webhook_errors [:unsupported_transport]
 
   @spec telegram(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def telegram(conn, params) do
@@ -35,19 +36,8 @@ defmodule FermixWebWeb.WebhookController do
 
       json(conn, %{ok: true})
     else
-      {:error, reason} when reason in @auth_errors ->
-        Logger.error("Telegram webhook auth failed: #{inspect(reason)}")
-
-        conn
-        |> put_status(401)
-        |> json(%{error: "Unauthorized"})
-
       {:error, reason} ->
-        Logger.error("Telegram webhook failed: #{inspect(reason)}")
-
-        conn
-        |> put_status(400)
-        |> json(%{error: "Invalid webhook"})
+        webhook_error_response(conn, "Telegram webhook", reason)
     end
   end
 
@@ -57,19 +47,8 @@ defmodule FermixWebWeb.WebhookController do
       {:ok, challenge} ->
         text(conn, challenge)
 
-      {:error, reason} when reason in @auth_errors ->
-        Logger.error("WhatsApp webhook verification failed: #{inspect(reason)}")
-
-        conn
-        |> put_status(401)
-        |> json(%{error: "Unauthorized"})
-
       {:error, reason} ->
-        Logger.error("WhatsApp webhook verification failed: #{inspect(reason)}")
-
-        conn
-        |> put_status(400)
-        |> json(%{error: "Invalid webhook"})
+        webhook_error_response(conn, "WhatsApp webhook verification", reason)
     end
   end
 
@@ -91,15 +70,32 @@ defmodule FermixWebWeb.WebhookController do
 
       json(conn, %{ok: true})
     else
-      {:error, reason} when reason in @auth_errors ->
-        Logger.error("WhatsApp webhook auth failed: #{inspect(reason)}")
+      {:error, reason} ->
+        webhook_error_response(conn, "WhatsApp webhook", reason)
+    end
+  end
+
+  @doc false
+  @spec webhook_error_response(Plug.Conn.t(), String.t(), term()) :: Plug.Conn.t()
+  def webhook_error_response(conn, label, reason)
+      when is_binary(label) or is_atom(label) do
+    cond do
+      reason in @auth_errors ->
+        Logger.error("#{label} auth failed: #{inspect(reason)}")
 
         conn
         |> put_status(401)
         |> json(%{error: "Unauthorized"})
 
-      {:error, reason} ->
-        Logger.error("WhatsApp webhook failed: #{inspect(reason)}")
+      reason in @invalid_webhook_errors ->
+        Logger.error("#{label} failed: #{inspect(reason)}")
+
+        conn
+        |> put_status(400)
+        |> json(%{error: "Invalid webhook"})
+
+      true ->
+        Logger.error("#{label} failed: #{inspect(reason)}")
 
         conn
         |> put_status(400)

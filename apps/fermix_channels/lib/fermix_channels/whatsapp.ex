@@ -54,6 +54,7 @@ defmodule FermixChannels.WhatsApp do
   end
 
   @impl true
+  @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(to, text, opts \\ []) when is_binary(to) and is_binary(text) do
@@ -197,7 +198,7 @@ defmodule FermixChannels.WhatsApp do
   defp allowed_sender_ids do
     with {:ok, config} <- FermixCore.Config.channel(:whatsapp) do
       config
-      |> Keyword.get(:allowed_sender_ids, Keyword.get(config, :allowed_user_ids, []))
+      |> Keyword.get(:allowed_sender_ids, [])
       |> Enum.map(&to_string/1)
     else
       _ -> []

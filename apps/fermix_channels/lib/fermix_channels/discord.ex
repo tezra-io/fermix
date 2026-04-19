@@ -4,6 +4,8 @@ defmodule FermixChannels.Discord do
 
   Gateway events are normalized into shared channel messages. Outbound replies are
   sent through Discord's REST API as plain text messages with reply context.
+  Discord does not expose webhook ingress for Fermix, so webhook entrypoints
+  return `{:error, :unsupported_transport}`.
   """
 
   @behaviour FermixChannels.Channel
@@ -42,6 +44,7 @@ defmodule FermixChannels.Discord do
   def parse_gateway_event(_event), do: {:ok, []}
 
   @impl true
+  @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(channel_id, text, opts \\ []) when is_binary(channel_id) and is_binary(text) do
