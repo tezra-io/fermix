@@ -28,7 +28,7 @@ defmodule FermixChannels.Application do
   @doc false
   @spec polling_children(keyword(), Readiness.report()) :: [{FermixChannels.Telegram.Poller, []}]
   def polling_children(config, %{status: :ready}) when is_list(config) do
-    if config[:mode] == :polling and config[:enabled] != false do
+    if config[:enabled] != false do
       [{FermixChannels.Telegram.Poller, []}]
     else
       []

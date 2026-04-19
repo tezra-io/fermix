@@ -50,7 +50,6 @@ defmodule FermixChannels.TelegramTest do
   setup do
     Application.put_env(:fermix_channels, :telegram,
       bot_token: "test-bot-token",
-      webhook_secret: "test-secret",
       req_options: [plug: {Req.Test, :telegram}]
     )
 
@@ -62,101 +61,8 @@ defmodule FermixChannels.TelegramTest do
   # -- parse_webhook/1 --
 
   describe "parse_webhook/1" do
-    test "parses text message into standard message" do
-      payload = message_payload()
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.id == "42"
-      assert msg.content == "hello bot"
-      assert msg.sender == "alice"
-      assert msg.channel == "telegram"
-      assert msg.chat_id == "123456"
-      assert msg.reply_target == "123456"
-      assert msg.thread_ts == nil
-    end
-
-    test "preserves Telegram message_thread_id as an integer thread id" do
-      payload = put_in(message_payload(), ["message", "message_thread_id"], 456)
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.thread_ts == 456
-      assert msg.thread_scope == :thread
-    end
-
-    test "parses edited_message" do
-      payload = %{
-        "edited_message" => %{
-          "message_id" => 99,
-          "text" => "edited text",
-          "chat" => %{"id" => 789},
-          "from" => %{"username" => "bob", "first_name" => "Bob"}
-        }
-      }
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.id == "99"
-      assert msg.content == "edited text"
-      assert msg.sender == "bob"
-    end
-
-    test "falls back to first_name when no username" do
-      payload = %{
-        "message" => %{
-          "message_id" => 1,
-          "text" => "hi",
-          "chat" => %{"id" => 1},
-          "from" => %{"first_name" => "Charlie"}
-        }
-      }
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.sender == "Charlie"
-    end
-
-    test "falls back to unknown when no from info" do
-      payload = %{
-        "message" => %{
-          "message_id" => 1,
-          "text" => "hi",
-          "chat" => %{"id" => 1},
-          "from" => %{}
-        }
-      }
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.sender == "unknown"
-    end
-
-    test "uses caption when no text (photo with caption)" do
-      payload = %{
-        "message" => %{
-          "message_id" => 1,
-          "caption" => "look at this",
-          "chat" => %{"id" => 1},
-          "from" => %{"username" => "alice"}
-        }
-      }
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.content == "look at this"
-    end
-
-    test "returns empty content when no text or caption" do
-      payload = %{
-        "message" => %{
-          "message_id" => 1,
-          "chat" => %{"id" => 1},
-          "from" => %{"username" => "alice"}
-        }
-      }
-
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
-      assert msg.content == ""
-    end
-
-    test "returns {:ok, []} for unhandled update types" do
-      assert {:ok, []} = Telegram.parse_webhook(%{"callback_query" => %{}})
-      assert {:ok, []} = Telegram.parse_webhook(%{"inline_query" => %{}})
+    test "returns unsupported_transport" do
+      assert {:error, :unsupported_transport} = Telegram.parse_webhook(%{})
     end
   end
 
@@ -209,46 +115,40 @@ defmodule FermixChannels.TelegramTest do
     test "allows message when user ID is in allow-list" do
       Application.put_env(:fermix_channels, :telegram,
         bot_token: "test-bot-token",
-        webhook_secret: "test-secret",
         allowed_user_ids: [111]
       )
 
       payload = message_payload()
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert {:ok, [msg]} = Telegram.parse_update(payload)
       assert msg.sender == "alice"
     end
 
     test "silently drops message when user ID is not in allow-list" do
       Application.put_env(:fermix_channels, :telegram,
         bot_token: "test-bot-token",
-        webhook_secret: "test-secret",
         allowed_user_ids: [999]
       )
 
       payload = message_payload()
-      assert {:ok, []} = Telegram.parse_webhook(payload)
+      assert {:ok, []} = Telegram.parse_update(payload)
     end
 
     test "allows all messages when allowed_user_ids is empty list" do
       Application.put_env(:fermix_channels, :telegram,
         bot_token: "test-bot-token",
-        webhook_secret: "test-secret",
         allowed_user_ids: []
       )
 
       payload = message_payload()
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert {:ok, [msg]} = Telegram.parse_update(payload)
       assert msg.sender == "alice"
     end
 
     test "allows all messages when allowed_user_ids is not configured" do
-      Application.put_env(:fermix_channels, :telegram,
-        bot_token: "test-bot-token",
-        webhook_secret: "test-secret"
-      )
+      Application.put_env(:fermix_channels, :telegram, bot_token: "test-bot-token")
 
       payload = message_payload()
-      assert {:ok, [msg]} = Telegram.parse_webhook(payload)
+      assert {:ok, [msg]} = Telegram.parse_update(payload)
       assert msg.sender == "alice"
     end
   end
@@ -401,24 +301,9 @@ defmodule FermixChannels.TelegramTest do
   # -- verify_webhook/1 --
 
   describe "verify_webhook/1" do
-    test "returns :ok when secret token header matches" do
+    test "returns unsupported_transport" do
       conn = Plug.Test.conn(:post, "/webhook/telegram")
-      conn = Plug.Conn.put_req_header(conn, "x-telegram-bot-api-secret-token", "test-secret")
-
-      assert :ok = Telegram.verify_webhook(conn)
-    end
-
-    test "returns error when header does not match" do
-      conn = Plug.Test.conn(:post, "/webhook/telegram")
-      conn = Plug.Conn.put_req_header(conn, "x-telegram-bot-api-secret-token", "wrong-secret")
-
-      assert {:error, :invalid_token} = Telegram.verify_webhook(conn)
-    end
-
-    test "returns error when header is missing" do
-      conn = Plug.Test.conn(:post, "/webhook/telegram")
-
-      assert {:error, :missing_token} = Telegram.verify_webhook(conn)
+      assert {:error, :unsupported_transport} = Telegram.verify_webhook(conn)
     end
   end
 
@@ -440,30 +325,6 @@ defmodule FermixChannels.TelegramTest do
   # -- telemetry --
 
   describe "telemetry" do
-    test "emits [:fermix, :channel, :message] on inbound parse" do
-      _ref =
-        :telemetry.attach(
-          "test-channel-inbound",
-          [:fermix, :channel, :message],
-          fn event, measurements, metadata, _config ->
-            send(self(), {:telemetry, event, measurements, metadata})
-          end,
-          nil
-        )
-
-      payload = message_payload()
-      {:ok, [_msg]} = Telegram.parse_webhook(payload)
-
-      assert_received {:telemetry, [:fermix, :channel, :message], measurements, metadata}
-      assert metadata.channel == :telegram
-      assert metadata.direction == :inbound
-      assert is_integer(measurements.count)
-
-      :telemetry.detach("test-channel-inbound")
-    after
-      :telemetry.detach("test-channel-inbound")
-    end
-
     test "emits [:fermix, :channel, :message] on outbound send" do
       _ref =
         :telemetry.attach(

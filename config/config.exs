@@ -55,8 +55,6 @@ config :fermix_core, :transcription,
 config :fermix_channels,
   telegram: [
     enabled: true,
-    mode: :webhook,
-    webhook_path: "/webhook/telegram",
     allowed_user_ids: []
   ],
   whatsapp: [

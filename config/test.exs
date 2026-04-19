@@ -21,8 +21,6 @@ config :fermix_core,
 config :fermix_channels,
   telegram: [
     enabled: false,
-    mode: :webhook,
-    webhook_path: "/webhook/telegram",
     bot_token: "test-token",
     allowed_user_ids: []
   ]
