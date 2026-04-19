@@ -41,6 +41,39 @@ defmodule FermixChannels.DispatcherTest do
     end
   end
 
+  defmodule AudioChannel do
+    def build_reply(%Message{reply_target: reply_target}) do
+      fn text -> send_message(reply_target, text, []) end
+    end
+
+    def send_message(reply_target, text, opts) do
+      send(self(), {:reply_sent, reply_target, text, opts})
+      :ok
+    end
+
+    def download_attachment(_message, attachment) do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-dispatcher-audio-#{attachment.file_id}-#{System.unique_integer([:positive])}.ogg"
+        )
+
+      File.write!(path, "audio-bytes:#{attachment.file_id}")
+      {:ok, path}
+    end
+  end
+
+  defmodule FakeTranscriptionBackend do
+    def transcribe(path, opts) do
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:dispatcher_transcription, path, File.read!(path), Keyword.fetch!(opts, :metadata)}
+      )
+
+      {:ok, "voice note text"}
+    end
+  end
+
   test "routes normalized inbound messages into the configured agent with reply runtime" do
     message = %Message{
       id: "42",
@@ -104,5 +137,58 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:agent_message, agent_message}
     assert :ok = agent_message.reply_fn.("reply")
     assert_received {:reply_built_and_sent, "message-1", "chat-1", "reply"}
+  end
+
+  test "transcribes audio attachments before delivering them to the agent" do
+    message = %Message{
+      id: "voice-1",
+      content: "",
+      sender: "alice",
+      channel: "whatsapp",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{message_type: "audio"},
+      attachments: [%{kind: :audio, file_id: "audio-1", mime_type: "audio/ogg"}]
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: AudioChannel,
+               agent: CapturingAgent,
+               agent_server: self(),
+               transcription: [backend: FakeTranscriptionBackend, test_pid: self()]
+             )
+
+    assert_receive {:dispatcher_transcription, path, "audio-bytes:audio-1", metadata}
+    assert metadata[:attachment][:file_id] == "audio-1"
+    refute File.exists?(path)
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.content == "voice note text"
+    assert agent_message.metadata.transcription.backend == FakeTranscriptionBackend
+  end
+
+  test "accepts normalized plain maps without crashing the agent delivery path" do
+    message = %{
+      "id" => "message-1",
+      "content" => "hello from map",
+      "sender" => "alice",
+      "channel" => "cli",
+      "chat_id" => "chat-1",
+      "reply_target" => "chat-1",
+      "metadata" => %{"source" => "map"},
+      "attachments" => []
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: AudioChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.content == "hello from map"
+    assert agent_message.metadata == %{"source" => "map"}
   end
 end

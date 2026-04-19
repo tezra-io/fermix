@@ -19,18 +19,18 @@ defmodule FermixWebWeb.WebhookController do
     :not_configured,
     :stale_timestamp
   ]
-  @invalid_webhook_errors [:unsupported_transport]
+  @invalid_webhook_errors [:unsupported_transport, :invalid_webhook_payload]
 
   @spec telegram(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def telegram(conn, params) do
     with :ok <- Telegram.verify_webhook(conn),
-         {:ok, messages} <- Telegram.parse_webhook(params) do
-      Dispatcher.dispatch(messages,
-        channel: Telegram,
-        agent: MainAgent,
-        agent_server: MainAgent
-      )
-
+         {:ok, messages} <- Telegram.parse_webhook(params),
+         :ok <-
+           Dispatcher.dispatch(messages,
+             channel: Telegram,
+             agent: MainAgent,
+             agent_server: MainAgent
+           ) do
       :telemetry.execute(
         [:fermix, :channel, :webhook],
         %{count: length(messages)},
@@ -58,13 +58,13 @@ defmodule FermixWebWeb.WebhookController do
   @spec whatsapp(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def whatsapp(conn, params) do
     with :ok <- WhatsApp.verify_webhook(conn),
-         {:ok, messages} <- WhatsApp.parse_webhook(params) do
-      Dispatcher.dispatch(messages,
-        channel: WhatsApp,
-        agent: MainAgent,
-        agent_server: MainAgent
-      )
-
+         {:ok, messages} <- WhatsApp.parse_webhook(params),
+         :ok <-
+           Dispatcher.dispatch(messages,
+             channel: WhatsApp,
+             agent: MainAgent,
+             agent_server: MainAgent
+           ) do
       :telemetry.execute(
         [:fermix, :channel, :webhook],
         %{count: length(messages)},
@@ -116,23 +116,30 @@ defmodule FermixWebWeb.WebhookController do
         |> put_status(400)
         |> json(%{error: "Invalid webhook"})
 
-      true ->
-        Logger.error("#{label} failed: #{inspect(reason)}")
+      client_dispatch_error?(reason) ->
+        Logger.error("#{label} failed client validation: #{inspect(reason)}")
 
         conn
         |> put_status(400)
         |> json(%{error: "Invalid webhook"})
+
+      true ->
+        Logger.error("#{label} dispatch failed: #{inspect(reason)}")
+
+        conn
+        |> put_status(500)
+        |> json(%{error: "Webhook dispatch failed"})
     end
   end
 
   defp dispatch_slack_webhook(conn, params) do
-    with {:ok, messages} <- Slack.parse_webhook(params) do
-      Dispatcher.dispatch(messages,
-        channel: Slack,
-        agent: MainAgent,
-        agent_server: MainAgent
-      )
-
+    with {:ok, messages} <- Slack.parse_webhook(params),
+         :ok <-
+           Dispatcher.dispatch(messages,
+             channel: Slack,
+             agent: MainAgent,
+             agent_server: MainAgent
+           ) do
       :telemetry.execute(
         [:fermix, :channel, :webhook],
         %{count: length(messages)},
@@ -145,4 +152,11 @@ defmodule FermixWebWeb.WebhookController do
         webhook_error_response(conn, "Slack webhook", reason)
     end
   end
+
+  defp client_dispatch_error?({:attachment_download_failed, :missing_attachment_reference}),
+    do: true
+
+  defp client_dispatch_error?({:transcription_failed, :empty_transcription}), do: true
+  defp client_dispatch_error?({:invalid_message, _field}), do: true
+  defp client_dispatch_error?(_reason), do: false
 end

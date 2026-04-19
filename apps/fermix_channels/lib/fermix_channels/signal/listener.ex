@@ -70,15 +70,25 @@ defmodule FermixChannels.Signal.Listener do
              client_opts: state.client_opts
            ) do
         {:ok, messages} when messages != [] ->
-          Dispatcher.dispatch(messages,
-            channel: Signal,
-            agent: state.agent,
-            agent_server: state.agent_server
-          )
+          handle_dispatch_result(messages, state)
 
         _ ->
           :ok
       end
     end)
+  end
+
+  defp handle_dispatch_result(messages, state) do
+    case Dispatcher.dispatch(messages,
+           channel: Signal,
+           agent: state.agent,
+           agent_server: state.agent_server
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Signal listener dispatch failed: #{inspect(reason)}")
+    end
   end
 end

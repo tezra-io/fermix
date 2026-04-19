@@ -1,9 +1,13 @@
 defmodule FermixCore.Setup.ConfigStore do
   @moduledoc """
   Thin persisted setup store shared by web and CLI onboarding.
+
+  Persists the runtime snapshot to `config.toml` under `FERMIX_HOME` (or the
+  default `~/.fermix`) and owns the local workspace layout used by setup,
+  health reporting, traces, and logs.
   """
 
-  @workspace_dirs ~w(skills journals traces logs)
+  @workspace_dirs [skills: "skills", journals: "journals", traces: "traces", logs: "logs"]
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -18,6 +22,18 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec path() :: String.t()
   def path, do: Path.join(fermix_home(), "config.toml")
+
+  @spec workspace_paths() :: %{
+          skills: String.t(),
+          journals: String.t(),
+          traces: String.t(),
+          logs: String.t()
+        }
+  def workspace_paths do
+    Enum.into(@workspace_dirs, %{}, fn {name, dir} ->
+      {name, Path.join(fermix_home(), dir)}
+    end)
+  end
 
   @spec current_snapshot() :: runtime_config()
   def current_snapshot do
@@ -123,16 +139,12 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec ensure_workspace() :: :ok | {:error, term()}
   def ensure_workspace do
-    Enum.reduce_while(workspace_paths(), :ok, fn path, :ok ->
+    Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
       case File.mkdir_p(path) do
         :ok -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
-  end
-
-  defp workspace_paths do
-    Enum.map(@workspace_dirs, &Path.join(fermix_home(), &1))
   end
 
   defp empty_runtime_config do

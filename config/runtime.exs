@@ -23,6 +23,21 @@ end
 config :fermix_web, FermixWebWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+workspace_paths =
+  if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
+       function_exported?(FermixCore.Setup.ConfigStore, :workspace_paths, 0) do
+    FermixCore.Setup.ConfigStore.workspace_paths()
+  else
+    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+
+    %{
+      skills: Path.join(fermix_home, "skills"),
+      journals: Path.join(fermix_home, "journals"),
+      traces: Path.join(fermix_home, "traces"),
+      logs: Path.join(fermix_home, "logs")
+    }
+  end
+
 persisted_setup =
   if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
        function_exported?(FermixCore.Setup.ConfigStore, :load_runtime_config, 0) do
@@ -121,6 +136,21 @@ merged_openai =
 config :fermix_core,
   providers: Keyword.put(existing_providers, :openai, merged_openai)
 
+existing_trace = Application.get_env(:fermix_core, :trace, [])
+existing_log = Application.get_env(:fermix_core, :log, [])
+
+config :fermix_core,
+       :trace,
+       Keyword.merge(existing_trace,
+         base_dir: System.get_env("FERMIX_TRACE_DIR") || workspace_paths.traces
+       )
+
+config :fermix_core,
+       :log,
+       Keyword.merge(existing_log,
+         file: System.get_env("FERMIX_LOG_FILE") || Path.join(workspace_paths.logs, "fermix.log")
+       )
+
 telegram_mode =
   case System.get_env("TELEGRAM_MODE") do
     "polling" -> :polling
@@ -192,7 +222,8 @@ discord_allowed_user_ids =
 
 merged_discord =
   Keyword.merge(existing_discord,
-    bot_token: System.get_env("DISCORD_BOT_TOKEN") || Keyword.get(existing_discord, :bot_token, ""),
+    bot_token:
+      System.get_env("DISCORD_BOT_TOKEN") || Keyword.get(existing_discord, :bot_token, ""),
     bot_user_id:
       System.get_env("DISCORD_BOT_USER_ID") || Keyword.get(existing_discord, :bot_user_id, ""),
     allowed_user_ids: discord_allowed_user_ids,

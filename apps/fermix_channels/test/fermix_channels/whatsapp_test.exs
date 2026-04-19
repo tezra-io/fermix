@@ -30,6 +30,17 @@ defmodule FermixChannels.WhatsAppTest do
     def models, do: {:ok, ["mock-model"]}
   end
 
+  defmodule FakeTranscriptionBackend do
+    def transcribe(path, opts) do
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:whatsapp_transcription, path, File.read!(path), Keyword.fetch!(opts, :metadata)}
+      )
+
+      {:ok, "voice note from whatsapp"}
+    end
+  end
+
   setup do
     Req.Test.set_req_test_to_shared()
 
@@ -193,6 +204,117 @@ defmodule FermixChannels.WhatsAppTest do
       assert_receive {:whatsapp_request, "/v19.0/123456789/messages", body}, 5_000
       assert body["to"] == "15551234567"
       assert body["text"]["body"] == "reply from main agent"
+    end
+
+    test "routes inbound audio through transcription and MainAgent and sends the agent reply" do
+      test_pid = self()
+      agent_name = :"whatsapp_voice_agent_#{System.unique_integer([:positive])}"
+      store_name = :"whatsapp_voice_store_#{System.unique_integer([:positive])}"
+
+      conversation_store = start_supervised!({ConversationStore, [name: store_name]})
+
+      agent =
+        start_supervised!(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: StaticProvider,
+             conversation_store: conversation_store
+           ]}
+        )
+
+      Req.Test.stub(:whatsapp, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v19.0/audio-media-id"} ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              Jason.encode!(%{"url" => "https://lookaside.fbsbx.com/media/audio-media-id"})
+            )
+
+          {"GET", "/media/audio-media-id"} ->
+            Plug.Conn.send_resp(conn, 200, "voice-bytes")
+
+          {"POST", "/v19.0/123456789/messages"} ->
+            {:ok, body, conn} = Plug.Conn.read_body(conn)
+            send(test_pid, {:whatsapp_request, conn.request_path, Jason.decode!(body)})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, Jason.encode!(%{"messages" => [%{"id" => "reply-id"}]}))
+        end
+      end)
+
+      audio_message =
+        payload("", %{
+          "messages" => [
+            %{
+              "from" => "15551234567",
+              "id" => "wamid.audio",
+              "timestamp" => "1714000000",
+              "type" => "audio",
+              "audio" => %{
+                "id" => "audio-media-id",
+                "mime_type" => "audio/ogg"
+              }
+            }
+          ]
+        })
+
+      assert {:ok, messages} = WhatsApp.parse_webhook(audio_message)
+
+      assert :ok =
+               Dispatcher.dispatch(messages,
+                 channel: WhatsApp,
+                 agent: MainAgent,
+                 agent_server: agent,
+                 transcription: [backend: FakeTranscriptionBackend, test_pid: self()]
+               )
+
+      assert_receive {:whatsapp_transcription, path, "voice-bytes", metadata}
+      assert metadata[:attachment][:file_id] == "audio-media-id"
+      refute File.exists?(path)
+
+      assert_receive {:whatsapp_request, "/v19.0/123456789/messages", body}, 5_000
+      assert body["to"] == "15551234567"
+      assert body["text"]["body"] == "reply from main agent"
+    end
+  end
+
+  describe "download_attachment/2" do
+    test "downloads WhatsApp media to a temp file for transcription" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        case {conn.method, conn.request_path} do
+          {"GET", "/v19.0/audio-media-id"} ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              Jason.encode!(%{"url" => "https://lookaside.fbsbx.com/media/audio-media-id"})
+            )
+
+          {"GET", "/media/audio-media-id"} ->
+            Plug.Conn.send_resp(conn, 200, "voice-bytes")
+        end
+      end)
+
+      message = payload("", %{})
+      {:ok, [normalized_message]} = WhatsApp.parse_webhook(message)
+
+      audio_attachment = %{
+        "kind" => "audio",
+        "file_id" => "audio-media-id",
+        "mime_type" => "audio/ogg",
+        "url" => nil,
+        "size_bytes" => nil
+      }
+
+      assert {:ok, path} = WhatsApp.download_attachment(normalized_message, audio_attachment)
+      assert File.read!(path) == "voice-bytes"
+      assert String.ends_with?(path, ".ogg")
+
+      File.rm!(path)
     end
   end
 

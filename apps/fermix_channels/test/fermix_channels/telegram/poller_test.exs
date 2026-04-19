@@ -3,7 +3,13 @@ defmodule FermixChannels.Telegram.PollerTest do
 
   alias FermixChannels.Telegram.Poller
 
+  defmodule TestAgent do
+    def handle_message(_message, _server), do: :ok
+  end
+
   setup do
+    Req.Test.set_req_test_to_shared()
+
     Application.put_env(:fermix_channels, :telegram,
       bot_token: "test-bot-token",
       webhook_secret: "test-secret",
@@ -67,6 +73,8 @@ defmodule FermixChannels.Telegram.PollerTest do
     defaults = [
       req_options: [plug: {Req.Test, :telegram_poller}],
       poll_interval: :manual,
+      agent: TestAgent,
+      agent_server: self(),
       name: :"poller_#{System.unique_integer([:positive])}"
     ]
 

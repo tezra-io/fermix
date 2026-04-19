@@ -10,31 +10,20 @@ defmodule FermixChannels.Dispatcher do
 
   alias FermixChannels.Message
 
-  @spec dispatch([Message.t()], keyword()) :: :ok | {:error, term()}
+  @spec dispatch([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def dispatch(messages, opts) when is_list(messages) do
     channel = Keyword.fetch!(opts, :channel)
     agent = Keyword.fetch!(opts, :agent)
     agent_server = Keyword.fetch!(opts, :agent_server)
+    transcription_opts = Keyword.get(opts, :transcription, [])
 
     Enum.reduce_while(messages, :ok, fn message, :ok ->
-      reply_fn = build_reply_fn(channel, message)
-
-      agent_message =
-        message
-        |> Map.from_struct()
-        |> Map.put(:reply_fn, reply_fn)
-
-      case agent.handle_message(agent_message, agent_server) do
+      case dispatch_message(channel, message, agent, agent_server, transcription_opts) do
         :ok ->
           {:cont, :ok}
 
-        {:error, reason} = error ->
-          Logger.error("Dispatcher agent delivery failed: #{inspect(reason)}")
+        {:error, _reason} = error ->
           {:halt, error}
-
-        other ->
-          Logger.error("Dispatcher agent delivery returned unexpected result: #{inspect(other)}")
-          {:halt, {:error, {:unexpected_agent_result, other}}}
       end
     end)
   end
@@ -53,4 +42,92 @@ defmodule FermixChannels.Dispatcher do
       end
     end
   end
+
+  defp to_agent_message(%{__struct__: _} = message), do: Map.from_struct(message)
+  defp to_agent_message(message) when is_map(message), do: message_attrs(message)
+
+  defp dispatch_message(channel, message, agent, agent_server, transcription_opts) do
+    with {:ok, message} <-
+           FermixCore.Transcription.maybe_transcribe_message(
+             channel,
+             message,
+             transcription_opts
+           ),
+         {:ok, reply_message} <- normalize_message(message) do
+      reply_fn = build_reply_fn(channel, reply_message)
+      agent_message = message |> to_agent_message() |> Map.put(:reply_fn, reply_fn)
+      handle_agent_delivery(agent.handle_message(agent_message, agent_server))
+    else
+      {:error, {:invalid_message, _field}} = error ->
+        Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
+        error
+
+      {:error, reason} = error ->
+        Logger.error("Dispatcher transcription failed: #{inspect(reason)}")
+        error
+    end
+  end
+
+  defp handle_agent_delivery(:ok), do: :ok
+
+  defp handle_agent_delivery({:error, reason} = error) do
+    Logger.error("Dispatcher agent delivery failed: #{inspect(reason)}")
+    error
+  end
+
+  defp handle_agent_delivery(other) do
+    Logger.error("Dispatcher agent delivery returned unexpected result: #{inspect(other)}")
+    {:error, {:unexpected_agent_result, other}}
+  end
+
+  defp normalize_message(%Message{} = message), do: {:ok, message}
+
+  defp normalize_message(message) when is_map(message) do
+    with {:ok, attrs} <- required_message_attrs(message) do
+      {:ok,
+       Message.new!(
+         Map.merge(attrs, %{
+           thread_ts: message_value(message, :thread_ts),
+           metadata: normalize_metadata(message_value(message, :metadata)),
+           attachments: normalize_attachments(message_value(message, :attachments))
+         })
+       )}
+    end
+  end
+
+  defp required_message_attrs(message) do
+    Enum.reduce_while(
+      [:id, :content, :sender, :channel, :chat_id, :reply_target],
+      {:ok, %{}},
+      fn key, {:ok, acc} ->
+        case message_value(message, key) do
+          value when is_binary(value) ->
+            {:cont, {:ok, Map.put(acc, key, value)}}
+
+          _ ->
+            {:halt, {:error, {:invalid_message, key}}}
+        end
+      end
+    )
+  end
+
+  defp message_attrs(message) do
+    {:ok, attrs} = required_message_attrs(message)
+
+    Map.merge(attrs, %{
+      thread_ts: message_value(message, :thread_ts),
+      metadata: normalize_metadata(message_value(message, :metadata)),
+      attachments: normalize_attachments(message_value(message, :attachments))
+    })
+  end
+
+  defp message_value(message, key) do
+    Map.get(message, key) || Map.get(message, Atom.to_string(key))
+  end
+
+  defp normalize_metadata(value) when is_map(value), do: value
+  defp normalize_metadata(_value), do: %{}
+
+  defp normalize_attachments(value) when is_list(value), do: value
+  defp normalize_attachments(_value), do: []
 end

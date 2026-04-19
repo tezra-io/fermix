@@ -1,7 +1,7 @@
 defmodule FermixWebWeb.HealthController do
   use FermixWebWeb, :controller
 
-  alias FermixCore.Setup.BootReport
+  alias FermixCore.Health
 
   @spec index(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def index(conn, _params) do
@@ -15,19 +15,11 @@ defmodule FermixWebWeb.HealthController do
 
   @spec ready(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def ready(conn, _params) do
-    readiness = readiness_payload()
+    readiness = Health.report()
 
     conn
     |> put_status(if(readiness.status == :ready, do: :ok, else: :service_unavailable))
     |> json(readiness)
-  end
-
-  defp readiness_payload do
-    BootReport.current()
-    |> Map.take([:status, :failures, :config_path, :restart_required?])
-    |> Map.put(:app, "fermix")
-    |> Map.put(:version, "0.1.0")
-    |> Map.put(:timestamp, DateTime.utc_now())
   end
 
   defp ok_payload do

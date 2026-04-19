@@ -38,6 +38,15 @@ defmodule FermixChannels.Channel do
   @callback build_reply(message()) :: reply_fn()
 
   @doc """
+  Download an attachment to a local temp path for shared runtime processing.
+
+  Voice/audio-capable channels can implement this callback to opt into the
+  shared transcription path without embedding speech-to-text logic in the
+  channel adapter itself.
+  """
+  @callback download_attachment(message(), map()) :: {:ok, String.t()} | {:error, term()}
+
+  @doc """
   Verify webhook authenticity (HMAC, token, etc.).
 
   Channels without webhook transport should return `{:error, :unsupported_transport}`.
@@ -47,5 +56,5 @@ defmodule FermixChannels.Channel do
   @doc "Start typing indicator (optional)"
   @callback start_typing(String.t()) :: :ok
 
-  @optional_callbacks [start_typing: 1]
+  @optional_callbacks [start_typing: 1, download_attachment: 2]
 end

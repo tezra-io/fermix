@@ -39,7 +39,9 @@ defmodule FermixChannels.Telegram.Poller do
       startup_phase: :drain_backlog,
       req_options: Keyword.get(opts, :req_options, []),
       poll_interval: Keyword.get(opts, :poll_interval, :immediate),
-      error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms)
+      error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms),
+      agent: Keyword.get(opts, :agent, MainAgent),
+      agent_server: Keyword.get(opts, :agent_server, MainAgent)
     }
 
     if state.poll_interval == :immediate do
@@ -75,7 +77,7 @@ defmodule FermixChannels.Telegram.Poller do
   def handle_info(:poll, state) do
     case do_poll(state) do
       {:ok, updates, state} ->
-        process_updates(updates)
+        process_updates(updates, state)
         state = advance_offset(state, updates)
 
         if state.poll_interval == :immediate do
@@ -129,26 +131,39 @@ defmodule FermixChannels.Telegram.Poller do
     end
   end
 
-  defp process_updates(updates) do
+  defp process_updates(updates, state) do
     Enum.each(updates, fn update ->
       case Telegram.parse_update(update) do
         {:ok, messages} when messages != [] ->
-          :telemetry.execute(
-            [:fermix, :channel, :message],
-            %{count: length(messages)},
-            %{channel: :telegram, direction: :inbound}
-          )
-
-          Dispatcher.dispatch(messages,
-            channel: Telegram,
-            agent: MainAgent,
-            agent_server: MainAgent
-          )
+          emit_inbound_telemetry(length(messages))
+          handle_dispatch_result(messages, state)
 
         _ ->
           :ok
       end
     end)
+  end
+
+  defp emit_inbound_telemetry(count) do
+    :telemetry.execute(
+      [:fermix, :channel, :message],
+      %{count: count},
+      %{channel: :telegram, direction: :inbound}
+    )
+  end
+
+  defp handle_dispatch_result(messages, state) do
+    case Dispatcher.dispatch(messages,
+           channel: Telegram,
+           agent: state.agent,
+           agent_server: state.agent_server
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Telegram poller dispatch failed: #{inspect(reason)}")
+    end
   end
 
   defp advance_offset(state, []), do: state
