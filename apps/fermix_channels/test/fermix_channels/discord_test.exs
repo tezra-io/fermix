@@ -117,6 +117,17 @@ defmodule FermixChannels.DiscordTest do
     end
   end
 
+  describe "webhook transport" do
+    test "reports webhook parsing as unsupported" do
+      assert {:error, :unsupported_transport} = Discord.parse_webhook(%{})
+    end
+
+    test "reports webhook verification as unsupported" do
+      assert {:error, :unsupported_transport} =
+               Discord.verify_webhook(Plug.Test.conn(:post, "/webhook/discord", "{}"))
+    end
+  end
+
   describe "dispatch and reply" do
     test "routes inbound direct text through dispatcher and replies through REST" do
       Req.Test.stub(:discord, fn conn ->

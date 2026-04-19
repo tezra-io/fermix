@@ -59,6 +59,9 @@ defmodule FermixChannels.CLI do
   def parse_webhook(_params), do: {:error, :unsupported_transport}
 
   @impl true
+  @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
+  @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
+          :ok | {:error, term()}
   def send_message(_chat_id, text, _opts \\ []) when is_binary(text) do
     IO.puts(text)
 

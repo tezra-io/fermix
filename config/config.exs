@@ -59,6 +59,7 @@ config :fermix_channels,
     enabled: false,
     mode: :webhook,
     webhook_path: "/webhook/whatsapp",
+    # WhatsApp allowlists sender phone numbers only; it does not use allowed_user_ids.
     allowed_sender_ids: []
   ],
   discord: [
