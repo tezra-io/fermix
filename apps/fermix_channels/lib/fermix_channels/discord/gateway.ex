@@ -53,11 +53,7 @@ defmodule FermixChannels.Discord.Gateway do
   def handle_cast({:gateway_event, event}, state) do
     case Discord.parse_gateway_event(event) do
       {:ok, messages} when messages != [] ->
-        Dispatcher.dispatch(messages,
-          channel: Discord,
-          agent: state.agent,
-          agent_server: state.agent_server
-        )
+        handle_dispatch_result(messages, state)
 
       {:ok, []} ->
         :ok
@@ -130,5 +126,19 @@ defmodule FermixChannels.Discord.Gateway do
   defp schedule_reconnect(state) do
     Process.send_after(self(), :connect, state.reconnect_ms)
     state
+  end
+
+  defp handle_dispatch_result(messages, state) do
+    case Dispatcher.dispatch(messages,
+           channel: Discord,
+           agent: state.agent,
+           agent_server: state.agent_server
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Discord gateway dispatch failed: #{inspect(reason)}")
+    end
   end
 end

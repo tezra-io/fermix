@@ -149,6 +149,8 @@ defmodule FermixChannels.Discord do
     end
   end
 
+  # Leave this as a per-message config read. Discord DM/app-mention ingress volume
+  # is low, and avoiding a cache keeps runtime enable/disable toggles immediate.
   defp ingress_enabled? do
     case FermixCore.Config.channel(:discord) do
       {:ok, config} -> Keyword.get(config, :enabled, false) == true
