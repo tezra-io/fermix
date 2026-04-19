@@ -113,6 +113,30 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 
 ---
 
+## Milestone 4.5: Prompt Bootstrap Architecture
+
+**Goal:** Replace the hardcoded main-agent system prompt with a composable file-backed bootstrap layer.
+
+This milestone is intentionally separate from M4:
+
+- `USER.md` and `MEMORY.md` are memory artifacts and belong in M4
+- `AGENT.md` and `SOUL.md` are prompt/bootstrap artifacts and should not be coupled to memory implementation
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **PromptComposer** | Build system prompt from ordered prompt/bootstrap parts instead of one hardcoded heredoc | P0 | New | OpenClaw system prompt docs | M |
+| **`AGENT.md` support** | File-backed agent operating instructions / runtime identity block | P0 | New | OpenClaw `AGENTS.md` | S |
+| **`SOUL.md` support** | File-backed persona/style/voice layer for the main agent | P1 | New | OpenClaw `SOUL.md` | S |
+| **Prompt file ordering policy** | Define stable ordering for `AGENT.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, skill catalog, and runtime guidance | P0 | New | OpenClaw system prompt docs | S |
+| **Bootstrap file loader** | Load prompt files from the Fermix workspace/home with missing-file handling | P0 | New | N/A | S |
+| **Prompt budget accounting** | Track approximate contribution of each injected prompt/bootstrap file | P1 | New | OpenClaw `/context` inspiration | M |
+| **Truncation visibility** | Surface when injected prompt/bootstrap files were clipped by context policy | P1 | New | OpenClaw truncation warnings | S |
+| **Sub-agent bootstrap filtering** | Future-proof rule for which bootstrap files sub-agents do or do not inherit | P1 | New | OpenClaw sub-agent filtering | S |
+
+**Milestone 4.5 Total Effort:** ~3-5 weeks
+
+---
+
 ## Milestone 5: Security & Governance
 
 **Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering.
@@ -254,8 +278,11 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 
 ## Additional Providers (Ongoing)
 
+**Note:** The current OpenAI provider uses Chat Completions API for api_key auth and a Codex-specific Responses API for oauth auth. Both paths should be unified onto the official OpenAI Responses API (`api.openai.com/v1/responses`), which accepts standard API keys and is the newer recommended API. This would eliminate the Chat Completions code path and unify request/response parsing. Low effort (S), do before adding more providers.
+
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
+| **OpenAI Responses API unification** | Migrate api_key path from Chat Completions to official Responses API; unify with oauth path | P1 | New | N/A | S |
 | **OpenRouter provider** | Meta-provider for many models | P1 | Rewrite | `src/providers/openrouter.rs` | M |
 | **Ollama provider** | Local model support | P1 | Rewrite | `src/providers/ollama.rs` | M |
 | **Gemini provider** | Google Gemini API | P1 | Rewrite | `src/providers/gemini.rs` | L |

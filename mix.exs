@@ -9,7 +9,8 @@ defmodule Fermix.MixProject do
       deps: deps(),
       aliases: aliases(),
       releases: releases(),
-      dialyzer: [plt_add_apps: [:ex_unit, :mix]]
+      dialyzer: [plt_add_apps: [:ex_unit, :mix]],
+      listeners: [Phoenix.CodeReloader]
     ]
   end
 
