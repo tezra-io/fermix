@@ -120,20 +120,44 @@ This roadmap organizes features by milestone AFTER the Phase 1 MVP (single-agent
 This milestone is intentionally separate from M4:
 
 - `USER.md` and `MEMORY.md` are memory artifacts and belong in M4
-- `AGENT.md` and `SOUL.md` are prompt/bootstrap artifacts and should not be coupled to memory implementation
+- `AGENTS.md` and `SOUL.md` are prompt/bootstrap artifacts and should not be coupled to memory implementation
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
 | **PromptComposer** | Build system prompt from ordered prompt/bootstrap parts instead of one hardcoded heredoc | P0 | New | OpenClaw system prompt docs | M |
-| **`AGENT.md` support** | File-backed agent operating instructions / runtime identity block | P0 | New | OpenClaw `AGENTS.md` | S |
+| **`AGENTS.md` support** | File-backed agent operating instructions / runtime identity block | P0 | New | OpenClaw `AGENTS.md` | S |
 | **`SOUL.md` support** | File-backed persona/style/voice layer for the main agent | P1 | New | OpenClaw `SOUL.md` | S |
-| **Prompt file ordering policy** | Define stable ordering for `AGENT.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, skill catalog, and runtime guidance | P0 | New | OpenClaw system prompt docs | S |
+| **Prompt file ordering policy** | Define stable ordering for `AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, skill catalog, and runtime guidance | P0 | New | OpenClaw system prompt docs | S |
 | **Bootstrap file loader** | Load prompt files from the Fermix workspace/home with missing-file handling | P0 | New | N/A | S |
+| **Runtime contract generation** | Generate compact contract-style runtime sections from live skill/tool state instead of prose-heavy prompt fragments | P1 | New | Autogenesis `Fτ,i` exported representations | S |
 | **Prompt budget accounting** | Track approximate contribution of each injected prompt/bootstrap file | P1 | New | OpenClaw `/context` inspiration | M |
 | **Truncation visibility** | Surface when injected prompt/bootstrap files were clipped by context policy | P1 | New | OpenClaw truncation warnings | S |
 | **Sub-agent bootstrap filtering** | Future-proof rule for which bootstrap files sub-agents do or do not inherit | P1 | New | OpenClaw sub-agent filtering | S |
 
 **Milestone 4.5 Total Effort:** ~3-5 weeks
+
+---
+
+## Milestone 4.6: Versioned Prompt and Memory Resources
+
+**Goal:** Add revision lineage, rollback, and auditable provenance for prompt/bootstrap and prompt-memory artifacts without introducing autonomous self-modification.
+
+This milestone captures the useful part of Autogenesis for Fermix:
+
+- prompt and memory artifacts are treated as first-class resources
+- every accepted rewrite has lineage and can be rolled back
+- the system stays operator-controlled; no closed-loop autonomous prompt mutation is introduced yet
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Prompt resource registry** | Register `AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, and compaction checkpoints as typed resources with metadata | P0 | New | Autogenesis RSPL | M |
+| **Revision lineage** | Track resource versions, parent revision, timestamps, and mutation source | P0 | New | Autogenesis version lineage | M |
+| **Rollback support** | Revert prompt or memory resources to a prior accepted revision safely | P0 | New | Autogenesis rollback | S |
+| **Change provenance** | Store why a prompt/memory artifact changed and what source events or memories drove the rewrite | P1 | New | Autogenesis auditability | M |
+| **Diff inspection UI** | Surface prompt/memory revision diffs in LiveView or CLI tooling | P1 | New | N/A | M |
+| **Checkpoint resource history** | Version persisted compaction checkpoints the same way as other prompt resources | P1 | New | Autogenesis resource model | S |
+
+**Milestone 4.6 Total Effort:** ~4-6 weeks
 
 ---
 
