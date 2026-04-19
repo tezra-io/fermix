@@ -6,10 +6,18 @@ defmodule FermixWebWeb.HealthControllerTest do
   setup do
     providers = Application.get_env(:fermix_core, :providers)
     telegram = Application.get_env(:fermix_channels, :telegram)
+    whatsapp = Application.get_env(:fermix_channels, :whatsapp)
+    discord = Application.get_env(:fermix_channels, :discord)
+    slack = Application.get_env(:fermix_channels, :slack)
+    signal = Application.get_env(:fermix_channels, :signal)
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
       restore_env(:fermix_channels, :telegram, telegram)
+      restore_env(:fermix_channels, :whatsapp, whatsapp)
+      restore_env(:fermix_channels, :discord, discord)
+      restore_env(:fermix_channels, :slack, slack)
+      restore_env(:fermix_channels, :signal, signal)
       BootReport.refresh()
     end)
 
@@ -32,6 +40,10 @@ defmodule FermixWebWeb.HealthControllerTest do
     test "returns setup_required with actionable readiness failures", %{conn: conn} do
       Application.put_env(:fermix_core, :providers, [])
       Application.delete_env(:fermix_channels, :telegram)
+      Application.put_env(:fermix_channels, :whatsapp, enabled: false)
+      Application.put_env(:fermix_channels, :discord, enabled: false)
+      Application.put_env(:fermix_channels, :slack, enabled: false)
+      Application.put_env(:fermix_channels, :signal, enabled: false)
       BootReport.refresh()
 
       conn = get(conn, ~p"/health/ready")
@@ -39,6 +51,10 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert body["status"] == "setup_required"
       assert is_list(body["failures"])
+      assert is_map(body["config"])
+      assert is_list(body["providers"])
+      assert is_list(body["channels"])
+      assert is_map(body["memory"])
 
       assert Enum.any?(body["failures"], fn failure ->
                failure["component"] == "provider:openai" and
@@ -48,6 +64,53 @@ defmodule FermixWebWeb.HealthControllerTest do
       assert Enum.any?(body["failures"], fn failure ->
                failure["component"] == "channel:telegram" and
                  failure["action"] == "Set TELEGRAM_BOT_TOKEN."
+             end)
+
+      assert Enum.any?(body["providers"], fn provider ->
+               provider["name"] == "openai" and provider["status"] == "setup_required"
+             end)
+
+      assert Enum.any?(body["channels"], fn channel ->
+               channel["name"] == "telegram" and channel["status"] == "setup_required"
+             end)
+
+      assert body["memory"]["conversation_store"] == "ready"
+      assert body["memory"]["store"] == "ready"
+    end
+
+    test "returns degraded when a configured long-running channel process is unavailable", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram,
+        enabled: true,
+        mode: :webhook,
+        bot_token: "bot"
+      )
+
+      Application.put_env(:fermix_channels, :whatsapp, enabled: false)
+      Application.put_env(:fermix_channels, :discord, enabled: false)
+      Application.put_env(:fermix_channels, :slack, enabled: false)
+
+      Application.put_env(:fermix_channels, :signal,
+        enabled: true,
+        mode: :subprocess,
+        account: "+15550001111"
+      )
+
+      BootReport.refresh()
+
+      conn = get(conn, ~p"/health/ready")
+      body = json_response(conn, 503)
+
+      assert body["status"] == "degraded"
+
+      assert Enum.any?(body["channels"], fn channel ->
+               channel["name"] == "signal" and channel["status"] == "degraded" and
+                 channel["process_alive"] == false
              end)
     end
   end

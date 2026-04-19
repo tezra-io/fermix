@@ -232,6 +232,30 @@ defmodule FermixWebWeb.WebhookControllerTest do
 
       assert json_response(conn, 400) == %{"error" => "Invalid webhook"}
     end
+
+    test "maps client-side dispatch validation failures to invalid webhook responses", %{
+      conn: conn
+    } do
+      conn =
+        WebhookController.webhook_error_response(
+          conn,
+          "WhatsApp",
+          {:attachment_download_failed, :missing_attachment_reference}
+        )
+
+      assert json_response(conn, 400) == %{"error" => "Invalid webhook"}
+    end
+
+    test "keeps genuine internal dispatch failures as 500 responses", %{conn: conn} do
+      conn =
+        WebhookController.webhook_error_response(
+          conn,
+          "WhatsApp",
+          {:transcription_failed, :timeout}
+        )
+
+      assert json_response(conn, 500) == %{"error" => "Webhook dispatch failed"}
+    end
   end
 
   defp telegram_message_payload(text) do

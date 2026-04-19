@@ -11,6 +11,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
   alias FermixCore.Setup.BootReport
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Tools.Registry
   alias FermixCore.Trace
 
@@ -103,6 +104,6 @@ defmodule FermixCore.Application do
     end
   end
 
-  defp default_trace_dir, do: Path.join(System.user_home!(), ".fermix/traces")
-  defp default_log_file, do: Path.join(System.user_home!(), ".fermix/logs/fermix.log")
+  defp default_trace_dir, do: ConfigStore.workspace_paths().traces
+  defp default_log_file, do: Path.join(ConfigStore.workspace_paths().logs, "fermix.log")
 end
