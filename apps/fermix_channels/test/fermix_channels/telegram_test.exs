@@ -1,5 +1,5 @@
 defmodule FermixChannels.TelegramTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias FermixChannels.Message
   alias FermixChannels.Telegram

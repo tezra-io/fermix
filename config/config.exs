@@ -48,6 +48,12 @@ config :fermix_core,
   max_conversation_history: 50,
   context_window_limit: 120_000
 
+config :fermix_core, :memory,
+  enabled: true,
+  database_path: Path.expand("~/.fermix/memory.db"),
+  owner_id: "default",
+  agent_id: "main"
+
 config :fermix_core, :transcription,
   backend: FermixCore.Transcription.OpenAI,
   model: "whisper-1"

@@ -1,6 +1,7 @@
 defmodule FermixCore.Memory.StoreTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
 
   setup do
@@ -110,6 +111,47 @@ defmodule FermixCore.Memory.StoreTest do
 
       assert {:ok, "yes"} = Store.recall(conv_key, "keep", server: store)
       assert {:error, :not_found} = Store.recall(conv_key, "remove", server: store)
+    end
+  end
+
+  describe "durable persistence" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-store-#{unique}.db")
+      repo_name = :"store_repo_#{unique}"
+      store_name = :"store_durable_#{unique}"
+
+      start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
+      start_supervised!(%{
+        id: store_name,
+        start: {Store, :start_link, [[name: store_name, repo: repo_name]]}
+      })
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+          File.rm(path)
+        end)
+      end)
+
+      %{repo: repo_name, store: store_name}
+    end
+
+    test "reloads memories from sqlite after the store restarts", %{repo: repo, store: store} do
+      conv_key = {"telegram", "chat_1", :root}
+
+      assert :ok = Store.store(conv_key, "user_name", "Alice", server: store)
+      assert :ok = GenServer.stop(store)
+
+      restarted = :"store_restarted_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: restarted,
+        start: {Store, :start_link, [[name: restarted, repo: repo]]}
+      })
+
+      assert {:ok, "Alice"} = Store.recall(conv_key, "user_name", server: restarted)
+      assert %{"user_name" => "Alice"} = Store.recall_all(conv_key, server: restarted)
     end
   end
 end
