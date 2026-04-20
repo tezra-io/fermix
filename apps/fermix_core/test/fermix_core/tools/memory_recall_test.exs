@@ -1,16 +1,46 @@
 defmodule FermixCore.Tools.MemoryRecallTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
   alias FermixCore.Tools.MemoryRecall
 
   setup do
-    {:ok, store} =
-      Store.start_link(name: :"mem_recall_tool_#{System.unique_integer([:positive])}")
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-memory-recall-#{unique}.db")
+    repo = :"mem_recall_repo_#{unique}"
+    store = :"mem_recall_tool_#{unique}"
+    conversation_store = :"mem_recall_history_#{unique}"
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    start_supervised!(%{
+      id: store,
+      start: {Store, :start_link, [[name: store, repo: repo]]}
+    })
+
+    start_supervised!(%{
+      id: conversation_store,
+      start: {ConversationStore, :start_link, [[name: conversation_store, repo: repo]]}
+    })
 
     conv_key = {"telegram", "chat_#{System.unique_integer([:positive])}"}
-    context = %{agent_name: "test_agent", conversation_key: conv_key, memory_store: store}
-    %{context: context, conv_key: conv_key, store: store}
+
+    context = %{
+      agent_name: "test_agent",
+      conversation_key: conv_key,
+      memory_store: store,
+      memory_repo: repo
+    }
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        File.rm(path)
+      end)
+    end)
+
+    %{context: context, conv_key: conv_key, repo: repo, store: store, history: conversation_store}
   end
 
   describe "name/0" do
@@ -28,10 +58,13 @@ defmodule FermixCore.Tools.MemoryRecallTest do
   end
 
   describe "parameters/0" do
-    test "returns JSON Schema with optional key" do
+    test "returns JSON Schema with exact and search options" do
       params = MemoryRecall.parameters()
       assert params.type == "object"
       assert Map.has_key?(params.properties, :key)
+      assert Map.has_key?(params.properties, :search)
+      assert Map.has_key?(params.properties, :scope)
+      assert Map.has_key?(params.properties, :source)
       refute Map.has_key?(params, :required)
     end
   end
@@ -73,6 +106,102 @@ defmodule FermixCore.Tools.MemoryRecallTest do
       assert {:ok, result} = MemoryRecall.execute(%{}, context)
       assert result.success == true
       assert result.output =~ "No memories"
+    end
+  end
+
+  describe "execute/2 - lexical search" do
+    test "returns ranked memory and history hits with source metadata", %{
+      context: context,
+      conv_key: conv_key,
+      store: store,
+      history: history
+    } do
+      Store.store(conv_key, "timezone", "UTC", server: store)
+
+      ConversationStore.add_message(
+        {"telegram", elem(conv_key, 1), :root},
+        "user",
+        "We discussed timezone handling in the chat",
+        server: history
+      )
+
+      assert {:ok, result} =
+               MemoryRecall.execute(%{"search" => "timezone", "source" => "all"}, context)
+
+      assert result.success == true
+      assert result.output =~ "[memories"
+      assert result.output =~ "key=timezone"
+      assert result.output =~ "[history"
+      assert result.output =~ "timezone handling"
+    end
+
+    test "respects owner scope and history source filters", %{context: context, repo: repo} do
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "owner",
+                   scope_id: "default",
+                   category: "fact",
+                   key: "timezone",
+                   value: "UTC owner preference"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, _message} =
+               Repo.insert_message(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   channel: "telegram",
+                   chat_id: "chat_history",
+                   thread_scope: "root",
+                   sender: "alice",
+                   role: "user",
+                   kind: "chat_message",
+                   content: "timezone from message history"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, history_only} =
+               MemoryRecall.execute(
+                 %{"search" => "timezone", "source" => "history", "scope" => "owner"},
+                 context
+               )
+
+      assert history_only.success == true
+      assert history_only.output =~ "[history"
+      refute history_only.output =~ "[memories"
+    end
+
+    test "returns a graceful error for malformed FTS queries", %{
+      context: context,
+      conv_key: conv_key,
+      store: store
+    } do
+      Store.store(conv_key, "timezone", "UTC", server: store)
+
+      assert {:ok, result} = MemoryRecall.execute(%{"search" => "AND OR"}, context)
+      assert result.success == false
+      assert result.error != nil
+    end
+
+    test "prefers lexical search when key and search are both present", %{
+      context: context,
+      conv_key: conv_key,
+      store: store
+    } do
+      Store.store(conv_key, "timezone", "UTC", server: store)
+
+      assert {:ok, result} =
+               MemoryRecall.execute(%{"key" => "timezone", "search" => "timezone"}, context)
+
+      assert result.success == true
+      assert result.output =~ "[memories"
+      refute result.output == "UTC"
     end
   end
 

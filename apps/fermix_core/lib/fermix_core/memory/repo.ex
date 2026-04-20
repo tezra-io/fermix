@@ -8,7 +8,8 @@ defmodule FermixCore.Memory.Repo do
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Config
 
-  @migration_version 1
+  @base_migration_version 1
+  @fts_migration_version 2
 
   @base_schema_sql """
   CREATE TABLE IF NOT EXISTS messages (
@@ -45,6 +46,48 @@ defmodule FermixCore.Memory.Repo do
   );
   CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_scope_key
     ON memories(agent_id, owner_id, scope_type, scope_id, key);
+  """
+
+  @fts_schema_sql """
+  CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+  USING fts5(category, key, value, content=memories, content_rowid=id);
+
+  CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, category, key, value)
+    VALUES (new.id, new.category, new.key, new.value);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, category, key, value)
+    VALUES('delete', old.id, old.category, old.key, old.value);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, category, key, value)
+    VALUES('delete', old.id, old.category, old.key, old.value);
+    INSERT INTO memories_fts(rowid, category, key, value)
+    VALUES (new.id, new.category, new.key, new.value);
+  END;
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+  USING fts5(role, kind, content, content=messages, content_rowid=id);
+
+  CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, role, kind, content)
+    VALUES (new.id, new.role, new.kind, new.content);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, role, kind, content)
+    VALUES('delete', old.id, old.role, old.kind, old.content);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+    INSERT INTO messages_fts(messages_fts, rowid, role, kind, content)
+    VALUES('delete', old.id, old.role, old.kind, old.content);
+    INSERT INTO messages_fts(rowid, role, kind, content)
+    VALUES (new.id, new.role, new.kind, new.content);
+  END;
   """
 
   @type message_attrs :: %{
@@ -107,6 +150,32 @@ defmodule FermixCore.Memory.Repo do
           created_at: DateTime.t()
         }
 
+  @type message_search_row :: %{
+          id: integer(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          channel: String.t(),
+          chat_id: String.t(),
+          thread_scope: String.t(),
+          sender: String.t(),
+          role: String.t(),
+          kind: String.t(),
+          content: String.t(),
+          metadata: map() | nil,
+          created_at: DateTime.t(),
+          rank: float()
+        }
+
+  @type message_search_selector :: %{
+          required(:agent_id) => String.t(),
+          optional(:owner_id) => String.t(),
+          optional(:channel) => String.t(),
+          optional(:chat_id) => String.t(),
+          optional(:thread_scope) => String.t() | atom() | integer(),
+          optional(:role) => String.t(),
+          optional(:kind) => String.t()
+        }
+
   @type memory_row :: %{
           id: integer(),
           agent_id: String.t(),
@@ -121,6 +190,23 @@ defmodule FermixCore.Memory.Repo do
           source_message_id: integer() | nil,
           created_at: DateTime.t(),
           updated_at: DateTime.t()
+        }
+
+  @type memory_search_row :: %{
+          id: integer(),
+          agent_id: String.t(),
+          owner_id: String.t(),
+          scope_type: String.t(),
+          scope_id: String.t(),
+          category: String.t(),
+          key: String.t(),
+          value: String.t(),
+          confidence: float(),
+          promote_target: String.t(),
+          source_message_id: integer() | nil,
+          created_at: DateTime.t(),
+          updated_at: DateTime.t(),
+          rank: float()
         }
 
   @type state :: %{
@@ -181,6 +267,22 @@ defmodule FermixCore.Memory.Repo do
   @spec delete_memory(memory_selector(), keyword()) :: :ok | {:error, term()}
   def delete_memory(selector, opts \\ []) when is_map(selector) do
     call({:delete_memory, selector}, opts)
+  end
+
+  @spec search_memories(String.t(), keyword()) :: {:ok, [memory_search_row()]} | {:error, term()}
+  def search_memories(query, opts \\ []) when is_binary(query) do
+    call(
+      {:search_memories, query, Keyword.get(opts, :selector, %{}), Keyword.get(opts, :limit, 10)},
+      opts
+    )
+  end
+
+  @spec search_messages(String.t(), keyword()) :: {:ok, [message_search_row()]} | {:error, term()}
+  def search_messages(query, opts \\ []) when is_binary(query) do
+    call(
+      {:search_messages, query, Keyword.get(opts, :selector, %{}), Keyword.get(opts, :limit, 10)},
+      opts
+    )
   end
 
   @spec migrate(keyword()) :: :ok | {:error, term()}
@@ -282,6 +384,16 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:search_memories, query, selector, limit}, _from, state) do
+    reply = with_connection(state, &search_memory_rows(&1, query, selector, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:search_messages, query, selector, limit}, _from, state) do
+    reply = with_connection(state, &search_message_rows(&1, query, selector, limit))
+    {:reply, reply, state}
+  end
+
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, request)
@@ -319,7 +431,8 @@ defmodule FermixCore.Memory.Repo do
   defp run_migrations(conn) do
     with :ok <- ensure_schema_migrations_table(conn),
          {:ok, versions} <- migration_versions_for_conn(conn),
-         :ok <- apply_base_migration(conn, versions) do
+         :ok <- apply_base_migration(conn, versions),
+         :ok <- apply_fts_migration(conn, versions) do
       :ok
     end
   end
@@ -337,7 +450,7 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp apply_base_migration(conn, versions) do
-    if Enum.member?(versions, @migration_version) do
+    if Enum.member?(versions, @base_migration_version) do
       :ok
     else
       Sqlite3.execute(
@@ -345,7 +458,25 @@ defmodule FermixCore.Memory.Repo do
         """
         BEGIN;
         #{@base_schema_sql}
-        INSERT INTO schema_migrations(version) VALUES (#{@migration_version});
+        INSERT INTO schema_migrations(version) VALUES (#{@base_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_fts_migration(conn, versions) do
+    if Enum.member?(versions, @fts_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@fts_schema_sql}
+        INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
+        INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+        INSERT INTO schema_migrations(version) VALUES (#{@fts_migration_version});
         COMMIT;
         """
       )
@@ -542,6 +673,50 @@ defmodule FermixCore.Memory.Repo do
     execute(conn, "DELETE FROM memories WHERE #{where_sql}", params)
   end
 
+  defp search_memory_rows(conn, query, selector, limit) do
+    {where_sql, params} = search_memory_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT
+               memories.*,
+               bm25(memories_fts) AS rank
+             FROM memories_fts
+             JOIN memories ON memories.id = memories_fts.rowid
+             WHERE memories_fts MATCH ? AND #{where_sql}
+             ORDER BY bm25(memories_fts), memories.updated_at DESC, memories.id DESC
+             LIMIT ?
+             """,
+             [query | params] ++ [limit]
+           ) do
+      {:ok, Enum.map(rows, &memory_search_row/1)}
+    end
+  end
+
+  defp search_message_rows(conn, query, selector, limit) do
+    {where_sql, params} = message_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT
+               messages.*,
+               bm25(messages_fts) AS rank
+             FROM messages_fts
+             JOIN messages ON messages.id = messages_fts.rowid
+             WHERE messages_fts MATCH ? AND #{where_sql}
+             ORDER BY bm25(messages_fts), messages.created_at DESC, messages.id DESC
+             LIMIT ?
+             """,
+             [query | params] ++ [limit]
+           ) do
+      {:ok, Enum.map(rows, &message_search_row/1)}
+    end
+  end
+
   defp query_all(conn, sql, params) do
     with_statement(conn, sql, fn stmt ->
       with :ok <- bind(stmt, params),
@@ -625,6 +800,15 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
+  defp normalize_message_search_selector(selector) do
+    selector
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.into(%{}, fn
+      {:thread_scope, value} -> {:thread_scope, normalize_thread_scope(value)}
+      {key, value} -> {key, fetch_string_value!(key, value)}
+    end)
+  end
+
   defp message_insert_params(message) do
     [
       message.agent_id,
@@ -675,14 +859,50 @@ defmodule FermixCore.Memory.Repo do
     |> Enum.map_reduce([], fn {key, value}, params ->
       {"#{column_name(key)} = ?", params ++ [value]}
     end)
-    |> then(fn {clauses, params} ->
-      {Enum.join(clauses, " AND "), params}
+    |> join_where_clause()
+  end
+
+  defp search_memory_where_clause(selector) do
+    selector
+    |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn {key, value}, params ->
+      {"memories.#{search_memory_column_name(key)} = ?", params ++ [value]}
     end)
+    |> join_where_clause()
+  end
+
+  defp message_where_clause(selector) do
+    selector
+    |> normalize_message_search_selector()
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn {key, value}, params ->
+      {"messages.#{message_column_name(key)} = ?", params ++ [value]}
+    end)
+    |> join_where_clause()
+  end
+
+  defp join_where_clause({[], params}), do: {"1 = 1", params}
+
+  defp join_where_clause({clauses, params}) do
+    {Enum.join(clauses, " AND "), params}
   end
 
   defp column_name(:key), do: "\"key\""
 
   defp column_name(key) when key in [:agent_id, :owner_id, :scope_type, :scope_id, :category] do
+    Atom.to_string(key)
+  end
+
+  defp search_memory_column_name(:key), do: "\"key\""
+
+  defp search_memory_column_name(key)
+       when key in [:agent_id, :owner_id, :scope_type, :scope_id, :category] do
+    Atom.to_string(key)
+  end
+
+  defp message_column_name(key)
+       when key in [:agent_id, :owner_id, :channel, :chat_id, :thread_scope, :role, :kind] do
     Atom.to_string(key)
   end
 
@@ -748,6 +968,72 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
+  defp message_search_row([
+         id,
+         agent_id,
+         owner_id,
+         channel,
+         chat_id,
+         thread_scope,
+         sender,
+         role,
+         kind,
+         content,
+         metadata_json,
+         created_at,
+         rank
+       ]) do
+    message_row([
+      id,
+      agent_id,
+      owner_id,
+      channel,
+      chat_id,
+      thread_scope,
+      sender,
+      role,
+      kind,
+      content,
+      metadata_json,
+      created_at
+    ])
+    |> Map.put(:rank, rank * 1.0)
+  end
+
+  defp memory_search_row([
+         id,
+         agent_id,
+         owner_id,
+         scope_type,
+         scope_id,
+         category,
+         key,
+         value,
+         confidence,
+         promote_target,
+         source_message_id,
+         created_at,
+         updated_at,
+         rank
+       ]) do
+    memory_row([
+      id,
+      agent_id,
+      owner_id,
+      scope_type,
+      scope_id,
+      category,
+      key,
+      value,
+      confidence,
+      promote_target,
+      source_message_id,
+      created_at,
+      updated_at
+    ])
+    |> Map.put(:rank, rank * 1.0)
+  end
+
   defp encode_metadata(nil), do: nil
   defp encode_metadata(metadata), do: Jason.encode!(metadata)
 
@@ -768,6 +1054,10 @@ defmodule FermixCore.Memory.Repo do
   defp fetch_string!(attrs, key) do
     value = Map.fetch!(attrs, key)
 
+    fetch_string_value!(key, value)
+  end
+
+  defp fetch_string_value!(key, value) do
     if is_binary(value) do
       value
     else

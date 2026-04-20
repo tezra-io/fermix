@@ -6,6 +6,9 @@ defmodule FermixCore.Tools.MemoryRecall do
 
   @behaviour FermixCore.Tools.Tool
 
+  alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Search
   alias FermixCore.Memory.Store
   alias FermixCore.Tools.Tool
 
@@ -28,6 +31,20 @@ defmodule FermixCore.Tools.MemoryRecall do
         key: %{
           type: "string",
           description: "The key of the memory to recall. If omitted, returns all memories."
+        },
+        search: %{
+          type: "string",
+          description: "Keyword or phrase search over durable memories and/or history."
+        },
+        scope: %{
+          type: "string",
+          enum: ["current", "owner", "all"],
+          description: "Search scope for lexical recall. Defaults to current."
+        },
+        source: %{
+          type: "string",
+          enum: ["memories", "history", "all"],
+          description: "Which durable source to search. Defaults to memories."
         }
       }
     }
@@ -51,6 +68,10 @@ defmodule FermixCore.Tools.MemoryRecall do
     )
 
     result
+  end
+
+  defp do_execute(%{"search" => search} = args, context) when is_binary(search) do
+    lexical_search(search, args, context)
   end
 
   defp do_execute(%{"key" => key}, context) do
@@ -85,5 +106,58 @@ defmodule FermixCore.Tools.MemoryRecall do
       output = Enum.map_join(memories, "\n", fn {k, v} -> "#{k}: #{v}" end)
       {:ok, Tool.success(output)}
     end
+  end
+
+  defp lexical_search(search, args, context) do
+    opts =
+      [
+        repo: Map.get(context, :memory_repo, Repo),
+        source: Map.get(args, "source", "memories"),
+        scope: Map.get(args, "scope", "current"),
+        limit: 10,
+        agent_id: Map.get(context, :memory_agent_id, Config.agent_id()),
+        owner_id: Map.get(context, :memory_owner_id, Config.owner_id())
+      ]
+      |> maybe_put_conversation_key(context)
+
+    case run_search(search, opts) do
+      {:ok, []} ->
+        {:ok, Tool.success("No lexical matches found for: #{search}")}
+
+      {:ok, results} ->
+        {:ok, Tool.success(Enum.map_join(results, "\n", &format_search_result/1))}
+
+      {:error, message} ->
+        {:ok, Tool.error(message)}
+    end
+  end
+
+  defp run_search(search, opts) do
+    {:ok, Search.query(search, opts)}
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+    error in RuntimeError -> {:error, Exception.message(error)}
+  end
+
+  defp maybe_put_conversation_key(opts, context) do
+    case Map.fetch(context, :conversation_key) do
+      {:ok, conversation_key} -> Keyword.put(opts, :conversation_key, conversation_key)
+      :error -> opts
+    end
+  end
+
+  defp format_search_result(%{source: :memories} = result) do
+    "[memories rank=#{format_rank(result.rank)}] scope=#{result.scope_type} " <>
+      "key=#{result.key} category=#{result.category} value=#{result.value}"
+  end
+
+  defp format_search_result(%{source: :messages} = result) do
+    "[history rank=#{format_rank(result.rank)}] channel=#{result.channel} " <>
+      "thread=#{result.thread_scope} role=#{result.role} kind=#{result.kind} " <>
+      "content=#{result.content}"
+  end
+
+  defp format_rank(rank) when is_float(rank) do
+    :erlang.float_to_binary(rank, decimals: 4)
   end
 end

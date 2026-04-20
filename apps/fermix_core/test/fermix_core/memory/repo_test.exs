@@ -21,15 +21,15 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
   end
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
   end
 
   test "supports message CRUD through the repo API", %{repo: repo} do
@@ -115,5 +115,145 @@ defmodule FermixCore.Memory.RepoTest do
 
     assert :ok = Repo.delete_memory(selector, server: repo)
     assert {:error, :not_found} = Repo.get_memory(selector, server: repo)
+  end
+
+  test "keeps memory fts results in sync across upserts and deletes", %{repo: repo} do
+    attrs = %{
+      agent_id: "main",
+      owner_id: "default",
+      scope_type: "conversation",
+      scope_id: "telegram:chat-search:root",
+      category: "preference",
+      key: "timezone",
+      value: "UTC timezone preference"
+    }
+
+    assert {:ok, inserted} = Repo.upsert_memory(attrs, server: repo)
+
+    assert {:ok, [match]} =
+             Repo.search_memories(
+               "utc",
+               selector: %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "telegram:chat-search:root"
+               },
+               server: repo
+             )
+
+    assert match.id == inserted.id
+    assert match.key == "timezone"
+    assert is_float(match.rank)
+
+    assert {:ok, _updated} =
+             Repo.upsert_memory(Map.put(attrs, :value, "calendar preference"), server: repo)
+
+    assert {:ok, []} =
+             Repo.search_memories(
+               "utc",
+               selector: %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "telegram:chat-search:root"
+               },
+               server: repo
+             )
+
+    assert {:ok, [updated]} =
+             Repo.search_memories(
+               "calendar",
+               selector: %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "telegram:chat-search:root"
+               },
+               server: repo
+             )
+
+    assert updated.id == inserted.id
+
+    assert :ok =
+             Repo.delete_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "telegram:chat-search:root",
+                 key: "timezone"
+               },
+               server: repo
+             )
+
+    assert {:ok, []} =
+             Repo.search_memories(
+               "calendar",
+               selector: %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "telegram:chat-search:root"
+               },
+               server: repo
+             )
+  end
+
+  test "keeps message fts results in sync across inserts and deletes", %{repo: repo} do
+    attrs = %{
+      agent_id: "main",
+      owner_id: "default",
+      channel: "telegram",
+      chat_id: "chat-search",
+      thread_scope: "root",
+      sender: "alice",
+      role: "user",
+      kind: "chat_message",
+      content: "timezone preferences came up in chat"
+    }
+
+    assert {:ok, inserted} = Repo.insert_message(attrs, server: repo)
+
+    assert {:ok, [match]} =
+             Repo.search_messages(
+               "timezone",
+               selector: %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 channel: "telegram",
+                 chat_id: "chat-search",
+                 thread_scope: "root"
+               },
+               server: repo
+             )
+
+    assert match.id == inserted.id
+    assert match.content =~ "timezone"
+    assert is_float(match.rank)
+
+    assert :ok =
+             Repo.delete_messages(
+               %{
+                 agent_id: "main",
+                 channel: "telegram",
+                 chat_id: "chat-search",
+                 thread_scope: "root"
+               },
+               server: repo
+             )
+
+    assert {:ok, []} =
+             Repo.search_messages(
+               "timezone",
+               selector: %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 channel: "telegram",
+                 chat_id: "chat-search",
+                 thread_scope: "root"
+               },
+               server: repo
+             )
   end
 end
