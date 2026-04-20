@@ -115,8 +115,13 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   def handle_call({:get_history, key, limit}, _from, state) when is_integer(limit) do
-    {messages, next_state} = get_or_load_history(state, key)
-    {:reply, history_slice(messages, limit), next_state}
+    case Map.fetch(state.conversations, key) do
+      {:ok, messages} ->
+        {:reply, history_slice(messages, limit), state}
+
+      :error ->
+        reply_from_repo(state, key, limit)
+    end
   end
 
   def handle_call(:list_conversations, _from, state) do
@@ -138,26 +143,23 @@ defmodule FermixCore.Memory.ConversationStore do
     |> Enum.take(state.max_messages)
   end
 
-  defp get_or_load_history(state, key) do
-    case Map.fetch(state.conversations, key) do
+  defp reply_from_repo(state, key, limit) do
+    repo_limit = max(limit, state.max_messages)
+
+    case load_messages_from_repo(state, key, repo_limit) do
+      {:ok, []} ->
+        {:reply, [], state}
+
       {:ok, messages} ->
-        {messages, state}
+        cached = cache_window(messages, state.max_messages)
+        next_state = put_in(state, [:conversations, key], cached)
+        {:reply, take_recent_chronological(messages, limit), next_state}
 
-      :error ->
-        case load_messages_from_repo(state, key) do
-          {:ok, []} ->
-            {[], state}
+      {:error, :disabled} ->
+        {:reply, [], state}
 
-          {:ok, messages} ->
-            cached = Enum.reverse(messages)
-            {cached, put_in(state, [:conversations, key], cached)}
-
-          {:error, :disabled} ->
-            {[], state}
-
-          {:error, reason} ->
-            raise "conversation repo load failed: #{inspect(reason)}"
-        end
+      {:error, reason} ->
+        raise "conversation repo load failed: #{inspect(reason)}"
     end
   end
 
@@ -218,7 +220,20 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
-  defp load_messages_from_repo(state, key) do
+  defp cache_window(messages, max_messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.take(max_messages)
+  end
+
+  defp take_recent_chronological(messages, limit) do
+    messages
+    |> Enum.reverse()
+    |> Enum.take(limit)
+    |> Enum.reverse()
+  end
+
+  defp load_messages_from_repo(state, key, limit) do
     case repo_server(state.repo) do
       nil ->
         {:error, :disabled}
@@ -232,7 +247,7 @@ defmodule FermixCore.Memory.ConversationStore do
                    chat_id: elem(key, 1),
                    thread_scope: elem(key, 2)
                  },
-                 limit: state.max_messages,
+                 limit: limit,
                  server: repo
                ) do
           {:ok, Enum.map(rows, &to_history_message/1)}

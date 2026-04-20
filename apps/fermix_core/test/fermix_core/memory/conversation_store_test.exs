@@ -207,5 +207,26 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       history = ConversationStore.get_history(@key, server: restarted)
       assert ["hello", "hi there"] == Enum.map(history, & &1.content)
     end
+
+    test "backfills persisted history after cache eviction while keeping a rolling hot window", %{
+      store: store
+    } do
+      for i <- 1..8 do
+        ConversationStore.add_message(@key, "user", "msg_#{i}", server: store)
+      end
+
+      sync(store)
+
+      :sys.replace_state(store, fn state ->
+        %{state | conversations: %{}}
+      end)
+
+      history = ConversationStore.get_history(@key, 8, server: store)
+      assert Enum.map(history, & &1.content) == Enum.map(1..8, &"msg_#{&1}")
+
+      cached = :sys.get_state(store).conversations[@key]
+      assert length(cached) == 5
+      assert Enum.map(Enum.reverse(cached), & &1.content) == Enum.map(4..8, &"msg_#{&1}")
+    end
   end
 end

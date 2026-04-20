@@ -1,14 +1,10 @@
 defmodule FermixCore.Memory.Store do
   @moduledoc """
-  ETS-backed key-value memory store scoped by conversation.
+  ETS-backed key-value memory store with durable SQLite backing.
 
-  Each memory is keyed by {conversation_key, key} and stores a value
-  with a timestamp. Designed for agent fact storage during conversations.
-
-  The M3 runtime uses `{channel, chat_id, thread_scope}` keys for thread-aware
-  conversations. `{channel, chat_id}` remains supported as a legacy namespace
-  for existing tool contexts and callers; the store does not normalize between
-  the two arities.
+  Existing callers keep using conversation keys directly. Internal callers can
+  also address explicit `owner`, `conversation`, or `agent` scopes without
+  changing the public function arity.
   """
 
   use GenServer
@@ -20,6 +16,11 @@ defmodule FermixCore.Memory.Store do
 
   @type thread_scope :: :root | String.t() | integer()
   @type conversation_key :: {String.t(), String.t()} | {String.t(), String.t(), thread_scope()}
+  @type explicit_scope ::
+          {:owner, String.t()}
+          | {:conversation, conversation_key()}
+          | {:agent, String.t()}
+  @type memory_scope :: conversation_key() | explicit_scope()
 
   # --- Client API ---
 
@@ -29,38 +30,38 @@ defmodule FermixCore.Memory.Store do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @spec store(conversation_key(), String.t(), String.t(), keyword()) :: :ok
-  def store(conv_key, key, value, opts \\ [])
+  @spec store(memory_scope(), String.t(), String.t(), keyword()) :: :ok
+  def store(scope, key, value, opts \\ [])
       when is_binary(key) and is_binary(value) do
-    assert_conversation_key!(conv_key)
+    assert_scope!(scope)
 
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:store, conv_key, key, value})
+    GenServer.call(server, {:store, scope, key, value})
   end
 
-  @spec recall(conversation_key(), String.t(), keyword()) ::
+  @spec recall(memory_scope(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, :not_found}
-  def recall(conv_key, key, opts \\ []) when is_binary(key) do
-    assert_conversation_key!(conv_key)
+  def recall(scope, key, opts \\ []) when is_binary(key) do
+    assert_scope!(scope)
 
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:recall, conv_key, key})
+    GenServer.call(server, {:recall, scope, key})
   end
 
-  @spec recall_all(conversation_key(), keyword()) :: %{String.t() => String.t()}
-  def recall_all(conv_key, opts \\ []) do
-    assert_conversation_key!(conv_key)
+  @spec recall_all(memory_scope(), keyword()) :: %{String.t() => String.t()}
+  def recall_all(scope, opts \\ []) do
+    assert_scope!(scope)
 
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:recall_all, conv_key})
+    GenServer.call(server, {:recall_all, scope})
   end
 
-  @spec delete(conversation_key(), String.t(), keyword()) :: :ok
-  def delete(conv_key, key, opts \\ []) when is_binary(key) do
-    assert_conversation_key!(conv_key)
+  @spec delete(memory_scope(), String.t(), keyword()) :: :ok
+  def delete(scope, key, opts \\ []) when is_binary(key) do
+    assert_scope!(scope)
 
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:delete, conv_key, key})
+    GenServer.call(server, {:delete, scope, key})
   end
 
   # --- GenServer Callbacks ---
@@ -79,53 +80,57 @@ defmodule FermixCore.Memory.Store do
   end
 
   @impl true
-  def handle_call({:store, conv_key, key, value}, _from, state) do
-    persist_memory!(state, conv_key, key, value)
-    :ets.insert(state.table, {{conv_key, key}, value, DateTime.utc_now()})
+  def handle_call({:store, scope, key, value}, _from, state) do
+    scope_ref = normalize_scope!(scope, state)
+    persist_memory!(state, scope_ref, key, value)
+    put_cached_memory(state.table, scope_ref, key, value)
     {:reply, :ok, state}
   end
 
-  def handle_call({:recall, conv_key, key}, _from, state) do
-    result =
-      case :ets.lookup(state.table, {conv_key, key}) do
-        [{_, value, _timestamp}] -> {:ok, value}
-        [] -> recall_from_repo(state, conv_key, key)
-      end
-
+  def handle_call({:recall, scope, key}, _from, state) do
+    scope_ref = normalize_scope!(scope, state)
+    result = recall_value(state, scope_ref, key)
     {:reply, result, state}
   end
 
-  def handle_call({:recall_all, conv_key}, _from, state) do
-    hydrate_conversation_from_repo(state, conv_key)
-
-    memories =
-      state.table
-      |> recall_all_from_table(conv_key)
-
+  def handle_call({:recall_all, scope}, _from, state) do
+    scope_ref = normalize_scope!(scope, state)
+    memories = recall_scope(state, scope_ref)
     {:reply, memories, state}
   end
 
-  def handle_call({:delete, conv_key, key}, _from, state) do
-    delete_memory!(state, conv_key, key)
-    :ets.delete(state.table, {conv_key, key})
+  def handle_call({:delete, scope, key}, _from, state) do
+    scope_ref = normalize_scope!(scope, state)
+    delete_memory!(state, scope_ref, key)
+    delete_cached_memory(state.table, scope_ref, key)
     {:reply, :ok, state}
   end
 
-  defp recall_all_from_table(table, conv_key) do
-    pattern = {{conv_key, :"$1"}, :"$2", :_}
+  defp recall_value(state, scope_ref, key) do
+    case recall_cached_value(state.table, scope_ref, key) do
+      {:ok, value} ->
+        {:ok, value}
 
-    table
-    |> :ets.match(pattern)
-    |> Enum.into(%{}, fn [key, value] -> {key, value} end)
+      {:error, :not_found} ->
+        recall_repo_fallback(state, scope_ref, key)
+    end
   end
 
-  defp recall_from_repo(state, conv_key, key) do
-    case repo_lookup(state, conv_key, key) do
+  defp recall_repo_fallback(state, scope_ref, key) do
+    case repo_server(state.repo) do
+      nil -> {:error, :not_found}
+      repo -> recall_repo_value(state.table, repo, scope_ref, key)
+    end
+  end
+
+  defp recall_repo_value(table, repo, scope_ref, key) do
+    case repo_lookup(repo, scope_ref, key) do
       {:ok, memory} ->
-        :ets.insert(state.table, {{conv_key, key}, memory.value, DateTime.utc_now()})
+        put_cached_memory(table, scope_ref, key, memory.value)
         {:ok, memory.value}
 
       {:error, :not_found} ->
+        delete_cached_memory(table, scope_ref, key)
         {:error, :not_found}
 
       {:error, reason} ->
@@ -133,112 +138,90 @@ defmodule FermixCore.Memory.Store do
     end
   end
 
-  defp hydrate_conversation_from_repo(state, conv_key) do
-    case repo_list(state, conv_key) do
-      {:ok, memories} ->
-        Enum.each(memories, fn memory ->
-          :ets.insert(state.table, {{conv_key, memory.key}, memory.value, DateTime.utc_now()})
-        end)
+  defp recall_cached_value(table, scope_ref, key) do
+    case :ets.lookup(table, cache_key(scope_ref, key)) do
+      [{_, value, _timestamp}] -> {:ok, value}
+      [] -> {:error, :not_found}
+    end
+  end
 
-      {:error, :disabled} ->
-        :ok
+  defp recall_scope(state, scope_ref) do
+    case repo_server(state.repo) do
+      nil -> cached_scope_memories(state.table, scope_ref)
+      repo -> sync_scope_from_repo(state.table, repo, scope_ref)
+    end
+  end
+
+  defp sync_scope_from_repo(table, repo, scope_ref) do
+    case repo_list(repo, scope_ref) do
+      {:ok, memories} ->
+        replace_cached_scope(table, scope_ref, memories)
+        Enum.into(memories, %{}, fn memory -> {memory.key, memory.value} end)
 
       {:error, reason} ->
         raise "memory repo recall_all failed: #{inspect(reason)}"
     end
   end
 
-  defp persist_memory!(state, conv_key, key, value) do
-    case maybe_upsert_repo(state, conv_key, key, value) do
-      :ok -> :ok
-      {:error, :disabled} -> :ok
-      {:error, reason} -> raise "memory repo write failed: #{inspect(reason)}"
-    end
+  defp cached_scope_memories(table, scope_ref) do
+    pattern = {{namespace(scope_ref), :"$1"}, :"$2", :_}
+
+    table
+    |> :ets.match(pattern)
+    |> Enum.into(%{}, fn [key, value] -> {key, value} end)
   end
 
-  defp delete_memory!(state, conv_key, key) do
-    case maybe_delete_repo(state, conv_key, key) do
-      :ok -> :ok
-      {:error, :disabled} -> :ok
-      {:error, reason} -> raise "memory repo delete failed: #{inspect(reason)}"
-    end
+  defp replace_cached_scope(table, scope_ref, memories) do
+    delete_cached_scope(table, scope_ref)
+
+    Enum.each(memories, fn memory ->
+      put_cached_memory(table, scope_ref, memory.key, memory.value)
+    end)
   end
 
-  defp maybe_upsert_repo(state, conv_key, key, value) do
+  defp delete_cached_scope(table, scope_ref) do
+    :ets.match_delete(table, {{namespace(scope_ref), :_}, :_, :_})
+  end
+
+  defp persist_memory!(state, scope_ref, key, value) do
     case repo_server(state.repo) do
       nil ->
-        {:error, :disabled}
+        :ok
 
       repo ->
-        Repo.upsert_memory(
-          %{
-            agent_id: state.agent_id,
-            owner_id: state.owner_id,
-            scope_type: "conversation",
-            scope_id: scope_id(conv_key),
-            category: "fact",
-            key: key,
-            value: value
-          },
-          server: repo
-        )
-        |> to_ok()
+        case Repo.upsert_memory(repo_attrs(scope_ref, key, value), server: repo) do
+          {:ok, _memory} -> :ok
+          {:error, :disabled} -> :ok
+          {:error, reason} -> raise "memory repo write failed: #{inspect(reason)}"
+        end
     end
   end
 
-  defp maybe_delete_repo(state, conv_key, key) do
+  defp delete_memory!(state, scope_ref, key) do
     case repo_server(state.repo) do
       nil ->
-        {:error, :disabled}
+        :ok
 
       repo ->
-        Repo.delete_memory(
-          %{
-            agent_id: state.agent_id,
-            owner_id: state.owner_id,
-            scope_type: "conversation",
-            scope_id: scope_id(conv_key),
-            key: key
-          },
-          server: repo
-        )
+        case delete_repo_memory(repo, scope_ref, key) do
+          :ok -> :ok
+          {:error, :disabled} -> :ok
+          {:error, reason} -> raise "memory repo delete failed: #{inspect(reason)}"
+        end
     end
   end
 
-  defp repo_lookup(state, conv_key, key) do
-    case repo_server(state.repo) do
-      nil ->
-        {:error, :not_found}
-
-      repo ->
-        Repo.get_memory(
-          %{
-            agent_id: state.agent_id,
-            owner_id: state.owner_id,
-            scope_type: "conversation",
-            scope_id: scope_id(conv_key),
-            key: key
-          },
-          server: repo
-        )
+  defp repo_lookup(repo, scope_ref, key) do
+    case Repo.get_memory(repo_selector(scope_ref, key), server: repo) do
+      {:error, :not_found} -> migrate_fallback_lookup(repo, scope_ref, key)
+      result -> result
     end
   end
 
-  defp repo_list(state, conv_key) do
-    case repo_server(state.repo) do
-      nil ->
-        {:error, :disabled}
-
-      repo ->
-        Repo.get_memories(
-          %{
-            agent_id: state.agent_id,
-            owner_id: state.owner_id,
-            scope_type: "conversation",
-            scope_id: scope_id(conv_key)
-          },
-          server: repo
-        )
+  defp repo_list(repo, scope_ref) do
+    case Repo.get_memories(repo_scope_selector(scope_ref), server: repo) do
+      {:ok, []} -> migrate_fallback_list(repo, scope_ref)
+      result -> result
     end
   end
 
@@ -250,12 +233,111 @@ defmodule FermixCore.Memory.Store do
     end
   end
 
-  defp to_ok({:ok, _value}), do: :ok
-  defp to_ok(other), do: other
+  defp normalize_scope!({:owner, owner_id}, state) when is_binary(owner_id) do
+    scope_ref(state.agent_id, owner_id, "owner", owner_id, nil)
+  end
 
-  defp scope_id({channel, chat_id}), do: Enum.join([channel, chat_id, "root"], ":")
+  defp normalize_scope!({:agent, agent_id}, state) when is_binary(agent_id) do
+    scope_ref(agent_id, state.owner_id, "agent", agent_id, nil)
+  end
 
-  defp scope_id({channel, chat_id, thread_scope}) do
+  defp normalize_scope!({:conversation, conversation_key}, state) do
+    conversation_scope_ref(conversation_key, state)
+  end
+
+  defp normalize_scope!(conversation_key, state) do
+    conversation_scope_ref(conversation_key, state)
+  end
+
+  defp conversation_scope_ref({channel, chat_id}, state)
+       when is_binary(channel) and is_binary(chat_id) do
+    scope_ref(
+      state.agent_id,
+      state.owner_id,
+      "conversation",
+      legacy_scope_id(channel, chat_id),
+      fallback_scope_ref(state.agent_id, state.owner_id, channel, chat_id)
+    )
+  end
+
+  defp conversation_scope_ref({channel, chat_id, thread_scope}, state)
+       when is_binary(channel) and is_binary(chat_id) do
+    scope_ref(
+      state.agent_id,
+      state.owner_id,
+      "conversation",
+      conversation_scope_id(channel, chat_id, thread_scope),
+      nil
+    )
+  end
+
+  defp scope_ref(agent_id, owner_id, scope_type, scope_id, fallback_scope_ref) do
+    # All scopes stay namespaced by both agent_id and owner_id so future
+    # multi-agent or multi-owner installs do not collide in SQLite or ETS.
+    %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: scope_type,
+      scope_id: scope_id,
+      fallback_scope_ref: fallback_scope_ref
+    }
+  end
+
+  defp repo_attrs(scope_ref, key, value) do
+    %{
+      agent_id: scope_ref.agent_id,
+      owner_id: scope_ref.owner_id,
+      scope_type: scope_ref.scope_type,
+      scope_id: scope_ref.scope_id,
+      category: "fact",
+      key: key,
+      value: value
+    }
+  end
+
+  defp repo_selector(scope_ref, key) do
+    repo_scope_selector(scope_ref)
+    |> Map.put(:key, key)
+  end
+
+  defp repo_scope_selector(scope_ref) do
+    %{
+      agent_id: scope_ref.agent_id,
+      owner_id: scope_ref.owner_id,
+      scope_type: scope_ref.scope_type,
+      scope_id: scope_ref.scope_id
+    }
+  end
+
+  defp cache_key(scope_ref, key) do
+    {namespace(scope_ref), key}
+  end
+
+  defp namespace(scope_ref) do
+    {scope_ref.agent_id, scope_ref.owner_id, scope_ref.scope_type, scope_ref.scope_id}
+  end
+
+  defp put_cached_memory(table, scope_ref, key, value) do
+    :ets.insert(table, {cache_key(scope_ref, key), value, DateTime.utc_now()})
+  end
+
+  defp delete_cached_memory(table, scope_ref, key) do
+    :ets.delete(table, cache_key(scope_ref, key))
+  end
+
+  defp legacy_scope_id(channel, chat_id), do: "legacy:#{channel}:#{chat_id}"
+
+  defp fallback_scope_ref(agent_id, owner_id, channel, chat_id) do
+    %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "conversation",
+      scope_id: conversation_scope_id(channel, chat_id, :root),
+      fallback_scope_ref: nil
+    }
+  end
+
+  defp conversation_scope_id(channel, chat_id, thread_scope) do
     Enum.join([channel, chat_id, normalize_thread_scope(thread_scope)], ":")
   end
 
@@ -263,12 +345,87 @@ defmodule FermixCore.Memory.Store do
   defp normalize_thread_scope(value) when is_binary(value), do: value
   defp normalize_thread_scope(value) when is_integer(value), do: Integer.to_string(value)
 
-  defp assert_conversation_key!({channel, chat_id})
+  defp delete_repo_memory(repo, scope_ref, key) do
+    Repo.delete_memory(repo_selector(scope_ref, key), server: repo)
+  end
+
+  defp migrate_fallback_lookup(_repo, %{fallback_scope_ref: nil}, _key), do: {:error, :not_found}
+
+  defp migrate_fallback_lookup(repo, scope_ref, key) do
+    fallback_scope_ref = scope_ref.fallback_scope_ref
+
+    with {:ok, memory} <- Repo.get_memory(repo_selector(fallback_scope_ref, key), server: repo),
+         {:ok, migrated} <- migrate_memory(repo, scope_ref, memory),
+         :ok <- Repo.delete_memory(repo_selector(fallback_scope_ref, key), server: repo) do
+      {:ok, migrated}
+    end
+  end
+
+  defp migrate_fallback_list(_repo, %{fallback_scope_ref: nil}), do: {:ok, []}
+
+  defp migrate_fallback_list(repo, scope_ref) do
+    fallback_scope_ref = scope_ref.fallback_scope_ref
+
+    with {:ok, []} <- Repo.get_memories(repo_scope_selector(fallback_scope_ref), server: repo) do
+      {:ok, []}
+    else
+      {:ok, memories} ->
+        with {:ok, migrated} <- migrate_memories(repo, scope_ref, memories),
+             :ok <- Repo.delete_memory(repo_scope_selector(fallback_scope_ref), server: repo) do
+          {:ok, migrated}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp migrate_memories(repo, scope_ref, memories) do
+    Enum.reduce_while(memories, {:ok, []}, fn memory, {:ok, acc} ->
+      case migrate_memory(repo, scope_ref, memory) do
+        {:ok, migrated} -> {:cont, {:ok, [migrated | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, migrated} -> {:ok, Enum.reverse(migrated)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp migrate_memory(repo, scope_ref, memory) do
+    Repo.upsert_memory(
+      %{
+        agent_id: scope_ref.agent_id,
+        owner_id: scope_ref.owner_id,
+        scope_type: scope_ref.scope_type,
+        scope_id: scope_ref.scope_id,
+        category: memory.category,
+        key: memory.key,
+        value: memory.value,
+        confidence: memory.confidence,
+        promote_target: memory.promote_target,
+        source_message_id: memory.source_message_id,
+        created_at: memory.created_at,
+        updated_at: memory.updated_at
+      },
+      server: repo
+    )
+  end
+
+  defp assert_scope!({:owner, owner_id}) when is_binary(owner_id), do: :ok
+  defp assert_scope!({:agent, agent_id}) when is_binary(agent_id), do: :ok
+
+  defp assert_scope!({:conversation, conversation_key}) do
+    assert_scope!(conversation_key)
+  end
+
+  defp assert_scope!({channel, chat_id})
        when is_binary(channel) and is_binary(chat_id) do
     :ok
   end
 
-  defp assert_conversation_key!({channel, chat_id, _thread_scope})
+  defp assert_scope!({channel, chat_id, _thread_scope})
        when is_binary(channel) and is_binary(chat_id) do
     :ok
   end
