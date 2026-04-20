@@ -153,5 +153,167 @@ defmodule FermixCore.Memory.StoreTest do
       assert {:ok, "Alice"} = Store.recall(conv_key, "user_name", server: restarted)
       assert %{"user_name" => "Alice"} = Store.recall_all(conv_key, server: restarted)
     end
+
+    test "recall/3 reloads a single key from sqlite after cache eviction", %{store: store} do
+      conv_key = {"telegram", "chat_1", :root}
+
+      assert :ok = Store.store(conv_key, "user_name", "Alice", server: store)
+
+      evict_store_cache(store)
+
+      assert {:ok, "Alice"} = Store.recall(conv_key, "user_name", server: store)
+    end
+
+    test "persists owner and agent scoped memories across restart", %{repo: repo, store: store} do
+      assert :ok = Store.store({:owner, "default"}, "timezone", "UTC", server: store)
+      assert :ok = Store.store({:agent, "main"}, "workspace", "/tmp/fermix", server: store)
+      assert :ok = GenServer.stop(store)
+
+      restarted = :"store_scoped_restarted_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: restarted,
+        start: {Store, :start_link, [[name: restarted, repo: repo]]}
+      })
+
+      assert {:ok, "UTC"} = Store.recall({:owner, "default"}, "timezone", server: restarted)
+
+      assert {:ok, "/tmp/fermix"} =
+               Store.recall({:agent, "main"}, "workspace", server: restarted)
+    end
+
+    test "keeps legacy and thread-aware root namespaces distinct in sqlite", %{
+      repo: repo,
+      store: store
+    } do
+      legacy_key = {"telegram", "chat_1"}
+      root_key = {"telegram", "chat_1", :root}
+
+      assert :ok = Store.store(legacy_key, "topic", "legacy", server: store)
+      assert :ok = Store.store(root_key, "topic", "root", server: store)
+      assert :ok = GenServer.stop(store)
+
+      restarted = :"store_namespace_restarted_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: restarted,
+        start: {Store, :start_link, [[name: restarted, repo: repo]]}
+      })
+
+      assert {:ok, "legacy"} = Store.recall(legacy_key, "topic", server: restarted)
+      assert {:ok, "root"} = Store.recall(root_key, "topic", server: restarted)
+    end
+
+    test "migrates TEZ-374 legacy rows into the new legacy namespace", %{repo: repo, store: store} do
+      legacy_key = {"telegram", "chat_legacy"}
+      root_key = {"telegram", "chat_legacy", :root}
+      root_scope_id = "telegram:chat_legacy:root"
+      legacy_scope_id = "legacy:telegram:chat_legacy"
+
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: root_scope_id,
+                   category: "fact",
+                   key: "topic",
+                   value: "historic"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, "historic"} = Store.recall(legacy_key, "topic", server: store)
+      assert {:error, :not_found} = Store.recall(root_key, "topic", server: store)
+
+      assert {:error, :not_found} =
+               Repo.get_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: root_scope_id,
+                   key: "topic"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, migrated} =
+               Repo.get_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: legacy_scope_id,
+                   key: "topic"
+                 },
+                 server: repo
+               )
+
+      assert migrated.value == "historic"
+
+      assert :ok = Store.store(root_key, "topic", "fresh-root", server: store)
+      assert {:ok, "historic"} = Store.recall(legacy_key, "topic", server: store)
+      assert {:ok, "fresh-root"} = Store.recall(root_key, "topic", server: store)
+    end
+
+    test "recall_all prefers sqlite values when ETS diverges", %{repo: repo, store: store} do
+      conv_key = {"telegram", "chat_1", :root}
+      scope_id = "telegram:chat_1:root"
+
+      assert :ok = Store.store(conv_key, "topic", "cached", server: store)
+
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: scope_id,
+                   category: "fact",
+                   key: "topic",
+                   value: "persisted"
+                 },
+                 server: repo
+               )
+
+      assert %{"topic" => "persisted"} = Store.recall_all(conv_key, server: store)
+    end
+
+    test "owner and agent scopes stay namespaced by both agent_id and owner_id", %{repo: repo} do
+      main_store = start_repo_backed_store(repo, agent_id: "main", owner_id: "default")
+      side_agent_store = start_repo_backed_store(repo, agent_id: "sidecar", owner_id: "default")
+      side_owner_store = start_repo_backed_store(repo, agent_id: "main", owner_id: "secondary")
+
+      assert :ok = Store.store({:owner, "default"}, "timezone", "UTC", server: main_store)
+      assert {:ok, "UTC"} = Store.recall({:owner, "default"}, "timezone", server: main_store)
+
+      assert {:error, :not_found} =
+               Store.recall({:owner, "default"}, "timezone", server: side_agent_store)
+
+      assert :ok = Store.store({:agent, "main"}, "workspace", "/tmp/fermix", server: main_store)
+
+      assert {:ok, "/tmp/fermix"} =
+               Store.recall({:agent, "main"}, "workspace", server: main_store)
+
+      assert {:error, :not_found} =
+               Store.recall({:agent, "main"}, "workspace", server: side_owner_store)
+    end
+  end
+
+  defp start_repo_backed_store(repo, opts) do
+    store_name = :"store_#{System.unique_integer([:positive])}"
+
+    start_supervised!(%{
+      id: store_name,
+      start: {Store, :start_link, [[name: store_name, repo: repo] ++ opts]}
+    })
+  end
+
+  defp evict_store_cache(store) do
+    :sys.replace_state(store, fn state ->
+      %{state | table: :ets.new(:fermix_memory, [:set, :private])}
+    end)
   end
 end
