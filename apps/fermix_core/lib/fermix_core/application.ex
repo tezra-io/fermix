@@ -9,6 +9,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
@@ -27,6 +28,7 @@ defmodule FermixCore.Application do
         maybe_token_manager(),
         SkillRegistry,
         Registry,
+        Repo,
         ConversationStore,
         Store,
         BootReport,

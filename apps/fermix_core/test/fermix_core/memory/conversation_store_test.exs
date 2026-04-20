@@ -2,6 +2,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
 
   @key {"telegram", "chat_123", :root}
   @key2 {"discord", "chat_456", :root}
@@ -159,6 +160,52 @@ defmodule FermixCore.Memory.ConversationStoreTest do
   test "rejects non-string content", %{store: store} do
     assert_raise FunctionClauseError, fn ->
       ConversationStore.add_message(@key, "user", 123, server: store)
+    end
+  end
+
+  describe "durable persistence" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-conversation-store-#{unique}.db")
+      repo_name = :"conversation_repo_#{unique}"
+      store_name = :"conversation_store_#{unique}"
+
+      start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
+      start_supervised!(%{
+        id: store_name,
+        start:
+          {ConversationStore, :start_link, [[name: store_name, max_messages: 5, repo: repo_name]]}
+      })
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+          File.rm(path)
+        end)
+      end)
+
+      %{repo: repo_name, store: store_name}
+    end
+
+    test "reloads conversation history from sqlite after the store restarts", %{
+      repo: repo,
+      store: store
+    } do
+      ConversationStore.add_message(@key, "user", "hello", server: store)
+      ConversationStore.add_message(@key, "assistant", "hi there", server: store)
+      sync(store)
+
+      assert :ok = GenServer.stop(store)
+
+      restarted = :"conversation_store_restarted_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: restarted,
+        start: {ConversationStore, :start_link, [[name: restarted, max_messages: 5, repo: repo]]}
+      })
+
+      history = ConversationStore.get_history(@key, server: restarted)
+      assert ["hello", "hi there"] == Enum.map(history, & &1.content)
     end
   end
 end

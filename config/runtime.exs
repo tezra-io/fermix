@@ -138,6 +138,33 @@ config :fermix_core,
 
 existing_trace = Application.get_env(:fermix_core, :trace, [])
 existing_log = Application.get_env(:fermix_core, :log, [])
+existing_memory = Application.get_env(:fermix_core, :memory, [])
+
+memory_enabled =
+  case System.get_env("FERMIX_MEMORY_ENABLED") do
+    "0" -> false
+    "false" -> false
+    "FALSE" -> false
+    "1" -> true
+    "true" -> true
+    "TRUE" -> true
+    _ -> Keyword.get(existing_memory, :enabled, true)
+  end
+
+memory_database_path =
+  System.get_env("FERMIX_MEMORY_DB_PATH") ||
+    Keyword.get(
+      existing_memory,
+      :database_path,
+      Path.join(FermixCore.Setup.ConfigStore.fermix_home(), "memory.db")
+    )
+
+config :fermix_core,
+       :memory,
+       Keyword.merge(existing_memory,
+         enabled: memory_enabled,
+         database_path: memory_database_path
+       )
 
 config :fermix_core,
        :trace,

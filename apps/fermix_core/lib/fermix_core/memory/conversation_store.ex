@@ -8,6 +8,9 @@ defmodule FermixCore.Memory.ConversationStore do
 
   use GenServer
 
+  alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo
+
   @type thread_scope :: :root | String.t() | integer()
   @type conversation_key :: {channel :: String.t(), chat_id :: String.t(), thread_scope()}
   @type message :: %{
@@ -24,7 +27,7 @@ defmodule FermixCore.Memory.ConversationStore do
   def start_link(opts \\ []) do
     {max_messages, opts} = Keyword.pop(opts, :max_messages, @max_messages_default)
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, max_messages, [{:name, name} | opts])
+    GenServer.start_link(__MODULE__, {max_messages, opts}, name: name)
   end
 
   @spec add_message(conversation_key(), String.t(), String.t(), keyword()) :: :ok
@@ -32,7 +35,7 @@ defmodule FermixCore.Memory.ConversationStore do
       when is_binary(channel) and is_binary(chat_id) and
              is_binary(role) and is_binary(content) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.cast(server, {:add_message, key, role, content})
+    GenServer.call(server, {:add_message, key, role, content, opts})
   end
 
   @spec get_history(conversation_key(), non_neg_integer() | keyword()) :: [message()]
@@ -58,7 +61,7 @@ defmodule FermixCore.Memory.ConversationStore do
   def clear({channel, chat_id, _thread_scope} = key, opts \\ [])
       when is_binary(channel) and is_binary(chat_id) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.cast(server, {:clear, key})
+    GenServer.call(server, {:clear, key})
   end
 
   @spec list_conversations(keyword()) :: [conversation_key()]
@@ -70,20 +73,27 @@ defmodule FermixCore.Memory.ConversationStore do
   # --- GenServer Callbacks ---
 
   @impl true
-  def init(max_messages) when is_integer(max_messages) and max_messages > 0 do
-    {:ok, %{conversations: %{}, max_messages: max_messages}}
+  def init({max_messages, opts}) when is_integer(max_messages) and max_messages > 0 do
+    {:ok,
+     %{
+       conversations: %{},
+       max_messages: max_messages,
+       repo: Keyword.get(opts, :repo, Repo),
+       agent_id: Config.agent_id(opts),
+       owner_id: Config.owner_id(opts)
+     }}
   end
 
   @impl true
-  def handle_cast({:add_message, {channel, chat_id, _thread_scope} = key, role, content}, state) do
-    message = %{
-      role: role,
-      content: content,
-      timestamp: DateTime.utc_now()
-    }
+  def handle_call(
+        {:add_message, {channel, chat_id, _thread_scope} = key, role, content, opts},
+        _from,
+        state
+      ) do
+    message = new_message(role, content)
 
-    messages = Map.get(state.conversations, key, [])
-    updated = [message | messages] |> Enum.take(state.max_messages)
+    persist_message!(state, key, role, content, opts, message.timestamp)
+    updated = append_message(state, key, message)
 
     :telemetry.execute(
       [:fermix, :memory, :message],
@@ -91,11 +101,12 @@ defmodule FermixCore.Memory.ConversationStore do
       %{channel: channel, chat_id: chat_id}
     )
 
-    {:noreply, put_in(state, [:conversations, key], updated)}
+    {:reply, :ok, put_in(state, [:conversations, key], updated)}
   end
 
-  def handle_cast({:clear, key}, state) do
-    {:noreply, %{state | conversations: Map.delete(state.conversations, key)}}
+  def handle_call({:clear, key}, _from, state) do
+    delete_messages!(state, key)
+    {:reply, :ok, %{state | conversations: Map.delete(state.conversations, key)}}
   end
 
   @impl true
@@ -104,16 +115,144 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   def handle_call({:get_history, key, limit}, _from, state) when is_integer(limit) do
-    messages =
-      state.conversations
-      |> Map.get(key, [])
-      |> Enum.take(limit)
-      |> Enum.reverse()
-
-    {:reply, messages, state}
+    {messages, next_state} = get_or_load_history(state, key)
+    {:reply, history_slice(messages, limit), next_state}
   end
 
   def handle_call(:list_conversations, _from, state) do
     {:reply, Map.keys(state.conversations), state}
+  end
+
+  defp new_message(role, content) do
+    %{
+      role: role,
+      content: content,
+      timestamp: DateTime.utc_now()
+    }
+  end
+
+  defp append_message(state, key, message) do
+    state.conversations
+    |> Map.get(key, [])
+    |> then(&[message | &1])
+    |> Enum.take(state.max_messages)
+  end
+
+  defp get_or_load_history(state, key) do
+    case Map.fetch(state.conversations, key) do
+      {:ok, messages} ->
+        {messages, state}
+
+      :error ->
+        case load_messages_from_repo(state, key) do
+          {:ok, []} ->
+            {[], state}
+
+          {:ok, messages} ->
+            cached = Enum.reverse(messages)
+            {cached, put_in(state, [:conversations, key], cached)}
+
+          {:error, :disabled} ->
+            {[], state}
+
+          {:error, reason} ->
+            raise "conversation repo load failed: #{inspect(reason)}"
+        end
+    end
+  end
+
+  defp history_slice(messages, limit) do
+    messages
+    |> Enum.take(limit)
+    |> Enum.reverse()
+  end
+
+  defp persist_message!(state, key, role, content, opts, timestamp) do
+    case repo_server(state.repo) do
+      nil ->
+        :ok
+
+      repo ->
+        case Repo.insert_message(
+               %{
+                 agent_id: Keyword.get(opts, :agent_id, state.agent_id),
+                 owner_id: Keyword.get(opts, :owner_id, state.owner_id),
+                 channel: elem(key, 0),
+                 chat_id: elem(key, 1),
+                 thread_scope: elem(key, 2),
+                 sender: Keyword.get(opts, :sender, role),
+                 role: role,
+                 kind: Keyword.get(opts, :kind, "chat_message"),
+                 content: content,
+                 metadata: Keyword.get(opts, :metadata),
+                 created_at: timestamp
+               },
+               server: repo
+             ) do
+          {:ok, _message} -> :ok
+          {:error, :disabled} -> :ok
+          {:error, reason} -> raise "conversation repo write failed: #{inspect(reason)}"
+        end
+    end
+  end
+
+  defp delete_messages!(state, key) do
+    case repo_server(state.repo) do
+      nil ->
+        :ok
+
+      repo ->
+        case Repo.delete_messages(
+               %{
+                 agent_id: state.agent_id,
+                 channel: elem(key, 0),
+                 chat_id: elem(key, 1),
+                 thread_scope: elem(key, 2)
+               },
+               server: repo
+             ) do
+          :ok -> :ok
+          {:error, :disabled} -> :ok
+          {:error, reason} -> raise "conversation repo delete failed: #{inspect(reason)}"
+        end
+    end
+  end
+
+  defp load_messages_from_repo(state, key) do
+    case repo_server(state.repo) do
+      nil ->
+        {:error, :disabled}
+
+      repo ->
+        with {:ok, rows} <-
+               Repo.get_messages(
+                 %{
+                   agent_id: state.agent_id,
+                   channel: elem(key, 0),
+                   chat_id: elem(key, 1),
+                   thread_scope: elem(key, 2)
+                 },
+                 limit: state.max_messages,
+                 server: repo
+               ) do
+          {:ok, Enum.map(rows, &to_history_message/1)}
+        end
+    end
+  end
+
+  defp to_history_message(row) do
+    %{
+      role: row.role,
+      content: row.content,
+      timestamp: row.created_at
+    }
+  end
+
+  defp repo_server(repo) when is_pid(repo), do: repo
+
+  defp repo_server(repo) when is_atom(repo) do
+    if Process.whereis(repo) && Repo.enabled?(server: repo) do
+      repo
+    end
   end
 end

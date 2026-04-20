@@ -9,6 +9,12 @@ config :logger, level: :warning
 
 config :fermix_core, :log, enabled: false
 
+config :fermix_core, :memory,
+  enabled: false,
+  database_path: Path.join(System.tmp_dir!(), "fermix-test-memory.db"),
+  owner_id: "default",
+  agent_id: "main"
+
 config :fermix_core,
   providers: [
     openai: [

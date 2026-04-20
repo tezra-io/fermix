@@ -372,14 +372,16 @@ defmodule FermixCore.Agents.MainAgent do
           conversation_key,
           "user",
           msg.content,
-          server: state.conversation_store
+          server: state.conversation_store,
+          sender: msg.sender
         )
 
         ConversationStore.add_message(
           conversation_key,
           "assistant",
           result.response,
-          server: state.conversation_store
+          server: state.conversation_store,
+          sender: "main"
         )
 
         :telemetry.execute(
