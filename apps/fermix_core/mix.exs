@@ -25,6 +25,7 @@ defmodule FermixCore.MixProject do
 
   defp deps do
     [
+      {:exqlite, "~> 0.36.0"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"}
