@@ -50,10 +50,16 @@ config :fermix_core,
 
 config :fermix_core, :memory,
   enabled: true,
+  extraction_enabled: true,
+  extraction_timeout_ms: 5_000,
+  extraction_context_messages: 12,
+  extraction_min_confidence: 0.75,
   database_path: Path.expand("~/.fermix/memory.db"),
   prompt_base_dir: Path.expand("~/.fermix/memory"),
   prompt_user_token_cap: 800,
   prompt_memory_token_cap: 1600,
+  prompt_files_rebuild_hours: 12,
+  scheduler_enabled: true,
   owner_id: "default",
   agent_id: "main"
 
