@@ -182,7 +182,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     }
 
     opts
-    |> Keyword.take([:thread_ts, :thread_scope])
+    |> Keyword.take([:thread_ts, :thread_scope, :metadata, :chat_mode])
     |> Enum.into(message)
   end
 
@@ -198,6 +198,19 @@ defmodule FermixCore.Agents.MainAgentTest do
     # Synchronous call ensures all prior casts have been processed
     ConversationStore.list_conversations(server: conv_store)
   end
+
+  defp eventually(fun, attempts \\ 20)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    if fun.() do
+      true
+    else
+      Process.sleep(25)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 
   defp write_skill(skills_dir, name, body \\ "You are helpful.") do
     skill_dir = Path.join(skills_dir, name)
@@ -511,6 +524,159 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       # Clean up the Task
       assert_receive {:reply, _}, 5_000
+    end
+
+    test "skips background extraction when extraction is disabled", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      agent_name = :"extract_disabled_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             extraction_enabled: false
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([mock_response("No extraction")])
+
+      MainAgent.handle_message(make_message("Hello"), agent_name)
+
+      assert_receive {:reply, "No extraction"}, 5_000
+      assert eventually(fn -> length(MockProvider.get_calls()) == 1 end)
+      refute eventually(fn -> length(MockProvider.get_calls()) > 1 end)
+    end
+
+    test "does not block reply delivery while background extraction is slow", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      agent_name = :"extract_slow_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             extraction_enabled: true
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([
+        mock_response("Reply first"),
+        {:block, :extract, mock_response("[]")}
+      ])
+
+      MainAgent.handle_message(make_message("Hello with slow extraction"), agent_name)
+
+      assert_receive {:reply, "Reply first"}, 5_000
+      assert_receive {:mock_provider_blocked, :extract, extraction_pid}, 5_000
+      send(extraction_pid, {:continue, :extract})
+    end
+
+    test "passes Telegram shared-chat metadata through to background extraction", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      agent_name = :"extract_shared_mode_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             extraction_enabled: true
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([
+        mock_response("Shared chat reply"),
+        mock_response("[]")
+      ])
+
+      MainAgent.handle_message(
+        make_message("Remember this from the group chat",
+          metadata: %{chat_type: "group"}
+        ),
+        agent_name
+      )
+
+      assert_receive {:reply, "Shared chat reply"}, 5_000
+      assert eventually(fn -> length(MockProvider.get_calls()) == 2 end, 80)
+
+      [{main_messages, _main_opts}, {extraction_messages, _extraction_opts}] =
+        MockProvider.get_calls()
+
+      assert Enum.any?(
+               main_messages,
+               &(&1.role == "user" and &1.content == "Remember this from the group chat")
+             )
+
+      assert Enum.any?(
+               extraction_messages,
+               &(&1.role == "system" and &1.content =~ "Current chat mode: shared.")
+             )
+    end
+
+    test "keeps reply handling successful when background extraction fails", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      agent_name = :"extract_fail_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             extraction_enabled: true
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([
+        mock_response("Reply survives extraction failure"),
+        {:error, :extraction_failed}
+      ])
+
+      MainAgent.handle_message(make_message("Hello with failing extraction"), agent_name)
+
+      assert_receive {:reply, "Reply survives extraction failure"}, 5_000
+      assert eventually(fn -> length(MockProvider.get_calls()) == 2 end)
     end
 
     test "keeps the skill list static until reload_skills/1 is called", %{
