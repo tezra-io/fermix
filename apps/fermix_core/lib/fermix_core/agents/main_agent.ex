@@ -32,7 +32,10 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Extractor
   alias FermixCore.Memory.PromptFiles
+  alias FermixCore.Memory.Scheduler
+  alias FermixCore.Memory.Store
   alias FermixCore.Tools.Registry
 
   @type thread_scope :: :root | String.t() | integer()
@@ -117,6 +120,16 @@ defmodule FermixCore.Agents.MainAgent do
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       journal_base_dir: Keyword.get(opts, :journal_base_dir),
+      memory_store: Keyword.get(opts, :memory_store, Store),
+      memory_repo: Keyword.get(opts, :memory_repo, Config.repo_server(opts)),
+      memory_scheduler: Keyword.get(opts, :memory_scheduler, Scheduler),
+      memory_agent_id: Config.agent_id(opts),
+      memory_owner_id: Config.owner_id(opts),
+      extraction_enabled: Config.extraction_enabled?(opts),
+      extraction_timeout_ms: Config.extraction_timeout_ms(opts),
+      extraction_context_messages: Config.extraction_context_messages(opts),
+      extraction_min_confidence: Config.extraction_min_confidence(opts),
+      extraction_model: Config.extraction_model(opts),
       conversations: %{},
       task_refs: %{}
     }
@@ -326,7 +339,17 @@ defmodule FermixCore.Agents.MainAgent do
       available_skills: state.available_skills,
       conversation_store: state.conversation_store,
       task_supervisor: state.task_supervisor,
-      journal_base_dir: state.journal_base_dir
+      journal_base_dir: state.journal_base_dir,
+      memory_store: state.memory_store,
+      memory_repo: state.memory_repo,
+      memory_scheduler: state.memory_scheduler,
+      memory_agent_id: state.memory_agent_id,
+      memory_owner_id: state.memory_owner_id,
+      extraction_enabled: state.extraction_enabled,
+      extraction_timeout_ms: state.extraction_timeout_ms,
+      extraction_context_messages: state.extraction_context_messages,
+      extraction_min_confidence: state.extraction_min_confidence,
+      extraction_model: state.extraction_model
     }
   end
 
@@ -339,7 +362,7 @@ defmodule FermixCore.Agents.MainAgent do
   defp process_message(msg, state) do
     start = System.monotonic_time(:millisecond)
     conversation_key = conversation_key(msg)
-    prompt_memory = load_prompt_memory!()
+    prompt_memory = load_prompt_memory!(state.memory_agent_id)
 
     history = ConversationStore.get_history(conversation_key, server: state.conversation_store)
 
@@ -362,7 +385,11 @@ defmodule FermixCore.Agents.MainAgent do
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       task_supervisor: state.task_supervisor,
-      journal_base_dir: state.journal_base_dir
+      journal_base_dir: state.journal_base_dir,
+      memory_store: state.memory_store,
+      memory_repo: state.memory_repo,
+      memory_agent_id: state.memory_agent_id,
+      memory_owner_id: state.memory_owner_id
     }
 
     case AgentLoop.run(
@@ -380,7 +407,10 @@ defmodule FermixCore.Agents.MainAgent do
           "user",
           msg.content,
           server: state.conversation_store,
-          sender: msg.sender
+          sender: msg.sender,
+          agent_id: state.memory_agent_id,
+          owner_id: state.memory_owner_id,
+          metadata: Map.get(msg, :metadata)
         )
 
         ConversationStore.add_message(
@@ -388,7 +418,9 @@ defmodule FermixCore.Agents.MainAgent do
           "assistant",
           result.response,
           server: state.conversation_store,
-          sender: "main"
+          sender: "main",
+          agent_id: state.memory_agent_id,
+          owner_id: state.memory_owner_id
         )
 
         :telemetry.execute(
@@ -406,6 +438,7 @@ defmodule FermixCore.Agents.MainAgent do
         )
 
         deliver_reply(msg, result.response)
+        maybe_start_extraction(msg, history, result.response, state)
 
       {:error, reason} ->
         Logger.error("Agent loop failed: #{inspect(reason)}")
@@ -441,11 +474,110 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
-  defp load_prompt_memory! do
-    case PromptFiles.load(Config.agent_id()) do
+  defp load_prompt_memory!(agent_id) when is_binary(agent_id) do
+    case PromptFiles.load(agent_id) do
       {:ok, prompt_memory} -> prompt_memory
       {:error, reason} -> raise "prompt memory load failed: #{inspect(reason)}"
     end
+  end
+
+  defp maybe_start_extraction(_msg, _history, _assistant_response, %{extraction_enabled: false}),
+    do: :ok
+
+  defp maybe_start_extraction(msg, history, assistant_response, state) do
+    case Task.Supervisor.start_child(state.task_supervisor, fn ->
+           run_extraction(msg, history, assistant_response, state)
+         end) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("failed to start background extraction: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp run_extraction(msg, history, assistant_response, state) do
+    result =
+      Extractor.extract(
+        provider: state.provider,
+        messages: extraction_messages(history, msg.content, assistant_response),
+        agent_id: state.memory_agent_id,
+        owner_id: state.memory_owner_id,
+        conversation_key: conversation_key(msg),
+        chat_mode: chat_mode(msg),
+        memory_store: state.memory_store,
+        scheduler: state.memory_scheduler,
+        repo: state.memory_repo,
+        extraction_timeout_ms: state.extraction_timeout_ms,
+        extraction_context_messages: state.extraction_context_messages,
+        extraction_min_confidence: state.extraction_min_confidence,
+        extraction_model: state.extraction_model
+      )
+
+    case result do
+      {:ok, _data} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("background extraction failed: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp extraction_messages(history, user_content, assistant_content) do
+    history
+    |> Enum.map(fn message ->
+      %{role: message.role, content: message.content}
+    end)
+    |> Kernel.++([
+      %{role: "user", content: user_content},
+      %{role: "assistant", content: assistant_content}
+    ])
+  end
+
+  defp chat_mode(%{chat_mode: mode}) do
+    normalize_chat_mode(mode)
+  end
+
+  defp chat_mode(%{metadata: metadata}) when is_map(metadata) do
+    metadata_chat_mode(metadata)
+  end
+
+  defp chat_mode(_msg), do: :direct
+
+  defp normalize_chat_mode(:direct), do: :direct
+  defp normalize_chat_mode(:shared), do: :shared
+  defp normalize_chat_mode("direct"), do: :direct
+  defp normalize_chat_mode("shared"), do: :shared
+  defp normalize_chat_mode(_mode), do: :direct
+
+  defp metadata_chat_mode(metadata) do
+    explicit_metadata_chat_mode(metadata) || inferred_metadata_chat_mode(metadata) || :direct
+  end
+
+  defp explicit_metadata_chat_mode(metadata) do
+    case metadata_value(metadata, :chat_mode) do
+      value when value in [:direct, "direct"] -> :direct
+      value when value in [:shared, "shared"] -> :shared
+      _other -> nil
+    end
+  end
+
+  defp inferred_metadata_chat_mode(metadata) do
+    cond do
+      metadata_value(metadata, :chat_type) == "private" -> :direct
+      metadata_value(metadata, :chat_type) in ["group", "supergroup", "channel"] -> :shared
+      metadata_value(metadata, :channel_type) == "im" -> :direct
+      metadata_value(metadata, :channel_type) in ["channel", "group", "mpim"] -> :shared
+      not is_nil(metadata_value(metadata, :guild_id)) -> :shared
+      not is_nil(metadata_value(metadata, :group_id)) -> :shared
+      true -> nil
+    end
+  end
+
+  defp metadata_value(metadata, key) do
+    Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
   end
 
   defp system_prompt(available_skills, prompt_memory) do

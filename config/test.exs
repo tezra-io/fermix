@@ -11,10 +11,16 @@ config :fermix_core, :log, enabled: false
 
 config :fermix_core, :memory,
   enabled: false,
+  extraction_enabled: false,
+  extraction_timeout_ms: 1_000,
+  extraction_context_messages: 8,
+  extraction_min_confidence: 0.75,
   database_path: Path.join(System.tmp_dir!(), "fermix-test-memory.db"),
   prompt_base_dir: Path.join(System.tmp_dir!(), "fermix-test-prompt-memory"),
   prompt_user_token_cap: 800,
   prompt_memory_token_cap: 1600,
+  prompt_files_rebuild_hours: 12,
+  scheduler_enabled: false,
   owner_id: "default",
   agent_id: "main"
 

@@ -163,7 +163,8 @@ defmodule FermixChannels.Telegram do
           channel: "telegram",
           chat_id: chat_id,
           reply_target: chat_id,
-          thread_ts: msg["message_thread_id"]
+          thread_ts: msg["message_thread_id"],
+          metadata: %{chat_type: get_in(msg, ["chat", "type"])}
         })
 
       {:ok, [message]}

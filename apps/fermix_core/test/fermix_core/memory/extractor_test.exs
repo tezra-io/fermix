@@ -1,0 +1,244 @@
+defmodule FermixCore.Memory.ExtractorTest do
+  use ExUnit.Case, async: true
+
+  alias FermixCore.Memory.Extractor
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Scheduler
+  alias FermixCore.Memory.Store
+
+  defmodule StaticProvider do
+    @behaviour FermixCore.Providers.Provider
+
+    def put_response(response), do: Process.put({__MODULE__, :response}, response)
+
+    @impl true
+    def chat(messages, opts) do
+      send(self(), {:extractor_provider_called, messages, opts})
+      Process.get({__MODULE__, :response}, {:error, :missing_response})
+    end
+
+    @impl true
+    def models, do: {:ok, ["mock-model"]}
+  end
+
+  defmodule RebuildNotifier do
+    def rebuild(agent_id, owner_id, reason, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:rebuild_requested, agent_id, owner_id, reason})
+      {:ok, %{user: nil, memory: nil}}
+    end
+  end
+
+  test "parse_candidates/1 decodes validated JSON candidates" do
+    json = """
+    [
+      {
+        "category": "preference",
+        "key": "preferred_editor",
+        "value": "neovim",
+        "scope_type": "owner",
+        "confidence": 0.93,
+        "promote_target": "user_md"
+      },
+      {
+        "category": "environment",
+        "key": "workspace_root",
+        "value": "/tmp/fermix",
+        "scope_type": "agent",
+        "confidence": 0.88,
+        "promote_target": "memory_md"
+      }
+    ]
+    """
+
+    assert {:ok, candidates} = Extractor.parse_candidates(json)
+
+    assert candidates == [
+             %{
+               category: "preference",
+               confidence: 0.93,
+               key: "preferred_editor",
+               promote_target: "user_md",
+               scope_type: "owner",
+               value: "neovim"
+             },
+             %{
+               category: "environment",
+               confidence: 0.88,
+               key: "workspace_root",
+               promote_target: "memory_md",
+               scope_type: "agent",
+               value: "/tmp/fermix"
+             }
+           ]
+  end
+
+  test "parse_candidates/1 accepts json fenced payloads" do
+    json = """
+    ```json
+    [
+      {
+        "category": "preference",
+        "key": "preferred_editor",
+        "value": "helix",
+        "scope_type": "owner",
+        "confidence": 0.95,
+        "promote_target": "user_md"
+      }
+    ]
+    ```
+    """
+
+    assert {:ok,
+            [
+              %{
+                category: "preference",
+                confidence: 0.95,
+                key: "preferred_editor",
+                promote_target: "user_md",
+                scope_type: "owner",
+                value: "helix"
+              }
+            ]} = Extractor.parse_candidates(json)
+  end
+
+  test "parse_candidates/1 accepts untagged fenced payloads" do
+    json = """
+    ```
+    [
+      {
+        "category": "environment",
+        "key": "workspace_root",
+        "value": "/tmp/fermix",
+        "scope_type": "agent",
+        "confidence": 0.9,
+        "promote_target": "memory_md"
+      }
+    ]
+    ```
+    """
+
+    assert {:ok,
+            [
+              %{
+                category: "environment",
+                confidence: 0.9,
+                key: "workspace_root",
+                promote_target: "memory_md",
+                scope_type: "agent",
+                value: "/tmp/fermix"
+              }
+            ]} = Extractor.parse_candidates(json)
+  end
+
+  test "parse_candidates/1 rejects malformed or non-array JSON" do
+    assert {:error, {:invalid_json, _}} = Extractor.parse_candidates("{")
+    assert {:error, :invalid_payload} = Extractor.parse_candidates(~s({"key":"value"}))
+  end
+
+  test "extract/1 persists admitted memories and triggers rebuilds for promoted policy matches" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-extractor-#{unique}.db")
+    repo_name = :"extractor_repo_#{unique}"
+    store_name = :"extractor_store_#{unique}"
+    scheduler_name = :"extractor_scheduler_#{unique}"
+    task_supervisor_name = :"extractor_task_supervisor_#{unique}"
+
+    start_supervised!({Task.Supervisor, name: task_supervisor_name})
+    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
+    start_supervised!(%{
+      id: store_name,
+      start: {Store, :start_link, [[name: store_name, repo: repo_name]]}
+    })
+
+    start_supervised!(
+      {Scheduler,
+       [
+         name: scheduler_name,
+         scheduler_enabled: true,
+         task_supervisor: task_supervisor_name,
+         rebuild_module: RebuildNotifier,
+         rebuild_opts: [test_pid: self()],
+         periodic_interval_ms: 10_000,
+         periodic_agent_ids: [],
+         periodic_owner_id: "default"
+       ]}
+    )
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        File.rm(path)
+      end)
+    end)
+
+    StaticProvider.put_response(
+      mock_response("""
+      [
+        {
+          "category": "preference",
+          "key": "preferred_editor",
+          "value": "helix",
+          "scope_type": "owner",
+          "confidence": 0.98,
+          "promote_target": "none"
+        }
+      ]
+      """)
+    )
+
+    assert {:ok, %{candidate_count: 1, admitted_count: 1, rebuild?: true, corrective?: false}} =
+             Extractor.extract(
+               provider: StaticProvider,
+               messages: [
+                 %{role: "user", content: "Please remember that I prefer Helix."},
+                 %{role: "assistant", content: "Understood."}
+               ],
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat_1", :root},
+               chat_mode: :direct,
+               memory_store: store_name,
+               scheduler: scheduler_name,
+               repo: repo_name
+             )
+
+    assert_receive {:extractor_provider_called, messages, opts}, 1_000
+
+    assert Enum.any?(
+             messages,
+             &(&1.role == "system" and &1.content =~ "Current chat mode: direct.")
+           )
+
+    assert opts[:temperature] == 0.1
+
+    assert_receive {:rebuild_requested, "main", "default", :event}, 1_000
+
+    assert {:ok, memory} =
+             Repo.get_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "owner",
+                 scope_id: "default",
+                 key: "preferred_editor"
+               },
+               server: repo_name
+             )
+
+    assert memory.category == "preference"
+    assert memory.value == "helix"
+    assert memory.promote_target == "user_md"
+
+    assert {:ok, "helix"} =
+             Store.recall({:owner, "default"}, "preferred_editor", server: store_name)
+  end
+
+  defp mock_response(content) do
+    {:ok,
+     %{
+       content: content,
+       tool_calls: [],
+       usage: %{prompt_tokens: 10, completion_tokens: 0, total_tokens: 10}
+     }}
+  end
+end

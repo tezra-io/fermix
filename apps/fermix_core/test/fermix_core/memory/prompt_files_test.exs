@@ -127,6 +127,29 @@ defmodule FermixCore.Memory.PromptFilesTest do
              []
   end
 
+  test "rebuild/2 re-evaluates stored promotion hints under current policy", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "owner",
+      scope_id: owner_id,
+      category: "episode",
+      key: "last_small_talk_topic",
+      value: "weekend plans",
+      promote_target: "user_md"
+    })
+
+    assert {:ok, %{user: user_text, memory: memory_text}} =
+             PromptFiles.rebuild(agent_id, owner_id)
+
+    assert user_text in [nil, ""]
+    assert memory_text in [nil, ""]
+  end
+
   defp insert_memory(repo, attrs) do
     assert {:ok, _memory} = Repo.upsert_memory(attrs, server: repo)
   end

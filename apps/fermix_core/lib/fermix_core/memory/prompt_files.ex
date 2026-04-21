@@ -3,6 +3,7 @@ defmodule FermixCore.Memory.PromptFiles do
   Maintains bounded prompt-memory markdown files derived from durable memory rows.
   """
 
+  alias FermixCore.Memory.Admission
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
 
@@ -43,6 +44,13 @@ defmodule FermixCore.Memory.PromptFiles do
     end
   end
 
+  @spec rebuild(String.t(), String.t(), atom(), keyword()) ::
+          {:ok, prompt_memory()} | {:error, term()}
+  def rebuild(agent_id, owner_id, _reason, _opts)
+      when is_binary(agent_id) and is_binary(owner_id) do
+    rebuild(agent_id, owner_id)
+  end
+
   defp load_memories(agent_id, owner_id) do
     case Repo.get_memories(
            %{agent_id: agent_id, owner_id: owner_id},
@@ -70,20 +78,20 @@ defmodule FermixCore.Memory.PromptFiles do
 
   defp select_user_memories(memories) do
     memories
-    |> Enum.filter(&(&1.scope_type == "owner" and &1.promote_target == "user_md"))
+    |> Enum.filter(&(&1.scope_type == "owner" and Admission.prompt_target(&1) == "user_md"))
     |> dedupe_rows()
   end
 
   defp select_memory_memories(memories) do
     memories
-    |> Enum.filter(&(&1.promote_target == "memory_md"))
+    |> Enum.filter(&(Admission.prompt_target(&1) == "memory_md"))
     |> dedupe_rows()
   end
 
   defp dedupe_rows(rows) do
     {deduped, _seen} =
       Enum.reduce(rows, {[], MapSet.new()}, fn row, {acc, seen} ->
-        marker = {row.category, row.key, row.value, row.promote_target}
+        marker = {row.scope_type, row.scope_id, row.key}
 
         if MapSet.member?(seen, marker) do
           {acc, seen}
