@@ -5,6 +5,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.PromptFiles
   alias FermixCore.Tools.InvokeSkill
   alias FermixCore.Tools.Registry
 
@@ -229,8 +230,17 @@ defmodule FermixCore.Agents.MainAgentTest do
     agent_supervisor_name = :"test_agent_supervisor_#{suffix}"
     skills_dir = Path.join(System.tmp_dir!(), "fermix-skills-#{suffix}")
     journal_dir = Path.join(System.tmp_dir!(), "fermix-journals-#{suffix}")
+    prompt_dir = Path.join(System.tmp_dir!(), "fermix-prompt-memory-#{suffix}")
+    previous_memory_config = Application.get_env(:fermix_core, :memory, [])
 
     File.mkdir_p!(skills_dir)
+    File.mkdir_p!(prompt_dir)
+
+    Application.put_env(
+      :fermix_core,
+      :memory,
+      Keyword.merge(previous_memory_config, prompt_base_dir: prompt_dir, agent_id: "main")
+    )
 
     {:ok, _} =
       start_supervised({Task.Supervisor, name: task_sup_name}, id: :test_task_sup)
@@ -268,9 +278,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       )
 
     on_exit(fn ->
+      Application.put_env(:fermix_core, :memory, previous_memory_config)
       MockProvider.cleanup()
       File.rm_rf!(skills_dir)
       File.rm_rf!(journal_dir)
+      File.rm_rf!(prompt_dir)
     end)
 
     %{
@@ -281,7 +293,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       skills_dir: skills_dir,
       task_supervisor: task_sup_name,
       agent_supervisor: agent_supervisor_name,
-      journal_dir: journal_dir
+      journal_dir: journal_dir,
+      prompt_dir: prompt_dir
     }
   end
 
@@ -352,6 +365,64 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert hist_assistant.content == "First answer"
       assert new_user.role == "user"
       assert new_user.content == "Follow-up question"
+    end
+
+    test "continues without prompt-memory injection when files are missing", %{agent: agent} do
+      MockProvider.set_responses([mock_response("No prompt files")])
+
+      msg = make_message("Hello without memory files")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, "No prompt files"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+      [system, user] = messages
+      assert system.role == "system"
+      refute system.content =~ "## USER MEMORY"
+      refute system.content =~ "## AGENT MEMORY"
+      assert user.content == "Hello without memory files"
+    end
+
+    test "ignores empty prompt-memory files", %{agent: agent} do
+      File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
+      File.write!(PromptFiles.user_path("main"), "\n\n")
+      File.write!(PromptFiles.memory_path("main"), "")
+
+      MockProvider.set_responses([mock_response("Empty prompt files")])
+
+      msg = make_message("Hello with empty files")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, "Empty prompt files"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+      [system, user] = messages
+      assert system.role == "system"
+      refute system.content =~ "## USER MEMORY"
+      refute system.content =~ "## AGENT MEMORY"
+      assert user.content == "Hello with empty files"
+    end
+
+    test "injects prompt-memory file contents into the main system prompt", %{agent: agent} do
+      File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
+      File.write!(PromptFiles.user_path("main"), "## Preferences\n- editor: vim\n")
+      File.write!(PromptFiles.memory_path("main"), "## Working Rules\n- warnings are errors\n")
+
+      MockProvider.set_responses([mock_response("Prompt memory loaded")])
+
+      msg = make_message("Hello with prompt memory")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, "Prompt memory loaded"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+      [system, user] = messages
+      assert system.role == "system"
+      assert system.content =~ "## USER MEMORY"
+      assert system.content =~ "## Preferences\n- editor: vim"
+      assert system.content =~ "## AGENT MEMORY"
+      assert system.content =~ "## Working Rules\n- warnings are errors"
+      assert user.content == "Hello with prompt memory"
     end
 
     test "sends error message via reply_fn on agent loop failure", %{agent: agent} do

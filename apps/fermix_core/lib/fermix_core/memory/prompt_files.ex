@@ -1,0 +1,233 @@
+defmodule FermixCore.Memory.PromptFiles do
+  @moduledoc """
+  Maintains bounded prompt-memory markdown files derived from durable memory rows.
+  """
+
+  alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo
+
+  @type prompt_memory :: %{
+          user: String.t() | nil,
+          memory: String.t() | nil
+        }
+
+  @type memory_row :: Repo.memory_row()
+
+  @user_sections ["Identity", "Preferences", "Ongoing Goals", "Additional Context"]
+  @memory_sections ["Environment", "Project Context", "Working Rules", "Additional Context"]
+
+  @spec user_path(String.t()) :: String.t()
+  def user_path(agent_id) when is_binary(agent_id) do
+    Path.join([Config.prompt_base_dir(), agent_id, "USER.md"])
+  end
+
+  @spec memory_path(String.t()) :: String.t()
+  def memory_path(agent_id) when is_binary(agent_id) do
+    Path.join([Config.prompt_base_dir(), agent_id, "MEMORY.md"])
+  end
+
+  @spec load(String.t()) :: {:ok, prompt_memory()} | {:error, term()}
+  def load(agent_id) when is_binary(agent_id) do
+    with {:ok, user} <- read_document(user_path(agent_id)),
+         {:ok, memory} <- read_document(memory_path(agent_id)) do
+      {:ok, %{user: user, memory: memory}}
+    end
+  end
+
+  @spec rebuild(String.t(), String.t()) :: {:ok, prompt_memory()} | {:error, term()}
+  def rebuild(agent_id, owner_id) when is_binary(agent_id) and is_binary(owner_id) do
+    with {:ok, memories} <- load_memories(agent_id, owner_id),
+         :ok <- write_document(user_path(agent_id), render_user_document(memories)),
+         :ok <- write_document(memory_path(agent_id), render_memory_document(memories)) do
+      load(agent_id)
+    end
+  end
+
+  defp load_memories(agent_id, owner_id) do
+    case Repo.get_memories(
+           %{agent_id: agent_id, owner_id: owner_id},
+           server: Config.repo_server()
+         ) do
+      {:ok, memories} -> {:ok, memories}
+      {:error, :disabled} -> {:ok, []}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp render_user_document(memories) do
+    memories
+    |> select_user_memories()
+    |> sectioned_items(:user)
+    |> build_document(:user, Config.prompt_user_token_cap())
+  end
+
+  defp render_memory_document(memories) do
+    memories
+    |> select_memory_memories()
+    |> sectioned_items(:memory)
+    |> build_document(:memory, Config.prompt_memory_token_cap())
+  end
+
+  defp select_user_memories(memories) do
+    memories
+    |> Enum.filter(&(&1.scope_type == "owner" and &1.promote_target == "user_md"))
+    |> dedupe_rows()
+  end
+
+  defp select_memory_memories(memories) do
+    memories
+    |> Enum.filter(&(&1.promote_target == "memory_md"))
+    |> dedupe_rows()
+  end
+
+  defp dedupe_rows(rows) do
+    {deduped, _seen} =
+      Enum.reduce(rows, {[], MapSet.new()}, fn row, {acc, seen} ->
+        marker = {row.category, row.key, row.value, row.promote_target}
+
+        if MapSet.member?(seen, marker) do
+          {acc, seen}
+        else
+          {[row | acc], MapSet.put(seen, marker)}
+        end
+      end)
+
+    Enum.reverse(deduped)
+  end
+
+  defp sectioned_items(rows, kind) do
+    rows
+    |> Enum.reduce(empty_sections(kind), fn row, acc ->
+      section = section_name(kind, row.category)
+      item = format_item(row)
+      Map.update!(acc, section, fn items -> [item | items] end)
+    end)
+    |> ordered_sections(kind)
+  end
+
+  defp empty_sections(:user), do: Map.new(@user_sections, &{&1, []})
+  defp empty_sections(:memory), do: Map.new(@memory_sections, &{&1, []})
+
+  defp ordered_sections(section_map, kind) do
+    kind
+    |> section_titles()
+    |> Enum.map(fn title -> {title, section_map |> Map.fetch!(title) |> Enum.reverse()} end)
+    |> Enum.reject(fn {_title, items} -> items == [] end)
+  end
+
+  defp build_document([], _kind, _token_cap), do: ""
+
+  defp build_document(sectioned_items, kind, token_cap) do
+    flat_items =
+      for {section, items} <- sectioned_items,
+          item <- items do
+        {section, item}
+      end
+
+    flat_items
+    |> fitting_item_count(token_cap, section_titles(kind))
+    |> then(&Enum.take(flat_items, &1))
+    |> compose_document(section_titles(kind))
+  end
+
+  defp fitting_item_count(flat_items, token_cap, section_order) do
+    max_count = length(flat_items)
+
+    Enum.reduce_while(Range.new(max_count, 0, -1), 0, fn count, _acc ->
+      document =
+        flat_items
+        |> Enum.take(count)
+        |> compose_document(section_order)
+
+      if estimated_tokens(document) <= token_cap do
+        {:halt, count}
+      else
+        {:cont, 0}
+      end
+    end)
+  end
+
+  defp compose_document([], _section_order), do: ""
+
+  defp compose_document(flat_items, section_order) do
+    section_map =
+      Enum.reduce(flat_items, %{}, fn {section, item}, acc ->
+        Map.update(acc, section, [item], fn items -> items ++ [item] end)
+      end)
+
+    section_order
+    |> Enum.map(&render_section(&1, Map.get(section_map, &1, [])))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n\n")
+  end
+
+  defp render_section(_title, []), do: nil
+
+  defp render_section(title, items) do
+    "## #{title}\n" <> Enum.map_join(items, "\n", &"- #{&1}")
+  end
+
+  defp section_titles(:user), do: @user_sections
+  defp section_titles(:memory), do: @memory_sections
+
+  defp section_name(:user, "identity"), do: "Identity"
+  defp section_name(:user, "preference"), do: "Preferences"
+  defp section_name(:user, "goal"), do: "Ongoing Goals"
+  defp section_name(:user, _category), do: "Additional Context"
+
+  defp section_name(:memory, "environment"), do: "Environment"
+  defp section_name(:memory, "project"), do: "Project Context"
+  defp section_name(:memory, "goal"), do: "Project Context"
+  defp section_name(:memory, "instruction"), do: "Working Rules"
+  defp section_name(:memory, "correction"), do: "Working Rules"
+  defp section_name(:memory, "preference"), do: "Working Rules"
+  defp section_name(:memory, _category), do: "Additional Context"
+
+  defp format_item(row) do
+    "#{normalize_inline(row.key)}: #{normalize_inline(row.value)}"
+  end
+
+  defp normalize_inline(text) do
+    text
+    |> String.replace(~r/[_-]+/u, " ")
+    |> String.replace(~r/\s+/u, " ")
+    |> String.trim()
+  end
+
+  defp write_document(path, content) do
+    temp_path = temp_path(path)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         :ok <- File.write(temp_path, content),
+         :ok <- File.rename(temp_path, path) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        File.rm(temp_path)
+        error
+    end
+  end
+
+  defp temp_path(path) do
+    suffix = System.unique_integer([:positive, :monotonic])
+    "#{path}.tmp-#{suffix}"
+  end
+
+  defp read_document(path) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, normalize_loaded_content(content)}
+      {:error, :enoent} -> {:ok, nil}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_loaded_content(content) do
+    case String.trim(content) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp estimated_tokens(""), do: 0
+  defp estimated_tokens(text), do: div(byte_size(text) + 3, 4)
+end
