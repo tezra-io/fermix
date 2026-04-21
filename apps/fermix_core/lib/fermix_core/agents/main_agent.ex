@@ -30,7 +30,9 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.PromptFiles
   alias FermixCore.Tools.Registry
 
   @type thread_scope :: :root | String.t() | integer()
@@ -337,10 +339,15 @@ defmodule FermixCore.Agents.MainAgent do
   defp process_message(msg, state) do
     start = System.monotonic_time(:millisecond)
     conversation_key = conversation_key(msg)
+    prompt_memory = load_prompt_memory!()
 
     history = ConversationStore.get_history(conversation_key, server: state.conversation_store)
 
-    system_message = %{role: "system", content: system_prompt(state.available_skills)}
+    system_message = %{
+      role: "system",
+      content: system_prompt(state.available_skills, prompt_memory)
+    }
+
     user_message = %{role: "user", content: msg.content}
     messages = [system_message] ++ history ++ [user_message]
 
@@ -434,7 +441,14 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
-  defp system_prompt(available_skills) do
+  defp load_prompt_memory! do
+    case PromptFiles.load(Config.agent_id()) do
+      {:ok, prompt_memory} -> prompt_memory
+      {:error, reason} -> raise "prompt memory load failed: #{inspect(reason)}"
+    end
+  end
+
+  defp system_prompt(available_skills, prompt_memory) do
     skill_catalog =
       case available_skills do
         [] ->
@@ -444,13 +458,31 @@ defmodule FermixCore.Agents.MainAgent do
           "Available skills snapshot:\n#{Enum.map_join(skills, "\n", &format_skill_summary/1)}"
       end
 
+    [
+      """
+      You are a helpful AI assistant with access to tools.
+      You can execute shell commands, read and write files, and store/recall memories.
+      """,
+      prompt_memory_block("## USER MEMORY", prompt_memory.user),
+      prompt_memory_block("## AGENT MEMORY", prompt_memory.memory),
+      """
+      Skills are discovered from a cached registry snapshot and only change after an explicit reload.
+      Use the `invoke_skill` tool when a specialized skill is a better fit than handling the work directly.
+      #{skill_catalog}
+      When you need to perform an action, use the appropriate tool. Think step by step.
+      """
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.join("\n\n")
+  end
+
+  defp prompt_memory_block(_heading, nil), do: nil
+
+  defp prompt_memory_block(heading, content) do
     """
-    You are a helpful AI assistant with access to tools.
-    You can execute shell commands, read and write files, and store/recall memories.
-    Skills are discovered from a cached registry snapshot and only change after an explicit reload.
-    Use the `invoke_skill` tool when a specialized skill is a better fit than handling the work directly.
-    #{skill_catalog}
-    When you need to perform an action, use the appropriate tool. Think step by step.\
+    #{heading}
+    #{content}
     """
   end
 
