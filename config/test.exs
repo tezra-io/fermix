@@ -12,6 +12,9 @@ config :fermix_core, :log, enabled: false
 config :fermix_core, :memory,
   enabled: false,
   database_path: Path.join(System.tmp_dir!(), "fermix-test-memory.db"),
+  prompt_base_dir: Path.join(System.tmp_dir!(), "fermix-test-prompt-memory"),
+  prompt_user_token_cap: 800,
+  prompt_memory_token_cap: 1600,
   owner_id: "default",
   agent_id: "main"
 

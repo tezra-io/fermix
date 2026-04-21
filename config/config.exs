@@ -51,6 +51,9 @@ config :fermix_core,
 config :fermix_core, :memory,
   enabled: true,
   database_path: Path.expand("~/.fermix/memory.db"),
+  prompt_base_dir: Path.expand("~/.fermix/memory"),
+  prompt_user_token_cap: 800,
+  prompt_memory_token_cap: 1600,
   owner_id: "default",
   agent_id: "main"
 
