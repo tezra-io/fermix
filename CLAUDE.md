@@ -58,6 +58,8 @@ mix format --check-formatted
 - `docs/MILESTONE_2_MULTI_AGENT_ORCHESTRATION.md` — M2 design (partially implemented)
 - `docs/MILESTONE_3_ONBOARDING_CHANNEL_COVERAGE.md` — M3 design (shipped)
 - `docs/MILESTONE_4_ADVANCED_MEMORY.md` — M4 design (draft)
+- `docs/MILESTONE_4_5_PROMPT_BOOTSTRAP_ARCHITECTURE.md` — M4.5 design (draft)
+- `docs/MILESTONE_4_6_VERSIONED_PROMPT_RESOURCES.md` — M4.6 design (draft)
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
