@@ -161,11 +161,19 @@ memory_database_path =
       Path.join(FermixCore.Setup.ConfigStore.fermix_home(), "memory.db")
     )
 
+memory_extraction_debounce_seconds =
+  case System.get_env("FERMIX_MEMORY_EXTRACTION_DEBOUNCE_SECONDS") do
+    nil -> Keyword.get(existing_memory, :extraction_debounce_seconds, 60)
+    "" -> Keyword.get(existing_memory, :extraction_debounce_seconds, 60)
+    seconds -> String.to_integer(seconds)
+  end
+
 config :fermix_core,
        :memory,
        Keyword.merge(existing_memory,
          enabled: memory_enabled,
-         database_path: memory_database_path
+         database_path: memory_database_path,
+         extraction_debounce_seconds: memory_extraction_debounce_seconds
        )
 
 config :fermix_core,
