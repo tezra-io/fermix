@@ -6,7 +6,10 @@ defmodule FermixCore.Prompt.BootstrapLoader do
   empty `SOUL.md` is omitted because that layer is optional.
   """
 
+  alias FermixCore.Prompt.BootstrapFile
   alias FermixCore.Prompt.Seeder
+
+  require Logger
 
   @type bootstrap_file :: %{
           name: :agents | :soul,
@@ -24,9 +27,14 @@ defmodule FermixCore.Prompt.BootstrapLoader do
 
   @spec load(String.t(), keyword()) :: {:ok, bootstrap_prompt()} | {:error, term()}
   def load(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
-    with :ok <- maybe_seed(agent_id, opts),
-         {:ok, agents} <- load_agents(agent_id, opts),
-         {:ok, soul} <- load_soul(agent_id, opts) do
+    with :ok <- Seeder.validate_agent_id(agent_id) do
+      load_seeded(agent_id, opts, maybe_seed(agent_id, opts))
+    end
+  end
+
+  defp load_seeded(agent_id, opts, seed_status) do
+    with {:ok, agents} <- load_agents(agent_id, opts, seed_status),
+         {:ok, soul} <- load_soul(agent_id, opts, seed_status) do
       {:ok, %{agents: agents, soul: soul}}
     end
   end
@@ -35,68 +43,49 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     if Seeder.seed_agent_file?(opts) do
       case Seeder.ensure_seeded(agent_id, opts) do
         {:ok, _result} -> :ok
-        {:error, reason} -> {:error, reason}
+        {:error, reason} -> seed_failed(agent_id, reason)
       end
     else
       :ok
     end
   end
 
-  defp load_agents(agent_id, opts) do
+  defp load_agents(agent_id, opts, {:seed_failed, _reason}) do
+    path = Seeder.agents_path(agent_id, opts)
+    {:ok, BootstrapFile.metadata(:agents, path, Seeder.default_agents_content(), :fallback)}
+  end
+
+  defp load_agents(agent_id, opts, :ok) do
     path = Seeder.agents_path(agent_id, opts)
 
-    case read_present(path) do
+    case BootstrapFile.read_present(path) do
       {:ok, content} ->
-        {:ok, metadata(:agents, path, content, :present)}
+        {:ok, BootstrapFile.metadata(:agents, path, content, :present)}
 
       {:missing, _reason} ->
-        {:ok, metadata(:agents, path, Seeder.default_agents_content(), :fallback)}
+        {:ok, BootstrapFile.metadata(:agents, path, Seeder.default_agents_content(), :fallback)}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp load_soul(agent_id, opts) do
+  defp load_soul(_agent_id, _opts, {:seed_failed, _reason}) do
+    {:ok, nil}
+  end
+
+  defp load_soul(agent_id, opts, :ok) do
     path = Seeder.soul_path(agent_id, opts)
 
-    case read_present(path) do
-      {:ok, content} -> {:ok, metadata(:soul, path, content, :present)}
+    case BootstrapFile.read_present(path) do
+      {:ok, content} -> {:ok, BootstrapFile.metadata(:soul, path, content, :present)}
       {:missing, _reason} -> {:ok, nil}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp read_present(path) do
-    case File.read(path) do
-      {:ok, content} ->
-        if String.trim(content) == "" do
-          {:missing, :empty}
-        else
-          {:ok, content}
-        end
-
-      {:error, :enoent} ->
-        {:missing, :enoent}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+  defp seed_failed(agent_id, reason) do
+    Logger.warning("prompt bootstrap seed failed for #{agent_id}: #{inspect(reason)}")
+    {:seed_failed, reason}
   end
-
-  defp metadata(name, path, content, status) do
-    size = byte_size(content)
-
-    %{
-      name: name,
-      path: path,
-      content: content,
-      approx_size: size,
-      approx_tokens: estimated_tokens(content),
-      status: status
-    }
-  end
-
-  defp estimated_tokens(""), do: 0
-  defp estimated_tokens(content), do: div(byte_size(content) + 3, 4)
 end

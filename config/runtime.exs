@@ -31,6 +31,7 @@ workspace_paths =
     fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
 
     %{
+      bootstrap: Path.join(fermix_home, "bootstrap"),
       skills: Path.join(fermix_home, "skills"),
       journals: Path.join(fermix_home, "journals"),
       traces: Path.join(fermix_home, "traces"),
