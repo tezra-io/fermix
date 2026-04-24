@@ -15,6 +15,11 @@ defmodule FermixCore.Resource.Registry do
 
   @type resource_row :: Repo.resource_row()
 
+  @spec list_resources(String.t(), keyword()) :: {:ok, [resource_row()]} | {:error, term()}
+  def list_resources(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
+    Repo.list_resources(%{agent_id: agent_id}, repo_opts(opts))
+  end
+
   @spec ensure_registered(String.t(), String.t() | atom(), String.t(), keyword()) ::
           {:ok, resource_row()} | {:error, term()}
   def ensure_registered(agent_id, resource_type, scope_id, opts \\ [])
@@ -37,6 +42,15 @@ defmodule FermixCore.Resource.Registry do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  @spec get_resource(String.t(), String.t() | atom(), String.t(), keyword()) ::
+          {:ok, resource_row()} | {:error, term()}
+  def get_resource(agent_id, resource_type, scope_id, opts \\ [])
+      when is_binary(agent_id) and is_binary(scope_id) and is_list(opts) do
+    with {:ok, type} <- normalize_resource_type(resource_type) do
+      Repo.get_resource(resource_selector(agent_id, type, scope_id), repo_opts(opts))
     end
   end
 
