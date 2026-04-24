@@ -433,6 +433,11 @@ defmodule FermixCore.Memory.Repo do
     call({:get_resource, selector}, opts)
   end
 
+  @spec list_resources(map(), keyword()) :: {:ok, [resource_row()]} | {:error, term()}
+  def list_resources(selector \\ %{}, opts \\ []) when is_map(selector) do
+    call({:list_resources, selector}, opts)
+  end
+
   @spec insert_revision(revision_attrs(), keyword()) ::
           {:ok, resource_revision_row()} | {:error, term()}
   def insert_revision(attrs, opts \\ []) when is_map(attrs) do
@@ -593,6 +598,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:get_resource, selector}, _from, state) do
     reply = with_connection(state, &fetch_resource(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_resources, selector}, _from, state) do
+    reply = with_connection(state, &fetch_resources(&1, selector))
     {:reply, reply, state}
   end
 
@@ -1014,6 +1024,17 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  defp fetch_resources(conn, selector) do
+    selector
+    |> normalize_resource_list_selector()
+    |> resource_list_query()
+    |> then(fn {sql, params} ->
+      with {:ok, rows} <- query_all(conn, sql, params) do
+        {:ok, Enum.map(rows, &resource_row/1)}
+      end
+    end)
+  end
+
   defp insert_revision_row(conn, attrs) do
     revision = normalize_revision_attrs(attrs)
 
@@ -1285,6 +1306,12 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
+  defp normalize_resource_list_selector(selector) do
+    selector
+    |> Map.take([:agent_id])
+    |> Enum.into(%{}, fn {key, value} -> {key, fetch_string_value!(key, value)} end)
+  end
+
   defp normalize_revision_attrs(attrs) do
     %{
       agent_id: fetch_string!(attrs, :agent_id),
@@ -1447,6 +1474,29 @@ defmodule FermixCore.Memory.Repo do
       agent_id: resource.agent_id,
       resource_type: resource.resource_type,
       scope_id: resource.scope_id
+    }
+  end
+
+  defp resource_list_query(%{agent_id: agent_id}) do
+    {
+      """
+      SELECT *
+      FROM resources
+      WHERE agent_id = ?
+      ORDER BY resource_type ASC, scope_id ASC
+      """,
+      [agent_id]
+    }
+  end
+
+  defp resource_list_query(%{}) do
+    {
+      """
+      SELECT *
+      FROM resources
+      ORDER BY agent_id ASC, resource_type ASC, scope_id ASC
+      """,
+      []
     }
   end
 
