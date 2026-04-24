@@ -32,7 +32,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Memory.Extractor
+  alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
@@ -123,12 +123,14 @@ defmodule FermixCore.Agents.MainAgent do
       memory_store: Keyword.get(opts, :memory_store, Store),
       memory_repo: Keyword.get(opts, :memory_repo, Config.repo_server(opts)),
       memory_scheduler: Keyword.get(opts, :memory_scheduler, Scheduler),
+      extraction_debouncer: Keyword.get(opts, :extraction_debouncer, ExtractionDebouncer),
       memory_agent_id: Config.agent_id(opts),
       memory_owner_id: Config.owner_id(opts),
       extraction_enabled: Config.extraction_enabled?(opts),
       extraction_timeout_ms: Config.extraction_timeout_ms(opts),
       extraction_context_messages: Config.extraction_context_messages(opts),
       extraction_min_confidence: Config.extraction_min_confidence(opts),
+      extraction_debounce_ms: Config.extraction_debounce_ms(opts),
       extraction_model: Config.extraction_model(opts),
       conversations: %{},
       task_refs: %{}
@@ -343,12 +345,14 @@ defmodule FermixCore.Agents.MainAgent do
       memory_store: state.memory_store,
       memory_repo: state.memory_repo,
       memory_scheduler: state.memory_scheduler,
+      extraction_debouncer: state.extraction_debouncer,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
       extraction_enabled: state.extraction_enabled,
       extraction_timeout_ms: state.extraction_timeout_ms,
       extraction_context_messages: state.extraction_context_messages,
       extraction_min_confidence: state.extraction_min_confidence,
+      extraction_debounce_ms: state.extraction_debounce_ms,
       extraction_model: state.extraction_model
     }
   end
@@ -485,21 +489,8 @@ defmodule FermixCore.Agents.MainAgent do
     do: :ok
 
   defp maybe_start_extraction(msg, history, assistant_response, state) do
-    case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           run_extraction(msg, history, assistant_response, state)
-         end) do
-      {:ok, _pid} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("failed to start background extraction: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  defp run_extraction(msg, history, assistant_response, state) do
-    result =
-      Extractor.extract(
+    ExtractionDebouncer.request(
+      [
         provider: state.provider,
         messages: extraction_messages(history, msg.content, assistant_response),
         agent_id: state.memory_agent_id,
@@ -512,17 +503,11 @@ defmodule FermixCore.Agents.MainAgent do
         extraction_timeout_ms: state.extraction_timeout_ms,
         extraction_context_messages: state.extraction_context_messages,
         extraction_min_confidence: state.extraction_min_confidence,
+        extraction_debounce_ms: state.extraction_debounce_ms,
         extraction_model: state.extraction_model
-      )
-
-    case result do
-      {:ok, _data} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("background extraction failed: #{inspect(reason)}")
-        :ok
-    end
+      ],
+      server: state.extraction_debouncer
+    )
   end
 
   defp extraction_messages(history, user_content, assistant_content) do
