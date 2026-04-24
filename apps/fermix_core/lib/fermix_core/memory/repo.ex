@@ -140,6 +140,15 @@ defmodule FermixCore.Memory.Repo do
           optional(:key) => String.t()
         }
 
+  @type memory_key_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t(),
+          optional(:scope_type) => String.t(),
+          optional(:scope_id) => String.t(),
+          optional(:category) => String.t(),
+          required(:key) => String.t()
+        }
+
   @type message_row :: %{
           id: integer(),
           agent_id: String.t(),
@@ -286,9 +295,24 @@ defmodule FermixCore.Memory.Repo do
     call({:get_memories, selector}, opts)
   end
 
-  @spec delete_memory(memory_selector(), keyword()) :: :ok | {:error, term()}
+  @doc """
+  Deletes one memory selected by key and scope.
+
+  Use `delete_memories/2` for bulk deletes by scope or category.
+  """
+  @spec delete_memory(memory_key_selector(), keyword()) :: :ok | {:error, term()}
   def delete_memory(selector, opts \\ []) when is_map(selector) do
-    call({:delete_memory, selector}, opts)
+    with {:ok, selector} <- require_memory_key(selector) do
+      call({:delete_memory, selector}, opts)
+    end
+  end
+
+  @doc """
+  Deletes all memories matching the selector.
+  """
+  @spec delete_memories(memory_selector(), keyword()) :: :ok | {:error, term()}
+  def delete_memories(selector, opts \\ []) when is_map(selector) do
+    call({:delete_memories, selector}, opts)
   end
 
   @spec search_memories(String.t(), keyword()) :: {:ok, [memory_search_row()]} | {:error, term()}
@@ -402,6 +426,11 @@ defmodule FermixCore.Memory.Repo do
   end
 
   def handle_call({:delete_memory, selector}, _from, state) do
+    reply = with_connection(state, &delete_memory_row(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:delete_memories, selector}, _from, state) do
     reply = with_connection(state, &delete_memory_row(&1, selector))
     {:reply, reply, state}
   end
@@ -909,6 +938,14 @@ defmodule FermixCore.Memory.Repo do
       scope_id: memory.scope_id,
       key: memory.key
     }
+  end
+
+  defp require_memory_key(selector) do
+    case Map.fetch(selector, :key) do
+      {:ok, value} when is_binary(value) -> {:ok, selector}
+      {:ok, _value} -> {:error, {:invalid_memory_selector_key, :key}}
+      :error -> {:error, {:missing_required_memory_selector_key, :key}}
+    end
   end
 
   defp memory_where_clause(selector) do

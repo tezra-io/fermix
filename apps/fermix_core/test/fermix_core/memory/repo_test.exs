@@ -146,6 +146,36 @@ defmodule FermixCore.Memory.RepoTest do
     assert {:error, :not_found} = Repo.get_memory(selector, server: repo)
   end
 
+  test "supports explicit bulk memory deletes by selector", %{repo: repo} do
+    base_attrs = %{
+      agent_id: "main",
+      owner_id: "default",
+      scope_type: "conversation",
+      scope_id: "telegram:chat-bulk:root",
+      category: "preference",
+      value: "stored"
+    }
+
+    assert {:ok, _memory} =
+             Repo.upsert_memory(Map.put(base_attrs, :key, "language"), server: repo)
+
+    assert {:ok, _memory} =
+             Repo.upsert_memory(Map.put(base_attrs, :key, "timezone"), server: repo)
+
+    selector = %{
+      agent_id: "main",
+      owner_id: "default",
+      scope_type: "conversation",
+      scope_id: "telegram:chat-bulk:root"
+    }
+
+    assert {:error, {:missing_required_memory_selector_key, :key}} =
+             Repo.delete_memory(selector, server: repo)
+
+    assert :ok = Repo.delete_memories(selector, server: repo)
+    assert {:ok, []} = Repo.get_memories(selector, server: repo)
+  end
+
   test "keeps memory fts results in sync across upserts and deletes", %{repo: repo} do
     attrs = %{
       agent_id: "main",
