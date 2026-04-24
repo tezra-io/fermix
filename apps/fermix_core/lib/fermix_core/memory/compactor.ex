@@ -46,6 +46,7 @@ defmodule FermixCore.Memory.Compactor do
 
   defp compact_over_budget(messages, budget, opts) do
     {protected, history} = split_protected(messages)
+    protected = Enum.reject(protected, &checkpoint_summary_message?/1)
     history = Enum.reject(history, &checkpoint_summary_message?/1)
     {older, recent} = split_for_compaction(history, budget)
 
@@ -78,8 +79,9 @@ defmodule FermixCore.Memory.Compactor do
   defp create_summary(older, budget, opts) do
     prior = latest_checkpoint(opts)
 
-    with {:ok, summary} <- call_summary_provider(older, prior, budget, opts),
-         :ok <- maybe_persist_checkpoint(summary, opts) do
+    with {:ok, summary} <- call_summary_provider(older, prior, budget, opts) do
+      # Persistence errors are logged in persist_checkpoint/2 and must not block the turn.
+      _ = maybe_persist_checkpoint(summary, opts)
       {:ok, summary, %{summary: summary}}
     end
   end

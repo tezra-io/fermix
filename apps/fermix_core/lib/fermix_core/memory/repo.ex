@@ -529,9 +529,8 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp fetch_messages(conn, selector, limit) do
-    {where_sql, params} = message_where_clause(selector)
-
-    with {:ok, rows} <-
+    with {:ok, {where_sql, params}} <- message_fetch_where_clause(selector),
+         {:ok, rows} <-
            query_all(
              conn,
              """
@@ -806,6 +805,42 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
+  defp normalize_message_fetch_selector(selector) do
+    with {:ok, required} <- required_message_selector(selector) do
+      {:ok, Map.merge(required, optional_message_fetch_filters(selector))}
+    end
+  end
+
+  defp required_message_selector(selector) do
+    Enum.reduce_while([:agent_id, :channel, :chat_id, :thread_scope], {:ok, %{}}, fn key,
+                                                                                     {:ok, acc} ->
+      case Map.fetch(selector, key) do
+        {:ok, nil} ->
+          {:halt, {:error, {:missing_required_message_selector_key, key}}}
+
+        {:ok, value} ->
+          {:cont, {:ok, Map.put(acc, key, normalize_message_selector_value!(key, value))}}
+
+        :error ->
+          {:halt, {:error, {:missing_required_message_selector_key, key}}}
+      end
+    end)
+  end
+
+  defp optional_message_fetch_filters(selector) do
+    [:owner_id, :sender, :role, :kind]
+    |> Enum.reduce(%{}, fn key, acc ->
+      case Map.fetch(selector, key) do
+        {:ok, nil} -> acc
+        {:ok, value} -> Map.put(acc, key, fetch_string_value!(key, value))
+        :error -> acc
+      end
+    end)
+  end
+
+  defp normalize_message_selector_value!(:thread_scope, value), do: normalize_thread_scope(value)
+  defp normalize_message_selector_value!(key, value), do: fetch_string_value!(key, value)
+
   defp message_insert_params(message) do
     [
       message.agent_id,
@@ -877,6 +912,20 @@ defmodule FermixCore.Memory.Repo do
       {"messages.#{message_column_name(key)} = ?", params ++ [value]}
     end)
     |> join_where_clause()
+  end
+
+  defp message_fetch_where_clause(selector) do
+    with {:ok, normalized} <- normalize_message_fetch_selector(selector) do
+      clause =
+        normalized
+        |> Enum.sort_by(fn {key, _value} -> key end)
+        |> Enum.map_reduce([], fn {key, value}, params ->
+          {"messages.#{message_column_name(key)} = ?", params ++ [value]}
+        end)
+        |> join_where_clause()
+
+      {:ok, clause}
+    end
   end
 
   defp join_where_clause({[], params}), do: {"1 = 1", params}
