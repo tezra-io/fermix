@@ -4,6 +4,26 @@ defmodule FermixCore.Memory.SearchTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Search
 
+  defmodule FakeSearchRepo do
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts), do: {:ok, Map.new(opts)}
+
+    @impl true
+    def handle_call({:search_memories, _query, _selector, limit}, _from, state) do
+      send(state.test_pid, {:search_call, :memories, limit})
+      {:reply, {:ok, Enum.take(state.memories, limit)}, state}
+    end
+
+    def handle_call({:search_messages, _query, _selector, limit}, _from, state) do
+      send(state.test_pid, {:search_call, :messages, limit})
+      {:reply, {:ok, Enum.take(state.messages, limit)}, state}
+    end
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-memory-search-#{unique}.db")
@@ -126,6 +146,56 @@ defmodule FermixCore.Memory.SearchTest do
     assert results == Enum.sort_by(results, & &1.rank)
   end
 
+  test "source all expands only candidate windows that can still affect the final limit" do
+    {:ok, repo} =
+      FakeSearchRepo.start_link(
+        test_pid: self(),
+        memories: search_rows(:updated_at, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]),
+        messages: search_rows(:created_at, [9.1, 9.2, 9.3, 9.4, 9.5, 9.6])
+      )
+
+    results =
+      Search.query(
+        "timezone",
+        repo: repo,
+        source: :all,
+        scope: :all,
+        limit: 6,
+        agent_id: "main"
+      )
+
+    assert Enum.map(results, & &1.source) == List.duplicate(:memories, 6)
+    assert_receive {:search_call, :memories, 3}
+    assert_receive {:search_call, :messages, 3}
+    assert_receive {:search_call, :memories, 6}
+    refute_receive {:search_call, :messages, 6}
+  end
+
+  test "source all expands a non-exhausted window when the split window underfills the limit" do
+    {:ok, repo} =
+      FakeSearchRepo.start_link(
+        test_pid: self(),
+        memories: search_rows(:updated_at, [0.1, 0.2, 0.3, 0.4]),
+        messages: []
+      )
+
+    results =
+      Search.query(
+        "timezone",
+        repo: repo,
+        source: :all,
+        scope: :all,
+        limit: 4,
+        agent_id: "main"
+      )
+
+    assert Enum.map(results, & &1.source) == List.duplicate(:memories, 4)
+    assert_receive {:search_call, :memories, 2}
+    assert_receive {:search_call, :messages, 2}
+    assert_receive {:search_call, :memories, 4}
+    refute_receive {:search_call, :messages, 4}
+  end
+
   defp insert_memory(repo, scope_type, scope_id, key, value) do
     assert {:ok, _memory} =
              Repo.upsert_memory(
@@ -158,5 +228,16 @@ defmodule FermixCore.Memory.SearchTest do
                },
                server: repo
              )
+  end
+
+  defp search_rows(timestamp_field, ranks) do
+    now = DateTime.utc_now()
+
+    ranks
+    |> Enum.with_index(1)
+    |> Enum.map(fn {rank, id} ->
+      %{id: id, rank: rank}
+      |> Map.put(timestamp_field, DateTime.add(now, -id, :second))
+    end)
   end
 end
