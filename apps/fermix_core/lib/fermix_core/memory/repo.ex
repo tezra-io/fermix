@@ -108,7 +108,10 @@ defmodule FermixCore.Memory.Repo do
           required(:agent_id) => String.t(),
           required(:channel) => String.t(),
           required(:chat_id) => String.t(),
-          required(:thread_scope) => String.t() | atom() | integer()
+          required(:thread_scope) => String.t() | atom() | integer(),
+          optional(:owner_id) => String.t(),
+          optional(:role) => String.t(),
+          optional(:kind) => String.t()
         }
 
   @type memory_attrs :: %{
@@ -526,7 +529,7 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp fetch_messages(conn, selector, limit) do
-    message_selector = normalize_message_selector(selector)
+    {where_sql, params} = message_where_clause(selector)
 
     with {:ok, rows} <-
            query_all(
@@ -534,17 +537,11 @@ defmodule FermixCore.Memory.Repo do
              """
              SELECT *
              FROM messages
-             WHERE agent_id = ? AND channel = ? AND chat_id = ? AND thread_scope = ?
+             WHERE #{where_sql}
              ORDER BY created_at DESC, id DESC
              LIMIT ?
              """,
-             [
-               message_selector.agent_id,
-               message_selector.channel,
-               message_selector.chat_id,
-               message_selector.thread_scope,
-               limit
-             ]
+             params ++ [limit]
            ) do
       {:ok, rows |> Enum.map(&message_row/1) |> Enum.reverse()}
     end
@@ -774,15 +771,6 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
-  defp normalize_message_selector(selector) do
-    %{
-      agent_id: fetch_string!(selector, :agent_id),
-      channel: fetch_string!(selector, :channel),
-      chat_id: fetch_string!(selector, :chat_id),
-      thread_scope: normalize_thread_scope(Map.fetch!(selector, :thread_scope))
-    }
-  end
-
   defp normalize_memory_attrs(attrs) do
     %{
       agent_id: fetch_string!(attrs, :agent_id),
@@ -797,6 +785,15 @@ defmodule FermixCore.Memory.Repo do
       source_message_id: Map.get(attrs, :source_message_id),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
       updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
+    }
+  end
+
+  defp normalize_message_selector(selector) do
+    %{
+      agent_id: fetch_string!(selector, :agent_id),
+      channel: fetch_string!(selector, :channel),
+      chat_id: fetch_string!(selector, :chat_id),
+      thread_scope: normalize_thread_scope(Map.fetch!(selector, :thread_scope))
     }
   end
 
@@ -902,7 +899,16 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp message_column_name(key)
-       when key in [:agent_id, :owner_id, :channel, :chat_id, :thread_scope, :role, :kind] do
+       when key in [
+              :agent_id,
+              :owner_id,
+              :channel,
+              :chat_id,
+              :thread_scope,
+              :sender,
+              :role,
+              :kind
+            ] do
     Atom.to_string(key)
   end
 
