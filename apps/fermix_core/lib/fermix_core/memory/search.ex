@@ -1,6 +1,10 @@
 defmodule FermixCore.Memory.Search do
   @moduledoc """
   Unified FTS5-backed lexical search over durable memories and message history.
+
+  Defaults intentionally favor broad programmatic search: `query/2` searches all
+  durable sources across all scopes unless callers pass narrower options. The
+  `memory_recall` tool uses narrower defaults for agent-facing recall.
   """
 
   alias FermixCore.Memory.Config
@@ -44,7 +48,102 @@ defmodule FermixCore.Memory.Search do
     do: search_message_results(search_term, ctx)
 
   defp search_results(search_term, %{source: :all} = ctx) do
-    search_memory_results(search_term, ctx) ++ search_message_results(search_term, ctx)
+    initial_limit = div(ctx.limit + 1, 2)
+
+    search_term
+    |> search_source_windows(ctx, initial_limit)
+    |> expand_source_windows(search_term, ctx)
+    |> merged_source_results()
+  end
+
+  defp search_source_windows(search_term, ctx, window_limit) do
+    %{
+      memories: search_source_window(:memories, search_term, ctx, window_limit),
+      messages: search_source_window(:messages, search_term, ctx, window_limit)
+    }
+  end
+
+  defp search_source_window(source, search_term, ctx, window_limit) do
+    limited_ctx = %{ctx | limit: window_limit}
+    results = search_single_source(source, search_term, limited_ctx)
+
+    %{
+      limit: window_limit,
+      results: results,
+      exhausted?: length(results) < window_limit
+    }
+  end
+
+  defp search_single_source(:memories, search_term, ctx),
+    do: search_memory_results(search_term, ctx)
+
+  defp search_single_source(:messages, search_term, ctx),
+    do: search_message_results(search_term, ctx)
+
+  defp expand_source_windows(windows, search_term, ctx) do
+    windows
+    |> expandable_sources(ctx.limit)
+    |> case do
+      [] -> windows
+      sources -> expand_source_windows(windows, sources, search_term, ctx)
+    end
+  end
+
+  defp expand_source_windows(windows, sources, search_term, ctx) do
+    expanded =
+      Enum.reduce(sources, windows, fn source, acc ->
+        Map.put(acc, source, search_source_window(source, search_term, ctx, ctx.limit))
+      end)
+
+    expand_source_windows(expanded, search_term, ctx)
+  end
+
+  defp expandable_sources(windows, final_limit) do
+    cutoff = cutoff_result(windows, final_limit)
+
+    windows
+    |> Enum.filter(fn {_source, window} ->
+      expandable_window?(window, cutoff, final_limit)
+    end)
+    |> Enum.map(fn {source, _window} -> source end)
+  end
+
+  defp expandable_window?(%{limit: limit}, _cutoff, final_limit) when limit >= final_limit,
+    do: false
+
+  defp expandable_window?(%{exhausted?: true}, _cutoff, _final_limit), do: false
+
+  defp expandable_window?(%{results: _results}, nil, _final_limit), do: true
+
+  defp expandable_window?(%{results: results}, cutoff, _final_limit) do
+    results
+    |> List.last()
+    |> result_can_improve_cutoff?(cutoff)
+  end
+
+  defp result_can_improve_cutoff?(nil, _cutoff), do: false
+
+  defp result_can_improve_cutoff?(result, cutoff) do
+    sort_key(result) < sort_key(cutoff)
+  end
+
+  defp cutoff_result(windows, final_limit) do
+    results = merged_source_results(windows)
+
+    if length(results) < final_limit do
+      nil
+    else
+      results
+      |> Enum.take(final_limit)
+      |> List.last()
+    end
+  end
+
+  defp merged_source_results(windows) do
+    windows
+    |> Map.values()
+    |> Enum.flat_map(& &1.results)
+    |> Enum.sort_by(&sort_key/1)
   end
 
   defp search_memory_results(search_term, ctx) do
@@ -238,12 +337,12 @@ defmodule FermixCore.Memory.Search do
   end
 
   defp sort_key(%{rank: rank, updated_at: updated_at, id: id}),
-    do: {rank, -updated_at_microseconds(updated_at), -id}
+    do: {rank, -timestamp_microseconds(updated_at), -id}
 
   defp sort_key(%{rank: rank, created_at: created_at, id: id}),
-    do: {rank, -updated_at_microseconds(created_at), -id}
+    do: {rank, -timestamp_microseconds(created_at), -id}
 
-  defp updated_at_microseconds(%DateTime{} = value), do: DateTime.to_unix(value, :microsecond)
+  defp timestamp_microseconds(%DateTime{} = value), do: DateTime.to_unix(value, :microsecond)
 
   defp normalize_source!(:memories), do: :memories
   defp normalize_source!(:messages), do: :messages
