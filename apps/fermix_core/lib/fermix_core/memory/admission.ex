@@ -5,6 +5,7 @@ defmodule FermixCore.Memory.Admission do
 
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Scope
 
   @valid_categories MapSet.new(
                       ~w(identity preference goal project environment instruction correction episode)
@@ -211,7 +212,7 @@ defmodule FermixCore.Memory.Admission do
 
   defp scope_id("conversation", ctx) do
     {channel, chat_id, thread_scope} = ctx.conversation_key
-    Enum.join([channel, chat_id, normalize_thread_scope(thread_scope)], ":")
+    Scope.conversation_scope_id(channel, chat_id, thread_scope)
   end
 
   defp existing_memory(ctx, scope_type, scope_id, key, "correction") do
@@ -321,8 +322,4 @@ defmodule FermixCore.Memory.Admission do
   defp normalize_chat_mode(value) do
     raise ArgumentError, "invalid chat_mode: #{inspect(value)}"
   end
-
-  defp normalize_thread_scope(:root), do: "root"
-  defp normalize_thread_scope(value) when is_binary(value), do: value
-  defp normalize_thread_scope(value) when is_integer(value), do: Integer.to_string(value)
 end

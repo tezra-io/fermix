@@ -3,6 +3,22 @@ defmodule FermixCore.Memory.RepoTest do
 
   alias FermixCore.Memory.Repo
 
+  defmodule ExitingRepo do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, :ok, name: Keyword.fetch!(opts, :name))
+    end
+
+    @impl true
+    def init(:ok), do: {:ok, nil}
+
+    @impl true
+    def handle_call(:enabled?, _from, state) do
+      {:stop, :normal, state}
+    end
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-memory-repo-#{unique}.db")
@@ -22,6 +38,14 @@ defmodule FermixCore.Memory.RepoTest do
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
     assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
+  end
+
+  test "enabled_server returns nil when a named repo exits during lookup" do
+    repo_name = :"exiting_repo_#{System.unique_integer([:positive])}"
+
+    start_supervised!({ExitingRepo, name: repo_name})
+
+    assert is_nil(Repo.enabled_server(repo_name))
   end
 
   test "rerunning migrations is idempotent", %{repo: repo} do

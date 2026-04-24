@@ -143,6 +143,15 @@ defmodule FermixCore.Memory.ConversationStoreTest do
                      %{channel: "telegram", chat_id: "chat_123"}}
   end
 
+  test "falls back to memory when configured repo name is no longer registered", %{store: store} do
+    repo_name = :"missing_conversation_repo_#{System.unique_integer([:positive])}"
+
+    :sys.replace_state(store, fn state -> %{state | repo: repo_name} end)
+
+    ConversationStore.add_message(@key, "user", "hello", server: store)
+    assert [%{content: "hello"}] = ConversationStore.get_history(@key, server: store)
+  end
+
   # --- Guards ---
 
   test "rejects non-tuple conversation key", %{store: store} do
