@@ -72,7 +72,8 @@ config :fermix_core, :memory,
 
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.expand("~/.fermix/bootstrap"),
-  seed_agent_file: true
+  seed_agent_file: true,
+  accounting_enabled: true
 
 config :fermix_core, :transcription,
   backend: FermixCore.Transcription.OpenAI,
