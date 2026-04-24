@@ -199,6 +199,10 @@ defmodule FermixCore.Agents.MainAgentTest do
     ConversationStore.list_conversations(server: conv_store)
   end
 
+  defp runtime_message(messages) do
+    Enum.find(messages, &(&1.role == "system" and &1.content =~ "## Runtime Contract"))
+  end
+
   defp eventually(fun, attempts \\ 20)
 
   defp eventually(fun, attempts) when attempts > 0 do
@@ -244,7 +248,9 @@ defmodule FermixCore.Agents.MainAgentTest do
     skills_dir = Path.join(System.tmp_dir!(), "fermix-skills-#{suffix}")
     journal_dir = Path.join(System.tmp_dir!(), "fermix-journals-#{suffix}")
     prompt_dir = Path.join(System.tmp_dir!(), "fermix-prompt-memory-#{suffix}")
+    bootstrap_dir = Path.join(System.tmp_dir!(), "fermix-bootstrap-#{suffix}")
     previous_memory_config = Application.get_env(:fermix_core, :memory, [])
+    previous_bootstrap_config = Application.get_env(:fermix_core, :prompt_bootstrap, [])
 
     File.mkdir_p!(skills_dir)
     File.mkdir_p!(prompt_dir)
@@ -253,6 +259,12 @@ defmodule FermixCore.Agents.MainAgentTest do
       :fermix_core,
       :memory,
       Keyword.merge(previous_memory_config, prompt_base_dir: prompt_dir, agent_id: "main")
+    )
+
+    Application.put_env(:fermix_core, :prompt_bootstrap,
+      bootstrap_dir: bootstrap_dir,
+      seed_agent_file: false,
+      accounting_enabled: true
     )
 
     {:ok, _} =
@@ -292,10 +304,12 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_memory_config)
+      Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
       MockProvider.cleanup()
       File.rm_rf!(skills_dir)
       File.rm_rf!(journal_dir)
       File.rm_rf!(prompt_dir)
+      File.rm_rf!(bootstrap_dir)
     end)
 
     %{
@@ -307,7 +321,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       task_supervisor: task_sup_name,
       agent_supervisor: agent_supervisor_name,
       journal_dir: journal_dir,
-      prompt_dir: prompt_dir
+      prompt_dir: prompt_dir,
+      bootstrap_dir: bootstrap_dir
     }
   end
 
@@ -367,11 +382,14 @@ defmodule FermixCore.Agents.MainAgentTest do
       # Verify provider received messages including history
       [{messages, _opts}] = MockProvider.get_calls()
 
-      # Should have: system + 2 history messages + new user message
-      assert length(messages) == 4
+      # Should have: composed systems + 2 history messages + new user message
+      assert length(messages) == 5
 
-      [system, hist_user, hist_assistant, new_user] = messages
-      assert system.role == "system"
+      [agents, runtime, hist_user, hist_assistant, new_user] = messages
+      assert agents.role == "system"
+      assert agents.content =~ "You are a helpful AI assistant"
+      assert runtime.role == "system"
+      assert runtime.content =~ "## Runtime Contract"
       assert hist_user.role == "user"
       assert hist_user.content == "First question"
       assert hist_assistant.role == "assistant"
@@ -389,10 +407,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "No prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [system, user] = messages
-      assert system.role == "system"
-      refute system.content =~ "## USER MEMORY"
-      refute system.content =~ "## AGENT MEMORY"
+      [agents, runtime, user] = messages
+      assert agents.role == "system"
+      assert runtime.role == "system"
+      refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
+      refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
       assert user.content == "Hello without memory files"
     end
 
@@ -409,14 +428,15 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [system, user] = messages
-      assert system.role == "system"
-      refute system.content =~ "## USER MEMORY"
-      refute system.content =~ "## AGENT MEMORY"
+      [agents, runtime, user] = messages
+      assert agents.role == "system"
+      assert runtime.role == "system"
+      refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
+      refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
       assert user.content == "Hello with empty files"
     end
 
-    test "injects prompt-memory file contents into the main system prompt", %{agent: agent} do
+    test "injects prompt-memory file contents as ordered system prompts", %{agent: agent} do
       File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
       File.write!(PromptFiles.user_path("main"), "## Preferences\n- editor: vim\n")
       File.write!(PromptFiles.memory_path("main"), "## Working Rules\n- warnings are errors\n")
@@ -429,12 +449,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [system, user] = messages
-      assert system.role == "system"
-      assert system.content =~ "## USER MEMORY"
-      assert system.content =~ "## Preferences\n- editor: vim"
-      assert system.content =~ "## AGENT MEMORY"
-      assert system.content =~ "## Working Rules\n- warnings are errors"
+      [agents, user_memory, agent_memory, runtime, user] = messages
+      assert agents.role == "system"
+      assert user_memory.content == "## Preferences\n- editor: vim"
+      assert agent_memory.content == "## Working Rules\n- warnings are errors"
+      assert runtime.content =~ "## Runtime Contract"
       assert user.content == "Hello with prompt memory"
     end
 
@@ -747,7 +766,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "first"}, 5_000
 
       [{messages_before, _opts}] = MockProvider.get_calls()
-      refute hd(messages_before).content =~ "coding-skill"
+      refute runtime_message(messages_before).content =~ "coding-skill"
 
       write_skill(skills_dir, "coding-skill")
       MockProvider.reset_calls()
@@ -756,7 +775,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "second"}, 5_000
 
       [{messages_without_reload, _opts}] = MockProvider.get_calls()
-      refute hd(messages_without_reload).content =~ "coding-skill"
+      refute runtime_message(messages_without_reload).content =~ "coding-skill"
 
       assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
       MockProvider.reset_calls()
@@ -765,9 +784,10 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "third"}, 5_000
 
       [{messages_after_reload, _opts}] = MockProvider.get_calls()
-      assert hd(messages_after_reload).content =~ "coding-skill"
-      assert hd(messages_after_reload).content =~ "capabilities: code"
-      assert hd(messages_after_reload).content =~ "tools: file_read"
+      runtime = runtime_message(messages_after_reload)
+      assert runtime.content =~ "coding-skill"
+      assert runtime.content =~ "capabilities=code"
+      assert runtime.content =~ "tools=file_read"
     end
 
     test "delegates through invoke_skill when the LLM requests a skill", %{
