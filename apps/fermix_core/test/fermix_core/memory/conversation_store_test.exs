@@ -228,5 +228,35 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       assert length(cached) == 5
       assert Enum.map(Enum.reverse(cached), & &1.content) == Enum.map(4..8, &"msg_#{&1}")
     end
+
+    test "excludes checkpoint summaries from chat history backfill", %{
+      repo: repo,
+      store: store
+    } do
+      ConversationStore.add_message(@key, "user", "visible chat", server: store)
+
+      assert {:ok, _checkpoint} =
+               Repo.insert_message(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   channel: elem(@key, 0),
+                   chat_id: elem(@key, 1),
+                   thread_scope: elem(@key, 2),
+                   sender: "compactor",
+                   role: "system",
+                   kind: "checkpoint_summary",
+                   content: "hidden checkpoint"
+                 },
+                 server: repo
+               )
+
+      :sys.replace_state(store, fn state ->
+        %{state | conversations: %{}}
+      end)
+
+      history = ConversationStore.get_history(@key, 5, server: store)
+      assert Enum.map(history, & &1.content) == ["visible chat"]
+    end
   end
 end

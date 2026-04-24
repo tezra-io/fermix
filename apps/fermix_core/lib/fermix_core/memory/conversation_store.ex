@@ -245,7 +245,8 @@ defmodule FermixCore.Memory.ConversationStore do
                    agent_id: state.agent_id,
                    channel: elem(key, 0),
                    chat_id: elem(key, 1),
-                   thread_scope: elem(key, 2)
+                   thread_scope: elem(key, 2),
+                   kind: "chat_message"
                  },
                  limit: limit,
                  server: repo
