@@ -12,6 +12,7 @@ defmodule FermixCore.Memory.Config do
   @extraction_timeout_ms 5_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75
+  @extraction_debounce_seconds 60
   @prompt_files_rebuild_hours 12
   @compaction_token_budget 8_000
   @loop_detection_window 10
@@ -69,6 +70,26 @@ defmodule FermixCore.Memory.Config do
       Keyword.get(memory_config(), :extraction_min_confidence, @extraction_min_confidence)
     )
     |> normalize_probability!(:extraction_min_confidence)
+  end
+
+  @spec extraction_debounce_ms(options()) :: non_neg_integer()
+  def extraction_debounce_ms(opts \\ []) do
+    cond do
+      Keyword.has_key?(opts, :extraction_debounce_ms) ->
+        opts
+        |> Keyword.fetch!(:extraction_debounce_ms)
+        |> normalize_non_negative_integer!(:extraction_debounce_ms)
+
+      Keyword.has_key?(opts, :extraction_debounce_seconds) ->
+        opts
+        |> Keyword.fetch!(:extraction_debounce_seconds)
+        |> debounce_seconds_to_ms()
+
+      true ->
+        memory_config()
+        |> Keyword.get(:extraction_debounce_seconds, @extraction_debounce_seconds)
+        |> debounce_seconds_to_ms()
+    end
   end
 
   @spec database_path(options()) :: String.t()
@@ -225,6 +246,19 @@ defmodule FermixCore.Memory.Config do
 
   defp normalize_positive_integer!(value, key) do
     raise ArgumentError, "#{key} must be a positive integer, got: #{inspect(value)}"
+  end
+
+  defp normalize_non_negative_integer!(value, _key) when is_integer(value) and value >= 0,
+    do: value
+
+  defp normalize_non_negative_integer!(value, key) do
+    raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
+  end
+
+  defp debounce_seconds_to_ms(value) do
+    value
+    |> normalize_non_negative_integer!(:extraction_debounce_seconds)
+    |> Kernel.*(1_000)
   end
 
   defp normalize_probability!(value, _key)

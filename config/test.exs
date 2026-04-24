@@ -12,6 +12,7 @@ config :fermix_core, :log, enabled: false
 config :fermix_core, :memory,
   enabled: false,
   extraction_enabled: false,
+  extraction_debounce_seconds: 60,
   extraction_timeout_ms: 1_000,
   extraction_context_messages: 8,
   extraction_min_confidence: 0.75,

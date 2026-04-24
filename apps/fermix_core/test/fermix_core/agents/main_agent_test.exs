@@ -576,7 +576,8 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true
+             extraction_enabled: true,
+             extraction_debounce_ms: 0
            ]},
           id: agent_name
         )
@@ -611,7 +612,8 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true
+             extraction_enabled: true,
+             extraction_debounce_ms: 0
            ]},
           id: agent_name
         )
@@ -663,7 +665,8 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true
+             extraction_enabled: true,
+             extraction_debounce_ms: 0
            ]},
           id: agent_name
         )
@@ -677,6 +680,57 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, "Reply survives extraction failure"}, 5_000
       assert eventually(fn -> length(MockProvider.get_calls()) == 2 end)
+    end
+
+    test "debounces rapid-fire extraction without blocking replies", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      agent_name = :"extract_debounce_main_agent_#{System.unique_integer([:positive])}"
+      chat_id = "chat_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             extraction_enabled: true,
+             extraction_debounce_ms: 80
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([
+        mock_response("Reply one"),
+        mock_response("Reply two"),
+        {:block, :extract, mock_response("[]")}
+      ])
+
+      MainAgent.handle_message(make_message("first", chat_id: chat_id), agent_name)
+      assert_receive {:reply, "Reply one"}, 5_000
+
+      MainAgent.handle_message(make_message("second", chat_id: chat_id), agent_name)
+      assert_receive {:reply, "Reply two"}, 5_000
+
+      refute_receive {:mock_provider_blocked, :extract, _pid}, 40
+      assert_receive {:mock_provider_blocked, :extract, extraction_pid}, 1_000
+      send(extraction_pid, {:continue, :extract})
+
+      assert eventually(fn -> length(MockProvider.get_calls()) == 3 end)
+
+      [_first_main, _second_main, {extraction_messages, _opts}] = MockProvider.get_calls()
+
+      assert Enum.any?(
+               extraction_messages,
+               &(&1.role == "user" and &1.content =~ "[user] second")
+             )
     end
 
     test "keeps the skill list static until reload_skills/1 is called", %{
