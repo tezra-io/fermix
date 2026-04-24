@@ -42,6 +42,13 @@ defmodule FermixCore.Memory.Store do
 
   @spec recall(memory_scope(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, :not_found}
+  @doc """
+  Recalls one memory key from ETS first, falling back to SQLite only on cache miss.
+
+  This intentionally preserves hot-path cache authority for single-key lookups.
+  Use `recall_all/2` when the caller needs SQLite to authoritatively resync the
+  scope cache.
+  """
   def recall(scope, key, opts \\ []) when is_binary(key) do
     assert_scope!(scope)
 
@@ -50,6 +57,13 @@ defmodule FermixCore.Memory.Store do
   end
 
   @spec recall_all(memory_scope(), keyword()) :: %{String.t() => String.t()}
+  @doc """
+  Recalls all memory keys for a scope.
+
+  When durable memory is enabled, SQLite is authoritative: this reloads the
+  scope from the repo and replaces that scope's ETS entries. When no repo is
+  registered, it returns the current ETS contents.
+  """
   def recall_all(scope, opts \\ []) do
     assert_scope!(scope)
 
@@ -156,7 +170,6 @@ defmodule FermixCore.Memory.Store do
         {:ok, memory.value}
 
       {:error, :not_found} ->
-        delete_cached_memory(table, scope_ref, key)
         {:error, :not_found}
 
       {:error, reason} ->
@@ -405,7 +418,7 @@ defmodule FermixCore.Memory.Store do
     else
       {:ok, memories} ->
         with {:ok, migrated} <- migrate_memories(repo, scope_ref, memories),
-             :ok <- Repo.delete_memory(repo_scope_selector(fallback_scope_ref), server: repo) do
+             :ok <- Repo.delete_memories(repo_scope_selector(fallback_scope_ref), server: repo) do
           {:ok, migrated}
         end
 

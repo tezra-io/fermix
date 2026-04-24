@@ -291,6 +291,29 @@ defmodule FermixCore.Memory.StoreTest do
       assert %{"topic" => "persisted"} = Store.recall_all(conv_key, server: store)
     end
 
+    test "recall prefers cached values when ETS diverges from sqlite", %{repo: repo, store: store} do
+      conv_key = {"telegram", "chat_1", :root}
+      scope_id = "telegram:chat_1:root"
+
+      assert :ok = Store.store(conv_key, "topic", "cached", server: store)
+
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: scope_id,
+                   category: "fact",
+                   key: "topic",
+                   value: "persisted"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, "cached"} = Store.recall(conv_key, "topic", server: store)
+    end
+
     test "owner and agent scopes stay namespaced by both agent_id and owner_id", %{repo: repo} do
       main_store = start_repo_backed_store(repo, agent_id: "main", owner_id: "default")
       side_agent_store = start_repo_backed_store(repo, agent_id: "sidecar", owner_id: "default")
@@ -323,7 +346,11 @@ defmodule FermixCore.Memory.StoreTest do
 
   defp evict_store_cache(store) do
     :sys.replace_state(store, fn state ->
-      %{state | table: :ets.new(:fermix_memory, [:set, :private])}
+      previous_table = state.table
+      next_table = :ets.new(:fermix_memory, [:set, :private])
+      true = :ets.delete(previous_table)
+
+      %{state | table: next_table}
     end)
   end
 end
