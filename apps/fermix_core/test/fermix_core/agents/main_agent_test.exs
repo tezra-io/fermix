@@ -450,10 +450,13 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [agents, user_memory, agent_memory, runtime, user] = messages
+      [agents, memory_context, runtime, user] = messages
       assert agents.role == "system"
-      assert user_memory.content == "## Preferences\n- editor: vim"
-      assert agent_memory.content == "## Working Rules\n- warnings are errors"
+      assert memory_context.content =~ "<memory-context>"
+      assert memory_context.content =~ "USER PROFILE (who the user is)"
+      assert memory_context.content =~ "## Preferences\n- editor: vim"
+      assert memory_context.content =~ "MEMORY (agent's working notes)"
+      assert memory_context.content =~ "## Working Rules\n- warnings are errors"
       assert runtime.content =~ "## Runtime Contract"
       assert user.content == "Hello with prompt memory"
     end
@@ -481,18 +484,22 @@ defmodule FermixCore.Agents.MainAgentTest do
                "system",
                "system",
                "system",
-               "system",
                "user"
              ]
+
+      memory_context = Enum.at(messages, 2).content
 
       assert Enum.map(messages, & &1.content) == [
                "SOUL bootstrap",
                "AGENTS bootstrap",
-               "USER memory",
-               "AGENT memory",
+               memory_context,
                runtime_message(messages).content,
                "Hello with bootstrap"
              ]
+
+      assert memory_context =~ "<memory-context>"
+      assert memory_context =~ "USER memory"
+      assert memory_context =~ "AGENT memory"
     end
 
     test "sends error message via reply_fn on agent loop failure", %{agent: agent} do

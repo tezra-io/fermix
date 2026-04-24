@@ -1,23 +1,34 @@
 defmodule FermixCore.Prompt.SeederTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.Seeder
+  alias FermixCore.Resource.Registry
 
   setup do
+    unique = unique()
+    repo_name = :"prompt_seeder_repo_#{unique}"
+    db_path = Path.join(System.tmp_dir!(), "fermix-prompt-seeder-#{unique}.db")
     previous_config = Application.get_env(:fermix_core, :prompt_bootstrap, [])
-    base_dir = Path.join(System.tmp_dir!(), "fermix-prompt-seeder-#{unique()}")
+    base_dir = Path.join(System.tmp_dir!(), "fermix-prompt-seeder-#{unique}")
 
     Application.put_env(:fermix_core, :prompt_bootstrap,
       bootstrap_dir: base_dir,
       seed_agent_file: true
     )
 
+    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
     on_exit(fn ->
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_config)
       File.rm_rf!(base_dir)
+
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        File.rm(path)
+      end)
     end)
 
-    %{agent_id: "main", base_dir: base_dir}
+    %{agent_id: "main", base_dir: base_dir, repo: repo_name}
   end
 
   test "paths resolve under the configured bootstrap directory", %{
@@ -30,9 +41,10 @@ defmodule FermixCore.Prompt.SeederTest do
   end
 
   test "ensure_seeded/1 creates default AGENTS.md and leaves SOUL.md absent", %{
-    agent_id: agent_id
+    agent_id: agent_id,
+    repo: repo
   } do
-    assert {:ok, result} = Seeder.ensure_seeded(agent_id)
+    assert {:ok, result} = Seeder.ensure_seeded(agent_id, repo: repo)
     assert result.agents.path == Seeder.agents_path(agent_id)
     assert result.agents.approx_size > 0
     assert result.agents.approx_tokens > 0
@@ -40,6 +52,10 @@ defmodule FermixCore.Prompt.SeederTest do
 
     assert File.read!(Seeder.agents_path(agent_id)) =~ "You are a helpful AI assistant"
     refute File.exists?(Seeder.soul_path(agent_id))
+
+    assert {:ok, [revision]} = Registry.list_revisions(agent_id, :agents_md, "global", repo: repo)
+    assert revision.mutation_source == "seed"
+    assert revision.content == result.agents.content
   end
 
   test "default AGENTS.md keeps the old stable operating prompt semantics" do

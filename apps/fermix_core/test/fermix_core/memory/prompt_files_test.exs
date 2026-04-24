@@ -5,6 +5,7 @@ defmodule FermixCore.Memory.PromptFilesTest do
 
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo
+  alias FermixCore.Resource.Registry
 
   setup do
     unique = System.unique_integer([:positive])
@@ -229,8 +230,81 @@ defmodule FermixCore.Memory.PromptFilesTest do
     assert memory_text in [nil, ""]
   end
 
+  test "rebuild/4 commits prompt file revisions with extraction provenance and dedupes unchanged output",
+       %{
+         agent_id: agent_id,
+         owner_id: owner_id,
+         repo: repo
+       } do
+    memory =
+      insert_memory(repo, %{
+        agent_id: agent_id,
+        owner_id: owner_id,
+        scope_type: "owner",
+        scope_id: owner_id,
+        category: "preference",
+        key: "preferred_editor",
+        value: "helix",
+        promote_target: "user_md"
+      })
+
+    provenance = %{memory_ids: [memory.id], categories: [memory.category]}
+
+    assert {:ok, %{user: user_text, memory: nil}} =
+             PromptFiles.rebuild(agent_id, owner_id, :event, provenance: provenance)
+
+    assert user_text =~ "preferred editor: helix"
+    assert File.read!(PromptFiles.user_path(agent_id)) == user_text
+    assert File.read!(PromptFiles.memory_path(agent_id)) == ""
+
+    assert {:ok, %{user: ^user_text, memory: nil}} =
+             PromptFiles.rebuild(agent_id, owner_id, :event, provenance: provenance)
+
+    assert {:ok, [user_revision]} =
+             Registry.list_revisions(agent_id, :user_md, "global", repo: repo)
+
+    assert user_revision.mutation_source == "extraction_rebuild"
+    assert user_revision.provenance["trigger"] == "extraction_rebuild"
+    assert user_revision.provenance["memory_ids"] == [memory.id]
+    assert user_revision.provenance["categories"] == ["preference"]
+
+    assert {:ok, [memory_revision]} =
+             Registry.list_revisions(agent_id, :memory_md, "global", repo: repo)
+
+    assert memory_revision.mutation_source == "extraction_rebuild"
+    assert memory_revision.content == ""
+  end
+
+  test "rebuild/4 commits scheduler rebuild revisions with default provenance", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "agent",
+      scope_id: agent_id,
+      category: "environment",
+      key: "runtime",
+      value: "elixir",
+      promote_target: "memory_md"
+    })
+
+    assert {:ok, %{memory: memory_text}} = PromptFiles.rebuild(agent_id, owner_id, :periodic, [])
+    assert memory_text =~ "runtime: elixir"
+
+    assert {:ok, [revision]} =
+             Registry.list_revisions(agent_id, :memory_md, "global", repo: repo)
+
+    assert revision.mutation_source == "scheduler_rebuild"
+    assert revision.provenance["trigger"] == "scheduler_rebuild"
+    assert revision.provenance["rebuild_reason"] == "periodic"
+  end
+
   defp insert_memory(repo, attrs) do
-    assert {:ok, _memory} = Repo.upsert_memory(attrs, server: repo)
+    assert {:ok, memory} = Repo.upsert_memory(attrs, server: repo)
+    memory
   end
 
   defp estimated_tokens(text) do
