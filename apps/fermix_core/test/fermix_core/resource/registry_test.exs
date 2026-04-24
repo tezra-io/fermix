@@ -117,6 +117,138 @@ defmodule FermixCore.Resource.RegistryTest do
              Registry.list_revisions("main", "checkpoint", scope_id, repo: repo)
   end
 
+  test "rollback appends a revision, preserves history, and rewrites file", %{repo: repo} do
+    path = temp_resource_path("rollback-user")
+    File.write!(path, "current")
+
+    assert {:ok, first} =
+             Registry.commit("main", "user_md", "global", "first",
+               mutation_source: :imported,
+               provenance: %{"trigger" => "imported"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:ok, second} =
+             Registry.commit("main", "user_md", "global", "second",
+               mutation_source: :scheduler_rebuild,
+               provenance: %{"trigger" => "scheduler_rebuild"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:ok, rollback} = Registry.rollback("main", "user_md", "global", 1, repo: repo)
+
+    assert rollback.revision == 3
+    assert rollback.parent_revision == 2
+    assert rollback.content == first.content
+    assert rollback.content_hash == first.content_hash
+    assert rollback.mutation_source == "rollback"
+
+    assert rollback.provenance == %{
+             "trigger" => "rollback",
+             "target_revision" => 1,
+             "from_revision" => 2,
+             "description" => "Operator rolled back from revision 2 to revision 1"
+           }
+
+    assert {:ok, 3} = Registry.current_revision("main", "user_md", "global", repo: repo)
+    assert File.read!(path) == "first"
+
+    assert {:ok, second} == Registry.get_revision("main", "user_md", "global", 2, repo: repo)
+
+    assert {:ok, [latest, middle, oldest]} =
+             Registry.list_revisions("main", "user_md", "global", repo: repo)
+
+    assert {latest.revision, middle.revision, oldest.revision} == {3, 2, 1}
+  end
+
+  test "rollback rejects nonexistent target revision", %{repo: repo} do
+    path = temp_resource_path("rollback-missing-target")
+    File.write!(path, "only")
+
+    assert {:ok, _revision} =
+             Registry.commit("main", "memory_md", "global", "only",
+               mutation_source: :imported,
+               provenance: %{"trigger" => "imported"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:error, :not_found} = Registry.rollback("main", "memory_md", "global", 9, repo: repo)
+
+    assert {:ok, [revision]} = Registry.list_revisions("main", "memory_md", "global", repo: repo)
+    assert revision.revision == 1
+    assert File.read!(path) == "only"
+  end
+
+  test "rollback to current content is a no-op", %{repo: repo} do
+    path = temp_resource_path("rollback-current-target")
+    File.write!(path, "current")
+
+    assert {:ok, _first} =
+             Registry.commit("main", "agents_md", "global", "first",
+               mutation_source: :imported,
+               provenance: %{"trigger" => "imported"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:ok, second} =
+             Registry.commit("main", "agents_md", "global", "second",
+               mutation_source: :manual_edit,
+               provenance: %{"trigger" => "manual_edit"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:ok, :already_at_target} =
+             Registry.rollback("main", "agents_md", "global", 2, repo: repo)
+
+    assert {:ok, [^second, first]} =
+             Registry.list_revisions("main", "agents_md", "global", repo: repo)
+
+    assert first.revision == 1
+    assert File.read!(path) == "current"
+  end
+
+  test "rollback rewrites file-backed resources with temporary file cleanup", %{repo: repo} do
+    path = temp_resource_path("rollback-atomic-file")
+
+    assert {:ok, _first} =
+             Registry.commit("main", "soul_md", "global", "soul v1\n",
+               mutation_source: :imported,
+               provenance: %{"trigger" => "imported"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:ok, _second} =
+             Registry.commit("main", "soul_md", "global", "soul v2\n",
+               mutation_source: :manual_edit,
+               provenance: %{"trigger" => "manual_edit"},
+               resource_path: path,
+               repo: repo
+             )
+
+    assert {:ok, _rollback} = Registry.rollback("main", "soul_md", "global", 1, repo: repo)
+
+    assert File.read!(path) == "soul v1\n"
+    assert Path.wildcard("#{path}.tmp-*") == []
+  end
+
+  test "checkpoint rollback is explicitly not implemented", %{repo: repo} do
+    assert {:ok, _revision} =
+             Registry.commit("main", "checkpoint", "telegram:chat-1:root", "summary",
+               mutation_source: :compaction,
+               provenance: %{"trigger" => "compaction"},
+               repo: repo
+             )
+
+    assert {:error, :checkpoint_rollback_not_implemented} =
+             Registry.rollback("main", "checkpoint", "telegram:chat-1:root", 1, repo: repo)
+  end
+
   test "rejects unknown resource types and mutation sources", %{repo: repo} do
     assert {:error, {:unsupported_resource_type, "unknown"}} =
              Registry.ensure_registered("main", "unknown", "global", repo: repo)
@@ -126,5 +258,15 @@ defmodule FermixCore.Resource.RegistryTest do
                mutation_source: :unknown,
                repo: repo
              )
+  end
+
+  defp temp_resource_path(name) do
+    unique = System.unique_integer([:positive])
+    dir = Path.join(System.tmp_dir!(), "#{name}-#{unique}")
+    File.mkdir_p!(dir)
+
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    Path.join(dir, "RESOURCE.md")
   end
 end
