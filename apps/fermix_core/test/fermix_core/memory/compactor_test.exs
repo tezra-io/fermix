@@ -113,6 +113,39 @@ defmodule FermixCore.Memory.CompactorTest do
     assert checkpoint.content == "summary 1"
   end
 
+  test "preserves composed prompt system messages verbatim during compaction", %{repo: repo} do
+    composed_system_messages = [
+      %{role: "system", content: "SOUL bootstrap"},
+      %{role: "system", content: "AGENTS bootstrap"},
+      %{role: "system", content: "USER memory"},
+      %{role: "system", content: "AGENT memory"},
+      %{role: "system", content: "## Runtime Contract\n- runtime rules"}
+    ]
+
+    messages =
+      composed_system_messages ++
+        [
+          %{role: "user", content: String.duplicate("old user ", 80)},
+          %{role: "assistant", content: String.duplicate("old assistant ", 80)},
+          %{role: "user", content: "latest question"}
+        ]
+
+    assert {:ok, result} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 80,
+               provider: SummaryProvider,
+               model: "summary-model",
+               context: context(repo)
+             )
+
+    assert Enum.take(result.messages, length(composed_system_messages)) ==
+             composed_system_messages
+
+    assert Enum.any?(result.messages, &(&1.role == "system" and &1.content =~ "summary 1"))
+    assert List.last(result.messages).content == "latest question"
+  end
+
   test "continues with in-memory summary when checkpoint persistence fails" do
     repo = start_supervised!(FailingRepo)
 

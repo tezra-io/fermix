@@ -42,6 +42,15 @@ defmodule FermixCore.Prompt.SeederTest do
     refute File.exists?(Seeder.soul_path(agent_id))
   end
 
+  test "default AGENTS.md keeps the old stable operating prompt semantics" do
+    content = Seeder.default_agents_content()
+
+    assert content =~ "You are a helpful AI assistant with access to tools."
+    assert content =~ "execute shell commands, read and write files, and store/recall memories"
+    assert content =~ "When you need to perform an action, use the appropriate tool."
+    assert content =~ "Think step by step."
+  end
+
   test "ensure_seeded/1 does not overwrite an existing AGENTS.md", %{agent_id: agent_id} do
     File.mkdir_p!(Seeder.agent_dir(agent_id))
     File.write!(Seeder.agents_path(agent_id), "custom instructions")

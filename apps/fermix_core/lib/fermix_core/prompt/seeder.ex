@@ -13,11 +13,13 @@ defmodule FermixCore.Prompt.Seeder do
 
   @default_agents_content """
   You are a helpful AI assistant with access to tools.
-  You can execute shell commands, read and write files, and store or recall memories.
+  You can execute shell commands, read and write files, and store/recall memories.
 
+  When you need to perform an action, use the appropriate tool.
   Use available tools when they are the right way to inspect state, change files, or perform an action.
   Use the `invoke_skill` tool when a specialized skill is a better fit than handling the work directly.
-  Think step by step, keep changes focused, and report errors clearly.
+  Think step by step.
+  Keep changes focused and report errors clearly.
   """
 
   @type bootstrap_file :: %{

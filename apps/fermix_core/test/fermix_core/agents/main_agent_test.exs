@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
+  alias FermixCore.Prompt.Seeder
   alias FermixCore.Tools.InvokeSkill
   alias FermixCore.Tools.Registry
 
@@ -455,6 +456,43 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert agent_memory.content == "## Working Rules\n- warnings are errors"
       assert runtime.content =~ "## Runtime Contract"
       assert user.content == "Hello with prompt memory"
+    end
+
+    test "sends composed bootstrap and runtime prompts through the live request path", %{
+      agent: agent
+    } do
+      File.mkdir_p!(Seeder.agent_dir("main"))
+      File.write!(Seeder.soul_path("main"), "SOUL bootstrap")
+      File.write!(Seeder.agents_path("main"), "AGENTS bootstrap")
+      File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
+      File.write!(PromptFiles.user_path("main"), "USER memory")
+      File.write!(PromptFiles.memory_path("main"), "AGENT memory")
+
+      MockProvider.set_responses([mock_response("Composed prompt loaded")])
+
+      MainAgent.handle_message(make_message("Hello with bootstrap"), agent)
+
+      assert_receive {:reply, "Composed prompt loaded"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+
+      assert Enum.map(messages, & &1.role) == [
+               "system",
+               "system",
+               "system",
+               "system",
+               "system",
+               "user"
+             ]
+
+      assert Enum.map(messages, & &1.content) == [
+               "SOUL bootstrap",
+               "AGENTS bootstrap",
+               "USER memory",
+               "AGENT memory",
+               runtime_message(messages).content,
+               "Hello with bootstrap"
+             ]
     end
 
     test "sends error message via reply_fn on agent loop failure", %{agent: agent} do
