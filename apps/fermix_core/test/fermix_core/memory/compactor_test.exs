@@ -24,6 +24,26 @@ defmodule FermixCore.Memory.CompactorTest do
     def models, do: {:ok, ["summary-model"]}
   end
 
+  defmodule FailingRepo do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_call({:get_messages, _selector, _limit}, _from, state) do
+      {:reply, {:ok, []}, state}
+    end
+
+    def handle_call({:insert_message, _attrs}, _from, state) do
+      {:reply, {:error, :sqlite_failure}, state}
+    end
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-compactor-#{unique}.db")
@@ -91,6 +111,68 @@ defmodule FermixCore.Memory.CompactorTest do
 
     assert checkpoint.kind == "checkpoint_summary"
     assert checkpoint.content == "summary 1"
+  end
+
+  test "continues with in-memory summary when checkpoint persistence fails" do
+    repo = start_supervised!(FailingRepo)
+
+    messages = [
+      %{role: "system", content: "base prompt"},
+      %{role: "user", content: String.duplicate("older turn ", 80)},
+      %{role: "user", content: "new turn"}
+    ]
+
+    assert {:ok, result} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               context: context(repo)
+             )
+
+    assert result.compacted?
+    assert result.cache.summary == "summary 1"
+    assert Enum.any?(result.messages, &(&1.content =~ "summary 1"))
+  end
+
+  test "does not duplicate injected checkpoint summaries on later compactions" do
+    messages = [
+      %{role: "system", content: "base prompt"},
+      %{role: "user", content: String.duplicate("older turn ", 80)},
+      %{role: "user", content: "new turn"}
+    ]
+
+    assert {:ok, first} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               persist_checkpoints: false
+             )
+
+    second_messages =
+      first.messages ++ [%{role: "assistant", content: String.duplicate("x", 240)}]
+
+    assert {:ok, second} =
+             Compactor.compact(second_messages,
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               persist_checkpoints: false,
+               cache: first.cache
+             )
+
+    checkpoint_count =
+      Enum.count(second.messages, fn message ->
+        message.role == "system" and
+          String.starts_with?(message.content, "Conversation checkpoint summary:")
+      end)
+
+    assert checkpoint_count == 1
+    assert Process.get(:summary_provider_calls) |> length() == 1
   end
 
   test "uses persisted checkpoint as prior summary on later compactions", %{repo: repo} do

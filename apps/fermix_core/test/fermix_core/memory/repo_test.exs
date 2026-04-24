@@ -68,6 +68,11 @@ defmodule FermixCore.Memory.RepoTest do
     assert {:ok, []} = Repo.get_messages(selector, server: repo)
   end
 
+  test "requires conversation scope when fetching messages", %{repo: repo} do
+    assert {:error, {:missing_required_message_selector_key, :agent_id}} =
+             Repo.get_messages(%{}, server: repo)
+  end
+
   test "supports memory upsert, lookup, listing, and delete", %{repo: repo} do
     attrs = %{
       agent_id: "main",
