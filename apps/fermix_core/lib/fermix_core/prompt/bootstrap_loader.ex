@@ -8,6 +8,7 @@ defmodule FermixCore.Prompt.BootstrapLoader do
 
   alias FermixCore.Prompt.BootstrapFile
   alias FermixCore.Prompt.Seeder
+  alias FermixCore.Resource.Registry
 
   require Logger
 
@@ -60,7 +61,9 @@ defmodule FermixCore.Prompt.BootstrapLoader do
 
     case BootstrapFile.read_present(path) do
       {:ok, content} ->
-        {:ok, BootstrapFile.metadata(:agents, path, content, :present)}
+        file = BootstrapFile.metadata(:agents, path, content, :present)
+        capture_bootstrap_revision(agent_id, :agents_md, file, opts)
+        {:ok, file}
 
       {:missing, _reason} ->
         {:ok, BootstrapFile.metadata(:agents, path, Seeder.default_agents_content(), :fallback)}
@@ -78,10 +81,74 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     path = Seeder.soul_path(agent_id, opts)
 
     case BootstrapFile.read_present(path) do
-      {:ok, content} -> {:ok, BootstrapFile.metadata(:soul, path, content, :present)}
-      {:missing, _reason} -> {:ok, nil}
+      {:ok, content} ->
+        file = BootstrapFile.metadata(:soul, path, content, :present)
+        capture_bootstrap_revision(agent_id, :soul_md, file, opts)
+        {:ok, file}
+
+      {:missing, _reason} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp capture_bootstrap_revision(agent_id, resource_type, file, opts) do
+    commit_opts =
+      [
+        mutation_source: nil,
+        provenance: nil,
+        resource_path: file.path
+      ]
+      |> Keyword.merge(registry_opts(opts))
+
+    with {:ok, source} <- bootstrap_mutation_source(agent_id, resource_type, opts),
+         {:ok, _revision_or_unchanged} <-
+           Registry.commit(
+             agent_id,
+             resource_type,
+             "global",
+             file.content,
+             Keyword.merge(commit_opts,
+               mutation_source: source,
+               provenance: bootstrap_provenance(source)
+             )
+           ) do
+      :ok
+    else
+      {:error, :disabled} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "prompt bootstrap revision capture failed for #{file.path}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp bootstrap_mutation_source(agent_id, resource_type, opts) do
+    case Registry.current_hash(agent_id, resource_type, "global", registry_opts(opts)) do
+      {:ok, _hash} -> {:ok, :manual_edit}
+      {:error, :not_found} -> {:ok, :imported}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp bootstrap_provenance(:imported) do
+    %{trigger: "imported", description: "Pre-existing bootstrap file imported on load"}
+  end
+
+  defp bootstrap_provenance(:manual_edit) do
+    %{trigger: "manual_edit", description: "Operator edited bootstrap file directly"}
+  end
+
+  defp registry_opts(opts) do
+    opts
+    |> Keyword.take([:repo, :server])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   defp seed_failed(agent_id, reason) do

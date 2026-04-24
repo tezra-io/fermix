@@ -6,6 +6,7 @@ defmodule FermixCore.Memory.PromptFiles do
   alias FermixCore.Memory.Admission
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
+  alias FermixCore.Resource.Registry
 
   require Logger
 
@@ -39,22 +40,23 @@ defmodule FermixCore.Memory.PromptFiles do
 
   @spec rebuild(String.t(), String.t()) :: {:ok, prompt_memory()} | {:error, term()}
   def rebuild(agent_id, owner_id) when is_binary(agent_id) and is_binary(owner_id) do
+    rebuild(agent_id, owner_id, :periodic, [])
+  end
+
+  @spec rebuild(String.t(), String.t(), atom(), keyword()) ::
+          {:ok, prompt_memory()} | {:error, term()}
+  def rebuild(agent_id, owner_id, reason, opts)
+      when is_binary(agent_id) and is_binary(owner_id) and is_atom(reason) and is_list(opts) do
     with {:ok, memories} <- load_memories(agent_id, owner_id) do
       user = render_user_document(memories)
       memory = render_memory_document(memories)
 
       with :ok <- write_document(user_path(agent_id), user),
            :ok <- write_document(memory_path(agent_id), memory) do
+        capture_revisions(agent_id, reason, opts, user, memory)
         {:ok, %{user: normalize_content(user), memory: normalize_content(memory)}}
       end
     end
-  end
-
-  @spec rebuild(String.t(), String.t(), atom(), keyword()) ::
-          {:ok, prompt_memory()} | {:error, term()}
-  def rebuild(agent_id, owner_id, _reason, _opts)
-      when is_binary(agent_id) and is_binary(owner_id) do
-    rebuild(agent_id, owner_id)
   end
 
   defp load_memories(agent_id, owner_id) do
@@ -261,6 +263,87 @@ defmodule FermixCore.Memory.PromptFiles do
   defp read_failed(path, reason) do
     Logger.warning("prompt memory file read failed for #{path}: #{inspect(reason)}")
     {:ok, nil}
+  end
+
+  defp capture_revisions(agent_id, reason, opts, user, memory) do
+    source = mutation_source(reason)
+    provenance = revision_provenance(source, reason, Keyword.get(opts, :provenance))
+
+    capture_revision(agent_id, :user_md, user_path(agent_id), user, source, provenance, opts)
+
+    capture_revision(
+      agent_id,
+      :memory_md,
+      memory_path(agent_id),
+      memory,
+      source,
+      provenance,
+      opts
+    )
+  end
+
+  defp capture_revision(agent_id, resource_type, path, content, source, provenance, opts) do
+    commit_opts =
+      opts
+      |> registry_opts()
+      |> Keyword.merge(
+        mutation_source: source,
+        provenance: provenance,
+        resource_path: path
+      )
+
+    case Registry.commit(agent_id, resource_type, "global", content, commit_opts) do
+      {:ok, _revision_or_unchanged} ->
+        :ok
+
+      {:error, :disabled} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("prompt memory revision capture failed for #{path}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp mutation_source(:event), do: :extraction_rebuild
+  defp mutation_source(:periodic), do: :scheduler_rebuild
+  defp mutation_source(_reason), do: :scheduler_rebuild
+
+  defp registry_opts(opts) do
+    case Keyword.get(opts, :repo, Keyword.get(opts, :server)) do
+      nil -> [repo: Config.repo_server()]
+      repo -> [repo: repo]
+    end
+  end
+
+  defp revision_provenance(:extraction_rebuild, _reason, provenance) when is_map(provenance) do
+    provenance
+    |> Map.new()
+    |> Map.put_new(:trigger, "extraction_rebuild")
+    |> Map.put_new(:description, "Prompt file rebuild triggered by memory extraction")
+  end
+
+  defp revision_provenance(:extraction_rebuild, _reason, _provenance) do
+    %{
+      trigger: "extraction_rebuild",
+      description: "Prompt file rebuild triggered by memory extraction"
+    }
+  end
+
+  defp revision_provenance(:scheduler_rebuild, reason, provenance) when is_map(provenance) do
+    provenance
+    |> Map.new()
+    |> Map.put_new(:trigger, "scheduler_rebuild")
+    |> Map.put_new(:rebuild_reason, Atom.to_string(reason))
+    |> Map.put_new(:description, "Periodic prompt file rebuild under current policy")
+  end
+
+  defp revision_provenance(:scheduler_rebuild, reason, _provenance) do
+    %{
+      trigger: "scheduler_rebuild",
+      rebuild_reason: Atom.to_string(reason),
+      description: "Periodic prompt file rebuild under current policy"
+    }
   end
 
   defp normalize_content(content) do

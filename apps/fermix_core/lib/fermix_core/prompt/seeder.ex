@@ -7,7 +7,10 @@ defmodule FermixCore.Prompt.Seeder do
   """
 
   alias FermixCore.Prompt.BootstrapFile
+  alias FermixCore.Resource.Registry
   alias FermixCore.Setup.ConfigStore
+
+  require Logger
 
   @agent_id_pattern ~r/\A[A-Za-z0-9_-]+\z/
 
@@ -100,33 +103,64 @@ defmodule FermixCore.Prompt.Seeder do
 
     case BootstrapFile.read_present(path) do
       {:ok, content} -> {:ok, BootstrapFile.metadata(:agents, path, content, :present)}
-      {:missing, _reason} -> maybe_write_agents(path, opts)
+      {:missing, _reason} -> maybe_write_agents(agent_id, path, opts)
       {:error, reason} -> {:error, {:read_failed, reason}}
     end
   end
 
-  defp maybe_write_agents(path, opts) do
+  defp maybe_write_agents(agent_id, path, opts) do
     if seed_agent_file?(opts) do
-      write_agents(path)
+      write_agents(agent_id, path, opts)
     else
       {:ok, nil}
     end
   end
 
-  defp write_agents(path) do
+  defp write_agents(agent_id, path, opts) do
     content = default_agents_content()
 
     case File.mkdir_p(Path.dirname(path)) do
-      :ok -> write_agents_file(path, content)
+      :ok -> write_agents_file(agent_id, path, content, opts)
       {:error, reason} -> {:error, {:write_failed, reason}}
     end
   end
 
-  defp write_agents_file(path, content) do
-    with :ok <- File.write(path, content) do
+  defp write_agents_file(agent_id, path, content, opts) do
+    with :ok <- File.write(path, content),
+         :ok <- capture_seed_revision(agent_id, path, content, opts) do
       {:ok, BootstrapFile.metadata(:agents, path, content, :seeded)}
     else
       {:error, reason} -> {:error, {:write_failed, reason}}
+    end
+  end
+
+  defp capture_seed_revision(agent_id, path, content, opts) do
+    case Registry.commit(
+           agent_id,
+           :agents_md,
+           "global",
+           content,
+           Keyword.merge(opts,
+             mutation_source: :seed,
+             provenance: %{
+               trigger: "seed",
+               description: "Default AGENTS.md seeded on first access"
+             },
+             resource_path: path
+           )
+         ) do
+      {:ok, _revision_or_unchanged} ->
+        :ok
+
+      {:error, :disabled} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "prompt bootstrap seed revision capture failed for #{path}: #{inspect(reason)}"
+        )
+
+        :ok
     end
   end
 

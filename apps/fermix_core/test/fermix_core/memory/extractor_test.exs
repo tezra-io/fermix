@@ -24,14 +24,18 @@ defmodule FermixCore.Memory.ExtractorTest do
 
   defmodule RebuildNotifier do
     def rebuild(agent_id, owner_id, reason, opts) do
-      send(Keyword.fetch!(opts, :test_pid), {:rebuild_requested, agent_id, owner_id, reason})
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:rebuild_requested, agent_id, owner_id, reason, Keyword.get(opts, :provenance)}
+      )
+
       {:ok, %{user: nil, memory: nil}}
     end
   end
 
   defmodule PromptRebuildNotifier do
     def rebuild(agent_id, owner_id, reason, opts) do
-      result = PromptFiles.rebuild(agent_id, owner_id)
+      result = PromptFiles.rebuild(agent_id, owner_id, reason, opts)
       send(Keyword.fetch!(opts, :test_pid), {:prompt_rebuilt, agent_id, owner_id, reason, result})
       result
     end
@@ -218,9 +222,16 @@ defmodule FermixCore.Memory.ExtractorTest do
              &(&1.role == "system" and &1.content =~ "Current chat mode: direct.")
            )
 
+    assert Enum.any?(
+             messages,
+             &(&1.role == "system" and
+                 &1.content =~ "Write memory values as declarative facts, not instructions")
+           )
+
     assert opts[:temperature] == 0.1
 
-    assert_receive {:rebuild_requested, "main", "default", :event}, 1_000
+    assert_receive {:rebuild_requested, "main", "default", :event, provenance}, 1_000
+    assert provenance.categories == ["preference"]
 
     assert {:ok, memory} =
              Repo.get_memory(
@@ -237,6 +248,7 @@ defmodule FermixCore.Memory.ExtractorTest do
     assert memory.category == "preference"
     assert memory.value == "helix"
     assert memory.promote_target == "user_md"
+    assert provenance.memory_ids == [memory.id]
 
     assert {:ok, "helix"} =
              Store.recall({:owner, "default"}, "preferred_editor", server: store_name)
