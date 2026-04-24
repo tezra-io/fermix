@@ -117,6 +117,29 @@ defmodule FermixCore.Resource.RegistryTest do
              Registry.list_revisions("main", "checkpoint", scope_id, repo: repo)
   end
 
+  test "lists registered resources for an agent", %{repo: repo} do
+    assert {:ok, _revision} =
+             Registry.commit("main", "agents_md", "global", "agents",
+               mutation_source: :seed,
+               provenance: %{"trigger" => "seed"},
+               repo: repo
+             )
+
+    assert {:ok, _revision} =
+             Registry.commit("main", "checkpoint", "telegram:chat-1:root", "summary",
+               mutation_source: :compaction,
+               provenance: %{"trigger" => "compaction"},
+               repo: repo
+             )
+
+    assert {:ok, resources} = Registry.list_resources("main", repo: repo)
+
+    assert Enum.map(resources, &{&1.resource_type, &1.scope_id, &1.current_revision}) == [
+             {"agents_md", "global", 1},
+             {"checkpoint", "telegram:chat-1:root", 1}
+           ]
+  end
+
   test "rollback appends a revision, preserves history, and rewrites file", %{repo: repo} do
     path = temp_resource_path("rollback-user")
     File.write!(path, "current")
