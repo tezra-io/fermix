@@ -9,9 +9,7 @@ defmodule FermixCore.Prompt.SeederTest do
 
     Application.put_env(:fermix_core, :prompt_bootstrap,
       bootstrap_dir: base_dir,
-      seed_agent_file: true,
-      seed_soul_file: false,
-      accounting_enabled: true
+      seed_agent_file: true
     )
 
     on_exit(fn ->
@@ -51,6 +49,14 @@ defmodule FermixCore.Prompt.SeederTest do
     assert {:ok, result} = Seeder.ensure_seeded(agent_id)
     assert result.agents.content == "custom instructions"
     assert File.read!(Seeder.agents_path(agent_id)) == "custom instructions"
+  end
+
+  test "ensure_seeded/1 rejects agent IDs that can escape the bootstrap directory" do
+    assert {:error, {:invalid_agent_id, "../main"}} = Seeder.ensure_seeded("../main")
+
+    assert_raise ArgumentError, ~r/invalid agent_id/, fn ->
+      Seeder.agent_dir("../main")
+    end
   end
 
   defp unique do
