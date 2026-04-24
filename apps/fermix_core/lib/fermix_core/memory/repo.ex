@@ -7,9 +7,11 @@ defmodule FermixCore.Memory.Repo do
 
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Scope
 
   @base_migration_version 1
   @fts_migration_version 2
+  @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
   CREATE TABLE IF NOT EXISTS messages (
@@ -230,6 +232,23 @@ defmodule FermixCore.Memory.Repo do
     GenServer.call(server, :enabled?)
   end
 
+  @spec enabled_server(pid() | atom()) :: pid() | atom() | nil
+  def enabled_server(server) when is_pid(server), do: server
+
+  def enabled_server(server) when is_atom(server) do
+    if safely_enabled?(server) do
+      server
+    end
+  end
+
+  defp safely_enabled?(server) do
+    enabled?(server: server)
+  catch
+    :exit, {:noproc, _call} -> false
+    :exit, {:normal, _call} -> false
+    :exit, {:shutdown, _call} -> false
+  end
+
   @spec insert_message(message_attrs(), keyword()) :: {:ok, message_row()} | {:error, term()}
   def insert_message(attrs, opts \\ []) when is_map(attrs) do
     call({:insert_message, attrs}, opts)
@@ -406,11 +425,16 @@ defmodule FermixCore.Memory.Repo do
 
   defp open_connection(true, database_path) do
     with :ok <- ensure_database_dir(database_path),
-         {:ok, conn} <- Sqlite3.open(database_path, mode: :readwrite),
+         {:ok, conn} <- Sqlite3.open(database_path, sqlite_open_opts(@sqlite_open_intent)),
          :ok <- configure_connection(conn),
          :ok <- run_migrations(conn) do
       {:ok, conn}
     end
+  end
+
+  defp sqlite_open_opts(:readwritecreate) do
+    # Exqlite exposes SQLite READWRITE | CREATE as :readwrite.
+    [mode: :readwrite]
   end
 
   defp ensure_database_dir(":memory:"), do: :ok
@@ -760,7 +784,7 @@ defmodule FermixCore.Memory.Repo do
       owner_id: fetch_string!(attrs, :owner_id),
       channel: fetch_string!(attrs, :channel),
       chat_id: fetch_string!(attrs, :chat_id),
-      thread_scope: normalize_thread_scope(Map.fetch!(attrs, :thread_scope)),
+      thread_scope: Scope.normalize_thread_scope(Map.fetch!(attrs, :thread_scope)),
       sender: fetch_string!(attrs, :sender),
       role: fetch_string!(attrs, :role),
       kind: fetch_string!(attrs, :kind),
@@ -792,7 +816,7 @@ defmodule FermixCore.Memory.Repo do
       agent_id: fetch_string!(selector, :agent_id),
       channel: fetch_string!(selector, :channel),
       chat_id: fetch_string!(selector, :chat_id),
-      thread_scope: normalize_thread_scope(Map.fetch!(selector, :thread_scope))
+      thread_scope: Scope.normalize_thread_scope(Map.fetch!(selector, :thread_scope))
     }
   end
 
@@ -800,7 +824,7 @@ defmodule FermixCore.Memory.Repo do
     selector
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Enum.into(%{}, fn
-      {:thread_scope, value} -> {:thread_scope, normalize_thread_scope(value)}
+      {:thread_scope, value} -> {:thread_scope, Scope.normalize_thread_scope(value)}
       {key, value} -> {key, fetch_string_value!(key, value)}
     end)
   end
@@ -838,7 +862,10 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
-  defp normalize_message_selector_value!(:thread_scope, value), do: normalize_thread_scope(value)
+  defp normalize_message_selector_value!(:thread_scope, value) do
+    Scope.normalize_thread_scope(value)
+  end
+
   defp normalize_message_selector_value!(key, value), do: fetch_string_value!(key, value)
 
   defp message_insert_params(message) do
@@ -1101,10 +1128,6 @@ defmodule FermixCore.Memory.Repo do
     {:ok, timestamp, _offset} = DateTime.from_iso8601(value)
     timestamp
   end
-
-  defp normalize_thread_scope(:root), do: "root"
-  defp normalize_thread_scope(value) when is_binary(value), do: value
-  defp normalize_thread_scope(value) when is_integer(value), do: Integer.to_string(value)
 
   defp fetch_string!(attrs, key) do
     value = Map.fetch!(attrs, key)

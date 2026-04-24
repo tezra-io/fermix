@@ -89,6 +89,16 @@ defmodule FermixCore.Memory.StoreTest do
     end
   end
 
+  test "falls back to ETS when configured repo name is no longer registered", %{store: store} do
+    repo_name = :"missing_store_repo_#{System.unique_integer([:positive])}"
+
+    :sys.replace_state(store, fn state -> %{state | repo: repo_name} end)
+
+    assert :ok = Store.store({"telegram", "chat_1"}, "name", "Alice", server: store)
+    assert {:ok, "Alice"} = Store.recall({"telegram", "chat_1"}, "name", server: store)
+    assert %{"name" => "Alice"} = Store.recall_all({"telegram", "chat_1"}, server: store)
+  end
+
   describe "delete/3" do
     test "removes a stored key", %{store: store} do
       conv_key = {"telegram", "chat_1"}
