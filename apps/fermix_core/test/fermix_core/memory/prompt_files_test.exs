@@ -127,6 +127,45 @@ defmodule FermixCore.Memory.PromptFilesTest do
              []
   end
 
+  test "rebuild/2 returns normalized rendered content without changing file output", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "owner",
+      scope_id: owner_id,
+      category: "preference",
+      key: "first_pref",
+      value: "alpha",
+      promote_target: "user_md"
+    })
+
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "owner",
+      scope_id: owner_id,
+      category: "preference",
+      key: "second_pref",
+      value: "beta",
+      promote_target: "user_md"
+    })
+
+    assert {:ok, %{user: user_text, memory: nil}} = PromptFiles.rebuild(agent_id, owner_id)
+
+    assert user_text == File.read!(PromptFiles.user_path(agent_id))
+    assert File.read!(PromptFiles.memory_path(agent_id)) == ""
+
+    assert user_text == """
+           ## Preferences
+           - second pref: beta
+           - first pref: alpha\
+           """
+  end
+
   test "rebuild/2 re-evaluates stored promotion hints under current policy", %{
     agent_id: agent_id,
     owner_id: owner_id,
