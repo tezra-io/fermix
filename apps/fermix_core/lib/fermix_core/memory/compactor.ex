@@ -1,13 +1,18 @@
 defmodule FermixCore.Memory.Compactor do
   @moduledoc """
   Token-aware prompt compaction with durable checkpoint summaries.
+
+  Checkpoint resource revisions are audit history only. M4.6 runtime behavior does not
+  read checkpoints from the resource registry or support checkpoint rollback.
   """
 
   require Logger
 
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Scope
   alias FermixCore.Providers.OpenAI
+  alias FermixCore.Resource.Registry
 
   @type message :: map()
   @type compact_result :: %{
@@ -80,8 +85,8 @@ defmodule FermixCore.Memory.Compactor do
     prior = latest_checkpoint(opts)
 
     with {:ok, summary} <- call_summary_provider(older, prior, budget, opts) do
-      # Persistence errors are logged in persist_checkpoint/2 and must not block the turn.
-      _ = maybe_persist_checkpoint(summary, opts)
+      # Persistence errors are logged and must not block the turn.
+      _ = maybe_persist_checkpoint(summary, length(older), budget, opts)
       {:ok, summary, %{summary: summary}}
     end
   end
@@ -202,23 +207,25 @@ defmodule FermixCore.Memory.Compactor do
     end
   end
 
-  defp maybe_persist_checkpoint(summary, opts) do
+  defp maybe_persist_checkpoint(summary, message_count, budget, opts) do
     persist? =
       Keyword.get(opts, :persist_checkpoints, Config.checkpoint_persistence_enabled?(opts))
 
     if persist? do
-      persist_checkpoint(summary, opts)
+      persist_checkpoint(summary, message_count, budget, opts)
     else
       :ok
     end
   end
 
-  defp persist_checkpoint(summary, opts) do
+  defp persist_checkpoint(summary, message_count, budget, opts) do
     context = Keyword.get(opts, :context, %{})
 
     with {:ok, repo} <- repo_server(context),
          {:ok, attrs} <- checkpoint_attrs(summary, context),
-         {:ok, _row} <- Repo.insert_message(attrs, server: repo) do
+         {:ok, _row} <- Repo.insert_message(attrs, server: repo),
+         {:ok, _revision} <-
+           commit_checkpoint_revision(summary, message_count, budget, context, repo) do
       :ok
     else
       {:error, :missing_checkpoint_context} ->
@@ -231,6 +238,37 @@ defmodule FermixCore.Memory.Compactor do
         Logger.error("compaction checkpoint persistence failed: #{inspect(reason)}")
         {:error, reason}
     end
+  end
+
+  defp commit_checkpoint_revision(summary, message_count, budget, context, repo) do
+    with {:ok, {agent_id, scope_id}} <- checkpoint_revision_selector(context) do
+      Registry.commit(agent_id, "checkpoint", scope_id, summary,
+        mutation_source: :compaction,
+        provenance: checkpoint_provenance(message_count, budget),
+        repo: repo
+      )
+    end
+  end
+
+  defp checkpoint_revision_selector(context) do
+    case Map.get(context, :conversation_key) do
+      {channel, chat_id, thread_scope} ->
+        {:ok,
+         {Map.get(context, :memory_agent_id, "main"),
+          Scope.conversation_scope_id(channel, chat_id, thread_scope)}}
+
+      _missing ->
+        {:error, :missing_checkpoint_context}
+    end
+  end
+
+  defp checkpoint_provenance(message_count, budget) do
+    %{
+      "trigger" => "compaction",
+      "messages_summarized" => message_count,
+      "token_budget" => budget,
+      "description" => "Compacted #{message_count} messages into checkpoint summary"
+    }
   end
 
   defp checkpoint_attrs(summary, context) do
