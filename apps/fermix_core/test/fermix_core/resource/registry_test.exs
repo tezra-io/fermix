@@ -71,6 +71,36 @@ defmodule FermixCore.Resource.RegistryTest do
     assert history.mutation_source == "imported"
   end
 
+  test "concurrent identical commits create one revision", %{repo: repo} do
+    results =
+      1..8
+      |> Task.async_stream(
+        fn _index ->
+          Registry.commit("main", "agents_md", "global", "same",
+            mutation_source: :manual_edit,
+            provenance: %{"trigger" => "manual_edit"},
+            repo: repo
+          )
+        end,
+        max_concurrency: 8,
+        timeout: 5_000
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    created_count = Enum.count(results, &match?({:ok, %Revision{}}, &1))
+    unchanged_count = Enum.count(results, &(&1 == {:ok, :unchanged}))
+
+    assert created_count == 1
+    assert unchanged_count == 7
+
+    selector = %{agent_id: "main", resource_type: "agents_md", scope_id: "global"}
+
+    assert {:ok, 1} = Repo.revision_count(selector, server: repo)
+    assert {:ok, [revision]} = Registry.list_revisions("main", "agents_md", "global", repo: repo)
+    assert revision.content == "same"
+    assert revision.revision == 1
+  end
+
   test "changed content increments revisions and exposes history", %{repo: repo} do
     assert {:ok, first} =
              Registry.commit("main", "memory_md", "global", "one",
