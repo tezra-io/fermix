@@ -139,6 +139,7 @@ config :fermix_core,
 existing_trace = Application.get_env(:fermix_core, :trace, [])
 existing_log = Application.get_env(:fermix_core, :log, [])
 existing_memory = Application.get_env(:fermix_core, :memory, [])
+existing_prompt_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
 
 memory_enabled =
   case System.get_env("FERMIX_MEMORY_ENABLED") do
@@ -164,6 +165,14 @@ config :fermix_core,
        Keyword.merge(existing_memory,
          enabled: memory_enabled,
          database_path: memory_database_path
+       )
+
+config :fermix_core,
+       :prompt_bootstrap,
+       Keyword.merge(existing_prompt_bootstrap,
+         bootstrap_dir:
+           System.get_env("FERMIX_BOOTSTRAP_DIR") ||
+             workspace_paths.bootstrap
        )
 
 config :fermix_core,

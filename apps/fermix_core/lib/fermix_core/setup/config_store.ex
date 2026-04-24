@@ -7,7 +7,13 @@ defmodule FermixCore.Setup.ConfigStore do
   health reporting, traces, and logs.
   """
 
-  @workspace_dirs [skills: "skills", journals: "journals", traces: "traces", logs: "logs"]
+  @workspace_dirs [
+    bootstrap: "bootstrap",
+    skills: "skills",
+    journals: "journals",
+    traces: "traces",
+    logs: "logs"
+  ]
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -24,6 +30,7 @@ defmodule FermixCore.Setup.ConfigStore do
   def path, do: Path.join(fermix_home(), "config.toml")
 
   @spec workspace_paths() :: %{
+          bootstrap: String.t(),
           skills: String.t(),
           journals: String.t(),
           traces: String.t(),

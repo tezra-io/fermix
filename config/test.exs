@@ -30,6 +30,12 @@ config :fermix_core, :memory,
   owner_id: "default",
   agent_id: "main"
 
+config :fermix_core, :prompt_bootstrap,
+  bootstrap_dir: Path.join(System.tmp_dir!(), "fermix-test-bootstrap"),
+  seed_agent_file: true,
+  seed_soul_file: false,
+  accounting_enabled: true
+
 config :fermix_core,
   providers: [
     openai: [

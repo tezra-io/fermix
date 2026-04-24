@@ -23,6 +23,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
 
     assert ConfigStore.workspace_paths() == %{
+             bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              journals: Path.join(tmp_home, "journals"),
              traces: Path.join(tmp_home, "traces"),

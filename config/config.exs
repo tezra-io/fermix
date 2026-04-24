@@ -69,6 +69,12 @@ config :fermix_core, :memory,
   owner_id: "default",
   agent_id: "main"
 
+config :fermix_core, :prompt_bootstrap,
+  bootstrap_dir: Path.expand("~/.fermix/bootstrap"),
+  seed_agent_file: true,
+  seed_soul_file: false,
+  accounting_enabled: true
+
 config :fermix_core, :transcription,
   backend: FermixCore.Transcription.OpenAI,
   model: "whisper-1"
