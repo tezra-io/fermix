@@ -37,10 +37,14 @@ defmodule FermixCore.Memory.PromptFiles do
 
   @spec rebuild(String.t(), String.t()) :: {:ok, prompt_memory()} | {:error, term()}
   def rebuild(agent_id, owner_id) when is_binary(agent_id) and is_binary(owner_id) do
-    with {:ok, memories} <- load_memories(agent_id, owner_id),
-         :ok <- write_document(user_path(agent_id), render_user_document(memories)),
-         :ok <- write_document(memory_path(agent_id), render_memory_document(memories)) do
-      load(agent_id)
+    with {:ok, memories} <- load_memories(agent_id, owner_id) do
+      user = render_user_document(memories)
+      memory = render_memory_document(memories)
+
+      with :ok <- write_document(user_path(agent_id), user),
+           :ok <- write_document(memory_path(agent_id), memory) do
+        {:ok, %{user: normalize_content(user), memory: normalize_content(memory)}}
+      end
     end
   end
 
@@ -138,21 +142,22 @@ defmodule FermixCore.Memory.PromptFiles do
     |> compose_document(section_titles(kind))
   end
 
-  defp fitting_item_count(flat_items, token_cap, section_order) do
-    max_count = length(flat_items)
+  defp fitting_item_count(flat_items, token_cap, _section_order) do
+    max_bytes = token_cap * 4
 
-    Enum.reduce_while(Range.new(max_count, 0, -1), 0, fn count, _acc ->
-      document =
-        flat_items
-        |> Enum.take(count)
-        |> compose_document(section_order)
+    {_bytes, count, _seen_sections} =
+      Enum.reduce_while(flat_items, {0, 0, MapSet.new()}, fn {section, item},
+                                                             {bytes, count, seen_sections} ->
+        next_bytes = bytes + added_item_bytes(section, item, bytes, seen_sections)
 
-      if estimated_tokens(document) <= token_cap do
-        {:halt, count}
-      else
-        {:cont, 0}
-      end
-    end)
+        if next_bytes <= max_bytes do
+          {:cont, {next_bytes, count + 1, MapSet.put(seen_sections, section)}}
+        else
+          {:halt, {bytes, count, seen_sections}}
+        end
+      end)
+
+    count
   end
 
   defp compose_document([], _section_order), do: ""
@@ -160,14 +165,33 @@ defmodule FermixCore.Memory.PromptFiles do
   defp compose_document(flat_items, section_order) do
     section_map =
       Enum.reduce(flat_items, %{}, fn {section, item}, acc ->
-        Map.update(acc, section, [item], fn items -> items ++ [item] end)
+        Map.update(acc, section, [item], fn items -> [item | items] end)
       end)
 
     section_order
-    |> Enum.map(&render_section(&1, Map.get(section_map, &1, [])))
+    |> Enum.map(&render_section(&1, section_items(section_map, &1)))
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n\n")
   end
+
+  defp section_items(section_map, title) do
+    section_map
+    |> Map.get(title, [])
+    |> Enum.reverse()
+  end
+
+  defp added_item_bytes(section, item, current_bytes, seen_sections) do
+    item_bytes = byte_size("- #{item}")
+
+    if MapSet.member?(seen_sections, section) do
+      byte_size("\n") + item_bytes
+    else
+      section_separator_bytes(current_bytes) + byte_size("## #{section}\n") + item_bytes
+    end
+  end
+
+  defp section_separator_bytes(0), do: 0
+  defp section_separator_bytes(_current_bytes), do: byte_size("\n\n")
 
   defp render_section(_title, []), do: nil
 
@@ -223,19 +247,16 @@ defmodule FermixCore.Memory.PromptFiles do
 
   defp read_document(path) do
     case File.read(path) do
-      {:ok, content} -> {:ok, normalize_loaded_content(content)}
+      {:ok, content} -> {:ok, normalize_content(content)}
       {:error, :enoent} -> {:ok, nil}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp normalize_loaded_content(content) do
+  defp normalize_content(content) do
     case String.trim(content) do
       "" -> nil
       trimmed -> trimmed
     end
   end
-
-  defp estimated_tokens(""), do: 0
-  defp estimated_tokens(text), do: div(byte_size(text) + 3, 4)
 end
