@@ -143,6 +143,22 @@ defmodule FermixCore.Memory.ConversationStoreTest do
                      %{channel: "telegram", chat_id: "chat_123"}}
   end
 
+  test "telemetry includes synchronous write latency", %{store: store} do
+    ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:fermix, :memory, :message]
+      ])
+
+    ConversationStore.add_message(@key, "user", "hello", server: store)
+
+    assert_received {[:fermix, :memory, :message], ^ref, measurements, metadata}
+    assert measurements.count == 1
+    assert is_integer(measurements.duration_us)
+    assert measurements.duration_us >= 0
+    assert measurements.durable_write_us == 0
+    assert metadata.durable? == false
+  end
+
   test "falls back to memory when configured repo name is no longer registered", %{store: store} do
     repo_name = :"missing_conversation_repo_#{System.unique_integer([:positive])}"
 
@@ -266,6 +282,25 @@ defmodule FermixCore.Memory.ConversationStoreTest do
 
       history = ConversationStore.get_history(@key, 5, server: store)
       assert Enum.map(history, & &1.content) == ["visible chat"]
+    end
+
+    test "telemetry marks durable writes and records sqlite write latency", %{
+      store: store
+    } do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:fermix, :memory, :message]
+        ])
+
+      ConversationStore.add_message(@key, "user", "hello", server: store)
+
+      assert_received {[:fermix, :memory, :message], ^ref, measurements, metadata}
+      assert measurements.count == 1
+      assert is_integer(measurements.duration_us)
+      assert is_integer(measurements.durable_write_us)
+      assert measurements.duration_us >= measurements.durable_write_us
+      assert measurements.durable_write_us >= 0
+      assert metadata.durable? == true
     end
   end
 end
