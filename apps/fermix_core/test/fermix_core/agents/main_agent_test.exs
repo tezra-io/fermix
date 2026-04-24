@@ -416,6 +416,34 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert user.content == "Hello without memory files"
     end
 
+    test "seeds default AGENTS.md through the live request path when enabled", %{
+      agent: agent,
+      bootstrap_dir: bootstrap_dir
+    } do
+      Application.put_env(:fermix_core, :prompt_bootstrap,
+        bootstrap_dir: bootstrap_dir,
+        seed_agent_file: true,
+        accounting_enabled: true
+      )
+
+      agents_path = Seeder.agents_path("main")
+      refute File.exists?(agents_path)
+
+      MockProvider.set_responses([mock_response("Seeded prompt")])
+
+      MainAgent.handle_message(make_message("Hello first run"), agent)
+
+      assert_receive {:reply, "Seeded prompt"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+      [agents, runtime, user] = messages
+
+      assert File.read!(agents_path) == Seeder.default_agents_content()
+      assert agents.content == Seeder.default_agents_content()
+      assert runtime.content =~ "## Runtime Contract"
+      assert user.content == "Hello first run"
+    end
+
     test "ignores empty prompt-memory files", %{agent: agent} do
       File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
       File.write!(PromptFiles.user_path("main"), "\n\n")
