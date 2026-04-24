@@ -1,6 +1,7 @@
 defmodule FermixCore.Memory.RepoTest do
   use ExUnit.Case, async: true
 
+  alias Exqlite.Sqlite3
   alias FermixCore.Memory.Repo
 
   defmodule ExitingRepo do
@@ -37,7 +38,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3]} = Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -50,10 +51,85 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3]} = Repo.migration_versions(server: repo)
+  end
+
+  test "resource migration creates required tables and indexes", %{db_path: db_path, repo: repo} do
+    assert :ok = Repo.migrate(server: repo)
+
+    assert {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+
+    try do
+      assert {:ok, tables} =
+               sqlite_values(
+                 conn,
+                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
+                 ["resources", "resource_revisions"]
+               )
+
+      assert Enum.sort(tables) == ["resource_revisions", "resources"]
+
+      assert {:ok, resource_indexes} = sqlite_index_names(conn, "resources")
+      assert "idx_resources_type_scope" in resource_indexes
+
+      assert {:ok, revision_indexes} = sqlite_index_names(conn, "resource_revisions")
+
+      assert "idx_revisions_latest" in revision_indexes
+      assert "idx_revisions_resource_version" in revision_indexes
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  test "supports resource registry and revision queries through the repo API", %{repo: repo} do
+    resource = %{
+      agent_id: "main",
+      resource_type: "agents_md",
+      scope_id: "global",
+      current_revision: 0,
+      resource_path: "/tmp/AGENTS.md"
+    }
+
+    assert {:ok, registered} = Repo.upsert_resource(resource, server: repo)
+    assert registered.current_revision == 0
+    assert registered.resource_path == "/tmp/AGENTS.md"
+
+    revision = %{
+      agent_id: "main",
+      resource_type: "agents_md",
+      scope_id: "global",
+      revision: 1,
+      parent_revision: nil,
+      content_hash: String.duplicate("a", 64),
+      content: "hello",
+      byte_size: 5,
+      mutation_source: "seed",
+      provenance: %{"trigger" => "seed"}
+    }
+
+    assert {:ok, inserted} = Repo.insert_revision(revision, server: repo)
+    assert inserted.revision == 1
+    assert inserted.provenance == %{"trigger" => "seed"}
+
+    assert {:ok, _resource} =
+             Repo.upsert_resource(%{resource | current_revision: 1}, server: repo)
+
+    assert {:ok, stored} = Repo.get_resource(resource, server: repo)
+    assert stored.current_revision == 1
+
+    assert {:ok, latest} = Repo.get_latest_revision(resource, server: repo)
+    assert latest.id == inserted.id
+
+    assert {:ok, fetched} = Repo.get_revision(Map.put(resource, :revision, 1), server: repo)
+    assert fetched.content == "hello"
+
+    assert {:ok, [history]} = Repo.list_revisions(resource, server: repo)
+    assert history.revision == 1
+
+    assert {:ok, 1} = Repo.revision_count(resource, server: repo)
   end
 
   test "supports message CRUD through the repo API", %{repo: repo} do
@@ -314,5 +390,22 @@ defmodule FermixCore.Memory.RepoTest do
                },
                server: repo
              )
+  end
+
+  defp sqlite_values(conn, sql, params) do
+    with {:ok, stmt} <- Sqlite3.prepare(conn, sql),
+         :ok <- Sqlite3.bind(stmt, params),
+         {:ok, rows} <- Sqlite3.fetch_all(conn, stmt),
+         :ok <- Sqlite3.release(conn, stmt) do
+      {:ok, Enum.map(rows, fn [value | _rest] -> value end)}
+    end
+  end
+
+  defp sqlite_index_names(conn, table) do
+    with {:ok, stmt} <- Sqlite3.prepare(conn, "PRAGMA index_list(#{table})"),
+         {:ok, rows} <- Sqlite3.fetch_all(conn, stmt),
+         :ok <- Sqlite3.release(conn, stmt) do
+      {:ok, Enum.map(rows, fn [_seq, name | _rest] -> name end)}
+    end
   end
 end
