@@ -274,13 +274,10 @@ defmodule FermixCore.Memory.Compactor do
     end
   end
 
-  defp repo_server(%{memory_repo: repo}) when is_pid(repo), do: {:ok, repo}
-
-  defp repo_server(%{memory_repo: repo}) when is_atom(repo) do
-    if Process.whereis(repo) && Repo.enabled?(server: repo) do
-      {:ok, repo}
-    else
-      {:error, :disabled}
+  defp repo_server(%{memory_repo: repo}) when is_pid(repo) or is_atom(repo) do
+    case Repo.enabled_server(repo) do
+      nil -> {:error, :disabled}
+      server -> {:ok, server}
     end
   end
 

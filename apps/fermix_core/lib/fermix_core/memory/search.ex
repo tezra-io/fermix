@@ -5,6 +5,7 @@ defmodule FermixCore.Memory.Search do
 
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Scope
 
   @type source :: :memories | :messages | :all
   @type scope :: :current_conversation | :owner | :all
@@ -97,7 +98,7 @@ defmodule FermixCore.Memory.Search do
             agent_id: agent_id,
             owner_id: owner_id,
             scope_type: "conversation",
-            scope_id: "#{channel}:#{chat_id}:root"
+            scope_id: Scope.conversation_scope_id(channel, chat_id, :root)
           },
           limit
         )
@@ -123,7 +124,7 @@ defmodule FermixCore.Memory.Search do
         agent_id: agent_id,
         owner_id: owner_id,
         scope_type: "conversation",
-        scope_id: "#{channel}:#{chat_id}:#{normalize_thread_scope(thread_scope)}"
+        scope_id: Scope.conversation_scope_id(channel, chat_id, thread_scope)
       },
       limit
     )
@@ -194,7 +195,7 @@ defmodule FermixCore.Memory.Search do
         owner_id: owner_id,
         channel: channel,
         chat_id: chat_id,
-        thread_scope: normalize_thread_scope(thread_scope)
+        thread_scope: Scope.normalize_thread_scope(thread_scope)
       },
       limit
     )
@@ -273,8 +274,4 @@ defmodule FermixCore.Memory.Search do
   defp normalize_limit!(value) do
     raise ArgumentError, "expected search limit to be a positive integer, got: #{inspect(value)}"
   end
-
-  defp normalize_thread_scope(:root), do: "root"
-  defp normalize_thread_scope(value) when is_binary(value), do: value
-  defp normalize_thread_scope(value) when is_integer(value), do: Integer.to_string(value)
 end

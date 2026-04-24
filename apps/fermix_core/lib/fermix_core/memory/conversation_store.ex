@@ -264,11 +264,5 @@ defmodule FermixCore.Memory.ConversationStore do
     }
   end
 
-  defp repo_server(repo) when is_pid(repo), do: repo
-
-  defp repo_server(repo) when is_atom(repo) do
-    if Process.whereis(repo) && Repo.enabled?(server: repo) do
-      repo
-    end
-  end
+  defp repo_server(repo), do: Repo.enabled_server(repo)
 end
