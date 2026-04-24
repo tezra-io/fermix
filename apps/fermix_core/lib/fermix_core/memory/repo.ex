@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.Repo do
 
   @base_migration_version 1
   @fts_migration_version 2
+  @resource_migration_version 3
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -92,6 +93,43 @@ defmodule FermixCore.Memory.Repo do
   END;
   """
 
+  @resource_schema_sql """
+  CREATE TABLE IF NOT EXISTS resources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL DEFAULT 'main',
+    resource_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL DEFAULT 'global',
+    resource_path TEXT,
+    current_revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_resources_type_scope
+    ON resources(agent_id, resource_type, scope_id);
+
+  CREATE TABLE IF NOT EXISTS resource_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL DEFAULT 'main',
+    resource_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL DEFAULT 'global',
+    revision INTEGER NOT NULL,
+    parent_revision INTEGER,
+    content_hash TEXT NOT NULL,
+    content TEXT NOT NULL,
+    byte_size INTEGER NOT NULL,
+    mutation_source TEXT NOT NULL,
+    provenance_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_revisions_resource_version
+    ON resource_revisions(agent_id, resource_type, scope_id, revision);
+
+  CREATE INDEX IF NOT EXISTS idx_revisions_latest
+    ON resource_revisions(agent_id, resource_type, scope_id, created_at DESC);
+  """
+
   @type message_attrs :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
@@ -147,6 +185,33 @@ defmodule FermixCore.Memory.Repo do
           optional(:scope_id) => String.t(),
           optional(:category) => String.t(),
           required(:key) => String.t()
+        }
+
+  @type resource_attrs :: %{
+          required(:agent_id) => String.t(),
+          required(:resource_type) => String.t(),
+          required(:scope_id) => String.t(),
+          required(:current_revision) => non_neg_integer(),
+          optional(:resource_path) => String.t() | nil
+        }
+
+  @type resource_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:resource_type) => String.t(),
+          required(:scope_id) => String.t()
+        }
+
+  @type revision_attrs :: %{
+          required(:agent_id) => String.t(),
+          required(:resource_type) => String.t(),
+          required(:scope_id) => String.t(),
+          required(:revision) => pos_integer(),
+          required(:parent_revision) => pos_integer() | nil,
+          required(:content_hash) => String.t(),
+          required(:content) => String.t(),
+          required(:byte_size) => non_neg_integer(),
+          required(:mutation_source) => String.t(),
+          optional(:provenance) => map() | nil
         }
 
   @type message_row :: %{
@@ -221,6 +286,32 @@ defmodule FermixCore.Memory.Repo do
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
           rank: float()
+        }
+
+  @type resource_row :: %{
+          id: integer(),
+          agent_id: String.t(),
+          resource_type: String.t(),
+          scope_id: String.t(),
+          resource_path: String.t() | nil,
+          current_revision: non_neg_integer(),
+          created_at: DateTime.t(),
+          updated_at: DateTime.t()
+        }
+
+  @type resource_revision_row :: %{
+          id: integer(),
+          agent_id: String.t(),
+          resource_type: String.t(),
+          scope_id: String.t(),
+          revision: pos_integer(),
+          parent_revision: pos_integer() | nil,
+          content_hash: String.t(),
+          content: String.t(),
+          byte_size: non_neg_integer(),
+          mutation_source: String.t(),
+          provenance: map() | nil,
+          created_at: DateTime.t()
         }
 
   @type state :: %{
@@ -329,6 +420,56 @@ defmodule FermixCore.Memory.Repo do
       {:search_messages, query, Keyword.get(opts, :selector, %{}), Keyword.get(opts, :limit, 10)},
       opts
     )
+  end
+
+  @spec upsert_resource(resource_attrs(), keyword()) :: {:ok, resource_row()} | {:error, term()}
+  def upsert_resource(attrs, opts \\ []) when is_map(attrs) do
+    call({:upsert_resource, attrs}, opts)
+  end
+
+  @spec get_resource(resource_selector(), keyword()) ::
+          {:ok, resource_row()} | {:error, :not_found | term()}
+  def get_resource(selector, opts \\ []) when is_map(selector) do
+    call({:get_resource, selector}, opts)
+  end
+
+  @spec insert_revision(revision_attrs(), keyword()) ::
+          {:ok, resource_revision_row()} | {:error, term()}
+  def insert_revision(attrs, opts \\ []) when is_map(attrs) do
+    call({:insert_revision, attrs}, opts)
+  end
+
+  @spec commit_resource_revision(map(), keyword()) ::
+          {:ok, resource_revision_row() | :unchanged} | {:error, term()}
+  def commit_resource_revision(attrs, opts \\ []) when is_map(attrs) do
+    call({:commit_resource_revision, attrs}, opts)
+  end
+
+  @spec get_revision(map(), keyword()) ::
+          {:ok, resource_revision_row()} | {:error, :not_found | term()}
+  def get_revision(selector, opts \\ []) when is_map(selector) do
+    call({:get_revision, selector}, opts)
+  end
+
+  @spec get_latest_revision(resource_selector(), keyword()) ::
+          {:ok, resource_revision_row()} | {:error, :not_found | term()}
+  def get_latest_revision(selector, opts \\ []) when is_map(selector) do
+    call({:get_latest_revision, selector}, opts)
+  end
+
+  @spec list_revisions(resource_selector(), keyword()) ::
+          {:ok, [resource_revision_row()]} | {:error, term()}
+  def list_revisions(selector, opts \\ []) when is_map(selector) do
+    call(
+      {:list_revisions, selector, Keyword.get(opts, :limit, 20), Keyword.get(opts, :offset, 0)},
+      opts
+    )
+  end
+
+  @spec revision_count(resource_selector(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def revision_count(selector, opts \\ []) when is_map(selector) do
+    call({:revision_count, selector}, opts)
   end
 
   @spec migrate(keyword()) :: :ok | {:error, term()}
@@ -445,6 +586,46 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:upsert_resource, attrs}, _from, state) do
+    reply = with_connection(state, &upsert_resource_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_resource, selector}, _from, state) do
+    reply = with_connection(state, &fetch_resource(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:insert_revision, attrs}, _from, state) do
+    reply = with_connection(state, &insert_revision_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:commit_resource_revision, attrs}, _from, state) do
+    reply = with_connection(state, &commit_resource_revision_tx(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_revision, selector}, _from, state) do
+    reply = with_connection(state, &fetch_revision(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_latest_revision, selector}, _from, state) do
+    reply = with_connection(state, &fetch_latest_revision(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_revisions, selector, limit, offset}, _from, state) do
+    reply = with_connection(state, &fetch_revisions(&1, selector, limit, offset))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:revision_count, selector}, _from, state) do
+    reply = with_connection(state, &count_revisions(&1, selector))
+    {:reply, reply, state}
+  end
+
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, request)
@@ -488,7 +669,8 @@ defmodule FermixCore.Memory.Repo do
     with :ok <- ensure_schema_migrations_table(conn),
          {:ok, versions} <- migration_versions_for_conn(conn),
          :ok <- apply_base_migration(conn, versions),
-         :ok <- apply_fts_migration(conn, versions) do
+         :ok <- apply_fts_migration(conn, versions),
+         :ok <- apply_resource_migration(conn, versions) do
       :ok
     end
   end
@@ -533,6 +715,22 @@ defmodule FermixCore.Memory.Repo do
         INSERT INTO memories_fts(memories_fts) VALUES('rebuild');
         INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
         INSERT INTO schema_migrations(version) VALUES (#{@fts_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_resource_migration(conn, versions) do
+    if Enum.member?(versions, @resource_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@resource_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@resource_migration_version});
         COMMIT;
         """
       )
@@ -766,6 +964,234 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  defp upsert_resource_row(conn, attrs) do
+    resource = normalize_resource_attrs(attrs)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO resources (
+               agent_id,
+               resource_type,
+               scope_id,
+               resource_path,
+               current_revision,
+               updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent_id, resource_type, scope_id)
+             DO UPDATE SET
+               resource_path = COALESCE(excluded.resource_path, resources.resource_path),
+               current_revision = excluded.current_revision,
+               updated_at = excluded.updated_at
+             """,
+             resource_upsert_params(resource)
+           ),
+         {:ok, row} <- fetch_resource(conn, resource_selector(resource)) do
+      {:ok, row}
+    end
+  end
+
+  defp fetch_resource(conn, selector) do
+    resource = normalize_resource_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM resources
+             WHERE agent_id = ? AND resource_type = ? AND scope_id = ?
+             LIMIT 1
+             """,
+             [resource.agent_id, resource.resource_type, resource.scope_id]
+           ) do
+      case rows do
+        [row] -> {:ok, resource_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp insert_revision_row(conn, attrs) do
+    revision = normalize_revision_attrs(attrs)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO resource_revisions (
+               agent_id,
+               resource_type,
+               scope_id,
+               revision,
+               parent_revision,
+               content_hash,
+               content,
+               byte_size,
+               mutation_source,
+               provenance_json,
+               created_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             """,
+             revision_insert_params(revision)
+           ),
+         {:ok, [row]} <-
+           query_all(conn, "SELECT * FROM resource_revisions WHERE id = last_insert_rowid()", []) do
+      {:ok, resource_revision_row(row)}
+    end
+  end
+
+  defp commit_resource_revision_tx(conn, attrs) do
+    revision = normalize_commit_revision_attrs(attrs)
+
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
+         result <- commit_resource_revision_in_tx(conn, revision),
+         :ok <- finish_resource_commit(conn, result) do
+      result
+    else
+      {:error, :busy} -> {:error, :busy}
+      {:error, reason} -> rollback_resource_commit(conn, reason)
+    end
+  end
+
+  defp commit_resource_revision_in_tx(conn, revision) do
+    with {:ok, current} <- fetch_resource_current(conn, revision),
+         false <- current.content_hash == revision.content_hash,
+         attrs <- revision_attrs_for_commit(revision, current),
+         {:ok, inserted} <- insert_revision_row(conn, attrs),
+         {:ok, _resource} <-
+           upsert_resource_row(conn, resource_attrs_for_commit(revision, inserted)) do
+      {:ok, inserted}
+    else
+      true -> {:ok, :unchanged}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_resource_commit(conn, {:ok, _result}) do
+    execute(conn, "COMMIT", [])
+  end
+
+  defp finish_resource_commit(_conn, {:error, reason}), do: {:error, reason}
+
+  defp rollback_resource_commit(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
+  end
+
+  defp fetch_resource_current(conn, selector) do
+    resource = normalize_resource_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT resources.current_revision, resource_revisions.content_hash
+             FROM resources
+             LEFT JOIN resource_revisions
+               ON resource_revisions.agent_id = resources.agent_id
+              AND resource_revisions.resource_type = resources.resource_type
+              AND resource_revisions.scope_id = resources.scope_id
+              AND resource_revisions.revision = resources.current_revision
+             WHERE resources.agent_id = ?
+               AND resources.resource_type = ?
+               AND resources.scope_id = ?
+             LIMIT 1
+             """,
+             [resource.agent_id, resource.resource_type, resource.scope_id]
+           ) do
+      case rows do
+        [[current_revision, content_hash]] ->
+          {:ok, %{current_revision: current_revision, content_hash: content_hash}}
+
+        [] ->
+          {:ok, %{current_revision: 0, content_hash: nil}}
+      end
+    end
+  end
+
+  defp fetch_revision(conn, selector) do
+    revision = normalize_revision_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM resource_revisions
+             WHERE agent_id = ? AND resource_type = ? AND scope_id = ? AND revision = ?
+             LIMIT 1
+             """,
+             [revision.agent_id, revision.resource_type, revision.scope_id, revision.revision]
+           ) do
+      case rows do
+        [row] -> {:ok, resource_revision_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_latest_revision(conn, selector) do
+    resource = normalize_resource_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM resource_revisions
+             WHERE agent_id = ? AND resource_type = ? AND scope_id = ?
+             ORDER BY revision DESC
+             LIMIT 1
+             """,
+             [resource.agent_id, resource.resource_type, resource.scope_id]
+           ) do
+      case rows do
+        [row] -> {:ok, resource_revision_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_revisions(conn, selector, limit, offset) do
+    resource = normalize_resource_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM resource_revisions
+             WHERE agent_id = ? AND resource_type = ? AND scope_id = ?
+             ORDER BY revision DESC
+             LIMIT ? OFFSET ?
+             """,
+             [resource.agent_id, resource.resource_type, resource.scope_id, limit, offset]
+           ) do
+      {:ok, Enum.map(rows, &resource_revision_row/1)}
+    end
+  end
+
+  defp count_revisions(conn, selector) do
+    resource = normalize_resource_selector(selector)
+
+    with {:ok, [[count]]} <-
+           query_all(
+             conn,
+             """
+             SELECT COUNT(*)
+             FROM resource_revisions
+             WHERE agent_id = ? AND resource_type = ? AND scope_id = ?
+             """,
+             [resource.agent_id, resource.resource_type, resource.scope_id]
+           ) do
+      {:ok, count}
+    end
+  end
+
   defp query_all(conn, sql, params) do
     with_statement(conn, sql, fn stmt ->
       with :ok <- bind(stmt, params),
@@ -838,6 +1264,55 @@ defmodule FermixCore.Memory.Repo do
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
       updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
     }
+  end
+
+  defp normalize_resource_attrs(attrs) do
+    %{
+      agent_id: fetch_string!(attrs, :agent_id),
+      resource_type: fetch_string!(attrs, :resource_type),
+      scope_id: fetch_string!(attrs, :scope_id),
+      resource_path: optional_string!(attrs, :resource_path),
+      current_revision: fetch_non_negative_integer!(attrs, :current_revision),
+      updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
+    }
+  end
+
+  defp normalize_resource_selector(selector) do
+    %{
+      agent_id: fetch_string!(selector, :agent_id),
+      resource_type: fetch_string!(selector, :resource_type),
+      scope_id: fetch_string!(selector, :scope_id)
+    }
+  end
+
+  defp normalize_revision_attrs(attrs) do
+    %{
+      agent_id: fetch_string!(attrs, :agent_id),
+      resource_type: fetch_string!(attrs, :resource_type),
+      scope_id: fetch_string!(attrs, :scope_id),
+      revision: fetch_positive_integer!(attrs, :revision),
+      parent_revision: optional_positive_integer!(attrs, :parent_revision),
+      content_hash: fetch_string!(attrs, :content_hash),
+      content: fetch_string!(attrs, :content),
+      byte_size: fetch_non_negative_integer!(attrs, :byte_size),
+      mutation_source: fetch_string!(attrs, :mutation_source),
+      provenance: Map.get(attrs, :provenance),
+      created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now()))
+    }
+  end
+
+  defp normalize_commit_revision_attrs(attrs) do
+    attrs
+    |> Map.put(:revision, 1)
+    |> Map.put(:parent_revision, nil)
+    |> normalize_revision_attrs()
+    |> Map.put(:resource_path, optional_string!(attrs, :resource_path))
+  end
+
+  defp normalize_revision_selector(selector) do
+    selector
+    |> normalize_resource_selector()
+    |> Map.put(:revision, fetch_positive_integer!(selector, :revision))
   end
 
   defp normalize_message_selector(selector) do
@@ -930,6 +1405,33 @@ defmodule FermixCore.Memory.Repo do
     ]
   end
 
+  defp resource_upsert_params(resource) do
+    [
+      resource.agent_id,
+      resource.resource_type,
+      resource.scope_id,
+      resource.resource_path,
+      resource.current_revision,
+      resource.updated_at
+    ]
+  end
+
+  defp revision_insert_params(revision) do
+    [
+      revision.agent_id,
+      revision.resource_type,
+      revision.scope_id,
+      revision.revision,
+      revision.parent_revision,
+      revision.content_hash,
+      revision.content,
+      revision.byte_size,
+      revision.mutation_source,
+      encode_metadata(revision.provenance),
+      revision.created_at
+    ]
+  end
+
   defp memory_lookup(memory) do
     %{
       agent_id: memory.agent_id,
@@ -939,6 +1441,33 @@ defmodule FermixCore.Memory.Repo do
       key: memory.key
     }
   end
+
+  defp resource_selector(resource) do
+    %{
+      agent_id: resource.agent_id,
+      resource_type: resource.resource_type,
+      scope_id: resource.scope_id
+    }
+  end
+
+  defp revision_attrs_for_commit(revision, current) do
+    revision
+    |> Map.put(:revision, current.current_revision + 1)
+    |> Map.put(:parent_revision, parent_revision(current.current_revision))
+  end
+
+  defp resource_attrs_for_commit(revision, inserted) do
+    %{
+      agent_id: revision.agent_id,
+      resource_type: revision.resource_type,
+      scope_id: revision.scope_id,
+      resource_path: revision.resource_path,
+      current_revision: inserted.revision
+    }
+  end
+
+  defp parent_revision(0), do: nil
+  defp parent_revision(revision), do: revision
 
   defp require_memory_key(selector) do
     case Map.fetch(selector, :key) do
@@ -1153,6 +1682,58 @@ defmodule FermixCore.Memory.Repo do
     |> Map.put(:rank, rank * 1.0)
   end
 
+  defp resource_row([
+         id,
+         agent_id,
+         resource_type,
+         scope_id,
+         resource_path,
+         current_revision,
+         created_at,
+         updated_at
+       ]) do
+    %{
+      id: id,
+      agent_id: agent_id,
+      resource_type: resource_type,
+      scope_id: scope_id,
+      resource_path: resource_path,
+      current_revision: current_revision,
+      created_at: parse_timestamp!(created_at),
+      updated_at: parse_timestamp!(updated_at)
+    }
+  end
+
+  defp resource_revision_row([
+         id,
+         agent_id,
+         resource_type,
+         scope_id,
+         revision,
+         parent_revision,
+         content_hash,
+         content,
+         byte_size,
+         mutation_source,
+         provenance_json,
+         created_at
+       ]) do
+    %{
+      id: id,
+      agent_id: agent_id,
+      resource_type: resource_type,
+      scope_id: scope_id,
+      revision: revision,
+      parent_revision: parent_revision,
+      content_hash: content_hash,
+      content: content,
+      byte_size: byte_size,
+      mutation_source: mutation_source,
+      provenance: decode_metadata(provenance_json),
+      created_at: parse_timestamp!(created_at)
+    }
+  end
+
   defp encode_metadata(nil), do: nil
   defp encode_metadata(metadata), do: Jason.encode!(metadata)
 
@@ -1160,6 +1741,7 @@ defmodule FermixCore.Memory.Repo do
   defp decode_metadata(metadata_json), do: Jason.decode!(metadata_json)
 
   defp timestamp_string(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp timestamp_string(value) when is_binary(value), do: value
 
   defp parse_timestamp!(value) do
     {:ok, timestamp, _offset} = DateTime.from_iso8601(value)
@@ -1178,5 +1760,43 @@ defmodule FermixCore.Memory.Repo do
     else
       raise ArgumentError, "expected #{inspect(key)} to be a string, got: #{inspect(value)}"
     end
+  end
+
+  defp optional_string!(attrs, key) do
+    case Map.get(attrs, key) do
+      nil -> nil
+      value -> fetch_string_value!(key, value)
+    end
+  end
+
+  defp fetch_non_negative_integer!(attrs, key) do
+    value = Map.fetch!(attrs, key)
+    non_negative_integer_value!(key, value)
+  end
+
+  defp fetch_positive_integer!(attrs, key) do
+    value = Map.fetch!(attrs, key)
+    positive_integer_value!(key, value)
+  end
+
+  defp optional_positive_integer!(attrs, key) do
+    case Map.get(attrs, key) do
+      nil -> nil
+      value -> positive_integer_value!(key, value)
+    end
+  end
+
+  defp non_negative_integer_value!(_key, value) when is_integer(value) and value >= 0, do: value
+
+  defp non_negative_integer_value!(key, value) do
+    raise ArgumentError,
+          "expected #{inspect(key)} to be a non-negative integer, got: #{inspect(value)}"
+  end
+
+  defp positive_integer_value!(_key, value) when is_integer(value) and value > 0, do: value
+
+  defp positive_integer_value!(key, value) do
+    raise ArgumentError,
+          "expected #{inspect(key)} to be a positive integer, got: #{inspect(value)}"
   end
 end
