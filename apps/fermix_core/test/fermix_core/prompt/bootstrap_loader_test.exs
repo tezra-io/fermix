@@ -1,6 +1,8 @@
 defmodule FermixCore.Prompt.BootstrapLoaderTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Prompt.Seeder
 
@@ -10,9 +12,7 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
 
     Application.put_env(:fermix_core, :prompt_bootstrap,
       bootstrap_dir: base_dir,
-      seed_agent_file: false,
-      seed_soul_file: false,
-      accounting_enabled: true
+      seed_agent_file: false
     )
 
     on_exit(fn ->
@@ -20,7 +20,7 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
       File.rm_rf!(base_dir)
     end)
 
-    %{agent_id: "main"}
+    %{agent_id: "main", base_dir: base_dir}
   end
 
   test "load/1 returns present AGENTS.md and SOUL.md with metadata", %{agent_id: agent_id} do
@@ -75,6 +75,37 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     assert {:ok, result} = BootstrapLoader.load(agent_id)
     assert result.agents.status == :present
     assert File.read!(Seeder.agents_path(agent_id)) == result.agents.content
+  end
+
+  test "load/1 falls back when seeding cannot write AGENTS.md", %{
+    agent_id: agent_id,
+    base_dir: base_dir
+  } do
+    File.mkdir_p!(base_dir)
+    blocking_path = Path.join(base_dir, "not-a-directory")
+    File.write!(blocking_path, "block mkdir_p")
+
+    previous_config = Application.get_env(:fermix_core, :prompt_bootstrap, [])
+
+    Application.put_env(:fermix_core, :prompt_bootstrap,
+      bootstrap_dir: blocking_path,
+      seed_agent_file: true
+    )
+
+    log =
+      capture_log(fn ->
+        assert {:ok, result} = BootstrapLoader.load(agent_id)
+        assert result.agents.content =~ "You are a helpful AI assistant"
+        assert result.agents.status == :fallback
+        assert result.soul == nil
+      end)
+
+    assert log =~ "prompt bootstrap seed failed for main"
+    Application.put_env(:fermix_core, :prompt_bootstrap, previous_config)
+  end
+
+  test "load/1 rejects agent IDs that can escape the bootstrap directory" do
+    assert {:error, {:invalid_agent_id, "../../etc"}} = BootstrapLoader.load("../../etc")
   end
 
   defp unique do
