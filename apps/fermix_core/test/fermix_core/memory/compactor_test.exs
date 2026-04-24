@@ -3,6 +3,7 @@ defmodule FermixCore.Memory.CompactorTest do
 
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Repo
+  alias FermixCore.Resource.Registry
 
   defmodule SummaryProvider do
     @behaviour FermixCore.Providers.Provider
@@ -12,9 +13,11 @@ defmodule FermixCore.Memory.CompactorTest do
       calls = Process.get(:summary_provider_calls, [])
       Process.put(:summary_provider_calls, calls ++ [{messages, opts}])
 
+      content = Process.get(:summary_provider_content, "summary #{length(calls) + 1}")
+
       {:ok,
        %{
-         content: "summary #{length(calls) + 1}",
+         content: content,
          tool_calls: [],
          usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}
        }}
@@ -111,6 +114,84 @@ defmodule FermixCore.Memory.CompactorTest do
 
     assert checkpoint.kind == "checkpoint_summary"
     assert checkpoint.content == "summary 1"
+
+    assert {:ok, [revision]} =
+             Registry.list_revisions("main", "checkpoint", "telegram:chat-1:root", repo: repo)
+
+    assert revision.content == "summary 1"
+    assert revision.mutation_source == "compaction"
+
+    assert revision.provenance == %{
+             "trigger" => "compaction",
+             "messages_summarized" => 2,
+             "token_budget" => 80,
+             "description" => "Compacted 2 messages into checkpoint summary"
+           }
+  end
+
+  test "does not create duplicate checkpoint revisions for unchanged summaries", %{repo: repo} do
+    Process.put(:summary_provider_content, "stable checkpoint")
+
+    messages = compactable_messages()
+
+    assert {:ok, %{compacted?: true}} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               context: context(repo)
+             )
+
+    assert {:ok, %{compacted?: true}} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               context: context(repo)
+             )
+
+    assert {:ok, [revision]} =
+             Registry.list_revisions("main", "checkpoint", "telegram:chat-1:root", repo: repo)
+
+    assert revision.revision == 1
+    assert revision.content == "stable checkpoint"
+    assert revision.mutation_source == "compaction"
+  end
+
+  test "keeps checkpoint revision histories isolated by conversation scope", %{repo: repo} do
+    Process.put(:summary_provider_content, "chat 1 summary")
+
+    assert {:ok, %{compacted?: true}} =
+             Compactor.compact(compactable_messages(),
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               context: context(repo, chat_id: "chat-1")
+             )
+
+    Process.put(:summary_provider_content, "chat 2 summary")
+
+    assert {:ok, %{compacted?: true}} =
+             Compactor.compact(compactable_messages(),
+               enabled: true,
+               token_budget: 60,
+               provider: SummaryProvider,
+               model: "summary-model",
+               context: context(repo, chat_id: "chat-2")
+             )
+
+    assert {:ok, [chat_1_revision]} =
+             Registry.list_revisions("main", "checkpoint", "telegram:chat-1:root", repo: repo)
+
+    assert {:ok, [chat_2_revision]} =
+             Registry.list_revisions("main", "checkpoint", "telegram:chat-2:root", repo: repo)
+
+    assert chat_1_revision.content == "chat 1 summary"
+    assert chat_2_revision.content == "chat 2 summary"
+    assert chat_1_revision.scope_id != chat_2_revision.scope_id
   end
 
   test "preserves composed prompt system messages verbatim during compaction", %{repo: repo} do
@@ -246,12 +327,24 @@ defmodule FermixCore.Memory.CompactorTest do
     assert rendered_prompt =~ "previous checkpoint"
   end
 
-  defp context(repo) do
+  defp compactable_messages do
+    [
+      %{role: "system", content: "base prompt"},
+      %{role: "user", content: String.duplicate("older turn ", 80)},
+      %{role: "assistant", content: String.duplicate("older response ", 80)},
+      %{role: "user", content: "new turn"}
+    ]
+  end
+
+  defp context(repo, opts \\ []) do
+    chat_id = Keyword.get(opts, :chat_id, "chat-1")
+    thread_scope = Keyword.get(opts, :thread_scope, :root)
+
     %{
       memory_repo: repo,
       memory_agent_id: "main",
       memory_owner_id: "default",
-      conversation_key: {"telegram", "chat-1", :root}
+      conversation_key: {"telegram", chat_id, thread_scope}
     }
   end
 
