@@ -173,6 +173,54 @@ defmodule FermixCore.Memory.AdmissionTest do
     assert result.rebuild?
   end
 
+  test "conversation corrections replace superseded prompt-backed owner memories" do
+    existing = %{
+      {"main", "owner", "default", "preferred_editor"} => %{
+        agent_id: "main",
+        owner_id: "default",
+        scope_type: "owner",
+        scope_id: "default",
+        category: "preference",
+        key: "preferred_editor",
+        value: "vim",
+        confidence: 0.91,
+        promote_target: "user_md"
+      }
+    }
+
+    correction = %{
+      category: "correction",
+      key: "preferred_editor",
+      value: "helix",
+      scope_type: "conversation",
+      confidence: 0.99,
+      promote_target: "none"
+    }
+
+    result =
+      Admission.apply([correction],
+        agent_id: "main",
+        owner_id: "default",
+        conversation_key: {"slack", "C123", :root},
+        chat_mode: :shared,
+        existing_memories: existing
+      )
+
+    assert [
+             %{
+               category: "preference",
+               key: "preferred_editor",
+               value: "helix",
+               scope_type: "owner",
+               scope_id: "default",
+               promote_target: "user_md"
+             }
+           ] = result.admitted
+
+    assert result.corrective?
+    assert result.rebuild?
+  end
+
   test "dedupes by final scope and key with the latest candidate winning" do
     result =
       Admission.apply(

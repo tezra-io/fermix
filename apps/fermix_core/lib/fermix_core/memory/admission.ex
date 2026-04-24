@@ -91,9 +91,11 @@ defmodule FermixCore.Memory.Admission do
          {:ok, key} <- fetch_candidate_string(candidate, :key),
          {:ok, value} <- fetch_candidate_string(candidate, :value),
          confidence when confidence >= ctx.min_confidence <- fetch_confidence(candidate),
-         scope_type <- resolve_scope_type(category, ctx.chat_mode, candidate),
-         scope_id <- scope_id(scope_type, ctx),
-         existing <- existing_memory(ctx, scope_type, scope_id, key),
+         candidate_scope_type <- resolve_scope_type(category, ctx.chat_mode, candidate),
+         candidate_scope_id <- scope_id(candidate_scope_type, ctx),
+         existing <- existing_memory(ctx, candidate_scope_type, candidate_scope_id, key, category),
+         {scope_type, scope_id} <-
+           admitted_scope(candidate_scope_type, candidate_scope_id, existing, category),
          final_category <- resolve_category(category, existing),
          promote_target <- prompt_target(final_category, scope_type),
          true <- changed?(existing, value, final_category, promote_target) do
@@ -212,7 +214,21 @@ defmodule FermixCore.Memory.Admission do
     Enum.join([channel, chat_id, normalize_thread_scope(thread_scope)], ":")
   end
 
-  defp existing_memory(
+  defp existing_memory(ctx, scope_type, scope_id, key, "correction") do
+    exact = exact_existing_memory(ctx, scope_type, scope_id, key)
+
+    if prompt_backed_memory?(exact) do
+      exact
+    else
+      prompt_backed_existing_memory(ctx, key) || exact
+    end
+  end
+
+  defp existing_memory(ctx, scope_type, scope_id, key, _category) do
+    exact_existing_memory(ctx, scope_type, scope_id, key)
+  end
+
+  defp exact_existing_memory(
          %{existing_memories: existing_memories, agent_id: agent_id},
          scope_type,
          scope_id,
@@ -224,7 +240,7 @@ defmodule FermixCore.Memory.Admission do
       Map.get(existing_memories, {agent_id, scope_type, scope_id, key})
   end
 
-  defp existing_memory(ctx, scope_type, scope_id, key) do
+  defp exact_existing_memory(ctx, scope_type, scope_id, key) do
     case Repo.get_memory(
            %{
              agent_id: ctx.agent_id,
@@ -241,6 +257,42 @@ defmodule FermixCore.Memory.Admission do
       {:error, reason} -> raise "admission lookup failed: #{inspect(reason)}"
     end
   end
+
+  defp prompt_backed_existing_memory(%{existing_memories: existing_memories} = ctx, key)
+       when map_size(existing_memories) > 0 do
+    existing_memories
+    |> Map.values()
+    |> Enum.filter(&memory_matches_key?(ctx, &1, key))
+    |> Enum.find(&prompt_backed_memory?/1)
+  end
+
+  defp prompt_backed_existing_memory(ctx, key) do
+    case Repo.get_memories(
+           %{agent_id: ctx.agent_id, owner_id: ctx.owner_id, key: key},
+           server: ctx.repo
+         ) do
+      {:ok, memories} -> Enum.find(memories, &prompt_backed_memory?/1)
+      {:error, :disabled} -> nil
+      {:error, reason} -> raise "admission prompt lookup failed: #{inspect(reason)}"
+    end
+  end
+
+  defp memory_matches_key?(ctx, memory, key) do
+    memory.key == key and memory.agent_id == ctx.agent_id and memory.owner_id == ctx.owner_id
+  end
+
+  defp prompt_backed_memory?(nil), do: false
+
+  defp prompt_backed_memory?(memory) do
+    prompt_target(memory) != "none"
+  end
+
+  defp admitted_scope(_scope_type, _scope_id, existing, "correction")
+       when is_map(existing) and is_binary(existing.scope_type) and is_binary(existing.scope_id) do
+    {existing.scope_type, existing.scope_id}
+  end
+
+  defp admitted_scope(scope_type, scope_id, _existing, _category), do: {scope_type, scope_id}
 
   defp changed?(nil, _value, _category, _promote_target), do: true
 

@@ -1,7 +1,8 @@
 defmodule FermixCore.Memory.ExtractorTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias FermixCore.Memory.Extractor
+  alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
@@ -25,6 +26,14 @@ defmodule FermixCore.Memory.ExtractorTest do
     def rebuild(agent_id, owner_id, reason, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:rebuild_requested, agent_id, owner_id, reason})
       {:ok, %{user: nil, memory: nil}}
+    end
+  end
+
+  defmodule PromptRebuildNotifier do
+    def rebuild(agent_id, owner_id, reason, opts) do
+      result = PromptFiles.rebuild(agent_id, owner_id)
+      send(Keyword.fetch!(opts, :test_pid), {:prompt_rebuilt, agent_id, owner_id, reason, result})
+      result
     end
   end
 
@@ -228,6 +237,147 @@ defmodule FermixCore.Memory.ExtractorTest do
     assert memory.category == "preference"
     assert memory.value == "helix"
     assert memory.promote_target == "user_md"
+
+    assert {:ok, "helix"} =
+             Store.recall({:owner, "default"}, "preferred_editor", server: store_name)
+  end
+
+  test "extract/1 immediately rebuilds prompt files for conversation-scoped corrections" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-extractor-correction-#{unique}.db")
+    prompt_dir = Path.join(System.tmp_dir!(), "fermix-extractor-prompt-#{unique}")
+    repo_name = :"extractor_correction_repo_#{unique}"
+    store_name = :"extractor_correction_store_#{unique}"
+    scheduler_name = :"extractor_correction_scheduler_#{unique}"
+    task_supervisor_name = :"extractor_correction_task_supervisor_#{unique}"
+    previous_memory_config = Application.get_env(:fermix_core, :memory, [])
+
+    Application.put_env(
+      :fermix_core,
+      :memory,
+      Keyword.merge(previous_memory_config,
+        enabled: true,
+        database_path: db_path,
+        prompt_base_dir: prompt_dir,
+        repo: repo_name
+      )
+    )
+
+    start_supervised!({Task.Supervisor, name: task_supervisor_name})
+    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
+    start_supervised!(%{
+      id: store_name,
+      start: {Store, :start_link, [[name: store_name, repo: repo_name]]}
+    })
+
+    start_supervised!(
+      {Scheduler,
+       [
+         name: scheduler_name,
+         scheduler_enabled: true,
+         task_supervisor: task_supervisor_name,
+         rebuild_module: PromptRebuildNotifier,
+         rebuild_opts: [test_pid: self()],
+         periodic_interval_ms: 10_000,
+         periodic_agent_ids: [],
+         periodic_owner_id: "default"
+       ]}
+    )
+
+    on_exit(fn ->
+      Application.put_env(:fermix_core, :memory, previous_memory_config)
+      File.rm_rf!(prompt_dir)
+
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        File.rm(path)
+      end)
+    end)
+
+    assert {:ok, _memory} =
+             Repo.upsert_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "owner",
+                 scope_id: "default",
+                 category: "preference",
+                 key: "preferred_editor",
+                 value: "vim",
+                 confidence: 0.91,
+                 promote_target: "user_md"
+               },
+               server: repo_name
+             )
+
+    assert {:ok, %{user: stale_user_text}} = PromptFiles.rebuild("main", "default")
+    assert stale_user_text =~ "preferred editor: vim"
+
+    StaticProvider.put_response(
+      mock_response("""
+      [
+        {
+          "category": "correction",
+          "key": "preferred_editor",
+          "value": "helix",
+          "scope_type": "conversation",
+          "confidence": 0.99,
+          "promote_target": "none"
+        }
+      ]
+      """)
+    )
+
+    assert {:ok, %{candidate_count: 1, admitted_count: 1, rebuild?: true, corrective?: true}} =
+             Extractor.extract(
+               provider: StaticProvider,
+               messages: [
+                 %{role: "user", content: "Correction: my preferred editor is Helix, not Vim."},
+                 %{role: "assistant", content: "Got it."}
+               ],
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"slack", "C123", :root},
+               chat_mode: :shared,
+               memory_store: store_name,
+               scheduler: scheduler_name,
+               repo: repo_name
+             )
+
+    assert_receive {:prompt_rebuilt, "main", "default", :event, {:ok, %{user: user_text}}},
+                   1_000
+
+    assert user_text =~ "preferred editor: helix"
+    refute user_text =~ "preferred editor: vim"
+    assert File.read!(PromptFiles.user_path("main")) =~ "preferred editor: helix"
+
+    assert {:ok, corrected} =
+             Repo.get_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "owner",
+                 scope_id: "default",
+                 key: "preferred_editor"
+               },
+               server: repo_name
+             )
+
+    assert corrected.category == "preference"
+    assert corrected.value == "helix"
+    assert corrected.promote_target == "user_md"
+
+    assert {:error, :not_found} =
+             Repo.get_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "slack:C123:root",
+                 key: "preferred_editor"
+               },
+               server: repo_name
+             )
 
     assert {:ok, "helix"} =
              Store.recall({:owner, "default"}, "preferred_editor", server: store_name)
