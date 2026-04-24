@@ -395,6 +395,147 @@ defmodule FermixCore.Memory.ExtractorTest do
              Store.recall({:owner, "default"}, "preferred_editor", server: store_name)
   end
 
+  test "extract/1 immediately rebuilds MEMORY.md for conversation corrections to agent facts" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-extractor-agent-correction-#{unique}.db")
+    prompt_dir = Path.join(System.tmp_dir!(), "fermix-extractor-agent-prompt-#{unique}")
+    repo_name = :"extractor_agent_correction_repo_#{unique}"
+    store_name = :"extractor_agent_correction_store_#{unique}"
+    scheduler_name = :"extractor_agent_correction_scheduler_#{unique}"
+    task_supervisor_name = :"extractor_agent_correction_task_supervisor_#{unique}"
+    previous_memory_config = Application.get_env(:fermix_core, :memory, [])
+
+    Application.put_env(
+      :fermix_core,
+      :memory,
+      Keyword.merge(previous_memory_config,
+        enabled: true,
+        database_path: db_path,
+        prompt_base_dir: prompt_dir,
+        repo: repo_name
+      )
+    )
+
+    start_supervised!({Task.Supervisor, name: task_supervisor_name})
+    start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
+
+    start_supervised!(%{
+      id: store_name,
+      start: {Store, :start_link, [[name: store_name, repo: repo_name]]}
+    })
+
+    start_supervised!(
+      {Scheduler,
+       [
+         name: scheduler_name,
+         scheduler_enabled: true,
+         task_supervisor: task_supervisor_name,
+         rebuild_module: PromptRebuildNotifier,
+         rebuild_opts: [test_pid: self()],
+         periodic_interval_ms: 10_000,
+         periodic_agent_ids: [],
+         periodic_owner_id: "default"
+       ]}
+    )
+
+    on_exit(fn ->
+      Application.put_env(:fermix_core, :memory, previous_memory_config)
+      File.rm_rf!(prompt_dir)
+
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        File.rm(path)
+      end)
+    end)
+
+    assert {:ok, _memory} =
+             Repo.upsert_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "agent",
+                 scope_id: "main",
+                 category: "project",
+                 key: "backend_stack",
+                 value: "ruby",
+                 confidence: 0.91,
+                 promote_target: "memory_md"
+               },
+               server: repo_name
+             )
+
+    assert {:ok, %{memory: stale_memory_text}} = PromptFiles.rebuild("main", "default")
+    assert stale_memory_text =~ "backend stack: ruby"
+
+    StaticProvider.put_response(
+      mock_response("""
+      [
+        {
+          "category": "correction",
+          "key": "backend_stack",
+          "value": "elixir",
+          "scope_type": "conversation",
+          "confidence": 0.99,
+          "promote_target": "none"
+        }
+      ]
+      """)
+    )
+
+    assert {:ok, %{candidate_count: 1, admitted_count: 1, rebuild?: true, corrective?: true}} =
+             Extractor.extract(
+               provider: StaticProvider,
+               messages: [
+                 %{role: "user", content: "Correction: this backend stack is Elixir, not Ruby."},
+                 %{role: "assistant", content: "Got it."}
+               ],
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"slack", "C123", :root},
+               chat_mode: :shared,
+               memory_store: store_name,
+               scheduler: scheduler_name,
+               repo: repo_name
+             )
+
+    assert_receive {:prompt_rebuilt, "main", "default", :event, {:ok, %{memory: memory_text}}},
+                   1_000
+
+    assert memory_text =~ "backend stack: elixir"
+    refute memory_text =~ "backend stack: ruby"
+    assert File.read!(PromptFiles.memory_path("main")) =~ "backend stack: elixir"
+
+    assert {:ok, corrected} =
+             Repo.get_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "agent",
+                 scope_id: "main",
+                 key: "backend_stack"
+               },
+               server: repo_name
+             )
+
+    assert corrected.category == "project"
+    assert corrected.value == "elixir"
+    assert corrected.promote_target == "memory_md"
+
+    assert {:error, :not_found} =
+             Repo.get_memory(
+               %{
+                 agent_id: "main",
+                 owner_id: "default",
+                 scope_type: "conversation",
+                 scope_id: "slack:C123:root",
+                 key: "backend_stack"
+               },
+               server: repo_name
+             )
+
+    assert {:ok, "elixir"} =
+             Store.recall({:agent, "main"}, "backend_stack", server: store_name)
+  end
+
   defp mock_response(content) do
     {:ok,
      %{
