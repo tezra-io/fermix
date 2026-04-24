@@ -1,6 +1,8 @@
 defmodule FermixCore.Memory.PromptFilesTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo
 
@@ -54,6 +56,44 @@ defmodule FermixCore.Memory.PromptFilesTest do
     File.write!(PromptFiles.memory_path(agent_id), "")
 
     assert {:ok, %{user: nil, memory: nil}} = PromptFiles.load(agent_id)
+  end
+
+  test "load/1 logs and skips prompt files that cannot be read", %{agent_id: agent_id} do
+    File.mkdir_p!(PromptFiles.user_path(agent_id))
+    File.write!(PromptFiles.memory_path(agent_id), "memory content")
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{user: nil, memory: "memory content"}} = PromptFiles.load(agent_id)
+      end)
+
+    assert log =~ "prompt memory file read failed"
+    assert log =~ "USER.md"
+  end
+
+  test "rebuild/2 rewrites empty prompt files when durable memory repo is disabled", %{
+    agent_id: agent_id,
+    owner_id: owner_id
+  } do
+    disabled_repo = :"prompt_files_disabled_repo_#{System.unique_integer([:positive])}"
+
+    start_supervised!(
+      Supervisor.child_spec(
+        {Repo, name: disabled_repo, enabled: false, database_path: ":memory:"},
+        id: disabled_repo
+      )
+    )
+
+    current_config = Application.get_env(:fermix_core, :memory, [])
+    Application.put_env(:fermix_core, :memory, Keyword.put(current_config, :repo, disabled_repo))
+
+    File.mkdir_p!(Path.dirname(PromptFiles.user_path(agent_id)))
+    File.write!(PromptFiles.user_path(agent_id), "STALE USER CONTENT")
+    File.write!(PromptFiles.memory_path(agent_id), "STALE MEMORY CONTENT")
+
+    assert {:ok, %{user: nil, memory: nil}} = PromptFiles.rebuild(agent_id, owner_id)
+    assert File.read!(PromptFiles.user_path(agent_id)) == ""
+    assert File.read!(PromptFiles.memory_path(agent_id)) == ""
   end
 
   test "rebuild/2 rewrites both files under hard caps without appending stale content", %{

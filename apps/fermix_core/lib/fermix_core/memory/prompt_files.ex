@@ -7,6 +7,8 @@ defmodule FermixCore.Memory.PromptFiles do
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
 
+  require Logger
+
   @type prompt_memory :: %{
           user: String.t() | nil,
           memory: String.t() | nil
@@ -81,6 +83,9 @@ defmodule FermixCore.Memory.PromptFiles do
   end
 
   defp select_user_memories(memories) do
+    # USER.md is intentionally owner-scoped because it is injected as direct
+    # user preference/identity context; MEMORY.md may carry broader promoted
+    # agent/project facts that are safe to share across that agent's prompts.
     memories
     |> Enum.filter(&(&1.scope_type == "owner" and Admission.prompt_target(&1) == "user_md"))
     |> dedupe_rows()
@@ -249,8 +254,13 @@ defmodule FermixCore.Memory.PromptFiles do
     case File.read(path) do
       {:ok, content} -> {:ok, normalize_content(content)}
       {:error, :enoent} -> {:ok, nil}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> read_failed(path, reason)
     end
+  end
+
+  defp read_failed(path, reason) do
+    Logger.warning("prompt memory file read failed for #{path}: #{inspect(reason)}")
+    {:ok, nil}
   end
 
   defp normalize_content(content) do
