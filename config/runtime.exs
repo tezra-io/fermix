@@ -23,6 +23,24 @@ end
 config :fermix_web, FermixWebWeb.Endpoint,
   http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# Hydrate Application env from the persisted ConfigStore snapshot. This is
+# the single source of truth for "what was set during setup". Any key added
+# to ConfigStore.persistable_snapshot/1 + apply_snapshot/1 lands in env
+# automatically — runtime.exs only needs to apply env-var overlays below.
+if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
+     function_exported?(FermixCore.Setup.ConfigStore, :bootstrap_runtime_config, 0) do
+  case FermixCore.Setup.ConfigStore.bootstrap_runtime_config() do
+    :ok ->
+      :ok
+
+    {:error, reason} ->
+      IO.warn(
+        "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
+          inspect(reason) <> " — booting with compile-time defaults"
+      )
+  end
+end
+
 workspace_paths =
   if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
        function_exported?(FermixCore.Setup.ConfigStore, :workspace_paths, 0) do
@@ -39,80 +57,10 @@ workspace_paths =
     }
   end
 
-persisted_setup =
-  if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
-       function_exported?(FermixCore.Setup.ConfigStore, :load_runtime_config, 0) do
-    case FermixCore.Setup.ConfigStore.load_runtime_config() do
-      {:ok, config} ->
-        config
+# Env-var overlays: layered on top of whatever ConfigStore hydrated above.
 
-      {:error, _reason} ->
-        %{
-          fermix_core: [providers: [openai: []]],
-          fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
-          fermix_web: []
-        }
-    end
-  else
-    %{
-      fermix_core: [providers: [openai: []]],
-      fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
-      fermix_web: []
-    }
-  end
-
-# Merge runtime config with compile-time config to preserve base_url, default_model, etc.
 existing_providers = Application.get_env(:fermix_core, :providers, [])
-
-existing_openai =
-  existing_providers
-  |> Keyword.get(:openai, [])
-  |> Keyword.merge(
-    persisted_setup
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:providers, [])
-    |> Keyword.get(:openai, [])
-  )
-
-existing_telegram =
-  Application.get_env(:fermix_channels, :telegram, [])
-  |> Keyword.merge(
-    persisted_setup
-    |> Map.get(:fermix_channels, [])
-    |> Keyword.get(:telegram, [])
-  )
-
-existing_whatsapp =
-  Application.get_env(:fermix_channels, :whatsapp, [])
-  |> Keyword.merge(
-    persisted_setup
-    |> Map.get(:fermix_channels, [])
-    |> Keyword.get(:whatsapp, [])
-  )
-
-existing_discord =
-  Application.get_env(:fermix_channels, :discord, [])
-  |> Keyword.merge(
-    persisted_setup
-    |> Map.get(:fermix_channels, [])
-    |> Keyword.get(:discord, [])
-  )
-
-existing_slack =
-  Application.get_env(:fermix_channels, :slack, [])
-  |> Keyword.merge(
-    persisted_setup
-    |> Map.get(:fermix_channels, [])
-    |> Keyword.get(:slack, [])
-  )
-
-existing_signal =
-  Application.get_env(:fermix_channels, :signal, [])
-  |> Keyword.merge(
-    persisted_setup
-    |> Map.get(:fermix_channels, [])
-    |> Keyword.get(:signal, [])
-  )
+existing_openai = Keyword.get(existing_providers, :openai, [])
 
 openai_auth_mode =
   case System.get_env("OPENAI_AUTH_MODE") do
@@ -196,6 +144,8 @@ config :fermix_core,
          file: System.get_env("FERMIX_LOG_FILE") || Path.join(workspace_paths.logs, "fermix.log")
        )
 
+existing_telegram = Application.get_env(:fermix_channels, :telegram, [])
+
 allowed_user_ids =
   case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
     nil -> Keyword.get(existing_telegram, :allowed_user_ids, [])
@@ -211,6 +161,8 @@ merged_telegram =
   )
 
 config :fermix_channels, telegram: merged_telegram
+
+existing_whatsapp = Application.get_env(:fermix_channels, :whatsapp, [])
 
 whatsapp_mode =
   case System.get_env("WHATSAPP_MODE") do
@@ -243,6 +195,8 @@ merged_whatsapp =
 
 config :fermix_channels, whatsapp: merged_whatsapp
 
+existing_discord = Application.get_env(:fermix_channels, :discord, [])
+
 discord_mode =
   case System.get_env("DISCORD_MODE") do
     "gateway" -> :gateway
@@ -268,6 +222,8 @@ merged_discord =
 
 config :fermix_channels, discord: merged_discord
 
+existing_slack = Application.get_env(:fermix_channels, :slack, [])
+
 slack_mode =
   case System.get_env("SLACK_MODE") do
     "webhook" -> :webhook
@@ -292,6 +248,8 @@ merged_slack =
   )
 
 config :fermix_channels, slack: merged_slack
+
+existing_signal = Application.get_env(:fermix_channels, :signal, [])
 
 signal_mode =
   case System.get_env("SIGNAL_MODE") do

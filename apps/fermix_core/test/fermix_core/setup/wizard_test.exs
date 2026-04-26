@@ -1,6 +1,7 @@
 defmodule FermixCore.Setup.WizardTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
@@ -11,7 +12,17 @@ defmodule FermixCore.Setup.WizardTest do
     discord = Application.fetch_env(:fermix_channels, :discord)
     slack = Application.fetch_env(:fermix_channels, :slack)
     signal = Application.fetch_env(:fermix_channels, :signal)
+    personalization = Application.get_env(:fermix_core, :personalization, [])
+    agent = Application.get_env(:fermix_core, :agent, [])
     fermix_home = System.get_env("FERMIX_HOME")
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Test User",
+      timezone: "UTC",
+      communication_style: "neutral and direct"
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix")
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -20,6 +31,8 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      Application.put_env(:fermix_core, :personalization, personalization)
+      Application.put_env(:fermix_core, :agent, agent)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -108,6 +121,7 @@ defmodule FermixCore.Setup.WizardTest do
     System.put_env("FERMIX_HOME", tmp_home)
     Application.put_env(:fermix_core, :providers, [])
     Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
 
     {:ok, report} =
       Wizard.report().wizard
@@ -133,6 +147,116 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :allowed_user_ids) == []
   end
 
+  test "report routes to :personalization step when only personalization is missing" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+    Application.put_env(:fermix_core, :personalization, [])
+
+    report = Wizard.report()
+
+    assert report.status == :setup_required
+    assert report.wizard.step == :personalization
+
+    prompts = Wizard.prompts(report.wizard)
+    assert Enum.any?(prompts, &(&1.key == :user_name and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :timezone and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :communication_style and &1.required?))
+  end
+
+  test "save_answers seeds prompt files when readiness becomes :ready" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-wizard-seed-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+    Application.put_env(:fermix_core, :personalization, [])
+    start_memory_repo!()
+
+    {:ok, report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        user_name: "Sujeeth",
+        timezone: "Asia/Singapore",
+        communication_style: "blunt"
+      )
+
+    assert report.status == :ready
+
+    assert Enum.map(report.seeding_results, & &1.name) == [
+             :identity,
+             :agents,
+             :soul,
+             :user,
+             :memory
+           ]
+
+    assert Enum.all?(report.seeding_results, &(&1.outcome == :seeded))
+
+    bootstrap_dir = Application.get_env(:fermix_core, :prompt_bootstrap)[:bootstrap_dir]
+    assert File.exists?(Path.join([bootstrap_dir, "main", "IDENTITY.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "AGENTS.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "SOUL.md"]))
+  end
+
+  test "save_answers skips seeding when prerequisites are still missing" do
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :personalization, [])
+    start_memory_repo!()
+
+    {:ok, report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        user_name: "Sujeeth",
+        timezone: "Asia/Singapore",
+        communication_style: "blunt"
+      )
+
+    assert report.status == :setup_required
+    assert report.seeding_results == []
+  end
+
+  test "seed_now restores files deleted from disk when readiness is :ready" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+    start_memory_repo!()
+
+    assert {:ok, first_results} = Wizard.seed_now()
+    assert Enum.all?(first_results, &(&1.outcome == :seeded))
+
+    bootstrap_dir = Application.get_env(:fermix_core, :prompt_bootstrap)[:bootstrap_dir]
+    soul_path = Path.join([bootstrap_dir, "main", "SOUL.md"])
+    File.rm!(soul_path)
+
+    assert {:ok, second_results} = Wizard.seed_now()
+
+    by_name = Map.new(second_results, &{&1.name, &1.outcome})
+    assert by_name[:soul] == :seeded
+    assert by_name[:identity] == :skipped_exists
+    assert by_name[:agents] == :skipped_exists
+    assert by_name[:user] == :skipped_exists
+    assert by_name[:memory] == :skipped_exists
+    assert File.exists?(soul_path)
+  end
+
+  test "seed_now is a no-op when readiness is not :ready" do
+    Application.put_env(:fermix_core, :providers, [])
+    start_memory_repo!()
+
+    assert {:ok, []} = Wizard.seed_now()
+  end
+
   test "save_answers persists whatsapp and discord setup answers" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 
@@ -147,6 +271,7 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :telegram, enabled: false)
     Application.put_env(:fermix_channels, :whatsapp, enabled: true)
     Application.put_env(:fermix_channels, :discord, enabled: true)
+    start_memory_repo!()
 
     {:ok, report} =
       Wizard.report().wizard
@@ -192,6 +317,7 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :telegram, enabled: false)
     Application.put_env(:fermix_channels, :slack, enabled: true)
     Application.put_env(:fermix_channels, :signal, enabled: true)
+    start_memory_repo!()
 
     {:ok, report} =
       Wizard.report().wizard
@@ -219,4 +345,64 @@ defmodule FermixCore.Setup.WizardTest do
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+
+  defp start_memory_repo! do
+    unique = System.unique_integer([:positive, :monotonic])
+    db_path = Path.join(System.tmp_dir!(), "fermix-wizard-#{unique}.db")
+    bootstrap_dir = Path.join(System.tmp_dir!(), "fermix-wizard-bootstrap-#{unique}")
+    memory_dir = Path.join(System.tmp_dir!(), "fermix-wizard-memory-#{unique}")
+
+    previous_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
+    previous_memory = Application.get_env(:fermix_core, :memory, [])
+
+    Application.put_env(
+      :fermix_core,
+      :prompt_bootstrap,
+      Keyword.put(previous_bootstrap, :bootstrap_dir, bootstrap_dir)
+    )
+
+    Application.put_env(
+      :fermix_core,
+      :memory,
+      previous_memory
+      |> Keyword.merge(
+        prompt_base_dir: memory_dir,
+        agent_id: "main",
+        enabled: true,
+        database_path: db_path
+      )
+    )
+
+    restart_global_memory_repo!()
+
+    on_exit(fn ->
+      Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
+      Application.put_env(:fermix_core, :memory, previous_memory)
+      restart_global_memory_repo!()
+      File.rm_rf!(bootstrap_dir)
+      File.rm_rf!(memory_dir)
+
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path -> File.rm(path) end)
+    end)
+  end
+
+  defp restart_global_memory_repo! do
+    case Process.whereis(MemoryRepo) do
+      nil ->
+        :ok
+
+      pid ->
+        ref = Process.monitor(pid)
+        :ok = Supervisor.terminate_child(FermixCore.Supervisor, MemoryRepo)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          1_000 -> Process.demonitor(ref, [:flush])
+        end
+    end
+
+    {:ok, _pid} = Supervisor.restart_child(FermixCore.Supervisor, MemoryRepo)
+    :ok
+  end
 end

@@ -33,7 +33,6 @@ config :fermix_core, :memory,
 
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.join(System.tmp_dir!(), "fermix-test-bootstrap"),
-  seed_agent_file: true,
   accounting_enabled: true
 
 config :fermix_core,

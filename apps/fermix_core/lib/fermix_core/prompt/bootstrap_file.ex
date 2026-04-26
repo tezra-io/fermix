@@ -3,8 +3,8 @@ defmodule FermixCore.Prompt.BootstrapFile do
   Shared file handling for prompt bootstrap resources.
   """
 
-  @type name :: :agents | :soul
-  @type status :: :present | :seeded | :fallback
+  @type name :: :identity | :agents | :soul
+  @type status :: :present | :fallback
   @type t :: %{
           name: name(),
           path: String.t(),
@@ -35,8 +35,8 @@ defmodule FermixCore.Prompt.BootstrapFile do
 
   @spec metadata(name(), String.t(), String.t(), status()) :: t()
   def metadata(name, path, content, status)
-      when name in [:agents, :soul] and is_binary(path) and is_binary(content) and
-             status in [:present, :seeded, :fallback] do
+      when name in [:identity, :agents, :soul] and is_binary(path) and is_binary(content) and
+             status in [:present, :fallback] do
     size = byte_size(content)
 
     %{

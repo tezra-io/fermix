@@ -10,6 +10,16 @@ defmodule FermixWebWeb.HealthControllerTest do
     discord = Application.get_env(:fermix_channels, :discord)
     slack = Application.get_env(:fermix_channels, :slack)
     signal = Application.get_env(:fermix_channels, :signal)
+    personalization = Application.get_env(:fermix_core, :personalization, [])
+    agent = Application.get_env(:fermix_core, :agent, [])
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Test User",
+      timezone: "UTC",
+      communication_style: "neutral and direct"
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix")
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -18,6 +28,8 @@ defmodule FermixWebWeb.HealthControllerTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      Application.put_env(:fermix_core, :personalization, personalization)
+      Application.put_env(:fermix_core, :agent, agent)
       BootReport.refresh()
     end)
 

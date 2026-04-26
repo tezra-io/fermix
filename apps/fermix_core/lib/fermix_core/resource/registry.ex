@@ -5,11 +5,11 @@ defmodule FermixCore.Resource.Registry do
 
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
+  alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Resource.Revision
-  alias FermixCore.Setup.ConfigStore
 
-  @resource_types ~w(agents_md soul_md user_md memory_md checkpoint)
-  @file_resource_types ~w(agents_md soul_md user_md memory_md)
+  @resource_types ~w(identity_md agents_md soul_md user_md memory_md checkpoint)
+  @file_resource_types ~w(identity_md agents_md soul_md user_md memory_md)
   @mutation_sources ~w(seed imported manual_edit extraction_rebuild scheduler_rebuild compaction rollback)
   @max_commit_attempts 4
 
@@ -236,6 +236,10 @@ defmodule FermixCore.Resource.Registry do
     end
   end
 
+  defp default_resource_path(agent_id, "identity_md", opts) do
+    {:ok, Path.join([bootstrap_dir(opts), agent_id, "IDENTITY.md"])}
+  end
+
   defp default_resource_path(agent_id, "agents_md", opts) do
     {:ok, Path.join([bootstrap_dir(opts), agent_id, "AGENTS.md"])}
   end
@@ -252,18 +256,7 @@ defmodule FermixCore.Resource.Registry do
     {:ok, Path.join([Config.prompt_base_dir(opts), agent_id, "MEMORY.md"])}
   end
 
-  defp bootstrap_dir(opts) do
-    opts
-    |> Keyword.get(
-      :bootstrap_dir,
-      Keyword.get(
-        Application.get_env(:fermix_core, :prompt_bootstrap, []),
-        :bootstrap_dir,
-        ConfigStore.workspace_paths().bootstrap
-      )
-    )
-    |> Path.expand()
-  end
+  defp bootstrap_dir(opts), do: BootstrapPaths.bootstrap_dir(opts)
 
   defp rollback_provenance(target_revision, from_revision) do
     %{

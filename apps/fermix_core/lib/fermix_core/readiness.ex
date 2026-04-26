@@ -36,7 +36,8 @@ defmodule FermixCore.Readiness do
           whatsapp_failure(),
           discord_failure(),
           slack_failure(),
-          signal_failure()
+          signal_failure(),
+          personalization_failure()
         ],
         &is_nil/1
       )
@@ -45,6 +46,23 @@ defmodule FermixCore.Readiness do
       status: status_for(failures),
       failures: failures
     }
+  end
+
+  @spec personalization_failure() :: failure() | nil
+  def personalization_failure do
+    config = Application.get_env(:fermix_core, :personalization, [])
+
+    if Enum.all?(
+         [:user_name, :timezone, :communication_style],
+         &present?(Keyword.get(config, &1))
+       ) do
+      nil
+    else
+      %{
+        component: "personalization",
+        action: "Run mix fermix.setup to provide your name, timezone, and communication style."
+      }
+    end
   end
 
   defp openai_failure do
