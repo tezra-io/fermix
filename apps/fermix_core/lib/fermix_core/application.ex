@@ -4,6 +4,8 @@ defmodule FermixCore.Application do
   use Application
   require Logger
 
+  alias Burrito.Util, as: BurritoUtil
+  alias Burrito.Util.Args, as: BurritoArgs
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
@@ -20,6 +22,53 @@ defmodule FermixCore.Application do
 
   @impl true
   def start(_type, _args) do
+    if BurritoUtil.running_standalone?() do
+      cli_dispatch(BurritoArgs.argv())
+    else
+      # Dev (mix test, iex -S mix phx.server) or plain release
+      # (`bin/fermix start`). All sibling apps are `:permanent`, so OTP
+      # auto-starts them after this returns; whether the Phoenix endpoint
+      # binds is governed by the existing PHX_SERVER convention in
+      # `config/runtime.exs`.
+      start_supervision_tree()
+    end
+  end
+
+  # `run`: enable the endpoint server now (before OTP proceeds to start
+  # fermix_web), build the supervision tree, then spawn `Fermix.CLI.Run`
+  # for log + block. The BEAM stays alive because all sibling apps are
+  # `:permanent` — we do not call `System.halt`.
+  defp cli_dispatch(["run" | _] = argv) do
+    enable_endpoint_server()
+
+    with {:ok, pid} <- start_supervision_tree() do
+      spawn(fn -> run_cli(argv) end)
+      {:ok, pid}
+    end
+  end
+
+  # `setup`: build the supervision tree (needed for `Memory.Repo` during
+  # `SetupSeeder`), run the wizard synchronously, then halt before OTP
+  # proceeds to start fermix_channels/fermix_web. Setup never binds a
+  # network port.
+  defp cli_dispatch(["setup" | _] = argv) do
+    {:ok, _pid} = start_supervision_tree()
+    System.halt(run_cli(argv))
+  end
+
+  # version / help / start / stop / unknown — strictly read-only, no side
+  # effects. Halt before any sibling app starts so there is no file
+  # logger, no `Memory.Repo`, no `TokenManager`, no port bind.
+  defp cli_dispatch(argv) do
+    System.halt(run_cli(argv))
+  end
+
+  defp enable_endpoint_server do
+    existing = Application.get_env(:fermix_web, FermixWebWeb.Endpoint, [])
+    Application.put_env(:fermix_web, FermixWebWeb.Endpoint, Keyword.put(existing, :server, true))
+  end
+
+  defp start_supervision_tree do
     setup_file_logger()
     Trace.TelemetryHandler.attach()
 
@@ -47,6 +96,15 @@ defmodule FermixCore.Application do
       register_tools()
       {:ok, pid}
     end
+  end
+
+  defp run_cli(argv) do
+    Fermix.CLI.main(argv)
+  rescue
+    error ->
+      IO.puts(:stderr, "fermix: unexpected error — #{Exception.message(error)}")
+      IO.puts(:stderr, Exception.format_stacktrace(__STACKTRACE__))
+      1
   end
 
   defp register_tools do

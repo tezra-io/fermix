@@ -1,6 +1,7 @@
 # Elixir
 /_build/
 /deps/
+/burrito_out/
 # No lock file exclusion — mix.lock must be committed for reproducible builds
 
 # Umbrella apps

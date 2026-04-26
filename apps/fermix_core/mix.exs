@@ -25,6 +25,7 @@ defmodule FermixCore.MixProject do
 
   defp deps do
     [
+      {:burrito, "~> 1.5"},
       {:exqlite, "~> 0.36.0"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
