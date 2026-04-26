@@ -27,13 +27,13 @@ defmodule FermixCore.Trace.TelemetryHandler do
     for %{event: event} <- event_definitions() do
       handler_id = "#{prefix}-#{Enum.join(event, "-")}"
 
-      case :telemetry.attach(handler_id, event, &handle_event/4, config) do
+      case :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, config) do
         :ok ->
           :ok
 
         {:error, :already_exists} ->
           :telemetry.detach(handler_id)
-          :telemetry.attach(handler_id, event, &handle_event/4, config)
+          :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, config)
       end
     end
 

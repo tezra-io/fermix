@@ -50,7 +50,9 @@ defmodule FermixCore.Setup.ConfigStore do
           openai:
             Application.get_env(:fermix_core, :providers, [])
             |> Keyword.get(:openai, [])
-        ]
+        ],
+        personalization: Application.get_env(:fermix_core, :personalization, []),
+        agent: Application.get_env(:fermix_core, :agent, [])
       ],
       fermix_channels: [
         telegram: Application.get_env(:fermix_channels, :telegram, []),
@@ -93,11 +95,35 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Keyword.get(:openai, [])
     )
 
+    apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
+    apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
+
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
     apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
     apply_channel_config(:discord, Keyword.get(persisted.fermix_channels, :discord, []))
     apply_channel_config(:slack, Keyword.get(persisted.fermix_channels, :slack, []))
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
+  end
+
+  @doc """
+  Hydrates Application env from the persisted runtime snapshot.
+
+  Single entry point for boot-time config loading: `runtime.exs` calls this
+  before layering env-var overrides on top. Any key added to
+  `persistable_snapshot/1` and `apply_snapshot/1` is automatically
+  propagated to Application env at boot — no per-key wiring in
+  `runtime.exs` is required.
+
+  Missing TOML returns `:ok` (the in-memory defaults from
+  `empty_runtime_config/0` apply, which normalize to no-op merges).
+  Malformed TOML returns `{:error, reason}` so boot can surface the
+  problem rather than silently start with stale defaults.
+  """
+  @spec bootstrap_runtime_config() :: :ok | {:error, term()}
+  def bootstrap_runtime_config do
+    with {:ok, snapshot} <- load_runtime_config() do
+      apply_snapshot(snapshot)
+    end
   end
 
   @spec persistable_snapshot(runtime_config()) :: runtime_config()
@@ -111,7 +137,17 @@ defmodule FermixCore.Setup.ConfigStore do
             |> Keyword.get(:providers, [])
             |> Keyword.get(:openai, [])
             |> normalize_openai()
-        ]
+        ],
+        personalization:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:personalization, [])
+          |> normalize_personalization(),
+        agent:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:agent, [])
+          |> normalize_agent()
       ],
       fermix_channels: [
         telegram:
@@ -156,7 +192,11 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp empty_runtime_config do
     %{
-      fermix_core: [providers: [openai: []]],
+      fermix_core: [
+        providers: [openai: []],
+        personalization: [user_name: nil, timezone: nil, communication_style: nil],
+        agent: [name: "fermix"]
+      ],
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
     }
@@ -170,6 +210,24 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_personalization_config(personalization_config) do
+    merged =
+      Application.get_env(:fermix_core, :personalization, [])
+      |> Keyword.merge(personalization_config)
+
+    Application.put_env(:fermix_core, :personalization, merged)
+    :ok
+  end
+
+  defp apply_agent_config(agent_config) do
+    merged =
+      Application.get_env(:fermix_core, :agent, [])
+      |> Keyword.merge(agent_config)
+
+    Application.put_env(:fermix_core, :agent, merged)
+    :ok
+  end
+
   defp apply_channel_config(channel, channel_config) do
     merged =
       Application.get_env(:fermix_channels, channel, [])
@@ -180,17 +238,22 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp dump_snapshot(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+
     openai =
-      snapshot
-      |> Map.get(:fermix_core, [])
+      fermix_core
       |> Keyword.get(:providers, [])
       |> Keyword.get(:openai, [])
 
+    personalization = Keyword.get(fermix_core, :personalization, [])
+    agent = Keyword.get(fermix_core, :agent, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
       "# Managed by mix fermix.setup",
       render_section(["fermix_core", "providers", "openai"], openai),
+      render_section(["fermix_core", "personalization"], personalization),
+      render_section(["fermix_core", "agent"], agent),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -267,7 +330,10 @@ defmodule FermixCore.Setup.ConfigStore do
       fermix_core: [
         providers: [
           openai: normalize_openai(get_in(document, ["fermix_core", "providers", "openai"]))
-        ]
+        ],
+        personalization:
+          normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
+        agent: normalize_agent(get_in(document, ["fermix_core", "agent"]))
       ],
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
@@ -324,6 +390,25 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
     |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
+  end
+
+  defp normalize_personalization(nil), do: []
+
+  defp normalize_personalization(config) do
+    []
+    |> put_if_present(:user_name, normalize_string(lookup(config, "user_name", :user_name)))
+    |> put_if_present(:timezone, normalize_string(lookup(config, "timezone", :timezone)))
+    |> put_if_present(
+      :communication_style,
+      normalize_string(lookup(config, "communication_style", :communication_style))
+    )
+  end
+
+  defp normalize_agent(nil), do: []
+
+  defp normalize_agent(config) do
+    []
+    |> put_if_present(:name, normalize_string(lookup(config, "name", :name)))
   end
 
   defp normalize_telegram(nil), do: []

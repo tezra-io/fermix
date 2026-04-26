@@ -4,9 +4,10 @@ defmodule FermixCore.Prompt.PromptComposerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Memory.PromptFiles
+  alias FermixCore.Prompt.BootstrapPaths
+  alias FermixCore.Prompt.Defaults
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Prompt.RuntimeSections
-  alias FermixCore.Prompt.Seeder
 
   setup do
     unique = System.unique_integer([:positive, :monotonic])
@@ -15,10 +16,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     previous_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
     previous_memory = Application.get_env(:fermix_core, :memory, [])
 
-    Application.put_env(:fermix_core, :prompt_bootstrap,
-      bootstrap_dir: bootstrap_dir,
-      seed_agent_file: false
-    )
+    Application.put_env(:fermix_core, :prompt_bootstrap, bootstrap_dir: bootstrap_dir)
 
     Application.put_env(
       :fermix_core,
@@ -37,6 +35,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
   end
 
   test "compose/1 returns system messages in documented order", %{agent_id: agent_id} do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
     write_bootstrap(agent_id, "SOUL.md", "soul content")
     write_bootstrap(agent_id, "AGENTS.md", "agents content")
     write_memory(agent_id, "USER.md", "user content")
@@ -44,11 +43,12 @@ defmodule FermixCore.Prompt.PromptComposerTest do
 
     assert {:ok, messages} = PromptComposer.compose(agent_id: agent_id, available_skills: [])
 
-    assert Enum.map(messages, & &1.role) == List.duplicate("system", 4)
+    assert Enum.map(messages, & &1.role) == List.duplicate("system", 5)
 
-    memory_context = Enum.at(messages, 2).content
+    memory_context = Enum.at(messages, 3).content
 
     assert Enum.map(messages, & &1.content) == [
+             "identity content",
              "soul content",
              "agents content",
              memory_context,
@@ -64,18 +64,20 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert memory_context =~ "</memory-context>"
   end
 
-  test "compose/1 omits absent optional parts but keeps AGENTS fallback and runtime", %{
+  test "compose/1 falls back to defaults for IDENTITY/AGENTS when bootstrap is missing", %{
     agent_id: agent_id
   } do
     assert {:ok, messages} = PromptComposer.compose(agent_id: agent_id, available_skills: [])
 
-    assert length(messages) == 2
-    [agents, runtime] = messages
-    assert agents.content =~ "You are a helpful AI assistant"
+    assert length(messages) == 3
+    [identity, agents, runtime] = messages
+    assert identity.content == Defaults.identity_md()
+    assert agents.content == Defaults.agents_md()
     assert runtime.content =~ "## Runtime Contract"
   end
 
   test "compose_with_metadata/1 exposes accounting for every emitted part", %{agent_id: agent_id} do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
     write_bootstrap(agent_id, "SOUL.md", "soul content")
     write_bootstrap(agent_id, "AGENTS.md", "agents content")
     write_memory(agent_id, "USER.md", "user content")
@@ -83,14 +85,23 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert {:ok, result} =
              PromptComposer.compose_with_metadata(agent_id: agent_id, available_skills: [])
 
-    assert Enum.map(result.accounting, & &1.name) == [:soul, :agents, :user, :runtime]
+    assert Enum.map(result.accounting, & &1.name) == [
+             :identity,
+             :soul,
+             :agents,
+             :user,
+             :runtime
+           ]
 
     assert Enum.find(result.accounting, &(&1.name == :soul)) == %{
              name: :soul,
-             source_path: Seeder.soul_path(agent_id),
+             source_path: BootstrapPaths.soul_path(agent_id),
              approx_size: byte_size("soul content"),
              approx_tokens: 3
            }
+
+    assert Enum.find(result.accounting, &(&1.name == :identity)).source_path ==
+             BootstrapPaths.identity_path(agent_id)
 
     assert Enum.find(result.accounting, &(&1.name == :runtime)).source_path == nil
     assert Enum.all?(result.accounting, &(&1.approx_size > 0))
@@ -133,7 +144,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
   end
 
   defp write_bootstrap(agent_id, file, content) do
-    path = Path.join(Seeder.agent_dir(agent_id), file)
+    path = Path.join(BootstrapPaths.agent_dir(agent_id), file)
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, content)
   end

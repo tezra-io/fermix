@@ -3,10 +3,13 @@ defmodule FermixCore.Setup.Wizard do
   Shared setup/readiness surface for CLI and web onboarding.
   """
 
+  alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Readiness
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.WizardState
+
+  require Logger
 
   @type answer ::
           {:openai_api_key, String.t()}
@@ -20,16 +23,30 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_bot_token, String.t()}
           | {:slack_signing_secret, String.t()}
           | {:signal_account, String.t()}
+          | {:user_name, String.t()}
+          | {:timezone, String.t()}
+          | {:communication_style, String.t()}
+
+  @type seeding_result :: %{
+          name: :identity | :agents | :soul | :user | :memory,
+          path: String.t(),
+          outcome: :seeded | :skipped_exists | :seeded_uncommitted
+        }
+
   @type report :: %{
           status: Readiness.status(),
           failures: [Readiness.failure()],
           wizard: WizardState.t(),
           config_path: String.t(),
-          restart_required?: boolean()
+          restart_required?: boolean(),
+          seeding_results: [seeding_result()]
         }
 
   @spec report() :: report()
-  def report do
+  def report, do: report([])
+
+  @spec report([seeding_result()]) :: report()
+  def report(seeding_results) when is_list(seeding_results) do
     readiness = Readiness.report()
     snapshot = ConfigStore.current_snapshot()
 
@@ -38,7 +55,8 @@ defmodule FermixCore.Setup.Wizard do
       failures: readiness.failures,
       wizard: build_state(snapshot, readiness),
       config_path: ConfigStore.path(),
-      restart_required?: restart_required?(snapshot)
+      restart_required?: restart_required?(snapshot),
+      seeding_results: seeding_results
     }
   end
 
@@ -99,6 +117,21 @@ defmodule FermixCore.Setup.Wizard do
         key: :signal_account,
         label: "Signal account",
         required?: missing_component?(state, "channel:signal")
+      },
+      %{
+        key: :user_name,
+        label: "Your name",
+        required?: missing_component?(state, "personalization")
+      },
+      %{
+        key: :timezone,
+        label: "Your timezone (e.g. America/Los_Angeles)",
+        required?: missing_component?(state, "personalization")
+      },
+      %{
+        key: :communication_style,
+        label: "Preferred communication style (e.g. concise and direct)",
+        required?: missing_component?(state, "personalization")
       }
     ]
     |> Enum.filter(& &1.required?)
@@ -114,11 +147,26 @@ defmodule FermixCore.Setup.Wizard do
       |> put_discord_config(answers)
       |> put_slack_config(answers)
       |> put_signal_config(answers)
+      |> put_personalization(answers)
 
     with :ok <- ConfigStore.save_snapshot(snapshot),
-         :ok <- ConfigStore.apply_snapshot(snapshot) do
-      {:ok, BootReport.refresh_if_started() || report()}
+         :ok <- ConfigStore.apply_snapshot(snapshot),
+         {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
+      {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
+  end
+
+  @doc """
+  Re-runs prompt-file seeding against the current persisted snapshot.
+
+  Used by the CLI re-run path: when setup is already ready and the operator
+  re-runs `mix fermix.setup` (e.g., after deleting `SOUL.md`), this recreates
+  any missing files without requiring new answers. Idempotent — files that
+  already exist are skipped by `SetupSeeder`.
+  """
+  @spec seed_now() :: {:ok, [seeding_result()]} | {:error, term()}
+  def seed_now do
+    maybe_seed_prompt_files(ConfigStore.current_snapshot())
   end
 
   defp build_state(snapshot, readiness) do
@@ -139,6 +187,7 @@ defmodule FermixCore.Setup.Wizard do
       Enum.any?(failures, &(&1.component == "channel:discord")) -> :channel
       Enum.any?(failures, &(&1.component == "channel:slack")) -> :channel
       Enum.any?(failures, &(&1.component == "channel:signal")) -> :channel
+      Enum.any?(failures, &(&1.component == "personalization")) -> :personalization
       true -> :review
     end
   end
@@ -268,6 +317,53 @@ defmodule FermixCore.Setup.Wizard do
       |> Keyword.merge(values)
 
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
+  end
+
+  defp put_personalization(snapshot, answers) do
+    values =
+      [
+        user_name: Keyword.get(answers, :user_name),
+        timezone: Keyword.get(answers, :timezone),
+        communication_style: Keyword.get(answers, :communication_style)
+      ]
+      |> reject_blank_values()
+
+    if values == [] do
+      snapshot
+    else
+      fermix_core = Map.get(snapshot, :fermix_core, [])
+      existing = Keyword.get(fermix_core, :personalization, [])
+      merged = Keyword.merge(existing, values)
+      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :personalization, merged))
+    end
+  end
+
+  defp maybe_seed_prompt_files(snapshot) do
+    if seeding_ready?() do
+      personalization = personalization_map(snapshot)
+
+      case SetupSeeder.seed(personalization) do
+        {:ok, results} ->
+          {:ok, results}
+
+        {:error, reason} = error ->
+          Logger.warning("setup wizard prompt seed failed: #{inspect(reason)}")
+          error
+      end
+    else
+      {:ok, []}
+    end
+  end
+
+  defp seeding_ready? do
+    Readiness.report().status == :ready
+  end
+
+  defp personalization_map(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:personalization, [])
+    |> Enum.into(%{})
   end
 
   defp reject_blank_values(values) do
