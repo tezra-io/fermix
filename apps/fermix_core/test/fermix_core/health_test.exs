@@ -69,6 +69,7 @@ defmodule FermixCore.HealthTest do
     assert report.config.home == tmp_home
 
     assert report.config.workspace == %{
+             bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              journals: Path.join(tmp_home, "journals"),
              traces: Path.join(tmp_home, "traces"),

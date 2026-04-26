@@ -28,6 +28,8 @@ defmodule Mix.Tasks.Fermix.Setup do
   @impl true
   def run(args) do
     Mix.Task.run("loadpaths")
+    Mix.Task.run("app.config")
+    {:ok, _started} = Application.ensure_all_started(:fermix_core)
 
     {opts, _argv, invalid} = OptionParser.parse(args, strict: @switches)
 
@@ -60,7 +62,13 @@ defmodule Mix.Tasks.Fermix.Setup do
         print_report(report)
 
       report.status == :ready and provided_answers(opts) == [] ->
-        print_report(report)
+        case Wizard.seed_now() do
+          {:ok, results} ->
+            print_report(%{report | seeding_results: results})
+
+          {:error, reason} ->
+            Mix.raise("failed to seed prompt files: #{inspect(reason)}")
+        end
 
       true ->
         answers = collect_answers(report, opts)
@@ -126,5 +134,17 @@ defmodule Mix.Tasks.Fermix.Setup do
         Mix.shell().info("- #{failure.component}: #{failure.action}")
       end)
     end
+
+    print_seeding_results(report.seeding_results)
+  end
+
+  defp print_seeding_results([]), do: :ok
+
+  defp print_seeding_results(results) do
+    Mix.shell().info("Prompt files:")
+
+    Enum.each(results, fn %{name: name, outcome: outcome, path: path} ->
+      Mix.shell().info("- #{name} #{outcome}: #{path}")
+    end)
   end
 end

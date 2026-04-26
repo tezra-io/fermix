@@ -5,6 +5,7 @@ defmodule FermixCore.Memory.Extractor do
 
   alias FermixCore.Memory.Admission
   alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
 
@@ -23,19 +24,18 @@ defmodule FermixCore.Memory.Extractor do
 
     result =
       with {:ok, response} <- call_provider(ctx),
-           {:ok, candidates} <- parse_candidates(response.content) do
-        admission =
-          Admission.apply(candidates,
-            agent_id: ctx.agent_id,
-            owner_id: ctx.owner_id,
-            conversation_key: ctx.conversation_key,
-            chat_mode: ctx.chat_mode,
-            repo: ctx.repo,
-            min_confidence: ctx.min_confidence
-          )
-
-        :ok = persist_admitted(admission.admitted, ctx.memory_store)
-        maybe_request_rebuild(admission, ctx)
+           {:ok, candidates} <- parse_candidates(response.content),
+           admission <-
+             Admission.apply(candidates,
+               agent_id: ctx.agent_id,
+               owner_id: ctx.owner_id,
+               conversation_key: ctx.conversation_key,
+               chat_mode: ctx.chat_mode,
+               repo: ctx.repo,
+               min_confidence: ctx.min_confidence
+             ),
+           {:ok, persisted} <- persist_admitted(admission.admitted, ctx.memory_store, ctx.repo) do
+        maybe_request_rebuild(admission, ctx, persisted)
         {:ok, extraction_result(candidates, admission)}
       end
 
@@ -45,12 +45,16 @@ defmodule FermixCore.Memory.Extractor do
 
   @spec parse_candidates(String.t()) :: {:ok, [candidate()]} | {:error, term()}
   def parse_candidates(payload) when is_binary(payload) do
-    with {:ok, decoded} <- payload |> normalize_payload() |> Jason.decode(),
-         true <- is_list(decoded) do
-      reduce_candidates(decoded)
-    else
-      {:error, reason} -> {:error, {:invalid_json, reason}}
-      false -> {:error, :invalid_payload}
+    case payload |> normalize_payload() |> Jason.decode() do
+      {:ok, decoded} ->
+        with {:ok, candidates} <- candidate_items(decoded) do
+          reduce_candidates(candidates)
+        else
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, {:invalid_json, reason}}
     end
   end
 
@@ -100,6 +104,10 @@ defmodule FermixCore.Memory.Extractor do
     end
   end
 
+  defp candidate_items(items) when is_list(items), do: {:ok, items}
+  defp candidate_items(%{"candidates" => items}) when is_list(items), do: {:ok, items}
+  defp candidate_items(_decoded), do: {:error, :invalid_payload}
+
   defp reduce_candidates(decoded) do
     Enum.reduce_while(decoded, {:ok, []}, fn item, {:ok, acc} ->
       case normalize_candidate(item) do
@@ -136,6 +144,8 @@ defmodule FermixCore.Memory.Extractor do
         content: """
         Extract only durable memory candidates from the conversation.
         Output strict JSON only. Do not emit prose, markdown, or code fences.
+        Return either a top-level JSON array of candidate objects or an object with a
+        "candidates" array. Return [] when there are no durable memory candidates.
 
         Allowed categories: identity, preference, goal, project, environment, instruction, correction, episode.
         Allowed scope_type values: owner, conversation, agent.
@@ -144,6 +154,11 @@ defmodule FermixCore.Memory.Extractor do
         Current chat mode: #{chat_mode}.
         Prefer explicit facts over guesses. Ignore transient chatter and one-off steps.
         Latest correction wins over older beliefs.
+        Write memory values as declarative facts, not instructions to yourself.
+        Good: "User prefers dark mode"
+        Bad: "Remember to always use dark mode"
+        Good: "Project uses Elixir with Phoenix for the backend"
+        Bad: "Always use Elixir and Phoenix when writing backend code"
         """
       },
       %{
@@ -211,21 +226,52 @@ defmodule FermixCore.Memory.Extractor do
 
   defp fetch_confidence(_item), do: {:error, {:invalid_field, "confidence"}}
 
-  defp persist_admitted([], _memory_store), do: :ok
+  defp persist_admitted([], _memory_store, _repo), do: {:ok, []}
 
-  defp persist_admitted(admitted, memory_store) do
-    Enum.reduce_while(admitted, :ok, fn memory, :ok ->
+  defp persist_admitted(admitted, memory_store, repo) do
+    Enum.reduce_while(admitted, {:ok, []}, fn memory, {:ok, acc} ->
       case Store.remember(memory, server: memory_store) do
-        :ok -> {:cont, :ok}
+        :ok -> {:cont, {:ok, acc ++ [persisted_memory(memory, repo)]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp maybe_request_rebuild(%{rebuild?: false}, _ctx), do: :ok
+  defp maybe_request_rebuild(%{rebuild?: false}, _ctx, _persisted), do: :ok
 
-  defp maybe_request_rebuild(%{rebuild?: true}, ctx) do
-    Scheduler.request_rebuild(ctx.agent_id, ctx.owner_id, :event, server: ctx.scheduler)
+  defp maybe_request_rebuild(%{rebuild?: true}, ctx, persisted) do
+    Scheduler.request_rebuild(ctx.agent_id, ctx.owner_id, :event,
+      server: ctx.scheduler,
+      provenance: extraction_provenance(persisted)
+    )
+  end
+
+  defp persisted_memory(memory, repo) do
+    case Repo.get_memory(memory_selector(memory), server: repo) do
+      {:ok, persisted} -> persisted
+      {:error, :disabled} -> memory
+      {:error, :not_found} -> memory
+      {:error, _reason} -> memory
+    end
+  end
+
+  defp memory_selector(memory) do
+    %{
+      agent_id: memory.agent_id,
+      owner_id: memory.owner_id,
+      scope_type: memory.scope_type,
+      scope_id: memory.scope_id,
+      key: memory.key
+    }
+  end
+
+  defp extraction_provenance(memories) do
+    %{
+      trigger: "extraction_rebuild",
+      memory_ids: memories |> Enum.map(&Map.get(&1, :id)) |> Enum.reject(&is_nil/1),
+      categories: memories |> Enum.map(& &1.category) |> Enum.uniq(),
+      description: "Prompt file rebuild triggered by memory extraction"
+    }
   end
 
   defp emit_telemetry(result, ctx, duration_ms) do

@@ -90,15 +90,19 @@ defmodule FermixCore.Memory.ConversationStore do
         _from,
         state
       ) do
+    start = System.monotonic_time()
     message = new_message(role, content)
 
-    persist_message!(state, key, role, content, opts, message.timestamp)
+    {durable?, durable_write_us} =
+      persist_message!(state, key, role, content, opts, message.timestamp)
+
     updated = append_message(state, key, message)
+    duration_us = elapsed_us(start)
 
     :telemetry.execute(
       [:fermix, :memory, :message],
-      %{count: 1},
-      %{channel: channel, chat_id: chat_id}
+      %{count: 1, duration_us: duration_us, durable_write_us: durable_write_us},
+      %{channel: channel, chat_id: chat_id, durable?: durable?}
     )
 
     {:reply, :ok, put_in(state, [:conversations, key], updated)}
@@ -172,9 +176,11 @@ defmodule FermixCore.Memory.ConversationStore do
   defp persist_message!(state, key, role, content, opts, timestamp) do
     case repo_server(state.repo) do
       nil ->
-        :ok
+        {false, 0}
 
       repo ->
+        start = System.monotonic_time()
+
         case Repo.insert_message(
                %{
                  agent_id: Keyword.get(opts, :agent_id, state.agent_id),
@@ -191,8 +197,8 @@ defmodule FermixCore.Memory.ConversationStore do
                },
                server: repo
              ) do
-          {:ok, _message} -> :ok
-          {:error, :disabled} -> :ok
+          {:ok, _message} -> {true, elapsed_us(start)}
+          {:error, :disabled} -> {false, elapsed_us(start)}
           {:error, reason} -> raise "conversation repo write failed: #{inspect(reason)}"
         end
     end
@@ -245,7 +251,8 @@ defmodule FermixCore.Memory.ConversationStore do
                    agent_id: state.agent_id,
                    channel: elem(key, 0),
                    chat_id: elem(key, 1),
-                   thread_scope: elem(key, 2)
+                   thread_scope: elem(key, 2),
+                   kind: "chat_message"
                  },
                  limit: limit,
                  server: repo
@@ -263,11 +270,12 @@ defmodule FermixCore.Memory.ConversationStore do
     }
   end
 
-  defp repo_server(repo) when is_pid(repo), do: repo
-
-  defp repo_server(repo) when is_atom(repo) do
-    if Process.whereis(repo) && Repo.enabled?(server: repo) do
-      repo
-    end
+  defp elapsed_us(start) do
+    System.monotonic_time()
+    |> Kernel.-(start)
+    |> System.convert_time_unit(:native, :microsecond)
   end
+
+  defp repo_server(nil), do: nil
+  defp repo_server(repo), do: Repo.enabled_server(repo)
 end

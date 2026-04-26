@@ -12,7 +12,12 @@ defmodule FermixCore.Memory.Config do
   @extraction_timeout_ms 5_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75
+  @extraction_debounce_seconds 60
   @prompt_files_rebuild_hours 12
+  @compaction_token_budget 8_000
+  @loop_detection_window 10
+  @loop_detection_warn_threshold 3
+  @loop_detection_kill_threshold 5
 
   @spec enabled?(options()) :: boolean()
   def enabled?(opts \\ []) do
@@ -65,6 +70,26 @@ defmodule FermixCore.Memory.Config do
       Keyword.get(memory_config(), :extraction_min_confidence, @extraction_min_confidence)
     )
     |> normalize_probability!(:extraction_min_confidence)
+  end
+
+  @spec extraction_debounce_ms(options()) :: non_neg_integer()
+  def extraction_debounce_ms(opts \\ []) do
+    cond do
+      Keyword.has_key?(opts, :extraction_debounce_ms) ->
+        opts
+        |> Keyword.fetch!(:extraction_debounce_ms)
+        |> normalize_non_negative_integer!(:extraction_debounce_ms)
+
+      Keyword.has_key?(opts, :extraction_debounce_seconds) ->
+        opts
+        |> Keyword.fetch!(:extraction_debounce_seconds)
+        |> debounce_seconds_to_ms()
+
+      true ->
+        memory_config()
+        |> Keyword.get(:extraction_debounce_seconds, @extraction_debounce_seconds)
+        |> debounce_seconds_to_ms()
+    end
   end
 
   @spec database_path(options()) :: String.t()
@@ -131,6 +156,64 @@ defmodule FermixCore.Memory.Config do
     )
   end
 
+  @spec compaction_enabled?(options()) :: boolean()
+  def compaction_enabled?(opts \\ []) do
+    Keyword.get(
+      opts,
+      :compaction_enabled,
+      Keyword.get(memory_config(), :compaction_enabled, enabled?(opts))
+    )
+  end
+
+  @spec compaction_token_budget(options()) :: pos_integer()
+  def compaction_token_budget(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :compaction_token_budget,
+      Keyword.get(memory_config(), :compaction_token_budget, @compaction_token_budget)
+    )
+    |> normalize_positive_integer!(:compaction_token_budget)
+  end
+
+  @spec checkpoint_persistence_enabled?(options()) :: boolean()
+  def checkpoint_persistence_enabled?(opts \\ []) do
+    Keyword.get(
+      opts,
+      :checkpoint_persistence_enabled,
+      Keyword.get(memory_config(), :checkpoint_persistence_enabled, true)
+    )
+  end
+
+  @spec loop_detection_window(options()) :: pos_integer()
+  def loop_detection_window(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :loop_detection_window,
+      Keyword.get(memory_config(), :loop_detection_window, @loop_detection_window)
+    )
+    |> normalize_positive_integer!(:loop_detection_window)
+  end
+
+  @spec loop_detection_warn_threshold(options()) :: pos_integer()
+  def loop_detection_warn_threshold(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :loop_detection_warn_threshold,
+      Keyword.get(memory_config(), :loop_detection_warn_threshold, @loop_detection_warn_threshold)
+    )
+    |> normalize_positive_integer!(:loop_detection_warn_threshold)
+  end
+
+  @spec loop_detection_kill_threshold(options()) :: pos_integer()
+  def loop_detection_kill_threshold(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :loop_detection_kill_threshold,
+      Keyword.get(memory_config(), :loop_detection_kill_threshold, @loop_detection_kill_threshold)
+    )
+    |> normalize_positive_integer!(:loop_detection_kill_threshold)
+  end
+
   @spec prompt_files_rebuild_hours(options()) :: pos_integer()
   def prompt_files_rebuild_hours(opts \\ []) do
     opts
@@ -163,6 +246,19 @@ defmodule FermixCore.Memory.Config do
 
   defp normalize_positive_integer!(value, key) do
     raise ArgumentError, "#{key} must be a positive integer, got: #{inspect(value)}"
+  end
+
+  defp normalize_non_negative_integer!(value, _key) when is_integer(value) and value >= 0,
+    do: value
+
+  defp normalize_non_negative_integer!(value, key) do
+    raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
+  end
+
+  defp debounce_seconds_to_ms(value) do
+    value
+    |> normalize_non_negative_integer!(:extraction_debounce_seconds)
+    |> Kernel.*(1_000)
   end
 
   defp normalize_probability!(value, _key)

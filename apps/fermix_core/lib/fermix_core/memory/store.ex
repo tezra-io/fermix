@@ -11,6 +11,7 @@ defmodule FermixCore.Memory.Store do
 
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Scope
 
   @table :fermix_memory
 
@@ -41,6 +42,13 @@ defmodule FermixCore.Memory.Store do
 
   @spec recall(memory_scope(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, :not_found}
+  @doc """
+  Recalls one memory key from ETS first, falling back to SQLite only on cache miss.
+
+  This intentionally preserves hot-path cache authority for single-key lookups.
+  Use `recall_all/2` when the caller needs SQLite to authoritatively resync the
+  scope cache.
+  """
   def recall(scope, key, opts \\ []) when is_binary(key) do
     assert_scope!(scope)
 
@@ -49,6 +57,13 @@ defmodule FermixCore.Memory.Store do
   end
 
   @spec recall_all(memory_scope(), keyword()) :: %{String.t() => String.t()}
+  @doc """
+  Recalls all memory keys for a scope.
+
+  When durable memory is enabled, SQLite is authoritative: this reloads the
+  scope from the repo and replaces that scope's ETS entries. When no repo is
+  registered, it returns the current ETS contents.
+  """
   def recall_all(scope, opts \\ []) do
     assert_scope!(scope)
 
@@ -155,7 +170,6 @@ defmodule FermixCore.Memory.Store do
         {:ok, memory.value}
 
       {:error, :not_found} ->
-        delete_cached_memory(table, scope_ref, key)
         {:error, :not_found}
 
       {:error, reason} ->
@@ -250,13 +264,7 @@ defmodule FermixCore.Memory.Store do
     end
   end
 
-  defp repo_server(repo) when is_pid(repo), do: repo
-
-  defp repo_server(repo) when is_atom(repo) do
-    if Process.whereis(repo) && Repo.enabled?(server: repo) do
-      repo
-    end
-  end
+  defp repo_server(repo), do: Repo.enabled_server(repo)
 
   defp normalize_scope!({:owner, owner_id}, state) when is_binary(owner_id) do
     scope_ref(state.agent_id, owner_id, "owner", owner_id, nil)
@@ -280,7 +288,7 @@ defmodule FermixCore.Memory.Store do
       state.agent_id,
       state.owner_id,
       "conversation",
-      legacy_scope_id(channel, chat_id),
+      Scope.legacy_scope_id(channel, chat_id),
       fallback_scope_ref(state.agent_id, state.owner_id, channel, chat_id)
     )
   end
@@ -291,7 +299,7 @@ defmodule FermixCore.Memory.Store do
       state.agent_id,
       state.owner_id,
       "conversation",
-      conversation_scope_id(channel, chat_id, thread_scope),
+      Scope.conversation_scope_id(channel, chat_id, thread_scope),
       nil
     )
   end
@@ -364,25 +372,15 @@ defmodule FermixCore.Memory.Store do
     :ets.delete(table, cache_key(scope_ref, key))
   end
 
-  defp legacy_scope_id(channel, chat_id), do: "legacy:#{channel}:#{chat_id}"
-
   defp fallback_scope_ref(agent_id, owner_id, channel, chat_id) do
     %{
       agent_id: agent_id,
       owner_id: owner_id,
       scope_type: "conversation",
-      scope_id: conversation_scope_id(channel, chat_id, :root),
+      scope_id: Scope.conversation_scope_id(channel, chat_id, :root),
       fallback_scope_ref: nil
     }
   end
-
-  defp conversation_scope_id(channel, chat_id, thread_scope) do
-    Enum.join([channel, chat_id, normalize_thread_scope(thread_scope)], ":")
-  end
-
-  defp normalize_thread_scope(:root), do: "root"
-  defp normalize_thread_scope(value) when is_binary(value), do: value
-  defp normalize_thread_scope(value) when is_integer(value), do: Integer.to_string(value)
 
   defp scope_ref_from_memory_attrs!(attrs) do
     %{
@@ -420,7 +418,7 @@ defmodule FermixCore.Memory.Store do
     else
       {:ok, memories} ->
         with {:ok, migrated} <- migrate_memories(repo, scope_ref, memories),
-             :ok <- Repo.delete_memory(repo_scope_selector(fallback_scope_ref), server: repo) do
+             :ok <- Repo.delete_memories(repo_scope_selector(fallback_scope_ref), server: repo) do
           {:ok, migrated}
         end
 
