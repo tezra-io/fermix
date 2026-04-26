@@ -161,6 +161,31 @@ This milestone captures the useful part of Autogenesis for Fermix:
 
 ---
 
+## Milestone 4.8: Distribution & Daemon
+
+**Goal:** Turn Fermix from a runnable project into an installable product. Single binary per `(os, arch)`, OS-supervised daemon, native OpenAI OAuth (drops the `~/.codex` bootstrap), explicit `fermix upgrade`.
+
+See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Burrito single-binary build** | Wrap `mix release` into one self-extracting binary per target; bundles ERTS + NIFs | P0 | New | [burrito-elixir/burrito](https://github.com/burrito-elixir/burrito) | M |
+| **Cross-compile matrix** | macOS aarch64/x86_64, Linux aarch64/x86_64; Windows deferred | P0 | New | N/A | M |
+| **`fermix` CLI** | `setup`, `start`, `stop`, `restart`, `status`, `logs`, `upgrade`, `doctor`, `version`, `uninstall` | P0 | New | N/A | M |
+| **OS daemon integration** | launchd plist (macOS) and systemd-user unit (Linux); user-scope by default | P0 | New | Tailscale install pattern | M |
+| **Native OpenAI OAuth** | Device-code flow into `~/.fermix/auth.json`; delete `TokenManager` `~/.codex` fallback | P0 | New | Codex CLI auth flow | M |
+| **`fermix upgrade`** | Fetch + verify signature + atomic swap + restart | P0 | New | N/A | M |
+| **Versioning + signed releases** | SemVer in `mix.exs`; cosign keyless OIDC; `releases.json` manifest | P0 | New | Sigstore | S |
+| **Homebrew tap** | `tezra-io/homebrew-fermix`, auto-bumped from CI | P1 | New | N/A | S |
+| **Linux install script** | `curl -fsSL .../install \| sh` — detect platform, download, verify, run setup | P1 | New | Hermes install pattern | S |
+| **`fermix doctor`** | Post-install diagnostics — binary integrity, daemon health, NIF load, auth validity | P1 | New | Tailscale doctor | S |
+| **Debian package** | `.deb` for Ubuntu/Debian with systemd unit | P2 | New | N/A | S |
+| **Docker image** | Production image for server deployments (consolidated from M8) | P2 | New | M8 | S |
+
+**Milestone 4.8 Total Effort:** ~5-7 weeks
+
+---
+
 ## Milestone 5: Security & Governance
 
 **Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering.
