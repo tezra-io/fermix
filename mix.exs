@@ -16,6 +16,7 @@ defmodule Fermix.MixProject do
 
   defp deps do
     [
+      {:burrito, "~> 1.5"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       {:stream_data, "~> 1.0", only: [:dev, :test]}
@@ -49,7 +50,12 @@ defmodule Fermix.MixProject do
           fermix_nif: :temporary
         ],
         include_executables_for: [:unix],
-        steps: [:assemble, :tar]
+        steps: [:assemble, &Burrito.wrap/1],
+        burrito: [
+          targets: [
+            macos_aarch64: [os: :darwin, cpu: :aarch64]
+          ]
+        ]
       ]
     ]
   end
