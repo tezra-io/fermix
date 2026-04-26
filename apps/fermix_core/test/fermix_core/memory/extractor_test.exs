@@ -114,6 +114,35 @@ defmodule FermixCore.Memory.ExtractorTest do
             ]} = Extractor.parse_candidates(json)
   end
 
+  test "parse_candidates/1 accepts candidates object wrapper" do
+    json = """
+    {
+      "candidates": [
+        {
+          "category": "preference",
+          "key": "preferred_editor",
+          "value": "zed",
+          "scope_type": "owner",
+          "confidence": 0.91,
+          "promote_target": "user_md"
+        }
+      ]
+    }
+    """
+
+    assert {:ok,
+            [
+              %{
+                category: "preference",
+                confidence: 0.91,
+                key: "preferred_editor",
+                promote_target: "user_md",
+                scope_type: "owner",
+                value: "zed"
+              }
+            ]} = Extractor.parse_candidates(json)
+  end
+
   test "parse_candidates/1 accepts untagged fenced payloads" do
     json = """
     ```
