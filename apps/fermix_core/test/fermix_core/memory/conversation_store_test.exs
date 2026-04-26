@@ -143,6 +143,31 @@ defmodule FermixCore.Memory.ConversationStoreTest do
                      %{channel: "telegram", chat_id: "chat_123"}}
   end
 
+  test "telemetry includes synchronous write latency", %{store: store} do
+    ref =
+      :telemetry_test.attach_event_handlers(self(), [
+        [:fermix, :memory, :message]
+      ])
+
+    ConversationStore.add_message(@key, "user", "hello", server: store)
+
+    assert_received {[:fermix, :memory, :message], ^ref, measurements, metadata}
+    assert measurements.count == 1
+    assert is_integer(measurements.duration_us)
+    assert measurements.duration_us >= 0
+    assert measurements.durable_write_us == 0
+    assert metadata.durable? == false
+  end
+
+  test "falls back to memory when configured repo name is no longer registered", %{store: store} do
+    repo_name = :"missing_conversation_repo_#{System.unique_integer([:positive])}"
+
+    :sys.replace_state(store, fn state -> %{state | repo: repo_name} end)
+
+    ConversationStore.add_message(@key, "user", "hello", server: store)
+    assert [%{content: "hello"}] = ConversationStore.get_history(@key, server: store)
+  end
+
   # --- Guards ---
 
   test "rejects non-tuple conversation key", %{store: store} do
@@ -227,6 +252,55 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       cached = :sys.get_state(store).conversations[@key]
       assert length(cached) == 5
       assert Enum.map(Enum.reverse(cached), & &1.content) == Enum.map(4..8, &"msg_#{&1}")
+    end
+
+    test "excludes checkpoint summaries from chat history backfill", %{
+      repo: repo,
+      store: store
+    } do
+      ConversationStore.add_message(@key, "user", "visible chat", server: store)
+
+      assert {:ok, _checkpoint} =
+               Repo.insert_message(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   channel: elem(@key, 0),
+                   chat_id: elem(@key, 1),
+                   thread_scope: elem(@key, 2),
+                   sender: "compactor",
+                   role: "system",
+                   kind: "checkpoint_summary",
+                   content: "hidden checkpoint"
+                 },
+                 server: repo
+               )
+
+      :sys.replace_state(store, fn state ->
+        %{state | conversations: %{}}
+      end)
+
+      history = ConversationStore.get_history(@key, 5, server: store)
+      assert Enum.map(history, & &1.content) == ["visible chat"]
+    end
+
+    test "telemetry marks durable writes and records sqlite write latency", %{
+      store: store
+    } do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:fermix, :memory, :message]
+        ])
+
+      ConversationStore.add_message(@key, "user", "hello", server: store)
+
+      assert_received {[:fermix, :memory, :message], ^ref, measurements, metadata}
+      assert measurements.count == 1
+      assert is_integer(measurements.duration_us)
+      assert is_integer(measurements.durable_write_us)
+      assert measurements.duration_us >= measurements.durable_write_us
+      assert measurements.durable_write_us >= 0
+      assert metadata.durable? == true
     end
   end
 end

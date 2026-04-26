@@ -9,6 +9,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
@@ -32,6 +33,7 @@ defmodule FermixCore.Application do
         Repo,
         ConversationStore,
         Store,
+        ExtractionDebouncer,
         Scheduler,
         BootReport,
         AgentSupervisor,

@@ -228,6 +228,99 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  describe "run/1 compaction" do
+    test "reuses one compaction summary across loop iterations", %{registry: registry} do
+      :ok = Registry.register(registry, EchoTool)
+
+      long_history =
+        for index <- 1..8 do
+          %{role: "user", content: "older message #{index} #{String.duplicate("x", 160)}"}
+        end
+
+      set_mock_responses([
+        mock_response("checkpoint summary"),
+        mock_response("", tool_calls: [tool_call("call_1", "echo", %{"text" => "hi"})]),
+        mock_response("Done")
+      ])
+
+      assert {:ok, result} =
+               run_loop(
+                 messages: [%{role: "system", content: "protected prompt"}] ++ long_history,
+                 tools: [],
+                 registry: registry,
+                 compaction_token_budget: 90,
+                 compaction_persist_checkpoints: false
+               )
+
+      assert result.response == "Done"
+
+      [
+        {summary_messages, _summary_opts},
+        {first_loop_messages, _first_opts},
+        {second_loop_messages, _second_opts}
+      ] =
+        mock_calls()
+
+      assert Enum.any?(summary_messages, &(&1.content =~ "older message"))
+      assert hd(first_loop_messages).content == "protected prompt"
+      assert Enum.any?(first_loop_messages, &(&1.content =~ "checkpoint summary"))
+      assert Enum.any?(second_loop_messages, &(&1.content =~ "checkpoint summary"))
+    end
+  end
+
+  describe "run/1 loop detection" do
+    test "injects a warning when identical tool calls hit the warn threshold", %{
+      registry: registry
+    } do
+      :ok = Registry.register(registry, EchoTool)
+
+      repeated = tool_call("call_same", "echo", %{"text" => "loop"})
+
+      set_mock_responses([
+        mock_response("", tool_calls: [repeated]),
+        mock_response("", tool_calls: [repeated]),
+        mock_response("", tool_calls: [repeated]),
+        mock_response("Recovered")
+      ])
+
+      assert {:ok, result} =
+               run_loop(
+                 tools: [],
+                 registry: registry,
+                 loop_detection_warn_threshold: 3,
+                 loop_detection_kill_threshold: 5
+               )
+
+      assert result.response == "Recovered"
+
+      warning_messages = elem(Enum.at(mock_calls(), 3), 0)
+
+      assert Enum.any?(
+               warning_messages,
+               &(&1.role == "system" and &1.content =~ "Repeated tool call")
+             )
+    end
+
+    test "terminates when identical tool calls hit the kill threshold", %{registry: registry} do
+      :ok = Registry.register(registry, EchoTool)
+
+      repeated = tool_call("call_same", "echo", %{"text" => "loop"})
+      set_mock_responses(List.duplicate(mock_response("", tool_calls: [repeated]), 5))
+
+      assert {:error, reason} =
+               run_loop(
+                 tools: [],
+                 registry: registry,
+                 max_iterations: 10,
+                 loop_detection_warn_threshold: 3,
+                 loop_detection_kill_threshold: 5
+               )
+
+      assert reason =~ "Repeated tool call loop detected"
+      assert length(mock_calls()) == 5
+    end
+  end
+
   # -- Provider error --
 
   describe "run/1 provider error" do

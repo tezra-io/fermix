@@ -151,6 +151,24 @@ Runs: format check → compile (warnings=errors) → credo strict → dialyzer �
 
 Git pre-commit hook enforces format, compile, credo, and tests.
 
+## Resource History CLI
+
+Versioned prompt and memory resources can be inspected from Mix:
+
+```bash
+mix fermix.resource.list
+mix fermix.resource.history user_md --limit 10
+mix fermix.resource.show user_md 3
+mix fermix.resource.diff user_md 2 3
+mix fermix.resource.rollback user_md 2
+```
+
+Use `--scope <conversation-key>` for checkpoint resources. Checkpoint rollback is
+not supported; checkpoint revisions are audit/history records only. Rolling back
+`USER.md` or `MEMORY.md` restores the file-backed prompt resource, but future
+memory rebuilds can overwrite the file if the underlying promoted memories are
+unchanged.
+
 ## Tests
 
 ```bash

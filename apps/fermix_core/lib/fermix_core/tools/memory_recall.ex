@@ -2,6 +2,12 @@ defmodule FermixCore.Tools.MemoryRecall do
   @moduledoc """
   Recall a previously stored fact from memory.
   If key is omitted, returns all memories for the conversation.
+
+  Lexical recall intentionally defaults to `scope: "current"` and
+  `source: "memories"` so agent tool calls stay local and fact-focused unless
+  they explicitly request owner/global scope or message history. This is
+  narrower than `FermixCore.Memory.Search.query/2`, whose raw API defaults are
+  broad for internal callers.
   """
 
   @behaviour FermixCore.Tools.Tool
@@ -39,12 +45,14 @@ defmodule FermixCore.Tools.MemoryRecall do
         scope: %{
           type: "string",
           enum: ["current", "owner", "all"],
-          description: "Search scope for lexical recall. Defaults to current."
+          description:
+            "Search scope for lexical recall. Defaults to current; raw Search.query/2 defaults to all."
         },
         source: %{
           type: "string",
           enum: ["memories", "history", "all"],
-          description: "Which durable source to search. Defaults to memories."
+          description:
+            "Which durable source to search. Defaults to memories; raw Search.query/2 defaults to all."
         }
       }
     }

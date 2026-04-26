@@ -27,15 +27,14 @@ defmodule FermixCore.Agents.MainAgent do
   require Logger
 
   alias FermixCore.AgentLoop
-  alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Memory.Extractor
-  alias FermixCore.Memory.PromptFiles
+  alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
+  alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Tools.Registry
 
   @type thread_scope :: :root | String.t() | integer()
@@ -123,12 +122,14 @@ defmodule FermixCore.Agents.MainAgent do
       memory_store: Keyword.get(opts, :memory_store, Store),
       memory_repo: Keyword.get(opts, :memory_repo, Config.repo_server(opts)),
       memory_scheduler: Keyword.get(opts, :memory_scheduler, Scheduler),
+      extraction_debouncer: Keyword.get(opts, :extraction_debouncer, ExtractionDebouncer),
       memory_agent_id: Config.agent_id(opts),
       memory_owner_id: Config.owner_id(opts),
       extraction_enabled: Config.extraction_enabled?(opts),
       extraction_timeout_ms: Config.extraction_timeout_ms(opts),
       extraction_context_messages: Config.extraction_context_messages(opts),
       extraction_min_confidence: Config.extraction_min_confidence(opts),
+      extraction_debounce_ms: Config.extraction_debounce_ms(opts),
       extraction_model: Config.extraction_model(opts),
       conversations: %{},
       task_refs: %{}
@@ -343,12 +344,14 @@ defmodule FermixCore.Agents.MainAgent do
       memory_store: state.memory_store,
       memory_repo: state.memory_repo,
       memory_scheduler: state.memory_scheduler,
+      extraction_debouncer: state.extraction_debouncer,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
       extraction_enabled: state.extraction_enabled,
       extraction_timeout_ms: state.extraction_timeout_ms,
       extraction_context_messages: state.extraction_context_messages,
       extraction_min_confidence: state.extraction_min_confidence,
+      extraction_debounce_ms: state.extraction_debounce_ms,
       extraction_model: state.extraction_model
     }
   end
@@ -362,17 +365,11 @@ defmodule FermixCore.Agents.MainAgent do
   defp process_message(msg, state) do
     start = System.monotonic_time(:millisecond)
     conversation_key = conversation_key(msg)
-    prompt_memory = load_prompt_memory!(state.memory_agent_id)
+    prompt_context = load_prompt_context!(state.memory_agent_id, state.available_skills)
 
     history = ConversationStore.get_history(conversation_key, server: state.conversation_store)
-
-    system_message = %{
-      role: "system",
-      content: system_prompt(state.available_skills, prompt_memory)
-    }
-
     user_message = %{role: "user", content: msg.content}
-    messages = [system_message] ++ history ++ [user_message]
+    messages = prompt_context.messages ++ history ++ [user_message]
 
     tools = Registry.all_tools_for_llm(state.registry)
 
@@ -389,7 +386,8 @@ defmodule FermixCore.Agents.MainAgent do
       memory_store: state.memory_store,
       memory_repo: state.memory_repo,
       memory_agent_id: state.memory_agent_id,
-      memory_owner_id: state.memory_owner_id
+      memory_owner_id: state.memory_owner_id,
+      prompt_accounting: prompt_context.accounting
     }
 
     case AgentLoop.run(
@@ -474,10 +472,14 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
-  defp load_prompt_memory!(agent_id) when is_binary(agent_id) do
-    case PromptFiles.load(agent_id) do
-      {:ok, prompt_memory} -> prompt_memory
-      {:error, reason} -> raise "prompt memory load failed: #{inspect(reason)}"
+  defp load_prompt_context!(agent_id, available_skills)
+       when is_binary(agent_id) and is_list(available_skills) do
+    case PromptComposer.compose_with_metadata(
+           agent_id: agent_id,
+           available_skills: available_skills
+         ) do
+      {:ok, prompt_context} -> prompt_context
+      {:error, reason} -> raise "prompt composition failed: #{inspect(reason)}"
     end
   end
 
@@ -485,21 +487,8 @@ defmodule FermixCore.Agents.MainAgent do
     do: :ok
 
   defp maybe_start_extraction(msg, history, assistant_response, state) do
-    case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           run_extraction(msg, history, assistant_response, state)
-         end) do
-      {:ok, _pid} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("failed to start background extraction: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  defp run_extraction(msg, history, assistant_response, state) do
-    result =
-      Extractor.extract(
+    ExtractionDebouncer.request(
+      [
         provider: state.provider,
         messages: extraction_messages(history, msg.content, assistant_response),
         agent_id: state.memory_agent_id,
@@ -512,17 +501,11 @@ defmodule FermixCore.Agents.MainAgent do
         extraction_timeout_ms: state.extraction_timeout_ms,
         extraction_context_messages: state.extraction_context_messages,
         extraction_min_confidence: state.extraction_min_confidence,
+        extraction_debounce_ms: state.extraction_debounce_ms,
         extraction_model: state.extraction_model
-      )
-
-    case result do
-      {:ok, _data} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("background extraction failed: #{inspect(reason)}")
-        :ok
-    end
+      ],
+      server: state.extraction_debouncer
+    )
   end
 
   defp extraction_messages(history, user_content, assistant_content) do
@@ -580,44 +563,6 @@ defmodule FermixCore.Agents.MainAgent do
     Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
   end
 
-  defp system_prompt(available_skills, prompt_memory) do
-    skill_catalog =
-      case available_skills do
-        [] ->
-          "Available skills snapshot: none loaded."
-
-        skills ->
-          "Available skills snapshot:\n#{Enum.map_join(skills, "\n", &format_skill_summary/1)}"
-      end
-
-    [
-      """
-      You are a helpful AI assistant with access to tools.
-      You can execute shell commands, read and write files, and store/recall memories.
-      """,
-      prompt_memory_block("## USER MEMORY", prompt_memory.user),
-      prompt_memory_block("## AGENT MEMORY", prompt_memory.memory),
-      """
-      Skills are discovered from a cached registry snapshot and only change after an explicit reload.
-      Use the `invoke_skill` tool when a specialized skill is a better fit than handling the work directly.
-      #{skill_catalog}
-      When you need to perform an action, use the appropriate tool. Think step by step.
-      """
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.map(&String.trim/1)
-    |> Enum.join("\n\n")
-  end
-
-  defp prompt_memory_block(_heading, nil), do: nil
-
-  defp prompt_memory_block(heading, content) do
-    """
-    #{heading}
-    #{content}
-    """
-  end
-
   defp load_available_skills(skill_registry) do
     case safe_skill_registry_call(fn -> SkillRegistry.list_detailed(skill_registry) end) do
       {:ok, skills} -> skills
@@ -638,22 +583,6 @@ defmodule FermixCore.Agents.MainAgent do
       {:error, reason} ->
         {:error, {:skill_registry_unavailable, reason}}
     end
-  end
-
-  defp format_skill_summary(%AgentDefinition{} = skill) do
-    capabilities =
-      case skill.capabilities do
-        [] -> "capabilities: none declared"
-        list -> "capabilities: #{Enum.join(list, ", ")}"
-      end
-
-    tools =
-      case skill.allowed_tools do
-        [] -> "tools: none declared"
-        list -> "tools: #{Enum.join(list, ", ")}"
-      end
-
-    "- #{skill.name}: #{capabilities}; #{tools}"
   end
 
   defp safe_skill_registry_call(fun) do

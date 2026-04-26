@@ -12,6 +12,7 @@ config :fermix_core, :log, enabled: false
 config :fermix_core, :memory,
   enabled: false,
   extraction_enabled: false,
+  extraction_debounce_seconds: 60,
   extraction_timeout_ms: 1_000,
   extraction_context_messages: 8,
   extraction_min_confidence: 0.75,
@@ -19,10 +20,20 @@ config :fermix_core, :memory,
   prompt_base_dir: Path.join(System.tmp_dir!(), "fermix-test-prompt-memory"),
   prompt_user_token_cap: 800,
   prompt_memory_token_cap: 1600,
+  compaction_enabled: true,
+  compaction_token_budget: 8_000,
+  checkpoint_persistence_enabled: true,
   prompt_files_rebuild_hours: 12,
   scheduler_enabled: false,
+  loop_detection_window: 10,
+  loop_detection_warn_threshold: 3,
+  loop_detection_kill_threshold: 5,
   owner_id: "default",
   agent_id: "main"
+
+config :fermix_core, :prompt_bootstrap,
+  bootstrap_dir: Path.join(System.tmp_dir!(), "fermix-test-bootstrap"),
+  accounting_enabled: true
 
 config :fermix_core,
   providers: [

@@ -6,6 +6,8 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
+  alias FermixCore.Prompt.BootstrapPaths
+  alias FermixCore.Prompt.Defaults
   alias FermixCore.Tools.InvokeSkill
   alias FermixCore.Tools.Registry
 
@@ -199,6 +201,10 @@ defmodule FermixCore.Agents.MainAgentTest do
     ConversationStore.list_conversations(server: conv_store)
   end
 
+  defp runtime_message(messages) do
+    Enum.find(messages, &(&1.role == "system" and &1.content =~ "## Runtime Contract"))
+  end
+
   defp eventually(fun, attempts \\ 20)
 
   defp eventually(fun, attempts) when attempts > 0 do
@@ -244,7 +250,9 @@ defmodule FermixCore.Agents.MainAgentTest do
     skills_dir = Path.join(System.tmp_dir!(), "fermix-skills-#{suffix}")
     journal_dir = Path.join(System.tmp_dir!(), "fermix-journals-#{suffix}")
     prompt_dir = Path.join(System.tmp_dir!(), "fermix-prompt-memory-#{suffix}")
+    bootstrap_dir = Path.join(System.tmp_dir!(), "fermix-bootstrap-#{suffix}")
     previous_memory_config = Application.get_env(:fermix_core, :memory, [])
+    previous_bootstrap_config = Application.get_env(:fermix_core, :prompt_bootstrap, [])
 
     File.mkdir_p!(skills_dir)
     File.mkdir_p!(prompt_dir)
@@ -253,6 +261,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       :fermix_core,
       :memory,
       Keyword.merge(previous_memory_config, prompt_base_dir: prompt_dir, agent_id: "main")
+    )
+
+    Application.put_env(:fermix_core, :prompt_bootstrap,
+      bootstrap_dir: bootstrap_dir,
+      accounting_enabled: true
     )
 
     {:ok, _} =
@@ -292,10 +305,12 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_memory_config)
+      Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
       MockProvider.cleanup()
       File.rm_rf!(skills_dir)
       File.rm_rf!(journal_dir)
       File.rm_rf!(prompt_dir)
+      File.rm_rf!(bootstrap_dir)
     end)
 
     %{
@@ -307,7 +322,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       task_supervisor: task_sup_name,
       agent_supervisor: agent_supervisor_name,
       journal_dir: journal_dir,
-      prompt_dir: prompt_dir
+      prompt_dir: prompt_dir,
+      bootstrap_dir: bootstrap_dir
     }
   end
 
@@ -367,11 +383,16 @@ defmodule FermixCore.Agents.MainAgentTest do
       # Verify provider received messages including history
       [{messages, _opts}] = MockProvider.get_calls()
 
-      # Should have: system + 2 history messages + new user message
-      assert length(messages) == 4
+      # Should have: composed systems + 2 history messages + new user message
+      assert length(messages) == 6
 
-      [system, hist_user, hist_assistant, new_user] = messages
-      assert system.role == "system"
+      [identity, agents, runtime, hist_user, hist_assistant, new_user] = messages
+      assert identity.role == "system"
+      assert identity.content == Defaults.identity_md()
+      assert agents.role == "system"
+      assert agents.content == Defaults.agents_md()
+      assert runtime.role == "system"
+      assert runtime.content =~ "## Runtime Contract"
       assert hist_user.role == "user"
       assert hist_user.content == "First question"
       assert hist_assistant.role == "assistant"
@@ -389,11 +410,41 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "No prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [system, user] = messages
-      assert system.role == "system"
-      refute system.content =~ "## USER MEMORY"
-      refute system.content =~ "## AGENT MEMORY"
+      [identity, agents, runtime, user] = messages
+      assert identity.role == "system"
+      assert agents.role == "system"
+      assert runtime.role == "system"
+      refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
+      refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
       assert user.content == "Hello without memory files"
+    end
+
+    test "uses in-memory bootstrap fallbacks without writing to disk", %{
+      agent: agent,
+      bootstrap_dir: bootstrap_dir
+    } do
+      identity_path = BootstrapPaths.identity_path("main")
+      agents_path = BootstrapPaths.agents_path("main")
+      refute File.exists?(identity_path)
+      refute File.exists?(agents_path)
+
+      MockProvider.set_responses([mock_response("Fallback prompt")])
+
+      MainAgent.handle_message(make_message("Hello first run"), agent)
+
+      assert_receive {:reply, "Fallback prompt"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+      [identity, agents, runtime, user] = messages
+
+      refute File.exists?(identity_path)
+      refute File.exists?(agents_path)
+      refute File.exists?(bootstrap_dir)
+
+      assert identity.content == Defaults.identity_md()
+      assert agents.content == Defaults.agents_md()
+      assert runtime.content =~ "## Runtime Contract"
+      assert user.content == "Hello first run"
     end
 
     test "ignores empty prompt-memory files", %{agent: agent} do
@@ -409,14 +460,16 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [system, user] = messages
-      assert system.role == "system"
-      refute system.content =~ "## USER MEMORY"
-      refute system.content =~ "## AGENT MEMORY"
+      [identity, agents, runtime, user] = messages
+      assert identity.role == "system"
+      assert agents.role == "system"
+      assert runtime.role == "system"
+      refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
+      refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
       assert user.content == "Hello with empty files"
     end
 
-    test "injects prompt-memory file contents into the main system prompt", %{agent: agent} do
+    test "injects prompt-memory file contents as ordered system prompts", %{agent: agent} do
       File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
       File.write!(PromptFiles.user_path("main"), "## Preferences\n- editor: vim\n")
       File.write!(PromptFiles.memory_path("main"), "## Working Rules\n- warnings are errors\n")
@@ -429,13 +482,60 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [system, user] = messages
-      assert system.role == "system"
-      assert system.content =~ "## USER MEMORY"
-      assert system.content =~ "## Preferences\n- editor: vim"
-      assert system.content =~ "## AGENT MEMORY"
-      assert system.content =~ "## Working Rules\n- warnings are errors"
+      [identity, agents, memory_context, runtime, user] = messages
+      assert identity.role == "system"
+      assert agents.role == "system"
+      assert memory_context.content =~ "<memory-context>"
+      assert memory_context.content =~ "USER PROFILE (who the user is)"
+      assert memory_context.content =~ "## Preferences\n- editor: vim"
+      assert memory_context.content =~ "MEMORY (agent's working notes)"
+      assert memory_context.content =~ "## Working Rules\n- warnings are errors"
+      assert runtime.content =~ "## Runtime Contract"
       assert user.content == "Hello with prompt memory"
+    end
+
+    test "sends composed bootstrap and runtime prompts through the live request path", %{
+      agent: agent
+    } do
+      File.mkdir_p!(BootstrapPaths.agent_dir("main"))
+      File.write!(BootstrapPaths.identity_path("main"), "IDENTITY bootstrap")
+      File.write!(BootstrapPaths.soul_path("main"), "SOUL bootstrap")
+      File.write!(BootstrapPaths.agents_path("main"), "AGENTS bootstrap")
+      File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
+      File.write!(PromptFiles.user_path("main"), "USER memory")
+      File.write!(PromptFiles.memory_path("main"), "AGENT memory")
+
+      MockProvider.set_responses([mock_response("Composed prompt loaded")])
+
+      MainAgent.handle_message(make_message("Hello with bootstrap"), agent)
+
+      assert_receive {:reply, "Composed prompt loaded"}, 5_000
+
+      [{messages, _opts}] = MockProvider.get_calls()
+
+      assert Enum.map(messages, & &1.role) == [
+               "system",
+               "system",
+               "system",
+               "system",
+               "system",
+               "user"
+             ]
+
+      memory_context = Enum.at(messages, 3).content
+
+      assert Enum.map(messages, & &1.content) == [
+               "IDENTITY bootstrap",
+               "SOUL bootstrap",
+               "AGENTS bootstrap",
+               memory_context,
+               runtime_message(messages).content,
+               "Hello with bootstrap"
+             ]
+
+      assert memory_context =~ "<memory-context>"
+      assert memory_context =~ "USER memory"
+      assert memory_context =~ "AGENT memory"
     end
 
     test "sends error message via reply_fn on agent loop failure", %{agent: agent} do
@@ -576,7 +676,8 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true
+             extraction_enabled: true,
+             extraction_debounce_ms: 0
            ]},
           id: agent_name
         )
@@ -611,7 +712,8 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true
+             extraction_enabled: true,
+             extraction_debounce_ms: 0
            ]},
           id: agent_name
         )
@@ -663,7 +765,8 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true
+             extraction_enabled: true,
+             extraction_debounce_ms: 0
            ]},
           id: agent_name
         )
@@ -677,6 +780,57 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, "Reply survives extraction failure"}, 5_000
       assert eventually(fn -> length(MockProvider.get_calls()) == 2 end)
+    end
+
+    test "debounces rapid-fire extraction without blocking replies", %{
+      registry: registry,
+      skill_registry: skill_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor
+    } do
+      agent_name = :"extract_debounce_main_agent_#{System.unique_integer([:positive])}"
+      chat_id = "chat_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             registry: registry,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             extraction_enabled: true,
+             extraction_debounce_ms: 80
+           ]},
+          id: agent_name
+        )
+
+      MockProvider.set_responses([
+        mock_response("Reply one"),
+        mock_response("Reply two"),
+        {:block, :extract, mock_response("[]")}
+      ])
+
+      MainAgent.handle_message(make_message("first", chat_id: chat_id), agent_name)
+      assert_receive {:reply, "Reply one"}, 5_000
+
+      MainAgent.handle_message(make_message("second", chat_id: chat_id), agent_name)
+      assert_receive {:reply, "Reply two"}, 5_000
+
+      refute_receive {:mock_provider_blocked, :extract, _pid}, 40
+      assert_receive {:mock_provider_blocked, :extract, extraction_pid}, 1_000
+      send(extraction_pid, {:continue, :extract})
+
+      assert eventually(fn -> length(MockProvider.get_calls()) == 3 end)
+
+      [_first_main, _second_main, {extraction_messages, _opts}] = MockProvider.get_calls()
+
+      assert Enum.any?(
+               extraction_messages,
+               &(&1.role == "user" and &1.content =~ "[user] second")
+             )
     end
 
     test "keeps the skill list static until reload_skills/1 is called", %{
@@ -693,7 +847,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "first"}, 5_000
 
       [{messages_before, _opts}] = MockProvider.get_calls()
-      refute hd(messages_before).content =~ "coding-skill"
+      refute runtime_message(messages_before).content =~ "coding-skill"
 
       write_skill(skills_dir, "coding-skill")
       MockProvider.reset_calls()
@@ -702,7 +856,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "second"}, 5_000
 
       [{messages_without_reload, _opts}] = MockProvider.get_calls()
-      refute hd(messages_without_reload).content =~ "coding-skill"
+      refute runtime_message(messages_without_reload).content =~ "coding-skill"
 
       assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
       MockProvider.reset_calls()
@@ -711,9 +865,10 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "third"}, 5_000
 
       [{messages_after_reload, _opts}] = MockProvider.get_calls()
-      assert hd(messages_after_reload).content =~ "coding-skill"
-      assert hd(messages_after_reload).content =~ "capabilities: code"
-      assert hd(messages_after_reload).content =~ "tools: file_read"
+      runtime = runtime_message(messages_after_reload)
+      assert runtime.content =~ "coding-skill"
+      assert runtime.content =~ "capabilities=code"
+      assert runtime.content =~ "tools=file_read"
     end
 
     test "delegates through invoke_skill when the LLM requests a skill", %{

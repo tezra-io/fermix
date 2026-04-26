@@ -22,7 +22,11 @@ defmodule FermixCore.Memory.Scheduler do
   def request_rebuild(agent_id, owner_id, reason, opts \\ [])
       when is_binary(agent_id) and is_binary(owner_id) and reason in [:event, :periodic] do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.cast(server, {:request_rebuild, agent_id, owner_id, reason})
+
+    GenServer.cast(
+      server,
+      {:request_rebuild, agent_id, owner_id, reason, provenance(reason, opts)}
+    )
   end
 
   @impl true
@@ -44,15 +48,15 @@ defmodule FermixCore.Memory.Scheduler do
   end
 
   @impl true
-  def handle_cast({:request_rebuild, agent_id, owner_id, reason}, state) do
-    {:noreply, enqueue_rebuild(state, agent_id, owner_id, reason)}
+  def handle_cast({:request_rebuild, agent_id, owner_id, reason, provenance}, state) do
+    {:noreply, enqueue_rebuild(state, agent_id, owner_id, reason, provenance)}
   end
 
   @impl true
   def handle_info(:tick, state) do
     next_state =
       Enum.reduce(state.periodic_agent_ids, state, fn agent_id, acc ->
-        enqueue_rebuild(acc, agent_id, state.periodic_owner_id, :periodic)
+        enqueue_rebuild(acc, agent_id, state.periodic_owner_id, :periodic, scheduler_provenance())
       end)
 
     schedule_tick(next_state)
@@ -84,22 +88,23 @@ defmodule FermixCore.Memory.Scheduler do
   defp schedule_tick(%{periodic_interval_ms: interval_ms}),
     do: Process.send_after(self(), :tick, interval_ms)
 
-  defp enqueue_rebuild(%{enabled: false} = state, _agent_id, _owner_id, _reason), do: state
+  defp enqueue_rebuild(%{enabled: false} = state, _agent_id, _owner_id, _reason, _provenance),
+    do: state
 
-  defp enqueue_rebuild(state, agent_id, owner_id, reason) do
+  defp enqueue_rebuild(state, agent_id, owner_id, reason, provenance) do
     case Map.get(state.jobs, agent_id, empty_job(owner_id)) do
       %{active: nil} ->
-        start_job(state, agent_id, owner_id, reason)
+        start_job(state, agent_id, owner_id, reason, provenance)
 
       job ->
         put_in(state.jobs[agent_id], %{
           job
-          | pending: merge_pending(job.pending, owner_id, reason)
+          | pending: merge_pending(job.pending, owner_id, reason, provenance)
         })
     end
   end
 
-  defp start_job(state, agent_id, owner_id, rebuild_reason) do
+  defp start_job(state, agent_id, owner_id, rebuild_reason, provenance) do
     parent = self()
 
     case Task.Supervisor.start_child(state.task_supervisor, fn ->
@@ -108,7 +113,7 @@ defmodule FermixCore.Memory.Scheduler do
                agent_id,
                owner_id,
                rebuild_reason,
-               state.rebuild_opts
+               Keyword.put(state.rebuild_opts, :provenance, provenance)
              )
 
            send(parent, {:rebuild_result, agent_id, rebuild_reason, result})
@@ -120,7 +125,12 @@ defmodule FermixCore.Memory.Scheduler do
         |> put_in(
           [:jobs, agent_id],
           %{
-            active: %{owner_id: owner_id, reason: rebuild_reason, monitor_ref: monitor_ref},
+            active: %{
+              owner_id: owner_id,
+              reason: rebuild_reason,
+              provenance: provenance,
+              monitor_ref: monitor_ref
+            },
             pending: nil
           }
         )
@@ -134,12 +144,13 @@ defmodule FermixCore.Memory.Scheduler do
 
   defp complete_job(state, agent_id) do
     case Map.get(state.jobs, agent_id) do
-      %{pending: %{owner_id: owner_id, reason: reason}} ->
+      %{pending: %{owner_id: owner_id, reason: reason, provenance: provenance}} ->
         start_job(
           put_in(state.jobs[agent_id], %{active: nil, pending: nil}),
           agent_id,
           owner_id,
-          reason
+          reason,
+          provenance
         )
 
       %{pending: nil} ->
@@ -155,12 +166,32 @@ defmodule FermixCore.Memory.Scheduler do
   defp merge_reason(:periodic, :event), do: :event
   defp merge_reason(:periodic, :periodic), do: :periodic
 
-  defp merge_pending(nil, owner_id, reason), do: %{owner_id: owner_id, reason: reason}
+  defp merge_pending(nil, owner_id, reason, provenance) do
+    %{owner_id: owner_id, reason: reason, provenance: provenance}
+  end
 
-  defp merge_pending(%{owner_id: existing_owner_id, reason: existing_reason}, owner_id, reason) do
+  defp merge_pending(pending, owner_id, reason, provenance) do
+    existing_reason = pending.reason
+    merged_reason = merge_reason(existing_reason, reason)
+
     %{
-      owner_id: owner_id || existing_owner_id,
-      reason: merge_reason(existing_reason, reason)
+      owner_id: owner_id || pending.owner_id,
+      reason: merged_reason,
+      provenance: merge_provenance(pending.provenance, provenance, merged_reason, reason)
+    }
+  end
+
+  defp merge_provenance(_existing, provenance, reason, reason), do: provenance
+  defp merge_provenance(existing, _provenance, _merged_reason, _new_reason), do: existing
+
+  defp provenance(:periodic, opts), do: Keyword.get(opts, :provenance, scheduler_provenance())
+  defp provenance(:event, opts), do: Keyword.get(opts, :provenance)
+
+  defp scheduler_provenance do
+    %{
+      trigger: "scheduler_rebuild",
+      rebuild_reason: "periodic",
+      description: "Periodic prompt file rebuild under current policy"
     }
   end
 
