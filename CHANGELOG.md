@@ -6,6 +6,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.8 Stage 2 (cross-compile + signed releases)
+- `mix.exs` Burrito targets now cover `macos_aarch64`, `macos_x86_64`,
+  `linux_aarch64`, `linux_x86_64`. Cross-compile from a macOS arm64 host
+  validated locally (`fermix_linux_aarch64` builds as a 19 MB statically
+  linked ELF).
+- `.github/workflows/release.yml` — tag-driven (`v*.*.*`) release
+  pipeline on `ubuntu-24.04`. Verifies tag matches `mix.exs` version,
+  builds all four targets, signs each binary with cosign keyless OIDC,
+  generates `releases.json`, and creates a GitHub Release with the
+  binaries, signatures, certificates, and manifest attached. Auto-
+  generated release notes include the cosign verification command.
+- `scripts/release/build_releases_json.sh` — emits the signed-release
+  manifest consumed by `fermix upgrade` (Stage 5). Schema is documented
+  inline; `schema_version` field bumps on breaking changes.
+
 ### Added — M4.8 Stage 1 (Burrito single-binary)
 - `fermix` CLI dispatcher (`Fermix.CLI`) routing argv to subcommand modules
   (`setup`, `run`, `version`, `help`). `start`/`stop` are registered but
