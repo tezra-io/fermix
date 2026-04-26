@@ -89,6 +89,16 @@ defmodule FermixCore.Memory.StoreTest do
     end
   end
 
+  test "falls back to ETS when configured repo name is no longer registered", %{store: store} do
+    repo_name = :"missing_store_repo_#{System.unique_integer([:positive])}"
+
+    :sys.replace_state(store, fn state -> %{state | repo: repo_name} end)
+
+    assert :ok = Store.store({"telegram", "chat_1"}, "name", "Alice", server: store)
+    assert {:ok, "Alice"} = Store.recall({"telegram", "chat_1"}, "name", server: store)
+    assert %{"name" => "Alice"} = Store.recall_all({"telegram", "chat_1"}, server: store)
+  end
+
   describe "delete/3" do
     test "removes a stored key", %{store: store} do
       conv_key = {"telegram", "chat_1"}
@@ -281,6 +291,29 @@ defmodule FermixCore.Memory.StoreTest do
       assert %{"topic" => "persisted"} = Store.recall_all(conv_key, server: store)
     end
 
+    test "recall prefers cached values when ETS diverges from sqlite", %{repo: repo, store: store} do
+      conv_key = {"telegram", "chat_1", :root}
+      scope_id = "telegram:chat_1:root"
+
+      assert :ok = Store.store(conv_key, "topic", "cached", server: store)
+
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: scope_id,
+                   category: "fact",
+                   key: "topic",
+                   value: "persisted"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, "cached"} = Store.recall(conv_key, "topic", server: store)
+    end
+
     test "owner and agent scopes stay namespaced by both agent_id and owner_id", %{repo: repo} do
       main_store = start_repo_backed_store(repo, agent_id: "main", owner_id: "default")
       side_agent_store = start_repo_backed_store(repo, agent_id: "sidecar", owner_id: "default")
@@ -313,7 +346,11 @@ defmodule FermixCore.Memory.StoreTest do
 
   defp evict_store_cache(store) do
     :sys.replace_state(store, fn state ->
-      %{state | table: :ets.new(:fermix_memory, [:set, :private])}
+      previous_table = state.table
+      next_table = :ets.new(:fermix_memory, [:set, :private])
+      true = :ets.delete(previous_table)
+
+      %{state | table: next_table}
     end)
   end
 end

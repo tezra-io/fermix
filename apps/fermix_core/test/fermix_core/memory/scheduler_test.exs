@@ -20,6 +20,7 @@ defmodule FermixCore.Memory.SchedulerTest do
 
     def rebuild(agent_id, owner_id, reason, opts) do
       state_agent = Keyword.fetch!(opts, :state_agent)
+      provenance = Keyword.get(opts, :provenance)
 
       {test_pid, should_block} =
         Agent.get_and_update(state_agent, fn state ->
@@ -32,6 +33,7 @@ defmodule FermixCore.Memory.SchedulerTest do
         end)
 
       send(test_pid, {:rebuild_started, agent_id, owner_id, reason, self()})
+      send(test_pid, {:rebuild_opts, agent_id, owner_id, reason, provenance})
 
       if should_block do
         receive do
@@ -103,6 +105,33 @@ defmodule FermixCore.Memory.SchedulerTest do
     assert_receive {:rebuild_started, "main", "default", :periodic, _pid}, 1_000
     assert_receive {:rebuild_finished, "main", "default", :periodic}, 1_000
     assert TestRebuilder.calls(rebuilder_state) != []
+  end
+
+  test "forwards request provenance and supplies scheduler provenance for periodic rebuilds", %{
+    task_supervisor: task_supervisor,
+    rebuilder_state: rebuilder_state
+  } do
+    scheduler =
+      start_scheduler(task_supervisor, rebuilder_state,
+        periodic_interval_ms: 10_000,
+        periodic_agent_ids: []
+      )
+
+    provenance = %{memory_ids: [42], categories: ["preference"]}
+
+    assert :ok =
+             Scheduler.request_rebuild("main", "default", :event,
+               server: scheduler,
+               provenance: provenance
+             )
+
+    assert_receive {:rebuild_opts, "main", "default", :event, ^provenance}, 1_000
+
+    assert :ok = Scheduler.request_rebuild("main", "default", :periodic, server: scheduler)
+
+    assert_receive {:rebuild_opts, "main", "default", :periodic, periodic_provenance}, 1_000
+    assert periodic_provenance.trigger == "scheduler_rebuild"
+    assert periodic_provenance.rebuild_reason == "periodic"
   end
 
   defp start_scheduler(task_supervisor, rebuilder_state, opts) do

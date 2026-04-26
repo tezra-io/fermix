@@ -73,6 +73,28 @@ defmodule FermixCore.Providers.OpenAITest do
       assert msg["content"] == "Hi"
     end
 
+    test "preserves multiple leading system messages for Chat Completions" do
+      stub_openai(self(), 200, success_body("Hello!"))
+
+      messages = [
+        %{role: "system", content: "SOUL bootstrap"},
+        %{role: "system", content: "AGENTS bootstrap"},
+        %{role: "user", content: "Hi"}
+      ]
+
+      {:ok, _resp} = chat(messages)
+
+      assert_received {:openai_request, body}
+
+      assert Enum.map(body["messages"], & &1["role"]) == ["system", "system", "user"]
+
+      assert Enum.map(body["messages"], & &1["content"]) == [
+               "SOUL bootstrap",
+               "AGENTS bootstrap",
+               "Hi"
+             ]
+    end
+
     test "preserves tool_call_id on tool-result messages" do
       stub_openai(self(), 200, success_body("Done"))
 
@@ -356,6 +378,71 @@ defmodule FermixCore.Providers.OpenAITest do
       assert resp.usage.completion_tokens == 20
       assert resp.tool_calls == []
       assert_received {:auth_header, "Bearer oauth_test_token"}
+
+      File.rm_rf!(dir)
+    end
+
+    test "joins only leading system messages into Responses instructions" do
+      dir = Path.join(System.tmp_dir!(), "fermix_oauth_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(dir)
+      auth_path = Path.join(dir, "auth.json")
+
+      File.write!(
+        auth_path,
+        Jason.encode!(%{
+          "tokens" => %{"access_token" => "oauth_test_token", "refresh_token" => "r"},
+          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+        })
+      )
+
+      tm_name = :"tm_oauth_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {FermixCore.Auth.TokenManager,
+         name: tm_name, fermix_auth_path: auth_path, codex_auth_path: Path.join(dir, "nope.json")},
+        id: :"test_tm_#{System.unique_integer([:positive])}"
+      )
+
+      responses_body = %{
+        "output_text" => "from oauth",
+        "output" => [],
+        "model" => "gpt-5.4-mini",
+        "usage" => %{"input_tokens" => 10, "output_tokens" => 20}
+      }
+
+      Req.Test.stub(:openai, fn conn ->
+        {:ok, req_body, conn} = Plug.Conn.read_body(conn)
+        send(self(), {:openai_request, Jason.decode!(req_body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(responses_body))
+      end)
+
+      assert {:ok, _resp} =
+               OpenAI.chat(
+                 [
+                   %{role: "system", content: "SOUL bootstrap"},
+                   %{role: "system", content: "AGENTS bootstrap"},
+                   %{role: "user", content: "Hi"},
+                   %{role: "system", content: "Conversation checkpoint summary:\nprevious"},
+                   %{role: "assistant", content: "Earlier answer"}
+                 ],
+                 auth_mode: :oauth,
+                 token_server: tm_name,
+                 responses_url: "http://localhost/responses",
+                 req_options: [plug: {Req.Test, :openai}]
+               )
+
+      assert_received {:openai_request, body}
+      assert body["instructions"] == "SOUL bootstrap\n\nAGENTS bootstrap"
+
+      assert Enum.map(body["input"], & &1["role"]) == ["user", "user", "assistant"]
+
+      assert body["input"]
+             |> Enum.at(1)
+             |> get_in(["content", Access.at(0), "text"]) ==
+               "Conversation checkpoint summary:\nprevious"
 
       File.rm_rf!(dir)
     end

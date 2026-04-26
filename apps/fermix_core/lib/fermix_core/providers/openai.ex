@@ -163,7 +163,7 @@ defmodule FermixCore.Providers.OpenAI do
 
   defp build_responses_input(messages) do
     {system_parts, rest} =
-      Enum.split_with(messages, fn msg -> msg.role == "system" end)
+      Enum.split_while(messages, fn msg -> msg.role == "system" end)
 
     instructions =
       case system_parts do
