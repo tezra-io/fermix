@@ -6,10 +6,22 @@ defmodule FermixWebWeb.PageControllerTest do
   setup do
     provider_config = Application.get_env(:fermix_core, :providers)
     telegram_config = Application.get_env(:fermix_channels, :telegram)
+    personalization = Application.get_env(:fermix_core, :personalization, [])
+    agent = Application.get_env(:fermix_core, :agent, [])
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Test User",
+      timezone: "UTC",
+      communication_style: "neutral and direct"
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix")
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, provider_config)
       restore_env(:fermix_channels, :telegram, telegram_config)
+      Application.put_env(:fermix_core, :personalization, personalization)
+      Application.put_env(:fermix_core, :agent, agent)
       BootReport.refresh()
     end)
 

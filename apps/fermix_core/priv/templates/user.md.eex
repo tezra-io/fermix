@@ -1,0 +1,6 @@
+## Identity
+- name: <%= @user_name %>
+- timezone: <%= @timezone %>
+
+## Preferences
+- communication style: <%= @communication_style %>

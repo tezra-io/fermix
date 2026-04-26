@@ -6,7 +6,8 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
-  alias FermixCore.Prompt.Seeder
+  alias FermixCore.Prompt.BootstrapPaths
+  alias FermixCore.Prompt.Defaults
   alias FermixCore.Tools.InvokeSkill
   alias FermixCore.Tools.Registry
 
@@ -264,7 +265,6 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     Application.put_env(:fermix_core, :prompt_bootstrap,
       bootstrap_dir: bootstrap_dir,
-      seed_agent_file: false,
       accounting_enabled: true
     )
 
@@ -384,11 +384,13 @@ defmodule FermixCore.Agents.MainAgentTest do
       [{messages, _opts}] = MockProvider.get_calls()
 
       # Should have: composed systems + 2 history messages + new user message
-      assert length(messages) == 5
+      assert length(messages) == 6
 
-      [agents, runtime, hist_user, hist_assistant, new_user] = messages
+      [identity, agents, runtime, hist_user, hist_assistant, new_user] = messages
+      assert identity.role == "system"
+      assert identity.content == Defaults.identity_md()
       assert agents.role == "system"
-      assert agents.content =~ "You are a helpful AI assistant"
+      assert agents.content == Defaults.agents_md()
       assert runtime.role == "system"
       assert runtime.content =~ "## Runtime Contract"
       assert hist_user.role == "user"
@@ -408,7 +410,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "No prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [agents, runtime, user] = messages
+      [identity, agents, runtime, user] = messages
+      assert identity.role == "system"
       assert agents.role == "system"
       assert runtime.role == "system"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
@@ -416,30 +419,30 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert user.content == "Hello without memory files"
     end
 
-    test "seeds default AGENTS.md through the live request path when enabled", %{
+    test "uses in-memory bootstrap fallbacks without writing to disk", %{
       agent: agent,
       bootstrap_dir: bootstrap_dir
     } do
-      Application.put_env(:fermix_core, :prompt_bootstrap,
-        bootstrap_dir: bootstrap_dir,
-        seed_agent_file: true,
-        accounting_enabled: true
-      )
-
-      agents_path = Seeder.agents_path("main")
+      identity_path = BootstrapPaths.identity_path("main")
+      agents_path = BootstrapPaths.agents_path("main")
+      refute File.exists?(identity_path)
       refute File.exists?(agents_path)
 
-      MockProvider.set_responses([mock_response("Seeded prompt")])
+      MockProvider.set_responses([mock_response("Fallback prompt")])
 
       MainAgent.handle_message(make_message("Hello first run"), agent)
 
-      assert_receive {:reply, "Seeded prompt"}, 5_000
+      assert_receive {:reply, "Fallback prompt"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [agents, runtime, user] = messages
+      [identity, agents, runtime, user] = messages
 
-      assert File.read!(agents_path) == Seeder.default_agents_content()
-      assert agents.content == Seeder.default_agents_content()
+      refute File.exists?(identity_path)
+      refute File.exists?(agents_path)
+      refute File.exists?(bootstrap_dir)
+
+      assert identity.content == Defaults.identity_md()
+      assert agents.content == Defaults.agents_md()
       assert runtime.content =~ "## Runtime Contract"
       assert user.content == "Hello first run"
     end
@@ -457,7 +460,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [agents, runtime, user] = messages
+      [identity, agents, runtime, user] = messages
+      assert identity.role == "system"
       assert agents.role == "system"
       assert runtime.role == "system"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
@@ -478,7 +482,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [agents, memory_context, runtime, user] = messages
+      [identity, agents, memory_context, runtime, user] = messages
+      assert identity.role == "system"
       assert agents.role == "system"
       assert memory_context.content =~ "<memory-context>"
       assert memory_context.content =~ "USER PROFILE (who the user is)"
@@ -492,9 +497,10 @@ defmodule FermixCore.Agents.MainAgentTest do
     test "sends composed bootstrap and runtime prompts through the live request path", %{
       agent: agent
     } do
-      File.mkdir_p!(Seeder.agent_dir("main"))
-      File.write!(Seeder.soul_path("main"), "SOUL bootstrap")
-      File.write!(Seeder.agents_path("main"), "AGENTS bootstrap")
+      File.mkdir_p!(BootstrapPaths.agent_dir("main"))
+      File.write!(BootstrapPaths.identity_path("main"), "IDENTITY bootstrap")
+      File.write!(BootstrapPaths.soul_path("main"), "SOUL bootstrap")
+      File.write!(BootstrapPaths.agents_path("main"), "AGENTS bootstrap")
       File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
       File.write!(PromptFiles.user_path("main"), "USER memory")
       File.write!(PromptFiles.memory_path("main"), "AGENT memory")
@@ -512,12 +518,14 @@ defmodule FermixCore.Agents.MainAgentTest do
                "system",
                "system",
                "system",
+               "system",
                "user"
              ]
 
-      memory_context = Enum.at(messages, 2).content
+      memory_context = Enum.at(messages, 3).content
 
       assert Enum.map(messages, & &1.content) == [
+               "IDENTITY bootstrap",
                "SOUL bootstrap",
                "AGENTS bootstrap",
                memory_context,
