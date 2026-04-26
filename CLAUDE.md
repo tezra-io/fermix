@@ -35,6 +35,7 @@ Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, R
 9. **Minimal indirection.** Readable > elegant. One layer of abstraction max.
 10. **Surgical changes only.** Touch only what the request requires. Do not refactor adjacent code, comments, or formatting unless the task needs it. Remove only the dead code your change creates.
 11. **Warnings = errors.** Linters, typecheckers, analyzers are hard gates. Zero warnings.
+12. **No fallbacks.** One code path per behavior. Do not add a "fallback" branch that silently retries with a different mechanism, reads from a deprecated location, or degrades to a partially-working state when the primary path fails. Fallbacks double the surface area, hide which path actually ran, mask real failures behind "it kind of worked," and turn every bug into a five-branch investigation. The old flow is dead the moment the new flow ships — delete it; do not keep it as a safety net. If the primary path fails, fail loud at the boundary with a clear message and exit non-zero. Two valid configurations are fine (e.g., user-scope vs system-scope service); two paths to handle one configuration is not. If you think you need a fallback, you actually need (a) a clearer error message, (b) a single failure-recovery step for a destructive op (e.g., upgrade rollback — explicitly scoped, no user-facing chain), or (c) a different design that doesn't have the failure mode at all.
 
 ## Conventions
 - `@callback` for all plugin interfaces (providers, channels, tools)
@@ -60,6 +61,7 @@ mix format --check-formatted
 - `docs/MILESTONE_4_ADVANCED_MEMORY.md` — M4 design (draft)
 - `docs/MILESTONE_4_5_PROMPT_BOOTSTRAP_ARCHITECTURE.md` — M4.5 design (draft)
 - `docs/MILESTONE_4_6_VERSIONED_PROMPT_RESOURCES.md` — M4.6 design (draft)
+- `docs/MILESTONE_4_8_DISTRIBUTION.md` — M4.8 design (draft) — Burrito single-binary, OS daemon, native Codex OAuth, `fermix upgrade`
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
