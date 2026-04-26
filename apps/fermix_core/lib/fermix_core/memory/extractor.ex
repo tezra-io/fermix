@@ -45,12 +45,16 @@ defmodule FermixCore.Memory.Extractor do
 
   @spec parse_candidates(String.t()) :: {:ok, [candidate()]} | {:error, term()}
   def parse_candidates(payload) when is_binary(payload) do
-    with {:ok, decoded} <- payload |> normalize_payload() |> Jason.decode(),
-         true <- is_list(decoded) do
-      reduce_candidates(decoded)
-    else
-      {:error, reason} -> {:error, {:invalid_json, reason}}
-      false -> {:error, :invalid_payload}
+    case payload |> normalize_payload() |> Jason.decode() do
+      {:ok, decoded} ->
+        with {:ok, candidates} <- candidate_items(decoded) do
+          reduce_candidates(candidates)
+        else
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, {:invalid_json, reason}}
     end
   end
 
@@ -100,6 +104,10 @@ defmodule FermixCore.Memory.Extractor do
     end
   end
 
+  defp candidate_items(items) when is_list(items), do: {:ok, items}
+  defp candidate_items(%{"candidates" => items}) when is_list(items), do: {:ok, items}
+  defp candidate_items(_decoded), do: {:error, :invalid_payload}
+
   defp reduce_candidates(decoded) do
     Enum.reduce_while(decoded, {:ok, []}, fn item, {:ok, acc} ->
       case normalize_candidate(item) do
@@ -136,6 +144,8 @@ defmodule FermixCore.Memory.Extractor do
         content: """
         Extract only durable memory candidates from the conversation.
         Output strict JSON only. Do not emit prose, markdown, or code fences.
+        Return either a top-level JSON array of candidate objects or an object with a
+        "candidates" array. Return [] when there are no durable memory candidates.
 
         Allowed categories: identity, preference, goal, project, environment, instruction, correction, episode.
         Allowed scope_type values: owner, conversation, agent.
