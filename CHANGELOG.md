@@ -6,6 +6,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.8 Stage 6 (Distribution channels)
+- `scripts/install.sh` — POSIX `sh` installer for the published
+  binary. Detects (os, arch), pulls `releases.json` from the latest
+  GitHub Release, sha256-verifies the binary against the manifest,
+  and installs to `/usr/local/bin` (with `sudo` if needed) or
+  `~/.local/bin` (no sudo). Aborts on any sha mismatch or
+  unsupported (os, arch) — there is no "best effort" partial
+  install. `--prefix DIR` overrides the install location;
+  `--no-setup` skips the post-install `fermix setup` wizard. Meant
+  to be invoked as `curl -fsSL https://fermix.sh/install | sh`.
+- `scripts/homebrew/fermix.rb` — starter Homebrew formula with all
+  four `on_macos`/`on_linux` × `on_arm`/`on_intel` artifact blocks
+  pre-wired. Versions and sha256s are placeholders that the bumper
+  rewrites.
+- `scripts/homebrew/bump.sh` — release-pipeline helper that reads
+  `releases.json` and rewrites the formula's `version`, `url`, and
+  `sha256` lines for each target. Idempotent and stateless. Used by
+  CI to open auto-bump PRs against `tezra-io/homebrew-fermix`.
+
 ### Added — M4.8 Stage 5 (`fermix upgrade`)
 - `Fermix.CLI.Upgrade.Manifest` fetches and parses the signed
   `releases.json` manifest, compares the running version against
