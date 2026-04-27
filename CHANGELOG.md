@@ -70,7 +70,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `scripts/homebrew/bump.sh` — release-pipeline helper that reads
   `releases.json` and rewrites the formula's `version`, `url`, and
   `sha256` lines for each target. Idempotent and stateless. Used by
-  CI to open auto-bump PRs against `tezra-io/homebrew-fermix`.
+  CI to open auto-bump PRs against `tezra-io/homebrew-tap`.
 
 ### Added — M4.8 Stage 5 (`fermix upgrade`)
 - `Fermix.CLI.Upgrade.Manifest` fetches and parses the signed

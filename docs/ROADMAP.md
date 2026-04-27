@@ -176,7 +176,7 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 | **Native OpenAI OAuth** | Device-code flow into `~/.fermix/auth.json`; delete `TokenManager` `~/.codex` fallback | P0 | New | Codex CLI auth flow | M |
 | **`fermix upgrade`** | Fetch + verify signature + atomic swap + restart | P0 | New | N/A | M |
 | **Versioning + signed releases** | SemVer in `mix.exs`; cosign keyless OIDC; `releases.json` manifest | P0 | New | Sigstore | S |
-| **Homebrew tap** | `tezra-io/homebrew-fermix`, auto-bumped from CI | P1 | New | N/A | S |
+| **Homebrew tap** | `tezra-io/homebrew-tap`, auto-bumped from CI | P1 | New | N/A | S |
 | **Linux install script** | `curl -fsSL .../install \| sh` — detect platform, download, verify, run setup | P1 | New | Hermes install pattern | S |
 | **`fermix doctor`** | Post-install diagnostics — binary integrity, daemon health, NIF load, auth validity | P1 | New | Tailscale doctor | S |
 | **Debian package** | `.deb` for Ubuntu/Debian with systemd unit | P2 | New | N/A | S |
