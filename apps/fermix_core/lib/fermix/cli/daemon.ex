@@ -35,8 +35,14 @@ defmodule Fermix.CLI.Daemon do
     task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
 
     File.mkdir_p!(Path.dirname(socket_path))
-    _ = File.rm(socket_path)
 
+    case clear_stale_socket(socket_path) do
+      :ok -> do_listen(socket_path, task_supervisor)
+      {:error, reason} -> {:stop, reason}
+    end
+  end
+
+  defp do_listen(socket_path, task_supervisor) do
     listen_opts = [
       :binary,
       {:active, false},
@@ -61,6 +67,42 @@ defmodule Fermix.CLI.Daemon do
 
       {:error, reason} ->
         {:stop, {:listen_failed, reason, socket_path}}
+    end
+  end
+
+  # If the socket file exists, probe it before deleting. A live daemon
+  # answers; a stale socket from a previous crash refuses or errors.
+  # Unlinking a live socket would let us bind the same path while the
+  # original daemon stays running but unreachable via status/stop.
+  defp clear_stale_socket(socket_path) do
+    cond do
+      not File.exists?(socket_path) -> :ok
+      live_daemon?(socket_path) -> {:error, {:another_daemon_running, socket_path}}
+      true -> rm_stale(socket_path)
+    end
+  end
+
+  defp live_daemon?(socket_path) do
+    case :gen_tcp.connect(
+           {:local, to_charlist(socket_path)},
+           0,
+           [:binary, {:active, false}, {:packet, :line}],
+           500
+         ) do
+      {:ok, conn} ->
+        _ = :gen_tcp.close(conn)
+        true
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp rm_stale(socket_path) do
+    case File.rm(socket_path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> {:error, {:stale_socket_unlink_failed, reason, socket_path}}
     end
   end
 

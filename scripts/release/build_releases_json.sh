@@ -53,7 +53,10 @@ for bin in "$artifacts_dir"/fermix_*; do
 
   filename="$(basename "$bin")"
   target="${filename#fermix_}"
-  target="${target//_/-}"
+  # Convert only the first underscore (the os/arch separator) so x86_64
+  # stays "x86_64", not "x86-64". Manifest consumers (the installer,
+  # upgrader, Homebrew bumper) all match on macos-x86_64 / linux-x86_64.
+  target="${target/_/-}"
   sha256="$(sha256sum "$bin" | awk '{print $1}')"
 
   artifacts="$(jq -c \
