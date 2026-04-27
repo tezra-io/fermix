@@ -6,6 +6,33 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.8 Stage 3 (Fermix-owned auth, drop runtime ~/.codex)
+- `FermixCore.Auth.Store` — versioned, provider-scoped JSON store at
+  `~/.fermix/auth.json`. Atomic writes via tmp+rename, `0600` perms,
+  silent migration of the M3-era flat shape into the new nested
+  schema.
+- `FermixCore.Auth.RefreshClient` — extracted OpenAI token refresh
+  HTTP shape so `TokenManager` and the new Codex import use one
+  implementation.
+- `FermixCore.Auth.CodexImport` — one-shot `~/.codex` → `~/.fermix`
+  migration. Performs a single OAuth refresh against the Codex
+  refresh token, persists the result, and never reads `~/.codex`
+  again. Fails loud if the refresh fails (no degraded path).
+- `fermix setup --import-codex` (also offered interactively when the
+  Codex CLI auth file is detected and OpenAI is otherwise missing).
+  Marks the openai provider with `auth_mode: :oauth` so subsequent
+  daemon boots start `TokenManager`.
+- `Readiness` recognizes `auth_mode == :oauth` as the canonical
+  OAuth-configured signal alongside the legacy credential keys.
+
+### Removed
+- `TokenManager` no longer reads `~/.codex` at runtime — the codex
+  bootstrap path, `:fork_refresh` handler, and the M3-temporary
+  TODO comment are gone. A daemon that starts without
+  `~/.fermix/auth.json` (or any equivalent provider config) logs a
+  warning and `:get_token` returns `{:error, :no_token}`. Operators
+  re-run `fermix setup` to migrate.
+
 ### Added — M4.8 Stage 2 (cross-compile + signed releases)
 - `mix.exs` Burrito targets now cover `macos_aarch64`, `macos_x86_64`,
   `linux_aarch64`, `linux_x86_64`. Cross-compile from a macOS arm64 host

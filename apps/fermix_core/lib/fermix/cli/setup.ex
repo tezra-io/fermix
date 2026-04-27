@@ -20,7 +20,8 @@ defmodule Fermix.CLI.Setup do
     slack_bot_token: :string,
     slack_signing_secret: :string,
     signal_account: :string,
-    print_state: :boolean
+    print_state: :boolean,
+    import_codex: :boolean
   ]
 
   @spec run([String.t()]) :: non_neg_integer()
