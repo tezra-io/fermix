@@ -66,15 +66,35 @@ defmodule Fermix.CLI.Upgrade do
          {:ok, target} <- Manifest.target_for_host(),
          {:ok, artifact} <- Manifest.select_artifact(release, target),
          {:ok, staged} <- Swapper.stage_artifact(artifact, opts),
-         :ok <- Swapper.verify(staged, opts),
-         {:ok, _swap_info} <- Swapper.swap(staged, installed_path, opts),
-         :ok <- restart_and_health_check(opts) do
-      record_audit(:ok, current, manifest.latest, artifact.sha256, opts)
-      :ok
+         :ok <- Swapper.verify(staged, opts) do
+      finalize(staged, artifact, current, manifest.latest, installed_path, opts)
     else
-      {:error, reason} = err ->
+      {:error, _reason} = err ->
         record_audit(:error, current, "?", "?", opts)
-        maybe_rollback(reason, installed_path, opts)
+        err
+    end
+  end
+
+  # Pre-swap failures (download, sha, cosign verify) leave the current
+  # binary untouched, so we must NOT trigger rollback from them — that
+  # would overwrite the running binary with a stale ~/.fermix/.previous
+  # from an earlier upgrade. Only the post-swap path may rollback.
+  defp finalize(staged, artifact, current, latest, installed_path, opts) do
+    case Swapper.swap(staged, installed_path, opts) do
+      {:ok, _swap_info} ->
+        case restart_and_health_check(opts) do
+          :ok ->
+            record_audit(:ok, current, latest, artifact.sha256, opts)
+            :ok
+
+          {:error, _reason} = err ->
+            record_audit(:error, current, latest, artifact.sha256, opts)
+            rollback(installed_path, opts)
+            err
+        end
+
+      {:error, _reason} = err ->
+        record_audit(:error, current, latest, artifact.sha256, opts)
         err
     end
   end
@@ -125,11 +145,7 @@ defmodule Fermix.CLI.Upgrade do
     end
   end
 
-  defp maybe_rollback({:already_latest, _}, _installed, _opts), do: :ok
-  defp maybe_rollback({:current_newer_than_latest, _, _}, _installed, _opts), do: :ok
-  defp maybe_rollback({:managed_install, _, _}, _installed, _opts), do: :ok
-
-  defp maybe_rollback(_reason, installed_path, opts) do
+  defp rollback(installed_path, opts) do
     previous = Keyword.get(opts, :previous_path, Swapper.default_previous_path())
 
     case Swapper.rollback(previous, installed_path) do

@@ -40,6 +40,31 @@ defmodule Fermix.CLI.UpgradeTest do
                Upgrade.run(binary_path: managed_path)
     end
 
+    test "pre-swap failure does NOT overwrite the current binary with .previous", %{tmp: tmp} do
+      installed = Path.join(tmp, "fermix")
+      File.write!(installed, "currently-running")
+
+      # A leftover .previous from a prior upgrade. If a pre-swap
+      # failure (e.g. download error) triggered rollback, we'd
+      # silently revert to this older binary even though nothing in
+      # this attempt was changed on disk.
+      previous = Path.join(tmp, ".previous")
+      File.write!(previous, "old-and-stale")
+
+      assert {:error, _} =
+               Upgrade.run(
+                 binary_path: installed,
+                 req_options: [plug: &__MODULE__.failing_manifest_plug/1, retry: false],
+                 staging_dir: Path.join(tmp, "staging"),
+                 previous_path: previous,
+                 audit_path: Path.join(tmp, "upgrades.jsonl"),
+                 skip_restart: true
+               )
+
+      assert File.read!(installed) == "currently-running"
+      assert File.read!(previous) == "old-and-stale"
+    end
+
     test "performs a full upgrade with verify+swap (skipping cosign + restart)", %{tmp: tmp} do
       installed = Path.join(tmp, "fermix")
       File.write!(installed, "old-bin")
@@ -66,6 +91,10 @@ defmodule Fermix.CLI.UpgradeTest do
       assert File.read!(Path.join(tmp, ".previous")) == "old-bin"
       assert File.read!(Path.join(tmp, "upgrades.jsonl")) =~ "\"status\":\"ok\""
     end
+  end
+
+  def failing_manifest_plug(conn) do
+    Plug.Conn.send_resp(conn, 503, "service unavailable")
   end
 
   def future_manifest_plug(conn) do

@@ -79,6 +79,27 @@ defmodule Fermix.CLI.DaemonTest do
     File.rm_rf(socket_dir)
   end
 
+  test "second daemon refuses to bind over a live socket", %{socket_path: socket_path} do
+    Process.sleep(50)
+    {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.SecondSup)
+
+    Process.flag(:trap_exit, true)
+
+    result =
+      Daemon.start_link(
+        name: :"second_daemon_#{System.unique_integer([:positive, :monotonic])}",
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.SecondSup
+      )
+
+    assert {:error, {:another_daemon_running, ^socket_path}} = result
+
+    # The original daemon must still answer; the second one didn't unlink
+    # the socket out from under it.
+    assert {:ok, %{"status" => "ok"}} =
+             Client.status(socket_path: socket_path, timeout: 1_000)
+  end
+
   defp mkdir! do
     path =
       Path.join(
