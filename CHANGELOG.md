@@ -6,6 +6,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.8 Stage 7 (`fermix doctor`)
+- `Fermix.CLI.Doctor` aggregates one-shot diagnostic checks into a
+  uniform table-style report. Returns exit `0` when no checks fail
+  (warnings are allowed) and exit `1` otherwise so monitoring
+  scripts can branch on it. The default invocation is offline; the
+  `--full` flag opts into network checks (binary integrity vs the
+  signed manifest, upgrade availability).
+- `Fermix.CLI.Doctor.Checks` — readiness (reuses
+  `FermixCore.Readiness`), workspace layout (`FERMIX_HOME` and
+  subdirs exist), service unit installed, daemon control socket
+  reachable, recent log activity (warns when stale > 24h), Linux
+  user-scope linger state, sha256 binary integrity vs the manifest
+  for the host's target, and upgrade availability.
+- `fermix doctor [--full]` wired through `Fermix.CLI.Doctor` and
+  documented in the usage banner.
+
 ### Added — M4.8 Stage 6 (Distribution channels)
 - `scripts/install.sh` — POSIX `sh` installer for the published
   binary. Detects (os, arch), pulls `releases.json` from the latest
