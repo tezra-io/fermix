@@ -6,6 +6,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.8 Stage 5 (`fermix upgrade`)
+- `Fermix.CLI.Upgrade.Manifest` fetches and parses the signed
+  `releases.json` manifest, compares the running version against
+  `latest`, and selects the binary artifact for the host
+  (os/arch). Schema mismatches and non-200 responses surface
+  verbatim instead of degrading to "no upgrade available".
+- `Fermix.CLI.Upgrade.InstallMethod` detects Homebrew (Cellar paths)
+  and dpkg-managed installs and refuses to mutate them. Returns
+  `{:managed, name, hint}` so the CLI can print the right
+  `brew upgrade` / `apt upgrade` command instead of silently
+  overwriting package-manager files.
+- `Fermix.CLI.Upgrade.Cosign` shells out to `cosign verify-blob`
+  with the certificate identity pinned to the
+  `tezra-io/fermix` release workflow file and OIDC issuer pinned to
+  GitHub Actions. A forged cert minted against another repo cannot
+  pass.
+- `Fermix.CLI.Upgrade.Swapper` downloads the binary, signature, and
+  certificate to a staging directory, sha256-verifies the binary
+  against the manifest, snapshots the current binary into a one-shot
+  `~/.fermix/.previous` recovery slot, and atomically renames the
+  staged binary into the installed path. `rollback/2` is a single
+  rename back from the recovery slot — there is no version history
+  or A/B install.
+- `Fermix.CLI.Upgrade.run/1` orchestrates the full
+  fetch → verify → snapshot → rename → restart sequence, polls the
+  control socket for up to 10s as a post-swap health check, and
+  rolls back automatically when the health check fails.
+- `~/.fermix/upgrades.jsonl` audit log records every attempt with
+  `{from, to, timestamp, sha256, status}` for `fermix doctor`
+  consumption (Stage 7).
+- `fermix upgrade` and `fermix upgrade --check` are now wired
+  through `Fermix.CLI.UpgradeCommand`. `--check` reports current vs
+  latest and the install method without touching disk.
+
 ### Added — M4.8 Stage 4 (OS daemon integration)
 - `Fermix.CLI.Service` and the `Service.Templates`, `Service.Launchd`,
   `Service.Systemd` backends — install/uninstall/start/stop the
