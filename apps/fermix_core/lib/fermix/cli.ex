@@ -9,6 +9,7 @@ defmodule Fermix.CLI do
   rather than a silent stub.
   """
 
+  alias Fermix.CLI.Doctor
   alias Fermix.CLI.LogsCommand
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
@@ -49,6 +50,7 @@ defmodule Fermix.CLI do
   defp dispatch("status", rest), do: StatusCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
+  defp dispatch("doctor", rest), do: Doctor.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
 
   @spec usage(non_neg_integer()) :: non_neg_integer()
@@ -69,6 +71,7 @@ defmodule Fermix.CLI do
       fermix status                                Show running daemon status
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
+      fermix doctor  [--full]                      Run post-install diagnostics
       fermix version                               Print version
       fermix help                                  Show this message
     """)
