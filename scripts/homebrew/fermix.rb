@@ -5,7 +5,7 @@
 # `releases.json` with the URL + sha256 for each binary; the bumper
 # script `scripts/homebrew/bump.sh` (Stage 6) reads that manifest,
 # rewrites the `url`/`sha256` lines below, and opens a PR against
-# the `tezra-io/homebrew-fermix` tap repo. We do not publish a
+# the `tezra-io/homebrew-tap` tap repo. We do not publish a
 # bottle in M4.8 — the binary is already statically linked, so the
 # formula installs the released artifact verbatim.
 #

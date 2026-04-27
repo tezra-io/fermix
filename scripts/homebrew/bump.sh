@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Rewrite the version, urls, and sha256s in scripts/homebrew/fermix.rb
 # from the freshly built releases.json. Used by the release pipeline
-# to push a PR to tezra-io/homebrew-fermix.
+# to push a PR to tezra-io/homebrew-tap.
 #
 # Inputs:
 #   $RELEASES_JSON  Path to the releases.json emitted by
