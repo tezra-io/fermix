@@ -28,8 +28,44 @@ defmodule Fermix.CLI.Upgrade.InstallMethod do
     end
   end
 
+  # Brew links binaries from the Cellar into a `bin/` directory, so the
+  # path operators actually invoke (e.g. `/usr/local/bin/fermix`) is
+  # often a symlink. We have to inspect both the symlink path AND the
+  # resolved target — checking only the link path would miss every
+  # Homebrew install on Intel macOS and every classic linuxbrew setup.
   defp homebrew_owned?(path) do
+    looks_like_brew?(path) or looks_like_brew?(resolve_symlink(path)) or
+      under_brew_prefix?(path)
+  end
+
+  defp looks_like_brew?(nil), do: false
+
+  defp looks_like_brew?(path) do
     String.contains?(path, "/Cellar/") or String.contains?(path, "/homebrew/")
+  end
+
+  defp resolve_symlink(path) do
+    case File.read_link(path) do
+      {:ok, target} -> Path.expand(target, Path.dirname(path))
+      {:error, _} -> nil
+    end
+  end
+
+  defp under_brew_prefix?(path) do
+    case System.find_executable("brew") do
+      nil ->
+        false
+
+      brew ->
+        case System.cmd(brew, ["--prefix"], stderr_to_stdout: true) do
+          {out, 0} ->
+            prefix = String.trim(out)
+            prefix != "" and String.starts_with?(path, prefix <> "/")
+
+          _ ->
+            false
+        end
+    end
   end
 
   defp dpkg_owned?(path) do

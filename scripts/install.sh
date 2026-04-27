@@ -54,11 +54,15 @@ require_cmd() {
 }
 
 require_cmd curl
-require_cmd shasum 2>/dev/null || require_cmd sha256sum
 require_cmd uname
 require_cmd mkdir
 require_cmd install
 require_cmd mktemp
+
+# Either shasum (BSD/macOS) or sha256sum (most Linux distros) is fine.
+if ! command -v shasum >/dev/null 2>&1 && ! command -v sha256sum >/dev/null 2>&1; then
+  abort "missing required command: shasum or sha256sum"
+fi
 
 detect_os() {
   case "$(uname -s)" in

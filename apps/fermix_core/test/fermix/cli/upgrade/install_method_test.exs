@@ -16,8 +16,32 @@ defmodule Fermix.CLI.Upgrade.InstallMethodTest do
   end
 
   test "anything outside a package-manager root is unmanaged" do
-    assert {:unmanaged, "/usr/local/bin/fermix"} =
-             InstallMethod.detect("/usr/local/bin/fermix")
+    assert {:unmanaged, "/opt/local/bin/fermix"} =
+             InstallMethod.detect("/opt/local/bin/fermix")
+  end
+
+  test "follows symlink targets into the brew Cellar" do
+    tmp =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-symlink-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.mkdir_p!(tmp)
+    cellar_dir = Path.join(tmp, "Cellar/fermix/0.1.0/bin")
+    File.mkdir_p!(cellar_dir)
+    cellar_target = Path.join(cellar_dir, "fermix")
+    File.write!(cellar_target, "binary")
+
+    bin_dir = Path.join(tmp, "bin")
+    File.mkdir_p!(bin_dir)
+    link_path = Path.join(bin_dir, "fermix")
+    File.ln_s!(cellar_target, link_path)
+
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    assert {:managed, :homebrew, "brew upgrade fermix"} =
+             InstallMethod.detect(link_path)
   end
 
   test "errors when fermix is not on PATH and no path is supplied" do

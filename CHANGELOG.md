@@ -6,6 +6,37 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed — M4.8 review
+- `scripts/release/build_releases_json.sh` previously rewrote every
+  underscore in the artifact filename, turning `fermix_macos_x86_64`
+  into target `macos-x86-64`. The installer, upgrader, and Homebrew
+  bumper all expect `macos-x86_64` / `linux-x86_64`, so x86_64
+  Linux and Intel macOS users could not find their artifact in
+  the published manifest. Now only the os/arch separator is
+  rewritten; `x86_64` stays intact.
+- `Fermix.CLI.Daemon` no longer unlinks the control socket
+  unconditionally on boot. We probe first: if a daemon is already
+  bound, we abort with `{:another_daemon_running, path}` instead of
+  unlinking the live socket out from under the running daemon and
+  leaving it unreachable via `status` / `stop`. Stale sockets
+  (no listener) are still removed.
+- `Fermix.CLI.Upgrade.InstallMethod` now follows symlinks and
+  consults `brew --prefix`. Intel Homebrew installs link
+  `/usr/local/bin/fermix` to a Cellar path, and the link itself
+  contains neither `/Cellar/` nor `/homebrew/`. The previous check
+  classified those as unmanaged, allowing `fermix upgrade` to
+  replace the brew symlink with a raw binary and desync the
+  package manager. Brew symlinks are now correctly detected.
+- `Fermix.CLI.Upgrade.run/1` only rolls back from the
+  `~/.fermix/.previous` recovery slot when a swap actually
+  happened. Pre-swap failures (download error, sha mismatch,
+  cosign failure) leave the running binary alone; previously they
+  could quietly overwrite the current binary with a stale recovery
+  slot from an earlier upgrade attempt.
+- `scripts/install.sh` no longer aborts when only `sha256sum`
+  (and not `shasum`) is on PATH — common on minimal Linux. The
+  preflight now accepts either tool.
+
 ### Added — M4.8 Stage 7 (`fermix doctor`)
 - `Fermix.CLI.Doctor` aggregates one-shot diagnostic checks into a
   uniform table-style report. Returns exit `0` when no checks fail
