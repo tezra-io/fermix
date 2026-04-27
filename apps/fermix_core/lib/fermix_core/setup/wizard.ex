@@ -142,6 +142,7 @@ defmodule FermixCore.Setup.Wizard do
     snapshot =
       state.config_snapshot
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
+      |> put_openai_oauth(Keyword.get(answers, :openai_auth_oauth))
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -240,6 +241,20 @@ defmodule FermixCore.Setup.Wizard do
 
     Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
   end
+
+  defp put_openai_oauth(snapshot, true) do
+    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
+
+    openai =
+      providers
+      |> Keyword.get(:openai, [])
+      |> Keyword.put(:auth_mode, :oauth)
+      |> Keyword.delete(:api_key)
+
+    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
+  end
+
+  defp put_openai_oauth(snapshot, _), do: snapshot
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot
   defp put_telegram_bot_token(snapshot, ""), do: snapshot

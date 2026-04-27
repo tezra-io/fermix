@@ -10,11 +10,13 @@ defmodule FermixCore.Setup.Runtime do
   and the packaged CLI binary.
   """
 
+  alias FermixCore.Auth.CodexImport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
   @answer_keys [
     :openai_api_key,
+    :openai_auth_oauth,
     :telegram_bot_token,
     :whatsapp_access_token,
     :whatsapp_phone_number_id,
@@ -47,13 +49,78 @@ defmodule FermixCore.Setup.Runtime do
         print_report(report, puts)
         :ok
 
-      report.status == :ready and provided_answers(opts) == [] ->
+      report.status == :ready and provided_answers(opts) == [] and
+          not Keyword.get(opts, :import_codex, false) ->
         seed_and_print(report, puts)
 
       true ->
-        save_and_print(report, opts, puts, prompt)
+        with {:ok, extras} <- maybe_import_codex(report, opts, puts, prompt) do
+          # Re-fetch the report — the codex import may have satisfied
+          # the openai provider check, leaving fewer required answers.
+          {:ok, refreshed} = load_report()
+          save_and_print(refreshed, opts ++ extras, puts, prompt)
+        end
     end
   end
+
+  defp maybe_import_codex(report, opts, puts, prompt) do
+    cond do
+      not openai_missing?(report) ->
+        {:ok, []}
+
+      Keyword.get(opts, :import_codex, false) ->
+        run_codex_import(opts, puts)
+
+      Keyword.get(opts, :openai_api_key) not in [nil, ""] ->
+        {:ok, []}
+
+      not CodexImport.codex_available?(codex_path(opts)) ->
+        {:ok, []}
+
+      true ->
+        case ask_yes_no(prompt, "Import OpenAI tokens from existing Codex CLI? [Y/n]: ", true) do
+          true -> run_codex_import(opts, puts)
+          false -> {:ok, []}
+        end
+    end
+  end
+
+  defp run_codex_import(opts, puts) do
+    import_opts =
+      []
+      |> maybe_put(:codex_path, Keyword.get(opts, :codex_auth_path))
+      |> maybe_put(:fermix_path, Keyword.get(opts, :fermix_auth_path))
+      |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+
+    case CodexImport.import_tokens(import_opts) do
+      {:ok, _entry} ->
+        puts.("Imported OpenAI tokens from Codex CLI.")
+        {:ok, [openai_auth_oauth: true]}
+
+      {:error, reason} ->
+        {:error, "codex import failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp openai_missing?(%{failures: failures}) do
+    Enum.any?(failures, &(&1.component == "provider:openai"))
+  end
+
+  defp codex_path(opts) do
+    Keyword.get(opts, :codex_auth_path, Path.join(System.user_home!(), ".codex/auth.json"))
+  end
+
+  defp ask_yes_no(prompt, label, default_yes) do
+    case prompt.(label) |> to_string() |> String.trim() |> String.downcase() do
+      "" -> default_yes
+      "y" -> true
+      "yes" -> true
+      _ -> false
+    end
+  end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp load_report do
     case ConfigStore.load_runtime_config() do

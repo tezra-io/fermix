@@ -50,7 +50,7 @@ defmodule Fermix.CLI do
     fermix — Elixir-native multi-agent platform
 
     Usage:
-      fermix setup [--print-state] [--openai-api-key VALUE] ...
+      fermix setup [--print-state] [--import-codex] [--openai-api-key VALUE] ...
       fermix run                  Start the daemon in the foreground
       fermix start                (Stage 4) Start the installed OS service
       fermix stop                 (Stage 4) Stop the installed OS service
