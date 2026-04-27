@@ -3,17 +3,20 @@ defmodule Fermix.CLI do
   Top-level CLI dispatcher invoked by the Burrito-wrapped binary.
 
   Routes argv to the subcommand modules under `Fermix.CLI.*` and returns
-  an integer exit status. Subcommands listed in the milestone but not yet
-  implemented (`start`, `stop`) print a Stage-4 deferral message and exit
-  non-zero — they do not silently delegate to `run`. Subcommands deferred
-  beyond Stage 4 (`status`, `logs`, `service`, `upgrade`, `doctor`,
-  `uninstall`) are not registered here; unknown commands fall through to
-  `usage/0` with a non-zero exit so users get a clear error rather than a
-  silent stub.
+  an integer exit status. Subcommands deferred beyond Stage 4
+  (`upgrade`, `doctor`) are not registered here; unknown commands fall
+  through to `usage/0` with a non-zero exit so users get a clear error
+  rather than a silent stub.
   """
 
+  alias Fermix.CLI.LogsCommand
+  alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
+  alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup
+  alias Fermix.CLI.StartCommand
+  alias Fermix.CLI.StatusCommand
+  alias Fermix.CLI.StopCommand
   alias Fermix.CLI.Version
 
   @doc """
@@ -38,8 +41,12 @@ defmodule Fermix.CLI do
   defp dispatch(cmd, _rest) when cmd in @version_flags, do: Version.run()
   defp dispatch("setup", rest), do: Setup.run(rest)
   defp dispatch("run", rest), do: Run.run(rest)
-  defp dispatch("start", _rest), do: stage4_pending("start")
-  defp dispatch("stop", _rest), do: stage4_pending("stop")
+  defp dispatch("service", rest), do: ServiceCommand.run(rest)
+  defp dispatch("start", rest), do: StartCommand.run(rest)
+  defp dispatch("stop", rest), do: StopCommand.run(rest)
+  defp dispatch("restart", rest), do: RestartCommand.run(rest)
+  defp dispatch("status", rest), do: StatusCommand.run(rest)
+  defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
 
   @spec usage(non_neg_integer()) :: non_neg_integer()
@@ -51,11 +58,16 @@ defmodule Fermix.CLI do
 
     Usage:
       fermix setup [--print-state] [--import-codex] [--openai-api-key VALUE] ...
-      fermix run                  Start the daemon in the foreground
-      fermix start                (Stage 4) Start the installed OS service
-      fermix stop                 (Stage 4) Stop the installed OS service
-      fermix version              Print version
-      fermix help                 Show this message
+      fermix run                        Start the daemon in the foreground
+      fermix service install   [--user|--system]   Install OS service unit
+      fermix service uninstall [--user|--system]   Remove OS service unit
+      fermix start             [--user|--system]   Start the installed OS service
+      fermix stop              [--user|--system]   Stop the installed OS service
+      fermix restart           [--user|--system]   Restart the installed OS service
+      fermix status                                Show running daemon status
+      fermix logs   [-f] [-n LINES]                Show daemon log file
+      fermix version                               Print version
+      fermix help                                  Show this message
     """)
 
     exit_status
@@ -65,16 +77,5 @@ defmodule Fermix.CLI do
   defp unknown_command(cmd) do
     IO.puts(:stderr, "fermix: unknown command: #{cmd}")
     usage(2)
-  end
-
-  @spec stage4_pending(String.t()) :: non_neg_integer()
-  defp stage4_pending(cmd) do
-    IO.puts(
-      :stderr,
-      "fermix #{cmd}: not implemented — Stage 4 will add launchd/systemd " <>
-        "service control. Use `fermix run` to run the daemon in the foreground."
-    )
-
-    2
   end
 end

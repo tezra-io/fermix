@@ -6,6 +6,37 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.8 Stage 4 (OS daemon integration)
+- `Fermix.CLI.Service` and the `Service.Templates`, `Service.Launchd`,
+  `Service.Systemd` backends — install/uninstall/start/stop the
+  daemon as a launchd `.plist` (macOS) or systemd `.service` unit
+  (Linux). Two scopes per OS — user (default; per-user, no sudo) and
+  system (`--system`; boot survival, sudo). On Linux user-scope, the
+  installer runs `loginctl enable-linger` and aborts non-zero with
+  the exact retry instructions if it fails (no degraded
+  "works-while-logged-in" half-state).
+- `fermix service install|uninstall [--user|--system]`,
+  `fermix start|stop|restart [--user|--system]`. Each command
+  refuses to operate when no unit is installed in the requested
+  scope and points the operator at the right next step instead of
+  silently no-op'ing.
+- `Fermix.CLI.Daemon` — Unix-domain control socket
+  (`~/.fermix/daemon.sock`, `0600`) that serves a tiny
+  newline-delimited JSON request/response protocol. Methods:
+  `status` (returns version, uptime, pid) and `shutdown` (replies
+  then halts the BEAM via `:init.stop()`). Started only inside
+  `fermix run`; stale sockets from prior crashes are removed on
+  boot.
+- `fermix status` queries the control socket and prints the daemon's
+  liveness, version, uptime, and pid. Returns exit `3` when nothing
+  is listening so monitoring scripts can branch on the conventional
+  "service not running" signal.
+- `fermix logs [-f|--follow] [-n LINES]` streams
+  `~/.fermix/logs/fermix.log` via `tail`. Aborts with a clear
+  message when the log file does not yet exist instead of hanging.
+- File-logger rotation default bumped from 5 × 10 MB to 10 × 10 MB to
+  match the milestone's stated retention budget.
+
 ### Added — M4.8 Stage 3 (Fermix-owned auth, drop runtime ~/.codex)
 - `FermixCore.Auth.Store` — versioned, provider-scoped JSON store at
   `~/.fermix/auth.json`. Atomic writes via tmp+rename, `0600` perms,

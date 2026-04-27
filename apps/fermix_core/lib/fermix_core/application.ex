@@ -6,6 +6,7 @@ defmodule FermixCore.Application do
 
   alias Burrito.Util, as: BurritoUtil
   alias Burrito.Util.Args, as: BurritoArgs
+  alias Fermix.CLI.Daemon
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
@@ -40,6 +41,7 @@ defmodule FermixCore.Application do
   # `:permanent` — we do not call `System.halt`.
   defp cli_dispatch(["run" | _] = argv) do
     enable_endpoint_server()
+    enable_daemon_socket()
 
     with {:ok, pid} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)
@@ -68,6 +70,10 @@ defmodule FermixCore.Application do
     Application.put_env(:fermix_web, FermixWebWeb.Endpoint, Keyword.put(existing, :server, true))
   end
 
+  defp enable_daemon_socket do
+    Application.put_env(:fermix_core, :daemon_socket_enabled, true)
+  end
+
   defp start_supervision_tree do
     setup_file_logger()
     Trace.TelemetryHandler.attach()
@@ -86,7 +92,8 @@ defmodule FermixCore.Application do
         Scheduler,
         BootReport,
         AgentSupervisor,
-        MainAgent
+        MainAgent,
+        maybe_daemon_socket()
       ]
       |> List.flatten()
 
@@ -137,6 +144,14 @@ defmodule FermixCore.Application do
     end
   end
 
+  defp maybe_daemon_socket do
+    if Application.get_env(:fermix_core, :daemon_socket_enabled, false) do
+      [Daemon]
+    else
+      []
+    end
+  end
+
   defp trace_opts do
     trace_config = Application.get_env(:fermix_core, :trace, [])
     [base_dir: Keyword.get(trace_config, :base_dir, default_trace_dir())]
@@ -148,7 +163,7 @@ defmodule FermixCore.Application do
     if Keyword.get(log_config, :enabled, true) do
       log_file = Keyword.get(log_config, :file, default_log_file())
       max_bytes = Keyword.get(log_config, :max_no_bytes, 10_485_760)
-      max_files = Keyword.get(log_config, :max_no_files, 5)
+      max_files = Keyword.get(log_config, :max_no_files, 10)
 
       File.mkdir_p!(Path.dirname(log_file))
 
