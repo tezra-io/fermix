@@ -17,6 +17,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StatusCommand
   alias Fermix.CLI.StopCommand
+  alias Fermix.CLI.UpgradeCommand
   alias Fermix.CLI.Version
 
   @doc """
@@ -47,6 +48,7 @@ defmodule Fermix.CLI do
   defp dispatch("restart", rest), do: RestartCommand.run(rest)
   defp dispatch("status", rest), do: StatusCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
+  defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
 
   @spec usage(non_neg_integer()) :: non_neg_integer()
@@ -66,6 +68,7 @@ defmodule Fermix.CLI do
       fermix restart           [--user|--system]   Restart the installed OS service
       fermix status                                Show running daemon status
       fermix logs   [-f] [-n LINES]                Show daemon log file
+      fermix upgrade [--check]                     Self-update from signed releases
       fermix version                               Print version
       fermix help                                  Show this message
     """)
