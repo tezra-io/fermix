@@ -22,7 +22,20 @@ defmodule FermixCore.Tools.InvokeSkillTest do
     end
 
     def cleanup do
-      if Process.whereis(@responses), do: Agent.stop(@responses)
+      # `Process.whereis` then `Agent.stop` is racy — the agent can exit
+      # between the lookup and the stop. Catch the exit so on_exit cleanup
+      # never crashes the test report.
+      case Process.whereis(@responses) do
+        nil ->
+          :ok
+
+        pid ->
+          try do
+            Agent.stop(pid)
+          catch
+            :exit, _ -> :ok
+          end
+      end
     end
 
     @impl true

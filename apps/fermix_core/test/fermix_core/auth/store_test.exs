@@ -3,8 +3,20 @@ defmodule FermixCore.Auth.StoreTest do
 
   alias FermixCore.Auth.Store
 
+  # `unique_integer` resets per BEAM run, so leftover files from prior test
+  # runs would otherwise satisfy `read/2` and break the "missing file" tests.
+  # Time-based suffix + on_exit cleanup keeps each path globally unique and
+  # ensures the file does not survive to the next run.
   defp tmp_path do
-    Path.join(System.tmp_dir!(), "fermix_store_#{System.unique_integer([:positive])}.json")
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix_store_#{System.system_time(:nanosecond)}_" <>
+          "#{System.unique_integer([:positive, :monotonic])}.json"
+      )
+
+    ExUnit.Callbacks.on_exit(fn -> File.rm(path) end)
+    path
   end
 
   defp future_iso8601(seconds) do
