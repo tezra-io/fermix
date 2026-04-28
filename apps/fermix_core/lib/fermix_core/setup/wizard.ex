@@ -62,6 +62,14 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec prompts(WizardState.t()) :: [map()]
   def prompts(%WizardState{} = state) do
+    # Channel-secret prompts read from the persisted TOML snapshot rather than
+    # the merged Application env. A token surfaced only via env vars (e.g. the
+    # operator's shell) would satisfy readiness during `fermix setup` but
+    # vanish in the launchd-spawned daemon, which inherits no shell env. Asking
+    # for the token whenever it is unpersisted forces it onto disk where the
+    # daemon will see it.
+    persisted = persisted_snapshot()
+
     [
       %{
         key: :openai_api_key,
@@ -71,52 +79,52 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :telegram_bot_token,
         label: "Telegram bot token",
-        required?: missing_component?(state, "channel:telegram")
+        required?: channel_field_unpersisted?(persisted, :telegram, :bot_token, true)
       },
       %{
         key: :whatsapp_access_token,
         label: "WhatsApp access token",
-        required?: missing_component?(state, "channel:whatsapp")
+        required?: channel_field_unpersisted?(persisted, :whatsapp, :access_token, false)
       },
       %{
         key: :whatsapp_phone_number_id,
         label: "WhatsApp phone number ID",
-        required?: missing_component?(state, "channel:whatsapp")
+        required?: channel_field_unpersisted?(persisted, :whatsapp, :phone_number_id, false)
       },
       %{
         key: :whatsapp_verify_token,
         label: "WhatsApp verify token",
-        required?: missing_component?(state, "channel:whatsapp")
+        required?: channel_field_unpersisted?(persisted, :whatsapp, :verify_token, false)
       },
       %{
         key: :whatsapp_app_secret,
         label: "WhatsApp app secret",
-        required?: missing_component?(state, "channel:whatsapp")
+        required?: channel_field_unpersisted?(persisted, :whatsapp, :app_secret, false)
       },
       %{
         key: :discord_bot_token,
         label: "Discord bot token",
-        required?: missing_component?(state, "channel:discord")
+        required?: channel_field_unpersisted?(persisted, :discord, :bot_token, false)
       },
       %{
         key: :discord_bot_user_id,
         label: "Discord bot user ID",
-        required?: missing_component?(state, "channel:discord")
+        required?: channel_field_unpersisted?(persisted, :discord, :bot_user_id, false)
       },
       %{
         key: :slack_bot_token,
         label: "Slack bot token",
-        required?: missing_component?(state, "channel:slack")
+        required?: channel_field_unpersisted?(persisted, :slack, :bot_token, false)
       },
       %{
         key: :slack_signing_secret,
         label: "Slack signing secret",
-        required?: missing_component?(state, "channel:slack")
+        required?: channel_field_unpersisted?(persisted, :slack, :signing_secret, false)
       },
       %{
         key: :signal_account,
         label: "Signal account",
-        required?: missing_component?(state, "channel:signal")
+        required?: channel_field_unpersisted?(persisted, :signal, :account, false)
       },
       %{
         key: :user_name,
@@ -142,6 +150,7 @@ defmodule FermixCore.Setup.Wizard do
     snapshot =
       state.config_snapshot
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
+      |> put_openai_oauth(Keyword.get(answers, :openai_auth_oauth))
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -216,6 +225,27 @@ defmodule FermixCore.Setup.Wizard do
     Enum.any?(state.validation_errors, &(&1.component == component))
   end
 
+  defp persisted_snapshot do
+    case ConfigStore.load_runtime_config() do
+      {:ok, snapshot} -> ConfigStore.persistable_snapshot(snapshot)
+      {:error, _reason} -> ConfigStore.persistable_snapshot(%{})
+    end
+  end
+
+  defp channel_field_unpersisted?(persisted, channel, field, default_enabled?) do
+    config =
+      persisted
+      |> Map.get(:fermix_channels, [])
+      |> Keyword.get(channel, [])
+
+    enabled? = Keyword.get(config, :enabled, default_enabled?) == true
+    enabled? and blank?(Keyword.get(config, field))
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(_), do: false
+
   defp restart_required?(snapshot) do
     case ConfigStore.load_runtime_config() do
       {:ok, persisted} ->
@@ -240,6 +270,20 @@ defmodule FermixCore.Setup.Wizard do
 
     Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
   end
+
+  defp put_openai_oauth(snapshot, true) do
+    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
+
+    openai =
+      providers
+      |> Keyword.get(:openai, [])
+      |> Keyword.put(:auth_mode, :oauth)
+      |> Keyword.delete(:api_key)
+
+    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
+  end
+
+  defp put_openai_oauth(snapshot, _), do: snapshot
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot
   defp put_telegram_bot_token(snapshot, ""), do: snapshot

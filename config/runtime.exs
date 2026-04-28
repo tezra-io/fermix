@@ -275,31 +275,36 @@ merged_signal =
 config :fermix_channels, signal: merged_signal
 
 if config_env() == :prod do
-  # The secret key base is used to sign/encrypt cookies and other secrets.
-  # A default value is used in config/dev.exs and config/test.exs but you
-  # want to use a different value for prod and you most likely don't want
-  # to check this value into version control, so we use an environment
-  # variable instead.
+  # The secret key base signs Phoenix session cookies. For a single-user
+  # local install, an ephemeral per-boot secret is fine (sessions expire on
+  # restart, which is acceptable). Operators who want stable sessions across
+  # restarts can set SECRET_KEY_BASE explicitly.
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
-      raise """
-      environment variable SECRET_KEY_BASE is missing.
-      You can generate one by calling: mix phx.gen.secret
-      """
+      (:crypto.strong_rand_bytes(48) |> Base.encode64())
 
-  host = System.get_env("PHX_HOST") || "example.com"
+  host = System.get_env("PHX_HOST") || "localhost"
 
   config :fermix_web, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # Default to loopback so a fresh local install does not expose the
+  # endpoint to the LAN. Operators serving the daemon across a network
+  # opt in explicitly via FERMIX_HTTP_BIND (e.g. `0.0.0.0` for IPv4 any,
+  # `::` for IPv6 any, or a specific interface IP).
+  bind_str = System.get_env("FERMIX_HTTP_BIND") || "127.0.0.1"
+
+  http_bind =
+    case :inet.parse_address(String.to_charlist(bind_str)) do
+      {:ok, address} ->
+        address
+
+      {:error, _} ->
+        raise "FERMIX_HTTP_BIND must be a valid IP address; got: #{inspect(bind_str)}"
+    end
+
   config :fermix_web, FermixWebWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
-    http: [
-      # Enable IPv6 and bind on all interfaces.
-      # Set it to  {0, 0, 0, 0, 0, 0, 0, 1} for local network only access.
-      # See the documentation on https://hexdocs.pm/bandit/Bandit.html#t:options/0
-      # for details about using IPv6 vs IPv4 and loopback vs public addresses.
-      ip: {0, 0, 0, 0, 0, 0, 0, 0}
-    ],
+    http: [ip: http_bind],
     secret_key_base: secret_key_base
 
   # ## SSL Support
