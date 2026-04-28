@@ -303,6 +303,54 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(discord, :bot_user_id) == "999"
   end
 
+  test "prompts surface telegram bot_token when env satisfies readiness but TOML has not persisted it" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-wizard-prompt-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    # TOML on disk: telegram enabled but no bot_token persisted (matches the
+    # state after a setup run where the env supplied the value).
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [auth_mode: :api_key, api_key: "sk-test-123"]],
+          personalization: [
+            user_name: "Test User",
+            timezone: "UTC",
+            communication_style: "neutral and direct"
+          ],
+          agent: [name: "fermix"]
+        ],
+        fermix_channels: [
+          telegram: [enabled: true, mode: :webhook, allowed_user_ids: []]
+        ]
+      })
+
+    # Application env carries the env-derived bot_token (what runtime.exs
+    # would have layered on top during boot).
+    Application.put_env(:fermix_channels, :telegram,
+      enabled: true,
+      mode: :webhook,
+      bot_token: "env-only-token",
+      allowed_user_ids: []
+    )
+
+    report = Wizard.report()
+
+    # Readiness sees the merged env value and reports :ready, but the prompt
+    # gate must still surface the bot_token because TOML lacks it.
+    assert report.status == :ready
+
+    prompts = Wizard.prompts(report.wizard)
+    assert Enum.any?(prompts, &(&1.key == :telegram_bot_token and &1.required?))
+  end
+
   test "save_answers persists slack and signal setup answers" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 

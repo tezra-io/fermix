@@ -1,0 +1,103 @@
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build, sign, and publish
+    runs-on: ubuntu-24.04
+    env:
+      MIX_ENV: prod
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28"
+      ZIG_VERSION: "0.15.2"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches mix.exs version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mix_version="$(awk -F '"' '/^      version:/ { print $2; exit }' mix.exs)"
+          tag_version="${TAG_NAME#v}"
+          if [ "$mix_version" != "$tag_version" ]; then
+            echo "::error::Tag $TAG_NAME (=> $tag_version) does not match mix.exs version $mix_version. Bump mix.exs and re-tag."
+            exit 1
+          fi
+          echo "Releasing v$mix_version"
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Install xz, jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils jq
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      - name: Build all Burrito targets
+        run: mix release fermix --overwrite
+
+      - name: Sign and hash binaries
+        working-directory: burrito_out
+        run: |
+          set -euo pipefail
+          for bin in fermix_*; do
+            case "$bin" in *.sig|*.pem|*.sha256) continue ;; esac
+            cosign sign-blob --yes \
+              --output-signature "${bin}.sig" \
+              --output-certificate "${bin}.pem" \
+              "$bin"
+            sha256sum "$bin" > "${bin}.sha256"
+          done
+          ls -la
+
+      - name: Generate releases.json
+        env:
+          VERSION: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: ./scripts/release/build_releases_json.sh > burrito_out/releases.json
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          append_body: true
+          body: |
+            ### Verifying signatures
+
+            Each binary is signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using GitHub Actions OIDC keyless signing. Verify a download with:
+
+            ```bash
+            cosign verify-blob \
+              --certificate fermix_<target>.pem \
+              --signature  fermix_<target>.sig \
+              --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              fermix_<target>
+            ```
+
+            The `releases.json` artifact lists every binary's URL, sha256, and signature URLs.
+          files: |
+            burrito_out/fermix_*
+            burrito_out/releases.json
