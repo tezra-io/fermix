@@ -208,10 +208,11 @@ defmodule FermixCore.Readiness do
   end
 
   defp oauth_configured?(config) do
-    Enum.any?(
-      [:oauth_credentials, :credentials, :client_id, :access_token],
-      &present?(Keyword.get(config, &1))
-    )
+    Keyword.get(config, :auth_mode) == :oauth or
+      Enum.any?(
+        [:oauth_credentials, :credentials, :client_id, :access_token],
+        &present?(Keyword.get(config, &1))
+      )
   end
 
   defp configured?(config, keys) do

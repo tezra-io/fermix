@@ -16,22 +16,16 @@ defmodule FermixCore.Auth.TokenManagerTest do
     path
   end
 
-  defp make_jwt_with_exp(exp_unix) do
-    header = Base.url_encode64("{}", padding: false)
-    payload = Base.url_encode64(Jason.encode!(%{"exp" => exp_unix}), padding: false)
-    "#{header}.#{payload}.fake_signature"
-  end
-
   def noop_plug(conn), do: Plug.Conn.send_resp(conn, 500, "test-noop")
 
-  def fork_success_plug(conn) do
+  def refresh_plug(conn) do
     conn
     |> Plug.Conn.put_resp_content_type("application/json")
     |> Plug.Conn.send_resp(
       200,
       Jason.encode!(%{
-        "access_token" => "fermix_own_at",
-        "refresh_token" => "fermix_own_rt",
+        "access_token" => "new_at",
+        "refresh_token" => "new_rt",
         "expires_in" => 3600
       })
     )
@@ -45,157 +39,72 @@ defmodule FermixCore.Auth.TokenManagerTest do
     name
   end
 
-  describe "init — loading tokens" do
-    test "loads from fermix auth file when available" do
-      dir = tmp_dir()
-
-      fermix_path =
-        write_auth_file(dir, "fermix_auth.json", %{
-          "tokens" => %{
-            "access_token" => "fermix_token",
-            "refresh_token" => "fermix_refresh"
-          },
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
-        })
-
-      codex_path = Path.join(dir, "codex_auth.json")
-
-      name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: codex_path)
-      assert {:ok, "fermix_token"} = TokenManager.get_token(name)
-
-      File.rm_rf!(dir)
-    end
-
-    test "falls back to codex auth file when fermix file missing" do
-      dir = tmp_dir()
-      exp = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
-      jwt = make_jwt_with_exp(exp)
-
-      codex_path =
-        write_auth_file(dir, "codex_auth.json", %{
-          "auth_mode" => "chatgpt",
-          "tokens" => %{
-            "access_token" => jwt,
-            "refresh_token" => "codex_refresh"
-          }
-        })
-
-      fermix_path = Path.join(dir, "fermix_auth.json")
-
-      name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: codex_path)
-      assert {:ok, ^jwt} = TokenManager.get_token(name)
-
-      File.rm_rf!(dir)
-    end
-
-    test "returns error when no auth files exist" do
-      dir = tmp_dir()
-
-      name =
-        start_manager(
-          fermix_auth_path: Path.join(dir, "nope1.json"),
-          codex_auth_path: Path.join(dir, "nope2.json")
-        )
-
-      assert {:error, :no_token} = TokenManager.get_token(name)
-    end
-
-    test "prefers fermix file over codex file" do
-      dir = tmp_dir()
-
-      fermix_path =
-        write_auth_file(dir, "fermix_auth.json", %{
-          "tokens" => %{
-            "access_token" => "fermix_wins",
-            "refresh_token" => "r"
-          },
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
-        })
-
-      codex_path =
-        write_auth_file(dir, "codex_auth.json", %{
-          "auth_mode" => "chatgpt",
-          "tokens" => %{
-            "access_token" => "codex_loses",
-            "refresh_token" => "r"
-          }
-        })
-
-      name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: codex_path)
-      assert {:ok, "fermix_wins"} = TokenManager.get_token(name)
-
-      File.rm_rf!(dir)
-    end
+  defp future_iso8601(seconds) do
+    DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
-  describe "codex bootstrap — fork token chain" do
-    test "immediately refreshes to fork own chain when loaded from codex" do
-      dir = tmp_dir()
-      exp = DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_unix()
-      jwt = make_jwt_with_exp(exp)
-
-      codex_path =
-        write_auth_file(dir, "codex_auth.json", %{
-          "auth_mode" => "chatgpt",
-          "tokens" => %{"access_token" => jwt, "refresh_token" => "codex_rt"}
-        })
-
-      fermix_path = Path.join(dir, "fermix_auth.json")
-
-      name =
-        start_manager(
-          fermix_auth_path: fermix_path,
-          codex_auth_path: codex_path,
-          req_options: [plug: &__MODULE__.fork_success_plug/1]
-        )
-
-      # Wait for the fork_refresh to complete
-      Process.sleep(200)
-
-      assert {:ok, "fermix_own_at"} = TokenManager.get_token(name)
-
-      # Verify it persisted to fermix path
-      assert {:ok, raw} = File.read(fermix_path)
-      assert {:ok, data} = Jason.decode(raw)
-      assert data["tokens"]["refresh_token"] == "fermix_own_rt"
-
-      File.rm_rf!(dir)
-    end
-
-    test "does not fork when loaded from fermix file" do
+  describe "init — loading tokens" do
+    test "loads from fermix auth file (new nested shape)" do
       dir = tmp_dir()
 
       fermix_path =
         write_auth_file(dir, "fermix_auth.json", %{
-          "tokens" => %{"access_token" => "already_own", "refresh_token" => "own_rt"},
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
         })
 
-      name =
-        start_manager(
-          fermix_auth_path: fermix_path,
-          codex_auth_path: Path.join(dir, "x")
-        )
-
-      # No fork_refresh should fire — token stays as loaded
-      Process.sleep(200)
-      assert {:ok, "already_own"} = TokenManager.get_token(name)
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "AT"} = TokenManager.get_token(name)
 
       File.rm_rf!(dir)
+    end
+
+    test "migrates flat M3-era shape (top-level tokens) to nested provider scope" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "auth_mode" => "chatgpt",
+          "tokens" => %{"access_token" => "legacy_at", "refresh_token" => "legacy_rt"},
+          "expires_at" => future_iso8601(3600)
+        })
+
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "legacy_at"} = TokenManager.get_token(name)
+
+      File.rm_rf!(dir)
+    end
+
+    test "returns error when no auth file exists" do
+      dir = tmp_dir()
+      name = start_manager(fermix_auth_path: Path.join(dir, "missing.json"))
+      assert {:error, :no_token} = TokenManager.get_token(name)
     end
   end
 
   describe "get_token/1" do
-    test "returns cached token" do
+    test "returns cached token across calls" do
       dir = tmp_dir()
 
       fermix_path =
-        write_auth_file(dir, "auth.json", %{
-          "tokens" => %{"access_token" => "cached", "refresh_token" => "r"},
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "cached", "refresh_token" => "rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
         })
 
-      name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: Path.join(dir, "x"))
+      name = start_manager(fermix_auth_path: fermix_path)
       assert {:ok, "cached"} = TokenManager.get_token(name)
       assert {:ok, "cached"} = TokenManager.get_token(name)
 
@@ -204,83 +113,76 @@ defmodule FermixCore.Auth.TokenManagerTest do
   end
 
   describe "refresh/1" do
-    test "returns error when no refresh token" do
+    test "returns no_refresh_token when state has none" do
       dir = tmp_dir()
 
       fermix_path =
-        write_auth_file(dir, "auth.json", %{
-          "tokens" => %{"access_token" => "tok"},
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "tok"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
         })
 
-      name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: Path.join(dir, "x"))
+      name = start_manager(fermix_auth_path: fermix_path)
       assert {:error, :no_refresh_token} = TokenManager.refresh(name)
 
       File.rm_rf!(dir)
     end
-  end
 
-  describe "JWT exp decoding" do
-    test "reads codex token with valid JWT exp" do
+    test "refreshes and persists to Auth.Store" do
       dir = tmp_dir()
-      future_exp = DateTime.utc_now() |> DateTime.add(7200) |> DateTime.to_unix()
-      jwt = make_jwt_with_exp(future_exp)
 
-      codex_path =
-        write_auth_file(dir, "codex.json", %{
-          "auth_mode" => "chatgpt",
-          "tokens" => %{"access_token" => jwt, "refresh_token" => "r"}
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
         })
 
       name =
         start_manager(
-          fermix_auth_path: Path.join(dir, "nope.json"),
-          codex_auth_path: codex_path
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
         )
 
-      assert {:ok, ^jwt} = TokenManager.get_token(name)
-
-      File.rm_rf!(dir)
-    end
-
-    test "handles non-JWT codex token gracefully" do
-      dir = tmp_dir()
-
-      codex_path =
-        write_auth_file(dir, "codex.json", %{
-          "auth_mode" => "chatgpt",
-          "tokens" => %{"access_token" => "not-a-jwt", "refresh_token" => "r"}
-        })
-
-      name =
-        start_manager(
-          fermix_auth_path: Path.join(dir, "nope.json"),
-          codex_auth_path: codex_path
-        )
-
-      # Still loads the token, just without expiry scheduling
-      assert {:ok, "not-a-jwt"} = TokenManager.get_token(name)
+      assert {:ok, "new_at"} = TokenManager.refresh(name)
+      assert {:ok, raw} = File.read(fermix_path)
+      data = Jason.decode!(raw)
+      assert data["providers"]["openai"]["tokens"]["access_token"] == "new_at"
+      assert data["providers"]["openai"]["tokens"]["refresh_token"] == "new_rt"
 
       File.rm_rf!(dir)
     end
   end
 
   describe "scheduled refresh" do
-    test "sends :refresh message when token is near expiry" do
+    test "stays alive when scheduled refresh fires and fails" do
       dir = tmp_dir()
 
-      # Token expires in 2 seconds — refresh_skew is 90s, so min delay kicks in (1s)
       fermix_path =
-        write_auth_file(dir, "auth.json", %{
-          "tokens" => %{"access_token" => "soon_expired", "refresh_token" => "r"},
-          "expires_at" => DateTime.utc_now() |> DateTime.add(2) |> DateTime.to_iso8601()
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "soon", "refresh_token" => "rt"},
+              "expires_at" => future_iso8601(2)
+            }
+          }
         })
 
-      name = start_manager(fermix_auth_path: fermix_path, codex_auth_path: Path.join(dir, "x"))
-
-      # The refresh will fire but fail (no real endpoint) — that's expected.
-      # We just verify the token was loaded and the GenServer stays alive.
-      assert {:ok, "soon_expired"} = TokenManager.get_token(name)
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "soon"} = TokenManager.get_token(name)
       Process.sleep(1_500)
       assert Process.whereis(name) |> Process.alive?()
 

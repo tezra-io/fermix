@@ -68,6 +68,10 @@ defmodule FermixChannels.Telegram.PollerTest do
     |> Plug.Conn.send_resp(status, Jason.encode!(body))
   end
 
+  defp send_get_updates_response(conn, {:transport_error, reason}) do
+    Req.Test.transport_error(conn, reason)
+  end
+
   defp start_poller(opts \\ []) do
     defaults = [
       req_options: [plug: {Req.Test, :telegram_poller}],
@@ -155,7 +159,7 @@ defmodule FermixChannels.Telegram.PollerTest do
 
       assert_receive {:get_updates, poll_body}, 1_000
       assert poll_body["offset"] == 0
-      assert poll_body["timeout"] == 30
+      assert poll_body["timeout"] == 50
       assert poll_body["allowed_updates"] == ["message"]
     end
 
@@ -175,7 +179,7 @@ defmodule FermixChannels.Telegram.PollerTest do
       send(pid, :poll)
       assert_receive {:get_updates, body}, 1_000
       assert body["offset"] == 0
-      assert body["timeout"] == 30
+      assert body["timeout"] == 50
 
       assert_offset(pid, 102)
     end
@@ -191,7 +195,7 @@ defmodule FermixChannels.Telegram.PollerTest do
       send(pid, :poll)
       assert_receive {:get_updates, body}, 1_000
       assert body["offset"] == 0
-      assert body["timeout"] == 30
+      assert body["timeout"] == 50
 
       assert_offset(pid, 0)
     end
@@ -217,7 +221,7 @@ defmodule FermixChannels.Telegram.PollerTest do
 
       assert_receive {:get_updates, poll_body}, 1_000
       assert poll_body["offset"] == 201
-      assert poll_body["timeout"] == 30
+      assert poll_body["timeout"] == 50
 
       assert_receive {:telemetry, [:fermix, :channel, :message], measurements, metadata}, 1_000
       assert measurements.count == 1
@@ -233,6 +237,27 @@ defmodule FermixChannels.Telegram.PollerTest do
       send(pid, :poll)
 
       Process.sleep(100)
+      assert Process.alive?(pid)
+    end
+
+    test "quickly reconnects after transient long-poll transport errors" do
+      stub_get_updates_sequence(self(), [
+        {:ok, []},
+        {:transport_error, :closed},
+        {:ok, []}
+      ])
+
+      pid = start_poller(poll_interval: :manual, transient_backoff_ms: 10)
+      send(pid, :poll)
+      assert_receive {:get_updates, startup_body}, 1_000
+      assert startup_body["timeout"] == 0
+
+      send(pid, :poll)
+      assert_receive {:get_updates, poll_body}, 1_000
+      assert poll_body["timeout"] == 50
+
+      assert_receive {:get_updates, retry_body}, 1_000
+      assert retry_body["timeout"] == 50
       assert Process.alive?(pid)
     end
   end
