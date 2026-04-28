@@ -16,6 +16,7 @@ defmodule Fermix.CLI.Service do
   contracts, and computes the install target paths.
   """
 
+  alias Burrito.Util.Args, as: BurritoArgs
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
@@ -130,9 +131,23 @@ defmodule Fermix.CLI.Service do
     Keyword.get(opts, :unit_path) || "/etc/systemd/system/#{@linux_unit}"
   end
 
+  # When running inside the Burrito wrapper, `System.find_executable/1`
+  # returns the *extracted* release launcher inside the Burrito cache,
+  # which only understands the standard mix-release verbs (`start`,
+  # `daemon`, `eval`) and rejects our `fermix run` subcommand. We need
+  # the wrapper binary itself — the one launchd or systemd should
+  # invoke — and Burrito exposes that via `__BURRITO_BIN_PATH`.
   defp fermix_path(opts) do
-    Keyword.get(opts, :fermix_path) || System.find_executable("fermix") ||
+    Keyword.get(opts, :fermix_path) || burrito_bin_path() ||
+      System.find_executable("fermix") ||
       raise ArgumentError, "fermix binary not on PATH; pass :fermix_path explicitly"
+  end
+
+  defp burrito_bin_path do
+    case BurritoArgs.get_bin_path() do
+      :not_in_burrito -> nil
+      path when is_binary(path) -> path
+    end
   end
 
   defp fermix_home(opts) do
