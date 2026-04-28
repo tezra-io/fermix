@@ -50,6 +50,7 @@ defmodule FermixCore.Setup.Runtime do
         :ok
 
       report.status == :ready and provided_answers(opts) == [] and
+        Wizard.prompts(report.wizard) == [] and
           not Keyword.get(opts, :import_codex, false) ->
         seed_and_print(report, puts)
 
