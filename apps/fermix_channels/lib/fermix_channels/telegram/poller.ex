@@ -23,8 +23,11 @@ defmodule FermixChannels.Telegram.Poller do
 
   @bot_api_base "https://api.telegram.org"
   @default_error_backoff_ms 5_000
+  @default_transient_backoff_ms 250
   @startup_probe_timeout 0
-  @poll_timeout 30
+  @poll_timeout 50
+  @receive_timeout_ms 60_000
+  @transient_transport_errors [:closed, :timeout, :econnreset, :socket_closed_remotely]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -40,6 +43,8 @@ defmodule FermixChannels.Telegram.Poller do
       req_options: Keyword.get(opts, :req_options, []),
       poll_interval: Keyword.get(opts, :poll_interval, :immediate),
       error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms),
+      transient_backoff_ms:
+        Keyword.get(opts, :transient_backoff_ms, @default_transient_backoff_ms),
       agent: Keyword.get(opts, :agent, MainAgent),
       agent_server: Keyword.get(opts, :agent_server, MainAgent)
     }
@@ -67,8 +72,8 @@ defmodule FermixChannels.Telegram.Poller do
         {:noreply, state}
 
       {:error, reason, state} ->
-        Logger.error("Telegram poller startup probe error: #{inspect(reason)}")
-        Process.send_after(self(), :poll, state.error_backoff_ms)
+        log_poll_error("startup probe", reason)
+        schedule_error_retry(state, reason)
         {:noreply, state}
     end
   end
@@ -87,8 +92,8 @@ defmodule FermixChannels.Telegram.Poller do
         {:noreply, state}
 
       {:error, reason, state} ->
-        Logger.error("Telegram poller error: #{inspect(reason)}")
-        Process.send_after(self(), :poll, state.error_backoff_ms)
+        log_poll_error("poll", reason)
+        schedule_error_retry(state, reason)
         {:noreply, state}
     end
   end
@@ -112,7 +117,7 @@ defmodule FermixChannels.Telegram.Poller do
       }
 
       result =
-        Req.new(url: url, method: :post, json: body, receive_timeout: 35_000)
+        Req.new(url: url, method: :post, json: body, receive_timeout: @receive_timeout_ms)
         |> Req.merge(state.req_options)
         |> Req.request()
 
@@ -130,6 +135,31 @@ defmodule FermixChannels.Telegram.Poller do
       {:error, reason} -> {:error, reason, state}
     end
   end
+
+  defp log_poll_error(context, reason) do
+    if transient_transport_error?(reason) do
+      Logger.warning("Telegram poller #{context} reconnecting after #{inspect(reason)}")
+    else
+      Logger.error("Telegram poller #{context} error: #{inspect(reason)}")
+    end
+  end
+
+  defp schedule_error_retry(state, reason) do
+    backoff =
+      if transient_transport_error?(reason) do
+        state.transient_backoff_ms
+      else
+        state.error_backoff_ms
+      end
+
+    Process.send_after(self(), :poll, backoff)
+  end
+
+  defp transient_transport_error?(%Req.TransportError{reason: reason})
+       when reason in @transient_transport_errors,
+       do: true
+
+  defp transient_transport_error?(_reason), do: false
 
   defp process_updates(updates, state) do
     Enum.each(updates, fn update ->
