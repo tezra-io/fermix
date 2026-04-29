@@ -4,8 +4,11 @@ defmodule FermixCore.Providers.RouteResolver do
   for `AgentLoop`. Keeps callers (AgentServer, MainAgent) out of the
   business of knowing which adapter wires up which auth mode.
 
-  Today only OpenAI is configured; per-skill `provider:` overrides land
-  in Stage 6.
+  `resolve!/1` dispatches on the `:provider` opt — `nil` falls back to
+  OpenAI (the only fully implemented provider). Anthropic returns a
+  scaffold route key whose adapter responds with `{:error, :not_implemented}`
+  until the real implementation lands; this lets `provider: anthropic`
+  in skill frontmatter route through cleanly during M4.9.
   """
 
   alias FermixCore.Auth.TokenManager
@@ -14,8 +17,21 @@ defmodule FermixCore.Providers.RouteResolver do
 
   @default_openai_base_url "https://api.openai.com/v1"
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
+  @default_anthropic_base_url "https://api.anthropic.com/v1"
+  @default_anthropic_model "claude-sonnet-4-6"
 
   @type resolution :: {Adapter.route_key(), keyword()}
+
+  @spec resolve!(keyword()) :: resolution()
+  def resolve!(opts \\ []) do
+    case Keyword.get(opts, :provider) do
+      nil -> resolve_openai!(opts)
+      :openai -> resolve_openai!(opts)
+      :openai_codex -> resolve_openai!(Keyword.put(opts, :auth_mode, :oauth))
+      :anthropic -> resolve_anthropic!(opts)
+      other -> raise ArgumentError, "no resolver for provider #{inspect(other)}"
+    end
+  end
 
   @spec resolve_openai!(keyword()) :: resolution()
   def resolve_openai!(opts \\ []) do
@@ -73,6 +89,26 @@ defmodule FermixCore.Providers.RouteResolver do
 
     adapter_opts =
       [model: model, base_url: base_url, api_key: api_key]
+      |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+      |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+
+    {route_key, adapter_opts}
+  end
+
+  defp resolve_anthropic!(opts) do
+    model = Keyword.get(opts, :model) || @default_anthropic_model
+    base_url = Keyword.get(opts, :base_url, @default_anthropic_base_url)
+
+    route_key = %{
+      provider: :anthropic,
+      model: model,
+      auth_mode: Keyword.get(opts, :auth_mode, :api_key),
+      base_url: base_url
+    }
+
+    adapter_opts =
+      [model: model, base_url: base_url]
+      |> maybe_put(:api_key, Keyword.get(opts, :api_key))
       |> maybe_put(:temperature, Keyword.get(opts, :temperature))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
