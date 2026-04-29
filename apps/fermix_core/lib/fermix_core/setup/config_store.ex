@@ -7,6 +7,8 @@ defmodule FermixCore.Setup.ConfigStore do
   health reporting, traces, and logs.
   """
 
+  alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+
   @workspace_dirs [
     bootstrap: "bootstrap",
     skills: "skills",
@@ -121,8 +123,26 @@ defmodule FermixCore.Setup.ConfigStore do
   """
   @spec bootstrap_runtime_config() :: :ok | {:error, term()}
   def bootstrap_runtime_config do
-    with {:ok, snapshot} <- load_runtime_config() do
-      apply_snapshot(snapshot)
+    with {:ok, snapshot} <- load_runtime_config(),
+         :ok <- apply_snapshot(snapshot) do
+      apply_mcp_config()
+    end
+  end
+
+  @spec apply_mcp_config() :: :ok | {:error, term()}
+  def apply_mcp_config do
+    case File.read(path()) do
+      {:ok, contents} ->
+        servers = McpConfig.from_toml(contents)
+        Application.put_env(:fermix_core, :mcp_servers, servers)
+        :ok
+
+      {:error, :enoent} ->
+        Application.put_env(:fermix_core, :mcp_servers, [])
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
