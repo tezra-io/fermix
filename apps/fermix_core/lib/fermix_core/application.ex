@@ -12,6 +12,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.ExtractionDebouncer
@@ -88,6 +89,7 @@ defmodule FermixCore.Application do
         Registry,
         CapabilityRegistry,
         {SkillRegistry, capability_registry: CapabilityRegistry},
+        {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
         ConversationStore,
         Store,
