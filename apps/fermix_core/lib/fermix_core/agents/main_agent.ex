@@ -35,6 +35,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
   alias FermixCore.Prompt.PromptComposer
+  alias FermixCore.Providers.RouteResolver
   alias FermixCore.Tools.Registry
 
   @type thread_scope :: :root | String.t() | integer()
@@ -113,6 +114,11 @@ defmodule FermixCore.Agents.MainAgent do
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       registry: Keyword.get(opts, :registry, Registry),
+      capability_registry:
+        Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
+      adapter_overrides: Keyword.get(opts, :adapter_overrides, []),
+      adapter: Keyword.get(opts, :adapter),
+      adapter_opts: Keyword.get(opts, :adapter_opts, []),
       agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
       skill_registry: skill_registry,
       available_skills: load_available_skills(skill_registry),
@@ -331,10 +337,56 @@ defmodule FermixCore.Agents.MainAgent do
     update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
   end
 
+  defp build_loop_opts(state, messages, context) do
+    base = [
+      messages: messages,
+      context: context,
+      capability_registry: state.capability_registry
+    ]
+
+    case resolve_loop_adapter(state) do
+      {:adapter, mod, opts} ->
+        base
+        |> Keyword.put(:adapter, mod)
+        |> Keyword.put(:adapter_opts, opts)
+
+      {:route, key, opts} ->
+        base
+        |> Keyword.put(:route_key, key)
+        |> Keyword.put(:adapter_opts, opts)
+    end
+  end
+
+  defp resolve_loop_adapter(state) do
+    cond do
+      state.adapter ->
+        {:adapter, state.adapter, state.adapter_opts}
+
+      adapter_capable?(state.provider) ->
+        # Test wiring: a provider that also implements the Adapter
+        # behaviour can stand in as the adapter without separate plumbing.
+        {:adapter, state.provider, Keyword.put(state.adapter_opts, :model, "mock-model")}
+
+      true ->
+        {route_key, adapter_opts} = RouteResolver.resolve_openai!(state.adapter_overrides)
+        {:route, route_key, adapter_opts}
+    end
+  end
+
+  defp adapter_capable?(nil), do: false
+
+  defp adapter_capable?(mod) when is_atom(mod) do
+    Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
+  end
+
   defp task_runtime_state(state) do
     %{
       provider: state.provider,
       registry: state.registry,
+      capability_registry: state.capability_registry,
+      adapter_overrides: state.adapter_overrides,
+      adapter: state.adapter,
+      adapter_opts: state.adapter_opts,
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       available_skills: state.available_skills,
@@ -371,8 +423,6 @@ defmodule FermixCore.Agents.MainAgent do
     user_message = %{role: "user", content: msg.content}
     messages = prompt_context.messages ++ history ++ [user_message]
 
-    tools = Registry.all_tools_for_llm(state.registry)
-
     context = %{
       agent_name: "main",
       conversation_key: conversation_key,
@@ -390,13 +440,9 @@ defmodule FermixCore.Agents.MainAgent do
       prompt_accounting: prompt_context.accounting
     }
 
-    case AgentLoop.run(
-           messages: messages,
-           tools: tools,
-           provider: state.provider,
-           context: context,
-           registry: state.registry
-         ) do
+    loop_opts = build_loop_opts(state, messages, context)
+
+    case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
 
