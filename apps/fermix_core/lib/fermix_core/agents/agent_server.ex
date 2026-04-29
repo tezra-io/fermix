@@ -285,17 +285,20 @@ defmodule FermixCore.Agents.AgentServer do
 
   defp build_route_loop_opts(base, definition, adapter_overrides) do
     overrides =
-      Keyword.merge(adapter_overrides,
-        model: definition.model,
-        temperature: definition.temperature
-      )
+      adapter_overrides
+      |> put_unless_nil(:provider, definition.provider)
+      |> put_unless_nil(:model, definition.model)
+      |> put_unless_nil(:temperature, definition.temperature)
 
-    {route_key, adapter_opts} = RouteResolver.resolve_openai!(overrides)
+    {route_key, adapter_opts} = RouteResolver.resolve!(overrides)
 
     base
     |> Keyword.put(:route_key, route_key)
     |> Keyword.put(:adapter_opts, adapter_opts)
   end
+
+  defp put_unless_nil(opts, _key, nil), do: opts
+  defp put_unless_nil(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp adapter_capable?(nil), do: false
 

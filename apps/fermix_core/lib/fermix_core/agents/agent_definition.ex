@@ -24,6 +24,7 @@ defmodule FermixCore.Agents.AgentDefinition do
           persistent: boolean(),
           system_prompt: String.t(),
           model: String.t() | nil,
+          provider: atom() | nil,
           temperature: float() | nil,
           capabilities: [String.t()],
           allowed_tools: [String.t()] | nil,
@@ -54,6 +55,7 @@ defmodule FermixCore.Agents.AgentDefinition do
     :persistent,
     :system_prompt,
     :model,
+    :provider,
     :temperature,
     :capabilities,
     :allowed_tools,
@@ -68,6 +70,7 @@ defmodule FermixCore.Agents.AgentDefinition do
 
   @absent_sentinel :__absent__
   @valid_policy_strings ~w(read_only read_write exec network external_api)
+  @valid_provider_strings ~w(openai openai_codex anthropic openrouter together groq)
 
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_map(attrs) do
@@ -83,7 +86,8 @@ defmodule FermixCore.Agents.AgentDefinition do
          {:ok, allowed_tools} <-
            parse_allowed_tools(get(attrs, "allowed_tools", @absent_sentinel)),
          {:ok, policy} <- parse_policy(get(attrs, "policy")),
-         {:ok, trust} <- parse_trust(get(attrs, "trust")) do
+         {:ok, trust} <- parse_trust(get(attrs, "trust")),
+         {:ok, provider} <- parse_provider(get(attrs, "provider")) do
       {:ok,
        %__MODULE__{
          name: name,
@@ -91,6 +95,7 @@ defmodule FermixCore.Agents.AgentDefinition do
          persistent: persistent,
          system_prompt: system_prompt,
          model: optional_string(get(attrs, "model")),
+         provider: provider,
          temperature: temperature,
          capabilities: normalize_string_list(get(attrs, "capabilities", [])),
          allowed_tools: allowed_tools,
@@ -234,6 +239,22 @@ defmodule FermixCore.Agents.AgentDefinition do
   defp parse_trust(nil), do: {:ok, nil}
   defp parse_trust(value) when value in [:core, :local, :third_party], do: {:ok, value}
   defp parse_trust(other), do: {:error, {:invalid_trust, other}}
+
+  defp parse_provider(nil), do: {:ok, nil}
+
+  defp parse_provider(value) when is_atom(value) do
+    parse_provider(Atom.to_string(value))
+  end
+
+  defp parse_provider(value) when is_binary(value) do
+    if value in @valid_provider_strings do
+      {:ok, String.to_existing_atom(value)}
+    else
+      {:error, {:invalid_provider, value}}
+    end
+  end
+
+  defp parse_provider(other), do: {:error, {:invalid_provider, other}}
 
   defp normalize_string_list(values) when is_list(values) do
     Enum.map(values, &to_string/1)

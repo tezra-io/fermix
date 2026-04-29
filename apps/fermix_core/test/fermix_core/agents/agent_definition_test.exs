@@ -158,6 +158,40 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
     end
   end
 
+  describe "provider field" do
+    test "absent → nil" do
+      assert {:ok, definition} =
+               AgentDefinition.new(%{"name" => "p", "system_prompt" => "."})
+
+      assert definition.provider == nil
+    end
+
+    test "string and atom forms parse to a known provider atom" do
+      assert {:ok, %{provider: :anthropic}} =
+               AgentDefinition.new(%{
+                 "name" => "p",
+                 "system_prompt" => ".",
+                 "provider" => "anthropic"
+               })
+
+      assert {:ok, %{provider: :openai_codex}} =
+               AgentDefinition.new(%{
+                 "name" => "p",
+                 "system_prompt" => ".",
+                 "provider" => :openai_codex
+               })
+    end
+
+    test "unknown provider rejected loud" do
+      assert {:error, {:invalid_provider, "claude"}} =
+               AgentDefinition.new(%{
+                 "name" => "p",
+                 "system_prompt" => ".",
+                 "provider" => "claude"
+               })
+    end
+  end
+
   describe "validation errors" do
     test "rejects invalid positive integer fields" do
       assert {:error, {:invalid_positive_integer, "0"}} =
