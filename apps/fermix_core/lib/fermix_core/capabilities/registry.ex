@@ -8,10 +8,9 @@ defmodule FermixCore.Capabilities.Registry do
   (`register/2`, `unregister_kind/2,3`, `refresh/2`) serialize through the
   GenServer.
 
-  Stage 1 ships the registry alongside `FermixCore.Tools.Registry`. Built-in
-  capabilities mirror the existing tool registrations via
-  `FermixCore.Capabilities.Builtin.from_tool_module/1`. Skill and MCP
-  capabilities land in later stages.
+  Built-ins are mirrored at boot through `FermixCore.Capabilities.Builtin.from_tool_module/1`.
+  Skills and MCP server tools register themselves through their own
+  supervisors as they come up.
   """
 
   use GenServer

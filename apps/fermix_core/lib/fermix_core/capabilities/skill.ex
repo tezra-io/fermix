@@ -13,8 +13,8 @@ defmodule FermixCore.Capabilities.Skill do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Agents.PersistencePolicy
+  alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
-  alias FermixCore.Tools.Tool
 
   require Logger
 
@@ -76,7 +76,6 @@ defmodule FermixCore.Capabilities.Skill do
            parent_name: Map.get(context, :agent_name, "main"),
            parent_session: Map.get(context, :session_id),
            provider: Map.get(context, :provider, FermixCore.Providers.OpenAI),
-           registry: Map.get(context, :registry, FermixCore.Tools.Registry),
            capability_registry:
              Map.get(context, :capability_registry, FermixCore.Capabilities.Registry),
            task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor)

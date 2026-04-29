@@ -4,9 +4,9 @@ defmodule FermixCore.Tools.Browser do
   Supports snapshot, navigate, click, fill, and screenshot actions.
   """
 
-  @behaviour FermixCore.Tools.Tool
+  @behaviour FermixCore.Capabilities.Builtin.Tool
 
-  alias FermixCore.Tools.Tool
+  alias FermixCore.Capabilities.Builtin.Tool
 
   @default_timeout_ms 30_000
   @valid_actions ~w(snapshot navigate click fill screenshot)

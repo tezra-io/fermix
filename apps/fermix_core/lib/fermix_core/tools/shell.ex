@@ -3,9 +3,9 @@ defmodule FermixCore.Tools.Shell do
   Execute shell commands. Supports working directory, timeout, and stderr capture.
   """
 
-  @behaviour FermixCore.Tools.Tool
+  @behaviour FermixCore.Capabilities.Builtin.Tool
 
-  alias FermixCore.Tools.Tool
+  alias FermixCore.Capabilities.Builtin.Tool
 
   @default_timeout_ms 30_000
 

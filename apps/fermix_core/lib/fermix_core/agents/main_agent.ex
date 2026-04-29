@@ -36,7 +36,6 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.Store
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Providers.RouteResolver
-  alias FermixCore.Tools.Registry
 
   @type thread_scope :: :root | String.t() | integer()
 
@@ -113,7 +112,6 @@ defmodule FermixCore.Agents.MainAgent do
 
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
-      registry: Keyword.get(opts, :registry, Registry),
       capability_registry:
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
       adapter_overrides: Keyword.get(opts, :adapter_overrides, []),
@@ -382,7 +380,6 @@ defmodule FermixCore.Agents.MainAgent do
   defp task_runtime_state(state) do
     %{
       provider: state.provider,
-      registry: state.registry,
       capability_registry: state.capability_registry,
       adapter_overrides: state.adapter_overrides,
       adapter: state.adapter,
@@ -427,7 +424,7 @@ defmodule FermixCore.Agents.MainAgent do
       agent_name: "main",
       conversation_key: conversation_key,
       session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
-      registry: state.registry,
+      capability_registry: state.capability_registry,
       provider: state.provider,
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,

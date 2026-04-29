@@ -11,9 +11,9 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   approval gates the LLM exposure (see `Capabilities.Registry.list/2`).
   """
 
+  alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.MCP.Naming
-  alias FermixCore.Tools.Tool
 
   require Logger
 

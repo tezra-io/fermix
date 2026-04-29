@@ -8,8 +8,9 @@ defmodule FermixWebWeb.IntegrationTest do
   use FermixWebWeb.ConnCase
 
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Tools.Registry
 
   @moduletag :integration
 
@@ -164,20 +165,22 @@ defmodule FermixWebWeb.IntegrationTest do
     conversation_store =
       start_supervised!({ConversationStore, [name: :"cs_integration_#{System.unique_integer()}"]})
 
-    registry =
-      start_supervised!({Registry, [name: :"reg_integration_#{System.unique_integer()}"]})
+    capability_registry =
+      start_supervised!(
+        {CapabilityRegistry, [name: :"caps_integration_#{System.unique_integer()}"]}
+      )
 
     on_exit(fn ->
       Application.delete_env(:fermix_channels, :telegram)
     end)
 
-    {:ok, conversation_store: conversation_store, registry: registry}
+    {:ok, conversation_store: conversation_store, capability_registry: capability_registry}
   end
 
   describe "full pipeline: webhook → agent → response" do
     test "simple message gets agent response", %{
       conversation_store: cs,
-      registry: reg
+      capability_registry: caps
     } do
       test_pid = self()
 
@@ -187,7 +190,7 @@ defmodule FermixWebWeb.IntegrationTest do
            [
              name: :"agent_integration_#{System.unique_integer()}",
              provider: MockProvider,
-             registry: reg,
+             capability_registry: caps,
              conversation_store: cs
            ]}
         )
@@ -215,12 +218,16 @@ defmodule FermixWebWeb.IntegrationTest do
 
     test "message with tool call executes tool and responds", %{
       conversation_store: cs,
-      registry: reg
+      capability_registry: caps
     } do
       test_pid = self()
 
-      # Register shell tool
-      Registry.register(reg, FermixCore.Tools.Shell)
+      # Register shell as a built-in capability
+      :ok =
+        CapabilityRegistry.register(
+          caps,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.Shell)
+        )
 
       agent =
         start_supervised!(
@@ -228,7 +235,7 @@ defmodule FermixWebWeb.IntegrationTest do
            [
              name: :"agent_tool_#{System.unique_integer()}",
              provider: ToolCallProvider,
-             registry: reg,
+             capability_registry: caps,
              conversation_store: cs
            ]}
         )
@@ -252,7 +259,7 @@ defmodule FermixWebWeb.IntegrationTest do
     test "telegram webhook route is removed (polling only)", %{
       conn: conn,
       conversation_store: _cs,
-      registry: _reg
+      capability_registry: _caps
     } do
       payload = %{
         "update_id" => 123_456,

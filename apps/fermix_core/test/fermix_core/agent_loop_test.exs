@@ -3,8 +3,8 @@ defmodule FermixCore.AgentLoopTest do
 
   alias FermixCore.AgentLoop
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
+  alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Tools.Tool
 
   # -- Mock adapter --
 
