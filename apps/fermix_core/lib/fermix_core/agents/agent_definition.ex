@@ -2,10 +2,21 @@ defmodule FermixCore.Agents.AgentDefinition do
   @moduledoc """
   Immutable description of a main or skill agent.
 
-  M2 uses this struct as the filesystem-backed contract for skill discovery.
+  Loaded from a SKILL.md frontmatter map. `trust` is set by `SkillRegistry`
+  from the on-disk path (operators can't self-declare `:core`); `policy`
+  comes from frontmatter and is parsed strictly — unknown classes raise.
+
+  `allowed_tools` is 3-state by design:
+
+    * `nil`   — field absent. Sub-agent uses the trust-level default policy.
+    * `[]`    — explicit empty. Sub-agent gets no capabilities.
+    * `[..]`  — exact name allowlist (still subject to `policy`/trust).
   """
 
+  alias FermixCore.Capabilities.Capability
+
   @type role :: :main | :sub
+  @type source :: :core | :local | :third_party
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -15,7 +26,9 @@ defmodule FermixCore.Agents.AgentDefinition do
           model: String.t() | nil,
           temperature: float() | nil,
           capabilities: [String.t()],
-          allowed_tools: [String.t()],
+          allowed_tools: [String.t()] | nil,
+          policy: [Capability.policy_class()] | nil,
+          trust: source() | nil,
           max_iterations: pos_integer(),
           timeout_seconds: pos_integer(),
           parent: String.t() | nil,
@@ -44,12 +57,17 @@ defmodule FermixCore.Agents.AgentDefinition do
     :temperature,
     :capabilities,
     :allowed_tools,
+    :policy,
+    :trust,
     :max_iterations,
     :timeout_seconds,
     :parent,
     :delegates_to,
     :source_path
   ]
+
+  @absent_sentinel :__absent__
+  @valid_policy_strings ~w(read_only read_write exec network external_api)
 
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_map(attrs) do
@@ -61,7 +79,11 @@ defmodule FermixCore.Agents.AgentDefinition do
            parse_persistent(get(attrs, "persistent", default_persistent(role)), role),
          {:ok, max_iterations} <- parse_positive_integer(get(attrs, "max_iterations", 25)),
          {:ok, timeout_seconds} <- parse_positive_integer(get(attrs, "timeout_seconds", 300)),
-         {:ok, temperature} <- parse_optional_float(get(attrs, "temperature")) do
+         {:ok, temperature} <- parse_optional_float(get(attrs, "temperature")),
+         {:ok, allowed_tools} <-
+           parse_allowed_tools(get(attrs, "allowed_tools", @absent_sentinel)),
+         {:ok, policy} <- parse_policy(get(attrs, "policy")),
+         {:ok, trust} <- parse_trust(get(attrs, "trust")) do
       {:ok,
        %__MODULE__{
          name: name,
@@ -71,7 +93,9 @@ defmodule FermixCore.Agents.AgentDefinition do
          model: optional_string(get(attrs, "model")),
          temperature: temperature,
          capabilities: normalize_string_list(get(attrs, "capabilities", [])),
-         allowed_tools: normalize_string_list(get(attrs, "allowed_tools", [])),
+         allowed_tools: allowed_tools,
+         policy: policy,
+         trust: trust,
          max_iterations: max_iterations,
          timeout_seconds: timeout_seconds,
          parent: optional_string(get(attrs, "parent")),
@@ -79,6 +103,16 @@ defmodule FermixCore.Agents.AgentDefinition do
          source_path: optional_string(get(attrs, "source_path"))
        }}
     end
+  end
+
+  @doc """
+  Tag an existing definition with its trust source. Used by `SkillRegistry`
+  after path-based classification.
+  """
+  @spec with_trust(t(), source()) :: t()
+  def with_trust(%__MODULE__{} = definition, trust)
+      when trust in [:core, :local, :third_party] do
+    %{definition | trust: trust}
   end
 
   defp get(attrs, key, default \\ nil) do
@@ -166,6 +200,40 @@ defmodule FermixCore.Agents.AgentDefinition do
   end
 
   defp parse_optional_float(value), do: {:error, {:invalid_float, value}}
+
+  defp parse_allowed_tools(@absent_sentinel), do: {:ok, nil}
+  defp parse_allowed_tools(nil), do: {:ok, nil}
+  defp parse_allowed_tools(list) when is_list(list), do: {:ok, normalize_string_list(list)}
+  defp parse_allowed_tools(other), do: {:error, {:invalid_allowed_tools, other}}
+
+  defp parse_policy(nil), do: {:ok, nil}
+
+  defp parse_policy(value) when is_binary(value), do: parse_policy([value])
+
+  defp parse_policy(values) when is_list(values) do
+    Enum.reduce_while(values, {:ok, []}, fn value, {:ok, acc} ->
+      case parse_policy_class(value) do
+        {:ok, class} -> {:cont, {:ok, [class | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, classes} -> {:ok, Enum.reverse(classes)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp parse_policy(other), do: {:error, {:invalid_policy, other}}
+
+  defp parse_policy_class(value) when is_binary(value) and value in @valid_policy_strings do
+    {:ok, String.to_existing_atom(value)}
+  end
+
+  defp parse_policy_class(value), do: {:error, {:invalid_policy_class, value}}
+
+  defp parse_trust(nil), do: {:ok, nil}
+  defp parse_trust(value) when value in [:core, :local, :third_party], do: {:ok, value}
+  defp parse_trust(other), do: {:error, {:invalid_trust, other}}
 
   defp normalize_string_list(values) when is_list(values) do
     Enum.map(values, &to_string/1)
