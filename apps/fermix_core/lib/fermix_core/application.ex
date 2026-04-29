@@ -11,6 +11,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
@@ -85,6 +87,7 @@ defmodule FermixCore.Application do
         maybe_token_manager(),
         SkillRegistry,
         Registry,
+        CapabilityRegistry,
         Repo,
         ConversationStore,
         Store,
@@ -101,6 +104,7 @@ defmodule FermixCore.Application do
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
       register_tools()
+      register_builtin_capabilities()
       {:ok, pid}
     end
   end
@@ -129,6 +133,18 @@ defmodule FermixCore.Application do
       case Registry.register(tool) do
         :ok -> :ok
         {:error, :already_registered} -> :ok
+      end
+    end)
+  end
+
+  defp register_builtin_capabilities do
+    Registry.all_tools()
+    |> Enum.each(fn tool_module ->
+      capability = BuiltinCapability.from_tool_module(tool_module)
+
+      case CapabilityRegistry.register(capability) do
+        :ok -> :ok
+        {:error, {:duplicate_name, _}} -> :ok
       end
     end)
   end

@@ -1,0 +1,87 @@
+defmodule FermixCore.Providers.AdapterTest do
+  use ExUnit.Case, async: true
+
+  alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.Anthropic.Messages, as: AnthropicMessages
+  alias FermixCore.Providers.OpenAI.ChatCompletions
+  alias FermixCore.Providers.OpenAI.Codex
+  alias FermixCore.Providers.OpenAI.Responses
+
+  describe "for_route/1" do
+    test "openai_codex provider routes to Codex regardless of model" do
+      assert Adapter.for_route(%{
+               provider: :openai_codex,
+               model: "gpt-5",
+               auth_mode: :oauth,
+               base_url: "https://chatgpt.com/backend-api/codex"
+             }) == Codex
+    end
+
+    test "openai + gpt model on api.openai.com routes to Responses" do
+      assert Adapter.for_route(%{
+               provider: :openai,
+               model: "gpt-5.4-mini",
+               auth_mode: :api_key,
+               base_url: "https://api.openai.com/v1"
+             }) == Responses
+    end
+
+    test "openai + o-series model on api.openai.com routes to Responses" do
+      assert Adapter.for_route(%{
+               provider: :openai,
+               model: "o4-mini",
+               auth_mode: :api_key,
+               base_url: "https://api.openai.com/v1"
+             }) == Responses
+    end
+
+    test "openai + gpt model on a non-openai base url routes to ChatCompletions" do
+      assert Adapter.for_route(%{
+               provider: :openai,
+               model: "gpt-5.4-mini",
+               auth_mode: :api_key,
+               base_url: "https://openrouter.ai/api/v1"
+             }) == ChatCompletions
+    end
+
+    test "openai + non-eligible model on api.openai.com routes to ChatCompletions" do
+      assert Adapter.for_route(%{
+               provider: :openai,
+               model: "babbage-002",
+               auth_mode: :api_key,
+               base_url: "https://api.openai.com/v1"
+             }) == ChatCompletions
+    end
+
+    test "anthropic provider routes to Messages" do
+      assert Adapter.for_route(%{
+               provider: :anthropic,
+               model: "claude-4-5-sonnet",
+               auth_mode: :api_key,
+               base_url: "https://api.anthropic.com"
+             }) == AnthropicMessages
+    end
+
+    for provider <- [:openrouter, :together, :groq] do
+      test "#{provider} routes to ChatCompletions" do
+        assert Adapter.for_route(%{
+                 provider: unquote(provider),
+                 model: "any-model",
+                 auth_mode: :api_key,
+                 base_url: "https://example.test/v1"
+               }) == ChatCompletions
+      end
+    end
+
+    test "raises ArgumentError when no adapter matches" do
+      assert_raise ArgumentError, ~r/no adapter for/, fn ->
+        Adapter.for_route(%{
+          provider: :unknown,
+          model: "x",
+          auth_mode: :api_key,
+          base_url: "https://example.test"
+        })
+      end
+    end
+  end
+end

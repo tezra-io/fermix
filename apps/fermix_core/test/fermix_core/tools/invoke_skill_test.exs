@@ -8,6 +8,7 @@ defmodule FermixCore.Tools.InvokeSkillTest do
 
   defmodule MockProvider do
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
     @responses :invoke_skill_mock_responses
 
@@ -38,16 +39,78 @@ defmodule FermixCore.Tools.InvokeSkillTest do
       end
     end
 
-    @impl true
-    def chat(_messages, _opts) do
+    @impl FermixCore.Providers.Provider
+    def chat(_messages, _opts), do: pop_response()
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["mock-model"]}
+
+    @impl FermixCore.Providers.Adapter
+    def chat(messages, capabilities, _opts) do
+      case pop_response() do
+        {:ok, response} -> {:ok, to_turn(response, messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def continue(provider_state, tool_results, opts) do
+      capabilities = Map.get(provider_state, :capabilities, [])
+      prior = Map.get(provider_state, :messages, [])
+
+      tool_messages =
+        Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
+          %{role: "tool", tool_call_id: call_id, content: to_string(output)}
+        end)
+
+      next_messages = prior ++ tool_messages
+      chat(next_messages, capabilities, opts)
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_response), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp pop_response do
       Agent.get_and_update(@responses, fn
         [next | rest] -> {next, rest}
         [] -> {{:error, "No mock responses left"}, []}
       end)
     end
 
-    @impl true
-    def models, do: {:ok, ["mock-model"]}
+    defp to_turn(%{content: content, usage: usage} = response, messages, capabilities) do
+      tool_calls = normalize_tool_calls(Map.get(response, :tool_calls, []))
+      assistant = %{role: "assistant", content: content || ""}
+
+      %{
+        content: content || "",
+        tool_calls: tool_calls,
+        provider_state: %{
+          messages: messages ++ [assistant],
+          capabilities: capabilities
+        },
+        usage: usage,
+        model: Map.get(response, :model, "mock-model")
+      }
+    end
+
+    defp normalize_tool_calls(calls) do
+      Enum.map(calls, fn
+        %{"id" => id, "function" => %{"name" => name, "arguments" => args}} ->
+          %{id: id, call_id: id, name: name, arguments: args}
+
+        %{name: _name, arguments: _args} = call ->
+          Map.put_new(call, :call_id, Map.get(call, :id))
+      end)
+    end
   end
 
   defp mock_response(content, opts \\ []) do

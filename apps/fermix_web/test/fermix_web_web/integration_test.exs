@@ -16,60 +16,145 @@ defmodule FermixWebWeb.IntegrationTest do
   defmodule MockProvider do
     @moduledoc false
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
-    @impl true
-    def chat(_messages, _opts) do
-      {:ok,
-       %{
-         content: "Hello from the integration test!",
-         tool_calls: [],
-         usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15},
-         model: "mock-model"
-       }}
+    @impl FermixCore.Providers.Provider
+    def chat(_messages, _opts), do: {:ok, response()}
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["mock-model"]}
+
+    @impl FermixCore.Providers.Adapter
+    def chat(_messages, _capabilities, _opts), do: {:ok, turn()}
+
+    @impl FermixCore.Providers.Adapter
+    def continue(_provider_state, _tool_results, _opts), do: {:ok, turn()}
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_response), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp response do
+      %{
+        content: "Hello from the integration test!",
+        tool_calls: [],
+        usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15},
+        model: "mock-model"
+      }
     end
 
-    @impl true
-    def models, do: {:ok, ["mock-model"]}
+    defp turn do
+      %{
+        content: "Hello from the integration test!",
+        tool_calls: [],
+        provider_state: %{},
+        usage: %{prompt_tokens: 10, completion_tokens: 5, total_tokens: 15},
+        model: "mock-model"
+      }
+    end
   end
 
   defmodule ToolCallProvider do
     @moduledoc false
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
-    @impl true
+    @impl FermixCore.Providers.Provider
     def chat(messages, _opts) do
       has_tool_result = Enum.any?(messages, &(&1.role == "tool" || &1[:role] == "tool"))
-
-      if has_tool_result do
-        {:ok,
-         %{
-           content: "The command output was captured.",
-           tool_calls: [],
-           usage: %{prompt_tokens: 20, completion_tokens: 10, total_tokens: 30},
-           model: "mock-model"
-         }}
-      else
-        {:ok,
-         %{
-           content: "",
-           tool_calls: [
-             %{
-               "id" => "call_1",
-               "type" => "function",
-               "function" => %{
-                 "name" => "shell",
-                 "arguments" => Jason.encode!(%{"command" => "echo integration-test"})
-               }
-             }
-           ],
-           usage: %{prompt_tokens: 15, completion_tokens: 8, total_tokens: 23},
-           model: "mock-model"
-         }}
-      end
+      {:ok, legacy_response(has_tool_result)}
     end
 
-    @impl true
+    @impl FermixCore.Providers.Provider
     def models, do: {:ok, ["mock-model"]}
+
+    @impl FermixCore.Providers.Adapter
+    def chat(_messages, capabilities, _opts) do
+      {:ok, turn(initial_tool_calls(), capabilities)}
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def continue(provider_state, _tool_results, _opts) do
+      capabilities = Map.get(provider_state, :capabilities, [])
+
+      turn = %{
+        content: "The command output was captured.",
+        tool_calls: [],
+        provider_state: %{capabilities: capabilities},
+        usage: %{prompt_tokens: 20, completion_tokens: 10, total_tokens: 30},
+        model: "mock-model"
+      }
+
+      {:ok, turn}
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_response), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp initial_tool_calls do
+      [
+        %{
+          id: "call_1",
+          call_id: "call_1",
+          name: "shell",
+          arguments: Jason.encode!(%{"command" => "echo integration-test"})
+        }
+      ]
+    end
+
+    defp turn(tool_calls, capabilities) do
+      %{
+        content: "",
+        tool_calls: tool_calls,
+        provider_state: %{capabilities: capabilities},
+        usage: %{prompt_tokens: 15, completion_tokens: 8, total_tokens: 23},
+        model: "mock-model"
+      }
+    end
+
+    defp legacy_response(true) do
+      %{
+        content: "The command output was captured.",
+        tool_calls: [],
+        usage: %{prompt_tokens: 20, completion_tokens: 10, total_tokens: 30},
+        model: "mock-model"
+      }
+    end
+
+    defp legacy_response(false) do
+      %{
+        content: "",
+        tool_calls: [
+          %{
+            "id" => "call_1",
+            "type" => "function",
+            "function" => %{
+              "name" => "shell",
+              "arguments" => Jason.encode!(%{"command" => "echo integration-test"})
+            }
+          }
+        ],
+        usage: %{prompt_tokens: 15, completion_tokens: 8, total_tokens: 23},
+        model: "mock-model"
+      }
+    end
   end
 
   setup do

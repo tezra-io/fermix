@@ -15,6 +15,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
   defmodule MockProvider do
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
     @responses :main_agent_mock_responses
     @calls :main_agent_mock_calls
@@ -55,8 +56,93 @@ defmodule FermixCore.Agents.MainAgentTest do
       end
     end
 
-    @impl true
+    @impl FermixCore.Providers.Provider
     def chat(messages, opts) do
+      record_and_reply(messages, opts)
+    end
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["mock-model"]}
+
+    # --- Adapter interface ---
+
+    @impl FermixCore.Providers.Adapter
+    def chat(messages, capabilities, opts) do
+      adapter_opts = Keyword.put(opts, :capabilities, capabilities)
+
+      case record_and_reply(messages, adapter_opts) do
+        {:ok, response} -> {:ok, to_turn(response, messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def continue(provider_state, tool_results, opts) do
+      capabilities = Map.get(provider_state, :capabilities, [])
+
+      tool_messages =
+        Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
+          %{role: "tool", tool_call_id: call_id, content: to_string(output)}
+        end)
+
+      prior = Map.get(provider_state, :messages, [])
+      next_messages = prior ++ tool_messages
+
+      adapter_opts = Keyword.put(opts, :capabilities, capabilities)
+
+      case record_and_reply(next_messages, adapter_opts) do
+        {:ok, response} -> {:ok, to_turn(response, next_messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_response), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp to_turn(%{content: content, usage: usage} = response, messages, capabilities) do
+      tool_calls = normalize_tool_calls(Map.get(response, :tool_calls, []))
+      assistant = build_assistant_message(content, tool_calls)
+
+      %{
+        content: content || "",
+        tool_calls: tool_calls,
+        provider_state: %{
+          messages: messages ++ [assistant],
+          capabilities: capabilities
+        },
+        usage: usage,
+        model: Map.get(response, :model, "mock-model")
+      }
+    end
+
+    defp build_assistant_message(content, []) do
+      %{role: "assistant", content: content || ""}
+    end
+
+    defp build_assistant_message(content, tool_calls) do
+      %{role: "assistant", content: content || "", tool_calls: tool_calls}
+    end
+
+    defp normalize_tool_calls(calls) do
+      Enum.map(calls, fn
+        %{"id" => id, "function" => %{"name" => name, "arguments" => args}} ->
+          %{id: id, call_id: id, name: name, arguments: args}
+
+        %{name: _name, arguments: _args} = call ->
+          Map.put_new(call, :call_id, Map.get(call, :id))
+      end)
+    end
+
+    defp record_and_reply(messages, opts) do
       Agent.update(@calls, fn calls -> calls ++ [{messages, opts}] end)
 
       user_content =
@@ -88,13 +174,11 @@ defmodule FermixCore.Agents.MainAgentTest do
           {{:error, "No mock responses left"}, []}
       end)
     end
-
-    @impl true
-    def models, do: {:ok, ["mock-model"]}
   end
 
   defmodule ControlledProvider do
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
     @state :main_agent_controlled_provider
 
@@ -122,8 +206,85 @@ defmodule FermixCore.Agents.MainAgentTest do
       if Process.whereis(@state), do: Agent.stop(@state)
     end
 
-    @impl true
-    def chat(messages, opts) do
+    @impl FermixCore.Providers.Provider
+    def chat(messages, opts), do: dispatch(messages, opts)
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["controlled-model"]}
+
+    @impl FermixCore.Providers.Adapter
+    def chat(messages, capabilities, opts) do
+      case dispatch(messages, Keyword.put(opts, :capabilities, capabilities)) do
+        {:ok, response} -> {:ok, to_turn(response, messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def continue(provider_state, tool_results, opts) do
+      capabilities = Map.get(provider_state, :capabilities, [])
+
+      tool_messages =
+        Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
+          %{role: "tool", tool_call_id: call_id, content: to_string(output)}
+        end)
+
+      prior = Map.get(provider_state, :messages, [])
+      next_messages = prior ++ tool_messages
+
+      case dispatch(next_messages, Keyword.put(opts, :capabilities, capabilities)) do
+        {:ok, response} -> {:ok, to_turn(response, next_messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp to_turn(%{content: content, usage: usage} = response, messages, capabilities) do
+      tool_calls = normalize_tool_calls(Map.get(response, :tool_calls, []))
+      assistant = build_assistant_message(content, tool_calls)
+
+      %{
+        content: content || "",
+        tool_calls: tool_calls,
+        provider_state: %{
+          messages: messages ++ [assistant],
+          capabilities: capabilities
+        },
+        usage: usage,
+        model: Map.get(response, :model, "controlled-model")
+      }
+    end
+
+    defp build_assistant_message(content, []) do
+      %{role: "assistant", content: content || ""}
+    end
+
+    defp build_assistant_message(content, tool_calls) do
+      %{role: "assistant", content: content || "", tool_calls: tool_calls}
+    end
+
+    defp normalize_tool_calls(calls) do
+      Enum.map(calls, fn
+        %{"id" => id, "function" => %{"name" => name, "arguments" => args}} ->
+          %{id: id, call_id: id, name: name, arguments: args}
+
+        %{name: _name, arguments: _args} = call ->
+          Map.put_new(call, :call_id, Map.get(call, :id))
+      end)
+    end
+
+    defp dispatch(messages, opts) do
       user_content =
         messages
         |> Enum.reverse()
@@ -151,9 +312,6 @@ defmodule FermixCore.Agents.MainAgentTest do
           response
       end
     end
-
-    @impl true
-    def models, do: {:ok, ["controlled-model"]}
   end
 
   # -- Helpers --
@@ -912,7 +1070,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert length(calls) == 3
 
       {_main_messages, main_opts} = hd(calls)
-      assert Enum.any?(main_opts[:tools], &(&1.function.name == "invoke_skill"))
+      assert Enum.any?(main_opts[:capabilities], &(&1.name == "invoke_skill"))
 
       {skill_messages, skill_opts} = Enum.at(calls, 1)
       assert hd(skill_messages).content == "You solve code tasks."
