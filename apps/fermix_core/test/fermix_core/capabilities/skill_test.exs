@@ -5,7 +5,6 @@ defmodule FermixCore.Capabilities.SkillTest do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Skill
-  alias FermixCore.Tools.Registry
 
   defmodule MockProvider do
     @behaviour FermixCore.Providers.Provider
@@ -130,13 +129,11 @@ defmodule FermixCore.Capabilities.SkillTest do
   setup do
     :ok = MockProvider.init()
     suffix = System.unique_integer([:positive])
-    registry_name = :"skill_capability_registry_#{suffix}"
     agent_supervisor_name = :"skill_capability_agent_supervisor_#{suffix}"
     task_supervisor_name = :"skill_capability_task_supervisor_#{suffix}"
     journal_dir = Path.join(System.tmp_dir!(), "skill-capability-journals-#{suffix}")
 
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor_name})
-    {:ok, _} = start_supervised({Registry, [name: registry_name]})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor_name})
 
     on_exit(fn ->
@@ -145,7 +142,6 @@ defmodule FermixCore.Capabilities.SkillTest do
     end)
 
     %{
-      registry: registry_name,
       agent_supervisor: agent_supervisor_name,
       task_supervisor: task_supervisor_name,
       journal_dir: journal_dir
@@ -172,7 +168,6 @@ defmodule FermixCore.Capabilities.SkillTest do
 
   describe "invoke/3" do
     test "spawns sub-agent, returns success tool result, and writes journal", %{
-      registry: registry,
       agent_supervisor: agent_supervisor,
       task_supervisor: task_supervisor,
       journal_dir: journal_dir
@@ -184,7 +179,6 @@ defmodule FermixCore.Capabilities.SkillTest do
         agent_name: "main",
         session_id: "main-session",
         provider: MockProvider,
-        registry: registry,
         agent_supervisor: agent_supervisor,
         task_supervisor: task_supervisor,
         journal_base_dir: journal_dir,
@@ -229,7 +223,6 @@ defmodule FermixCore.Capabilities.SkillTest do
     end
 
     test "caps recursion at max_skill_depth and emits telemetry", %{
-      registry: registry,
       agent_supervisor: agent_supervisor,
       task_supervisor: task_supervisor,
       journal_dir: journal_dir
@@ -254,7 +247,6 @@ defmodule FermixCore.Capabilities.SkillTest do
         agent_name: "main",
         session_id: "main-session",
         provider: MockProvider,
-        registry: registry,
         agent_supervisor: agent_supervisor,
         task_supervisor: task_supervisor,
         journal_base_dir: journal_dir,
@@ -273,7 +265,6 @@ defmodule FermixCore.Capabilities.SkillTest do
     end
 
     test "missing task arg returns a tool error before spawn", %{
-      registry: registry,
       agent_supervisor: agent_supervisor,
       task_supervisor: task_supervisor,
       journal_dir: journal_dir
@@ -284,7 +275,6 @@ defmodule FermixCore.Capabilities.SkillTest do
         agent_name: "main",
         session_id: "main-session",
         provider: MockProvider,
-        registry: registry,
         agent_supervisor: agent_supervisor,
         task_supervisor: task_supervisor,
         journal_base_dir: journal_dir,

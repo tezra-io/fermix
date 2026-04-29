@@ -28,7 +28,6 @@ defmodule FermixCore.Agents.AgentSupervisor do
       parent_name: Keyword.get(opts, :parent_name),
       parent_session: Keyword.get(opts, :parent_session),
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
-      registry: Keyword.get(opts, :registry, FermixCore.Tools.Registry),
       capability_registry:
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)

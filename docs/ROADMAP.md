@@ -186,6 +186,39 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 
 ---
 
+## Milestone 4.9: Unified Capabilities (Skills, Tools, MCP, Provider Adapters) — _Shipped_
+
+**Goal:** Collapse `Tools.Registry` and `SkillRegistry` into a single `CapabilityRegistry` exposing built-in tools, skills, and MCP-server tools through one shape. Add a per-provider `Adapter` layer so each provider gets its native tool schema. Route `gpt-*` to the OpenAI Responses API. Integrate MCP outbound via `hermes_mcp`. Implementation is OpenAI-only, but the abstraction is multi-provider.
+
+See `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **`Capability` behaviour** | Single contract for built-in tools, skills, and MCP tools — `name`, `description`, `parameters`, `execute`, `kind` | P0 | New | hermes-agent registry pattern | M |
+| **`CapabilityRegistry`** | One GenServer replacing `Tools.Registry`; sources from built-ins, `SkillRegistry`, MCP supervisor | P0 | New | N/A | M |
+| **Per-provider `Adapter` layer** | Behaviour + per-provider modules; `to_provider_tools`, `chat`, `parse_tool_calls` | P0 | New | hermes-agent api_mode pattern | M |
+| **OpenAI Responses adapter** | `/v1/responses` with `strict: false` function tools; deterministic call IDs for cache stability | P0 | New | hermes-agent `_responses_tools` | M |
+| **OpenAI Chat Completions adapter** | Extracted from existing `Providers.OpenAI`; fallback for OpenAI-compatible providers | P0 | Refactor | N/A | S |
+| **`Adapter.for_model/1` routing** | `gpt-*` → Responses, `claude-*` → Anthropic, default → ChatCompletions | P0 | New | N/A | S |
+| **Each-skill-as-tool exposure** | Replaces `invoke_skill` meta-tool with per-skill capabilities; sub-agent spawn inside `Skill.Capability.execute/2` | P0 | Rewrite | OpenCode meta-tool comparison | M |
+| **Force-skill instruction** | Sub-agent system-prompt prepend: "You are running as the X skill" | P0 | New | N/A | S |
+| **Sub-agent global capability inheritance** | Default = sub-agent sees parent's full registry; `allowed_tools` is opt-out | P0 | Refactor | N/A | S |
+| **`max_skill_depth` recursion cap** | Default 4; context-propagated; fail loud past it | P0 | New | N/A | S |
+| **MCP outbound integration** | `hermes_mcp` dependency; `MCP.Supervisor` boots configured stdio servers; tools register as namespaced capabilities | P0 | New | [hermes_mcp](https://hexdocs.pm/hermes_mcp), hermes-agent `_convert_mcp_schema` | M |
+| **`[mcp.servers.<name>]` config** | TOML block with `command`, `args`, `env`; `$env:VAR` prefix for shell-env references | P0 | New | N/A | S |
+| **Anthropic adapter scaffold** | Real `to_provider_tools` (input_schema rename); `chat/3` returns `{:error, :not_implemented}` until tokens land | P1 | New | N/A | S |
+| **Per-skill `provider:` override** | Optional frontmatter field; lets skills pin a specific provider | P1 | New | N/A | S |
+| **Telemetry uniformity** | `[:fermix, :capability, :exec]` across all kinds; replaces per-tool/per-skill events with overlap during migration | P1 | Refactor | N/A | S |
+| **Removal of `Tools.Registry`, `Tools.Tool`, `Tools.InvokeSkill`** | After Stage 4 cutover; no deprecation shim — fermix has 3 baked skills, no external consumers | P0 | Removal | N/A | S |
+
+**Migration safety:** Stages 1–4 run old + new registries side-by-side; old path deletion happens only at Stage 4 ship gate. Behaviour fixtures pin OpenAI request bodies for each baked skill across the migration. End-to-end Telegram smoke test required at every stage gate.
+
+**Multi-provider note:** The `Additional Providers (Ongoing)` section's "OpenAI Responses API unification" item is absorbed by this milestone. The `Reliable wrapper`, `Router provider`, and concrete `Anthropic`, `Gemini`, `OpenRouter`, `Ollama` adapters remain separate work items — M4.9 only delivers the abstraction layer they will plug into.
+
+**Milestone 4.9 Total Effort:** ~3-4 weeks
+
+---
+
 ## Milestone 5: Security & Governance
 
 **Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering.
@@ -331,7 +364,7 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
-| **OpenAI Responses API unification** | Migrate api_key path from Chat Completions to official Responses API; unify with oauth path | P1 | New | N/A | S |
+| **OpenAI Responses API unification** | _Absorbed by M4.9 (Unified Capabilities) — see `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md`._ Migrate api_key path from Chat Completions to official Responses API; unify with oauth path | P1 | New | N/A | S |
 | **OpenRouter provider** | Meta-provider for many models | P1 | Rewrite | `src/providers/openrouter.rs` | M |
 | **Ollama provider** | Local model support | P1 | Rewrite | `src/providers/ollama.rs` | M |
 | **Gemini provider** | Google Gemini API | P1 | Rewrite | `src/providers/gemini.rs` | L |

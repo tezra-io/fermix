@@ -9,7 +9,6 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
-  alias FermixCore.Tools.Registry
 
   # -- Mock provider backed by named Agent for cross-process access --
 
@@ -399,7 +398,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     :ok = MockProvider.init()
 
     suffix = System.unique_integer([:positive])
-    registry_name = :"test_registry_#{suffix}"
     skill_registry_name = :"test_skill_registry_#{suffix}"
     capability_registry_name = :"test_capability_registry_#{suffix}"
     conv_name = :"test_conv_#{suffix}"
@@ -429,8 +427,6 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     {:ok, _} =
       start_supervised({Task.Supervisor, name: task_sup_name}, id: :test_task_sup)
-
-    {:ok, _} = start_supervised({Registry, [name: registry_name]}, id: :test_registry)
 
     {:ok, _} =
       start_supervised({CapabilityRegistry, [name: capability_registry_name]},
@@ -462,7 +458,6 @@ defmodule FermixCore.Agents.MainAgentTest do
          [
            name: agent_name,
            provider: MockProvider,
-           registry: registry_name,
            capability_registry: capability_registry_name,
            agent_supervisor: agent_supervisor_name,
            skill_registry: skill_registry_name,
@@ -485,7 +480,6 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     %{
       agent: agent_name,
-      registry: registry_name,
       skill_registry: skill_registry_name,
       capability_registry: capability_registry_name,
       conv_store: conv_name,
@@ -748,7 +742,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "clears pending state and replies when request task cannot start", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store
     } do
@@ -768,7 +761,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_sup_name
@@ -798,7 +790,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "skips background extraction when extraction is disabled", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -811,7 +802,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -830,7 +820,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "does not block reply delivery while background extraction is slow", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -843,7 +832,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -866,7 +854,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "passes Telegram shared-chat metadata through to background extraction", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -879,7 +866,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -919,7 +905,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "keeps reply handling successful when background extraction fails", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -932,7 +917,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -954,7 +938,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "debounces rapid-fire extraction without blocking replies", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -968,7 +951,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -1087,7 +1069,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "supersedes an in-flight request with the newest same-conversation message", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -1113,7 +1094,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: ControlledProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor
@@ -1180,7 +1160,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "keeps different conversations independent while one chat has blocked work", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -1207,7 +1186,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: ControlledProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor

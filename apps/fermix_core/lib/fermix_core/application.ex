@@ -21,7 +21,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Store
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
-  alias FermixCore.Tools.Registry
   alias FermixCore.Trace
 
   @impl true
@@ -86,7 +85,6 @@ defmodule FermixCore.Application do
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Trace, trace_opts()},
         maybe_token_manager(),
-        Registry,
         CapabilityRegistry,
         {SkillRegistry, capability_registry: CapabilityRegistry},
         {McpSupervisor, capability_registry: CapabilityRegistry},
@@ -105,8 +103,7 @@ defmodule FermixCore.Application do
     opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
 
     with {:ok, pid} <- Supervisor.start_link(children, opts) do
-      register_tools()
-      register_builtin_capabilities()
+      register_builtins()
       {:ok, pid}
     end
   end
@@ -120,8 +117,8 @@ defmodule FermixCore.Application do
       1
   end
 
-  defp register_tools do
-    tools = [
+  defp register_builtins do
+    [
       FermixCore.Tools.Shell,
       FermixCore.Tools.FileRead,
       FermixCore.Tools.FileWrite,
@@ -129,17 +126,6 @@ defmodule FermixCore.Application do
       FermixCore.Tools.MemoryRecall,
       FermixCore.Tools.Browser
     ]
-
-    Enum.each(tools, fn tool ->
-      case Registry.register(tool) do
-        :ok -> :ok
-        {:error, :already_registered} -> :ok
-      end
-    end)
-  end
-
-  defp register_builtin_capabilities do
-    Registry.all_tools()
     |> Enum.each(fn tool_module ->
       capability = BuiltinCapability.from_tool_module(tool_module)
 

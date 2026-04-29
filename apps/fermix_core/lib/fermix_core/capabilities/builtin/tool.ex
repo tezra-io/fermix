@@ -1,10 +1,16 @@
-defmodule FermixCore.Tools.Tool do
+defmodule FermixCore.Capabilities.Builtin.Tool do
   @moduledoc """
-  Behaviour for all tool implementations.
+  Behaviour for built-in tool implementations.
 
-  Tools are functions that the agent can call during conversation loops.
-  Each tool must provide a JSON Schema for its parameters and execute
-  with the given arguments.
+  Built-in tools live in `FermixCore.Tools.*` and surface as
+  `kind: :builtin` capabilities through `FermixCore.Capabilities.Builtin.from_tool_module/1`.
+  Each module declares its name/description/JSON-Schema parameters and a
+  `c:execute/2` that returns a normalized result map.
+
+  This behaviour replaces the older `FermixCore.Tools.Tool` behaviour
+  removed in M4.9 Stage 7. Skill and MCP capabilities reuse `success/1`
+  and `error/1` here so every capability returns the same result shape
+  regardless of `kind`.
   """
 
   @type tool_result :: %{
@@ -23,18 +29,6 @@ defmodule FermixCore.Tools.Tool do
   @callback description() :: String.t()
   @callback parameters() :: map()
   @callback execute(map(), context()) :: {:ok, tool_result()} | {:error, term()}
-
-  @spec format_for_llm(module()) :: map()
-  def format_for_llm(tool_module) do
-    %{
-      type: "function",
-      function: %{
-        name: tool_module.name(),
-        description: tool_module.description(),
-        parameters: tool_module.parameters()
-      }
-    }
-  end
 
   @spec success(String.t()) :: tool_result()
   def success(output) when is_binary(output) do

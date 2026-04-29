@@ -6,6 +6,35 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.9 (Unified Capabilities)
+- Single `%FermixCore.Capabilities.Capability{}` shape for built-ins,
+  skills, and MCP server tools. ETS-backed `Capabilities.Registry`
+  serves the agent loop's hot path without a GenServer round-trip.
+- `Providers.Adapter` behaviour with deterministic `for_route/1`
+  routing on `(provider, model, auth_mode, base_url)`. OpenAI Responses
+  / Chat Completions / Codex extracted as separate adapters; Codex
+  treated as its own `:openai_codex` provider.
+- Skills surface as direct named tools — no `invoke_skill` meta-tool.
+  Sub-agent trust gate: third-party skills cannot reach `:exec` /
+  `:network` / `:external_api` capabilities; `allowed_tools` narrows by
+  name on top of policy.
+- MCP outbound integration via `hermes_mcp`. Per-server supervisor
+  isolates faults; async discovery with exponential backoff so one bad
+  server can't take down healthy peers. Tool name sanitization with
+  SHA256 collision suffix and 64-byte truncation matches OpenAI
+  Responses regex.
+- Anthropic adapter scaffold (`Providers.Anthropic.Messages`) with full
+  schema-translation coverage; `chat/3` returns `:not_implemented` until
+  the OAuth + token-storage milestone lands. `provider:` accepted in
+  skill frontmatter so per-skill provider overrides route end-to-end.
+
+### Removed — M4.9 cleanup
+- `FermixCore.Tools.Registry`, `FermixCore.Tools.Tool` behaviour, and
+  `FermixCore.Tools.InvokeSkill` are gone. Built-in tool modules now
+  implement `FermixCore.Capabilities.Builtin.Tool`. `Provider.chat_opts`
+  no longer carries a `:tools` field — capabilities flow through the
+  adapter, not provider opts.
+
 ### Fixed — M4.8 review
 - `scripts/release/build_releases_json.sh` previously rewrote every
   underscore in the artifact filename, turning `fermix_macos_x86_64`

@@ -1,15 +1,11 @@
 defmodule FermixCore.Capabilities.Builtin do
   @moduledoc """
-  Wraps an existing `FermixCore.Tools.Tool` module as a `%Capability{}` with
-  `kind: :builtin` and `executor: {ToolModule, :execute, []}`.
-
-  Stage 1 keeps `Tools.Registry` running unchanged. The capability registry
-  mirrors built-in tools through this constructor at boot, so both
-  registries hold the same set during the migration window.
+  Wraps a `FermixCore.Capabilities.Builtin.Tool` module as a `%Capability{}`
+  with `kind: :builtin` and `executor: {ToolModule, :execute, []}`.
 
   Policy class defaults are pinned per built-in so the §4.6 sub-agent gate
-  has stable metadata to filter against the moment Stage 3 lands. Built-ins
-  not listed here default to `:read_only` — fail closed.
+  has stable metadata to filter against. Built-ins not listed here default
+  to `:read_only` — fail closed.
   """
 
   alias FermixCore.Capabilities.Capability
