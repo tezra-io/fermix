@@ -4,11 +4,11 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
-  alias FermixCore.Tools.InvokeSkill
   alias FermixCore.Tools.Registry
 
   # -- Mock provider backed by named Agent for cross-process access --
@@ -401,6 +401,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     suffix = System.unique_integer([:positive])
     registry_name = :"test_registry_#{suffix}"
     skill_registry_name = :"test_skill_registry_#{suffix}"
+    capability_registry_name = :"test_capability_registry_#{suffix}"
     conv_name = :"test_conv_#{suffix}"
     agent_name = :"test_main_agent_#{suffix}"
     task_sup_name = :"test_task_sup_#{suffix}"
@@ -432,9 +433,19 @@ defmodule FermixCore.Agents.MainAgentTest do
     {:ok, _} = start_supervised({Registry, [name: registry_name]}, id: :test_registry)
 
     {:ok, _} =
+      start_supervised({CapabilityRegistry, [name: capability_registry_name]},
+        id: :test_capability_registry
+      )
+
+    {:ok, _} =
       start_supervised(
         {SkillRegistry,
-         [name: skill_registry_name, skills_dir: skills_dir, seed_defaults: false]},
+         [
+           name: skill_registry_name,
+           skills_dir: skills_dir,
+           seed_defaults: false,
+           capability_registry: capability_registry_name
+         ]},
         id: :test_skill_registry
       )
 
@@ -452,6 +463,7 @@ defmodule FermixCore.Agents.MainAgentTest do
            name: agent_name,
            provider: MockProvider,
            registry: registry_name,
+           capability_registry: capability_registry_name,
            agent_supervisor: agent_supervisor_name,
            skill_registry: skill_registry_name,
            conversation_store: conv_name,
@@ -475,6 +487,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       agent: agent_name,
       registry: registry_name,
       skill_registry: skill_registry_name,
+      capability_registry: capability_registry_name,
       conv_store: conv_name,
       skills_dir: skills_dir,
       task_supervisor: task_sup_name,
@@ -1029,23 +1042,18 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert runtime.content =~ "tools=file_read"
     end
 
-    test "delegates through invoke_skill when the LLM requests a skill", %{
+    test "delegates to a skill capability when the LLM picks one by name", %{
       agent: agent,
-      registry: registry,
       skills_dir: skills_dir,
       journal_dir: journal_dir
     } do
       write_skill(skills_dir, "coding-skill", "You solve code tasks.")
       assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
-      assert :ok = Registry.register(registry, InvokeSkill)
 
       MockProvider.set_responses([
         mock_response("",
           tool_calls: [
-            tool_call("call_1", "invoke_skill", %{
-              "skill" => "coding-skill",
-              "task" => "Inspect the README"
-            })
+            tool_call("call_1", "coding-skill", %{"task" => "Inspect the README"})
           ]
         ),
         mock_response("Inspected the README and found the issue."),
@@ -1070,7 +1078,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert length(calls) == 3
 
       {_main_messages, main_opts} = hd(calls)
-      assert Enum.any?(main_opts[:capabilities], &(&1.name == "invoke_skill"))
+      coding_cap = Enum.find(main_opts[:capabilities], &(&1.name == "coding-skill"))
+      assert coding_cap.kind == :skill
 
       {skill_messages, skill_opts} = Enum.at(calls, 1)
       assert hd(skill_messages).content == "You solve code tasks."

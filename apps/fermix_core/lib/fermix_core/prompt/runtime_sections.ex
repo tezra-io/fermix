@@ -22,9 +22,9 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp runtime_contract do
     """
     ## Runtime Contract
-    - Tools are available through the tool registry for shell commands, file access, memory, browser actions, and delegated skills.
-    - Use direct tools when the task is narrow and the required tool is obvious.
-    - Use `invoke_skill` when a specialized skill is a better fit than handling the work directly.
+    - Capabilities are available through the capability registry for shell commands, file access, memory, browser actions, and skills.
+    - Use direct built-in capabilities when the task is narrow and the required capability is obvious.
+    - Pick a skill capability by name when a specialized skill is a better fit than handling the work directly.
     - Runtime capability snapshots change only after explicit reloads or process restart.
     """
     |> String.trim()
