@@ -10,7 +10,6 @@ defmodule FermixCore.Agents.AgentServer do
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Providers.RouteResolver
-  alias FermixCore.Tools.Registry
 
   @type run_context :: %{
           optional(:task_context) => String.t() | nil,
@@ -90,7 +89,6 @@ defmodule FermixCore.Agents.AgentServer do
       parent_ref: parent_ref,
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
-      registry: Keyword.get(opts, :registry, Registry),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       adapter_overrides: Keyword.get(opts, :adapter_overrides, []),
       pending_task: nil,
@@ -140,7 +138,6 @@ defmodule FermixCore.Agents.AgentServer do
           state.definition,
           state.session_id,
           state.provider,
-          state.registry,
           state.capability_registry,
           state.adapter_overrides,
           task,
@@ -241,7 +238,6 @@ defmodule FermixCore.Agents.AgentServer do
          definition,
          session_id,
          provider,
-         registry,
          capability_registry,
          adapter_overrides,
          task,
@@ -258,7 +254,7 @@ defmodule FermixCore.Agents.AgentServer do
       |> Map.merge(%{
         agent_name: definition.name,
         session_id: session_id,
-        registry: registry
+        capability_registry: capability_registry
       })
 
     base = [
