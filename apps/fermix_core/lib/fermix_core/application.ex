@@ -125,8 +125,7 @@ defmodule FermixCore.Application do
       FermixCore.Tools.FileWrite,
       FermixCore.Tools.MemoryStore,
       FermixCore.Tools.MemoryRecall,
-      FermixCore.Tools.Browser,
-      FermixCore.Tools.InvokeSkill
+      FermixCore.Tools.Browser
     ]
 
     Enum.each(tools, fn tool ->

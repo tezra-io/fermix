@@ -40,10 +40,5 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       cap = Builtin.from_tool_module(FermixCore.Tools.MemoryStore)
       assert cap.policy_class == :read_write
     end
-
-    test "wraps Tools.InvokeSkill with policy_class :exec" do
-      cap = Builtin.from_tool_module(FermixCore.Tools.InvokeSkill)
-      assert cap.policy_class == :exec
-    end
   end
 end

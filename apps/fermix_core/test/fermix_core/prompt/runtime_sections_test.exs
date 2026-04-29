@@ -8,10 +8,10 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     content = RuntimeSections.build([])
 
     assert content =~ "## Runtime Contract"
-    assert content =~ "Tools are available through the tool registry"
+    assert content =~ "Capabilities are available through the capability registry"
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
-    assert content =~ "`invoke_skill`"
+    assert content =~ "Pick a skill capability by name"
   end
 
   test "build/1 renders a compact skill catalog from available skills" do

@@ -77,6 +77,8 @@ defmodule FermixCore.Capabilities.Skill do
            parent_session: Map.get(context, :session_id),
            provider: Map.get(context, :provider, FermixCore.Providers.OpenAI),
            registry: Map.get(context, :registry, FermixCore.Tools.Registry),
+           capability_registry:
+             Map.get(context, :capability_registry, FermixCore.Capabilities.Registry),
            task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor)
          ) do
       {:ok, pid, session_id} ->

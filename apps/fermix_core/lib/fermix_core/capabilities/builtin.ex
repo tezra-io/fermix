@@ -20,11 +20,7 @@ defmodule FermixCore.Capabilities.Builtin do
     "file_write" => %{policy_class: :read_write, requires_approval?: false},
     "memory_recall" => %{policy_class: :read_only, requires_approval?: false},
     "memory_store" => %{policy_class: :read_write, requires_approval?: false},
-    "browser" => %{policy_class: :network, requires_approval?: false},
-    # Stage 3 deletes invoke_skill, but during the migration window it
-    # registers like any other built-in. It spawns a sub-agent so the class
-    # is :exec.
-    "invoke_skill" => %{policy_class: :exec, requires_approval?: false}
+    "browser" => %{policy_class: :network, requires_approval?: false}
   }
 
   @spec from_tool_module(module()) :: Capability.t()
