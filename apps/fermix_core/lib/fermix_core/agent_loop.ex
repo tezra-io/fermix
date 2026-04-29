@@ -1,26 +1,32 @@
 defmodule FermixCore.AgentLoop do
   @moduledoc """
-  Core LLM conversation loop with tool execution.
+  Core LLM conversation loop with capability execution.
 
-  Calls the LLM, checks for tool calls, executes them via the Registry,
-  appends results, and loops until the LLM returns a final response
-  or max_iterations is reached.
+  Calls the provider adapter, executes any returned tool calls via the
+  capability registry, hands the results back through the adapter's
+  continuation surface, and repeats until the adapter returns no more
+  tool calls or the iteration cap is reached.
+
+  Adapter dispatch is a deterministic function of `(provider, model,
+  auth_mode, base_url)` — see `FermixCore.Providers.Adapter.for_route/1`.
   """
 
   require Logger
 
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
-  alias FermixCore.Providers.OpenAI
-  alias FermixCore.Tools.Registry
+  alias FermixCore.Providers.Adapter
 
   @max_iterations 25
 
   @type loop_opts :: [
           messages: [map()],
-          tools: [map()],
+          capabilities: [Capability.t()],
           allowed_tools: [String.t()] | nil,
-          provider: module(),
+          route_key: Adapter.route_key(),
+          adapter_opts: keyword(),
           model: String.t(),
           temperature: float(),
           max_iterations: pos_integer(),
@@ -31,7 +37,7 @@ defmodule FermixCore.AgentLoop do
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
           context: map(),
-          registry: GenServer.server()
+          capability_registry: GenServer.server()
         ]
 
   @type loop_result :: %{
@@ -42,121 +48,208 @@ defmodule FermixCore.AgentLoop do
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
   def run(opts) do
-    allowed_tools = Keyword.get(opts, :allowed_tools)
+    state = build_state(opts)
 
-    state = %{
+    case initial_chat(state) do
+      {:ok, turn, state} -> continue_until_terminal(turn, state)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp build_state(opts) do
+    capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
+    allowed_tools = Keyword.get(opts, :allowed_tools)
+    {adapter, route_key} = resolve_adapter(opts)
+
+    capabilities =
+      opts
+      |> Keyword.get(:capabilities)
+      |> default_capabilities(capability_registry, allowed_tools)
+
+    %{
       messages: Keyword.fetch!(opts, :messages),
-      tools: filter_tools_for_llm(Keyword.get(opts, :tools, []), allowed_tools),
+      capabilities: capabilities,
       allowed_tools: allowed_tools,
-      provider: Keyword.get(opts, :provider, OpenAI),
-      model: Keyword.get(opts, :model, OpenAI.default_model()),
-      temp: Keyword.get(opts, :temperature, 0.7),
+      capability_registry: capability_registry,
+      adapter: adapter,
+      adapter_opts: build_adapter_opts(opts, route_key),
       max_iter: Keyword.get(opts, :max_iterations, @max_iterations),
       context: Keyword.get(opts, :context, %{}),
-      registry: Keyword.get(opts, :registry, Registry),
       iteration: 0,
       total_tokens: 0,
       compaction: compaction_state(opts),
       loop_detector: loop_detector_state(opts)
     }
-
-    do_loop(state)
   end
 
-  defp do_loop(%{iteration: i, max_iter: max} = _state) when i >= max do
-    {:error, "Maximum iterations (#{max}) reached"}
-  end
+  defp resolve_adapter(opts) do
+    case Keyword.get(opts, :adapter) do
+      nil ->
+        route_key = Keyword.fetch!(opts, :route_key)
+        {Adapter.for_route(route_key), route_key}
 
-  defp do_loop(state) do
-    with {:ok, state} <- compact_state_messages(state) do
-      start = System.monotonic_time(:millisecond)
+      adapter when is_atom(adapter) ->
+        route_key =
+          Keyword.get(opts, :route_key, %{
+            provider: :mock,
+            model: Keyword.get(opts, :model, "mock"),
+            auth_mode: :api_key,
+            base_url: "mock://"
+          })
 
-      case call_provider(state) do
-        {:ok, response} ->
-          duration_ms = System.monotonic_time(:millisecond) - start
-          handle_response(response, duration_ms, state)
-
-        {:error, reason} ->
-          Logger.error("LLM call failed: #{inspect(reason)}")
-          {:error, reason}
-      end
+        {adapter, route_key}
     end
   end
 
-  defp call_provider(state) do
-    state.provider.chat(state.messages,
-      model: state.model,
-      temperature: state.temp,
-      tools: state.tools
+  defp default_capabilities(nil, registry, allowed_tools) do
+    CapabilityRegistry.list(registry, allowed_tools: allowed_tools)
+  end
+
+  defp default_capabilities(capabilities, _registry, _allowed_tools)
+       when is_list(capabilities),
+       do: capabilities
+
+  defp build_adapter_opts(opts, route_key) do
+    Keyword.merge(
+      [
+        model: route_key.model,
+        base_url: route_key.base_url,
+        temperature: Keyword.get(opts, :temperature, 0.7)
+      ],
+      Keyword.get(opts, :adapter_opts, [])
     )
   end
 
-  defp handle_response(%{tool_calls: tc} = response, duration_ms, state)
-       when tc == nil or tc == [] do
-    emit_telemetry(state.iteration + 1, duration_ms, false)
+  defp initial_chat(state) do
+    with {:ok, state} <- compact_state_messages(state),
+         start = System.monotonic_time(:millisecond),
+         {:ok, turn} <- state.adapter.chat(state.messages, state.capabilities, state.adapter_opts) do
+      duration_ms = System.monotonic_time(:millisecond) - start
+      emit_telemetry(state.iteration + 1, duration_ms, turn.tool_calls != [])
 
+      {:ok, turn,
+       %{
+         state
+         | iteration: state.iteration + 1,
+           total_tokens: state.total_tokens + turn.usage.total_tokens
+       }}
+    else
+      {:error, reason} ->
+        Logger.error("LLM call failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp continue_until_terminal(%{tool_calls: []} = turn, state) do
     {:ok,
      %{
-       response: response.content,
-       iterations: state.iteration + 1,
-       total_tokens: state.total_tokens + response.usage.total_tokens
+       response: turn.content,
+       iterations: state.iteration,
+       total_tokens: state.total_tokens
      }}
   end
 
-  defp handle_response(response, duration_ms, state) do
-    emit_telemetry(state.iteration + 1, duration_ms, true)
+  defp continue_until_terminal(_turn, %{iteration: i, max_iter: max}) when i >= max do
+    {:error, "Maximum iterations (#{max}) reached"}
+  end
 
-    case detect_tool_loop(response.tool_calls, state) do
+  defp continue_until_terminal(turn, state) do
+    case detect_tool_loop(turn.tool_calls, state) do
       {:kill, reason} ->
         {:error, reason}
 
       {warning, state} ->
-        continue_with_tool_calls(response, state, warning)
+        run_continuation(turn, state, warning)
     end
   end
 
-  defp continue_with_tool_calls(response, state, warning) do
-    tool_results =
-      execute_tool_calls(response.tool_calls, state.context, state.registry, state.allowed_tools)
+  defp run_continuation(turn, state, warning) do
+    tool_results = execute_tool_calls(turn.tool_calls, state)
 
-    assistant_message = %{
-      role: "assistant",
-      content: response.content,
-      tool_calls: response.tool_calls
-    }
+    case continuation_call(turn.provider_state, tool_results, warning, state) do
+      {:ok, next_turn, state} ->
+        continue_until_terminal(next_turn, state)
 
-    tool_messages =
-      Enum.map(tool_results, fn {tool_call_id, content} ->
-        %{role: "tool", tool_call_id: tool_call_id, content: content}
-      end)
-
-    next_messages =
-      [assistant_message | tool_messages]
-      |> maybe_append_loop_warning(warning)
-
-    do_loop(%{
-      state
-      | messages: state.messages ++ next_messages,
-        iteration: state.iteration + 1,
-        total_tokens: state.total_tokens + response.usage.total_tokens
-    })
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
-  defp execute_tool_calls(tool_calls, context, registry, allowed_tools) do
+  defp continuation_call(provider_state, tool_results, _warning, state) do
+    start = System.monotonic_time(:millisecond)
+
+    case state.adapter.continue(provider_state, tool_results, state.adapter_opts) do
+      {:ok, next_turn} ->
+        duration_ms = System.monotonic_time(:millisecond) - start
+        emit_telemetry(state.iteration + 1, duration_ms, next_turn.tool_calls != [])
+
+        {:ok, next_turn,
+         %{
+           state
+           | iteration: state.iteration + 1,
+             total_tokens: state.total_tokens + next_turn.usage.total_tokens
+         }}
+
+      {:error, reason} ->
+        Logger.error("LLM continuation failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp execute_tool_calls(tool_calls, state) do
     Enum.map(tool_calls, fn tool_call ->
-      function = tool_call["function"]
-
-      result =
-        case parse_arguments(function["arguments"]) do
-          {:ok, arguments} ->
-            execute_tool(registry, function["name"], arguments, context, allowed_tools)
-
-          {:error, reason} ->
-            reason
-        end
-
-      {tool_call["id"], result}
+      output = run_tool_call(tool_call, state)
+      %{call_id: tool_call.call_id, output: output}
     end)
+  end
+
+  defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
+    case parse_arguments(arguments_raw) do
+      {:ok, arguments} ->
+        invoke_capability(name, arguments, state)
+
+      {:error, reason} ->
+        reason
+    end
+  end
+
+  defp invoke_capability(name, arguments, state) do
+    if capability_allowed?(name, state.allowed_tools) do
+      lookup_and_dispatch(name, arguments, state)
+    else
+      "Error: Tool '#{name}' not available"
+    end
+  end
+
+  defp lookup_and_dispatch(name, arguments, state) do
+    case CapabilityRegistry.find(state.capability_registry, name) do
+      {:ok, capability} -> dispatch_capability(capability, arguments, state.context)
+      :error -> "Error: Tool '#{name}' not found"
+    end
+  end
+
+  defp capability_allowed?(_name, nil), do: true
+  defp capability_allowed?(name, allowed) when is_list(allowed), do: name in allowed
+
+  defp dispatch_capability(%Capability{} = capability, arguments, context) do
+    case Capability.execute(capability, arguments, context) do
+      {:ok, %{success: true, output: output}} ->
+        output
+
+      {:ok, %{success: false, error: error}} ->
+        "Error: #{error}"
+
+      {:ok, other} when is_binary(other) ->
+        other
+
+      {:ok, other} ->
+        inspect(other)
+
+      {:error, reason} ->
+        "Error executing tool: #{inspect(reason)}"
+    end
+  rescue
+    e -> "Error: tool raised #{Exception.message(e)}"
   end
 
   defp parse_arguments(json) when is_binary(json) do
@@ -169,31 +262,14 @@ defmodule FermixCore.AgentLoop do
   defp parse_arguments(args) when is_map(args), do: {:ok, args}
   defp parse_arguments(_), do: {:ok, %{}}
 
-  defp execute_tool(registry, name, arguments, context, allowed_tools) do
-    case Registry.find_tool(registry, name, allowed_tools) do
-      {:ok, tool_module} -> run_tool(tool_module, arguments, context)
-      {:error, :not_allowed} -> "Error: Tool '#{name}' not available"
-      :error -> "Error: Tool '#{name}' not found"
-    end
-  end
-
-  defp run_tool(tool_module, arguments, context) do
-    case tool_module.execute(arguments, context) do
-      {:ok, result} -> if result.success, do: result.output, else: "Error: #{result.error}"
-      {:error, reason} -> "Error executing tool: #{inspect(reason)}"
-    end
-  rescue
-    e -> "Error: tool raised #{Exception.message(e)}"
-  end
-
   defp compact_state_messages(state) do
     opts = [
       enabled: state.compaction.enabled,
       token_budget: state.compaction.token_budget,
       persist_checkpoints: state.compaction.persist_checkpoints,
       cache: state.compaction.cache,
-      provider: state.provider,
-      model: state.model,
+      provider: FermixCore.Providers.OpenAI,
+      model: Keyword.fetch!(state.adapter_opts, :model),
       context: state.context
     ]
 
@@ -207,21 +283,6 @@ defmodule FermixCore.AgentLoop do
         {:error, reason}
     end
   end
-
-  defp filter_tools_for_llm(tools, nil), do: tools
-
-  defp filter_tools_for_llm(tools, allowed_tools) when is_list(allowed_tools) do
-    Enum.filter(tools, fn tool ->
-      case tool_name_for_llm(tool) do
-        {:ok, name} -> name in allowed_tools
-        :error -> false
-      end
-    end)
-  end
-
-  defp tool_name_for_llm(%{function: %{name: name}}) when is_binary(name), do: {:ok, name}
-  defp tool_name_for_llm(%{"function" => %{"name" => name}}) when is_binary(name), do: {:ok, name}
-  defp tool_name_for_llm(_tool), do: :error
 
   defp detect_tool_loop(tool_calls, state) do
     signatures = Enum.map(tool_calls, &tool_signature/1)
@@ -266,11 +327,7 @@ defmodule FermixCore.AgentLoop do
     end)
   end
 
-  defp tool_signature(tool_call) do
-    function = tool_call["function"] || tool_call[:function] || %{}
-    name = function["name"] || function[:name] || "unknown"
-    arguments = function["arguments"] || function[:arguments] || %{}
-
+  defp tool_signature(%{name: name, arguments: arguments}) do
     {name, normalize_arguments(arguments)}
   end
 
@@ -293,12 +350,6 @@ defmodule FermixCore.AgentLoop do
 
   defp sort_json(list) when is_list(list), do: Enum.map(list, &sort_json/1)
   defp sort_json(value), do: value
-
-  defp maybe_append_loop_warning(messages, nil), do: messages
-
-  defp maybe_append_loop_warning(messages, warning) do
-    messages ++ [%{role: "system", content: warning}]
-  end
 
   defp loop_warning_message({name, arguments}, threshold) do
     "Repeated tool call warning: #{name} with #{arguments} has repeated #{threshold} times. " <>
