@@ -32,12 +32,19 @@ defmodule FermixCore.Providers.RouteResolver do
 
   @spec resolve!(keyword()) :: resolution()
   def resolve!(opts \\ []) do
-    case Keyword.get(opts, :provider) do
+    case Keyword.get(opts, :provider) || configured_provider() do
       nil -> resolve_openai!(opts)
       :openai -> resolve_openai!(opts)
       :openai_codex -> resolve_codex!(opts)
       :anthropic -> resolve_anthropic!(opts)
       other -> raise ArgumentError, "no resolver for provider #{inspect(other)}"
+    end
+  end
+
+  defp configured_provider do
+    case Config.provider(:openai) do
+      {:ok, cfg} -> Keyword.get(cfg, :provider)
+      _ -> nil
     end
   end
 

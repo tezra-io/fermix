@@ -366,7 +366,7 @@ defmodule FermixCore.Agents.MainAgent do
         {:adapter, state.provider, Keyword.put(state.adapter_opts, :model, "mock-model")}
 
       true ->
-        {route_key, adapter_opts} = RouteResolver.resolve_openai!(state.adapter_overrides)
+        {route_key, adapter_opts} = RouteResolver.resolve!(state.adapter_overrides)
         {:route, route_key, adapter_opts}
     end
   end

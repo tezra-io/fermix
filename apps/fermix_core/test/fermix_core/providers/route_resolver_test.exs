@@ -120,5 +120,48 @@ defmodule FermixCore.Providers.RouteResolverTest do
         RouteResolver.resolve!(provider: :mystery)
       end
     end
+
+    test "configured provider in :fermix_core, :providers, :openai is used when opts omit it" do
+      original = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [provider: :openai_codex, auth_mode: :oauth]
+        )
+
+        # Opts omit :provider — must pick up :openai_codex from app env.
+        {route_key, _opts} =
+          RouteResolver.resolve!(model: "gpt-5", access_token: "tok")
+
+        assert route_key.provider == :openai_codex
+        assert Adapter.for_route(route_key) == Codex
+      after
+        Application.put_env(:fermix_core, :providers, original)
+      end
+    end
+
+    test "explicit opts :provider overrides configured provider" do
+      original = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [provider: :openai_codex, auth_mode: :oauth]
+        )
+
+        {route_key, _opts} =
+          RouteResolver.resolve!(
+            provider: :openai,
+            model: "gpt-4o",
+            auth_mode: :oauth,
+            access_token: "tok",
+            base_url: "https://api.openai.com/v1"
+          )
+
+        assert route_key.provider == :openai
+        assert Adapter.for_route(route_key) == Responses
+      after
+        Application.put_env(:fermix_core, :providers, original)
+      end
+    end
   end
 end
