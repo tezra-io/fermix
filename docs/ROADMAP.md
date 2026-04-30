@@ -219,6 +219,57 @@ See `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` for the full design.
 
 ---
 
+## Milestone 4.10: Codex Parity & Provider Selection UX
+
+**Goal:** Close the M4.9 gap that left ChatGPT Plus users without a working agent loop. Make `:openai_codex` a first-class provider with tool-call support; persist provider/model/reasoning_effort in TOML with env overlays; expose a wizard step for provider+model+effort; surface the chosen surface in `fermix doctor` with a real auth probe so config mistakes fail at boot, not on the first message.
+
+See `docs/MILESTONE_4_10_CODEX_PARITY.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Codex tool-call adapter** | Implement `to_provider_tools/1`, `parse_tool_calls/1`, `continue/3` on `OpenAI.Codex`; SSE function_call accumulation | P0 | New | `~/projects/rustyclaw/src/providers/openai_codex.rs`, `~/projects/hermes-agent/run_agent.py:679–712` | M |
+| **Codex SSE parser** | Stateful accumulator for `chatgpt.com/backend-api/codex/responses` stream; emits final `body["output"]` shape | P0 | New | rustyclaw codex SSE handler | M |
+| **Reasoning effort plumbing** | `reasoning: %{effort: <level>}` in Codex/Responses request body; opts → app config → omitted; `none/minimal/low/medium/high/xhigh` | P1 | New | `~/projects/hermes-agent/hermes_constants.py` | S |
+| **Provider/model/effort persistence** | `ConfigStore.normalize_openai/anthropic` round-trip `provider`, `default_model`, `reasoning_effort` through TOML | P0 | New | N/A | S |
+| **Env-var overlays** | `FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT` in `runtime.exs` with fail-soft validation | P0 | New | existing OPENAI_AUTH_MODE pattern | S |
+| **Model catalog** | `FermixCore.Providers.ModelCatalog.models_for/1` static curated lists + Custom escape hatch | P0 | New | N/A | S |
+| **Wizard provider+model+effort step** | New `:model` wizard step extending `WizardState.step`; Codex disclaimer; Anthropic api_key entry | P0 | New | N/A | M |
+| **Doctor auth probe** | Per-provider real $0.0001 API call to verify scope works against the chosen surface; actionable error mapping | P0 | New | N/A | S |
+| **MainAgent default sourcing** | Read provider/model/effort from app config when adapter_overrides empty; layered with existing M4.9 per-agent overrides | P0 | Modify | N/A | S |
+
+**Why before M4.11:** scheduled jobs are agent loops with tool calls. Without M4.10, a job under `:openai_codex` either errors on `continue/3` or returns text-only. Stacking M4.11's cron infra on a broken provider substrate means re-validating M4.11 after M4.10 lands. Fix the foundation first.
+
+**Non-goals:** new providers (Gemini, OpenRouter, Ollama — see `Additional Providers (Ongoing)`); streaming partial tokens to channels; per-model effort clamping (we send verbatim and surface API rejections).
+
+**Milestone 4.10 Total Effort:** ~1.5 weeks
+
+---
+
+## Milestone 4.11: Scheduled Agents — Cron Jobs, Persistent Memory Sources, Isolated Runs
+
+**Goal:** First-class scheduled background tasks. Daily digests, repository watchers, deployment checks, "remind me later" tasks, long-running monitors. Each LLM execution is bounded and isolated; the catalog and memory provenance are durable and discoverable to the main agent.
+
+See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Job registry** | Durable `scheduled_jobs` records with schedule, task, capability policy, delivery, memory source, status | P0 | New | `~/projects/hermes-agent/cron/jobs.py` | M |
+| **Job scheduler** | OTP GenServer that tracks next due job, ticks/reconciles, starts due jobs asynchronously | P0 | New | `~/projects/hermes-agent/cron/scheduler.py` | M |
+| **Job runner** | Supervised worker; isolated session per occurrence; bounded `AgentLoop` execution | P0 | New | N/A | M |
+| **Main-agent job capabilities** | `schedule_job`, `list_jobs`, `pause_job`, `resume_job`, `update_job`, `remove_job`, `run_job_now`, `job_runs` | P0 | New | N/A | M |
+| **Memory source catalog** | Durable metadata for `main`, `job:<id>`, future source types | P0 | New | N/A | S |
+| **Source-aware memory recall** | Memory writes/reads carry `source_id`, `source_name`, `source_type`, `session_id`, `run_id` | P0 | Modify | N/A | M |
+| **Scheduler-owned delivery** | Job final output saved first, then delivered by scheduler/channel layer; agents do not self-deliver by default | P0 | New | N/A | S |
+| **Sync/async contract** | CRUD synchronous + fast; execution/extraction/delivery asynchronous + supervised | P0 | New | N/A | S |
+| **Latency targets** | Explicit targets for CRUD, due-job start jitter, scheduler recovery, run status, memory visibility, delivery | P0 | New | N/A | S |
+| **Observability** | Telemetry for job lifecycle: created/due/started/completed/failed/delivered/skipped | P1 | New | N/A | S |
+
+**Depends on M4.10:** scheduled jobs need full tool calls on whichever provider the user picked.
+
+**Milestone 4.11 Total Effort:** ~2-3 weeks
+
+---
+
 ## Milestone 5: Security & Governance
 
 **Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering.
