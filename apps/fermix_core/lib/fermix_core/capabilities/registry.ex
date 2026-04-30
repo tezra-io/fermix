@@ -17,13 +17,32 @@ defmodule FermixCore.Capabilities.Registry do
 
   alias FermixCore.Capabilities.Capability
 
+  @type policy_spec ::
+          nil
+          | [Capability.policy_class()]
+          | [allow: [Capability.policy_class()], deny: [Capability.policy_class()]]
+
+  @type trust :: nil | :core | :local | :third_party
+
   @type filter ::
           [
             allowed_tools: [String.t()] | nil,
-            policy: nil | [allow: [Capability.policy_class()], deny: [Capability.policy_class()]],
+            policy: policy_spec(),
+            trust: trust(),
             kind: Capability.kind() | :all,
             include_approval_required?: boolean()
           ]
+
+  # Default policies per trust source. See design §4.6.3.
+  # `:core` and `nil` (unscoped, e.g. main agent) are unfiltered.
+  @third_party_default_policy [
+    allow: [:read_only],
+    deny: [:read_write, :exec, :network, :external_api]
+  ]
+  @local_default_policy [
+    allow: [:read_only, :read_write, :exec, :network],
+    deny: [:external_api]
+  ]
 
   # --- Client API ---
 
@@ -154,12 +173,29 @@ defmodule FermixCore.Capabilities.Registry do
   defp table_name(name) when is_atom(name), do: :"#{name}.Table"
 
   defp apply_filters(capabilities, opts) do
+    policy = resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
+
     capabilities
     |> apply_kind(Keyword.get(opts, :kind, :all))
-    |> apply_policy(Keyword.get(opts, :policy))
+    |> apply_policy(policy)
     |> apply_allowlist(Keyword.get(opts, :allowed_tools))
     |> apply_approval_filter(Keyword.get(opts, :include_approval_required?, false))
   end
+
+  @doc """
+  Resolve the effective policy filter from `(trust, policy)`.
+
+  An explicit `policy` always wins. When the skill leaves `policy` unset,
+  fall back to the default for the trust level: `:third_party` is read-only,
+  `:local` is broad-but-not-external. `:core` and `nil` (main agent) are
+  unfiltered.
+  """
+  @spec resolve_policy(trust(), policy_spec()) :: policy_spec()
+  def resolve_policy(_trust, policy) when is_list(policy) and policy != [], do: policy
+  def resolve_policy(:third_party, _policy), do: @third_party_default_policy
+  def resolve_policy(:local, _policy), do: @local_default_policy
+  def resolve_policy(:core, _policy), do: nil
+  def resolve_policy(nil, _policy), do: nil
 
   defp apply_kind(capabilities, :all), do: capabilities
 
@@ -170,8 +206,7 @@ defmodule FermixCore.Capabilities.Registry do
   defp apply_policy(capabilities, nil), do: capabilities
 
   defp apply_policy(capabilities, policy) when is_list(policy) do
-    allow = Keyword.get(policy, :allow, Capability.valid_policy_classes())
-    deny = Keyword.get(policy, :deny, [])
+    {allow, deny} = normalize_policy(policy)
 
     validate_policy_classes!(allow, :allow)
     validate_policy_classes!(deny, :deny)
@@ -179,6 +214,17 @@ defmodule FermixCore.Capabilities.Registry do
     Enum.filter(capabilities, fn %Capability{policy_class: class} ->
       class in allow and class not in deny
     end)
+  end
+
+  defp normalize_policy(policy) do
+    if Keyword.keyword?(policy) and
+         (Keyword.has_key?(policy, :allow) or Keyword.has_key?(policy, :deny)) do
+      {Keyword.get(policy, :allow, Capability.valid_policy_classes()),
+       Keyword.get(policy, :deny, [])}
+    else
+      # bare list of classes acts as the allow set, no denies
+      {policy, []}
+    end
   end
 
   defp validate_policy_classes!(classes, key) do

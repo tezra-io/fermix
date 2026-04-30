@@ -7,20 +7,22 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   The list of configured MCP servers is read from `Application.get_env(
   :fermix_core, :mcp_servers, [])` at boot. A server config map (parsed
   by `MCP.Config`) carries `name`, `approved?`, `command`, `args`,
-  `env`, and `tools_overrides`. This stage owns discovery + capability
-  registration; spawning external `npx` subprocesses through Hermes is
-  intentionally left for the operator-facing follow-up — server entries
-  with no `client_pid` discover via the configured `Discoverer`.
+  `env`, and `tools_overrides`.
 
-  One bad server isolates inside its own subtree. The other servers
-  keep running. The supervisor uses `:rest_for_one` only between the
-  shared infrastructure (Naming + Registry) and the per-server children;
-  per-server children themselves are `:one_for_one`.
+  Each per-server sub-supervisor contains the Hermes client + transport
+  pair (built by the configured `:hermes_starter`, default
+  `HermesStarter.Default`) plus the `MCP.Server` discovery process. The
+  three are linked under `:one_for_all`, so a transport crash bounces the
+  client and the discovery process together.
+
+  One bad server isolates inside its own subtree. The other servers keep
+  running.
   """
 
   use Supervisor
   require Logger
 
+  alias FermixCore.Capabilities.MCP.HermesStarter
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
@@ -30,6 +32,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
           | {:servers, [map()]}
           | {:capability_registry, GenServer.server()}
           | {:mcp_registry, GenServer.server() | nil}
+          | {:hermes_starter, module()}
 
   @spec start_link([opt()]) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -45,36 +48,47 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
       Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry)
 
     mcp_registry_name = Keyword.get(opts, :mcp_registry, McpRegistry)
+    hermes_starter = Keyword.get(opts, :hermes_starter, HermesStarter.Default)
     servers = Keyword.get(opts, :servers, default_servers())
 
     children =
       [{McpRegistry, name: mcp_registry_name}] ++
-        Enum.map(servers, &child_spec_for(&1, capability_registry, mcp_registry_name))
+        Enum.map(
+          servers,
+          &child_spec_for(&1, capability_registry, mcp_registry_name, hermes_starter)
+        )
 
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  defp child_spec_for(server, capability_registry, mcp_registry_name) do
+  defp child_spec_for(server, capability_registry, mcp_registry_name, hermes_starter) do
+    %{children: hermes_children, client_name: hermes_client} =
+      hermes_starter.child_specs_for(server)
+
+    server_spec =
+      Supervisor.child_spec(
+        {McpServer, server_opts(server, capability_registry, mcp_registry_name, hermes_client)},
+        id: {:mcp_server, server.name},
+        restart: :permanent
+      )
+
+    children = hermes_children ++ [server_spec]
+
     %{
       id: {:mcp_server_supervisor, server.name},
       start:
         {Supervisor, :start_link,
-         [
-           [
-             Supervisor.child_spec(
-               {McpServer, server_opts(server, capability_registry, mcp_registry_name)},
-               id: {:mcp_server, server.name},
-               restart: :permanent
-             )
-           ],
-           [strategy: :one_for_one, max_restarts: 3, max_seconds: 60]
-         ]},
+         [children, [strategy: :one_for_all, max_restarts: 3, max_seconds: 60]]},
       type: :supervisor,
       restart: :temporary
     }
   end
 
-  defp server_opts(server, capability_registry, mcp_registry_name) do
+  defp server_opts(server, capability_registry, mcp_registry_name, hermes_client) do
+    # Explicit `:client` in the server map (test-supplied) wins. Otherwise the
+    # Hermes starter's spawned client name is the production default.
+    client = Map.get(server, :client) || hermes_client
+
     [
       server_name: server.name,
       approved?: Map.get(server, :approved?, false),
@@ -82,7 +96,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
       capability_registry: capability_registry,
       mcp_registry: mcp_registry_name
     ]
-    |> maybe_put(:client, Map.get(server, :client))
+    |> maybe_put(:client, client)
     |> maybe_put(:discoverer, Map.get(server, :discoverer))
     |> maybe_put(:caller, Map.get(server, :caller))
   end

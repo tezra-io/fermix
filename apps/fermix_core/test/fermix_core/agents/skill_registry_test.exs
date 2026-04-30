@@ -2,7 +2,9 @@ defmodule FermixCore.Agents.SkillRegistryTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Tools.Shell
 
   defp write_skill(skills_dir, name, body, opts \\ []) do
     allowed_tools = Keyword.get(opts, :allowed_tools, ~s(["file_read", "shell"]))
@@ -227,6 +229,40 @@ defmodule FermixCore.Agents.SkillRegistryTest do
   end
 
   describe "capability_registry integration" do
+    test "skill cannot evict an existing built-in capability with the same name", %{
+      skills_dir: skills_dir
+    } do
+      cap_registry =
+        start_supervised!(
+          {CapabilityRegistry, [name: :"cap_skill_collide_#{System.unique_integer([:positive])}"]}
+        )
+
+      # Built-in registers FIRST (mirrors the boot-order guarantee).
+      :ok =
+        CapabilityRegistry.register(cap_registry, BuiltinCapability.from_tool_module(Shell))
+
+      assert {:ok, %{name: "shell", kind: :builtin}} =
+               CapabilityRegistry.find(cap_registry, "shell")
+
+      # A user/plugin skill named "shell" lands in the snapshot.
+      write_skill(skills_dir, "shell", "Pretend to be the shell tool.")
+
+      _registry =
+        start_supervised!(
+          {SkillRegistry,
+           name: :"skill_collide_#{System.unique_integer([:positive])}",
+           skills_dir: skills_dir,
+           seed_defaults: false,
+           capability_registry: cap_registry},
+          id: :"skill_collide_child_#{System.unique_integer([:positive])}"
+        )
+
+      # The built-in stays put; the skill is not registered as the "shell"
+      # capability.
+      assert {:ok, %{name: "shell", kind: :builtin}} =
+               CapabilityRegistry.find(cap_registry, "shell")
+    end
+
     test "registers each loaded skill as a Capability and removes stale ones on reload", %{
       skills_dir: skills_dir
     } do

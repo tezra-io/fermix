@@ -135,6 +135,16 @@ defmodule FermixCore.Capabilities.MCP.Server do
     McpRegistry.register(state.mcp_registry, state.server_name, client)
   end
 
+  defp maybe_register_client(%{client: client} = state) when is_atom(client) do
+    case Process.whereis(client) do
+      pid when is_pid(pid) ->
+        McpRegistry.register(state.mcp_registry, state.server_name, pid)
+
+      nil ->
+        {:error, {:hermes_client_not_started, client}}
+    end
+  end
+
   defp maybe_register_client(_state), do: :ok
 
   defp register_descriptor(descriptor, state) do

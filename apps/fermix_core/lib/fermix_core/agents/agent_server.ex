@@ -260,6 +260,8 @@ defmodule FermixCore.Agents.AgentServer do
     base = [
       messages: messages,
       allowed_tools: definition.allowed_tools,
+      policy: definition.policy,
+      trust: definition.trust,
       max_iterations: definition.max_iterations,
       context: tool_context,
       capability_registry: capability_registry

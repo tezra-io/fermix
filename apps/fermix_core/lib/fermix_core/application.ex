@@ -11,7 +11,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
-  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
+  alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
@@ -86,6 +86,7 @@ defmodule FermixCore.Application do
         {Trace, trace_opts()},
         maybe_token_manager(),
         CapabilityRegistry,
+        BuiltinSeeder,
         {SkillRegistry, capability_registry: CapabilityRegistry},
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
@@ -102,10 +103,7 @@ defmodule FermixCore.Application do
 
     opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
 
-    with {:ok, pid} <- Supervisor.start_link(children, opts) do
-      register_builtins()
-      {:ok, pid}
-    end
+    Supervisor.start_link(children, opts)
   end
 
   defp run_cli(argv) do
@@ -115,25 +113,6 @@ defmodule FermixCore.Application do
       IO.puts(:stderr, "fermix: unexpected error — #{Exception.message(error)}")
       IO.puts(:stderr, Exception.format_stacktrace(__STACKTRACE__))
       1
-  end
-
-  defp register_builtins do
-    [
-      FermixCore.Tools.Shell,
-      FermixCore.Tools.FileRead,
-      FermixCore.Tools.FileWrite,
-      FermixCore.Tools.MemoryStore,
-      FermixCore.Tools.MemoryRecall,
-      FermixCore.Tools.Browser
-    ]
-    |> Enum.each(fn tool_module ->
-      capability = BuiltinCapability.from_tool_module(tool_module)
-
-      case CapabilityRegistry.register(capability) do
-        :ok -> :ok
-        {:error, {:duplicate_name, _}} -> :ok
-      end
-    end)
   end
 
   defp maybe_token_manager do

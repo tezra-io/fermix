@@ -351,6 +351,32 @@ defmodule FermixCore.AgentLoopTest do
       [{_state, [tool_result], _opts}] = mock_continues()
       assert tool_result.output =~ "not available"
     end
+
+    test "policy-filtered capability cannot be dispatched even if registered", %{
+      registry: registry
+    } do
+      # SpyTool is :read_only by default. Promote it to :exec so a third-party
+      # trust default filters it out, but it stays in the registry.
+      :ok = CapabilityRegistry.register(registry, BuiltinCapability.from_tool_module(EchoTool))
+
+      :ok =
+        CapabilityRegistry.register(registry, %{
+          BuiltinCapability.from_tool_module(SpyTool)
+          | policy_class: :exec
+        })
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "spy_tool", %{})]),
+        turn("Handled policy block")
+      ])
+
+      assert {:ok, result} = run_loop(capability_registry: registry, trust: :third_party)
+      assert result.response == "Handled policy block"
+      refute_received :spy_tool_executed
+
+      [{_state, [tool_result], _opts}] = mock_continues()
+      assert tool_result.output =~ "not found"
+    end
   end
 
   # -- Capability execution error --

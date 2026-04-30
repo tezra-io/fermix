@@ -193,18 +193,52 @@ defmodule FermixCore.Agents.SkillRegistry do
     current_names = MapSet.new(Map.keys(current))
 
     Enum.each(MapSet.difference(previous_names, current_names), fn name ->
-      CapabilityRegistry.unregister(server, name)
+      unregister_if_skill(server, name)
     end)
 
     Enum.each(current, fn {name, definition} ->
-      capability = Skill.from_definition(definition)
-      CapabilityRegistry.unregister(server, name)
-
-      case CapabilityRegistry.register(server, capability) do
-        :ok -> :ok
-        {:error, {:duplicate_name, _}} -> :ok
-      end
+      register_skill_capability(server, name, definition)
     end)
+  end
+
+  defp register_skill_capability(server, name, definition) do
+    case CapabilityRegistry.find(server, name) do
+      {:ok, %{kind: :builtin}} ->
+        Logger.warning(
+          "Refusing to register skill #{inspect(name)}: a built-in capability " <>
+            "with the same name is already registered. Rename the skill."
+        )
+
+      {:ok, %{kind: :mcp}} ->
+        Logger.warning(
+          "Refusing to register skill #{inspect(name)}: an MCP capability " <>
+            "with the same name is already registered. Rename the skill."
+        )
+
+      {:ok, %{kind: :skill}} ->
+        # Same-kind reload: replace cleanly.
+        :ok = CapabilityRegistry.unregister(server, name)
+        do_register(server, definition)
+
+      :error ->
+        do_register(server, definition)
+    end
+  end
+
+  defp do_register(server, definition) do
+    capability = Skill.from_definition(definition)
+
+    case CapabilityRegistry.register(server, capability) do
+      :ok -> :ok
+      {:error, {:duplicate_name, _}} -> :ok
+    end
+  end
+
+  defp unregister_if_skill(server, name) do
+    case CapabilityRegistry.find(server, name) do
+      {:ok, %{kind: :skill}} -> CapabilityRegistry.unregister(server, name)
+      _ -> :ok
+    end
   end
 
   defp read_skill_file(path) do
