@@ -25,6 +25,8 @@ defmodule FermixCore.AgentLoop do
           messages: [map()],
           capabilities: [Capability.t()],
           allowed_tools: [String.t()] | nil,
+          policy: CapabilityRegistry.policy_spec(),
+          trust: CapabilityRegistry.trust(),
           route_key: Adapter.route_key(),
           adapter_opts: keyword(),
           model: String.t(),
@@ -59,16 +61,23 @@ defmodule FermixCore.AgentLoop do
   defp build_state(opts) do
     capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
     allowed_tools = Keyword.get(opts, :allowed_tools)
+    policy = Keyword.get(opts, :policy)
+    trust = Keyword.get(opts, :trust)
     {adapter, route_key} = resolve_adapter(opts)
 
     capabilities =
       opts
       |> Keyword.get(:capabilities)
-      |> default_capabilities(capability_registry, allowed_tools)
+      |> default_capabilities(capability_registry,
+        allowed_tools: allowed_tools,
+        policy: policy,
+        trust: trust
+      )
 
     %{
       messages: Keyword.fetch!(opts, :messages),
       capabilities: capabilities,
+      capabilities_by_name: index_by_name(capabilities),
       allowed_tools: allowed_tools,
       capability_registry: capability_registry,
       adapter: adapter,
@@ -80,6 +89,10 @@ defmodule FermixCore.AgentLoop do
       compaction: compaction_state(opts),
       loop_detector: loop_detector_state(opts)
     }
+  end
+
+  defp index_by_name(capabilities) do
+    Map.new(capabilities, fn %Capability{name: name} = capability -> {name, capability} end)
   end
 
   defp resolve_adapter(opts) do
@@ -101,11 +114,11 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
-  defp default_capabilities(nil, registry, allowed_tools) do
-    CapabilityRegistry.list(registry, allowed_tools: allowed_tools)
+  defp default_capabilities(nil, registry, opts) do
+    CapabilityRegistry.list(registry, opts)
   end
 
-  defp default_capabilities(capabilities, _registry, _allowed_tools)
+  defp default_capabilities(capabilities, _registry, _opts)
        when is_list(capabilities),
        do: capabilities
 
@@ -222,7 +235,7 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp lookup_and_dispatch(name, arguments, state) do
-    case CapabilityRegistry.find(state.capability_registry, name) do
+    case Map.fetch(state.capabilities_by_name, name) do
       {:ok, capability} -> dispatch_capability(capability, arguments, state.context)
       :error -> "Error: Tool '#{name}' not found"
     end

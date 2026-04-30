@@ -29,6 +29,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
   @behaviour FermixCore.Providers.Adapter
 
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Capability
 
   require Logger
@@ -39,7 +40,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    api_key = require_api_key!(opts)
+    bearer = require_bearer_token!(opts)
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
@@ -53,13 +54,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> maybe_put(:tools, tools)
       |> maybe_put(:temperature, temperature)
 
-    post(base_url, api_key, body, req_options, model, input, tools, capabilities)
+    post(base_url, bearer, body, req_options, model, input, tools, capabilities)
   end
 
   @impl true
   def continue(provider_state, tool_results, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    api_key = require_api_key!(opts)
+    bearer = require_bearer_token!(opts)
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
@@ -79,7 +80,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> maybe_put(:tools, tools)
       |> maybe_put(:temperature, temperature)
 
-    post(base_url, api_key, body, req_options, model, next_input, tools, caps)
+    post(base_url, bearer, body, req_options, model, next_input, tools, caps)
   end
 
   @impl true
@@ -117,7 +118,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @impl true
   def supports_streaming?, do: false
 
-  defp post(base_url, api_key, body, req_options, model, input, tools, capabilities) do
+  defp post(base_url, bearer, body, req_options, model, input, tools, capabilities) do
     start = System.monotonic_time(:millisecond)
 
     result =
@@ -126,7 +127,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         method: :post,
         json: body,
         headers: [
-          {"authorization", "Bearer #{api_key}"},
+          {"authorization", "Bearer #{bearer}"},
           {"content-type", "application/json"}
         ]
       )
@@ -263,12 +264,32 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp require_api_key!(opts) do
-    case Keyword.get(opts, :api_key) do
-      key when is_binary(key) and key != "" -> key
-      _ -> raise ArgumentError, "OpenAI.Responses requires :api_key"
+  defp require_bearer_token!(opts) do
+    cond do
+      key = nonempty_string(Keyword.get(opts, :api_key)) ->
+        key
+
+      key = nonempty_string(Keyword.get(opts, :access_token)) ->
+        key
+
+      token_server = Keyword.get(opts, :token_server) ->
+        case TokenManager.get_token(token_server) do
+          {:ok, token} ->
+            token
+
+          {:error, reason} ->
+            raise ArgumentError,
+                  "OpenAI.Responses requires a bearer token: TokenManager returned #{inspect(reason)}"
+        end
+
+      true ->
+        raise ArgumentError,
+              "OpenAI.Responses requires :api_key, :access_token, or :token_server"
     end
   end
+
+  defp nonempty_string(value) when is_binary(value) and value != "", do: value
+  defp nonempty_string(_), do: nil
 
   defp emit_telemetry(result, model, duration_ms) do
     {status, tokens} =
