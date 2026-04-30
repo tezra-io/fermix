@@ -39,6 +39,37 @@ defmodule FermixCore.Providers.RouteResolverTest do
       assert Adapter.for_route(route_key) == Codex
     end
 
+    test ":openai with auth_mode :oauth routes to Responses (NOT Codex)" do
+      {route_key, opts} =
+        RouteResolver.resolve!(
+          provider: :openai,
+          model: "gpt-4o",
+          auth_mode: :oauth,
+          access_token: "oauth-bearer-token",
+          base_url: "https://api.openai.com/v1"
+        )
+
+      assert route_key.provider == :openai
+      assert route_key.auth_mode == :oauth
+      assert route_key.base_url == "https://api.openai.com/v1"
+      assert opts[:access_token] == "oauth-bearer-token"
+      assert Adapter.for_route(route_key) == Responses
+    end
+
+    test "default OpenAI OAuth user gets Responses (tool-call capable), not Codex" do
+      # No explicit provider; auth_mode :oauth on api.openai.com.
+      {route_key, _opts} =
+        RouteResolver.resolve!(
+          model: "gpt-4o",
+          auth_mode: :oauth,
+          access_token: "tok",
+          base_url: "https://api.openai.com/v1"
+        )
+
+      assert route_key.provider == :openai
+      assert Adapter.for_route(route_key) == Responses
+    end
+
     test ":openai with eligible model on api.openai.com routes to Responses" do
       {route_key, _opts} =
         RouteResolver.resolve!(

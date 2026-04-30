@@ -6,16 +6,18 @@ defmodule FermixCore.Capabilities.MCP.Registry do
   comes up so dispatch can resolve `server_name → client_pid` without
   walking supervisor trees. Lookup failures return `{:error, :not_found}`
   so capability execution surfaces a clean error instead of crashing.
+
+  The backing ETS table is derived from the registered GenServer name so
+  multiple registries (e.g., one per test, or per umbrella test setup)
+  don't collide on a shared table.
   """
 
   use GenServer
 
-  @table __MODULE__
-
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, opts, name: name)
+    GenServer.start_link(__MODULE__, Keyword.put(opts, :name, name), name: name)
   end
 
   @spec register(GenServer.server(), String.t(), pid()) :: :ok
@@ -29,14 +31,15 @@ defmodule FermixCore.Capabilities.MCP.Registry do
     GenServer.call(server, {:unregister, name})
   end
 
-  @spec lookup_client(String.t()) :: {:ok, pid()} | {:error, :not_found}
-  def lookup_client(name) when is_binary(name) do
-    case :ets.whereis(@table) do
-      :undefined ->
+  @spec lookup_client(GenServer.server(), String.t()) ::
+          {:ok, pid()} | {:error, :not_found}
+  def lookup_client(server \\ __MODULE__, name) when is_binary(name) do
+    case table_for(server) do
+      nil ->
         {:error, :not_found}
 
-      _tid ->
-        case :ets.lookup(@table, name) do
+      table ->
+        case :ets.lookup(table, name) do
           [{^name, pid}] when is_pid(pid) -> {:ok, pid}
           [] -> {:error, :not_found}
         end
@@ -44,24 +47,21 @@ defmodule FermixCore.Capabilities.MCP.Registry do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
+    name = Keyword.fetch!(opts, :name)
+    table_name = table_name(name)
+
     table =
-      case :ets.whereis(@table) do
-        :undefined ->
-          :ets.new(@table, [:named_table, :protected, :set, read_concurrency: true])
+      :ets.new(table_name, [:named_table, :protected, :set, read_concurrency: true])
 
-        tid ->
-          tid
-      end
-
-    {:ok, %{table: table, monitors: %{}}}
+    {:ok, %{table: table, name: name, monitors: %{}}}
   end
 
   @impl true
   def handle_call({:register, name, pid}, _from, state) do
-    drop_existing(name, state)
+    state = drop_existing(name, state)
     ref = Process.monitor(pid)
-    :ets.insert(@table, {name, pid})
+    :ets.insert(state.table, {name, pid})
     monitors = Map.put(state.monitors, ref, name)
     {:reply, :ok, %{state | monitors: monitors}}
   end
@@ -71,6 +71,8 @@ defmodule FermixCore.Capabilities.MCP.Registry do
     {:reply, :ok, state}
   end
 
+  def handle_call(:table_name, _from, state), do: {:reply, state.table, state}
+
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     case Map.pop(state.monitors, ref) do
@@ -78,15 +80,15 @@ defmodule FermixCore.Capabilities.MCP.Registry do
         {:noreply, %{state | monitors: monitors}}
 
       {name, monitors} ->
-        :ets.delete(@table, name)
+        :ets.delete(state.table, name)
         {:noreply, %{state | monitors: monitors}}
     end
   end
 
   defp drop_existing(name, state) do
-    case :ets.lookup(@table, name) do
+    case :ets.lookup(state.table, name) do
       [{^name, _pid}] ->
-        :ets.delete(@table, name)
+        :ets.delete(state.table, name)
 
         {ref, monitors} =
           Enum.reduce(state.monitors, {nil, %{}}, fn
@@ -104,4 +106,17 @@ defmodule FermixCore.Capabilities.MCP.Registry do
         state
     end
   end
+
+  defp table_for(server) when is_atom(server) do
+    case :ets.whereis(table_name(server)) do
+      :undefined -> nil
+      _tid -> table_name(server)
+    end
+  end
+
+  defp table_for(server) when is_pid(server) do
+    GenServer.call(server, :table_name)
+  end
+
+  defp table_name(name) when is_atom(name), do: :"#{name}.Table"
 end

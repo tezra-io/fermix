@@ -35,6 +35,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   no longer carries a `:tools` field — capabilities flow through the
   adapter, not provider opts.
 
+### Fixed — M4.9 review
+- `AgentLoop` now dispatches against the per-turn filtered capability
+  map, not the full `CapabilityRegistry`. A capability filtered out by
+  `policy:`, `trust:`, or `allowed_tools:` can no longer be invoked
+  from the loop just because it's in the registry.
+- `AgentServer` now threads `definition.policy` and `definition.trust`
+  into `AgentLoop` opts. Sub-agent capability filtering finally fires:
+  third-party skills are read-only by default, local skills get the
+  broad-but-not-`:external_api` set, and main-agent root sessions stay
+  unfiltered. Implements the §4.6.3 trust gate end-to-end.
+- `Prompt.RuntimeSections.build/1` no longer crashes on a skill with
+  `allowed_tools: nil` (the trust-default sentinel). Renders as
+  `tools=default`.
+- `RouteResolver` no longer auto-routes `auth_mode: :oauth` to Codex.
+  Per design §4.8, default OpenAI OAuth users land on `OpenAI.Responses`
+  (which supports tool calling); Codex is reachable only via explicit
+  `provider: :openai_codex`. `OpenAI.Responses` accepts `:api_key`,
+  `:access_token`, or a `:token_server` for the Bearer header.
+- `MCP.Supervisor` now actually starts a `Hermes.Client.Base` +
+  `Hermes.Transport.STDIO` pair per server with a `:command`. Pluggable
+  via `:hermes_starter` so tests don't have to spawn real subprocesses.
+  Per-server sub-supervisor is `:one_for_all` so a transport crash
+  bounces the client and discovery process together.
+- `SkillRegistry.sync_capabilities/3` refuses to evict an existing
+  built-in (or MCP) capability with the same name. Boot order is
+  reordered: a `BuiltinSeeder` runs as a supervised child between
+  `CapabilityRegistry` and `SkillRegistry`, so built-ins land before
+  any skill snapshot can race them.
+- `priv/templates/agents.md.eex` no longer references the deleted
+  `invoke_skill` tool.
+- `MCP.Registry` ETS table is now derived from the GenServer name
+  instead of a hardcoded module atom, so multiple registry instances
+  (e.g., per-test setups) don't fight over a shared table.
+
 ### Fixed — M4.8 review
 - `scripts/release/build_releases_json.sh` previously rewrote every
   underscore in the artifact filename, turning `fermix_macos_x86_64`

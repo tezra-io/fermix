@@ -123,6 +123,51 @@ defmodule FermixCore.Capabilities.RegistryTest do
     end
   end
 
+  describe "list/2 with :trust default policies" do
+    setup %{registry: reg} do
+      :ok = Registry.register(reg, cap("ro", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("rw", policy_class: :read_write))
+      :ok = Registry.register(reg, cap("ex", policy_class: :exec))
+      :ok = Registry.register(reg, cap("net", policy_class: :network))
+      :ok = Registry.register(reg, cap("api", policy_class: :external_api))
+      :ok
+    end
+
+    test "trust: :third_party defaults to read-only and denies the rest", %{registry: reg} do
+      names = reg |> Registry.list(trust: :third_party) |> Enum.map(& &1.name)
+      assert names == ["ro"]
+    end
+
+    test "trust: :local allows read/write/exec/network but denies external_api", %{registry: reg} do
+      names = reg |> Registry.list(trust: :local) |> Enum.map(& &1.name)
+      assert names == ["ex", "net", "ro", "rw"]
+    end
+
+    test "trust: :core allows everything", %{registry: reg} do
+      names = reg |> Registry.list(trust: :core) |> Enum.map(& &1.name)
+      assert names == ["api", "ex", "net", "ro", "rw"]
+    end
+
+    test "explicit policy overrides trust default", %{registry: reg} do
+      names =
+        reg
+        |> Registry.list(trust: :third_party, policy: [:read_only, :exec])
+        |> Enum.map(& &1.name)
+
+      assert names == ["ex", "ro"]
+    end
+
+    test "policy as bare class list is treated as allow", %{registry: reg} do
+      names = reg |> Registry.list(policy: [:exec]) |> Enum.map(& &1.name)
+      assert names == ["ex"]
+    end
+
+    test "no trust + no policy = main-agent style: no filtering", %{registry: reg} do
+      names = reg |> Registry.list() |> Enum.map(& &1.name)
+      assert names == ["api", "ex", "net", "ro", "rw"]
+    end
+  end
+
   describe "list/2 with :kind" do
     test "filters by capability kind", %{registry: reg} do
       :ok = Registry.register(reg, cap("a", kind: :builtin))

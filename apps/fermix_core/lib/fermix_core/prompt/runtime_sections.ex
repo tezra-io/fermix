@@ -45,6 +45,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     "- #{skill.name}: capabilities=#{join_values(skill.capabilities)}; tools=#{join_values(skill.allowed_tools)}"
   end
 
+  defp join_values(nil), do: "default"
   defp join_values([]), do: "none"
   defp join_values(values), do: Enum.join(values, ", ")
 end
