@@ -410,7 +410,17 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
     |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
+    |> put_if_present(:provider, normalize_provider(lookup(config, "provider", :provider)))
   end
+
+  defp normalize_provider(nil), do: nil
+  defp normalize_provider(:openai), do: :openai
+  defp normalize_provider(:openai_codex), do: :openai_codex
+  defp normalize_provider(:anthropic), do: :anthropic
+  defp normalize_provider("openai"), do: :openai
+  defp normalize_provider("openai_codex"), do: :openai_codex
+  defp normalize_provider("anthropic"), do: :anthropic
+  defp normalize_provider(_), do: nil
 
   defp normalize_personalization(nil), do: []
 
