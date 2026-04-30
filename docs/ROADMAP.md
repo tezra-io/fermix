@@ -241,7 +241,7 @@ See `docs/MILESTONE_4_10_CODEX_PARITY.md` for the full design.
 
 **Non-goals:** new providers (Gemini, OpenRouter, Ollama — see `Additional Providers (Ongoing)`); streaming partial tokens to channels; per-model effort clamping (we send verbatim and surface API rejections).
 
-**Milestone 4.10 Total Effort:** ~1.5 weeks
+**Milestone 4.10 Total Agent Wall-Clock:** ~5–8 hours (one end-of-day review pass). Stage 1 (Codex SSE parser) is the only realistic source of variance.
 
 ---
 
@@ -266,7 +266,7 @@ See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
 
 **Depends on M4.10:** scheduled jobs need full tool calls on whichever provider the user picked.
 
-**Milestone 4.11 Total Effort:** ~2-3 weeks
+**Milestone 4.11 Total Agent Wall-Clock:** ~7–10 hours (one review day, possibly stretching into a second pass for the source-aware memory schema migration). The job scheduler's timer/reconciliation logic and the memory-source DB shape are the two scope-shaped variances.
 
 ---
 
