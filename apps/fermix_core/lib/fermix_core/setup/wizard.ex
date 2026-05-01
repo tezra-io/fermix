@@ -4,6 +4,8 @@ defmodule FermixCore.Setup.Wizard do
   """
 
   alias FermixCore.Prompt.SetupSeeder
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Readiness
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
@@ -11,8 +13,14 @@ defmodule FermixCore.Setup.Wizard do
 
   require Logger
 
+  @type provider :: ModelCatalog.provider()
+  @type reasoning_effort :: :none | :minimal | :low | :medium | :high | :xhigh
+
   @type answer ::
           {:openai_api_key, String.t()}
+          | {:provider, provider() | String.t()}
+          | {:default_model, String.t()}
+          | {:reasoning_effort, reasoning_effort() | String.t()}
           | {:telegram_bot_token, String.t()}
           | {:whatsapp_access_token, String.t()}
           | {:whatsapp_phone_number_id, String.t()}
@@ -151,6 +159,9 @@ defmodule FermixCore.Setup.Wizard do
       state.config_snapshot
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
       |> put_openai_oauth(Keyword.get(answers, :openai_auth_oauth))
+      |> put_provider_selection(Keyword.get(answers, :provider))
+      |> put_default_model(Keyword.get(answers, :default_model))
+      |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -284,6 +295,104 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp put_openai_oauth(snapshot, _), do: snapshot
+
+  defp put_provider_selection(snapshot, nil), do: snapshot
+  defp put_provider_selection(snapshot, ""), do: snapshot
+
+  defp put_provider_selection(snapshot, value) do
+    provider = parse_provider!(value)
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    agent = Keyword.get(fermix_core, :agent, [])
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :agent, Keyword.put(agent, :provider, provider))
+    )
+  end
+
+  defp put_default_model(snapshot, nil), do: snapshot
+  defp put_default_model(snapshot, ""), do: snapshot
+
+  defp put_default_model(snapshot, value) when is_binary(value) do
+    update_active_provider_block(snapshot, :default_model, String.trim(value))
+  end
+
+  defp put_reasoning_effort(snapshot, nil), do: snapshot
+  defp put_reasoning_effort(snapshot, ""), do: snapshot
+
+  defp put_reasoning_effort(snapshot, value) do
+    effort = parse_reasoning_effort!(value)
+    provider = active_provider(snapshot)
+
+    if provider in [:openai, :openai_codex] do
+      update_active_provider_block(snapshot, :reasoning_effort, effort)
+    else
+      raise ArgumentError,
+            "reasoning_effort applies to :openai or :openai_codex providers only; selected provider is #{inspect(provider)}"
+    end
+  end
+
+  defp parse_provider!(value) when is_atom(value) do
+    if value in ModelCatalog.providers() do
+      value
+    else
+      raise ArgumentError,
+            "unknown provider #{inspect(value)}; expected one of #{inspect(ModelCatalog.providers())}"
+    end
+  end
+
+  defp parse_provider!(value) when is_binary(value) do
+    trimmed = value |> String.trim() |> String.downcase()
+
+    Enum.find(ModelCatalog.providers(), fn p -> Atom.to_string(p) == trimmed end) ||
+      raise ArgumentError,
+            "unknown provider #{inspect(value)}; expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &Atom.to_string/1)}"
+  end
+
+  defp parse_reasoning_effort!(value) when is_atom(value) do
+    valid = ResponsesShared.valid_reasoning_efforts()
+
+    if value in valid do
+      value
+    else
+      raise ArgumentError,
+            "invalid reasoning_effort #{inspect(value)}; expected one of #{inspect(valid)}"
+    end
+  end
+
+  defp parse_reasoning_effort!(value) when is_binary(value) do
+    trimmed = value |> String.trim() |> String.downcase()
+    valid = ResponsesShared.valid_reasoning_efforts()
+
+    Enum.find(valid, fn atom -> Atom.to_string(atom) == trimmed end) ||
+      raise ArgumentError,
+            "invalid reasoning_effort #{inspect(value)}; expected one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}"
+  end
+
+  defp active_provider(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:agent, [])
+    |> Keyword.get(:provider)
+    |> case do
+      nil -> :openai
+      provider -> provider
+    end
+  end
+
+  defp update_active_provider_block(snapshot, key, value) do
+    provider = active_provider(snapshot)
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    providers = Keyword.get(fermix_core, :providers, [])
+    block = providers |> Keyword.get(provider, []) |> Keyword.put(key, value)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :providers, Keyword.put(providers, provider, block))
+    )
+  end
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot
   defp put_telegram_bot_token(snapshot, ""), do: snapshot

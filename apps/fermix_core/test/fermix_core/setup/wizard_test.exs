@@ -391,6 +391,120 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(signal, :account) == "+15550001111"
   end
 
+  describe "save_answers — provider/model/reasoning_effort selection" do
+    test "writes provider, default_model, and reasoning_effort to TOML round-trip" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-wizard-m410-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      {:ok, _report} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(
+          provider: "openai_codex",
+          default_model: "gpt-5.4",
+          reasoning_effort: "medium"
+        )
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+
+      agent = Keyword.get(persisted.fermix_core, :agent, [])
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      codex = Keyword.get(providers, :openai_codex, [])
+
+      assert Keyword.get(agent, :provider) == :openai_codex
+      assert Keyword.get(codex, :default_model) == "gpt-5.4"
+      assert Keyword.get(codex, :reasoning_effort) == :medium
+    end
+
+    test "default_model writes to the active provider block (per agent.provider)" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-wizard-active-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      {:ok, _report} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(default_model: "claude-opus-4-7")
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      anthropic = Keyword.get(providers, :anthropic, [])
+
+      assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
+    end
+
+    test "accepts provider as atom" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-wizard-atom-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      {:ok, _report} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(provider: :anthropic)
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      assert Keyword.get(Keyword.get(persisted.fermix_core, :agent, []), :provider) == :anthropic
+    end
+
+    test "raises ArgumentError on unknown provider string" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/unknown provider/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, provider: "gemini")
+      end
+    end
+
+    test "raises ArgumentError on invalid reasoning_effort" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/invalid reasoning_effort/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "absurd")
+      end
+    end
+
+    test "raises when reasoning_effort answered for :anthropic provider" do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/reasoning_effort applies to :openai/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "high")
+      end
+    end
+  end
+
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
 
