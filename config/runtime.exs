@@ -61,6 +61,9 @@ workspace_paths =
 
 existing_providers = Application.get_env(:fermix_core, :providers, [])
 existing_openai = Keyword.get(existing_providers, :openai, [])
+existing_openai_codex = Keyword.get(existing_providers, :openai_codex, [])
+existing_anthropic = Keyword.get(existing_providers, :anthropic, [])
+existing_agent = Application.get_env(:fermix_core, :agent, [])
 
 openai_auth_mode =
   case System.get_env("OPENAI_AUTH_MODE") do
@@ -76,14 +79,114 @@ openai_api_key =
     System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
   end
 
-merged_openai =
-  Keyword.merge(existing_openai,
-    auth_mode: openai_auth_mode,
-    api_key: openai_api_key
-  )
+# FERMIX_PROVIDER overlays the agent's provider selection. Invalid values
+# log a warning and fall through to whatever TOML / agent block already
+# carries (matches the OPENAI_AUTH_MODE pattern — env doesn't crash boot).
+selected_provider =
+  case System.get_env("FERMIX_PROVIDER") do
+    nil ->
+      Keyword.get(existing_agent, :provider)
 
-config :fermix_core,
-  providers: Keyword.put(existing_providers, :openai, merged_openai)
+    "" ->
+      Keyword.get(existing_agent, :provider)
+
+    raw when raw in ["openai", "openai_codex", "anthropic"] ->
+      String.to_atom(raw)
+
+    raw ->
+      IO.warn(
+        "FERMIX_PROVIDER=#{inspect(raw)} is not a known provider " <>
+          "(openai | openai_codex | anthropic) — ignoring overlay"
+      )
+
+      Keyword.get(existing_agent, :provider)
+  end
+
+merged_agent =
+  if selected_provider do
+    Keyword.put(existing_agent, :provider, selected_provider)
+  else
+    existing_agent
+  end
+
+config :fermix_core, :agent, merged_agent
+
+# FERMIX_REASONING_EFFORT validates against the canonical enum; invalid
+# values log and fall back. Same pattern as FERMIX_PROVIDER above.
+valid_efforts = ~w(none minimal low medium high xhigh)a
+
+reasoning_effort_overlay =
+  case System.get_env("FERMIX_REASONING_EFFORT") do
+    nil ->
+      :__unset__
+
+    "" ->
+      :__unset__
+
+    raw ->
+      atom = Enum.find(valid_efforts, fn a -> Atom.to_string(a) == raw end)
+
+      case atom do
+        nil ->
+          IO.warn(
+            "FERMIX_REASONING_EFFORT=#{inspect(raw)} is not a valid effort " <>
+              "(#{Enum.map_join(valid_efforts, " | ", &Atom.to_string/1)}) — ignoring overlay"
+          )
+
+          :__unset__
+
+        atom ->
+          atom
+      end
+  end
+
+default_model_overlay =
+  case System.get_env("FERMIX_DEFAULT_MODEL") do
+    nil -> :__unset__
+    "" -> :__unset__
+    model -> model
+  end
+
+# Apply default_model + reasoning_effort to the *selected* provider's
+# block (env > TOML). Selected provider falls back to :openai when no
+# agent-level provider is configured, matching RouteResolver's default.
+overlay_target = selected_provider || :openai
+
+apply_provider_overlay = fn provider, base ->
+  if provider == overlay_target do
+    base
+    |> then(fn cfg ->
+      case default_model_overlay do
+        :__unset__ -> cfg
+        model -> Keyword.put(cfg, :default_model, model)
+      end
+    end)
+    |> then(fn cfg ->
+      case reasoning_effort_overlay do
+        :__unset__ -> cfg
+        atom -> Keyword.put(cfg, :reasoning_effort, atom)
+      end
+    end)
+  else
+    base
+  end
+end
+
+merged_openai =
+  existing_openai
+  |> Keyword.merge(auth_mode: openai_auth_mode, api_key: openai_api_key)
+  |> then(&apply_provider_overlay.(:openai, &1))
+
+merged_openai_codex = apply_provider_overlay.(:openai_codex, existing_openai_codex)
+merged_anthropic = apply_provider_overlay.(:anthropic, existing_anthropic)
+
+merged_providers =
+  existing_providers
+  |> Keyword.put(:openai, merged_openai)
+  |> Keyword.put(:openai_codex, merged_openai_codex)
+  |> Keyword.put(:anthropic, merged_anthropic)
+
+config :fermix_core, providers: merged_providers
 
 existing_trace = Application.get_env(:fermix_core, :trace, [])
 existing_log = Application.get_env(:fermix_core, :log, [])
