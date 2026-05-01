@@ -114,7 +114,7 @@ defmodule FermixCore.Agents.MainAgent do
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       capability_registry:
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
-      adapter_overrides: Keyword.get(opts, :adapter_overrides, []),
+      adapter_overrides: resolved_adapter_overrides(opts),
       adapter: Keyword.get(opts, :adapter),
       adapter_opts: Keyword.get(opts, :adapter_opts, []),
       agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
@@ -141,6 +141,55 @@ defmodule FermixCore.Agents.MainAgent do
 
     {:ok, state}
   end
+
+  # Bakes the configured provider/default_model/reasoning_effort into the
+  # agent's adapter_overrides at boot so RouteResolver picks them up at
+  # request time. Explicit opts win:
+  #   * If the caller sets `:provider` in opts, opts win whole — the config
+  #     block belongs to a different provider and its model/reasoning_effort
+  #     would leak across providers (e.g. `:openai_codex`'s effort applied
+  #     to an `:anthropic` route).
+  #   * Otherwise, config provides provider+model+reasoning_effort and
+  #     explicit opts override per-key.
+  # The snapshot is taken once at init; live config edits require a daemon
+  # restart (BootReport.restart_required? already enforces this for the
+  # wizard).
+  defp resolved_adapter_overrides(opts) do
+    explicit = Keyword.get(opts, :adapter_overrides, [])
+
+    if Keyword.has_key?(explicit, :provider) do
+      explicit
+    else
+      Keyword.merge(adapter_overrides_from_config(), explicit)
+    end
+  end
+
+  defp adapter_overrides_from_config do
+    agent_config = Application.get_env(:fermix_core, :agent, [])
+    providers = Application.get_env(:fermix_core, :providers, [])
+
+    case Keyword.get(agent_config, :provider) do
+      nil ->
+        []
+
+      provider when provider in [:openai, :openai_codex, :anthropic] ->
+        provider_config = Keyword.get(providers, provider, [])
+
+        [provider: provider]
+        |> maybe_put_override(:model, Keyword.get(provider_config, :default_model))
+        |> maybe_put_override(:reasoning_effort, Keyword.get(provider_config, :reasoning_effort))
+
+      other ->
+        Logger.warning(
+          "MainAgent ignoring unknown provider #{inspect(other)} in :fermix_core, :agent, :provider"
+        )
+
+        []
+    end
+  end
+
+  defp maybe_put_override(overrides, _key, nil), do: overrides
+  defp maybe_put_override(overrides, key, value), do: Keyword.put(overrides, key, value)
 
   @impl true
   def handle_cast({:handle_message, msg}, state) do
