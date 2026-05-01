@@ -1347,4 +1347,109 @@ defmodule FermixCore.Agents.MainAgentTest do
       GenServer.stop(pid)
     end
   end
+
+  describe "init/1 — adapter override sourcing from config" do
+    setup do
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end)
+
+      :ok
+    end
+
+    test "bakes provider/model/reasoning_effort from config into adapter_overrides" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+      )
+
+      name = :"main_agent_config_overrides_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+      state = :sys.get_state(pid)
+
+      assert Keyword.get(state.adapter_overrides, :provider) == :openai_codex
+      assert Keyword.get(state.adapter_overrides, :model) == "gpt-5.5"
+      assert Keyword.get(state.adapter_overrides, :reasoning_effort) == :high
+
+      GenServer.stop(pid)
+    end
+
+    test "explicit :provider in opts wins whole — config is dropped to avoid cross-provider leak" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+      )
+
+      name = :"main_agent_opts_win_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        MainAgent.start_link(
+          name: name,
+          adapter_overrides: [provider: :anthropic, model: "claude-opus-4-7"]
+        )
+
+      state = :sys.get_state(pid)
+
+      assert Keyword.get(state.adapter_overrides, :provider) == :anthropic
+      assert Keyword.get(state.adapter_overrides, :model) == "claude-opus-4-7"
+      # reasoning_effort from openai_codex config block must NOT leak into
+      # the anthropic route — the Anthropic Messages API has no such field.
+      refute Keyword.has_key?(state.adapter_overrides, :reasoning_effort)
+
+      GenServer.stop(pid)
+    end
+
+    test "explicit :model without :provider lets config-derived provider+effort fill in" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :medium]
+      )
+
+      name = :"main_agent_partial_opts_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        MainAgent.start_link(name: name, adapter_overrides: [model: "gpt-5.4"])
+
+      state = :sys.get_state(pid)
+
+      assert Keyword.get(state.adapter_overrides, :provider) == :openai_codex
+      assert Keyword.get(state.adapter_overrides, :model) == "gpt-5.4"
+      assert Keyword.get(state.adapter_overrides, :reasoning_effort) == :medium
+
+      GenServer.stop(pid)
+    end
+
+    test "no agent.provider configured → empty config-derived overrides" do
+      Application.delete_env(:fermix_core, :agent)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      name = :"main_agent_no_provider_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+      state = :sys.get_state(pid)
+
+      assert state.adapter_overrides == []
+
+      GenServer.stop(pid)
+    end
+
+    test "garbage provider in agent.provider is logged and ignored" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openia)
+      Application.put_env(:fermix_core, :providers, [])
+
+      name = :"main_agent_bad_provider_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+      state = :sys.get_state(pid)
+
+      assert state.adapter_overrides == []
+
+      GenServer.stop(pid)
+    end
+  end
 end
