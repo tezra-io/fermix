@@ -244,17 +244,23 @@ defmodule FermixCore.Setup.Doctor do
   defp require_codex_token(opts) do
     server = Keyword.get(opts, :token_server, TokenManager)
 
-    case TokenManager.get_token(server) do
-      {:ok, token} when is_binary(token) and token != "" ->
-        {:ok, token}
-
-      {:ok, _} ->
-        {:error, {:misconfigured, "Codex token is empty"}}
-
-      {:error, reason} ->
-        {:error, {:misconfigured, "Codex token unavailable: #{inspect(reason)}"}}
+    try do
+      classify_token(TokenManager.get_token(server))
+    catch
+      :exit, {:noproc, _} ->
+        {:error,
+         {:misconfigured,
+          "TokenManager not running — `fermix doctor --full` cannot probe OAuth providers " <>
+            "from the CLI process. Run the probe from the daemon (e.g. via the LiveView " <>
+            "setup screen) or configure an api_key provider."}}
     end
   end
+
+  defp classify_token({:ok, token}) when is_binary(token) and token != "", do: {:ok, token}
+  defp classify_token({:ok, _}), do: {:error, {:misconfigured, "Codex token is empty"}}
+
+  defp classify_token({:error, reason}),
+    do: {:error, {:misconfigured, "Codex token unavailable: #{inspect(reason)}"}}
 
   defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end
