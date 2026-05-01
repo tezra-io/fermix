@@ -231,6 +231,18 @@ defmodule FermixCore.Setup.DoctorTest do
       GenServer.stop(server)
     end
 
+    test "returns misconfigured (not :noproc exit) when token_server is a dead pid" do
+      put_provider(:openai_codex, default_model: "gpt-5.5")
+      {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, "oauth-bearer-xyz")
+      GenServer.stop(server)
+      refute Process.alive?(server)
+
+      assert {:error, {:misconfigured, message}} =
+               Doctor.probe_provider(:openai_codex, token_server: server)
+
+      assert message =~ "TokenManager not running"
+    end
+
     test "returns auth_scope_mismatch on 401 with codex-specific hint" do
       put_provider(:openai_codex, default_model: "gpt-5.5")
       {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, "oauth-stale")

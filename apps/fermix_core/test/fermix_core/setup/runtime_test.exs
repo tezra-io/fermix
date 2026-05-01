@@ -277,4 +277,49 @@ defmodule FermixCore.Setup.RuntimeTest do
       refute File.exists?(fermix_auth)
     end
   end
+
+  describe "provided_answers/1 — provider/model/effort flags" do
+    test "extracts provider/default_model/reasoning_effort opts as answers" do
+      opts = [
+        provider: "openai_codex",
+        default_model: "gpt-5.5",
+        reasoning_effort: "high"
+      ]
+
+      assert answers = Runtime.provided_answers(opts)
+      assert Keyword.get(answers, :provider) == "openai_codex"
+      assert Keyword.get(answers, :default_model) == "gpt-5.5"
+      assert Keyword.get(answers, :reasoning_effort) == "high"
+    end
+
+    test "non-interactive run with provider/model/effort writes them through ConfigStore" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   openai_api_key: "sk-test",
+                   provider: "openai_codex",
+                   default_model: "gpt-5.5",
+                   reasoning_effort: "high",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      agent = snapshot.fermix_core |> Keyword.get(:agent, [])
+      providers = snapshot.fermix_core |> Keyword.get(:providers, [])
+      codex_block = Keyword.get(providers, :openai_codex, [])
+
+      assert Keyword.get(agent, :provider) == :openai_codex
+      assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
+      assert Keyword.get(codex_block, :reasoning_effort) == :high
+    end
+  end
 end

@@ -18,15 +18,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in config and threaded through `RouteResolver.resolve!/1`.
 - TOML config schema gains `agent.provider`, per-provider `default_model`
   and `reasoning_effort`. `Providers.ModelCatalog` defines the canonical
-  per-provider model lists; `Setup.Wizard.save_answers/2` accepts
-  `:provider`, `:default_model`, and `:reasoning_effort` answer keys
-  (validated via the catalog) and persists them through `ConfigStore`.
-  Interactive prompting for these keys isn't yet wired into
-  `Wizard.prompts/1` or `SetupLive` — they're settable via TOML edit or
-  by a future CLI flag pass; tracked separately. Env-var overlays
-  (`FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT`)
-  layer on top of TOML values and survive round-trips through
-  `ConfigStore.save_snapshot/1`.
+  per-provider model lists. `fermix setup` exposes `--provider`,
+  `--default-model`, and `--reasoning-effort` switches; `Wizard.prompts/1`
+  asks the same three questions interactively when no provider is yet
+  persisted in `~/.fermix/config.toml`. A new `:model` wizard step shows
+  up in `WizardState.step` once the provider check is satisfied but no
+  provider is recorded. `SetupLive` displays the next step inline.
+  Env-var overlays (`FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`,
+  `FERMIX_REASONING_EFFORT`) layer on top of TOML values and survive
+  round-trips through `ConfigStore.save_snapshot/1`.
 - `Setup.Doctor.probe_provider/2` and `probe_active/1`: live ~$0.0001
   auth probes used by `fermix doctor --full` and the wizard finalize step
   to fail loud at config time. Probes classify into `:auth_scope_mismatch`
@@ -43,6 +43,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The "tool calls not supported on Codex" caveat in the M4.9 design doc;
   M4.10 closes that gap. `Providers.OpenAI.Codex` is the explicit
   `:openai_codex` route's adapter.
+
+### Fixed — M4.10
+- `Setup.Doctor.probe_provider/2` no longer crashes with `(EXIT) :noproc`
+  when the CLI invokes `fermix doctor --full` against an OAuth-mode
+  provider. The CLI process intentionally halts before starting the OTP
+  supervision tree (no `TokenManager`, no `Memory.Repo`, no port bind),
+  so probes that need a Codex bearer now return
+  `{:error, {:misconfigured, ...}}` with a hint to run the probe from
+  the daemon instead.
 
 ### Added — M4.9 (Unified Capabilities)
 - Single `%FermixCore.Capabilities.Capability{}` shape for built-ins,

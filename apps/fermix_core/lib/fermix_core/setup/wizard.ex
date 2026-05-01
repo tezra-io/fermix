@@ -77,12 +77,29 @@ defmodule FermixCore.Setup.Wizard do
     # for the token whenever it is unpersisted forces it onto disk where the
     # daemon will see it.
     persisted = persisted_snapshot()
+    provider_unset? = persisted_provider(persisted) == nil
 
     [
       %{
         key: :openai_api_key,
         label: "OpenAI API key",
         required?: missing_component?(state, "provider:openai")
+      },
+      %{
+        key: :provider,
+        label: "Provider (#{Enum.map_join(ModelCatalog.providers(), "/", &Atom.to_string/1)})",
+        required?: provider_unset?
+      },
+      %{
+        key: :default_model,
+        label: "Default model (e.g. #{ModelCatalog.default_model_for(:openai)})",
+        required?: provider_unset?
+      },
+      %{
+        key: :reasoning_effort,
+        label:
+          "Reasoning effort (#{Enum.map_join(ResponsesShared.valid_reasoning_efforts(), "/", &Atom.to_string/1)})",
+        required?: provider_unset?
       },
       %{
         key: :telegram_bot_token,
@@ -191,7 +208,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp build_state(snapshot, readiness) do
     %WizardState{
-      step: step_for(readiness.failures),
+      step: step_for(readiness.failures, snapshot),
       config_snapshot: snapshot,
       enabled_channels: enabled_channels(snapshot),
       validation_errors: readiness.failures,
@@ -199,17 +216,25 @@ defmodule FermixCore.Setup.Wizard do
     }
   end
 
-  defp step_for(failures) do
+  @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
+
+  defp step_for(failures, snapshot) do
+    components = Enum.map(failures, & &1.component) |> MapSet.new()
+
     cond do
-      Enum.any?(failures, &(&1.component == "provider:openai")) -> :provider
-      Enum.any?(failures, &(&1.component == "channel:telegram")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:whatsapp")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:discord")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:slack")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:signal")) -> :channel
-      Enum.any?(failures, &(&1.component == "personalization")) -> :personalization
+      MapSet.member?(components, "provider:openai") -> :provider
+      persisted_provider(snapshot) == nil -> :model
+      Enum.any?(@channel_components, &MapSet.member?(components, &1)) -> :channel
+      MapSet.member?(components, "personalization") -> :personalization
       true -> :review
     end
+  end
+
+  defp persisted_provider(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:agent, [])
+    |> Keyword.get(:provider)
   end
 
   defp enabled_channels(snapshot) do

@@ -113,7 +113,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       communication_style: "neutral and direct"
     )
 
-    Application.put_env(:fermix_core, :agent, name: "fermix")
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
 
     :ok =
       ConfigStore.save_snapshot(%{
@@ -124,7 +124,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
             timezone: "UTC",
             communication_style: "neutral and direct"
           ],
-          agent: [name: "fermix"]
+          agent: [name: "fermix", provider: :openai]
         ],
         fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
         fermix_web: []
