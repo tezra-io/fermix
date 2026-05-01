@@ -494,6 +494,18 @@ defmodule FermixCore.Setup.WizardTest do
       end
     end
 
+    test "raises ArgumentError on whitespace-only default_model" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/default_model cannot be blank/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, default_model: "   ")
+      end
+    end
+
     test "raises when reasoning_effort answered for :anthropic provider" do
       Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
       Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
