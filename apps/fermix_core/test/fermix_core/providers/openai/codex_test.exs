@@ -12,9 +12,12 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     def handle_call(:get_token, _from, reply), do: {:reply, reply, reply}
   end
 
-  defp capability do
+  # JWT with payload {"sub":"usr_1"} — base64url-encoded, no padding.
+  @jwt_with_sub "header.eyJzdWIiOiJ1c3JfMSJ9.sig"
+
+  defp capability(name \\ "echo") do
     Capability.new(%{
-      name: "echo",
+      name: name,
       description: "Echo input back",
       parameters: %{type: "object", properties: %{text: %{type: "string"}}, required: ["text"]},
       kind: :builtin,
@@ -23,15 +26,16 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "to_provider_tools/1" do
-    test "always returns [] — Codex does not support tool calls" do
-      assert Codex.to_provider_tools([capability()]) == []
-      assert Codex.to_provider_tools([]) == []
-    end
-  end
+    test "produces flat function shape — Codex uses the same tool shape as Responses" do
+      [tool] = Codex.to_provider_tools([capability()])
 
-  describe "continue/3" do
-    test "returns {:error, :tool_calls_not_supported_on_codex}" do
-      assert Codex.continue(%{}, [], []) == {:error, :tool_calls_not_supported_on_codex}
+      assert tool.type == "function"
+      assert tool.name == "echo"
+      assert tool.strict == false
+    end
+
+    test "returns [] for []" do
+      assert Codex.to_provider_tools([]) == []
     end
   end
 
@@ -41,8 +45,8 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
-  describe "chat/3" do
-    test "posts SSE-streaming body to Codex URL with bearer token" do
+  describe "chat/3 — request shape" do
+    test "posts SSE-streaming body to Codex URL with bearer token + tools" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         decoded = Jason.decode!(body)
@@ -51,6 +55,13 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         assert decoded["stream"] == true
         assert decoded["store"] == false
         assert is_list(decoded["input"])
+        assert [tool] = decoded["tools"]
+        assert tool["name"] == "echo"
+        assert tool["type"] == "function"
+
+        assert Plug.Conn.get_req_header(conn, "openai-beta") == ["responses=experimental"]
+        assert Plug.Conn.get_req_header(conn, "originator") == ["pi"]
+        assert Plug.Conn.get_req_header(conn, "chatgpt-account-id") == ["usr_1"]
 
         sse = """
         data: {"type":"response.output_text.delta","delta":"hello "}
@@ -74,15 +85,13 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       ]
 
       {:ok, turn} =
-        Codex.chat(messages, [],
-          access_token: "header.eyJzdWIiOiJ1c3JfMSJ9.sig",
+        Codex.chat(messages, [capability()],
+          access_token: @jwt_with_sub,
           model: "gpt-5",
           base_url: "https://chatgpt.test/codex/responses",
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert turn.content == "hello world"
-      assert turn.tool_calls == []
       assert turn.usage.prompt_tokens == 3
       assert turn.usage.completion_tokens == 2
       assert turn.usage.total_tokens == 5
@@ -114,7 +123,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       {:error, message} =
         Codex.chat([%{role: "user", content: "x"}], [],
-          access_token: "header.eyJzdWIiOiJ1c3JfMSJ9.sig",
+          access_token: @jwt_with_sub,
           model: "gpt-5",
           base_url: "https://chatgpt.test/codex/responses",
           req_options: [plug: {Req.Test, __MODULE__}]
@@ -122,5 +131,331 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       assert message == "Codex API error: 401"
     end
+  end
+
+  describe "chat/3 — SSE fixture: single function_call" do
+    test "parses one tool call from output_item.done with full arguments inline" do
+      sse = """
+      data: {"type":"response.created","response":{"model":"gpt-5"}}
+
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"echo","arguments":""}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_a","call_id":"call_a","name":"echo","arguments":"{\\"text\\":\\"hi\\"}"}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":4,"output_tokens":6}}}
+
+      data: [DONE]
+
+      """
+
+      {:ok, turn} = run_chat(sse)
+
+      assert [%{name: "echo", call_id: "call_a", arguments: args}] = turn.tool_calls
+      assert Jason.decode!(args) == %{"text" => "hi"}
+      assert turn.content == ""
+      assert turn.provider_state.capabilities == [capability()]
+      assert turn.provider_state.tools != []
+    end
+  end
+
+  describe "chat/3 — SSE fixture: function_call assembled from deltas" do
+    test "assembles function_call.arguments from function_call_arguments.delta when item.arguments is empty" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"echo","arguments":""}}
+
+      data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\\"text\\":"}
+
+      data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\\"streamed\\"}"}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_b","call_id":"call_b","name":"echo","arguments":""}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":2,"output_tokens":3}}}
+
+      data: [DONE]
+
+      """
+
+      {:ok, turn} = run_chat(sse)
+
+      assert [%{call_id: "call_b", arguments: args}] = turn.tool_calls
+      assert Jason.decode!(args) == %{"text" => "streamed"}
+    end
+  end
+
+  describe "chat/3 — SSE fixture: parallel function_calls" do
+    test "preserves output_index order across multiple tool calls" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"echo","arguments":"{\\"text\\":\\"a\\"}"}}
+
+      data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"echo","arguments":"{\\"text\\":\\"b\\"}"}}
+
+      data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"echo","arguments":"{\\"text\\":\\"b\\"}"}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_0","call_id":"call_0","name":"echo","arguments":"{\\"text\\":\\"a\\"}"}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":2}}}
+
+      data: [DONE]
+
+      """
+
+      {:ok, turn} = run_chat(sse)
+
+      assert [
+               %{call_id: "call_0", arguments: arg0},
+               %{call_id: "call_1", arguments: arg1}
+             ] = turn.tool_calls
+
+      assert Jason.decode!(arg0) == %{"text" => "a"}
+      assert Jason.decode!(arg1) == %{"text" => "b"}
+    end
+  end
+
+  describe "chat/3 — SSE fixture: function_call + reasoning + final message" do
+    test "preserves reasoning items and tool call alongside text" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","encrypted_content":"opaque"}}
+
+      data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"fc_x","call_id":"call_x","name":"echo","arguments":"{\\"text\\":\\"hi\\"}"}}
+
+      data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_x","call_id":"call_x","name":"echo","arguments":"{\\"text\\":\\"hi\\"}"}}
+
+      data: {"type":"response.output_item.added","output_index":2,"item":{"type":"message","id":"msg_1","content":[]}}
+
+      data: {"type":"response.output_text.delta","output_index":2,"delta":"done"}
+
+      data: {"type":"response.output_item.done","output_index":2,"item":{"type":"message","id":"msg_1","content":[{"type":"output_text","text":"done"}]}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":3,"output_tokens":5}}}
+
+      data: [DONE]
+
+      """
+
+      {:ok, turn} = run_chat(sse)
+
+      assert [%{call_id: "call_x"}] = turn.tool_calls
+      assert turn.content == "done"
+
+      types = Enum.map(turn.provider_state.output_items, & &1["type"])
+      assert types == ["reasoning", "function_call", "message"]
+
+      [reasoning | _] = turn.provider_state.output_items
+      assert reasoning["encrypted_content"] == "opaque"
+    end
+  end
+
+  describe "chat/3 — SSE fixture: completion-only (no items)" do
+    test "returns empty content and tool_calls when stream finishes without output items" do
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":0}}}
+
+      data: [DONE]
+
+      """
+
+      {:ok, turn} = run_chat(sse)
+
+      assert turn.tool_calls == []
+      assert turn.content == ""
+      assert turn.usage.prompt_tokens == 1
+    end
+  end
+
+  describe "continue/3" do
+    test "next request: input = prior_input ++ output_items ++ function_call_outputs, with instructions resent" do
+      test_id = :"codex_continue_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(test_id, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert decoded["stream"] == true
+        assert decoded["instructions"] == "be terse"
+        types = Enum.map(decoded["input"], &(&1["type"] || &1["role"]))
+        assert "function_call" in types
+        assert "function_call_output" in types
+        assert "user" in types
+
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("all done"))
+      end)
+
+      provider_state = %{
+        input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
+        output_items: [
+          %{
+            "type" => "function_call",
+            "id" => "fc_x",
+            "call_id" => "call_x",
+            "name" => "echo",
+            "arguments" => "{\"text\":\"hi\"}"
+          }
+        ],
+        tools: [],
+        capabilities: [capability()],
+        instructions: "be terse"
+      }
+
+      {:ok, turn} =
+        Codex.continue(provider_state, [%{call_id: "call_x", output: "echoed"}],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, test_id}]
+        )
+
+      assert turn.content == "all done"
+      assert turn.tool_calls == []
+    end
+
+    test "reasoning items in provider_state.output_items pass through byte-identical to next request input" do
+      test_id = :"codex_reasoning_passthrough_#{System.unique_integer([:positive])}"
+      reasoning_item = %{"type" => "reasoning", "id" => "rs_1", "encrypted_content" => "opaque"}
+
+      function_call_item = %{
+        "type" => "function_call",
+        "id" => "fc_x",
+        "call_id" => "call_x",
+        "name" => "echo",
+        "arguments" => "{\"text\":\"hi\"}"
+      }
+
+      Req.Test.stub(test_id, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        # Reasoning + function_call must appear in input, in original order, byte-identical.
+        carried_items =
+          Enum.filter(decoded["input"], fn item ->
+            item["type"] in ["reasoning", "function_call"]
+          end)
+
+        assert carried_items == [reasoning_item, function_call_item]
+
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      provider_state = %{
+        input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
+        output_items: [reasoning_item, function_call_item],
+        tools: [],
+        capabilities: [capability()],
+        instructions: "be terse"
+      }
+
+      {:ok, _turn} =
+        Codex.continue(provider_state, [%{call_id: "call_x", output: "done"}],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, test_id}]
+        )
+    end
+
+    test "chat/3 stores instructions in provider_state so continue/3 can re-send them" do
+      test_id = :"codex_instructions_capture_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(test_id, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      messages = [
+        %{role: "system", content: "stay terse"},
+        %{role: "user", content: "Hi"}
+      ]
+
+      {:ok, turn} =
+        Codex.chat(messages, [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, test_id}]
+        )
+
+      assert turn.provider_state.instructions == "stay terse"
+    end
+
+    test "chat/3 stores @default_instructions when no system message is present" do
+      test_id = :"codex_default_instructions_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(test_id, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      {:ok, turn} =
+        Codex.chat([%{role: "user", content: "Hi"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, test_id}]
+        )
+
+      assert is_binary(turn.provider_state.instructions)
+      assert turn.provider_state.instructions != ""
+    end
+  end
+
+  describe "parse_response/1" do
+    test "extracts text from a body shape (already-parsed map)" do
+      body = %{
+        "model" => "gpt-5",
+        "output" => [
+          %{
+            "type" => "message",
+            "id" => "msg_1",
+            "content" => [%{"type" => "output_text", "text" => "ok"}]
+          }
+        ],
+        "usage" => %{"input_tokens" => 1, "output_tokens" => 1}
+      }
+
+      turn = Codex.parse_response(body)
+      assert turn.content == "ok"
+      assert turn.tool_calls == []
+    end
+  end
+
+  defp terminal_message_sse(text) do
+    """
+    data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_z","content":[]}}
+
+    data: {"type":"response.output_text.delta","output_index":0,"delta":"#{text}"}
+
+    data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_z","content":[{"type":"output_text","text":"#{text}"}]}}
+
+    data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":1}}}
+
+    data: [DONE]
+
+    """
+  end
+
+  defp run_chat(sse) do
+    test_id = :"codex_chat_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(test_id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+      |> Plug.Conn.send_resp(200, sse)
+    end)
+
+    Codex.chat(
+      [%{role: "user", content: "Hi"}],
+      [capability()],
+      access_token: @jwt_with_sub,
+      model: "gpt-5",
+      base_url: "https://chatgpt.test/codex/responses",
+      req_options: [plug: {Req.Test, test_id}]
+    )
   end
 end
