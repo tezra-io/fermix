@@ -147,11 +147,61 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :allowed_user_ids) == []
   end
 
+  test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.delete_env(:fermix_core, :agent)
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Op",
+      timezone: "UTC",
+      communication_style: "concise"
+    )
+
+    report = Wizard.report()
+    assert report.wizard.step == :model
+
+    prompts = Wizard.prompts(report.wizard)
+    assert Enum.any?(prompts, &(&1.key == :provider and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :default_model and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
+  end
+
+  test "prompts omit provider/model/effort once agent.provider is persisted to TOML" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-wizard-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [auth_mode: :api_key, api_key: "sk-test-123"]],
+          agent: [name: "fermix", provider: :openai],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    report = Wizard.report()
+    prompts = Wizard.prompts(report.wizard)
+    refute Enum.any?(prompts, &(&1.key == :provider))
+    refute Enum.any?(prompts, &(&1.key == :default_model))
+    refute Enum.any?(prompts, &(&1.key == :reasoning_effort))
+  end
+
   test "report routes to :personalization step when only personalization is missing" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]
     )
 
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
     Application.put_env(:fermix_core, :personalization, [])
 

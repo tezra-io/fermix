@@ -10,6 +10,9 @@ defmodule Fermix.CLI.Setup do
 
   @switches [
     openai_api_key: :string,
+    provider: :string,
+    default_model: :string,
+    reasoning_effort: :string,
     telegram_bot_token: :string,
     whatsapp_access_token: :string,
     whatsapp_phone_number_id: :string,
