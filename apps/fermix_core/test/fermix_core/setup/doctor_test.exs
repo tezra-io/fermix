@@ -37,6 +37,22 @@ defmodule FermixCore.Setup.DoctorTest do
       set_active(:openai_codex)
       assert Doctor.active_provider() == :openai_codex
     end
+
+    test "raises ArgumentError on garbage atom (e.g. user typo)" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openia)
+
+      assert_raise ArgumentError, ~r/unknown provider :openia/, fn ->
+        Doctor.active_provider()
+      end
+    end
+  end
+
+  describe "probe_provider/2 — unknown provider" do
+    test "raises ArgumentError" do
+      assert_raise ArgumentError, ~r/unknown provider :gemini/, fn ->
+        Doctor.probe_provider(:gemini)
+      end
+    end
   end
 
   describe "probe_provider/2 — :openai" do
