@@ -1,6 +1,6 @@
 # Milestone 4.10: Codex Parity & Provider Selection UX
 
-**Status:** Draft
+**Status:** Shipped (2026-04-30)
 **Date:** 2026-04-30
 **Author:** Sujeeth / Aira
 **Depends on:** M4.9 (Unified Capabilities — `Adapter` behaviour, `RouteResolver`, `OpenAI.Codex` adapter scaffold, `OpenAI.Responses` continuation model)
