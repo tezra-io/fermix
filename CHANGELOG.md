@@ -17,10 +17,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   resolver. `:none | :minimal | :low | :medium | :high | :xhigh` accepted
   in config and threaded through `RouteResolver.resolve!/1`.
 - TOML config schema gains `agent.provider`, per-provider `default_model`
-  and `reasoning_effort`. Wizard adds a "model" step keyed off
-  `Providers.ModelCatalog`. Env-var overlays (`FERMIX_PROVIDER`,
-  `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT`) layer on top of TOML
-  values and survive round-trips through `ConfigStore.save_snapshot/1`.
+  and `reasoning_effort`. `Providers.ModelCatalog` defines the canonical
+  per-provider model lists; `Setup.Wizard.save_answers/2` accepts
+  `:provider`, `:default_model`, and `:reasoning_effort` answer keys
+  (validated via the catalog) and persists them through `ConfigStore`.
+  Interactive prompting for these keys isn't yet wired into
+  `Wizard.prompts/1` or `SetupLive` — they're settable via TOML edit or
+  by a future CLI flag pass; tracked separately. Env-var overlays
+  (`FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT`)
+  layer on top of TOML values and survive round-trips through
+  `ConfigStore.save_snapshot/1`.
 - `Setup.Doctor.probe_provider/2` and `probe_active/1`: live ~$0.0001
   auth probes used by `fermix doctor --full` and the wizard finalize step
   to fail loud at config time. Probes classify into `:auth_scope_mismatch`
