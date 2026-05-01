@@ -4,224 +4,185 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   Posts to `chatgpt.com/backend-api/codex/responses` with the SSE-streamed
   Codex Responses shape. Codex is a separate provider key (`:openai_codex`)
-  because the URL, request body, response shape, and streaming surface
+  because the URL, headers, and the fact that the surface is streaming
   diverge from the standard `api.openai.com/v1/responses` flow handled by
-  `OpenAI.Responses`.
+  `OpenAI.Responses`. The wire shape (item-list `input`, item-list
+  `output`, `function_call`/`function_call_output` pairs keyed by
+  `call_id`) is identical and lives in `OpenAI.ResponsesShared`.
 
-  Tool calls are not yet supported on the Codex surface — the model
-  returns text only. `to_provider_tools/1` returns `[]`; `chat/3` ignores
-  the capabilities list. When tool calls are needed, route to
-  `OpenAI.Responses` instead.
+  Codex tool-call flow:
+
+    1. `chat/3` posts initial `input` + `tools` (`stream: true`) and
+       consumes the SSE stream into a body-shaped map via `SSEParser`.
+       Returns `provider_state` carrying the prior `input`, every output
+       item, the tools list, and the original capabilities — same shape as
+       `OpenAI.Responses`.
+    2. `AgentLoop` executes returned tool calls.
+    3. `continue/3` builds `input = prior_input ++ output_items ++
+       function_call_outputs` (with API-emitted `call_id`s) and posts again.
+       Reasoning items pass through unchanged.
+
+  Auth: a ChatGPT Plus OAuth bearer (Codex auth flow). The bearer's JWT
+  payload may carry an account id under one of several claims; we extract
+  it and forward as `chatgpt-account-id` when present.
   """
 
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Providers.OpenAI.Codex.SSEParser
+  alias FermixCore.Providers.OpenAI.ResponsesShared
 
   require Logger
 
   @default_url "https://chatgpt.com/backend-api/codex/responses"
+  @default_instructions "You are a helpful AI assistant."
 
   @impl true
-  def chat(messages, _capabilities, opts) do
+  def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
     token = require_token!(opts)
     model = Keyword.fetch!(opts, :model)
     url = Keyword.get(opts, :base_url, @default_url)
 
-    {instructions, input} = build_input(messages)
-    account_id = decode_jwt_account_id(token)
+    {instructions, input} = ResponsesShared.build_input(messages)
+    resolved_instructions = instructions || @default_instructions
+    tools = ResponsesShared.to_provider_tools(capabilities)
+    headers = build_headers(token)
 
-    body = %{
+    body =
+      %{
+        model: model,
+        input: input,
+        instructions: resolved_instructions,
+        store: false,
+        stream: true
+      }
+      |> maybe_put(:tools, tools)
+
+    turn_state = %{
       model: model,
       input: input,
-      instructions: instructions,
-      store: false,
-      stream: true
+      tools: tools,
+      capabilities: capabilities,
+      instructions: resolved_instructions
     }
 
-    headers =
-      [
-        {"authorization", "Bearer #{token}"},
-        {"openai-beta", "responses=experimental"},
-        {"originator", "pi"},
-        {"content-type", "application/json"}
-      ]
-      |> maybe_put_header("chatgpt-account-id", account_id)
-
-    post(url, body, headers, req_options, model)
+    post(url, body, headers, req_options, turn_state)
   end
 
   @impl true
-  def continue(_provider_state, _tool_results, _opts) do
-    {:error, :tool_calls_not_supported_on_codex}
+  def continue(provider_state, tool_results, opts) do
+    {req_options, opts} = Keyword.pop(opts, :req_options, [])
+    token = require_token!(opts)
+    model = Keyword.fetch!(opts, :model)
+    url = Keyword.get(opts, :base_url, @default_url)
+
+    %{
+      input: prior_input,
+      output_items: output_items,
+      tools: tools,
+      capabilities: caps,
+      instructions: instructions
+    } = provider_state
+
+    outputs = ResponsesShared.build_function_call_outputs(tool_results)
+    next_input = prior_input ++ output_items ++ outputs
+    headers = build_headers(token)
+
+    body =
+      %{
+        model: model,
+        input: next_input,
+        instructions: instructions,
+        store: false,
+        stream: true
+      }
+      |> maybe_put(:tools, tools)
+
+    turn_state = %{
+      model: model,
+      input: next_input,
+      tools: tools,
+      capabilities: caps,
+      instructions: instructions
+    }
+
+    post(url, body, headers, req_options, turn_state)
   end
 
   @impl true
-  def to_provider_tools(_capabilities), do: []
+  def to_provider_tools(capabilities), do: ResponsesShared.to_provider_tools(capabilities)
 
   @impl true
-  def parse_tool_calls(_response), do: []
+  def parse_tool_calls(response), do: ResponsesShared.parse_tool_calls(response)
 
   @impl true
-  def parse_response(_body) do
-    %{content: "", tool_calls: [], provider_state: %{}, usage: zero_usage(), model: "unknown"}
+  def parse_response(body) when is_map(body) do
+    {:ok, turn} = ResponsesShared.build_turn(body, body["model"] || "unknown", [], [], [])
+    turn
   end
 
   @impl true
   def supports_streaming?, do: true
 
-  defp post(url, body, headers, req_options, model) do
+  defp build_headers(token) do
+    [
+      {"authorization", "Bearer #{token}"},
+      {"openai-beta", "responses=experimental"},
+      {"originator", "pi"},
+      {"content-type", "application/json"}
+    ]
+    |> maybe_put_header("chatgpt-account-id", decode_jwt_account_id(token))
+  end
+
+  defp post(url, body, headers, req_options, turn_state) do
     start = System.monotonic_time(:millisecond)
 
     result =
       Req.new(url: url, method: :post, json: body, headers: headers)
       |> Req.merge(req_options)
       |> Req.request()
-      |> handle_response(model)
+      |> handle_response(turn_state)
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms)
+    emit_telemetry(result, turn_state.model, duration_ms)
     result
   end
 
-  defp handle_response({:ok, %Req.Response{status: 200, body: body}}, model) do
-    {text, usage, parsed_model} = parse_body(body)
+  defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
+    parsed = parse_body_to_map(body)
 
-    {:ok,
-     %{
-       content: text || "",
-       tool_calls: [],
-       provider_state: %{},
-       usage: %{
-         prompt_tokens: usage["input_tokens"] || 0,
-         completion_tokens: usage["output_tokens"] || 0,
-         total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0)
-       },
-       model: parsed_model || model
-     }}
+    case ResponsesShared.build_turn(
+           parsed,
+           turn_state.model,
+           turn_state.input,
+           turn_state.tools,
+           turn_state.capabilities
+         ) do
+      {:ok, turn} ->
+        {:ok, put_in(turn, [:provider_state, :instructions], turn_state.instructions)}
+    end
   end
 
-  defp handle_response({:ok, %Req.Response{status: status, body: body}}, _model) do
+  defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
     Logger.error("Codex Responses API error: #{status} - #{inspect(body)}")
     {:error, "Codex API error: #{status}"}
   end
 
-  defp handle_response({:error, %Req.TransportError{reason: reason}}, _model) do
+  defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
     Logger.error("Codex transport error: #{inspect(reason)}")
     {:error, reason}
   end
 
-  defp handle_response({:error, reason}, _model) do
+  defp handle_response({:error, reason}, _turn_state) do
     Logger.error("Codex request failed: #{inspect(reason)}")
     {:error, reason}
   end
 
-  defp parse_body(body) when is_binary(body) do
-    events = parse_sse_events(body)
-    {text, completed} = extract_from_events(events)
-    {text, extract_usage(completed), completed && completed["model"]}
-  end
-
-  defp parse_body(body) when is_map(body) do
-    {extract_text(body), body["usage"] || %{}, body["model"]}
-  end
-
-  defp parse_body(_body), do: {nil, %{}, nil}
-
-  defp build_input(messages) do
-    {system_parts, rest} = Enum.split_while(messages, fn msg -> msg.role == "system" end)
-
-    instructions =
-      case system_parts do
-        [] -> "You are a helpful AI assistant."
-        parts -> Enum.map_join(parts, "\n\n", & &1.content)
-      end
-
-    input =
-      Enum.map(rest, fn msg ->
-        case msg.role do
-          "user" ->
-            %{role: "user", content: [%{type: "input_text", text: msg.content || ""}]}
-
-          "assistant" ->
-            %{role: "assistant", content: [%{type: "output_text", text: msg.content || ""}]}
-
-          _ ->
-            %{role: "user", content: [%{type: "input_text", text: msg.content || ""}]}
-        end
-      end)
-
-    {instructions, input}
-  end
-
-  defp parse_sse_events(body) do
-    body
-    |> String.split("\n\n", trim: true)
-    |> Enum.flat_map(&parse_sse_chunk/1)
-  end
-
-  defp parse_sse_chunk(chunk) do
-    chunk
-    |> String.split("\n", trim: true)
-    |> Enum.filter(&String.starts_with?(&1, "data: "))
-    |> Enum.flat_map(&decode_sse_line/1)
-  end
-
-  defp decode_sse_line("data: [DONE]"), do: []
-
-  defp decode_sse_line("data: " <> json) do
-    case Jason.decode(json) do
-      {:ok, event} -> [event]
-      _ -> []
-    end
-  end
-
-  defp extract_from_events(events) do
-    {deltas, completed_response} =
-      Enum.reduce(events, {"", nil}, fn
-        %{"type" => "response.output_text.delta", "delta" => d}, {acc, c} ->
-          {acc <> d, c}
-
-        %{"type" => t} = e, {acc, nil} when t in ["response.completed", "response.done"] ->
-          {acc, e["response"]}
-
-        _, acc ->
-          acc
-      end)
-
-    text =
-      if deltas != "" do
-        deltas
-      else
-        case completed_response do
-          %{} -> extract_text(completed_response)
-          _ -> nil
-        end
-      end
-
-    {text, completed_response}
-  end
-
-  defp extract_usage(%{"usage" => usage}), do: usage
-  defp extract_usage(_), do: %{}
-
-  defp extract_text(%{"output_text" => text}) when is_binary(text) and text != "", do: text
-
-  defp extract_text(%{"output" => output}) when is_list(output) do
-    output
-    |> Enum.flat_map(fn
-      %{"content" => contents} when is_list(contents) -> contents
-      _ -> []
-    end)
-    |> Enum.find_value(fn
-      %{"type" => "output_text", "text" => t} when is_binary(t) and t != "" -> t
-      %{"text" => t} when is_binary(t) and t != "" -> t
-      _ -> nil
-    end)
-  end
-
-  defp extract_text(_), do: nil
+  defp parse_body_to_map(body) when is_binary(body), do: SSEParser.parse(body)
+  defp parse_body_to_map(body) when is_map(body), do: body
+  defp parse_body_to_map(_), do: %{"output" => [], "usage" => %{}, "model" => nil}
 
   @account_id_claims ["account_id", "accountId", "sub", "https://api.openai.com/account_id"]
 
@@ -241,6 +202,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   defp maybe_put_header(headers, _key, nil), do: headers
   defp maybe_put_header(headers, key, value), do: [{key, value} | headers]
 
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, _key, []), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
   defp require_token!(opts) do
     case Keyword.get(opts, :access_token) do
       token when is_binary(token) and token != "" ->
@@ -255,8 +220,6 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         end
     end
   end
-
-  defp zero_usage, do: %{prompt_tokens: 0, completion_tokens: 0, total_tokens: 0}
 
   defp emit_telemetry(result, model, duration_ms) do
     {status, tokens} =
