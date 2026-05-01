@@ -139,6 +139,84 @@ defmodule FermixCore.Setup.RuntimeTest do
 
   defp puts_lines(agent), do: agent |> Agent.get(& &1) |> Enum.reverse()
 
+  describe "finalize probe wiring" do
+    test "skip_probe: true bypasses the probe entirely" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      refute Enum.any?(lines, &String.contains?(&1, "auth probe"))
+    end
+
+    test "probe pass emits an auth-probe line and returns :ok" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, collector} = puts_collector()
+      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", req_options: [plug: probe_plug]],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai/"))
+    end
+
+    test "probe auth_scope_mismatch (401) fails the run with a clear error message" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
+
+      assert {:error, message} =
+               Runtime.run(
+                 [openai_api_key: "sk-bad", req_options: [plug: probe_plug]],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert message =~ "auth probe failed"
+      assert message =~ "api.openai.com"
+    end
+
+    test "probe transient 5xx is inconclusive — run returns :ok with a warning line" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, collector} = puts_collector()
+      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 503, "service unavailable") end
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", req_options: [plug: probe_plug]],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      assert Enum.any?(lines, &String.contains?(&1, "auth probe inconclusive"))
+      assert Enum.any?(lines, &String.contains?(&1, "503"))
+    end
+  end
+
   describe "--import-codex" do
     test "imports tokens, persists to fermix store, and marks openai oauth-configured" do
       home = tmp_home()

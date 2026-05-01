@@ -37,6 +37,11 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:openai_codex, opts), do: probe_codex(opts)
   def probe_provider(:anthropic, opts), do: probe_anthropic(opts)
 
+  def probe_provider(other, _opts) do
+    raise ArgumentError,
+          "unknown provider #{inspect(other)}; expected one of :openai, :openai_codex, :anthropic"
+  end
+
   @spec probe_active(keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_active(opts \\ []) do
     provider = active_provider()
@@ -46,8 +51,16 @@ defmodule FermixCore.Setup.Doctor do
   @spec active_provider() :: provider()
   def active_provider do
     case Application.get_env(:fermix_core, :agent, []) |> Keyword.get(:provider) do
-      nil -> :openai
-      provider when provider in [:openai, :openai_codex, :anthropic] -> provider
+      nil ->
+        :openai
+
+      provider when provider in [:openai, :openai_codex, :anthropic] ->
+        provider
+
+      other ->
+        raise ArgumentError,
+              "unknown provider #{inspect(other)} in :fermix_core, :agent, :provider; " <>
+                "expected one of :openai, :openai_codex, :anthropic"
     end
   end
 
@@ -67,7 +80,8 @@ defmodule FermixCore.Setup.Doctor do
           input: [
             %{type: "message", role: "user", content: [%{type: "input_text", text: "."}]}
           ],
-          max_output_tokens: 1
+          max_output_tokens: 1,
+          store: false
         }
 
         headers = [
