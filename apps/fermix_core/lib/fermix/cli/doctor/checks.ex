@@ -13,6 +13,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Doctor, as: ProviderProbe
 
   @type status :: :ok | :warn | :fail
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
@@ -127,6 +128,26 @@ defmodule Fermix.CLI.Doctor.Checks do
 
       true ->
         compare_against_manifest(binary_path, opts)
+    end
+  end
+
+  @spec auth_probe(keyword()) :: result()
+  def auth_probe(opts \\ []) do
+    case ProviderProbe.probe_active(opts) do
+      {:ok, %{provider: provider, model: model, latency_ms: ms}} ->
+        ok("auth probe", "#{provider}/#{model} responded in #{ms}ms")
+
+      {:error, {:misconfigured, message}} ->
+        warn("auth probe", message)
+
+      {:error, {:auth_scope_mismatch, surface, hint}} ->
+        fail("auth probe", "auth rejected by #{surface}: #{hint}")
+
+      {:error, {:server_error, status, _body}} ->
+        warn("auth probe", "provider returned HTTP #{status} (transient?)")
+
+      {:error, {:network, reason}} ->
+        warn("auth probe", "network error: #{inspect(reason)}")
     end
   end
 
