@@ -6,6 +6,38 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.10 (Codex Parity & Provider Selection)
+- `Providers.OpenAI.Codex` adapter now implements the full Responses
+  tool-call lifecycle over SSE — `chat/3` posts `tools`, `parse_tool_calls/1`
+  surfaces normalized calls, `continue/3` rebuilds `input = prior_input ++
+  output_items ++ function_call_outputs` with the API-emitted `call_id`s.
+  ChatGPT-Plus users (no API key) can now run skills, MCP tools, and
+  built-ins through the agent loop end-to-end.
+- Reasoning-effort plumbing across the Responses + Codex adapters and the
+  resolver. `:none | :minimal | :low | :medium | :high | :xhigh` accepted
+  in config and threaded through `RouteResolver.resolve!/1`.
+- TOML config schema gains `agent.provider`, per-provider `default_model`
+  and `reasoning_effort`. Wizard adds a "model" step keyed off
+  `Providers.ModelCatalog`. Env-var overlays (`FERMIX_PROVIDER`,
+  `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT`) layer on top of TOML
+  values and survive round-trips through `ConfigStore.save_snapshot/1`.
+- `Setup.Doctor.probe_provider/2` and `probe_active/1`: live ~$0.0001
+  auth probes used by `fermix doctor --full` and the wizard finalize step
+  to fail loud at config time. Probes classify into `:auth_scope_mismatch`
+  (401/403), `:misconfigured`, `:server_error`, `:network`. Inject HTTP
+  with `req_options: [plug: ...]`; OAuth bearer comes from `TokenManager`
+  (override via `:token_server` for tests).
+- `MainAgent.init/1` bakes `agent.provider` + per-provider `default_model`
+  + `reasoning_effort` from config into `adapter_overrides`. Explicit
+  `adapter_overrides: [provider: ...]` wins whole, so a runtime route to
+  a different provider can't leak per-key config from the configured
+  provider's block.
+
+### Removed — M4.10
+- The "tool calls not supported on Codex" caveat in the M4.9 design doc;
+  M4.10 closes that gap. `Providers.OpenAI.Codex` is the explicit
+  `:openai_codex` route's adapter.
+
 ### Added — M4.9 (Unified Capabilities)
 - Single `%FermixCore.Capabilities.Capability{}` shape for built-ins,
   skills, and MCP server tools. ETS-backed `Capabilities.Registry`
