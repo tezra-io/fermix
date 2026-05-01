@@ -407,10 +407,35 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_openai(nil), do: []
 
   defp normalize_openai(config) do
+    if has_provider_key?(config), do: raise_old_provider_layout!()
+
     []
     |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
     |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
-    |> put_if_present(:provider, normalize_provider(lookup(config, "provider", :provider)))
+  end
+
+  defp has_provider_key?(config) when is_map(config) do
+    Map.has_key?(config, "provider") or Map.has_key?(config, :provider)
+  end
+
+  defp has_provider_key?(config) when is_list(config) do
+    Keyword.has_key?(config, :provider)
+  end
+
+  defp has_provider_key?(_), do: false
+
+  defp raise_old_provider_layout! do
+    raise """
+    config.toml has `provider = ...` under [fermix_core.providers.openai].
+
+    M4.10 moved provider selection to [fermix_core.agent]. Edit ~/.fermix/config.toml:
+
+        [fermix_core.agent]
+        provider = "openai_codex"   # or "openai" or "anthropic"
+
+    and remove the `provider` key from the [fermix_core.providers.openai] block.
+    The daemon will not boot until this is fixed.
+    """
   end
 
   defp normalize_provider(nil), do: nil
@@ -439,6 +464,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_agent(config) do
     []
     |> put_if_present(:name, normalize_string(lookup(config, "name", :name)))
+    |> put_if_present(:provider, normalize_provider(lookup(config, "provider", :provider)))
   end
 
   defp normalize_telegram(nil), do: []

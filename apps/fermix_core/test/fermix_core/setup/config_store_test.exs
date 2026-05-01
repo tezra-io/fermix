@@ -158,4 +158,60 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     personalization = Application.get_env(:fermix_core, :personalization, [])
     assert Keyword.get(personalization, :user_name) == "preserved"
   end
+
+  test "bootstrap_runtime_config persists provider selection under :agent" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :agent, [])
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [auth_mode: :oauth]],
+          agent: [name: "fermix", provider: :openai_codex]
+        ],
+        fermix_channels: [],
+        fermix_web: []
+      })
+
+    Application.put_env(:fermix_core, :agent, [])
+
+    assert :ok = ConfigStore.bootstrap_runtime_config()
+
+    agent = Application.get_env(:fermix_core, :agent, [])
+    assert Keyword.get(agent, :provider) == :openai_codex
+    assert Keyword.get(agent, :name) == "fermix"
+
+    # And the openai block does NOT carry the provider key.
+    openai = Application.get_env(:fermix_core, :providers, []) |> Keyword.get(:openai, [])
+    refute Keyword.has_key?(openai, :provider)
+  end
+
+  test "bootstrap_runtime_config raises on legacy c4f02a4 layout (provider under [providers.openai])" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    # Hand-write a TOML in the old c4f02a4 shape so we can prove the loader refuses it.
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openai]
+    auth_mode = "oauth"
+    provider = "openai_codex"
+    """)
+
+    err =
+      assert_raise RuntimeError, fn ->
+        ConfigStore.bootstrap_runtime_config()
+      end
+
+    assert err.message =~ "[fermix_core.providers.openai]"
+    assert err.message =~ "[fermix_core.agent]"
+  end
 end
