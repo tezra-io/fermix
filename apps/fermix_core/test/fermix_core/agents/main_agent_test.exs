@@ -1,6 +1,8 @@
 defmodule FermixCore.Agents.MainAgentTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
@@ -1444,10 +1446,29 @@ defmodule FermixCore.Agents.MainAgentTest do
       Application.put_env(:fermix_core, :providers, [])
 
       name = :"main_agent_bad_provider_#{System.unique_integer([:positive])}"
+
+      {pid, log} =
+        with_log(fn ->
+          {:ok, pid} = MainAgent.start_link(name: name)
+          pid
+        end)
+
+      state = :sys.get_state(pid)
+      assert state.adapter_overrides == []
+      assert log =~ "ignoring unknown provider :openia"
+
+      GenServer.stop(pid)
+    end
+
+    test "provider configured but per-provider block has no defaults yields provider-only overrides" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+      Application.put_env(:fermix_core, :providers, openai_codex: [])
+
+      name = :"main_agent_provider_only_#{System.unique_integer([:positive])}"
       {:ok, pid} = MainAgent.start_link(name: name)
       state = :sys.get_state(pid)
 
-      assert state.adapter_overrides == []
+      assert state.adapter_overrides == [provider: :openai_codex]
 
       GenServer.stop(pid)
     end
