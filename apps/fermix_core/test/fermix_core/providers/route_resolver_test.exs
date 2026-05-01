@@ -189,5 +189,107 @@ defmodule FermixCore.Providers.RouteResolverTest do
         Application.put_env(:fermix_core, :providers, original_providers)
       end
     end
+
+    test "reasoning_effort from opts overrides the per-provider config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [auth_mode: :api_key, api_key: "sk-test", reasoning_effort: :low]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(
+            provider: :openai,
+            model: "gpt-5",
+            base_url: "https://api.openai.com/v1",
+            reasoning_effort: :high
+          )
+
+        assert opts[:reasoning_effort] == :high
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "reasoning_effort falls through to the per-provider config block when opts omit it" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [auth_mode: :api_key, api_key: "sk-test", reasoning_effort: :medium]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(
+            provider: :openai,
+            model: "gpt-5",
+            base_url: "https://api.openai.com/v1"
+          )
+
+        assert opts[:reasoning_effort] == :medium
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "reasoning_effort is omitted from adapter_opts when neither opts nor config set it" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [auth_mode: :api_key, api_key: "sk-test"]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(
+            provider: :openai,
+            model: "gpt-5",
+            base_url: "https://api.openai.com/v1"
+          )
+
+        refute Keyword.has_key?(opts, :reasoning_effort)
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "raises ArgumentError when reasoning_effort in config is invalid (boundary validation)" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [auth_mode: :api_key, api_key: "sk-test", reasoning_effort: :absurd]
+        )
+
+        assert_raise ArgumentError, ~r/invalid reasoning_effort: :absurd/, fn ->
+          RouteResolver.resolve!(
+            provider: :openai,
+            model: "gpt-5",
+            base_url: "https://api.openai.com/v1"
+          )
+        end
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "Codex resolver reads reasoning_effort from the openai_codex config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [auth_mode: :oauth],
+          openai_codex: [reasoning_effort: :xhigh]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
+
+        assert opts[:reasoning_effort] == :xhigh
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
   end
 end

@@ -225,7 +225,8 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
         adapter: :chat_completions,
         model: model,
         status: status,
-        tokens: tokens
+        tokens: tokens,
+        reasoning_effort: nil
       }
     )
   end

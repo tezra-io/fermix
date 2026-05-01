@@ -48,6 +48,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     {instructions, input} = ResponsesShared.build_input(messages)
     resolved_instructions = instructions || @default_instructions
     tools = ResponsesShared.to_provider_tools(capabilities)
+    reasoning_effort = Keyword.get(opts, :reasoning_effort)
+    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
     headers = build_headers(token)
 
     body =
@@ -59,13 +61,15 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         stream: true
       }
       |> maybe_put(:tools, tools)
+      |> maybe_put(:reasoning, reasoning)
 
     turn_state = %{
       model: model,
       input: input,
       tools: tools,
       capabilities: capabilities,
-      instructions: resolved_instructions
+      instructions: resolved_instructions,
+      reasoning_effort: reasoning_effort
     }
 
     post(url, body, headers, req_options, turn_state)
@@ -86,6 +90,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       instructions: instructions
     } = provider_state
 
+    reasoning_effort = Keyword.get(opts, :reasoning_effort)
+    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ output_items ++ outputs
     headers = build_headers(token)
@@ -99,13 +105,15 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         stream: true
       }
       |> maybe_put(:tools, tools)
+      |> maybe_put(:reasoning, reasoning)
 
     turn_state = %{
       model: model,
       input: next_input,
       tools: tools,
       capabilities: caps,
-      instructions: instructions
+      instructions: instructions,
+      reasoning_effort: reasoning_effort
     }
 
     post(url, body, headers, req_options, turn_state)
@@ -146,7 +154,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       |> handle_response(turn_state)
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, turn_state.model, duration_ms)
+    emit_telemetry(result, turn_state, duration_ms)
     result
   end
 
@@ -221,7 +229,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     end
   end
 
-  defp emit_telemetry(result, model, duration_ms) do
+  defp emit_telemetry(result, turn_state, duration_ms) do
     {status, tokens} =
       case result do
         {:ok, resp} ->
@@ -234,7 +242,14 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     :telemetry.execute(
       [:fermix, :provider, :call],
       %{duration_ms: duration_ms},
-      %{provider: :openai_codex, adapter: :codex, model: model, status: status, tokens: tokens}
+      %{
+        provider: :openai_codex,
+        adapter: :codex,
+        model: turn_state.model,
+        status: status,
+        tokens: tokens,
+        reasoning_effort: Map.get(turn_state, :reasoning_effort)
+      }
     )
   end
 end
