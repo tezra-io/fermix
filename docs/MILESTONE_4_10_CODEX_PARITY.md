@@ -181,41 +181,53 @@ Adapter opts gain `:reasoning_effort` (atom or binary, validated against `~w(non
 reasoning: %{effort: Atom.to_string(effort)}
 ```
 
-The route resolver reads it from agent opts → app config (`:fermix_core, :providers, :openai, :reasoning_effort`) → omitted (no body field) in priority order. If the value is `:none`, the field is omitted entirely (the model uses its provider-side default).
+The route resolver reads `:reasoning_effort` from agent opts → the *selected provider's* block in app config (`:fermix_core, :providers, <selected_provider>, :reasoning_effort`) → omitted (no body field) in priority order. If the value is `:none`, the field is omitted entirely (the model uses its provider-side default).
 
 ### 4.5 Config schema
 
-New TOML keys under `[fermix_core.providers.openai]`:
+The selected provider is **one knob**, not a per-provider field. Mixing the selector with provider-specific settings (as the post-M4.9 patch did, putting `provider = "openai_codex"` under `[fermix_core.providers.openai]`) makes the schema ambiguous: which block holds the active settings depends on which provider is selected, but the selector itself is buried inside one of the blocks. Move it.
 
 ```toml
+# Selection: lives with the agent, not inside a provider block
+[fermix_core.agent]
+name = "fermix"
+provider = "openai_codex"      # one of: openai | openai_codex | anthropic
+
+# Per-provider settings: only the selected one is live, others are dormant
 [fermix_core.providers.openai]
-auth_mode = "oauth"            # existing
-api_key = ""                   # existing
-provider = "openai_codex"      # NEW (added in post-M4.9 patch)
-default_model = "gpt-5.5"      # NEW
-reasoning_effort = "high"      # NEW (only meaningful for codex/responses)
-```
+auth_mode = "api_key"
+api_key = ""
+default_model = "gpt-5.5"
+reasoning_effort = "high"      # only meaningful for codex/responses
 
-Same shape under `[fermix_core.providers.anthropic]`:
+[fermix_core.providers.openai_codex]
+default_model = "gpt-5.5"
+reasoning_effort = "high"
+# auth comes from ~/.fermix/auth.json (TokenManager); no api_key here
 
-```toml
 [fermix_core.providers.anthropic]
-auth_mode = "api_key"          # NEW
-api_key = ""                   # NEW
-default_model = "claude-sonnet-4-6"   # NEW
+auth_mode = "api_key"
+api_key = ""
+default_model = "claude-sonnet-4-6"
 ```
 
-`ConfigStore.normalize_openai/1` and `normalize_anthropic/1` read all of these into the keyword list. `render_section/2` writes them back when the user re-runs setup or saves over an existing config.
+Why each provider gets its own block (instead of one shared block): the three surfaces have different auth flows (API key vs OAuth vs API key), different default models, different live endpoints. Storing them separately means switching providers (re-running the wizard) doesn't clobber settings for the other two — useful when a user toggles between API-key OpenAI and Codex, or wants to keep an Anthropic fallback configured.
+
+`ConfigStore.normalize_agent/1` gains a `provider` field. `normalize_openai/1`, `normalize_openai_codex/1` (new), and `normalize_anthropic/1` each read their own block. `render_section/2` writes back only the blocks that have non-default values; unconfigured providers stay absent from the file.
+
+**Migration from c4f02a4:** the post-M4.9 patch placed `provider:` under `[fermix_core.providers.openai]`. **Stage 0** (see §6) moves it to `[fermix_core.agent]` *before* any other M4.10 work, so the schema is in its final shape from the start. No deprecation shim — c4f02a4 has been on `dev` for hours, no users. Daemon refuses to start with the old layout.
 
 ### 4.6 Env-var overlays
 
 `config/runtime.exs` adds (parallel to existing `OPENAI_AUTH_MODE` / `OPENAI_API_KEY`):
 
 ```
-FERMIX_PROVIDER          → :openai | :openai_codex | :anthropic
-FERMIX_DEFAULT_MODEL     → string, no validation against catalog (allows new releases)
-FERMIX_REASONING_EFFORT  → none | minimal | low | medium | high | xhigh
+FERMIX_PROVIDER          → openai | openai_codex | anthropic    (overlays [fermix_core.agent].provider)
+FERMIX_DEFAULT_MODEL     → string, no validation against catalog  (overlays the selected provider's default_model)
+FERMIX_REASONING_EFFORT  → none | minimal | low | medium | high | xhigh   (overlays the selected provider's reasoning_effort)
 ```
+
+The default-model and reasoning-effort overlays apply to the *selected* provider (resolved after `FERMIX_PROVIDER` overlay), so a single env-var trio gives a consistent override regardless of which provider is configured in TOML.
 
 Validation: invalid enum values log a warning and fall back to the TOML value (don't crash boot). Same fail-soft pattern as the existing `OPENAI_AUTH_MODE` overlay.
 
@@ -295,7 +307,25 @@ After the user picks, the wizard writes to TOML, runs the doctor probe, and on p
 | `:openai_codex` | `POST /backend-api/codex/responses` with same body + Codex headers. 200 = pass. 401 = fail with "Codex token rejected — re-run `fermix codex login`". |
 | `:anthropic` | `POST /v1/messages` with `model: <default_model>, max_tokens: 1, messages: [...]`. 200 = pass. 401 = fail with "API key rejected". |
 
-Probes cost ~$0.0001 (1 token). They run during `fermix doctor` and at the end of the wizard. They do not run on every boot.
+**When the probe runs.** Existing `Fermix.CLI.Doctor` is offline by default and gates network checks behind `--full` (see `apps/fermix_core/lib/fermix/cli/doctor.ex:11`, `apps/fermix_core/lib/fermix/cli/doctor/checks.ex:7`). M4.10 respects that contract:
+
+| Surface | Probe runs? |
+|---|---|
+| Wizard finalize step | **Yes, always.** The user just made a selection; verifying it works is part of "wizard finished cleanly". On failure, re-prompt instead of completing. |
+| `fermix doctor --full` | **Yes.** Joins the existing network-checks set. |
+| `fermix doctor` (default, no flag) | **No.** Stays offline, same as today. |
+| Daemon boot | **No.** Probes are an explicit user action, not a boot gate. Boot must remain offline-tolerant for air-gapped/restart scenarios. |
+
+Probes cost ~$0.0001 (1 token).
+
+**What the probe does NOT validate:**
+
+A 1-token completion exercises auth, model id, and endpoint URL — that's it. It does *not* exercise the SSE function-call shape, `function_call_arguments.delta` accumulation, `output_item.done` finalization, or the `function_call_output` continuation round-trip. So a passing Codex probe does not guarantee the tool-call path is intact if the Codex stream shape changes upstream.
+
+Defenses for the SSE/continuation path live elsewhere (see §7 test plan):
+- Recorded SSE fixture tests for the parser (Stage 1 unit tests).
+- Documented manual smoke test post-Stage 1 (`§7.3`): send one tool-shaped message through Codex; verify the round-trip in `~/.fermix/traces/`.
+- The first real user message is itself a smoke test for production.
 
 ---
 
@@ -311,13 +341,24 @@ Probes cost ~$0.0001 (1 token). They run during `fermix doctor` and at the end o
 **Default:** static list in `FermixCore.Providers.ModelCatalog`, with `Custom...` escape hatch in the wizard. Catalog updates ship in code, not config.
 
 **Q4. Doctor probe mechanism.**
-**Default:** real $0.0001 minimal API call per provider. Token introspection isn't reliably available across surfaces. Probes are gated behind `fermix doctor` and the wizard finalize step — not run on every daemon boot.
+**Default:** real $0.0001 minimal API call per provider. Token introspection isn't reliably available across surfaces. Probes are gated behind `fermix doctor --full` and the wizard finalize step — not run on every daemon boot, and not on `fermix doctor` (default offline mode).
 
 ---
 
 ## 6. Stages
 
 Each stage is a self-contained PR with code + tests + format/credo green. No stage merges with the prior stage's promised-but-deferred work outstanding. Estimates are **agent wall-clock**, not human-developer time — the entire milestone fits in one review day.
+
+### Stage 0 — Schema migration for c4f02a4 (15–20 min, P0)
+
+Pre-Stage-1 cleanup. The post-M4.9 patch (commit `c4f02a4`) placed `provider:` under `[fermix_core.providers.openai]`; §4.5 moves it to `[fermix_core.agent]`. Land this before any new M4.10 code so the schema starts in its final shape.
+
+- `ConfigStore.normalize_openai/1`: drop the `provider` key. (No longer reads it from there.)
+- `ConfigStore.normalize_agent/1`: add `provider` key with `:openai | :openai_codex | :anthropic` validation.
+- `RouteResolver.configured_provider/0`: read from `:fermix_core, :agent, :provider` instead of `:fermix_core, :providers, :openai, :provider`.
+- Update `route_resolver_test.exs`: the two tests added in c4f02a4 move their app-env writes from `[:providers, :openai]` to `[:agent]`.
+- `ConfigStore.load/1` (or wherever TOML is parsed at boot): if the parsed document has a `provider` key under `[fermix_core.providers.openai]`, raise loudly with `"~/.fermix/config.toml has provider = \"...\" under [fermix_core.providers.openai]; move it to [fermix_core.agent]"`. This is a refusal, not a fallback — old config = boot fail, no silent reroute to a default provider.
+- **User-impacting:** anyone with the c4f02a4 schema in their `~/.fermix/config.toml` must move the `provider = ...` line from the openai block to a new `[fermix_core.agent]` block. Document in CHANGELOG. The daemon refuses to start until the user edits their TOML — no migration shim per CLAUDE.md #12.
 
 ### Stage 1 — Codex tool-call adapter (1.5–3 h, P0)
 
@@ -369,7 +410,7 @@ Each stage is a self-contained PR with code + tests + format/credo green. No sta
 - CHANGELOG entry.
 - ROADMAP: confirm M4.10 entry, M4.11 sequencing.
 
-**Total agent wall-clock: ~5–8 hours. Stage 1's SSE parser is the only realistic source of variance — fixture surprises, retry patterns from Codex's stream shape, or `Req` streaming quirks could push that stage to the high end. Everything downstream is small and additive.**
+**Total agent wall-clock: ~5.5–8.5 hours.** Stage 0 is a 15–20 min schema cleanup of `c4f02a4`. Stage 1's SSE parser is the main source of variance — fixture surprises, retry patterns from Codex's stream shape, or `Req` streaming quirks could push that stage to the high end. Everything else is small and additive.
 
 **Reviewable in one end-of-day pass.**
 
@@ -383,8 +424,9 @@ Each stage is a self-contained PR with code + tests + format/credo green. No sta
 - **Codex `to_provider_tools/1`** — shape matches Responses adapter byte-for-byte (since they delegate to shared module).
 - **Codex `continue/3`** — assert `function_call_output` items match `call_id`s from prior turn; assert reasoning items pass through byte-identical.
 - **Reasoning effort body shape** — every level + `:none` (omitted) + nil (omitted).
-- **`ConfigStore.normalize_openai/1`** — reads provider/default_model/reasoning_effort from TOML.
-- **`ConfigStore.render_section/2`** — round-trips written values.
+- **`ConfigStore.normalize_agent/1`** — reads `provider` field from TOML (`[fermix_core.agent].provider`).
+- **`ConfigStore.normalize_openai/1`** / **`normalize_openai_codex/1`** / **`normalize_anthropic/1`** — each reads its own `[fermix_core.providers.<name>]` block (default_model, reasoning_effort where applicable, auth_mode/api_key where applicable).
+- **`ConfigStore.render_section/2`** — round-trips written values for all four blocks; switching provider mid-session preserves the other providers' settings.
 - **Env overlays** — precedence and invalid-value handling.
 - **`ModelCatalog.models_for/1`** — returns expected lists per provider.
 - **`Doctor.probe_provider/1`** — happy path + 401 + 403 + 5xx + transport error.
@@ -399,14 +441,28 @@ Each stage is a self-contained PR with code + tests + format/credo green. No sta
 
 ### 7.3 Manual verification (post-merge sanity)
 
-- ChatGPT Plus user runs `FERMIX_HOME=~/.fermix-test mix run -e 'Fermix.CLI.main(["setup"])'`, picks Codex + gpt-5.5 + high, sees doctor pass, messages bot, bot recalls memory.
-- Same user re-runs setup, switches to Anthropic with API key, doctor passes, bot still works.
+This is the SSE-shape defense the doctor probe cannot provide (see §4.9 "What the probe does NOT validate"). Run after Stage 1 lands and before announcing M4.10 complete.
+
+- **Codex tool-call smoke test.** ChatGPT Plus user runs `FERMIX_HOME=~/.fermix-test mix run -e 'Fermix.CLI.main(["setup"])'`, picks Codex + gpt-5.5 + high, sees doctor pass. Sends a message that *forces* a tool call (e.g., "what did I tell you about my timezone?" — invokes `MemoryRecall`). Verifies in `~/.fermix-test/traces/`:
+    - `provider:call` event with `provider: :openai_codex`.
+    - At least one `tool:exec` event with `name: "MemoryRecall"`.
+    - A second `provider:call` event (the continuation) showing the function_call_output round-trip.
+    - A final `agent_event` with terminal text.
+  Any missing event → SSE shape diverged or continuation broke. Capture the full trace and open an issue before declaring done.
+- **Provider switch.** Same user re-runs setup, switches to Anthropic with API key, doctor passes, bot still works (a tool-shaped message round-trips).
+- **Provider switch back.** Re-runs again to API-key OpenAI; the previously-configured Anthropic + Codex blocks stay intact in TOML (verifies §4.5 "switching provider doesn't clobber other blocks").
 
 ---
 
 ## 8. Risk and Rollback
 
-**Risk 1: Codex SSE shape diverges from documented Responses streaming.** Codex is a private surface — no public spec. We mitigate by recording fixtures from a real ChatGPT Plus session and round-tripping them through the parser. If the API changes shape post-merge, the recorded tests will pass while production breaks. Mitigation: doctor probe runs a real call, so the divergence is caught at config/boot.
+**Risk 1: Codex SSE shape diverges from documented Responses streaming.** Codex is a private surface — no public spec. We record fixtures from a real ChatGPT Plus session and round-trip them through the parser. If the upstream stream changes shape post-merge, recorded tests will pass while production breaks. **The doctor probe is *not* a defense against this** — it is a 1-token completion that exercises auth + model id + endpoint URL only, not function-call deltas, item finalization, or continuation (see §4.9). Real defenses:
+
+- Recorded SSE fixture corpus (Stage 1 unit tests) catches divergence in any shape we've seen.
+- Documented manual smoke test (§7.3) is mandatory before declaring Stage 1 done; the user sends one tool-shaped message and verifies the trace.
+- The first real production message from any user effectively re-runs the smoke test with a live stream. Telemetry on `provider:call` + `tool:exec` is the early warning.
+
+Residual risk after these: the first user to hit an undocumented stream shape variant will see a broken loop. Acceptable — the manual smoke test catches the most common case, and the alternative (a synthetic tool-call probe) costs more tokens per `fermix doctor` run for marginal extra coverage.
 
 **Risk 2: Model name volatility.** GPT-5.4-mini today, GPT-5.6 tomorrow. We mitigate via the wizard's `Custom...` escape hatch and free-form `default_model` writes. Catalog updates are code-shipped but not blocking.
 
@@ -424,16 +480,27 @@ Each stage is a self-contained PR with code + tests + format/credo green. No sta
 ### Added — M4.10
 - OpenAI.Codex adapter now supports tool calls. ChatGPT Plus users can run the
   full agent loop without an API key.
-- Provider, default model, and reasoning effort persist in config.toml
-  ([fermix_core.providers.openai|anthropic]) and round-trip through the wizard.
+- Provider selection lives at [fermix_core.agent].provider in config.toml
+  (one of: openai, openai_codex, anthropic). Per-provider settings round-trip
+  through their own [fermix_core.providers.<name>] blocks; switching provider
+  preserves the dormant blocks.
+- Default model and reasoning effort persist per provider and round-trip
+  through the setup wizard.
 - New env-var overlays: FERMIX_PROVIDER, FERMIX_DEFAULT_MODEL, FERMIX_REASONING_EFFORT.
 - FermixCore.Providers.ModelCatalog exposes per-provider curated model lists
   for the wizard.
 - Setup wizard prompts for provider → model → reasoning effort, with a
   doctor auth probe at finalize.
-- fermix doctor performs a per-provider auth probe; mismatched token/surface
-  combinations fail with an actionable message instead of producing 401s on
-  the first message.
+- fermix doctor --full performs a per-provider auth probe; mismatched
+  token/surface combinations fail with an actionable message instead of
+  producing 401s on the first message. Default `fermix doctor` stays offline.
+
+### Changed — M4.10
+- Schema migration from c4f02a4 (post-M4.9 hotpatch): the `provider` key
+  moves from [fermix_core.providers.openai] to [fermix_core.agent]. Users
+  whose ~/.fermix/config.toml was written by c4f02a4 must move the line
+  manually — no migration shim. Daemon will refuse to start with the old
+  layout (provider key in the openai block is no longer read).
 
 ### Removed — M4.10
 - :tool_calls_not_supported_on_codex error path. Codex now supports tool
