@@ -42,10 +42,9 @@ defmodule FermixCore.Providers.RouteResolver do
   end
 
   defp configured_provider do
-    case Config.provider(:openai) do
-      {:ok, cfg} -> Keyword.get(cfg, :provider)
-      _ -> nil
-    end
+    :fermix_core
+    |> Application.get_env(:agent, [])
+    |> Keyword.get(:provider)
   end
 
   @spec resolve_openai!(keyword()) :: resolution()

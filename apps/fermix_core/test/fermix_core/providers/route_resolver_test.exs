@@ -121,32 +121,33 @@ defmodule FermixCore.Providers.RouteResolverTest do
       end
     end
 
-    test "configured provider in :fermix_core, :providers, :openai is used when opts omit it" do
-      original = Application.get_env(:fermix_core, :providers, [])
+    test "configured provider in :fermix_core, :agent is used when opts omit it" do
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_providers = Application.get_env(:fermix_core, :providers, [])
 
       try do
-        Application.put_env(:fermix_core, :providers,
-          openai: [provider: :openai_codex, auth_mode: :oauth]
-        )
+        Application.put_env(:fermix_core, :agent, provider: :openai_codex)
+        Application.put_env(:fermix_core, :providers, openai: [auth_mode: :oauth])
 
-        # Opts omit :provider — must pick up :openai_codex from app env.
+        # Opts omit :provider — must pick up :openai_codex from agent app env.
         {route_key, _opts} =
           RouteResolver.resolve!(model: "gpt-5", access_token: "tok")
 
         assert route_key.provider == :openai_codex
         assert Adapter.for_route(route_key) == Codex
       after
-        Application.put_env(:fermix_core, :providers, original)
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :providers, original_providers)
       end
     end
 
     test "explicit opts :provider overrides configured provider" do
-      original = Application.get_env(:fermix_core, :providers, [])
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_providers = Application.get_env(:fermix_core, :providers, [])
 
       try do
-        Application.put_env(:fermix_core, :providers,
-          openai: [provider: :openai_codex, auth_mode: :oauth]
-        )
+        Application.put_env(:fermix_core, :agent, provider: :openai_codex)
+        Application.put_env(:fermix_core, :providers, openai: [auth_mode: :oauth])
 
         {route_key, _opts} =
           RouteResolver.resolve!(
@@ -160,7 +161,32 @@ defmodule FermixCore.Providers.RouteResolverTest do
         assert route_key.provider == :openai
         assert Adapter.for_route(route_key) == Responses
       after
-        Application.put_env(:fermix_core, :providers, original)
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "old c4f02a4 schema location is ignored (provider must live under :agent)" do
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        # Old layout: provider under [:providers, :openai] (the c4f02a4 hotpatch shape).
+        # The dispatcher must NOT pick it up from there.
+        Application.put_env(:fermix_core, :agent, [])
+
+        Application.put_env(:fermix_core, :providers,
+          openai: [provider: :openai_codex, auth_mode: :api_key, api_key: "sk-test"]
+        )
+
+        {route_key, _opts} =
+          RouteResolver.resolve!(model: "gpt-4o")
+
+        # Falls through to :openai (the default), NOT :openai_codex.
+        assert route_key.provider == :openai
+      after
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :providers, original_providers)
       end
     end
   end
