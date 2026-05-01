@@ -95,6 +95,66 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "auth_probe/1" do
+    setup do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :providers, original_providers)
+        Application.put_env(:fermix_core, :agent, original_agent)
+      end)
+
+      :ok
+    end
+
+    test "ok on probe pass" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", default_model: "gpt-5.5"]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end
+      result = Checks.auth_probe(req_options: [plug: plug])
+
+      assert result.name == "auth probe"
+      assert result.status == :ok
+      assert result.detail =~ "openai/gpt-5.5"
+    end
+
+    test "fail on auth_scope_mismatch" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-bad"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
+      result = Checks.auth_probe(req_options: [plug: plug])
+
+      assert result.status == :fail
+      assert result.detail =~ "api.openai.com"
+    end
+
+    test "warn on misconfigured provider" do
+      Application.put_env(:fermix_core, :providers, openai: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+      result = Checks.auth_probe()
+      assert result.status == :warn
+      assert result.detail =~ "api_key"
+    end
+
+    test "warn on transient 5xx" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 503, "service unavailable") end
+      result = Checks.auth_probe(req_options: [plug: plug])
+
+      assert result.status == :warn
+      assert result.detail =~ "503"
+    end
+  end
+
   def bad_sha_manifest_plug(conn) do
     body = manifest_with_sha("0000000000000000000000000000000000000000000000000000000000000000")
 
