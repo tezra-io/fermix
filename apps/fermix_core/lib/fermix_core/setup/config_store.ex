@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.ConfigStore do
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Providers.OpenAI.ResponsesShared
 
   @workspace_dirs [
     bootstrap: "bootstrap",
@@ -46,12 +47,14 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec current_snapshot() :: runtime_config()
   def current_snapshot do
+    providers = Application.get_env(:fermix_core, :providers, [])
+
     %{
       fermix_core: [
         providers: [
-          openai:
-            Application.get_env(:fermix_core, :providers, [])
-            |> Keyword.get(:openai, [])
+          openai: Keyword.get(providers, :openai, []),
+          openai_codex: Keyword.get(providers, :openai_codex, []),
+          anthropic: Keyword.get(providers, :anthropic, [])
         ],
         personalization: Application.get_env(:fermix_core, :personalization, []),
         agent: Application.get_env(:fermix_core, :agent, [])
@@ -91,11 +94,11 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec apply_snapshot(runtime_config()) :: :ok
   def apply_snapshot(snapshot) do
     persisted = persistable_snapshot(snapshot)
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
 
-    apply_openai_config(
-      Keyword.get(persisted.fermix_core, :providers, [])
-      |> Keyword.get(:openai, [])
-    )
+    apply_provider_config(:openai, Keyword.get(providers, :openai, []))
+    apply_provider_config(:openai_codex, Keyword.get(providers, :openai_codex, []))
+    apply_provider_config(:anthropic, Keyword.get(providers, :anthropic, []))
 
     apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
@@ -148,15 +151,17 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec persistable_snapshot(runtime_config()) :: runtime_config()
   def persistable_snapshot(snapshot) do
+    providers =
+      snapshot
+      |> Map.get(:fermix_core, [])
+      |> Keyword.get(:providers, [])
+
     %{
       fermix_core: [
         providers: [
-          openai:
-            snapshot
-            |> Map.get(:fermix_core, [])
-            |> Keyword.get(:providers, [])
-            |> Keyword.get(:openai, [])
-            |> normalize_openai()
+          openai: providers |> Keyword.get(:openai, []) |> normalize_openai(),
+          openai_codex: providers |> Keyword.get(:openai_codex, []) |> normalize_openai_codex(),
+          anthropic: providers |> Keyword.get(:anthropic, []) |> normalize_anthropic()
         ],
         personalization:
           snapshot
@@ -213,7 +218,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp empty_runtime_config do
     %{
       fermix_core: [
-        providers: [openai: []],
+        providers: [openai: [], openai_codex: [], anthropic: []],
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
         agent: [name: "fermix"]
       ],
@@ -222,11 +227,10 @@ defmodule FermixCore.Setup.ConfigStore do
     }
   end
 
-  defp apply_openai_config(openai_config) do
+  defp apply_provider_config(provider, config) do
     providers = Application.get_env(:fermix_core, :providers, [])
-    merged_openai = Keyword.merge(Keyword.get(providers, :openai, []), openai_config)
-
-    Application.put_env(:fermix_core, :providers, Keyword.put(providers, :openai, merged_openai))
+    merged = Keyword.merge(Keyword.get(providers, provider, []), config)
+    Application.put_env(:fermix_core, :providers, Keyword.put(providers, provider, merged))
     :ok
   end
 
@@ -259,21 +263,27 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp dump_snapshot(snapshot) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
-
-    openai =
-      fermix_core
-      |> Keyword.get(:providers, [])
-      |> Keyword.get(:openai, [])
-
+    providers = Keyword.get(fermix_core, :providers, [])
     personalization = Keyword.get(fermix_core, :personalization, [])
     agent = Keyword.get(fermix_core, :agent, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
       "# Managed by mix fermix.setup",
-      render_section(["fermix_core", "providers", "openai"], openai),
-      render_section(["fermix_core", "personalization"], personalization),
       render_section(["fermix_core", "agent"], agent),
+      render_section(
+        ["fermix_core", "providers", "openai"],
+        Keyword.get(providers, :openai, [])
+      ),
+      render_section(
+        ["fermix_core", "providers", "openai_codex"],
+        Keyword.get(providers, :openai_codex, [])
+      ),
+      render_section(
+        ["fermix_core", "providers", "anthropic"],
+        Keyword.get(providers, :anthropic, [])
+      ),
+      render_section(["fermix_core", "personalization"], personalization),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -349,7 +359,11 @@ defmodule FermixCore.Setup.ConfigStore do
     %{
       fermix_core: [
         providers: [
-          openai: normalize_openai(get_in(document, ["fermix_core", "providers", "openai"]))
+          openai: normalize_openai(get_in(document, ["fermix_core", "providers", "openai"])),
+          openai_codex:
+            normalize_openai_codex(get_in(document, ["fermix_core", "providers", "openai_codex"])),
+          anthropic:
+            normalize_anthropic(get_in(document, ["fermix_core", "providers", "anthropic"]))
         ],
         personalization:
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
@@ -412,6 +426,58 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
     |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
+    |> put_if_present(
+      :default_model,
+      normalize_string(lookup(config, "default_model", :default_model))
+    )
+    |> put_if_present(
+      :reasoning_effort,
+      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
+    )
+  end
+
+  defp normalize_openai_codex(nil), do: []
+
+  defp normalize_openai_codex(config) do
+    []
+    |> put_if_present(
+      :default_model,
+      normalize_string(lookup(config, "default_model", :default_model))
+    )
+    |> put_if_present(
+      :reasoning_effort,
+      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
+    )
+  end
+
+  defp normalize_anthropic(nil), do: []
+
+  defp normalize_anthropic(config) do
+    []
+    |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
+    |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
+    |> put_if_present(
+      :default_model,
+      normalize_string(lookup(config, "default_model", :default_model))
+    )
+  end
+
+  # Validates against the canonical enum owned by ResponsesShared.
+  # Returns the atom on success, or nil on unknown input — consistent
+  # with the rest of this module (normalize_auth_mode, normalize_mode).
+  # Hand-edited TOML with an invalid effort silently drops to nil; the
+  # wizard never writes an invalid value, and route_resolver still
+  # validates at the public boundary, so misconfig surfaces cleanly.
+  defp normalize_reasoning_effort(nil), do: nil
+
+  defp normalize_reasoning_effort(value) do
+    valid = ResponsesShared.valid_reasoning_efforts()
+
+    cond do
+      is_atom(value) and value in valid -> value
+      is_binary(value) -> Enum.find(valid, fn atom -> Atom.to_string(atom) == value end)
+      true -> nil
+    end
   end
 
   defp has_provider_key?(config) when is_map(config) do
