@@ -315,7 +315,10 @@ defmodule FermixCore.Setup.Wizard do
   defp put_default_model(snapshot, ""), do: snapshot
 
   defp put_default_model(snapshot, value) when is_binary(value) do
-    update_active_provider_block(snapshot, :default_model, String.trim(value))
+    case String.trim(value) do
+      "" -> raise ArgumentError, "default_model cannot be blank"
+      trimmed -> update_active_provider_block(snapshot, :default_model, trimmed)
+    end
   end
 
   defp put_reasoning_effort(snapshot, nil), do: snapshot
