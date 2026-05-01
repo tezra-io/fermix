@@ -643,8 +643,12 @@ defmodule FermixCore.Providers.Adapter do
         }
 
   @spec for_route(route_key()) :: module()
-  def for_route(%{provider: :openai, auth_mode: :oauth}),
-    do: FermixCore.Providers.OpenAI.Responses
+  # M4.10 update: explicit `:openai_codex` provider routes to the SSE
+  # Codex adapter. The original M4.9 sketch had `:openai + :oauth → Responses`
+  # here; that clause is gone — OAuth on `:openai` lands on Responses via
+  # the model-shape clauses below, and Codex requires the explicit provider.
+  def for_route(%{provider: :openai_codex}),
+    do: FermixCore.Providers.OpenAI.Codex
 
   def for_route(%{provider: :openai, model: "gpt-" <> _, base_url: "https://api.openai.com" <> _}),
     do: FermixCore.Providers.OpenAI.Responses
