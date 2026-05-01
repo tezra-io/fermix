@@ -22,6 +22,7 @@ defmodule FermixCore.Providers.RouteResolver do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.OpenAI.ResponsesShared
 
   @default_openai_base_url "https://api.openai.com/v1"
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
@@ -89,6 +90,7 @@ defmodule FermixCore.Providers.RouteResolver do
         token_server: Keyword.get(opts, :token_server, TokenManager)
       ]
       |> maybe_put(:access_token, Keyword.get(opts, :access_token))
+      |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai_codex, opts))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
@@ -110,6 +112,7 @@ defmodule FermixCore.Providers.RouteResolver do
       ]
       |> maybe_put(:access_token, Keyword.get(opts, :access_token))
       |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+      |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai, opts))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
@@ -128,6 +131,7 @@ defmodule FermixCore.Providers.RouteResolver do
     adapter_opts =
       [model: model, base_url: base_url, api_key: api_key]
       |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+      |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai, opts))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
@@ -155,4 +159,40 @@ defmodule FermixCore.Providers.RouteResolver do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # Effort precedence: explicit opt > per-provider config block > nil (omitted).
+  # The adapter omits the request body field when the result is nil or :none,
+  # so omitted-here = "use the provider's server-side default".
+  #
+  # Validation happens here, at config-read time, not deep in the adapter
+  # (CLAUDE.md #6 — fail loud at the public boundary). A hand-edited
+  # config.toml with `reasoning_effort = "absurd"` raises here on the very
+  # first call to `RouteResolver.resolve!/1`, not partway through a tool
+  # loop. Wizard writes (Stage 4) are pre-validated, so legitimate flows
+  # never trip this.
+  defp resolve_reasoning_effort(provider, opts) do
+    value =
+      case Keyword.fetch(opts, :reasoning_effort) do
+        {:ok, v} ->
+          v
+
+        :error ->
+          case Config.provider(provider) do
+            {:ok, cfg} -> Keyword.get(cfg, :reasoning_effort)
+            {:error, :not_configured} -> nil
+          end
+      end
+
+    validate_reasoning_effort!(value)
+    value
+  end
+
+  defp validate_reasoning_effort!(nil), do: :ok
+
+  defp validate_reasoning_effort!(value) do
+    # maybe_reasoning_field/1 owns the enum. Reuse it as the validator —
+    # one source of truth.
+    _ = ResponsesShared.maybe_reasoning_field(value)
+    :ok
+  end
 end

@@ -133,6 +133,78 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
+  describe "chat/3 — reasoning effort body shape" do
+    test "omits the reasoning field when :reasoning_effort is nil" do
+      assert {nil, decoded} = run_chat_capture_body(reasoning_effort: nil)
+      refute Map.has_key?(decoded, "reasoning")
+    end
+
+    test "omits the reasoning field when :reasoning_effort is :none" do
+      assert {nil, decoded} = run_chat_capture_body(reasoning_effort: :none)
+      refute Map.has_key?(decoded, "reasoning")
+    end
+
+    test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
+      for level <- [:minimal, :low, :medium, :high, :xhigh] do
+        assert {nil, decoded} = run_chat_capture_body(reasoning_effort: level)
+        assert decoded["reasoning"] == %{"effort" => Atom.to_string(level)}
+      end
+    end
+
+    test "raises ArgumentError for an invalid effort level (caught at body construction)" do
+      assert_raise ArgumentError, ~r/invalid reasoning_effort: :weird/, fn ->
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          reasoning_effort: :weird,
+          base_url: "https://chatgpt.test/codex/responses"
+        )
+      end
+    end
+
+    test "continue/3 also re-sends reasoning when :reasoning_effort is set in opts" do
+      test_id = :"codex_continue_reasoning_#{System.unique_integer([:positive])}"
+      parent = self()
+
+      Req.Test.stub(test_id, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:captured_body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      provider_state = %{
+        input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
+        output_items: [
+          %{
+            "type" => "function_call",
+            "id" => "fc_x",
+            "call_id" => "call_x",
+            "name" => "echo",
+            "arguments" => "{}"
+          }
+        ],
+        tools: [],
+        capabilities: [],
+        instructions: "be terse"
+      }
+
+      {:ok, _turn} =
+        Codex.continue(provider_state, [%{call_id: "call_x", output: "ok"}],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          reasoning_effort: :high,
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, test_id}]
+        )
+
+      assert_receive {:captured_body, decoded}, 500
+      assert decoded["reasoning"] == %{"effort" => "high"}
+    end
+  end
+
   describe "chat/3 — SSE fixture: single function_call" do
     test "parses one tool call from output_item.done with full arguments inline" do
       sse = """
@@ -422,6 +494,41 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       turn = Codex.parse_response(body)
       assert turn.content == "ok"
       assert turn.tool_calls == []
+    end
+  end
+
+  defp run_chat_capture_body(opts) do
+    test_id = :"codex_capture_#{System.unique_integer([:positive])}"
+    parent = self()
+
+    Req.Test.stub(test_id, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:captured_body, Jason.decode!(body)})
+
+      conn
+      |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+      |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+    end)
+
+    {:ok, _turn} =
+      Codex.chat(
+        [%{role: "user", content: "Hi"}],
+        [],
+        Keyword.merge(
+          [
+            access_token: @jwt_with_sub,
+            model: "gpt-5",
+            base_url: "https://chatgpt.test/codex/responses",
+            req_options: [plug: {Req.Test, test_id}]
+          ],
+          opts
+        )
+      )
+
+    receive do
+      {:captured_body, decoded} -> {nil, decoded}
+    after
+      500 -> flunk("no body captured")
     end
   end
 

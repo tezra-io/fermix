@@ -407,7 +407,7 @@ defmodule FermixCore.Providers.OpenAI do
     :telemetry.execute(
       [:fermix, :provider, :call],
       %{duration_ms: duration_ms},
-      %{provider: :openai, model: model, status: status, tokens: tokens}
+      %{provider: :openai, model: model, status: status, tokens: tokens, reasoning_effort: nil}
     )
   end
 

@@ -230,4 +230,66 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       refute Responses.supports_streaming?()
     end
   end
+
+  describe "chat/3 — reasoning effort body shape" do
+    test "omits the reasoning field when :reasoning_effort is nil" do
+      decoded = capture_body(reasoning_effort: nil)
+      refute Map.has_key?(decoded, "reasoning")
+    end
+
+    test "omits the reasoning field when :reasoning_effort is :none" do
+      decoded = capture_body(reasoning_effort: :none)
+      refute Map.has_key?(decoded, "reasoning")
+    end
+
+    test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
+      for level <- [:minimal, :low, :medium, :high, :xhigh] do
+        decoded = capture_body(reasoning_effort: level)
+        assert decoded["reasoning"] == %{"effort" => Atom.to_string(level)}
+      end
+    end
+
+    test "raises ArgumentError for an invalid effort level" do
+      assert_raise ArgumentError, ~r/invalid reasoning_effort: :weird/, fn ->
+        Responses.chat([%{role: "user", content: "x"}], [],
+          api_key: "sk-test",
+          model: "gpt-5.4-mini",
+          reasoning_effort: :weird,
+          base_url: "https://api.openai.com/v1"
+        )
+      end
+    end
+  end
+
+  defp capture_body(opts) do
+    test_id = :"responses_capture_#{System.unique_integer([:positive])}"
+    parent = self()
+
+    Req.Test.stub(test_id, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(parent, {:captured_body, Jason.decode!(body)})
+      Req.Test.json(conn, %{"model" => "gpt-5", "output" => [], "usage" => %{}})
+    end)
+
+    {:ok, _turn} =
+      Responses.chat(
+        [%{role: "user", content: "Hi"}],
+        [],
+        Keyword.merge(
+          [
+            api_key: "sk-test",
+            model: "gpt-5",
+            base_url: "https://api.openai.com/v1",
+            req_options: [plug: {Req.Test, test_id}]
+          ],
+          opts
+        )
+      )
+
+    receive do
+      {:captured_body, decoded} -> decoded
+    after
+      500 -> flunk("no body captured")
+    end
+  end
 end
