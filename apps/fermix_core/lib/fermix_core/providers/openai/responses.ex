@@ -22,15 +22,16 @@ defmodule FermixCore.Providers.OpenAI.Responses do
        through `output_items` unchanged so the model can resume its
        chain of thought.
 
-  `call_id` always comes from the API. We fall back to a deterministic
-  SHA256 hash only when the API response omits one — out-of-spec but
-  observed in practice.
+  Wire-shape conversion (tool list, item-list `input`, item-list
+  `output` parsing, `call_id` fallback) lives in `OpenAI.ResponsesShared`
+  and is shared with `OpenAI.Codex`. Only the URL, headers, and the
+  fact that this surface is non-streaming differ here.
   """
 
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Auth.TokenManager
-  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Providers.OpenAI.ResponsesShared
 
   require Logger
 
@@ -45,8 +46,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
 
-    {instructions, input} = build_input(messages)
-    tools = to_provider_tools(capabilities)
+    {instructions, input} = ResponsesShared.build_input(messages)
+    tools = ResponsesShared.to_provider_tools(capabilities)
 
     body =
       %{model: model, input: input, store: false}
@@ -68,11 +69,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     %{input: prior_input, output_items: output_items, tools: tools, capabilities: caps} =
       provider_state
 
-    outputs =
-      Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
-        %{type: "function_call_output", call_id: call_id, output: to_string(output)}
-      end)
-
+    outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ output_items ++ outputs
 
     body =
@@ -84,34 +81,14 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   end
 
   @impl true
-  def to_provider_tools([]), do: []
-
-  def to_provider_tools(capabilities) when is_list(capabilities) do
-    Enum.map(capabilities, fn %Capability{} = cap ->
-      %{
-        type: "function",
-        name: cap.name,
-        description: cap.description,
-        parameters: cap.parameters,
-        strict: false
-      }
-    end)
-  end
+  def to_provider_tools(capabilities), do: ResponsesShared.to_provider_tools(capabilities)
 
   @impl true
-  def parse_tool_calls(%{"output" => items}) when is_list(items) do
-    items
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {item, idx} -> normalize_tool_call(item, idx) end)
-  end
-
-  def parse_tool_calls(_), do: []
+  def parse_tool_calls(response), do: ResponsesShared.parse_tool_calls(response)
 
   @impl true
   def parse_response(body) when is_map(body) do
-    {:ok, turn} =
-      build_turn(body, body["model"] || "unknown", _input = [], _tools = [], _caps = [])
-
+    {:ok, turn} = ResponsesShared.build_turn(body, body["model"] || "unknown", [], [], [])
     turn
   end
 
@@ -148,7 +125,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
          capabilities
        )
        when is_map(body) do
-    build_turn(body, model, input, tools, capabilities)
+    ResponsesShared.build_turn(body, model, input, tools, capabilities)
   end
 
   defp handle_response(
@@ -170,94 +147,6 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp handle_response({:error, reason}, _model, _i, _t, _c) do
     Logger.error("OpenAI Responses request failed: #{inspect(reason)}")
     {:error, reason}
-  end
-
-  defp build_turn(body, model, input, tools, capabilities) do
-    output_items = Map.get(body, "output", [])
-    usage = Map.get(body, "usage", %{})
-
-    tool_calls =
-      output_items
-      |> Enum.with_index()
-      |> Enum.flat_map(fn {item, idx} -> normalize_tool_call(item, idx) end)
-
-    {:ok,
-     %{
-       content: extract_text(output_items),
-       tool_calls: tool_calls,
-       provider_state: %{
-         input: input,
-         output_items: output_items,
-         tools: tools,
-         capabilities: capabilities
-       },
-       usage: %{
-         prompt_tokens: Map.get(usage, "input_tokens", 0),
-         completion_tokens: Map.get(usage, "output_tokens", 0),
-         total_tokens: Map.get(usage, "input_tokens", 0) + Map.get(usage, "output_tokens", 0)
-       },
-       model: Map.get(body, "model", model)
-     }}
-  end
-
-  defp normalize_tool_call(%{"type" => "function_call"} = item, idx) do
-    name = Map.get(item, "name", "")
-    raw_args = Map.get(item, "arguments", "{}")
-    id = Map.get(item, "id", "fc_#{idx}")
-    call_id = Map.get(item, "call_id") || deterministic_call_id(name, raw_args, idx)
-
-    [%{id: id, call_id: call_id, name: name, arguments: raw_args}]
-  end
-
-  defp normalize_tool_call(_item, _idx), do: []
-
-  defp build_input(messages) do
-    {system_parts, rest} = Enum.split_while(messages, fn msg -> msg.role == "system" end)
-
-    instructions =
-      case system_parts do
-        [] -> nil
-        parts -> Enum.map_join(parts, "\n\n", & &1.content)
-      end
-
-    input =
-      Enum.map(rest, fn msg ->
-        case msg.role do
-          "user" ->
-            %{role: "user", content: [%{type: "input_text", text: msg.content || ""}]}
-
-          "assistant" ->
-            %{role: "assistant", content: [%{type: "output_text", text: msg.content || ""}]}
-
-          _ ->
-            %{role: "user", content: [%{type: "input_text", text: msg.content || ""}]}
-        end
-      end)
-
-    {instructions, input}
-  end
-
-  defp extract_text(items) when is_list(items) do
-    items
-    |> Enum.flat_map(fn
-      %{"type" => "message", "content" => parts} when is_list(parts) -> parts
-      _ -> []
-    end)
-    |> Enum.flat_map(fn
-      %{"type" => "output_text", "text" => t} when is_binary(t) -> [t]
-      %{"text" => t} when is_binary(t) -> [t]
-      _ -> []
-    end)
-    |> Enum.join("")
-  end
-
-  defp deterministic_call_id(name, arguments, idx) do
-    hash =
-      :crypto.hash(:sha256, "#{name}:#{arguments}:#{idx}")
-      |> Base.encode16(case: :lower)
-      |> binary_part(0, 12)
-
-    "call_#{hash}"
   end
 
   defp maybe_put(map, _key, nil), do: map
