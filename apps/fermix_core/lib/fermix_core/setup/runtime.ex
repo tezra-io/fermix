@@ -17,6 +17,9 @@ defmodule FermixCore.Setup.Runtime do
   @answer_keys [
     :openai_api_key,
     :openai_auth_oauth,
+    :provider,
+    :default_model,
+    :reasoning_effort,
     :telegram_bot_token,
     :whatsapp_access_token,
     :whatsapp_phone_number_id,
