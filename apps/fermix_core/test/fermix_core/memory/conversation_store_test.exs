@@ -410,6 +410,50 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       assert log =~ "conversation durable write failed after 1 attempts"
     end
 
+    test "supervisor-start failure surfaces as durable? false + error log + no fallback insert",
+         %{store: _store} do
+      repo = start_supervised!({FlakyRepo, test_pid: self(), failures_remaining: 0})
+      store = :"conversation_store_no_sup_#{System.unique_integer([:positive])}"
+
+      # Pass a non-existent supervisor atom so Task.Supervisor.start_child/2
+      # exits and start_persist_task/2 has to surface the failure.
+      missing_supervisor = :"conversation_store_missing_sup_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: store,
+        start:
+          {ConversationStore, :start_link,
+           [
+             [
+               name: store,
+               max_messages: 5,
+               repo: repo,
+               durable_max_attempts: 1,
+               durable_retry_initial_ms: 0,
+               durable_task_supervisor: missing_supervisor
+             ]
+           ]}
+      })
+
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [[:fermix, :memory, :message]])
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   ConversationStore.add_message(@key, "user", "no sup here", server: store)
+        end)
+
+      assert_received {[:fermix, :memory, :message], ^ref, _measurements, metadata}
+      assert metadata.durable? == false
+
+      assert log =~ "failed to start conversation durable write task"
+      assert log =~ "task_supervisor_exit"
+
+      # No async task should have run, so FlakyRepo never received an insert.
+      refute_received {:insert_attempt, "user", "no sup here"}
+    end
+
     test "retries async durable writes after transient failure", %{store: _store} do
       repo = start_supervised!({FlakyRepo, test_pid: self(), failures_remaining: 1})
       store = :"conversation_store_retry_#{System.unique_integer([:positive])}"
