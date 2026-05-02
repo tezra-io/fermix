@@ -35,7 +35,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
   alias FermixCore.Prompt.PromptComposer
-  alias FermixCore.Tools.Registry
+  alias FermixCore.Providers.RouteResolver
 
   @type thread_scope :: :root | String.t() | integer()
 
@@ -112,7 +112,11 @@ defmodule FermixCore.Agents.MainAgent do
 
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
-      registry: Keyword.get(opts, :registry, Registry),
+      capability_registry:
+        Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
+      adapter_overrides: resolved_adapter_overrides(opts),
+      adapter: Keyword.get(opts, :adapter),
+      adapter_opts: Keyword.get(opts, :adapter_opts, []),
       agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
       skill_registry: skill_registry,
       available_skills: load_available_skills(skill_registry),
@@ -138,14 +142,61 @@ defmodule FermixCore.Agents.MainAgent do
     {:ok, state}
   end
 
+  # Bakes the configured provider/default_model/reasoning_effort into the
+  # agent's adapter_overrides at boot so RouteResolver picks them up at
+  # request time. Explicit opts win:
+  #   * If the caller sets `:provider` in opts, opts win whole — the config
+  #     block belongs to a different provider and its model/reasoning_effort
+  #     would leak across providers (e.g. `:openai_codex`'s effort applied
+  #     to an `:anthropic` route).
+  #   * Otherwise, config provides provider+model+reasoning_effort and
+  #     explicit opts override per-key.
+  # The snapshot is taken once at init; live config edits require a daemon
+  # restart (BootReport.restart_required? already enforces this for the
+  # wizard).
+  defp resolved_adapter_overrides(opts) do
+    explicit = Keyword.get(opts, :adapter_overrides, [])
+
+    if Keyword.has_key?(explicit, :provider) do
+      explicit
+    else
+      Keyword.merge(adapter_overrides_from_config(), explicit)
+    end
+  end
+
+  defp adapter_overrides_from_config do
+    agent_config = Application.get_env(:fermix_core, :agent, [])
+    providers = Application.get_env(:fermix_core, :providers, [])
+
+    case Keyword.get(agent_config, :provider) do
+      nil ->
+        []
+
+      provider when provider in [:openai, :openai_codex, :anthropic] ->
+        provider_config = Keyword.get(providers, provider, [])
+
+        [provider: provider]
+        |> maybe_put_override(:model, Keyword.get(provider_config, :default_model))
+        |> maybe_put_override(:reasoning_effort, Keyword.get(provider_config, :reasoning_effort))
+
+      other ->
+        Logger.warning(
+          "MainAgent ignoring unknown provider #{inspect(other)} in :fermix_core, :agent, :provider"
+        )
+
+        []
+    end
+  end
+
+  defp maybe_put_override(overrides, _key, nil), do: overrides
+  defp maybe_put_override(overrides, key, value), do: Keyword.put(overrides, key, value)
+
   @impl true
   def handle_cast({:handle_message, msg}, state) do
     conversation_key = conversation_key(msg)
     state = enqueue_latest_message(conversation_key, msg, state)
 
-    Logger.info(
-      "Main Agent received message from #{msg.channel}/#{msg.chat_id} and queued latest request"
-    )
+    Logger.info("Main Agent received message from #{msg.channel}/#{msg.chat_id}")
 
     state =
       state
@@ -331,10 +382,55 @@ defmodule FermixCore.Agents.MainAgent do
     update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
   end
 
+  defp build_loop_opts(state, messages, context) do
+    base = [
+      messages: messages,
+      context: context,
+      capability_registry: state.capability_registry
+    ]
+
+    case resolve_loop_adapter(state) do
+      {:adapter, mod, opts} ->
+        base
+        |> Keyword.put(:adapter, mod)
+        |> Keyword.put(:adapter_opts, opts)
+
+      {:route, key, opts} ->
+        base
+        |> Keyword.put(:route_key, key)
+        |> Keyword.put(:adapter_opts, opts)
+    end
+  end
+
+  defp resolve_loop_adapter(state) do
+    cond do
+      state.adapter ->
+        {:adapter, state.adapter, state.adapter_opts}
+
+      adapter_capable?(state.provider) ->
+        # Test wiring: a provider that also implements the Adapter
+        # behaviour can stand in as the adapter without separate plumbing.
+        {:adapter, state.provider, Keyword.put(state.adapter_opts, :model, "mock-model")}
+
+      true ->
+        {route_key, adapter_opts} = RouteResolver.resolve!(state.adapter_overrides)
+        {:route, route_key, adapter_opts}
+    end
+  end
+
+  defp adapter_capable?(nil), do: false
+
+  defp adapter_capable?(mod) when is_atom(mod) do
+    Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
+  end
+
   defp task_runtime_state(state) do
     %{
       provider: state.provider,
-      registry: state.registry,
+      capability_registry: state.capability_registry,
+      adapter_overrides: state.adapter_overrides,
+      adapter: state.adapter,
+      adapter_opts: state.adapter_opts,
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       available_skills: state.available_skills,
@@ -371,13 +467,11 @@ defmodule FermixCore.Agents.MainAgent do
     user_message = %{role: "user", content: msg.content}
     messages = prompt_context.messages ++ history ++ [user_message]
 
-    tools = Registry.all_tools_for_llm(state.registry)
-
     context = %{
       agent_name: "main",
       conversation_key: conversation_key,
       session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
-      registry: state.registry,
+      capability_registry: state.capability_registry,
       provider: state.provider,
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
@@ -390,13 +484,9 @@ defmodule FermixCore.Agents.MainAgent do
       prompt_accounting: prompt_context.accounting
     }
 
-    case AgentLoop.run(
-           messages: messages,
-           tools: tools,
-           provider: state.provider,
-           context: context,
-           registry: state.registry
-         ) do
+    loop_opts = build_loop_opts(state, messages, context)
+
+    case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
 
@@ -487,7 +577,7 @@ defmodule FermixCore.Agents.MainAgent do
     do: :ok
 
   defp maybe_start_extraction(msg, history, assistant_response, state) do
-    ExtractionDebouncer.request(
+    opts =
       [
         provider: state.provider,
         messages: extraction_messages(history, msg.content, assistant_response),
@@ -503,9 +593,31 @@ defmodule FermixCore.Agents.MainAgent do
         extraction_min_confidence: state.extraction_min_confidence,
         extraction_debounce_ms: state.extraction_debounce_ms,
         extraction_model: state.extraction_model
-      ],
-      server: state.extraction_debouncer
-    )
+      ]
+      |> add_extraction_route(state)
+
+    ExtractionDebouncer.request(opts, server: state.extraction_debouncer)
+  end
+
+  defp add_extraction_route(opts, %{adapter: adapter, adapter_opts: adapter_opts})
+       when not is_nil(adapter) do
+    opts
+    |> Keyword.put(:adapter, adapter)
+    |> Keyword.put(:adapter_opts, adapter_opts)
+  end
+
+  defp add_extraction_route(opts, state) do
+    case resolve_loop_adapter(state) do
+      {:route, route_key, adapter_opts} ->
+        opts
+        |> Keyword.put(:route_key, route_key)
+        |> Keyword.put(:adapter_opts, adapter_opts)
+
+      {:adapter, mod, adapter_opts} ->
+        opts
+        |> Keyword.put(:adapter, mod)
+        |> Keyword.put(:adapter_opts, adapter_opts)
+    end
   end
 
   defp extraction_messages(history, user_content, assistant_content) do

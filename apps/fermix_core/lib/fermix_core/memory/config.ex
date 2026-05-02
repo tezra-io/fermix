@@ -3,10 +3,11 @@ defmodule FermixCore.Memory.Config do
   Typed accessors for durable memory runtime configuration.
   """
 
+  alias FermixCore.Setup.ConfigStore
+
   @type options :: keyword()
   @type repo_server :: pid() | atom()
 
-  @prompt_base_dir "~/.fermix/memory"
   @prompt_user_token_cap 800
   @prompt_memory_token_cap 1600
   @extraction_timeout_ms 5_000
@@ -97,7 +98,7 @@ defmodule FermixCore.Memory.Config do
     opts
     |> Keyword.get(
       :database_path,
-      Keyword.get(memory_config(), :database_path, "~/.fermix/memory.db")
+      Keyword.get(memory_config(), :database_path, ConfigStore.memory_paths().database_path)
     )
     |> normalize_database_path()
   end
@@ -117,7 +118,7 @@ defmodule FermixCore.Memory.Config do
     opts
     |> Keyword.get(
       :prompt_base_dir,
-      Keyword.get(memory_config(), :prompt_base_dir, @prompt_base_dir)
+      Keyword.get(memory_config(), :prompt_base_dir, ConfigStore.memory_paths().prompt_base_dir)
     )
     |> Path.expand()
   end

@@ -52,7 +52,7 @@ Fermix today is a single-agent system. One MainAgent GenServer handles every inb
 | TraceStore (ETS-backed distributed tracing) | P2, current file tracing sufficient | M2 future |
 | Multiple providers per agent | Requires provider registry (M8+ scope) | Later |
 | Memory isolation between agents | Requires advanced memory (M4) | M4 |
-| Formal security policy and audit logging on tool access | Requires security milestone | M5 |
+| Formal security policy and audit logging on tool access | Requires security milestone | M10 |
 | Cron-triggered skill invocation | Requires cron scheduler | M6 |
 
 ---
@@ -115,7 +115,7 @@ Telegram webhook → WebhookController → Telegram.parse_webhook()
 2. **One Main Agent.** All channels route to the same Main Agent instance.
 3. **OpenAI is the only provider.** Sub-agents will also use OpenAI until provider registry exists.
 4. **SQLite not yet available.** Memory is ETS + in-memory. M4 adds persistence.
-5. **No formal security policy/audit yet.** Skill-agent `allowed_tools` are enforced at runtime in M2, but broader policy evaluation and audit logging remain M5 work.
+5. **No formal security policy/audit yet.** Skill-agent `allowed_tools` are enforced at runtime in M2, but broader policy evaluation and audit logging remain M10 work.
 6. **Skills directory must exist.** `~/.fermix/skills/` and `~/.fermix/journals/` created at startup if missing.
 
 ---
@@ -628,7 +628,7 @@ Persistent `AgentServer` snapshots are **not part of M2** under this ownership m
 
 ## 8. Security / Trust Boundaries
 
-**M2 does not include a full security policy engine or audit system** — that's M5. However, M2 does enforce skill tool allowlists at runtime and establishes the structure that M5 will extend:
+**M2 does not include a full security policy engine or audit system** — that's M10. However, M2 does enforce skill tool allowlists at runtime and establishes the structure that M10 will extend:
 
 ### Trust boundary: Main Agent → Skill Agent
 
@@ -641,9 +641,9 @@ Persistent `AgentServer` snapshots are **not part of M2** under this ownership m
 
 - Unchanged from Phase 1. Telegram `allowed_user_ids` filter. No additional auth.
 
-### Preparation for M5
+### Preparation for M10
 
-AgentDefinition already carries `allowed_tools` and `delegates_to` fields. When M5 adds SecurityPolicy, it will read these fields and enforce them with audit logging. M2 does not block M5 — it sets up the data model.
+AgentDefinition already carries `allowed_tools` and `delegates_to` fields. When M10 adds SecurityPolicy, it will read these fields and enforce them with audit logging. M2 does not block M10 — it sets up the data model.
 
 ---
 
@@ -931,7 +931,7 @@ Default 5 minutes proposed. Some tasks (long research, large code changes) may n
 
 RustyClaw supports it via `delegates_to` ACL. In M2, proposed as non-goal.
 
-**Recommendation:** Defer. Add to skill's `allowed_tools` when needed. The architecture supports it — invoke_skill is just a tool — but unbounded recursion is risky without M5's security policy.
+**Recommendation:** Defer. Add to skill's `allowed_tools` when needed. The architecture supports it — invoke_skill is just a tool — but unbounded recursion is risky without M10's security policy.
 
 ### OQ-5: How does the skill get context about the user's workspace?
 

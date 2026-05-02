@@ -27,6 +27,7 @@ defmodule FermixCore.MixProject do
     [
       {:burrito, "~> 1.5"},
       {:exqlite, "~> 0.36.0"},
+      {:hermes_mcp, "~> 0.13"},
       {:jason, "~> 1.4"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"}

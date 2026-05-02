@@ -3,9 +3,9 @@ defmodule FermixCore.Tools.FileRead do
   Read file contents. Supports offset/limit for large files.
   """
 
-  @behaviour FermixCore.Tools.Tool
+  @behaviour FermixCore.Capabilities.Builtin.Tool
 
-  alias FermixCore.Tools.Tool
+  alias FermixCore.Capabilities.Builtin.Tool
 
   @impl true
   @spec name() :: String.t()

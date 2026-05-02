@@ -10,13 +10,13 @@ defmodule FermixCore.Tools.MemoryRecall do
   broad for internal callers.
   """
 
-  @behaviour FermixCore.Tools.Tool
+  @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Search
   alias FermixCore.Memory.Store
-  alias FermixCore.Tools.Tool
 
   @impl true
   @spec name() :: String.t()

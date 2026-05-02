@@ -1,13 +1,26 @@
 defmodule FermixCore.ReadinessTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Readiness
 
   setup do
+    providers = Application.get_env(:fermix_core, :providers, [])
     personalization = Application.get_env(:fermix_core, :personalization, [])
+    agent = Application.get_env(:fermix_core, :agent, [])
+    telegram = Application.get_env(:fermix_channels, :telegram, [])
+    fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
+      Application.put_env(:fermix_core, :providers, providers)
       Application.put_env(:fermix_core, :personalization, personalization)
+      Application.put_env(:fermix_core, :agent, agent)
+      Application.put_env(:fermix_channels, :telegram, telegram)
+
+      case fermix_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
     end)
 
     :ok
@@ -59,6 +72,38 @@ defmodule FermixCore.ReadinessTest do
 
       assert report.status == :setup_required
       assert Enum.any?(report.failures, &(&1.component == "personalization"))
+    end
+
+    test "openai_codex readiness uses Codex auth and does not require an OpenAI API key" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      assert :ok =
+               Store.write(:openai_codex, %{
+                 auth_mode: "chatgpt",
+                 tokens: %{access_token: "codex-at", refresh_token: "codex-rt"},
+                 expires_at: DateTime.utc_now() |> DateTime.add(3600),
+                 last_refresh: nil
+               })
+
+      report = Readiness.report()
+
+      refute Enum.any?(report.failures, &(&1.component == "provider:openai"))
+      refute Enum.any?(report.failures, &(&1.component == "provider:openai_codex"))
     end
   end
 end
