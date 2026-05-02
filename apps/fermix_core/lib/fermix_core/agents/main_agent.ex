@@ -196,9 +196,7 @@ defmodule FermixCore.Agents.MainAgent do
     conversation_key = conversation_key(msg)
     state = enqueue_latest_message(conversation_key, msg, state)
 
-    Logger.info(
-      "Main Agent received message from #{msg.channel}/#{msg.chat_id} and queued latest request"
-    )
+    Logger.info("Main Agent received message from #{msg.channel}/#{msg.chat_id}")
 
     state =
       state
@@ -579,7 +577,7 @@ defmodule FermixCore.Agents.MainAgent do
     do: :ok
 
   defp maybe_start_extraction(msg, history, assistant_response, state) do
-    ExtractionDebouncer.request(
+    opts =
       [
         provider: state.provider,
         messages: extraction_messages(history, msg.content, assistant_response),
@@ -595,9 +593,31 @@ defmodule FermixCore.Agents.MainAgent do
         extraction_min_confidence: state.extraction_min_confidence,
         extraction_debounce_ms: state.extraction_debounce_ms,
         extraction_model: state.extraction_model
-      ],
-      server: state.extraction_debouncer
-    )
+      ]
+      |> add_extraction_route(state)
+
+    ExtractionDebouncer.request(opts, server: state.extraction_debouncer)
+  end
+
+  defp add_extraction_route(opts, %{adapter: adapter, adapter_opts: adapter_opts})
+       when not is_nil(adapter) do
+    opts
+    |> Keyword.put(:adapter, adapter)
+    |> Keyword.put(:adapter_opts, adapter_opts)
+  end
+
+  defp add_extraction_route(opts, state) do
+    case resolve_loop_adapter(state) do
+      {:route, route_key, adapter_opts} ->
+        opts
+        |> Keyword.put(:route_key, route_key)
+        |> Keyword.put(:adapter_opts, adapter_opts)
+
+      {:adapter, mod, adapter_opts} ->
+        opts
+        |> Keyword.put(:adapter, mod)
+        |> Keyword.put(:adapter_opts, adapter_opts)
+    end
   end
 
   defp extraction_messages(history, user_content, assistant_content) do

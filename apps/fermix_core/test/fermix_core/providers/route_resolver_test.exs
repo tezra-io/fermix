@@ -39,8 +39,19 @@ defmodule FermixCore.Providers.RouteResolverTest do
       assert Adapter.for_route(route_key) == Codex
     end
 
-    test ":openai with auth_mode :oauth routes to Responses (NOT Codex)" do
+    test ":openai_codex defaults to gpt-5.5 when no model is configured" do
       {route_key, opts} =
+        RouteResolver.resolve!(
+          provider: :openai_codex,
+          access_token: "tok"
+        )
+
+      assert route_key.model == "gpt-5.5"
+      assert opts[:model] == "gpt-5.5"
+    end
+
+    test ":openai rejects auth_mode :oauth; Codex OAuth is a separate provider" do
+      assert_raise ArgumentError, ~r/use provider: :openai_codex/, fn ->
         RouteResolver.resolve!(
           provider: :openai,
           model: "gpt-4o",
@@ -48,26 +59,18 @@ defmodule FermixCore.Providers.RouteResolverTest do
           access_token: "oauth-bearer-token",
           base_url: "https://api.openai.com/v1"
         )
-
-      assert route_key.provider == :openai
-      assert route_key.auth_mode == :oauth
-      assert route_key.base_url == "https://api.openai.com/v1"
-      assert opts[:access_token] == "oauth-bearer-token"
-      assert Adapter.for_route(route_key) == Responses
+      end
     end
 
-    test "default OpenAI OAuth user gets Responses (tool-call capable), not Codex" do
-      # No explicit provider; auth_mode :oauth on api.openai.com.
-      {route_key, _opts} =
+    test "default OpenAI rejects auth_mode :oauth" do
+      assert_raise ArgumentError, ~r/use provider: :openai_codex/, fn ->
         RouteResolver.resolve!(
           model: "gpt-4o",
           auth_mode: :oauth,
           access_token: "tok",
           base_url: "https://api.openai.com/v1"
         )
-
-      assert route_key.provider == :openai
-      assert Adapter.for_route(route_key) == Responses
+      end
     end
 
     test ":openai with eligible model on api.openai.com routes to Responses" do
@@ -127,7 +130,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
 
       try do
         Application.put_env(:fermix_core, :agent, provider: :openai_codex)
-        Application.put_env(:fermix_core, :providers, openai: [auth_mode: :oauth])
+        Application.put_env(:fermix_core, :providers, openai: [])
 
         # Opts omit :provider — must pick up :openai_codex from agent app env.
         {route_key, _opts} =
@@ -147,14 +150,13 @@ defmodule FermixCore.Providers.RouteResolverTest do
 
       try do
         Application.put_env(:fermix_core, :agent, provider: :openai_codex)
-        Application.put_env(:fermix_core, :providers, openai: [auth_mode: :oauth])
+        Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
 
         {route_key, _opts} =
           RouteResolver.resolve!(
             provider: :openai,
             model: "gpt-4o",
-            auth_mode: :oauth,
-            access_token: "tok",
+            api_key: "sk-test",
             base_url: "https://api.openai.com/v1"
           )
 
@@ -279,7 +281,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
 
       try do
         Application.put_env(:fermix_core, :providers,
-          openai: [auth_mode: :oauth],
+          openai: [],
           openai_codex: [reasoning_effort: :xhigh]
         )
 
@@ -287,6 +289,24 @@ defmodule FermixCore.Providers.RouteResolverTest do
           RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
 
         assert opts[:reasoning_effort] == :xhigh
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "Codex resolver does not expose a store override because Codex requires store=false" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [],
+          openai_codex: [store: true]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
+
+        refute Keyword.has_key?(opts, :store)
       after
         Application.put_env(:fermix_core, :providers, original_providers)
       end

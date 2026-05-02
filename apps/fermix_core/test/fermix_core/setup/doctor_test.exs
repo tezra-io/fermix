@@ -130,22 +130,12 @@ defmodule FermixCore.Setup.DoctorTest do
       assert {:error, {:misconfigured, _}} = Doctor.probe_provider(:openai)
     end
 
-    test "uses TokenManager bearer when auth_mode is :oauth" do
+    test "does not use OAuth for the regular OpenAI provider" do
       put_provider(:openai, auth_mode: :oauth, default_model: "gpt-5.5")
-      {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, "oauth-bearer-xyz")
 
-      plug = fn conn ->
-        assert ["Bearer oauth-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
-        Plug.Conn.send_resp(conn, 200, "{}")
-      end
-
-      assert {:ok, %{provider: :openai, model: "gpt-5.5"}} =
-               Doctor.probe_provider(:openai,
-                 req_options: [plug: plug],
-                 token_server: server
-               )
-
-      GenServer.stop(server)
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:openai)
+      assert message =~ "openai"
+      assert message =~ "api_key"
     end
 
     test "uses ModelCatalog default when default_model is unset" do

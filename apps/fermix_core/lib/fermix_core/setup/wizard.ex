@@ -35,6 +35,17 @@ defmodule FermixCore.Setup.Wizard do
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
 
+  @setup_secret_paths [
+    openai_api_key: [:fermix_core, :providers, :openai, :api_key],
+    telegram_bot_token: [:fermix_channels, :telegram, :bot_token],
+    whatsapp_access_token: [:fermix_channels, :whatsapp, :access_token],
+    whatsapp_verify_token: [:fermix_channels, :whatsapp, :verify_token],
+    whatsapp_app_secret: [:fermix_channels, :whatsapp, :app_secret],
+    discord_bot_token: [:fermix_channels, :discord, :bot_token],
+    slack_bot_token: [:fermix_channels, :slack, :bot_token],
+    slack_signing_secret: [:fermix_channels, :slack, :signing_secret]
+  ]
+
   @type seeding_result :: %{
           name: :identity | :agents | :soul | :user | :memory,
           path: String.t(),
@@ -174,8 +185,8 @@ defmodule FermixCore.Setup.Wizard do
   def save_answers(%WizardState{} = state, answers) do
     snapshot =
       state.config_snapshot
+      |> drop_unanswered_env_only_secrets(answers)
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
-      |> put_openai_oauth(Keyword.get(answers, :openai_auth_oauth))
       |> put_provider_selection(Keyword.get(answers, :provider))
       |> put_default_model(Keyword.get(answers, :default_model))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
@@ -192,6 +203,25 @@ defmodule FermixCore.Setup.Wizard do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
   end
+
+  defp drop_unanswered_env_only_secrets(snapshot, answers) do
+    persisted = persisted_snapshot()
+
+    Enum.reduce(@setup_secret_paths, snapshot, fn {answer_key, path}, acc ->
+      cond do
+        answered?(answers, answer_key) ->
+          acc
+
+        not blank?(get_snapshot_value(persisted, path)) ->
+          acc
+
+        true ->
+          delete_snapshot_value(acc, path)
+      end
+    end)
+  end
+
+  defp answered?(answers, key), do: not blank?(Keyword.get(answers, key))
 
   @doc """
   Re-runs prompt-file seeding against the current persisted snapshot.
@@ -222,7 +252,7 @@ defmodule FermixCore.Setup.Wizard do
     components = Enum.map(failures, & &1.component) |> MapSet.new()
 
     cond do
-      MapSet.member?(components, "provider:openai") -> :provider
+      Enum.any?(components, &String.starts_with?(&1, "provider:")) -> :provider
       persisted_provider(snapshot) == nil -> :model
       Enum.any?(@channel_components, &MapSet.member?(components, &1)) -> :channel
       MapSet.member?(components, "personalization") -> :personalization
@@ -282,6 +312,35 @@ defmodule FermixCore.Setup.Wizard do
   defp blank?(""), do: true
   defp blank?(_), do: false
 
+  defp get_snapshot_value(%{} = snapshot, [key | rest]) do
+    snapshot
+    |> Map.get(key, [])
+    |> get_snapshot_value(rest)
+  end
+
+  defp get_snapshot_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
+
+  defp get_snapshot_value(keyword, [key | rest]) when is_list(keyword) do
+    keyword
+    |> Keyword.get(key, [])
+    |> get_snapshot_value(rest)
+  end
+
+  defp get_snapshot_value(_value, _path), do: nil
+
+  defp delete_snapshot_value(%{} = snapshot, [key | rest]) do
+    Map.update(snapshot, key, [], &delete_snapshot_value(&1, rest))
+  end
+
+  defp delete_snapshot_value(keyword, [key]) when is_list(keyword),
+    do: Keyword.delete(keyword, key)
+
+  defp delete_snapshot_value(keyword, [key | rest]) when is_list(keyword) do
+    Keyword.update(keyword, key, [], &delete_snapshot_value(&1, rest))
+  end
+
+  defp delete_snapshot_value(value, _path), do: value
+
   defp restart_required?(snapshot) do
     case ConfigStore.load_runtime_config() do
       {:ok, persisted} ->
@@ -301,25 +360,10 @@ defmodule FermixCore.Setup.Wizard do
     openai =
       providers
       |> Keyword.get(:openai, [])
-      |> Keyword.put(:auth_mode, :api_key)
       |> Keyword.put(:api_key, api_key)
 
     Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
   end
-
-  defp put_openai_oauth(snapshot, true) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
-
-    openai =
-      providers
-      |> Keyword.get(:openai, [])
-      |> Keyword.put(:auth_mode, :oauth)
-      |> Keyword.delete(:api_key)
-
-    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
-  end
-
-  defp put_openai_oauth(snapshot, _), do: snapshot
 
   defp put_provider_selection(snapshot, nil), do: snapshot
   defp put_provider_selection(snapshot, ""), do: snapshot

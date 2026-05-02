@@ -45,6 +45,14 @@ defmodule FermixCore.Setup.ConfigStore do
     end)
   end
 
+  @spec memory_paths() :: %{database_path: String.t(), prompt_base_dir: String.t()}
+  def memory_paths do
+    %{
+      database_path: Path.join(fermix_home(), "memory.db"),
+      prompt_base_dir: Path.join(fermix_home(), "memory")
+    }
+  end
+
   @spec current_snapshot() :: runtime_config()
   def current_snapshot do
     providers = Application.get_env(:fermix_core, :providers, [])
@@ -424,7 +432,6 @@ defmodule FermixCore.Setup.ConfigStore do
     if has_provider_key?(config), do: raise_old_provider_layout!()
 
     []
-    |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
     |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
     |> put_if_present(
       :default_model,
@@ -617,9 +624,7 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_auth_mode(:api_key), do: :api_key
-  defp normalize_auth_mode(:oauth), do: :oauth
   defp normalize_auth_mode("api_key"), do: :api_key
-  defp normalize_auth_mode("oauth"), do: :oauth
   defp normalize_auth_mode(_value), do: nil
 
   defp normalize_mode(:polling), do: :polling

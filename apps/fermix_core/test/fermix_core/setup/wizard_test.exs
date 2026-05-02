@@ -139,7 +139,7 @@ defmodule FermixCore.Setup.WizardTest do
     openai = persisted.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
     telegram = Keyword.get(persisted.fermix_channels, :telegram, [])
 
-    assert Keyword.get(openai, :auth_mode) == :api_key
+    refute Keyword.has_key?(openai, :auth_mode)
     assert Keyword.get(openai, :api_key) == "sk-test-123"
     assert Keyword.get(telegram, :enabled) == true
     assert Keyword.get(telegram, :mode) == :webhook
@@ -399,6 +399,58 @@ defmodule FermixCore.Setup.WizardTest do
 
     prompts = Wizard.prompts(report.wizard)
     assert Enum.any?(prompts, &(&1.key == :telegram_bot_token and &1.required?))
+  end
+
+  test "save_answers does not persist an env-only OpenAI API key for unrelated setup answers" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-wizard-env-secret-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [
+            openai: [default_model: "gpt-5.4-mini"],
+            openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+          ],
+          personalization: [user_name: nil, timezone: nil, communication_style: nil],
+          agent: [name: "fermix", provider: :openai_codex]
+        ],
+        fermix_channels: [telegram: [enabled: false]],
+        fermix_web: []
+      })
+
+    # Simulate runtime.exs layering OPENAI_API_KEY into Application env.
+    Application.put_env(:fermix_core, :providers,
+      openai: [default_model: "gpt-5.4-mini", api_key: "sk-env-only"],
+      openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+    report = Wizard.report()
+
+    assert {:ok, _updated_report} =
+             Wizard.save_answers(report.wizard,
+               user_name: "Sujeeth",
+               timezone: "America/New_York",
+               communication_style: "direct"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+    openai = Keyword.get(providers, :openai, [])
+    codex = Keyword.get(providers, :openai_codex, [])
+
+    refute Keyword.has_key?(openai, :api_key)
+    refute Keyword.has_key?(openai, :auth_mode)
+    assert Keyword.get(codex, :default_model) == "gpt-5.5"
   end
 
   test "save_answers persists slack and signal setup answers" do

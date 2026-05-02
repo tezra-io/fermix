@@ -116,10 +116,11 @@ defmodule FermixCore.Application do
   end
 
   defp maybe_token_manager do
-    providers = Application.get_env(:fermix_core, :providers, [])
-    openai = Keyword.get(providers, :openai, [])
+    provider =
+      Application.get_env(:fermix_core, :agent, [])
+      |> Keyword.get(:provider, :openai)
 
-    if Keyword.get(openai, :auth_mode) == :oauth do
+    if provider == :openai_codex do
       [TokenManager]
     else
       []

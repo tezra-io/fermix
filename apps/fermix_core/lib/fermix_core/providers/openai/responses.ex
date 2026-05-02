@@ -50,6 +50,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
     reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    text = text_field(opts)
 
     body =
       %{model: model, input: input, store: false}
@@ -57,6 +58,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> maybe_put(:tools, tools)
       |> maybe_put(:temperature, temperature)
       |> maybe_put(:reasoning, reasoning)
+      |> maybe_put(:text, text)
 
     turn_state = %{
       model: model,
@@ -82,6 +84,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
     reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ output_items ++ outputs
 
@@ -90,6 +93,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       |> maybe_put(:tools, tools)
       |> maybe_put(:temperature, temperature)
       |> maybe_put(:reasoning, reasoning)
+      |> maybe_put(:text, text)
 
     turn_state = %{
       model: model,
@@ -168,6 +172,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp text_field(opts) do
+    case Keyword.get(opts, :text_format) do
+      nil -> nil
+      format -> %{format: format}
+    end
+  end
 
   defp require_bearer_token!(opts) do
     cond do
