@@ -13,7 +13,6 @@ defmodule FermixCore.Providers.Provider do
   @type chat_opts :: [
           model: String.t(),
           temperature: float(),
-          tools: [map()],
           max_tokens: pos_integer()
         ]
 

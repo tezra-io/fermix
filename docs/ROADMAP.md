@@ -163,7 +163,7 @@ This milestone captures the useful part of Autogenesis for Fermix:
 
 ## Milestone 4.8: Distribution & Daemon
 
-**Goal:** Turn Fermix from a runnable project into an installable product. Single binary per `(os, arch)`, OS-supervised daemon, native OpenAI OAuth (drops the `~/.codex` bootstrap), explicit `fermix upgrade`.
+**Goal:** Turn Fermix from a runnable project into an installable product. Single binary per `(os, arch)`, OS-supervised daemon, Codex auth import for the `openai_codex` provider, explicit `fermix upgrade`.
 
 See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 
@@ -173,7 +173,7 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 | **Cross-compile matrix** | macOS aarch64/x86_64, Linux aarch64/x86_64; Windows deferred | P0 | New | N/A | M |
 | **`fermix` CLI** | `setup`, `start`, `stop`, `restart`, `status`, `logs`, `upgrade`, `doctor`, `version`, `uninstall` | P0 | New | N/A | M |
 | **OS daemon integration** | launchd plist (macOS) and systemd-user unit (Linux); user-scope by default | P0 | New | Tailscale install pattern | M |
-| **Native OpenAI OAuth** | Device-code flow into `~/.fermix/auth.json`; delete `TokenManager` `~/.codex` fallback | P0 | New | Codex CLI auth flow | M |
+| **Codex auth import** | Import Codex CLI tokens into `~/.fermix/auth.json` for the `openai_codex` provider | P0 | New | Codex CLI auth flow | M |
 | **`fermix upgrade`** | Fetch + verify signature + atomic swap + restart | P0 | New | N/A | M |
 | **Versioning + signed releases** | SemVer in `mix.exs`; cosign keyless OIDC; `releases.json` manifest | P0 | New | Sigstore | S |
 | **Homebrew tap** | `tezra-io/homebrew-tap`, auto-bumped from CI | P1 | New | N/A | S |
@@ -186,23 +186,93 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 
 ---
 
-## Milestone 5: Security & Governance
+## Milestone 4.9: Unified Capabilities (Skills, Tools, MCP, Provider Adapters) — _Shipped_
 
-**Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering.
+**Goal:** Collapse `Tools.Registry` and `SkillRegistry` into a single `CapabilityRegistry` exposing built-in tools, skills, and MCP-server tools through one shape. Add a per-provider `Adapter` layer so each provider gets its native tool schema. Route `gpt-*` to the OpenAI Responses API. Integrate MCP outbound via `hermes_mcp`. Implementation is OpenAI-only, but the abstraction is multi-provider.
+
+See `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` for the full design.
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
-| **Security policy** | Tool ACLs and operation enforcement | P0 | Rewrite | `src/security/policy.rs` | L |
-| **Approval manager** | `/approve` commands, auto_approve, always_ask | P0 | Rewrite | `src/security/mod.rs` | M |
-| **Sentinel engine** | LLM-based content filtering middleware | P1 | Rewrite | `src/security/sentinel/` | L |
-| **Content scanner** | Scan for secrets, PII, malicious content | P0 | Rewrite | `src/security/content_scanner.rs` | M |
-| **Leak detector** | Detect credential/secret leaks in agent output | P0 | Rewrite | `src/security/leak_detector.rs` | M |
-| **Secrets manager** | Secure credential storage | P1 | Rewrite | `src/security/secrets.rs` | M |
-| **Prompt guard** | Prompt injection detection | P1 | Rewrite | `src/security/prompt_guard.rs` | M |
-| **Audit logging** | Security event logging | P1 | Rewrite | `src/security/audit.rs` | S |
-| **E-stop** | Emergency stop for runaway agents | P1 | Rewrite | `src/security/estop.rs` | M |
+| **`Capability` behaviour** | Single contract for built-in tools, skills, and MCP tools — `name`, `description`, `parameters`, `execute`, `kind` | P0 | New | hermes-agent registry pattern | M |
+| **`CapabilityRegistry`** | One GenServer replacing `Tools.Registry`; sources from built-ins, `SkillRegistry`, MCP supervisor | P0 | New | N/A | M |
+| **Per-provider `Adapter` layer** | Behaviour + per-provider modules; `to_provider_tools`, `chat`, `parse_tool_calls` | P0 | New | hermes-agent api_mode pattern | M |
+| **OpenAI Responses adapter** | `/v1/responses` with `strict: false` function tools; deterministic call IDs for cache stability | P0 | New | hermes-agent `_responses_tools` | M |
+| **OpenAI Chat Completions adapter** | Extracted from existing `Providers.OpenAI`; fallback for OpenAI-compatible providers | P0 | Refactor | N/A | S |
+| **`Adapter.for_model/1` routing** | `gpt-*` → Responses, `claude-*` → Anthropic, default → ChatCompletions | P0 | New | N/A | S |
+| **Each-skill-as-tool exposure** | Replaces `invoke_skill` meta-tool with per-skill capabilities; sub-agent spawn inside `Skill.Capability.execute/2` | P0 | Rewrite | OpenCode meta-tool comparison | M |
+| **Force-skill instruction** | Sub-agent system-prompt prepend: "You are running as the X skill" | P0 | New | N/A | S |
+| **Sub-agent global capability inheritance** | Default = sub-agent sees parent's full registry; `allowed_tools` is opt-out | P0 | Refactor | N/A | S |
+| **`max_skill_depth` recursion cap** | Default 4; context-propagated; fail loud past it | P0 | New | N/A | S |
+| **MCP outbound integration** | `hermes_mcp` dependency; `MCP.Supervisor` boots configured stdio servers; tools register as namespaced capabilities | P0 | New | [hermes_mcp](https://hexdocs.pm/hermes_mcp), hermes-agent `_convert_mcp_schema` | M |
+| **`[mcp.servers.<name>]` config** | TOML block with `command`, `args`, `env`; `$env:VAR` prefix for shell-env references | P0 | New | N/A | S |
+| **Anthropic adapter scaffold** | Real `to_provider_tools` (input_schema rename); `chat/3` returns `{:error, :not_implemented}` until tokens land | P1 | New | N/A | S |
+| **Per-skill `provider:` override** | Optional frontmatter field; lets skills pin a specific provider | P1 | New | N/A | S |
+| **Telemetry uniformity** | `[:fermix, :capability, :exec]` across all kinds; replaces per-tool/per-skill events with overlap during migration | P1 | Refactor | N/A | S |
+| **Removal of `Tools.Registry`, `Tools.Tool`, `Tools.InvokeSkill`** | After Stage 4 cutover; no deprecation shim — fermix has 3 baked skills, no external consumers | P0 | Removal | N/A | S |
 
-**Milestone 5 Total Effort:** ~8-10 weeks
+**Migration safety:** Stages 1–4 run old + new registries side-by-side; old path deletion happens only at Stage 4 ship gate. Behaviour fixtures pin OpenAI request bodies for each baked skill across the migration. End-to-end Telegram smoke test required at every stage gate.
+
+**Multi-provider note:** The `Additional Providers (Ongoing)` section's "OpenAI Responses API unification" item is absorbed by this milestone. The `Reliable wrapper`, `Router provider`, and concrete `Anthropic`, `Gemini`, `OpenRouter`, `Ollama` adapters remain separate work items — M4.9 only delivers the abstraction layer they will plug into.
+
+**Milestone 4.9 Total Effort:** ~3-4 weeks
+
+---
+
+## Milestone 4.10: Codex Parity & Provider Selection UX
+
+**Goal:** Close the M4.9 gap that left ChatGPT Plus users without a working agent loop. Make `:openai_codex` a first-class provider with tool-call support; persist provider/model/reasoning_effort in TOML with env overlays; expose a wizard step for provider+model+effort; surface the chosen surface in `fermix doctor` with a real auth probe so config mistakes fail at boot, not on the first message.
+
+See `docs/MILESTONE_4_10_CODEX_PARITY.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Codex tool-call adapter** | Implement `to_provider_tools/1`, `parse_tool_calls/1`, `continue/3` on `OpenAI.Codex`; SSE function_call accumulation | P0 | New | `~/projects/rustyclaw/src/providers/openai_codex.rs`, `~/projects/hermes-agent/run_agent.py:679–712` | M |
+| **Codex SSE parser** | Stateful accumulator for `chatgpt.com/backend-api/codex/responses` stream; emits final `body["output"]` shape | P0 | New | rustyclaw codex SSE handler | M |
+| **Reasoning effort plumbing** | `reasoning: %{effort: <level>}` in Codex/Responses request body; opts → app config → omitted; `none/minimal/low/medium/high/xhigh` | P1 | New | `~/projects/hermes-agent/hermes_constants.py` | S |
+| **Provider/model/effort persistence** | `ConfigStore.normalize_openai/anthropic` round-trip `provider`, `default_model`, `reasoning_effort` through TOML | P0 | New | N/A | S |
+| **Env-var overlays** | `FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT` in `runtime.exs` with fail-soft validation | P0 | New | runtime env overlay pattern | S |
+| **Model catalog** | `FermixCore.Providers.ModelCatalog.models_for/1` static curated lists + Custom escape hatch | P0 | New | N/A | S |
+| **Wizard provider+model+effort step** | New `:model` wizard step extending `WizardState.step`; Codex disclaimer; Anthropic api_key entry | P0 | New | N/A | M |
+| **Doctor auth probe** | Per-provider real $0.0001 API call to verify scope works against the chosen surface; actionable error mapping | P0 | New | N/A | S |
+| **MainAgent default sourcing** | Read provider/model/effort from app config when adapter_overrides empty; layered with existing M4.9 per-agent overrides | P0 | Modify | N/A | S |
+
+**Why before M4.11:** scheduled jobs are agent loops with tool calls. Without M4.10, a job under `:openai_codex` either errors on `continue/3` or returns text-only. Stacking M4.11's cron infra on a broken provider substrate means re-validating M4.11 after M4.10 lands. Fix the foundation first.
+
+**Non-goals:** new providers (Gemini, OpenRouter, Ollama — see `Additional Providers (Ongoing)`); streaming partial tokens to channels; per-model effort clamping (we send verbatim and surface API rejections).
+
+**Milestone 4.10 Total Agent Wall-Clock:** ~5–8 hours (one end-of-day review pass). Stage 1 (Codex SSE parser) is the only realistic source of variance.
+
+---
+
+## Milestone 4.11: Scheduled Agents — Cron Jobs, Persistent Memory Sources, Isolated Runs
+
+**Goal:** First-class scheduled background tasks. Daily digests, repository watchers, deployment checks, "remind me later" tasks, long-running monitors. Each LLM execution is bounded and isolated; the catalog and memory provenance are durable and discoverable to the main agent.
+
+See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Job registry** | Durable `scheduled_jobs` records with schedule, task, capability policy, delivery, memory source, status | P0 | New | `~/projects/hermes-agent/cron/jobs.py` | M |
+| **Job scheduler** | OTP GenServer that tracks next due job, ticks/reconciles, starts due jobs asynchronously | P0 | New | `~/projects/hermes-agent/cron/scheduler.py` | M |
+| **Job runner** | Supervised worker; isolated session per occurrence; bounded `AgentLoop` execution | P0 | New | N/A | M |
+| **Main-agent job capabilities** | `schedule_job`, `list_jobs`, `pause_job`, `resume_job`, `update_job`, `remove_job`, `run_job_now`, `job_runs` | P0 | New | N/A | M |
+| **Memory source catalog** | Durable metadata for `main`, `job:<id>`, future source types | P0 | New | N/A | S |
+| **Source-aware memory recall** | Memory writes/reads carry `source_id`, `source_name`, `source_type`, `session_id`, `run_id` | P0 | Modify | N/A | M |
+| **Scheduler-owned delivery** | Job final output saved first, then delivered by scheduler/channel layer; agents do not self-deliver by default | P0 | New | N/A | S |
+| **Sync/async contract** | CRUD synchronous + fast; execution/extraction/delivery asynchronous + supervised | P0 | New | N/A | S |
+| **Latency targets** | Explicit targets for CRUD, due-job start jitter, scheduler recovery, run status, memory visibility, delivery | P0 | New | N/A | S |
+| **Observability** | Telemetry for job lifecycle: created/due/started/completed/failed/delivered/skipped | P1 | New | N/A | S |
+
+**Depends on M4.10:** scheduled jobs need full tool calls on whichever provider the user picked.
+
+**Milestone 4.11 Total Agent Wall-Clock:** ~7–10 hours (one review day, possibly stretching into a second pass for the source-aware memory schema migration). The job scheduler's timer/reconciliation logic and the memory-source DB shape are the two scope-shaped variances.
+
+---
+
+## Milestone 5: _Reserved_
+
+_Security & Governance was originally numbered M5; it has been moved to **M10** so feature exploration can run unconstrained first and security can be tightened against observed real-world usage rather than guessed-at threats. See M10 below._
 
 ---
 
@@ -325,13 +395,33 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 
 ---
 
-## Additional Providers (Ongoing)
+## Milestone 10: Security & Governance
 
-**Note:** The current OpenAI provider uses Chat Completions API for api_key auth and a Codex-specific Responses API for oauth auth. Both paths should be unified onto the official OpenAI Responses API (`api.openai.com/v1/responses`), which accepts standard API keys and is the newer recommended API. This would eliminate the Chat Completions code path and unify request/response parsing. Low effort (S), do before adding more providers.
+**Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering — added _last_ on purpose, after the feature surface has settled and we have observed real usage patterns. Earlier milestones (M4.9 capabilities, M4.11 scheduled agents) leave hooks (`requires_approval?`, `policy_class`, static-config gating) for M10 to bind to.
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
-| **OpenAI Responses API unification** | Migrate api_key path from Chat Completions to official Responses API; unify with oauth path | P1 | New | N/A | S |
+| **Security policy** | Tool ACLs and operation enforcement | P0 | Rewrite | `src/security/policy.rs` | L |
+| **Approval manager** | `/approve` commands, auto_approve, always_ask | P0 | Rewrite | `src/security/mod.rs` | M |
+| **Sentinel engine** | LLM-based content filtering middleware | P1 | Rewrite | `src/security/sentinel/` | L |
+| **Content scanner** | Scan for secrets, PII, malicious content | P0 | Rewrite | `src/security/content_scanner.rs` | M |
+| **Leak detector** | Detect credential/secret leaks in agent output | P0 | Rewrite | `src/security/leak_detector.rs` | M |
+| **Secrets manager** | Secure credential storage | P1 | Rewrite | `src/security/secrets.rs` | M |
+| **Prompt guard** | Prompt injection detection | P1 | Rewrite | `src/security/prompt_guard.rs` | M |
+| **Audit logging** | Security event logging | P1 | Rewrite | `src/security/audit.rs` | S |
+| **E-stop** | Emergency stop for runaway agents | P1 | Rewrite | `src/security/estop.rs` | M |
+
+**Milestone 10 Total Effort:** ~8-10 weeks
+
+---
+
+## Additional Providers (Ongoing)
+
+**Note:** The regular OpenAI provider should use the official OpenAI Responses API (`api.openai.com/v1/responses`) with standard API keys. Codex remains a separate `openai_codex` provider because it uses a different auth source, endpoint, and streaming shape. Low effort (S), do before adding more providers.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **OpenAI Responses API unification** | _Absorbed by M4.9 (Unified Capabilities) — see `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md`._ Migrate api_key path from Chat Completions to official Responses API; unify with oauth path | P1 | New | N/A | S |
 | **OpenRouter provider** | Meta-provider for many models | P1 | Rewrite | `src/providers/openrouter.rs` | M |
 | **Ollama provider** | Local model support | P1 | Rewrite | `src/providers/ollama.rs` | M |
 | **Gemini provider** | Google Gemini API | P1 | Rewrite | `src/providers/gemini.rs` | L |
@@ -463,14 +553,14 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 1. **Milestone 2** (Multi-Agent Orchestration) — unlocks delegation
 2. **Milestone 4** (Advanced Memory) — unlocks long-term context
 3. **Milestone 3** (WhatsApp, Discord, Signal, Slack, CLI) — core channels
-4. **Milestone 5** (Security core: policy, approval, content scanner) — production safety
-5. **Milestone 6** (Dashboard + CLI) — operational visibility
-6. **Milestone 8** (Production ops) — deployment readiness
-7. **Milestone 7** (Core tools) — essential feature parity
-8. **Milestone 9** (Differentiators) — unique value
+4. **Milestone 6** (Dashboard + CLI) — operational visibility
+5. **Milestone 8** (Production ops) — deployment readiness
+6. **Milestone 7** (Core tools) — essential feature parity
+7. **Milestone 9** (Differentiators) — unique value
+8. **Milestone 10** (Security core: policy, approval, content scanner) — tighten _after_ feature exploration; bind to the policy hooks already left by M4.9 / M4.11
 9. **Future** (Extended ecosystem) — demand-driven expansion
 
-**Total estimated time for core (M2–M9):** ~6-9 months full-time with AI assistance. Future items are demand-driven.
+**Total estimated time for core (M2–M10):** ~6-9 months full-time with AI assistance. Future items are demand-driven.
 
 ---
 

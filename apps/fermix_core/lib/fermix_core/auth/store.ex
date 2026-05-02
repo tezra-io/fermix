@@ -50,13 +50,15 @@ defmodule FermixCore.Auth.Store do
   @spec path() :: Path.t()
   def path, do: default_path()
 
-  defp default_path, do: Path.join(System.user_home!(), ".fermix/auth.json")
+  defp default_path do
+    home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    Path.join(home, "auth.json")
+  end
 
   defp providers_map(%{"providers" => providers}) when is_map(providers), do: {:ok, providers}
 
   # Migration: M3-era flat shape — one provider implicit at the top level.
-  # The flat file always represented openai (it was written by TokenManager
-  # before this milestone), so we promote it under "openai".
+  # TokenManager now reads these as legacy Codex tokens via its openai fallback.
   defp providers_map(%{"tokens" => _} = flat),
     do: {:ok, %{"openai" => flat}}
 

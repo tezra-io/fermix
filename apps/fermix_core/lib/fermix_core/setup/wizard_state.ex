@@ -6,7 +6,7 @@ defmodule FermixCore.Setup.WizardState do
   @enforce_keys [:step, :config_snapshot, :enabled_channels, :validation_errors, :dirty?]
   defstruct [:step, :config_snapshot, :enabled_channels, :validation_errors, :dirty?]
 
-  @type step :: :provider | :channel | :personalization | :review
+  @type step :: :provider | :model | :channel | :personalization | :review
 
   @type t :: %__MODULE__{
           step: step(),

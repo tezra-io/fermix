@@ -1,6 +1,6 @@
 defmodule FermixCore.Memory.ConversationWriteBenchmark do
   @moduledoc """
-  Measures the synchronous ConversationStore message write path.
+  Measures the synchronous ConversationStore message enqueue path.
   """
 
   alias FermixCore.Memory.ConversationStore

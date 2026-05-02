@@ -15,19 +15,49 @@ defmodule FermixChannels.SignalTest do
 
   defmodule StaticProvider do
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
-    @impl true
-    def chat(_messages, _opts) do
-      {:ok,
-       %{
-         content: "reply from main agent",
-         tool_calls: [],
-         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}
-       }}
+    @impl FermixCore.Providers.Provider
+    def chat(_messages, _opts), do: {:ok, response()}
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["mock-model"]}
+
+    @impl FermixCore.Providers.Adapter
+    def chat(_messages, _capabilities, _opts), do: {:ok, turn()}
+
+    @impl FermixCore.Providers.Adapter
+    def continue(_provider_state, _tool_results, _opts), do: {:ok, turn()}
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_response), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp response do
+      %{
+        content: "reply from main agent",
+        tool_calls: [],
+        usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}
+      }
     end
 
-    @impl true
-    def models, do: {:ok, ["mock-model"]}
+    defp turn do
+      %{
+        content: "reply from main agent",
+        tool_calls: [],
+        provider_state: %{},
+        usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+        model: "mock-model"
+      }
+    end
   end
 
   defmodule FakeSignalClient do

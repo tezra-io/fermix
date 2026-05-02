@@ -1,20 +1,22 @@
 defmodule FermixCore.Agents.MainAgentTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
-  alias FermixCore.Tools.InvokeSkill
-  alias FermixCore.Tools.Registry
 
   # -- Mock provider backed by named Agent for cross-process access --
 
   defmodule MockProvider do
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
     @responses :main_agent_mock_responses
     @calls :main_agent_mock_calls
@@ -55,8 +57,93 @@ defmodule FermixCore.Agents.MainAgentTest do
       end
     end
 
-    @impl true
+    @impl FermixCore.Providers.Provider
     def chat(messages, opts) do
+      record_and_reply(messages, opts)
+    end
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["mock-model"]}
+
+    # --- Adapter interface ---
+
+    @impl FermixCore.Providers.Adapter
+    def chat(messages, capabilities, opts) do
+      adapter_opts = Keyword.put(opts, :capabilities, capabilities)
+
+      case record_and_reply(messages, adapter_opts) do
+        {:ok, response} -> {:ok, to_turn(response, messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def continue(provider_state, tool_results, opts) do
+      capabilities = Map.get(provider_state, :capabilities, [])
+
+      tool_messages =
+        Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
+          %{role: "tool", tool_call_id: call_id, content: to_string(output)}
+        end)
+
+      prior = Map.get(provider_state, :messages, [])
+      next_messages = prior ++ tool_messages
+
+      adapter_opts = Keyword.put(opts, :capabilities, capabilities)
+
+      case record_and_reply(next_messages, adapter_opts) do
+        {:ok, response} -> {:ok, to_turn(response, next_messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_response), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp to_turn(%{content: content, usage: usage} = response, messages, capabilities) do
+      tool_calls = normalize_tool_calls(Map.get(response, :tool_calls, []))
+      assistant = build_assistant_message(content, tool_calls)
+
+      %{
+        content: content || "",
+        tool_calls: tool_calls,
+        provider_state: %{
+          messages: messages ++ [assistant],
+          capabilities: capabilities
+        },
+        usage: usage,
+        model: Map.get(response, :model, "mock-model")
+      }
+    end
+
+    defp build_assistant_message(content, []) do
+      %{role: "assistant", content: content || ""}
+    end
+
+    defp build_assistant_message(content, tool_calls) do
+      %{role: "assistant", content: content || "", tool_calls: tool_calls}
+    end
+
+    defp normalize_tool_calls(calls) do
+      Enum.map(calls, fn
+        %{"id" => id, "function" => %{"name" => name, "arguments" => args}} ->
+          %{id: id, call_id: id, name: name, arguments: args}
+
+        %{name: _name, arguments: _args} = call ->
+          Map.put_new(call, :call_id, Map.get(call, :id))
+      end)
+    end
+
+    defp record_and_reply(messages, opts) do
       Agent.update(@calls, fn calls -> calls ++ [{messages, opts}] end)
 
       user_content =
@@ -88,13 +175,11 @@ defmodule FermixCore.Agents.MainAgentTest do
           {{:error, "No mock responses left"}, []}
       end)
     end
-
-    @impl true
-    def models, do: {:ok, ["mock-model"]}
   end
 
   defmodule ControlledProvider do
     @behaviour FermixCore.Providers.Provider
+    @behaviour FermixCore.Providers.Adapter
 
     @state :main_agent_controlled_provider
 
@@ -122,8 +207,85 @@ defmodule FermixCore.Agents.MainAgentTest do
       if Process.whereis(@state), do: Agent.stop(@state)
     end
 
-    @impl true
-    def chat(messages, opts) do
+    @impl FermixCore.Providers.Provider
+    def chat(messages, opts), do: dispatch(messages, opts)
+
+    @impl FermixCore.Providers.Provider
+    def models, do: {:ok, ["controlled-model"]}
+
+    @impl FermixCore.Providers.Adapter
+    def chat(messages, capabilities, opts) do
+      case dispatch(messages, Keyword.put(opts, :capabilities, capabilities)) do
+        {:ok, response} -> {:ok, to_turn(response, messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def continue(provider_state, tool_results, opts) do
+      capabilities = Map.get(provider_state, :capabilities, [])
+
+      tool_messages =
+        Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
+          %{role: "tool", tool_call_id: call_id, content: to_string(output)}
+        end)
+
+      prior = Map.get(provider_state, :messages, [])
+      next_messages = prior ++ tool_messages
+
+      case dispatch(next_messages, Keyword.put(opts, :capabilities, capabilities)) do
+        {:ok, response} -> {:ok, to_turn(response, next_messages, capabilities)}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+
+    @impl FermixCore.Providers.Adapter
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl FermixCore.Providers.Adapter
+    def parse_tool_calls(_), do: []
+
+    @impl FermixCore.Providers.Adapter
+    def parse_response(response), do: response
+
+    @impl FermixCore.Providers.Adapter
+    def supports_streaming?, do: false
+
+    defp to_turn(%{content: content, usage: usage} = response, messages, capabilities) do
+      tool_calls = normalize_tool_calls(Map.get(response, :tool_calls, []))
+      assistant = build_assistant_message(content, tool_calls)
+
+      %{
+        content: content || "",
+        tool_calls: tool_calls,
+        provider_state: %{
+          messages: messages ++ [assistant],
+          capabilities: capabilities
+        },
+        usage: usage,
+        model: Map.get(response, :model, "controlled-model")
+      }
+    end
+
+    defp build_assistant_message(content, []) do
+      %{role: "assistant", content: content || ""}
+    end
+
+    defp build_assistant_message(content, tool_calls) do
+      %{role: "assistant", content: content || "", tool_calls: tool_calls}
+    end
+
+    defp normalize_tool_calls(calls) do
+      Enum.map(calls, fn
+        %{"id" => id, "function" => %{"name" => name, "arguments" => args}} ->
+          %{id: id, call_id: id, name: name, arguments: args}
+
+        %{name: _name, arguments: _args} = call ->
+          Map.put_new(call, :call_id, Map.get(call, :id))
+      end)
+    end
+
+    defp dispatch(messages, opts) do
       user_content =
         messages
         |> Enum.reverse()
@@ -151,9 +313,6 @@ defmodule FermixCore.Agents.MainAgentTest do
           response
       end
     end
-
-    @impl true
-    def models, do: {:ok, ["controlled-model"]}
   end
 
   # -- Helpers --
@@ -241,8 +400,8 @@ defmodule FermixCore.Agents.MainAgentTest do
     :ok = MockProvider.init()
 
     suffix = System.unique_integer([:positive])
-    registry_name = :"test_registry_#{suffix}"
     skill_registry_name = :"test_skill_registry_#{suffix}"
+    capability_registry_name = :"test_capability_registry_#{suffix}"
     conv_name = :"test_conv_#{suffix}"
     agent_name = :"test_main_agent_#{suffix}"
     task_sup_name = :"test_task_sup_#{suffix}"
@@ -271,12 +430,20 @@ defmodule FermixCore.Agents.MainAgentTest do
     {:ok, _} =
       start_supervised({Task.Supervisor, name: task_sup_name}, id: :test_task_sup)
 
-    {:ok, _} = start_supervised({Registry, [name: registry_name]}, id: :test_registry)
+    {:ok, _} =
+      start_supervised({CapabilityRegistry, [name: capability_registry_name]},
+        id: :test_capability_registry
+      )
 
     {:ok, _} =
       start_supervised(
         {SkillRegistry,
-         [name: skill_registry_name, skills_dir: skills_dir, seed_defaults: false]},
+         [
+           name: skill_registry_name,
+           skills_dir: skills_dir,
+           seed_defaults: false,
+           capability_registry: capability_registry_name
+         ]},
         id: :test_skill_registry
       )
 
@@ -293,7 +460,7 @@ defmodule FermixCore.Agents.MainAgentTest do
          [
            name: agent_name,
            provider: MockProvider,
-           registry: registry_name,
+           capability_registry: capability_registry_name,
            agent_supervisor: agent_supervisor_name,
            skill_registry: skill_registry_name,
            conversation_store: conv_name,
@@ -315,8 +482,8 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     %{
       agent: agent_name,
-      registry: registry_name,
       skill_registry: skill_registry_name,
+      capability_registry: capability_registry_name,
       conv_store: conv_name,
       skills_dir: skills_dir,
       task_supervisor: task_sup_name,
@@ -577,7 +744,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "clears pending state and replies when request task cannot start", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store
     } do
@@ -597,7 +763,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_sup_name
@@ -627,7 +792,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "skips background extraction when extraction is disabled", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -640,7 +804,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -659,7 +822,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "does not block reply delivery while background extraction is slow", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -672,7 +834,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -695,7 +856,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "passes Telegram shared-chat metadata through to background extraction", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -708,7 +868,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -748,7 +907,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "keeps reply handling successful when background extraction fails", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -761,7 +919,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -783,7 +940,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "debounces rapid-fire extraction without blocking replies", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -797,7 +953,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: MockProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
@@ -871,23 +1026,18 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert runtime.content =~ "tools=file_read"
     end
 
-    test "delegates through invoke_skill when the LLM requests a skill", %{
+    test "delegates to a skill capability when the LLM picks one by name", %{
       agent: agent,
-      registry: registry,
       skills_dir: skills_dir,
       journal_dir: journal_dir
     } do
       write_skill(skills_dir, "coding-skill", "You solve code tasks.")
       assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
-      assert :ok = Registry.register(registry, InvokeSkill)
 
       MockProvider.set_responses([
         mock_response("",
           tool_calls: [
-            tool_call("call_1", "invoke_skill", %{
-              "skill" => "coding-skill",
-              "task" => "Inspect the README"
-            })
+            tool_call("call_1", "coding-skill", %{"task" => "Inspect the README"})
           ]
         ),
         mock_response("Inspected the README and found the issue."),
@@ -912,7 +1062,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert length(calls) == 3
 
       {_main_messages, main_opts} = hd(calls)
-      assert Enum.any?(main_opts[:tools], &(&1.function.name == "invoke_skill"))
+      coding_cap = Enum.find(main_opts[:capabilities], &(&1.name == "coding-skill"))
+      assert coding_cap.kind == :skill
 
       {skill_messages, skill_opts} = Enum.at(calls, 1)
       assert hd(skill_messages).content == "You solve code tasks."
@@ -920,7 +1071,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "supersedes an in-flight request with the newest same-conversation message", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -946,7 +1096,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: ControlledProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor
@@ -1013,7 +1162,6 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "keeps different conversations independent while one chat has blocked work", %{
-      registry: registry,
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -1040,7 +1188,6 @@ defmodule FermixCore.Agents.MainAgentTest do
            [
              name: agent_name,
              provider: ControlledProvider,
-             registry: registry,
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor
@@ -1199,6 +1346,130 @@ defmodule FermixCore.Agents.MainAgentTest do
       name = :"main_agent_lifecycle_#{System.unique_integer()}"
       {:ok, pid} = MainAgent.start_link(name: name)
       assert Process.alive?(pid)
+      GenServer.stop(pid)
+    end
+  end
+
+  describe "init/1 — adapter override sourcing from config" do
+    setup do
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end)
+
+      :ok
+    end
+
+    test "bakes provider/model/reasoning_effort from config into adapter_overrides" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+      )
+
+      name = :"main_agent_config_overrides_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+      state = :sys.get_state(pid)
+
+      assert Keyword.get(state.adapter_overrides, :provider) == :openai_codex
+      assert Keyword.get(state.adapter_overrides, :model) == "gpt-5.5"
+      assert Keyword.get(state.adapter_overrides, :reasoning_effort) == :high
+
+      GenServer.stop(pid)
+    end
+
+    test "explicit :provider in opts wins whole — config is dropped to avoid cross-provider leak" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+      )
+
+      name = :"main_agent_opts_win_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        MainAgent.start_link(
+          name: name,
+          adapter_overrides: [provider: :anthropic, model: "claude-opus-4-7"]
+        )
+
+      state = :sys.get_state(pid)
+
+      assert Keyword.get(state.adapter_overrides, :provider) == :anthropic
+      assert Keyword.get(state.adapter_overrides, :model) == "claude-opus-4-7"
+      # reasoning_effort from openai_codex config block must NOT leak into
+      # the anthropic route — the Anthropic Messages API has no such field.
+      refute Keyword.has_key?(state.adapter_overrides, :reasoning_effort)
+
+      GenServer.stop(pid)
+    end
+
+    test "explicit :model without :provider lets config-derived provider+effort fill in" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :medium]
+      )
+
+      name = :"main_agent_partial_opts_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        MainAgent.start_link(name: name, adapter_overrides: [model: "gpt-5.4"])
+
+      state = :sys.get_state(pid)
+
+      assert Keyword.get(state.adapter_overrides, :provider) == :openai_codex
+      assert Keyword.get(state.adapter_overrides, :model) == "gpt-5.4"
+      assert Keyword.get(state.adapter_overrides, :reasoning_effort) == :medium
+
+      GenServer.stop(pid)
+    end
+
+    test "no agent.provider configured → empty config-derived overrides" do
+      Application.delete_env(:fermix_core, :agent)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      name = :"main_agent_no_provider_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+      state = :sys.get_state(pid)
+
+      assert state.adapter_overrides == []
+
+      GenServer.stop(pid)
+    end
+
+    test "garbage provider in agent.provider is logged and ignored" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openia)
+      Application.put_env(:fermix_core, :providers, [])
+
+      name = :"main_agent_bad_provider_#{System.unique_integer([:positive])}"
+
+      {pid, log} =
+        with_log(fn ->
+          {:ok, pid} = MainAgent.start_link(name: name)
+          pid
+        end)
+
+      state = :sys.get_state(pid)
+      assert state.adapter_overrides == []
+      assert log =~ "ignoring unknown provider :openia"
+
+      GenServer.stop(pid)
+    end
+
+    test "provider configured but per-provider block has no defaults yields provider-only overrides" do
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+      Application.put_env(:fermix_core, :providers, openai_codex: [])
+
+      name = :"main_agent_provider_only_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+      state = :sys.get_state(pid)
+
+      assert state.adapter_overrides == [provider: :openai_codex]
+
       GenServer.stop(pid)
     end
   end

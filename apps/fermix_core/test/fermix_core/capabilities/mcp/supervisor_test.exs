@@ -1,0 +1,269 @@
+defmodule FermixCore.Capabilities.MCP.SupervisorTest do
+  use ExUnit.Case, async: false
+
+  alias FermixCore.Capabilities.MCP.Naming
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+
+  defmodule StubCaller do
+    @behaviour FermixCore.Capabilities.MCP.Caller
+
+    @impl true
+    def call_tool(_server, _tool, _args), do: {:ok, "stub-response"}
+  end
+
+  defmodule HappyDiscoverer do
+    @behaviour FermixCore.Capabilities.MCP.Discoverer
+
+    @impl true
+    def list_tools(_client) do
+      {:ok,
+       [
+         %{name: "create_issue", description: "Create issue.", input_schema: %{}},
+         %{name: "list_issues", description: "List issues.", input_schema: %{}}
+       ]}
+    end
+  end
+
+  defmodule SadDiscoverer do
+    @behaviour FermixCore.Capabilities.MCP.Discoverer
+
+    @impl true
+    def list_tools(_client), do: {:error, :transport_closed}
+  end
+
+  defmodule FakeHermes do
+    @moduledoc false
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: opts[:name])
+
+    @impl true
+    def init(opts) do
+      send(opts[:reporter], {:fake_hermes_started, opts})
+      {:ok, opts}
+    end
+  end
+
+  defmodule RecordingHermesStarter do
+    @moduledoc false
+    @behaviour FermixCore.Capabilities.MCP.HermesStarter
+
+    @impl true
+    def child_specs_for(server) do
+      reporter = Map.get(server, :reporter)
+
+      case Map.get(server, :command) do
+        cmd when is_binary(cmd) and cmd != "" and is_pid(reporter) ->
+          send(reporter, {:hermes_starter_invoked, server})
+
+          client_name = :"recording_hermes_client_#{server.name}"
+
+          base_opts = [
+            name: client_name,
+            reporter: reporter,
+            command: cmd,
+            args: Map.get(server, :args, []),
+            env: Map.get(server, :env, %{})
+          ]
+
+          spec =
+            Supervisor.child_spec({FakeHermes, base_opts},
+              id: {:fake_hermes, server.name},
+              restart: :permanent
+            )
+
+          %{children: [spec], client_name: client_name}
+
+        _ ->
+          %{children: [], client_name: nil}
+      end
+    end
+  end
+
+  setup do
+    Naming.init()
+    suffix = System.unique_integer([:positive])
+
+    cap_registry =
+      start_supervised!(
+        {CapabilityRegistry, name: :"mcp_sup_cap_reg_#{suffix}"},
+        id: :"mcp_sup_cap_reg_child_#{suffix}"
+      )
+
+    on_exit(fn ->
+      case :ets.whereis(Naming) do
+        :undefined -> :ok
+        tid -> :ets.delete_all_objects(tid)
+      end
+    end)
+
+    %{cap_registry: cap_registry, suffix: suffix}
+  end
+
+  test "boots a healthy server and exposes its approved tools as capabilities", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    {:ok, _} =
+      start_supervised(
+        {McpSupervisor,
+         [
+           name: :"mcp_sup_happy_#{suffix}",
+           mcp_registry: :"mcp_sup_happy_reg_#{suffix}",
+           capability_registry: cap_registry,
+           servers: [
+             %{
+               name: "github",
+               approved?: true,
+               discoverer: HappyDiscoverer,
+               caller: StubCaller
+             }
+           ]
+         ]},
+        id: :mcp_supervisor_happy_test
+      )
+
+    assert eventually(fn ->
+             names =
+               cap_registry
+               |> CapabilityRegistry.list(kind: :mcp)
+               |> Enum.map(& &1.name)
+               |> Enum.sort()
+
+             names == ["mcp_github_create_issue", "mcp_github_list_issues"]
+           end)
+  end
+
+  test "an unhealthy server's restart loop does not bring down healthy peers", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    Process.flag(:trap_exit, true)
+
+    sup_name = :"mcp_sup_mixed_#{suffix}"
+
+    {:ok, sup_pid} =
+      McpSupervisor.start_link(
+        name: sup_name,
+        mcp_registry: :"mcp_sup_mixed_reg_#{suffix}",
+        capability_registry: cap_registry,
+        servers: [
+          %{
+            name: "github",
+            approved?: true,
+            discoverer: HappyDiscoverer,
+            caller: StubCaller
+          },
+          %{
+            name: "broken",
+            approved?: true,
+            discoverer: SadDiscoverer,
+            caller: StubCaller
+          }
+        ]
+      )
+
+    on_exit(fn ->
+      if Process.alive?(sup_pid), do: Process.exit(sup_pid, :shutdown)
+    end)
+
+    assert eventually(fn ->
+             "mcp_github_create_issue" in cap_names(cap_registry)
+           end)
+
+    assert Process.alive?(sup_pid)
+    refute Enum.any?(cap_names(cap_registry), &String.starts_with?(&1, "mcp_broken_"))
+  end
+
+  test "spawns the configured Hermes starter once per server with command/args/env", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    {:ok, _} =
+      start_supervised(
+        {McpSupervisor,
+         [
+           name: :"mcp_sup_hermes_#{suffix}",
+           mcp_registry: :"mcp_sup_hermes_reg_#{suffix}",
+           capability_registry: cap_registry,
+           hermes_starter: RecordingHermesStarter,
+           servers: [
+             %{
+               name: "github",
+               approved?: true,
+               discoverer: HappyDiscoverer,
+               caller: StubCaller,
+               command: "npx",
+               args: ["-y", "@modelcontextprotocol/server-github"],
+               env: %{"TOKEN" => "secret"},
+               reporter: self()
+             }
+           ]
+         ]},
+        id: :mcp_supervisor_hermes_test
+      )
+
+    assert_receive {:hermes_starter_invoked, server}, 500
+    assert server.command == "npx"
+    assert server.args == ["-y", "@modelcontextprotocol/server-github"]
+    assert server.env == %{"TOKEN" => "secret"}
+
+    assert_receive {:fake_hermes_started, opts}, 500
+    assert opts[:command] == "npx"
+    assert opts[:env] == %{"TOKEN" => "secret"}
+  end
+
+  test "skips Hermes starter for servers without command (test/discoverer-only path)", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    {:ok, _} =
+      start_supervised(
+        {McpSupervisor,
+         [
+           name: :"mcp_sup_no_hermes_#{suffix}",
+           mcp_registry: :"mcp_sup_no_hermes_reg_#{suffix}",
+           capability_registry: cap_registry,
+           hermes_starter: RecordingHermesStarter,
+           servers: [
+             %{
+               name: "github",
+               approved?: true,
+               discoverer: HappyDiscoverer,
+               caller: StubCaller,
+               reporter: self()
+             }
+           ]
+         ]},
+        id: :mcp_supervisor_no_hermes_test
+      )
+
+    refute_receive {:hermes_starter_invoked, _server}, 100
+    refute_receive {:fake_hermes_started, _opts}, 100
+  end
+
+  defp cap_names(cap_registry) do
+    cap_registry
+    |> CapabilityRegistry.list(kind: :mcp)
+    |> Enum.map(& &1.name)
+  end
+
+  defp eventually(fun, deadline_ms \\ 500) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    poll(fun, deadline)
+  end
+
+  defp poll(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(20)
+        poll(fun, deadline)
+      end
+    end
+  end
+end

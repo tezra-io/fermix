@@ -1,12 +1,12 @@
 defmodule FermixCore.Auth.TokenManager do
   @moduledoc """
-  Manages OAuth tokens for the OpenAI provider.
+  Manages OAuth tokens for the OpenAI Codex provider.
 
   Reads from the Fermix-owned `~/.fermix/auth.json` store and refreshes
   before expiry. Codex CLI bootstrap was removed in M4.8 Stage 3 — the
   one-time `~/.codex` import lives in `FermixCore.Auth.CodexImport`,
   invoked explicitly by the setup wizard, and the resulting tokens
-  land in `Auth.Store` under the `openai` provider scope.
+  land in `Auth.Store` under the `openai_codex` provider scope.
   """
 
   use GenServer
@@ -53,7 +53,7 @@ defmodule FermixCore.Auth.TokenManager do
       refresh_timer: nil
     }
 
-    case Store.read(:openai, fermix_path) do
+    case read_entry(fermix_path) do
       {:ok, entry} ->
         state = apply_entry(state, entry)
         Logger.info("TokenManager: loaded tokens, expires #{inspect(state.expires_at)}")
@@ -96,6 +96,19 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   # --- Internals ---
+
+  defp read_entry(path) do
+    case Store.read(:openai_codex, path) do
+      {:ok, entry} ->
+        {:ok, entry}
+
+      {:error, {:provider_missing, :openai_codex}} ->
+        Store.read(:openai, path)
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
 
   defp do_refresh(%{refresh_token: nil} = state) do
     {:error, :no_refresh_token, state}
@@ -161,7 +174,7 @@ defmodule FermixCore.Auth.TokenManager do
       last_refresh: DateTime.utc_now()
     }
 
-    case Store.write(:openai, entry, state.fermix_path) do
+    case Store.write(:openai_codex, entry, state.fermix_path) do
       :ok ->
         :ok
 

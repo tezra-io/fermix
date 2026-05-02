@@ -6,6 +6,116 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M4.10 (Codex Parity & Provider Selection)
+- `Providers.OpenAI.Codex` adapter now implements the full Responses
+  tool-call lifecycle over SSE — `chat/3` posts `tools`, `parse_tool_calls/1`
+  surfaces normalized calls, `continue/3` rebuilds `input = prior_input ++
+  output_items ++ function_call_outputs` with the API-emitted `call_id`s.
+  ChatGPT-Plus users (no API key) can now run skills, MCP tools, and
+  built-ins through the agent loop end-to-end.
+- Reasoning-effort plumbing across the Responses + Codex adapters and the
+  resolver. `:none | :minimal | :low | :medium | :high | :xhigh` accepted
+  in config and threaded through `RouteResolver.resolve!/1`.
+- TOML config schema gains `agent.provider`, per-provider `default_model`
+  and `reasoning_effort`. `Providers.ModelCatalog` defines the canonical
+  per-provider model lists. `fermix setup` exposes `--provider`,
+  `--default-model`, and `--reasoning-effort` switches; `Wizard.prompts/1`
+  asks the same three questions interactively when no provider is yet
+  persisted in `~/.fermix/config.toml`. A new `:model` wizard step shows
+  up in `WizardState.step` once the provider check is satisfied but no
+  provider is recorded. `SetupLive` displays the next step inline.
+  Env-var overlays (`FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`,
+  `FERMIX_REASONING_EFFORT`) layer on top of TOML values and survive
+  round-trips through `ConfigStore.save_snapshot/1`.
+- `Setup.Doctor.probe_provider/2` and `probe_active/1`: live ~$0.0001
+  auth probes used by `fermix doctor --full` and the wizard finalize step
+  to fail loud at config time. Probes classify into `:auth_scope_mismatch`
+  (401/403), `:misconfigured`, `:server_error`, `:network`. Inject HTTP
+  with `req_options: [plug: ...]`; OAuth bearer comes from `TokenManager`
+  (override via `:token_server` for tests).
+- `MainAgent.init/1` bakes `agent.provider` + per-provider `default_model`
+  + `reasoning_effort` from config into `adapter_overrides`. Explicit
+  `adapter_overrides: [provider: ...]` wins whole, so a runtime route to
+  a different provider can't leak per-key config from the configured
+  provider's block.
+
+### Removed — M4.10
+- The "tool calls not supported on Codex" caveat in the M4.9 design doc;
+  M4.10 closes that gap. `Providers.OpenAI.Codex` is the explicit
+  `:openai_codex` route's adapter.
+
+### Fixed — M4.10
+- `Setup.Doctor.probe_provider/2` no longer crashes with `(EXIT) :noproc`
+  when the CLI invokes `fermix doctor --full` against an OAuth-mode
+  provider. The CLI process intentionally halts before starting the OTP
+  supervision tree (no `TokenManager`, no `Memory.Repo`, no port bind),
+  so probes that need a Codex bearer now return
+  `{:error, {:misconfigured, ...}}` with a hint to run the probe from
+  the daemon instead.
+
+### Added — M4.9 (Unified Capabilities)
+- Single `%FermixCore.Capabilities.Capability{}` shape for built-ins,
+  skills, and MCP server tools. ETS-backed `Capabilities.Registry`
+  serves the agent loop's hot path without a GenServer round-trip.
+- `Providers.Adapter` behaviour with deterministic `for_route/1`
+  routing on `(provider, model, auth_mode, base_url)`. OpenAI Responses
+  / Chat Completions / Codex extracted as separate adapters; Codex
+  treated as its own `:openai_codex` provider.
+- Skills surface as direct named tools — no `invoke_skill` meta-tool.
+  Sub-agent trust gate: third-party skills cannot reach `:exec` /
+  `:network` / `:external_api` capabilities; `allowed_tools` narrows by
+  name on top of policy.
+- MCP outbound integration via `hermes_mcp`. Per-server supervisor
+  isolates faults; async discovery with exponential backoff so one bad
+  server can't take down healthy peers. Tool name sanitization with
+  SHA256 collision suffix and 64-byte truncation matches OpenAI
+  Responses regex.
+- Anthropic adapter scaffold (`Providers.Anthropic.Messages`) with full
+  schema-translation coverage; `chat/3` returns `:not_implemented` until
+  the OAuth + token-storage milestone lands. `provider:` accepted in
+  skill frontmatter so per-skill provider overrides route end-to-end.
+
+### Removed — M4.9 cleanup
+- `FermixCore.Tools.Registry`, `FermixCore.Tools.Tool` behaviour, and
+  `FermixCore.Tools.InvokeSkill` are gone. Built-in tool modules now
+  implement `FermixCore.Capabilities.Builtin.Tool`. `Provider.chat_opts`
+  no longer carries a `:tools` field — capabilities flow through the
+  adapter, not provider opts.
+
+### Fixed — M4.9 review
+- `AgentLoop` now dispatches against the per-turn filtered capability
+  map, not the full `CapabilityRegistry`. A capability filtered out by
+  `policy:`, `trust:`, or `allowed_tools:` can no longer be invoked
+  from the loop just because it's in the registry.
+- `AgentServer` now threads `definition.policy` and `definition.trust`
+  into `AgentLoop` opts. Sub-agent capability filtering finally fires:
+  third-party skills are read-only by default, local skills get the
+  broad-but-not-`:external_api` set, and main-agent root sessions stay
+  unfiltered. Implements the §4.6.3 trust gate end-to-end.
+- `Prompt.RuntimeSections.build/1` no longer crashes on a skill with
+  `allowed_tools: nil` (the trust-default sentinel). Renders as
+  `tools=default`.
+- `RouteResolver` no longer auto-routes `auth_mode: :oauth` to Codex.
+  Per design §4.8, default OpenAI OAuth users land on `OpenAI.Responses`
+  (which supports tool calling); Codex is reachable only via explicit
+  `provider: :openai_codex`. `OpenAI.Responses` accepts `:api_key`,
+  `:access_token`, or a `:token_server` for the Bearer header.
+- `MCP.Supervisor` now actually starts a `Hermes.Client.Base` +
+  `Hermes.Transport.STDIO` pair per server with a `:command`. Pluggable
+  via `:hermes_starter` so tests don't have to spawn real subprocesses.
+  Per-server sub-supervisor is `:one_for_all` so a transport crash
+  bounces the client and discovery process together.
+- `SkillRegistry.sync_capabilities/3` refuses to evict an existing
+  built-in (or MCP) capability with the same name. Boot order is
+  reordered: a `BuiltinSeeder` runs as a supervised child between
+  `CapabilityRegistry` and `SkillRegistry`, so built-ins land before
+  any skill snapshot can race them.
+- `priv/templates/agents.md.eex` no longer references the deleted
+  `invoke_skill` tool.
+- `MCP.Registry` ETS table is now derived from the GenServer name
+  instead of a hardcoded module atom, so multiple registry instances
+  (e.g., per-test setups) don't fight over a shared table.
+
 ### Fixed — M4.8 review
 - `scripts/release/build_releases_json.sh` previously rewrote every
   underscore in the artifact filename, turning `fermix_macos_x86_64`

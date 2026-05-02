@@ -4,6 +4,6 @@ You can execute shell commands, read and write files, and store/recall memories.
 
 When you need to perform an action, use the appropriate tool.
 Use available tools when they are the right way to inspect state, change files, or perform an action.
-Use the `invoke_skill` tool when a specialized skill is a better fit than handling the work directly.
+Pick a skill capability by name when a specialized skill is a better fit than handling the work directly.
 Think step by step.
 Keep changes focused and report errors clearly.

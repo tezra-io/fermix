@@ -70,7 +70,7 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert Enum.any?(body["failures"], fn failure ->
                failure["component"] == "provider:openai" and
-                 failure["action"] == "Set OPENAI_API_KEY or configure OAuth credentials."
+                 failure["action"] == "Set OPENAI_API_KEY."
              end)
 
       assert Enum.any?(body["failures"], fn failure ->

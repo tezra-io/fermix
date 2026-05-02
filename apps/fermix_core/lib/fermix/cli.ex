@@ -61,7 +61,10 @@ defmodule Fermix.CLI do
     fermix — Elixir-native multi-agent platform
 
     Usage:
-      fermix setup [--print-state] [--import-codex] [--openai-api-key VALUE] ...
+      fermix setup [--print-state] [--import-codex] [--openai-api-key VALUE]
+                   [--provider openai|openai_codex|anthropic]
+                   [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
+                   [--telegram-bot-token VALUE] ...
       fermix run                        Start the daemon in the foreground
       fermix service install   [--user|--system]   Install OS service unit
       fermix service uninstall [--user|--system]   Remove OS service unit

@@ -139,7 +139,7 @@ defmodule FermixCore.Setup.WizardTest do
     openai = persisted.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
     telegram = Keyword.get(persisted.fermix_channels, :telegram, [])
 
-    assert Keyword.get(openai, :auth_mode) == :api_key
+    refute Keyword.has_key?(openai, :auth_mode)
     assert Keyword.get(openai, :api_key) == "sk-test-123"
     assert Keyword.get(telegram, :enabled) == true
     assert Keyword.get(telegram, :mode) == :webhook
@@ -147,11 +147,61 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :allowed_user_ids) == []
   end
 
+  test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.delete_env(:fermix_core, :agent)
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Op",
+      timezone: "UTC",
+      communication_style: "concise"
+    )
+
+    report = Wizard.report()
+    assert report.wizard.step == :model
+
+    prompts = Wizard.prompts(report.wizard)
+    assert Enum.any?(prompts, &(&1.key == :provider and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :default_model and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
+  end
+
+  test "prompts omit provider/model/effort once agent.provider is persisted to TOML" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-wizard-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [auth_mode: :api_key, api_key: "sk-test-123"]],
+          agent: [name: "fermix", provider: :openai],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    report = Wizard.report()
+    prompts = Wizard.prompts(report.wizard)
+    refute Enum.any?(prompts, &(&1.key == :provider))
+    refute Enum.any?(prompts, &(&1.key == :default_model))
+    refute Enum.any?(prompts, &(&1.key == :reasoning_effort))
+  end
+
   test "report routes to :personalization step when only personalization is missing" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]
     )
 
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
     Application.put_env(:fermix_core, :personalization, [])
 
@@ -351,6 +401,58 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(prompts, &(&1.key == :telegram_bot_token and &1.required?))
   end
 
+  test "save_answers does not persist an env-only OpenAI API key for unrelated setup answers" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-wizard-env-secret-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [
+            openai: [default_model: "gpt-5.4-mini"],
+            openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+          ],
+          personalization: [user_name: nil, timezone: nil, communication_style: nil],
+          agent: [name: "fermix", provider: :openai_codex]
+        ],
+        fermix_channels: [telegram: [enabled: false]],
+        fermix_web: []
+      })
+
+    # Simulate runtime.exs layering OPENAI_API_KEY into Application env.
+    Application.put_env(:fermix_core, :providers,
+      openai: [default_model: "gpt-5.4-mini", api_key: "sk-env-only"],
+      openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+    report = Wizard.report()
+
+    assert {:ok, _updated_report} =
+             Wizard.save_answers(report.wizard,
+               user_name: "Sujeeth",
+               timezone: "America/New_York",
+               communication_style: "direct"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+    openai = Keyword.get(providers, :openai, [])
+    codex = Keyword.get(providers, :openai_codex, [])
+
+    refute Keyword.has_key?(openai, :api_key)
+    refute Keyword.has_key?(openai, :auth_mode)
+    assert Keyword.get(codex, :default_model) == "gpt-5.5"
+  end
+
   test "save_answers persists slack and signal setup answers" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
 
@@ -389,6 +491,132 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(signal, :enabled) == true
     assert Keyword.get(signal, :mode) == :subprocess
     assert Keyword.get(signal, :account) == "+15550001111"
+  end
+
+  describe "save_answers — provider/model/reasoning_effort selection" do
+    test "writes provider, default_model, and reasoning_effort to TOML round-trip" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-wizard-m410-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      {:ok, _report} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(
+          provider: "openai_codex",
+          default_model: "gpt-5.4",
+          reasoning_effort: "medium"
+        )
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+
+      agent = Keyword.get(persisted.fermix_core, :agent, [])
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      codex = Keyword.get(providers, :openai_codex, [])
+
+      assert Keyword.get(agent, :provider) == :openai_codex
+      assert Keyword.get(codex, :default_model) == "gpt-5.4"
+      assert Keyword.get(codex, :reasoning_effort) == :medium
+    end
+
+    test "default_model writes to the active provider block (per agent.provider)" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-wizard-active-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      {:ok, _report} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(default_model: "claude-opus-4-7")
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      anthropic = Keyword.get(providers, :anthropic, [])
+
+      assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
+    end
+
+    test "accepts provider as atom" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-wizard-atom-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      {:ok, _report} =
+        Wizard.report().wizard
+        |> Wizard.save_answers(provider: :anthropic)
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      assert Keyword.get(Keyword.get(persisted.fermix_core, :agent, []), :provider) == :anthropic
+    end
+
+    test "raises ArgumentError on unknown provider string" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/unknown provider/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, provider: "gemini")
+      end
+    end
+
+    test "raises ArgumentError on invalid reasoning_effort" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/invalid reasoning_effort/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "absurd")
+      end
+    end
+
+    test "raises ArgumentError on whitespace-only default_model" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/default_model cannot be blank/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, default_model: "   ")
+      end
+    end
+
+    test "raises when reasoning_effort answered for :anthropic provider" do
+      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+      assert_raise ArgumentError, ~r/reasoning_effort applies to :openai/, fn ->
+        Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "high")
+      end
+    end
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)

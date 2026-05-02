@@ -1,17 +1,13 @@
 defmodule FermixCore.Providers.OpenAI do
   @moduledoc """
-  OpenAI provider. Supports Chat Completions API (api_key mode)
-  and Codex Responses API (oauth mode via chatgpt.com).
+  OpenAI provider. Supports Chat Completions API using API-key auth.
   """
 
   @behaviour FermixCore.Providers.Provider
 
-  alias FermixCore.Auth.TokenManager
-
   require Logger
 
   @base_url "https://api.openai.com/v1"
-  @responses_url "https://chatgpt.com/backend-api/codex/responses"
 
   @doc false
   @spec default_model() :: String.t()
@@ -36,10 +32,7 @@ defmodule FermixCore.Providers.OpenAI do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
 
     case resolve_auth(opts) do
-      {:ok, key, :oauth, opts} ->
-        do_responses_chat(messages, key, opts, req_options)
-
-      {:ok, key, :api_key, opts} ->
+      {:ok, key, opts} ->
         do_completions_chat(messages, key, opts, req_options)
 
       {:error, reason} ->
@@ -59,11 +52,13 @@ defmodule FermixCore.Providers.OpenAI do
     model = Keyword.get(opts, :model, default_model())
     temperature = Keyword.get(opts, :temperature, default_temperature())
     tools = Keyword.get(opts, :tools)
+    response_format = Keyword.get(opts, :response_format)
     url = Keyword.get(opts, :base_url, base_url())
 
     body =
       %{model: model, messages: format_messages(messages), temperature: temperature}
       |> maybe_add_tools(tools)
+      |> maybe_add_response_format(response_format)
 
     start = System.monotonic_time(:millisecond)
 
@@ -123,224 +118,6 @@ defmodule FermixCore.Providers.OpenAI do
     {:error, "Unexpected response format"}
   end
 
-  # --- Responses API (oauth mode) ---
-
-  defp do_responses_chat(messages, key, opts, req_options) do
-    model = Keyword.get(opts, :model, default_model())
-    url = Keyword.get(opts, :responses_url, responses_url())
-    {instructions, input} = build_responses_input(messages)
-    account_id = decode_jwt_account_id(key)
-
-    body = %{
-      model: model,
-      input: input,
-      instructions: instructions,
-      store: false,
-      stream: true
-    }
-
-    headers =
-      [
-        {"authorization", "Bearer #{key}"},
-        {"openai-beta", "responses=experimental"},
-        {"originator", "pi"},
-        {"content-type", "application/json"}
-      ]
-      |> maybe_add_header("chatgpt-account-id", account_id)
-
-    start = System.monotonic_time(:millisecond)
-
-    result =
-      Req.new(url: url, method: :post, json: body, headers: headers)
-      |> Req.merge(req_options)
-      |> Req.request()
-      |> handle_responses_response(model)
-
-    duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms)
-    result
-  end
-
-  defp build_responses_input(messages) do
-    {system_parts, rest} =
-      Enum.split_while(messages, fn msg -> msg.role == "system" end)
-
-    instructions =
-      case system_parts do
-        [] -> "You are a helpful AI assistant."
-        parts -> Enum.map_join(parts, "\n\n", & &1.content)
-      end
-
-    input =
-      Enum.map(rest, fn msg ->
-        case msg.role do
-          "user" ->
-            %{role: "user", content: [%{type: "input_text", text: msg.content || ""}]}
-
-          "assistant" ->
-            %{role: "assistant", content: [%{type: "output_text", text: msg.content || ""}]}
-
-          _ ->
-            %{role: "user", content: [%{type: "input_text", text: msg.content || ""}]}
-        end
-      end)
-
-    {instructions, input}
-  end
-
-  defp handle_responses_response({:ok, %Req.Response{status: 200, body: body}}, model) do
-    parse_responses_body(body, model)
-  end
-
-  defp handle_responses_response({:ok, %Req.Response{status: status, body: body}}, _model) do
-    Logger.error("Codex Responses API error: #{status} - #{inspect(body)}")
-    {:error, "Codex API error: #{status}"}
-  end
-
-  defp handle_responses_response({:error, %Req.TransportError{reason: reason}}, _model) do
-    Logger.error("Codex request failed: #{inspect(reason)}")
-    {:error, reason}
-  end
-
-  defp handle_responses_response({:error, reason}, _model) do
-    Logger.error("Codex request failed: #{inspect(reason)}")
-    {:error, reason}
-  end
-
-  defp parse_responses_body(body, model) when is_binary(body) do
-    body
-    |> parse_sse_response()
-    |> build_responses_result(model)
-  end
-
-  defp parse_responses_body(body, model) when is_map(body) do
-    body
-    |> parse_map_response()
-    |> build_responses_result(model)
-  end
-
-  defp parse_responses_body(_body, _model), do: {:error, "Unexpected Codex response format"}
-
-  defp parse_sse_response(body) do
-    events = parse_sse_events(body)
-    {text, completed} = extract_from_events(events)
-
-    {text, extract_responses_usage(completed), completed && completed["model"]}
-  end
-
-  defp parse_map_response(body) do
-    {extract_responses_text(body), body["usage"] || %{}, body["model"]}
-  end
-
-  defp build_responses_result({text, usage, parsed_model}, fallback_model) do
-    {:ok,
-     %{
-       content: text || "",
-       tool_calls: [],
-       usage: %{
-         prompt_tokens: usage["input_tokens"] || 0,
-         completion_tokens: usage["output_tokens"] || 0,
-         total_tokens: (usage["input_tokens"] || 0) + (usage["output_tokens"] || 0)
-       },
-       model: parsed_model || fallback_model
-     }}
-  end
-
-  defp extract_responses_usage(%{"usage" => usage}), do: usage
-  defp extract_responses_usage(_), do: %{}
-
-  defp parse_sse_events(body) do
-    body
-    |> String.split("\n\n", trim: true)
-    |> Enum.flat_map(&parse_sse_chunk/1)
-  end
-
-  defp parse_sse_chunk(chunk) do
-    chunk
-    |> String.split("\n", trim: true)
-    |> Enum.filter(&String.starts_with?(&1, "data: "))
-    |> Enum.flat_map(&decode_sse_line/1)
-  end
-
-  defp decode_sse_line("data: [DONE]"), do: []
-
-  defp decode_sse_line("data: " <> json) do
-    case Jason.decode(json) do
-      {:ok, event} -> [event]
-      _ -> []
-    end
-  end
-
-  defp extract_from_events(events) do
-    {deltas, completed_response} =
-      Enum.reduce(events, {"", nil}, fn
-        %{"type" => "response.output_text.delta", "delta" => d}, {acc, c} ->
-          {acc <> d, c}
-
-        %{"type" => t} = e, {acc, nil} when t in ["response.completed", "response.done"] ->
-          {acc, e["response"]}
-
-        _, acc ->
-          acc
-      end)
-
-    text =
-      if deltas != "" do
-        deltas
-      else
-        case completed_response do
-          %{} -> extract_responses_text(completed_response)
-          _ -> nil
-        end
-      end
-
-    {text, completed_response}
-  end
-
-  defp extract_responses_text(%{"output_text" => text}) when is_binary(text) and text != "" do
-    text
-  end
-
-  defp extract_responses_text(%{"output" => output}) when is_list(output) do
-    output
-    |> Enum.flat_map(fn
-      %{"content" => contents} when is_list(contents) -> contents
-      _ -> []
-    end)
-    |> Enum.find_value(fn
-      %{"type" => "output_text", "text" => t} when is_binary(t) and t != "" -> t
-      %{"text" => t} when is_binary(t) and t != "" -> t
-      _ -> nil
-    end)
-  end
-
-  defp extract_responses_text(_), do: nil
-
-  defp decode_jwt_account_id(token) when is_binary(token) do
-    with [_, payload | _] <- String.split(token, "."),
-         {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, claims} <- Jason.decode(decoded) do
-      find_account_id(claims)
-    else
-      _ -> nil
-    end
-  end
-
-  defp find_account_id(claims) do
-    Enum.find_value(
-      ["account_id", "accountId", "sub", "https://api.openai.com/account_id"],
-      fn key ->
-        case claims[key] do
-          id when is_binary(id) and id != "" -> id
-          _ -> nil
-        end
-      end
-    )
-  end
-
-  defp maybe_add_header(headers, _key, nil), do: headers
-  defp maybe_add_header(headers, key, value), do: [{key, value} | headers]
-
   # --- Shared helpers ---
 
   defp format_messages(messages) do
@@ -363,27 +140,29 @@ defmodule FermixCore.Providers.OpenAI do
   defp maybe_add_tools(body, []), do: body
   defp maybe_add_tools(body, tools) when is_list(tools), do: Map.put(body, :tools, tools)
 
+  defp maybe_add_response_format(body, nil), do: body
+
+  defp maybe_add_response_format(body, response_format),
+    do: Map.put(body, :response_format, response_format)
+
   defp resolve_auth(opts) do
     {mode, opts} = Keyword.pop_lazy(opts, :auth_mode, &auth_mode/0)
 
     case mode do
       :oauth ->
-        {_, opts} = Keyword.pop(opts, :api_key)
-        token_server = Keyword.get(opts, :token_server, TokenManager)
+        {:error, {:unsupported_auth_mode, :oauth}}
 
-        case TokenManager.get_token(token_server) do
-          {:ok, token} -> {:ok, token, :oauth, opts}
-          {:error, reason} -> {:error, reason}
-        end
-
-      _ ->
+      :api_key ->
         {key, opts} = Keyword.pop_lazy(opts, :api_key, &api_key/0)
 
         if is_nil(key) or key == "" do
           {:error, :not_configured}
         else
-          {:ok, key, :api_key, opts}
+          {:ok, key, opts}
         end
+
+      other ->
+        {:error, {:unsupported_auth_mode, other}}
     end
   end
 
@@ -407,7 +186,7 @@ defmodule FermixCore.Providers.OpenAI do
     :telemetry.execute(
       [:fermix, :provider, :call],
       %{duration_ms: duration_ms},
-      %{provider: :openai, model: model, status: status, tokens: tokens}
+      %{provider: :openai, model: model, status: status, tokens: tokens, reasoning_effort: nil}
     )
   end
 
@@ -422,13 +201,6 @@ defmodule FermixCore.Providers.OpenAI do
     case FermixCore.Config.provider(:openai) do
       {:ok, config} -> Keyword.get(config, :base_url, @base_url)
       _ -> @base_url
-    end
-  end
-
-  defp responses_url do
-    case FermixCore.Config.provider(:openai) do
-      {:ok, config} -> Keyword.get(config, :responses_url, @responses_url)
-      _ -> @responses_url
     end
   end
 end

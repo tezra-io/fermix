@@ -1,0 +1,243 @@
+defmodule FermixCore.Capabilities.RegistryTest do
+  use ExUnit.Case, async: true
+
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry
+
+  defmodule FakeMod do
+    def execute(_args, _ctx, _extra \\ nil), do: {:ok, :ok}
+  end
+
+  setup do
+    name = :"capreg_#{System.unique_integer([:positive])}"
+    pid = start_supervised!({Registry, name: name})
+    %{registry: name, pid: pid}
+  end
+
+  defp cap(name, opts \\ []) do
+    Capability.new(%{
+      name: name,
+      description: "test #{name}",
+      parameters: %{type: "object"},
+      kind: Keyword.get(opts, :kind, :builtin),
+      executor: {FakeMod, :execute, []},
+      policy_class: Keyword.get(opts, :policy_class, :read_only),
+      requires_approval?: Keyword.get(opts, :requires_approval?, false),
+      metadata: Keyword.get(opts, :metadata, %{})
+    })
+  end
+
+  describe "register/2 + find/2" do
+    test "registers and looks up by name", %{registry: reg} do
+      :ok = Registry.register(reg, cap("shell"))
+      assert {:ok, %Capability{name: "shell"}} = Registry.find(reg, "shell")
+    end
+
+    test "rejects duplicate names loudly", %{registry: reg} do
+      :ok = Registry.register(reg, cap("shell"))
+
+      assert {:error, {:duplicate_name, "shell"}} =
+               Registry.register(reg, cap("shell"))
+    end
+
+    test "find returns :error for unknown name", %{registry: reg} do
+      assert :error = Registry.find(reg, "nope")
+    end
+  end
+
+  describe "list/2 with :allowed_tools" do
+    test "nil = no filter, returns everything", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a"))
+      :ok = Registry.register(reg, cap("b"))
+
+      names = reg |> Registry.list() |> Enum.map(& &1.name)
+      assert names == ["a", "b"]
+    end
+
+    test "[] = empty list (not inherit-all)", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a"))
+      :ok = Registry.register(reg, cap("b"))
+
+      assert Registry.list(reg, allowed_tools: []) == []
+    end
+
+    test "[names] = exact allowlist filter", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a"))
+      :ok = Registry.register(reg, cap("b"))
+      :ok = Registry.register(reg, cap("c"))
+
+      names =
+        reg
+        |> Registry.list(allowed_tools: ["a", "c"])
+        |> Enum.map(& &1.name)
+
+      assert names == ["a", "c"]
+    end
+  end
+
+  describe "list/2 with :policy" do
+    test "filters by allow class", %{registry: reg} do
+      :ok = Registry.register(reg, cap("ro", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("rw", policy_class: :read_write))
+      :ok = Registry.register(reg, cap("ex", policy_class: :exec))
+
+      names =
+        reg
+        |> Registry.list(policy: [allow: [:read_only]])
+        |> Enum.map(& &1.name)
+
+      assert names == ["ro"]
+    end
+
+    test "deny overrides allow", %{registry: reg} do
+      :ok = Registry.register(reg, cap("ro", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("ex", policy_class: :exec))
+
+      names =
+        reg
+        |> Registry.list(policy: [allow: [:read_only, :exec], deny: [:exec]])
+        |> Enum.map(& &1.name)
+
+      assert names == ["ro"]
+    end
+
+    test "policy + allowlist compose", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("b", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("c", policy_class: :exec))
+
+      names =
+        reg
+        |> Registry.list(policy: [allow: [:read_only]], allowed_tools: ["a", "c"])
+        |> Enum.map(& &1.name)
+
+      assert names == ["a"]
+    end
+
+    test "raises on unknown policy class", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a"))
+
+      assert_raise ArgumentError, ~r/invalid policy class/, fn ->
+        Registry.list(reg, policy: [allow: [:bogus]])
+      end
+    end
+  end
+
+  describe "list/2 with :trust default policies" do
+    setup %{registry: reg} do
+      :ok = Registry.register(reg, cap("ro", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("rw", policy_class: :read_write))
+      :ok = Registry.register(reg, cap("ex", policy_class: :exec))
+      :ok = Registry.register(reg, cap("net", policy_class: :network))
+      :ok = Registry.register(reg, cap("api", policy_class: :external_api))
+      :ok
+    end
+
+    test "trust: :third_party defaults to read-only and denies the rest", %{registry: reg} do
+      names = reg |> Registry.list(trust: :third_party) |> Enum.map(& &1.name)
+      assert names == ["ro"]
+    end
+
+    test "trust: :local allows read/write/exec/network but denies external_api", %{registry: reg} do
+      names = reg |> Registry.list(trust: :local) |> Enum.map(& &1.name)
+      assert names == ["ex", "net", "ro", "rw"]
+    end
+
+    test "trust: :core allows everything", %{registry: reg} do
+      names = reg |> Registry.list(trust: :core) |> Enum.map(& &1.name)
+      assert names == ["api", "ex", "net", "ro", "rw"]
+    end
+
+    test "explicit policy overrides trust default", %{registry: reg} do
+      names =
+        reg
+        |> Registry.list(trust: :third_party, policy: [:read_only, :exec])
+        |> Enum.map(& &1.name)
+
+      assert names == ["ex", "ro"]
+    end
+
+    test "policy as bare class list is treated as allow", %{registry: reg} do
+      names = reg |> Registry.list(policy: [:exec]) |> Enum.map(& &1.name)
+      assert names == ["ex"]
+    end
+
+    test "no trust + no policy = main-agent style: no filtering", %{registry: reg} do
+      names = reg |> Registry.list() |> Enum.map(& &1.name)
+      assert names == ["api", "ex", "net", "ro", "rw"]
+    end
+  end
+
+  describe "list/2 with :kind" do
+    test "filters by capability kind", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a", kind: :builtin))
+      :ok = Registry.register(reg, cap("b", kind: :skill))
+      :ok = Registry.register(reg, cap("c", kind: :mcp))
+
+      assert ["a"] = reg |> Registry.list(kind: :builtin) |> Enum.map(& &1.name)
+      assert ["b"] = reg |> Registry.list(kind: :skill) |> Enum.map(& &1.name)
+      assert ["c"] = reg |> Registry.list(kind: :mcp) |> Enum.map(& &1.name)
+    end
+  end
+
+  describe "list/2 with :include_approval_required?" do
+    test "default false hides capabilities with requires_approval?: true", %{registry: reg} do
+      :ok = Registry.register(reg, cap("ok"))
+      :ok = Registry.register(reg, cap("gated", requires_approval?: true))
+
+      assert ["ok"] = reg |> Registry.list() |> Enum.map(& &1.name)
+    end
+
+    test "true returns approval-gated capabilities", %{registry: reg} do
+      :ok = Registry.register(reg, cap("gated", requires_approval?: true))
+
+      assert ["gated"] =
+               reg
+               |> Registry.list(include_approval_required?: true)
+               |> Enum.map(& &1.name)
+    end
+  end
+
+  describe "unregister/2 and unregister_kind/3" do
+    test "unregister/2 drops a single capability", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a"))
+      :ok = Registry.unregister(reg, "a")
+      assert :error = Registry.find(reg, "a")
+    end
+
+    test "unregister/2 is idempotent for unknown names", %{registry: reg} do
+      assert :ok = Registry.unregister(reg, "missing")
+    end
+
+    test "unregister_kind/3 drops by kind + metadata match", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a", kind: :mcp, metadata: %{server: "github"}))
+      :ok = Registry.register(reg, cap("b", kind: :mcp, metadata: %{server: "filesystem"}))
+      :ok = Registry.register(reg, cap("c", kind: :builtin))
+
+      :ok = Registry.unregister_kind(reg, :mcp, metadata: %{server: "github"})
+
+      assert :error = Registry.find(reg, "a")
+      assert {:ok, _} = Registry.find(reg, "b")
+      assert {:ok, _} = Registry.find(reg, "c")
+    end
+
+    test "unregister_kind/3 with no metadata drops every capability of kind", %{registry: reg} do
+      :ok = Registry.register(reg, cap("a", kind: :mcp, metadata: %{server: "x"}))
+      :ok = Registry.register(reg, cap("b", kind: :mcp, metadata: %{server: "y"}))
+      :ok = Registry.register(reg, cap("c", kind: :builtin))
+
+      :ok = Registry.unregister_kind(reg, :mcp)
+
+      assert :error = Registry.find(reg, "a")
+      assert :error = Registry.find(reg, "b")
+      assert {:ok, _} = Registry.find(reg, "c")
+    end
+  end
+
+  describe "refresh/2" do
+    test "is a no-op stub at Stage 1", %{registry: reg} do
+      assert :ok = Registry.refresh(reg, :builtin)
+      assert :ok = Registry.refresh(reg, :all)
+    end
+  end
+end

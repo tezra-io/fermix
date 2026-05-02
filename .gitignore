@@ -32,5 +32,8 @@ Thumbs.db
 /apps/*/cover/
 erl_crash.dump
 
-#docs
-/docs/
+# docs/ — track markdown design docs and the superpowers/ subdirectory;
+# ignore generated artifacts (HTML renders, exported images, etc.).
+/docs/*.md
+!/docs/*.png
+/docs/superpowers/

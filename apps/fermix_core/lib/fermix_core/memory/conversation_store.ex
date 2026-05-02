@@ -11,6 +11,8 @@ defmodule FermixCore.Memory.ConversationStore do
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
 
+  require Logger
+
   @type thread_scope :: :root | String.t() | integer()
   @type conversation_key :: {channel :: String.t(), chat_id :: String.t(), thread_scope()}
   @type message :: %{
@@ -20,6 +22,8 @@ defmodule FermixCore.Memory.ConversationStore do
         }
 
   @max_messages_default 50
+  @durable_max_attempts 3
+  @durable_retry_initial_ms 100
 
   # --- Client API ---
 
@@ -77,10 +81,16 @@ defmodule FermixCore.Memory.ConversationStore do
     {:ok,
      %{
        conversations: %{},
+       clear_versions: %{},
        max_messages: max_messages,
        repo: Keyword.get(opts, :repo, Repo),
        agent_id: Config.agent_id(opts),
-       owner_id: Config.owner_id(opts)
+       owner_id: Config.owner_id(opts),
+       durable_max_attempts: Keyword.get(opts, :durable_max_attempts, @durable_max_attempts),
+       durable_retry_initial_ms:
+         Keyword.get(opts, :durable_retry_initial_ms, @durable_retry_initial_ms),
+       durable_task_supervisor:
+         Keyword.get(opts, :durable_task_supervisor, FermixCore.TaskSupervisor)
      }}
   end
 
@@ -92,16 +102,17 @@ defmodule FermixCore.Memory.ConversationStore do
       ) do
     start = System.monotonic_time()
     message = new_message(role, content)
-
-    {durable?, durable_write_us} =
-      persist_message!(state, key, role, content, opts, message.timestamp)
-
     updated = append_message(state, key, message)
+    version = Map.get(state.clear_versions, key, 0)
+
+    durable? =
+      enqueue_persist_message(state, key, role, content, opts, message.timestamp, version)
+
     duration_us = elapsed_us(start)
 
     :telemetry.execute(
       [:fermix, :memory, :message],
-      %{count: 1, duration_us: duration_us, durable_write_us: durable_write_us},
+      %{count: 1, duration_us: duration_us, durable_write_us: 0},
       %{channel: channel, chat_id: chat_id, durable?: durable?}
     )
 
@@ -110,10 +121,20 @@ defmodule FermixCore.Memory.ConversationStore do
 
   def handle_call({:clear, key}, _from, state) do
     delete_messages!(state, key)
-    {:reply, :ok, %{state | conversations: Map.delete(state.conversations, key)}}
+    next_clear_versions = Map.update(state.clear_versions, key, 1, &(&1 + 1))
+
+    {:reply, :ok,
+     %{
+       state
+       | conversations: Map.delete(state.conversations, key),
+         clear_versions: next_clear_versions
+     }}
   end
 
-  @impl true
+  def handle_call({:clear_version, key}, _from, state) do
+    {:reply, Map.get(state.clear_versions, key, 0), state}
+  end
+
   def handle_call({:get_history, key, nil}, from, state) do
     handle_call({:get_history, key, state.max_messages}, from, state)
   end
@@ -173,35 +194,154 @@ defmodule FermixCore.Memory.ConversationStore do
     |> Enum.reverse()
   end
 
-  defp persist_message!(state, key, role, content, opts, timestamp) do
-    case repo_server(state.repo) do
+  defp enqueue_persist_message(state, key, role, content, opts, timestamp, version) do
+    case configured_repo(state.repo) do
       nil ->
-        {false, 0}
+        false
 
       repo ->
-        start = System.monotonic_time()
+        ctx = %{
+          store: self(),
+          key: key,
+          version: version,
+          repo: repo,
+          attrs: message_attrs(state, key, role, content, opts, timestamp),
+          max_attempts: state.durable_max_attempts,
+          retry_initial_ms: state.durable_retry_initial_ms
+        }
 
-        case Repo.insert_message(
-               %{
-                 agent_id: Keyword.get(opts, :agent_id, state.agent_id),
-                 owner_id: Keyword.get(opts, :owner_id, state.owner_id),
-                 channel: elem(key, 0),
-                 chat_id: elem(key, 1),
-                 thread_scope: elem(key, 2),
-                 sender: Keyword.get(opts, :sender, role),
-                 role: role,
-                 kind: Keyword.get(opts, :kind, "chat_message"),
-                 content: content,
-                 metadata: Keyword.get(opts, :metadata),
-                 created_at: timestamp
-               },
-               server: repo
-             ) do
-          {:ok, _message} -> {true, elapsed_us(start)}
-          {:error, :disabled} -> {false, elapsed_us(start)}
-          {:error, reason} -> raise "conversation repo write failed: #{inspect(reason)}"
-        end
+        start_persist_task(state.durable_task_supervisor, ctx)
     end
+  end
+
+  defp configured_repo(nil), do: nil
+
+  defp configured_repo(repo) when is_pid(repo) do
+    if Process.alive?(repo), do: Repo.enabled_server(repo)
+  end
+
+  defp configured_repo(repo) when is_atom(repo) do
+    Repo.enabled_server(repo)
+  end
+
+  defp start_persist_task(supervisor, ctx) do
+    case start_child(supervisor, fn -> persist_message(ctx, 1) end) do
+      {:ok, _pid} ->
+        true
+
+      {:error, reason} ->
+        Logger.error(
+          "failed to start conversation durable write task for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
+        )
+
+        false
+    end
+  end
+
+  # `nil` means the caller explicitly opted out of supervision (test wiring,
+  # mostly). Anything else is a real supervisor and a missing/dead supervisor
+  # should surface as an error — we don't silently degrade to an unsupervised
+  # task because that hides the supervision-tree problem and lies in the
+  # `durable?` telemetry flag.
+  defp start_child(nil, task), do: Task.start(task)
+
+  defp start_child(supervisor, task) do
+    Task.Supervisor.start_child(supervisor, task)
+  catch
+    :exit, reason -> {:error, {:task_supervisor_exit, reason}}
+  end
+
+  defp persist_message(ctx, attempt) do
+    if current_clear_version(ctx.store, ctx.key) == ctx.version do
+      do_persist_message(ctx, attempt)
+    end
+  end
+
+  defp do_persist_message(ctx, attempt) do
+    start = System.monotonic_time()
+
+    case safe_insert_message(ctx.repo, ctx.attrs) do
+      {:ok, _message} ->
+        emit_persist_telemetry(ctx.attrs, attempt, elapsed_us(start), :ok, nil)
+
+      {:error, :disabled} ->
+        emit_persist_telemetry(ctx.attrs, attempt, elapsed_us(start), :disabled, :disabled)
+
+      {:error, reason} ->
+        duration_us = elapsed_us(start)
+        emit_persist_telemetry(ctx.attrs, attempt, duration_us, :error, reason)
+        retry_or_log_persist_failure(ctx, attempt, reason)
+    end
+  end
+
+  defp current_clear_version(store, key) do
+    GenServer.call(store, {:clear_version, key})
+  catch
+    :exit, _reason -> :cleared
+  end
+
+  defp safe_insert_message(repo, attrs) do
+    Repo.insert_message(attrs, server: repo)
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp retry_or_log_persist_failure(ctx, attempt, reason) do
+    if attempt < ctx.max_attempts do
+      delay_ms = retry_delay_ms(ctx.retry_initial_ms, attempt)
+
+      Logger.warning(
+        "conversation durable write failed; retrying attempt #{attempt + 1}/#{ctx.max_attempts} for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
+      )
+
+      if delay_ms > 0 do
+        Process.sleep(delay_ms)
+      end
+
+      persist_message(ctx, attempt + 1)
+    else
+      Logger.error(
+        "conversation durable write failed after #{attempt} attempts for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
+      )
+    end
+  end
+
+  defp retry_delay_ms(initial_ms, attempt) do
+    initial_ms * Integer.pow(2, max(attempt - 1, 0))
+  end
+
+  defp emit_persist_telemetry(attrs, attempt, duration_us, status, reason) do
+    metadata = %{
+      channel: attrs.channel,
+      chat_id: attrs.chat_id,
+      role: attrs.role,
+      kind: attrs.kind,
+      attempt: attempt,
+      status: status,
+      reason: reason
+    }
+
+    :telemetry.execute(
+      [:fermix, :memory, :message_persist],
+      %{count: 1, duration_us: duration_us},
+      metadata
+    )
+  end
+
+  defp message_attrs(state, key, role, content, opts, timestamp) do
+    %{
+      agent_id: Keyword.get(opts, :agent_id, state.agent_id),
+      owner_id: Keyword.get(opts, :owner_id, state.owner_id),
+      channel: elem(key, 0),
+      chat_id: elem(key, 1),
+      thread_scope: elem(key, 2),
+      sender: Keyword.get(opts, :sender, role),
+      role: role,
+      kind: Keyword.get(opts, :kind, "chat_message"),
+      content: content,
+      metadata: Keyword.get(opts, :metadata),
+      created_at: timestamp
+    }
   end
 
   defp delete_messages!(state, key) do
