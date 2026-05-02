@@ -103,7 +103,7 @@ Two existing codebases implement Codex tool calls correctly. We borrow shape, no
 | Streaming partial tokens to channels | Agent loop today delivers complete turns; channels render text as a single message. Real streaming is a cross-cutting UX change. | M6 (DX) or later |
 | Per-model reasoning-effort clamping table | Volatile, goes stale, hides the real API error. We send verbatim and surface the 400. | Never (intentional) |
 | Switching reasoning effort mid-conversation | Effort is set at agent boot per agent definition / config. | Later if needed |
-| Web UI for provider config | CLI/wizard first. LiveView dashboard is a separate concern. | M5/M6 |
+| Web UI for provider config | CLI/wizard first. LiveView dashboard is a separate concern. | M10/M6 |
 | Auto-detection of token type (Plus vs API key) | Doctor's auth probe is a better signal — it tells you what works, not what we guessed. | Avoid |
 
 ---

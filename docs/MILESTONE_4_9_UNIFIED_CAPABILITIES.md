@@ -58,7 +58,7 @@ After this milestone:
 | Anthropic adapter scaffold | P1 | New | Implement `Anthropic.Messages` adapter as a real module with `to_provider_tools/1` (input_schema rename) and `chat/3` returning `{:error, :not_implemented}` until tokens land. Tests pin the schema-translation behaviour so the future implementation has guard rails. |
 | Per-skill provider override | P1 | New | Add optional `provider` field to skill frontmatter (e.g., `provider: anthropic`). Defaults to global default. Lets `coding-skill` pin Claude even when the main agent is on GPT. Today's `model:` field stays. |
 | Telemetry uniformity | P1 | New | `[:fermix, :capability, :exec]` event for every capability execution (builtin, skill, mcp), with `kind` metadata. Replaces the per-tool/per-skill split. |
-| Capability policy metadata | P0 | New | Every `Capability` carries `requires_approval?: boolean()` and `policy_class :: :read_only \| :read_write \| :exec \| :network \| :external_api`. Built-ins set sane defaults (`shell` → `:exec`, `file_write` → `:read_write`, `file_read` → `:read_only`, `browser` → `:network`). MCP capabilities default to `:external_api` + `requires_approval?: true` until per-server overrides land. Skill capabilities are `:exec` because they spawn an agent, but the spawned agent's internal capability set is resolved separately. Surfaced now so M5's gate has somewhere to bind. |
+| Capability policy metadata | P0 | New | Every `Capability` carries `requires_approval?: boolean()` and `policy_class :: :read_only \| :read_write \| :exec \| :network \| :external_api`. Built-ins set sane defaults (`shell` → `:exec`, `file_write` → `:read_write`, `file_read` → `:read_only`, `browser` → `:network`). MCP capabilities default to `:external_api` + `requires_approval?: true` until per-server overrides land. Skill capabilities are `:exec` because they spawn an agent, but the spawned agent's internal capability set is resolved separately. Surfaced now so M10's gate has somewhere to bind. |
 | Sub-agent trust policy | P0 | New | `Capabilities.Registry.list/2` accepts `:policy` and `:allowed_tools` filters. For sub-agents, Fermix resolves a default policy from skill trust: core/local skills may inherit broad capabilities; third-party/plugin skills default to a safe read-only set until explicitly trusted or allowlisted. Without this, the moment MCP servers register, every sub-agent transitively gets destructive external tools. Default policy is documented and enforced in tests. |
 | Placeholder skill cleanup | P0 | Refactor | The existing placeholder skills are removed or replaced with real skills. M4.9 does not preserve their current frontmatter as a compatibility contract. Tests should cover generic installed skills and at least one fixture skill, not the placeholder names as product behaviour. |
 
@@ -66,12 +66,12 @@ After this milestone:
 
 | Feature | Reason | When |
 |---------|--------|------|
-| Inbound MCP — fermix as an MCP server | Outbound (consume external MCP) is the immediate value. Inbound (expose fermix skills to other agents) is a smaller follow-on once outbound is stable and the capability shape is settled. | M5 / M6 |
-| Real Anthropic implementation | Token storage, OAuth flow, billing decisions — all out of scope for this milestone. The adapter scaffold makes the path obvious; the implementation lands in the multi-provider milestone. | Multi-provider milestone (post-M5) |
+| Inbound MCP — fermix as an MCP server | Outbound (consume external MCP) is the immediate value. Inbound (expose fermix skills to other agents) is a smaller follow-on once outbound is stable and the capability shape is settled. | M10 / M6 |
+| Real Anthropic implementation | Token storage, OAuth flow, billing decisions — all out of scope for this milestone. The adapter scaffold makes the path obvious; the implementation lands in the multi-provider milestone. | Multi-provider milestone (post-M10) |
 | Streaming sub-agent output | Today's path is sync (parent blocks while sub-agent runs). Streaming changes the AgentLoop contract and the tool result shape. Defer until there's a real UX consumer. | M6 (LiveView dashboard) |
 | Skill plugin install CLI | This milestone establishes the registry shape. CLI affordances (`fermix skill add <git-url>`, `fermix skill remove <name>`) are next-step polish. Operators can drop a SKILL.md folder under `~/.fermix/skills/` today. | Follow-on (skill plugins milestone) |
 | MCP tool call streaming | Hermes_mcp supports streaming responses; we'll start sync-only. | Follow-on |
-| Per-user tool ACLs / approval prompts | M5 governance milestone owns the user-facing approval UI and per-user authorization. M4.9 surfaces the **metadata** (`requires_approval?`, `policy_class`) and enforces static config gates so MCP doesn't ship without a guardrail; the interactive gating UX is M5. | M5 |
+| Per-user tool ACLs / approval prompts | M10 governance milestone owns the user-facing approval UI and per-user authorization. M4.9 surfaces the **metadata** (`requires_approval?`, `policy_class`) and enforces static config gates so MCP doesn't ship without a guardrail; the interactive gating UX is M10. | M10 |
 | Smart capability pruning | When the registry passes ~30 entries, GPT/Claude tool selection degrades. We'll address with explicit per-agent allowlists for now (already supported via `allowed_tools`). Auto-pruning is a separate optimization. | After M4.9 in production |
 | Replacing `SkillRegistry` entirely | `SkillRegistry` keeps its job as the SKILL.md parser, hot-reloader, and definition cache. What changes is that its consumers move from "ask SkillRegistry directly" to "ask CapabilityRegistry, which queries SkillRegistry under the hood". | — |
 | Agent-loop redesign | `AgentLoop`, `AgentServer`, `AgentSupervisor`, `MainAgent` keep their current shapes. Only the parameter that crosses into providers changes (from `tools: [map()]` to `capabilities: [Capability.t()]`). | — |
@@ -139,8 +139,8 @@ defmodule FermixCore.Capabilities.Capability do
           parameters: map(),                 # JSON Schema, LLM-facing
           kind: kind(),                      # internal — telemetry / diagnostics, NOT sent to LLM
           executor: executor(),              # runtime: apply(mod, fun, [args, context | extra_args])
-          requires_approval?: boolean(),     # M5 hook — gate before execution
-          policy_class: policy_class(),      # M5 hook — coarse-grained classification
+          requires_approval?: boolean(),     # M10 hook — gate before execution
+          policy_class: policy_class(),      # M10 hook — coarse-grained classification
           metadata: map()                    # adapter hints, source pointers (mcp server name, skill path)
         }
 
@@ -183,7 +183,7 @@ The `:network` vs `:external_api` distinction matters because the sub-agent defa
 | `:skill` | `Skill.from_definition(%AgentDefinition{})` | SKILL.md (runtime) | `{Capabilities.Skill, :invoke, [definition]}` |
 | `:mcp` | `MCP.from_tool_descriptor(server, descriptor)` | `tools/list` (runtime) | `{Capabilities.MCP, :call_tool, [server_name, original_tool_name]}` |
 
-The LLM sees `name`, `description`, `parameters`. `kind`, `executor`, `requires_approval?`, `policy_class`, `metadata` are internal — used by the registry, telemetry, and the M5 policy gate, never serialised to the model.
+The LLM sees `name`, `description`, `parameters`. `kind`, `executor`, `requires_approval?`, `policy_class`, `metadata` are internal — used by the registry, telemetry, and the M10 policy gate, never serialised to the model.
 
 ### 4.2 Registry shape
 
@@ -422,7 +422,7 @@ requires_approval = false
 
 The `$env:` prefix lets users reference shell env vars without baking secrets into the TOML.
 
-MCP capability exposure is static-config gated in M4.9. A capability with `requires_approval?: true` is registered for diagnostics and `fermix mcp list`, but it is not exposed to the LLM until config marks the server/tool approved or overrides the tool to `requires_approval = false`. Interactive approval prompts are M5; M4.9 uses explicit TOML configuration only.
+MCP capability exposure is static-config gated in M4.9. A capability with `requires_approval?: true` is registered for diagnostics and `fermix mcp list`, but it is not exposed to the LLM until config marks the server/tool approved or overrides the tool to `requires_approval = false`. Interactive approval prompts are M10; M4.9 uses explicit TOML configuration only.
 
 ### 4.6 Sub-agent capability scope and recursion safety
 
@@ -931,7 +931,7 @@ Same script run after every stage. Failure = stage rejected.
 
 1. **`max_skill_depth` default.** Proposed: 4. That allows main → skill A → skill B → skill C, refuses D. Need a real workflow to validate; might raise to 6 if research workflows need deeper chains.
 
-2. **Per-capability rate limiting.** With MCP servers callable by the root agent and explicitly trusted sub-agents, a runaway loop could DOS an external service. Out of scope for M4.9, but worth flagging — likely lives in M5 (Security & Governance) as a token-bucket per capability per minute.
+2. **Per-capability rate limiting.** With MCP servers callable by the root agent and explicitly trusted sub-agents, a runaway loop could DOS an external service. Out of scope for M4.9, but worth flagging — likely lives in M10 (Security & Governance) as a token-bucket per capability per minute.
 
 3. **MCP server hot reload.** First version is "edit `config.toml`, restart fermix". A `fermix mcp reload` CLI command is a small follow-on once the supervisor shape is stable.
 
@@ -990,5 +990,5 @@ Concrete next-step milestones this design unlocks but does not deliver:
 - **Skill plugin install CLI.** `fermix skill add <git-url>`, `fermix skill remove <name>`, `fermix skill list`. Now feasible because skills are first-class capabilities. ~1 week.
 - **Inbound MCP — fermix as MCP server.** Expose every fermix capability over MCP so external agents can use fermix's skills + memory + tools. Requires deciding auth model (token? mTLS?). ~2 weeks.
 - **Real Anthropic implementation.** Token storage, OAuth flow, Anthropic Messages `chat/3` body, prompt caching. Adapter scaffold makes the change a 1-file fill-in. ~1.5 weeks.
-- **Capability ACL / approval policy.** M5 work. M4.9 surfaces `requires_approval?` so the gating logic has a hook to bind to.
-- **Capability rate limiting.** Token-bucket per capability per minute, configurable. M5.
+- **Capability ACL / approval policy.** M10 work. M4.9 surfaces `requires_approval?` so the gating logic has a hook to bind to.
+- **Capability rate limiting.** Token-bucket per capability per minute, configurable. M10.

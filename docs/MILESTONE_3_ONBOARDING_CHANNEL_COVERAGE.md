@@ -51,7 +51,7 @@ Fermix can currently accept messages from Telegram and route them to the persist
 | Full Slack interactivity, slash commands, or workflow apps | Initial scope is message ingress/egress only | Later |
 | Discord slash commands, threads, voice, or rich guild automation | Too broad for first Discord cut | Later |
 | Signal group management or provisioning UX | Start with existing account + send/receive loop | Later |
-| General auth system for the web UI | Security and governance land in M5 | Later |
+| General auth system for the web UI | Security and governance land in M10 | Later |
 | Production-ready setup secrets vault | Secrets remain local-file/env based in M3 | Later |
 | Phoenix Channels chat UI or dashboard | Roadmap places richer operator UI later | M6 |
 | Advanced media understanding beyond speech-to-text | Only transcription is in M3 scope | Later |
@@ -335,7 +335,7 @@ The task and release command both call the same wizard core.
 
 **Security decision**
 
-Because M5 auth is not here yet, setup UI must be restricted:
+Because M10 auth is not here yet, setup UI must be restricted:
 
 - available by default only on localhost when config is incomplete
 - remote setup requires an explicit opt-in flag

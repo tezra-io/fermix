@@ -65,7 +65,7 @@ After M4 and M4.5, Fermix has durable memory and composable file-backed prompts.
 | Cross-agent resource sharing | Only one agent exists today | Later |
 | Embedding-based revision search | FTS5 on revision content is sufficient | Later |
 | Branching/merging of resource revisions | Adds complexity without clear need for a single-user system | Later |
-| Operator approval workflow for LLM-generated rewrites | Interesting but requires UI/UX beyond CLI; revisit in M5/M6 | Later |
+| Operator approval workflow for LLM-generated rewrites | Interesting but requires UI/UX beyond CLI; revisit in M10/M6 | Later |
 
 ---
 
@@ -686,7 +686,7 @@ Without provenance, a revision history tells you *what* changed but not *why*. W
 - an operator can see which memory extractions drove a `USER.md` rewrite
 - a bad rebuild can be traced back to specific admitted memories
 - rollback decisions are informed by what the system was trying to do
-- future governance (M5) can audit the chain of prompt mutations
+- future governance (M10) can audit the chain of prompt mutations
 
 ---
 
