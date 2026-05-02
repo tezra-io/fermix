@@ -249,6 +249,22 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       end
     end
 
+    test "sends strict text.format schema when supplied" do
+      decoded =
+        capture_body(
+          text_format: %{
+            type: "json_schema",
+            name: "memory_candidates",
+            strict: true,
+            schema: %{type: "object", required: ["candidates"]}
+          }
+        )
+
+      assert decoded["text"]["format"]["type"] == "json_schema"
+      assert decoded["text"]["format"]["strict"] == true
+      assert decoded["text"]["format"]["schema"]["required"] == ["candidates"]
+    end
+
     test "raises ArgumentError for an invalid effort level" do
       assert_raise ArgumentError, ~r/invalid reasoning_effort: :weird/, fn ->
         Responses.chat([%{role: "user", content: "x"}], [],

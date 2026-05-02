@@ -6,22 +6,20 @@ defmodule FermixCore.Providers.RouteResolver do
 
   `resolve!/1` dispatches on the `:provider` opt:
 
-    * `nil` / `:openai` — standard OpenAI provider. `auth_mode: :api_key`
-      uses the API key Bearer; `auth_mode: :oauth` uses an OAuth Bearer
-      pulled from `TokenManager`. Both route to `OpenAI.Responses` (or
-      `OpenAI.ChatCompletions` for non-eligible models / proxy URLs).
+    * `nil` / `:openai` — standard OpenAI provider using API-key auth.
+      Routes to `OpenAI.Responses` (or `OpenAI.ChatCompletions` for
+      non-eligible models / proxy URLs).
     * `:openai_codex` — explicit Codex (ChatGPT Plus) surface. Uses a
       different URL, body, and streaming shape.
     * `:anthropic` — Anthropic Messages route key.
 
-  Codex is **only** selected via explicit `provider: :openai_codex`. The
-  default OpenAI OAuth user routes through Responses, which supports
-  tool calls (Codex does not).
+  Codex OAuth is **only** selected via explicit `provider: :openai_codex`.
   """
 
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
   @default_openai_base_url "https://api.openai.com/v1"
@@ -63,15 +61,23 @@ defmodule FermixCore.Providers.RouteResolver do
       Keyword.get(opts, :base_url) || Keyword.get(config, :base_url, @default_openai_base_url)
 
     case auth_mode do
-      :oauth -> resolve_openai_oauth(model, base_url, opts)
       :api_key -> resolve_openai_api_key(model, base_url, opts, config)
+      :oauth -> raise_openai_oauth!()
       other -> raise ArgumentError, "Unknown OpenAI auth_mode: #{inspect(other)}"
     end
   end
 
   @spec resolve_codex!(keyword()) :: resolution()
   def resolve_codex!(opts \\ []) do
-    model = Keyword.get(opts, :model) || "gpt-5"
+    config =
+      case Config.provider(:openai_codex) do
+        {:ok, cfg} -> cfg
+        {:error, :not_configured} -> []
+      end
+
+    model =
+      Keyword.get(opts, :model) ||
+        Keyword.get(config, :default_model, ModelCatalog.default_model_for(:openai_codex))
 
     base_url =
       Keyword.get(opts, :base_url) || @default_codex_base_url
@@ -96,28 +102,6 @@ defmodule FermixCore.Providers.RouteResolver do
     {route_key, adapter_opts}
   end
 
-  defp resolve_openai_oauth(model, base_url, opts) do
-    route_key = %{
-      provider: :openai,
-      model: model,
-      auth_mode: :oauth,
-      base_url: base_url
-    }
-
-    adapter_opts =
-      [
-        model: model,
-        base_url: base_url,
-        token_server: Keyword.get(opts, :token_server, TokenManager)
-      ]
-      |> maybe_put(:access_token, Keyword.get(opts, :access_token))
-      |> maybe_put(:temperature, Keyword.get(opts, :temperature))
-      |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai, opts))
-      |> maybe_put(:req_options, Keyword.get(opts, :req_options))
-
-    {route_key, adapter_opts}
-  end
-
   defp resolve_openai_api_key(model, base_url, opts, config) do
     api_key = Keyword.get(opts, :api_key) || Keyword.get(config, :api_key)
 
@@ -135,6 +119,11 @@ defmodule FermixCore.Providers.RouteResolver do
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
+  end
+
+  defp raise_openai_oauth! do
+    raise ArgumentError,
+          "openai provider supports api_key auth only; use provider: :openai_codex for Codex OAuth"
   end
 
   defp resolve_anthropic!(opts) do

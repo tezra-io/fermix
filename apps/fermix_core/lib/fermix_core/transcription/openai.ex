@@ -3,8 +3,6 @@ defmodule FermixCore.Transcription.OpenAI do
 
   require Logger
 
-  alias FermixCore.Auth.TokenManager
-
   @base_url "https://api.openai.com/v1"
   @default_model "whisper-1"
 
@@ -83,19 +81,18 @@ defmodule FermixCore.Transcription.OpenAI do
 
   defp resolve_token(opts) do
     case auth_mode(opts) do
-      :oauth ->
-        token_server = Keyword.get(opts, :token_server, TokenManager)
+      :api_key ->
+        api_key_token(opts)
 
-        case TokenManager.get_token(token_server) do
-          {:ok, token} -> {:ok, token}
-          {:error, reason} -> {:error, reason}
-        end
+      other ->
+        {:error, {:unsupported_auth_mode, other}}
+    end
+  end
 
-      _ ->
-        case api_key(opts) do
-          key when is_binary(key) and key != "" -> {:ok, key}
-          _ -> {:error, :not_configured}
-        end
+  defp api_key_token(opts) do
+    case api_key(opts) do
+      key when is_binary(key) and key != "" -> {:ok, key}
+      _ -> {:error, :not_configured}
     end
   end
 

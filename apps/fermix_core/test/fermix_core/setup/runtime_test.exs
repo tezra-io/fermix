@@ -223,7 +223,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   end
 
   describe "--import-codex" do
-    test "imports tokens, persists to fermix store, and marks openai oauth-configured" do
+    test "imports tokens, persists to fermix store, and selects openai_codex" do
       home = tmp_home()
       on_exit(fn -> File.rm_rf!(home) end)
 
@@ -247,23 +247,26 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert {:ok, raw} = File.read(fermix_auth)
       data = Jason.decode!(raw)
-      assert data["providers"]["openai"]["tokens"]["access_token"] == "imported_at"
+      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "imported_at"
 
       providers = Application.get_env(:fermix_core, :providers, [])
-      assert Keyword.get(providers[:openai], :auth_mode) == :oauth
+      refute Keyword.has_key?(providers[:openai], :auth_mode)
+
+      agent = Application.get_env(:fermix_core, :agent, [])
+      assert Keyword.get(agent, :provider) == :openai_codex
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
     end
 
-    test "explicit --import-codex re-runs even when openai is already oauth-configured" do
+    test "explicit --import-codex re-runs when openai_codex is already selected" do
       home = tmp_home()
       on_exit(fn -> File.rm_rf!(home) end)
 
       prepare(home)
 
       Application.put_env(:fermix_core, :providers,
-        openai: [auth_mode: :oauth],
+        openai: [],
         openai_codex: [default_model: "gpt-5.5", reasoning_effort: :medium]
       )
 
@@ -289,8 +292,8 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert {:ok, raw} = File.read(fermix_auth)
       data = Jason.decode!(raw)
-      assert data["providers"]["openai"]["tokens"]["access_token"] == "imported_at"
-      assert data["providers"]["openai"]["tokens"]["refresh_token"] == "imported_rt"
+      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "imported_at"
+      assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "imported_rt"
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))

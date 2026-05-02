@@ -49,7 +49,7 @@ After this milestone:
 | `Adapter` behaviour | P0 | New | Per-provider conversion + continuation. `to_provider_tools(capabilities)`, `chat(messages, capabilities, opts)`, `continue(provider_state, tool_results, opts)`, `parse_tool_calls(response)`, `parse_response(response)`. The only place that knows OpenAI-vs-Anthropic-vs-Responses wire shapes. The adapter never executes capabilities. |
 | OpenAI Responses adapter | P0 | New | Routes `gpt-*` and `o*` models on `api.openai.com` to `/v1/responses` with `{type: "function", name, description, parameters, strict: false}` tool shape. Implements Responses continuation formatting with `function_call` / `function_call_output` / `reasoning` items keyed by the API-returned `call_id` (deterministic SHA256 hash used only as a fallback when the API doesn't return one). Replaces the current Chat Completions path for OpenAI-direct GPT models. |
 | OpenAI Chat Completions adapter | P0 | Refactor | Extract from existing `Providers.OpenAI` into a dedicated adapter module. Used as fallback for OpenAI-compatible providers (OpenRouter, Together, Groq) that don't yet implement Responses. |
-| Adapter routing | P0 | New | `Adapter.for_route(%{provider, model, auth_mode, base_url})` returns the adapter module. `:openai_codex` (explicit Codex provider, M4.10) → `OpenAI.Codex`; OpenAI Direct + `gpt-*`/`o*` → `OpenAI.Responses`; Anthropic → `Anthropic.Messages`; OpenRouter / Together / Groq / OpenAI-compatible → `OpenAI.ChatCompletions`. Unknown combinations raise loud — no silent fallthrough. See §4.8. (Originally M4.9 routed OAuth/Codex through `OpenAI.Responses`; M4.10 split it into a dedicated SSE adapter so ChatGPT-Plus tool calls work without an API key.) |
+| Adapter routing | P0 | New | `Adapter.for_route(%{provider, model, auth_mode, base_url})` returns the adapter module. `:openai_codex` (explicit Codex provider, M4.10) -> `OpenAI.Codex`; OpenAI Direct + `gpt-*`/`o*` -> `OpenAI.Responses`; Anthropic -> `Anthropic.Messages`; OpenRouter / Together / Groq / OpenAI-compatible -> `OpenAI.ChatCompletions`. Unknown combinations raise loud; no silent fallthrough. See §4.8. (M4.10 split Codex into a dedicated SSE adapter so ChatGPT-Plus tool calls work without an API key.) |
 | Each-skill-as-tool exposure | P0 | New | Each installed skill registers as its own capability. Parent agent picks by name from the typed capability list. `Capabilities.Skill.invoke/3` spawns the supervised sub-agent — same `AgentSupervisor` + `AgentServer` path used today. |
 | Force-skill instruction | P0 | New | When a sub-agent is spawned for skill X, its system prompt is `[skill body] + "\n\nYou are running as the X skill. Use your tools and complete the task: {task}"`. Forces the right behaviour even with global tool inheritance. |
 | Sub-agent capability resolution | P0 | New | Sub-agents receive a capability set resolved by Fermix from skill trust level and SKILL.md frontmatter. The main agent chooses the skill/task, not the skill's internal tools. `allowed_tools` remains an explicit override: absent = trust default, `[]` = no capabilities, list = exact allowlist. Recursion depth cap `max_skill_depth: 4` enforced by the skill executor (`Capabilities.Skill.invoke/3`) before spawning the sub-agent — failing fast at the boundary, not after the AgentServer is already up. |
@@ -644,9 +644,9 @@ defmodule FermixCore.Providers.Adapter do
 
   @spec for_route(route_key()) :: module()
   # M4.10 update: explicit `:openai_codex` provider routes to the SSE
-  # Codex adapter. The original M4.9 sketch had `:openai + :oauth → Responses`
-  # here; that clause is gone — OAuth on `:openai` lands on Responses via
-  # the model-shape clauses below, and Codex requires the explicit provider.
+  # Codex adapter. The original M4.9 sketch tied OAuth to `:openai`;
+  # that clause is gone. Regular `:openai` is API-key only, and Codex
+  # requires the explicit provider.
   def for_route(%{provider: :openai_codex}),
     do: FermixCore.Providers.OpenAI.Codex
 
@@ -973,7 +973,7 @@ Recorded fixtures (replayed via `Req.Test`/`Bypass`) for every step of the Respo
 - [ ] **Tool loop cap** — synthesised "always tool-call" response loops to `@max_tool_loop_depth`; AgentLoop returns `{:error, {:tool_loop_cap_exceeded, depth}}`; depth cap is enforced; no silent stop.
 - [ ] **Final response parsing** — terminal response with `message` items containing both `content[].text` and a `finish_reason`; adapter extracts the joined text and the usage tally correctly.
 
-A separate **route-key matrix** test pins every `Adapter.for_route/1` clause (OpenAI `:oauth`, OpenAI `:api_key` + `gpt-*` on `api.openai.com`, OpenAI `:api_key` + `o*` on `api.openai.com`, OpenAI-compatible Chat Completions fallback, scaffolded future Anthropic/OpenRouter/Together/Groq routes, unknown-raise).
+A separate **route-key matrix** test pins every `Adapter.for_route/1` clause (`openai_codex`, OpenAI `:api_key` + `gpt-*` on `api.openai.com`, OpenAI `:api_key` + `o*` on `api.openai.com`, OpenAI-compatible Chat Completions fallback, scaffolded future Anthropic/OpenRouter/Together/Groq routes, unknown-raise).
 
 ### 9.3 Hygiene
 

@@ -105,6 +105,15 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
   describe "chat/3 — request shape and response handling" do
     test "posts the standard chat completions body and parses the response" do
+      response_format = %{
+        type: "json_schema",
+        json_schema: %{
+          name: "memory_candidates",
+          strict: true,
+          schema: %{type: "object", required: ["candidates"]}
+        }
+      }
+
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         decoded = Jason.decode!(body)
@@ -115,6 +124,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
         assert is_list(decoded["tools"])
         assert hd(decoded["tools"])["type"] == "function"
         assert hd(decoded["tools"])["function"]["name"] == "echo"
+        assert decoded["response_format"]["json_schema"]["strict"] == true
 
         Req.Test.json(conn, text_response_body())
       end)
@@ -126,6 +136,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
           api_key: "sk-test",
           model: "gpt-5.4-mini",
           temperature: 0.4,
+          response_format: response_format,
           base_url: "https://api.openai.com/v1",
           req_options: [plug: {Req.Test, __MODULE__}]
         )

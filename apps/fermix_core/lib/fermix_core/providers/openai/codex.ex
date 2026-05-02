@@ -15,12 +15,13 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     1. `chat/3` posts initial `input` + `tools` (`stream: true`) and
        consumes the SSE stream into a body-shaped map via `SSEParser`.
        Returns `provider_state` carrying the prior `input`, every output
-       item, the tools list, and the original capabilities — same shape as
-       `OpenAI.Responses`.
+       item, the tools list, and the original capabilities.
     2. `AgentLoop` executes returned tool calls.
-    3. `continue/3` builds `input = prior_input ++ output_items ++
+    3. `continue/3` builds `input = prior_input ++ replayable output_items ++
        function_call_outputs` (with API-emitted `call_id`s) and posts again.
-       Reasoning items pass through unchanged.
+       Codex requires `store: false`, so continuation replays inline
+       function calls/reasoning and strips response item ids that would
+       require provider-side storage.
 
   Auth: a ChatGPT Plus OAuth bearer (Codex auth flow). The bearer's JWT
   payload may carry an account id under one of several claims; we extract
@@ -41,7 +42,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    token = require_token!(opts)
+    auth = resolve_auth!(opts)
     model = Keyword.fetch!(opts, :model)
     url = Keyword.get(opts, :base_url, @default_url)
 
@@ -49,8 +50,9 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     resolved_instructions = instructions || @default_instructions
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
-    headers = build_headers(token)
+    reasoning = codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort))
+    include = codex_include(reasoning)
+    text = text_field(opts)
 
     body =
       %{
@@ -62,6 +64,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       }
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
+      |> maybe_put(:include, include)
+      |> maybe_put(:text, text)
 
     turn_state = %{
       model: model,
@@ -72,13 +76,13 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       reasoning_effort: reasoning_effort
     }
 
-    post(url, body, headers, req_options, turn_state)
+    post(url, body, auth, req_options, turn_state)
   end
 
   @impl true
   def continue(provider_state, tool_results, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    token = require_token!(opts)
+    auth = resolve_auth!(opts)
     model = Keyword.fetch!(opts, :model)
     url = Keyword.get(opts, :base_url, @default_url)
 
@@ -91,10 +95,11 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     } = provider_state
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    reasoning = codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort))
+    include = codex_include(reasoning)
+    text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
-    next_input = prior_input ++ output_items ++ outputs
-    headers = build_headers(token)
+    next_input = prior_input ++ replayable_output_items(output_items) ++ outputs
 
     body =
       %{
@@ -106,6 +111,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       }
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
+      |> maybe_put(:include, include)
+      |> maybe_put(:text, text)
 
     turn_state = %{
       model: model,
@@ -116,7 +123,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       reasoning_effort: reasoning_effort
     }
 
-    post(url, body, headers, req_options, turn_state)
+    post(url, body, auth, req_options, turn_state)
   end
 
   @impl true
@@ -144,19 +151,49 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     |> maybe_put_header("chatgpt-account-id", decode_jwt_account_id(token))
   end
 
-  defp post(url, body, headers, req_options, turn_state) do
+  defp post(url, body, auth, req_options, turn_state) do
     start = System.monotonic_time(:millisecond)
 
     result =
-      Req.new(url: url, method: :post, json: body, headers: headers)
-      |> Req.merge(req_options)
-      |> Req.request()
+      request_once(url, body, auth.token, req_options)
+      |> maybe_refresh_and_retry(url, body, auth, req_options)
       |> handle_response(turn_state)
 
     duration_ms = System.monotonic_time(:millisecond) - start
     emit_telemetry(result, turn_state, duration_ms)
     result
   end
+
+  defp request_once(url, body, token, req_options) do
+    Req.new(url: url, method: :post, json: body, headers: build_headers(token))
+    |> Req.merge(req_options)
+    |> Req.request()
+  end
+
+  defp maybe_refresh_and_retry(
+         {:ok, %Req.Response{status: 401, body: response_body}} = response,
+         url,
+         request_body,
+         %{refreshable?: true, token_server: token_server},
+         req_options
+       ) do
+    if token_invalidated?(response_body) do
+      Logger.warning("Codex bearer was invalidated; refreshing token and retrying once")
+
+      case TokenManager.refresh(token_server) do
+        {:ok, refreshed_token} ->
+          request_once(url, request_body, refreshed_token, req_options)
+
+        {:error, reason} ->
+          Logger.error("Codex token refresh after invalidation failed: #{inspect(reason)}")
+          response
+      end
+    else
+      response
+    end
+  end
+
+  defp maybe_refresh_and_retry(response, _url, _body, _auth, _req_options), do: response
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
     parsed = parse_body_to_map(body)
@@ -169,13 +206,26 @@ defmodule FermixCore.Providers.OpenAI.Codex do
            turn_state.capabilities
          ) do
       {:ok, turn} ->
-        {:ok, put_in(turn, [:provider_state, :instructions], turn_state.instructions)}
+        provider_state =
+          turn.provider_state
+          |> Map.put(:instructions, turn_state.instructions)
+
+        {:ok, %{turn | provider_state: provider_state}}
+    end
+  end
+
+  defp handle_response({:ok, %Req.Response{status: 404, body: body}}, _turn_state) do
+    if unpersisted_item_error?(body) do
+      {:error,
+       "Codex requires store=false, and this continuation referenced a persisted response item id. " <>
+         "Restart the request/server so Fermix can replay inline encrypted reasoning instead of stale item ids."}
+    else
+      log_api_error(404, body)
     end
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
-    Logger.error("Codex Responses API error: #{status} - #{inspect(body)}")
-    {:error, "Codex API error: #{status}"}
+    log_api_error(status, body)
   end
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
@@ -214,19 +264,137 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   defp maybe_put(map, _key, []), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
-  defp require_token!(opts) do
+  defp text_field(opts) do
+    case Keyword.get(opts, :text_format) do
+      nil -> nil
+      format -> %{format: format}
+    end
+  end
+
+  defp codex_reasoning(nil), do: nil
+
+  defp codex_reasoning(%{effort: _effort} = reasoning) do
+    Map.put(reasoning, :summary, "auto")
+  end
+
+  defp codex_include(nil), do: nil
+  defp codex_include(_reasoning), do: ["reasoning.encrypted_content"]
+
+  defp replayable_output_items(output_items) do
+    output_items
+    |> Enum.flat_map(&replayable_output_item/1)
+  end
+
+  defp replayable_output_item(%{"type" => "function_call"} = item) do
+    with call_id when is_binary(call_id) and call_id != "" <- item["call_id"],
+         name when is_binary(name) and name != "" <- item["name"] do
+      [
+        %{
+          "type" => "function_call",
+          "call_id" => call_id,
+          "name" => name,
+          "arguments" => normalize_arguments(item["arguments"])
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp replayable_output_item(%{"type" => "reasoning"} = item) do
+    case item["encrypted_content"] do
+      encrypted when is_binary(encrypted) and encrypted != "" ->
+        [
+          %{
+            "type" => "reasoning",
+            "encrypted_content" => encrypted,
+            "summary" => normalize_reasoning_summary(item["summary"])
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp replayable_output_item(%{"type" => "message"} = item) do
+    case message_text(item) do
+      "" -> []
+      text -> [%{"role" => "assistant", "content" => text}]
+    end
+  end
+
+  defp replayable_output_item(_item), do: []
+
+  defp normalize_arguments(arguments) when is_binary(arguments) and arguments != "", do: arguments
+  defp normalize_arguments(arguments) when is_map(arguments), do: Jason.encode!(arguments)
+  defp normalize_arguments(_arguments), do: "{}"
+
+  defp normalize_reasoning_summary(summary) when is_list(summary), do: summary
+  defp normalize_reasoning_summary(_summary), do: []
+
+  defp message_text(%{"content" => parts}) when is_list(parts) do
+    parts
+    |> Enum.flat_map(fn
+      %{"type" => "output_text", "text" => text} when is_binary(text) -> [text]
+      %{"text" => text} when is_binary(text) -> [text]
+      _ -> []
+    end)
+    |> Enum.join("")
+  end
+
+  defp message_text(_item), do: ""
+
+  defp resolve_auth!(opts) do
     case Keyword.get(opts, :access_token) do
       token when is_binary(token) and token != "" ->
-        token
+        %{token: token, refreshable?: false, token_server: nil}
 
       _ ->
         token_server = Keyword.get(opts, :token_server, TokenManager)
 
         case TokenManager.get_token(token_server) do
-          {:ok, token} -> token
+          {:ok, token} -> %{token: token, refreshable?: true, token_server: token_server}
           {:error, reason} -> raise ArgumentError, "Codex auth required: #{inspect(reason)}"
         end
     end
+  end
+
+  defp token_invalidated?(body) do
+    body
+    |> decode_error_body()
+    |> get_in(["error", "code"])
+    |> Kernel.==("token_invalidated")
+  end
+
+  defp decode_error_body(body) when is_map(body), do: body
+
+  defp decode_error_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _ -> %{}
+    end
+  end
+
+  defp decode_error_body(_body), do: %{}
+
+  defp unpersisted_item_error?(body) do
+    body
+    |> decode_error_body()
+    |> get_in(["error", "message"])
+    |> then(fn
+      message when is_binary(message) ->
+        String.contains?(message, "Items are not persisted") or
+          String.contains?(message, "store` is set to false")
+
+      _ ->
+        false
+    end)
+  end
+
+  defp log_api_error(status, body) do
+    Logger.error("Codex Responses API error: #{status} - #{inspect(body)}")
+    {:error, "Codex API error: #{status}"}
   end
 
   defp emit_telemetry(result, turn_state, duration_ms) do

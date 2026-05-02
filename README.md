@@ -58,9 +58,9 @@ It also creates the workspace roots the runtime expects:
 - `~/.fermix/journals`
 - `~/.fermix/traces`
 - `~/.fermix/logs`
-- `~/.fermix/auth.json` (when OpenAI OAuth is selected; `0600`)
+- `~/.fermix/auth.json` (when `openai_codex` is selected; `0600`)
 
-For OpenAI you can either paste an API key or run the native OAuth flow built into the wizard — Fermix no longer depends on the Codex CLI for OAuth. The token store is provider-scoped at `~/.fermix/auth.json` and refreshed by the supervised `TokenManager`.
+Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`.
 
 Runtime precedence is:
 
@@ -72,7 +72,7 @@ Runtime precedence is:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENAI_API_KEY` | Yes unless OAuth is configured | OpenAI API key |
+| `OPENAI_API_KEY` | Yes when provider is `openai` | OpenAI API key |
 | `TELEGRAM_BOT_TOKEN` | If Telegram is enabled | Telegram Bot API token |
 | `WHATSAPP_ACCESS_TOKEN` | If WhatsApp is enabled | WhatsApp Cloud API access token |
 | `WHATSAPP_PHONE_NUMBER_ID` | If WhatsApp is enabled | WhatsApp phone number ID |
