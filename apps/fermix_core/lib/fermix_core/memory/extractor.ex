@@ -8,6 +8,9 @@ defmodule FermixCore.Memory.Extractor do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
+  alias FermixCore.Providers.Adapter
+
+  require Logger
 
   @type conversation_message :: %{
           required(:role) => String.t(),
@@ -75,7 +78,10 @@ defmodule FermixCore.Memory.Extractor do
       repo: Keyword.get(opts, :repo, Config.repo_server(opts)),
       min_confidence: Config.extraction_min_confidence(opts),
       timeout_ms: Config.extraction_timeout_ms(opts),
-      model: Config.extraction_model(opts)
+      model: Config.extraction_model(opts),
+      route_key: Keyword.get(opts, :route_key),
+      adapter: Keyword.get(opts, :adapter),
+      adapter_opts: Keyword.get(opts, :adapter_opts, [])
     }
   end
 
@@ -109,12 +115,27 @@ defmodule FermixCore.Memory.Extractor do
   defp candidate_items(_decoded), do: {:error, :invalid_payload}
 
   defp reduce_candidates(decoded) do
-    Enum.reduce_while(decoded, {:ok, []}, fn item, {:ok, acc} ->
-      case normalize_candidate(item) do
-        {:ok, candidate} -> {:cont, {:ok, acc ++ [candidate]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    {candidates, skipped_reasons} =
+      Enum.reduce(decoded, {[], []}, fn item, {candidates, skipped_reasons} ->
+        case normalize_candidate(item) do
+          {:ok, candidate} -> {[candidate | candidates], skipped_reasons}
+          {:error, reason} -> {candidates, [reason | skipped_reasons]}
+        end
+      end)
+
+    log_skipped_candidates(skipped_reasons)
+    {:ok, Enum.reverse(candidates)}
+  end
+
+  defp log_skipped_candidates([]), do: :ok
+
+  defp log_skipped_candidates(skipped_reasons) do
+    summary =
+      skipped_reasons
+      |> Enum.frequencies()
+      |> Enum.sort()
+
+    Logger.debug("skipped malformed memory extraction candidates: #{inspect(summary)}")
   end
 
   defp recent_messages(messages, limit) when is_list(messages) do
@@ -131,10 +152,23 @@ defmodule FermixCore.Memory.Extractor do
   defp call_provider(ctx) do
     prompt_messages = extraction_prompt(ctx.messages, ctx.chat_mode)
 
-    ctx.provider.chat(
-      prompt_messages,
-      provider_opts(ctx)
-    )
+    cond do
+      ctx.adapter ->
+        call_adapter(ctx.adapter, prompt_messages, ctx)
+
+      ctx.route_key ->
+        call_adapter(Adapter.for_route(ctx.route_key), prompt_messages, ctx)
+
+      true ->
+        ctx.provider.chat(prompt_messages, provider_opts(ctx))
+    end
+  end
+
+  defp call_adapter(adapter, prompt_messages, ctx) do
+    case adapter.chat(prompt_messages, [], adapter_opts(ctx)) do
+      {:ok, turn} -> {:ok, %{content: turn.content, tool_calls: [], usage: turn.usage}}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp extraction_prompt(messages, chat_mode) do
@@ -144,12 +178,17 @@ defmodule FermixCore.Memory.Extractor do
         content: """
         Extract only durable memory candidates from the conversation.
         Output strict JSON only. Do not emit prose, markdown, or code fences.
-        Return either a top-level JSON array of candidate objects or an object with a
-        "candidates" array. Return [] when there are no durable memory candidates.
+        Return an object with a "candidates" array. Return {"candidates": []}
+        when there are no durable memory candidates.
+
+        Every candidate must include all fields:
+        category, key, value, scope_type, confidence, promote_target.
 
         Allowed categories: identity, preference, goal, project, environment, instruction, correction, episode.
         Allowed scope_type values: owner, conversation, agent.
         Allowed promote_target values: none, user_md, memory_md.
+        The key must be a stable snake_case identifier for this memory fact.
+        If no stable key can be named, omit that candidate.
 
         Current chat mode: #{chat_mode}.
         Prefer explicit facts over guesses. Ignore transient chatter and one-off steps.
@@ -169,12 +208,90 @@ defmodule FermixCore.Memory.Extractor do
   end
 
   defp provider_opts(ctx) do
-    [temperature: 0.1, tools: [], req_options: [receive_timeout: ctx.timeout_ms]]
+    [
+      temperature: 0.1,
+      tools: [],
+      response_format: chat_response_format(),
+      req_options: [receive_timeout: ctx.timeout_ms]
+    ]
     |> maybe_put_model(ctx.model)
+  end
+
+  defp adapter_opts(ctx) do
+    ctx.adapter_opts
+    |> Keyword.put_new(:temperature, 0.1)
+    |> Keyword.put(:req_options, req_options(ctx))
+    |> Keyword.put(:response_format, chat_response_format())
+    |> Keyword.put(:text_format, responses_text_format())
+    |> maybe_put_model(ctx.model)
+  end
+
+  defp req_options(ctx) do
+    ctx.adapter_opts
+    |> Keyword.get(:req_options, [])
+    |> Keyword.put(:receive_timeout, ctx.timeout_ms)
   end
 
   defp maybe_put_model(opts, nil), do: opts
   defp maybe_put_model(opts, model), do: Keyword.put(opts, :model, model)
+
+  defp chat_response_format do
+    %{
+      type: "json_schema",
+      json_schema: %{
+        name: "memory_extraction_candidates",
+        strict: true,
+        schema: candidate_schema()
+      }
+    }
+  end
+
+  defp responses_text_format do
+    %{
+      type: "json_schema",
+      name: "memory_extraction_candidates",
+      strict: true,
+      schema: candidate_schema()
+    }
+  end
+
+  defp candidate_schema do
+    %{
+      type: "object",
+      additionalProperties: false,
+      required: ["candidates"],
+      properties: %{
+        candidates: %{
+          type: "array",
+          items: %{
+            type: "object",
+            additionalProperties: false,
+            required: ["category", "key", "value", "scope_type", "confidence", "promote_target"],
+            properties: %{
+              category: %{
+                type: "string",
+                enum: [
+                  "identity",
+                  "preference",
+                  "goal",
+                  "project",
+                  "environment",
+                  "instruction",
+                  "correction",
+                  "episode"
+                ]
+              },
+              key: %{type: "string"},
+              value: %{type: "string"},
+              scope_type: %{type: "string", enum: ["owner", "conversation", "agent"]},
+              confidence: %{type: "number"},
+              promote_target: %{type: "string", enum: ["none", "user_md", "memory_md"]}
+            }
+          }
+        }
+      }
+    }
+  end
 
   defp render_messages(messages) do
     Enum.map_join(messages, "\n", fn %{role: role, content: content} ->

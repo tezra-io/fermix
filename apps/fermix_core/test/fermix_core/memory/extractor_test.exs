@@ -22,6 +22,38 @@ defmodule FermixCore.Memory.ExtractorTest do
     def models, do: {:ok, ["mock-model"]}
   end
 
+  defmodule StaticAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    def put_turn(content), do: Process.put({__MODULE__, :content}, content)
+
+    @impl true
+    def chat(messages, capabilities, opts) do
+      send(self(), {:extractor_adapter_called, messages, capabilities, opts})
+
+      {:ok,
+       %{
+         content: Process.get({__MODULE__, :content}, ~s({"candidates": []})),
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 0, total_tokens: 10},
+         model: Keyword.get(opts, :model, "mock-model")
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+  end
+
   defmodule RebuildNotifier do
     def rebuild(agent_id, owner_id, reason, opts) do
       send(
@@ -177,6 +209,53 @@ defmodule FermixCore.Memory.ExtractorTest do
     assert {:error, :invalid_payload} = Extractor.parse_candidates(~s({"key":"value"}))
   end
 
+  test "parse_candidates/1 skips malformed candidate objects without failing extraction" do
+    json = """
+    [
+      {
+        "category": "preference",
+        "value": "direct",
+        "scope_type": "owner",
+        "confidence": 0.96,
+        "promote_target": "user_md"
+      },
+      {
+        "category": "preference",
+        "key": "communication_style",
+        "value": "direct",
+        "scope_type": "owner",
+        "confidence": 0.96,
+        "promote_target": "user_md"
+      }
+    ]
+    """
+
+    assert {:ok,
+            [
+              %{
+                category: "preference",
+                confidence: 0.96,
+                key: "communication_style",
+                promote_target: "user_md",
+                scope_type: "owner",
+                value: "direct"
+              }
+            ]} = Extractor.parse_candidates(json)
+
+    assert {:ok, []} =
+             Extractor.parse_candidates("""
+             [
+               {
+                 "category": "preference",
+                 "value": "direct",
+                 "scope_type": "owner",
+                 "confidence": 0.96,
+                 "promote_target": "user_md"
+               }
+             ]
+             """)
+  end
+
   test "extract/1 persists admitted memories and triggers rebuilds for promoted policy matches" do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-extractor-#{unique}.db")
@@ -258,6 +337,8 @@ defmodule FermixCore.Memory.ExtractorTest do
            )
 
     assert opts[:temperature] == 0.1
+    assert get_in(opts, [:response_format, :json_schema, :strict]) == true
+    assert get_in(opts, [:response_format, :json_schema, :schema, :required]) == ["candidates"]
 
     assert_receive {:rebuild_requested, "main", "default", :event, provenance}, 1_000
     assert provenance.categories == ["preference"]
@@ -281,6 +362,39 @@ defmodule FermixCore.Memory.ExtractorTest do
 
     assert {:ok, "helix"} =
              Store.recall({:owner, "default"}, "preferred_editor", server: store_name)
+  end
+
+  test "extract/1 uses adapter routes with a strict structured-output schema" do
+    StaticAdapter.put_turn(~s({"candidates": []}))
+
+    assert {:ok, %{candidate_count: 0, admitted_count: 0, rebuild?: false, corrective?: false}} =
+             Extractor.extract(
+               provider: StaticProvider,
+               adapter: StaticAdapter,
+               adapter_opts: [model: "gpt-5.5", req_options: [plug: :keep]],
+               messages: [
+                 %{role: "user", content: "Nothing durable here."},
+                 %{role: "assistant", content: "OK."}
+               ],
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat_1", :root},
+               chat_mode: :direct
+             )
+
+    assert_receive {:extractor_adapter_called, messages, capabilities, opts}, 1_000
+    assert capabilities == []
+    assert opts[:model] == "gpt-5.5"
+    assert opts[:req_options][:plug] == :keep
+    assert opts[:req_options][:receive_timeout] == 1_000
+    assert get_in(opts, [:text_format, :strict]) == true
+    assert get_in(opts, [:text_format, :schema, :required]) == ["candidates"]
+    assert get_in(opts, [:response_format, :json_schema, :strict]) == true
+
+    assert Enum.any?(
+             messages,
+             &(&1.role == "system" and &1.content =~ "Every candidate must include all fields")
+           )
   end
 
   test "extract/1 immediately rebuilds prompt files for conversation-scoped corrections" do
