@@ -34,6 +34,6 @@ erl_crash.dump
 
 # docs/ — track markdown design docs and the superpowers/ subdirectory;
 # ignore generated artifacts (HTML renders, exported images, etc.).
-/docs/*
-!/docs/*.md
-!/docs/superpowers/
+/docs/*.md
+!/docs/*.png
+/docs/superpowers/
