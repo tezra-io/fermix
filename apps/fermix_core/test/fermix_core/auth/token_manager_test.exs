@@ -44,14 +44,14 @@ defmodule FermixCore.Auth.TokenManagerTest do
   end
 
   describe "init — loading tokens" do
-    test "loads from fermix auth file (new nested shape)" do
+    test "loads from fermix auth file (new openai_codex provider shape)" do
       dir = tmp_dir()
 
       fermix_path =
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai" => %{
+            "openai_codex" => %{
               "auth_mode" => "chatgpt",
               "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
               "expires_at" => future_iso8601(3600)
@@ -61,6 +61,27 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:ok, "AT"} = TokenManager.get_token(name)
+
+      File.rm_rf!(dir)
+    end
+
+    test "loads legacy openai-scoped Codex tokens" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "legacy_nested", "refresh_token" => "rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "legacy_nested"} = TokenManager.get_token(name)
 
       File.rm_rf!(dir)
     end
@@ -96,7 +117,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai" => %{
+            "openai_codex" => %{
               "auth_mode" => "chatgpt",
               "tokens" => %{"access_token" => "cached", "refresh_token" => "rt"},
               "expires_at" => future_iso8601(3600)
@@ -120,7 +141,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai" => %{
+            "openai_codex" => %{
               "auth_mode" => "chatgpt",
               "tokens" => %{"access_token" => "tok"},
               "expires_at" => future_iso8601(3600)
@@ -141,7 +162,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai" => %{
+            "openai_codex" => %{
               "auth_mode" => "chatgpt",
               "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
               "expires_at" => future_iso8601(3600)
@@ -158,8 +179,8 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert {:ok, "new_at"} = TokenManager.refresh(name)
       assert {:ok, raw} = File.read(fermix_path)
       data = Jason.decode!(raw)
-      assert data["providers"]["openai"]["tokens"]["access_token"] == "new_at"
-      assert data["providers"]["openai"]["tokens"]["refresh_token"] == "new_rt"
+      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "new_at"
+      assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "new_rt"
 
       File.rm_rf!(dir)
     end
@@ -173,7 +194,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai" => %{
+            "openai_codex" => %{
               "auth_mode" => "chatgpt",
               "tokens" => %{"access_token" => "soon", "refresh_token" => "rt"},
               "expires_at" => future_iso8601(2)

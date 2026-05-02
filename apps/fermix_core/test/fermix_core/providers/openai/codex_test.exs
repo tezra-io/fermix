@@ -12,6 +12,21 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     def handle_call(:get_token, _from, reply), do: {:reply, reply, reply}
   end
 
+  defmodule RefreshingTokenServer do
+    @moduledoc false
+    use GenServer
+
+    def init(tokens), do: {:ok, tokens}
+
+    def handle_call(:get_token, _from, %{current: current} = state) do
+      {:reply, {:ok, current}, state}
+    end
+
+    def handle_call(:refresh, _from, %{refreshed: refreshed} = state) do
+      {:reply, {:ok, refreshed}, %{state | current: refreshed}}
+    end
+  end
+
   # JWT with payload {"sub":"usr_1"} — base64url-encoded, no padding.
   @jwt_with_sub "header.eyJzdWIiOiJ1c3JfMSJ9.sig"
 
@@ -131,6 +146,60 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       assert message == "Codex API error: 401"
     end
+
+    test "refreshes token and retries once when Codex invalidates cached bearer" do
+      test_id = :"codex_refresh_retry_#{System.unique_integer([:positive])}"
+      parent = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      old_token = "header.eyJzdWIiOiJvbGRfdXNlciJ9.sig"
+      new_token = "header.eyJzdWIiOiJuZXdfdXNlciJ9.sig"
+
+      token_server = :"codex_refresh_token_server_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        GenServer.start_link(
+          FermixCore.Providers.OpenAI.CodexTest.RefreshingTokenServer,
+          %{current: old_token, refreshed: new_token},
+          name: token_server
+        )
+
+      Req.Test.stub(test_id, fn conn ->
+        attempt = Agent.get_and_update(counter, fn count -> {count + 1, count + 1} end)
+        send(parent, {:attempt, attempt, Plug.Conn.get_req_header(conn, "authorization")})
+
+        case attempt do
+          1 ->
+            Plug.Conn.send_resp(
+              conn,
+              401,
+              Jason.encode!(%{
+                "error" => %{
+                  "message" => "Your authentication token has been invalidated.",
+                  "code" => "token_invalidated"
+                }
+              })
+            )
+
+          2 ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+            |> Plug.Conn.send_resp(200, terminal_message_sse("refreshed"))
+        end
+      end)
+
+      {:ok, turn} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          token_server: token_server,
+          model: "gpt-5.5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, test_id}]
+        )
+
+      assert turn.content == "refreshed"
+      assert_receive {:attempt, 1, ["Bearer " <> ^old_token]}, 500
+      assert_receive {:attempt, 2, ["Bearer " <> ^new_token]}, 500
+    end
   end
 
   describe "chat/3 — reasoning effort body shape" do
@@ -147,8 +216,25 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
       for level <- [:minimal, :low, :medium, :high, :xhigh] do
         assert {nil, decoded} = run_chat_capture_body(reasoning_effort: level)
-        assert decoded["reasoning"] == %{"effort" => Atom.to_string(level)}
+        assert decoded["reasoning"] == %{"effort" => Atom.to_string(level), "summary" => "auto"}
+        assert decoded["include"] == ["reasoning.encrypted_content"]
       end
+    end
+
+    test "sends strict text.format schema when supplied" do
+      assert {nil, decoded} =
+               run_chat_capture_body(
+                 text_format: %{
+                   type: "json_schema",
+                   name: "memory_candidates",
+                   strict: true,
+                   schema: %{type: "object", required: ["candidates"]}
+                 }
+               )
+
+      assert decoded["text"]["format"]["type"] == "json_schema"
+      assert decoded["text"]["format"]["strict"] == true
+      assert decoded["text"]["format"]["schema"]["required"] == ["candidates"]
     end
 
     test "raises ArgumentError for an invalid effort level (caught at body construction)" do
@@ -201,7 +287,8 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
 
       assert_receive {:captured_body, decoded}, 500
-      assert decoded["reasoning"] == %{"effort" => "high"}
+      assert decoded["reasoning"] == %{"effort" => "high", "summary" => "auto"}
+      assert decoded["include"] == ["reasoning.encrypted_content"]
     end
   end
 
@@ -345,6 +432,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         decoded = Jason.decode!(body)
 
         assert decoded["stream"] == true
+        assert decoded["store"] == false
         assert decoded["instructions"] == "be terse"
         types = Enum.map(decoded["input"], &(&1["type"] || &1["role"]))
         assert "function_call" in types
@@ -384,9 +472,17 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert turn.tool_calls == []
     end
 
-    test "reasoning items in provider_state.output_items pass through byte-identical to next request input" do
+    test "continuation strips persisted item ids and drops unreplayable reasoning items" do
       test_id = :"codex_reasoning_passthrough_#{System.unique_integer([:positive])}"
-      reasoning_item = %{"type" => "reasoning", "id" => "rs_1", "encrypted_content" => "opaque"}
+
+      reasoning_item = %{
+        "type" => "reasoning",
+        "id" => "rs_1",
+        "encrypted_content" => "opaque",
+        "summary" => []
+      }
+
+      id_only_reasoning_item = %{"type" => "reasoning", "id" => "rs_missing_encrypted"}
 
       function_call_item = %{
         "type" => "function_call",
@@ -400,13 +496,24 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         decoded = Jason.decode!(body)
 
-        # Reasoning + function_call must appear in input, in original order, byte-identical.
         carried_items =
           Enum.filter(decoded["input"], fn item ->
             item["type"] in ["reasoning", "function_call"]
           end)
 
-        assert carried_items == [reasoning_item, function_call_item]
+        assert carried_items == [
+                 %{"type" => "reasoning", "encrypted_content" => "opaque", "summary" => []},
+                 %{
+                   "type" => "function_call",
+                   "call_id" => "call_x",
+                   "name" => "echo",
+                   "arguments" => "{\"text\":\"hi\"}"
+                 }
+               ]
+
+        refute Enum.any?(decoded["input"], &(&1["id"] == "rs_1"))
+        refute Enum.any?(decoded["input"], &(&1["id"] == "rs_missing_encrypted"))
+        refute Enum.any?(decoded["input"], &(&1["id"] == "fc_x"))
 
         conn
         |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
@@ -415,7 +522,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       provider_state = %{
         input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
-        output_items: [reasoning_item, function_call_item],
+        output_items: [reasoning_item, id_only_reasoning_item, function_call_item],
         tools: [],
         capabilities: [capability()],
         instructions: "be terse"
@@ -428,6 +535,42 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           base_url: "https://chatgpt.test/codex/responses",
           req_options: [plug: {Req.Test, test_id}]
         )
+    end
+
+    test "returns actionable error when Codex rejects a stale persisted item id" do
+      test_id = :"codex_store_disabled_#{System.unique_integer([:positive])}"
+
+      Req.Test.stub(test_id, fn conn ->
+        Plug.Conn.send_resp(
+          conn,
+          404,
+          Jason.encode!(%{
+            "error" => %{
+              "message" =>
+                "Item with id 'rs_1' not found. Items are not persisted when `store` is set to false."
+            }
+          })
+        )
+      end)
+
+      provider_state = %{
+        input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
+        output_items: [%{"type" => "reasoning", "id" => "rs_1", "encrypted_content" => "opaque"}],
+        tools: [],
+        capabilities: [],
+        instructions: "be terse"
+      }
+
+      assert {:error, message} =
+               Codex.continue(provider_state, [%{call_id: "call_x", output: "done"}],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, test_id}]
+               )
+
+      assert message =~ "store=false"
+      assert message =~ "Restart"
     end
 
     test "chat/3 stores instructions in provider_state so continue/3 can re-send them" do

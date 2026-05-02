@@ -163,7 +163,7 @@ This milestone captures the useful part of Autogenesis for Fermix:
 
 ## Milestone 4.8: Distribution & Daemon
 
-**Goal:** Turn Fermix from a runnable project into an installable product. Single binary per `(os, arch)`, OS-supervised daemon, native OpenAI OAuth (drops the `~/.codex` bootstrap), explicit `fermix upgrade`.
+**Goal:** Turn Fermix from a runnable project into an installable product. Single binary per `(os, arch)`, OS-supervised daemon, Codex auth import for the `openai_codex` provider, explicit `fermix upgrade`.
 
 See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 
@@ -173,7 +173,7 @@ See `docs/MILESTONE_4_8_DISTRIBUTION.md` for the full design.
 | **Cross-compile matrix** | macOS aarch64/x86_64, Linux aarch64/x86_64; Windows deferred | P0 | New | N/A | M |
 | **`fermix` CLI** | `setup`, `start`, `stop`, `restart`, `status`, `logs`, `upgrade`, `doctor`, `version`, `uninstall` | P0 | New | N/A | M |
 | **OS daemon integration** | launchd plist (macOS) and systemd-user unit (Linux); user-scope by default | P0 | New | Tailscale install pattern | M |
-| **Native OpenAI OAuth** | Device-code flow into `~/.fermix/auth.json`; delete `TokenManager` `~/.codex` fallback | P0 | New | Codex CLI auth flow | M |
+| **Codex auth import** | Import Codex CLI tokens into `~/.fermix/auth.json` for the `openai_codex` provider | P0 | New | Codex CLI auth flow | M |
 | **`fermix upgrade`** | Fetch + verify signature + atomic swap + restart | P0 | New | N/A | M |
 | **Versioning + signed releases** | SemVer in `mix.exs`; cosign keyless OIDC; `releases.json` manifest | P0 | New | Sigstore | S |
 | **Homebrew tap** | `tezra-io/homebrew-tap`, auto-bumped from CI | P1 | New | N/A | S |
@@ -231,7 +231,7 @@ See `docs/MILESTONE_4_10_CODEX_PARITY.md` for the full design.
 | **Codex SSE parser** | Stateful accumulator for `chatgpt.com/backend-api/codex/responses` stream; emits final `body["output"]` shape | P0 | New | rustyclaw codex SSE handler | M |
 | **Reasoning effort plumbing** | `reasoning: %{effort: <level>}` in Codex/Responses request body; opts → app config → omitted; `none/minimal/low/medium/high/xhigh` | P1 | New | `~/projects/hermes-agent/hermes_constants.py` | S |
 | **Provider/model/effort persistence** | `ConfigStore.normalize_openai/anthropic` round-trip `provider`, `default_model`, `reasoning_effort` through TOML | P0 | New | N/A | S |
-| **Env-var overlays** | `FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT` in `runtime.exs` with fail-soft validation | P0 | New | existing OPENAI_AUTH_MODE pattern | S |
+| **Env-var overlays** | `FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT` in `runtime.exs` with fail-soft validation | P0 | New | runtime env overlay pattern | S |
 | **Model catalog** | `FermixCore.Providers.ModelCatalog.models_for/1` static curated lists + Custom escape hatch | P0 | New | N/A | S |
 | **Wizard provider+model+effort step** | New `:model` wizard step extending `WizardState.step`; Codex disclaimer; Anthropic api_key entry | P0 | New | N/A | M |
 | **Doctor auth probe** | Per-provider real $0.0001 API call to verify scope works against the chosen surface; actionable error mapping | P0 | New | N/A | S |
@@ -411,7 +411,7 @@ See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
 
 ## Additional Providers (Ongoing)
 
-**Note:** The current OpenAI provider uses Chat Completions API for api_key auth and a Codex-specific Responses API for oauth auth. Both paths should be unified onto the official OpenAI Responses API (`api.openai.com/v1/responses`), which accepts standard API keys and is the newer recommended API. This would eliminate the Chat Completions code path and unify request/response parsing. Low effort (S), do before adding more providers.
+**Note:** The regular OpenAI provider should use the official OpenAI Responses API (`api.openai.com/v1/responses`) with standard API keys. Codex remains a separate `openai_codex` provider because it uses a different auth source, endpoint, and streaming shape. Low effort (S), do before adding more providers.
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|

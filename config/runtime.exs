@@ -21,7 +21,7 @@ if System.get_env("PHX_SERVER") do
 end
 
 config :fermix_web, FermixWebWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [port: String.to_integer(System.get_env("PORT", "4030"))]
 
 # Hydrate Application env from the persisted ConfigStore snapshot. This is
 # the single source of truth for "what was set during setup". Any key added
@@ -65,23 +65,11 @@ existing_openai_codex = Keyword.get(existing_providers, :openai_codex, [])
 existing_anthropic = Keyword.get(existing_providers, :anthropic, [])
 existing_agent = Application.get_env(:fermix_core, :agent, [])
 
-openai_auth_mode =
-  case System.get_env("OPENAI_AUTH_MODE") do
-    "api_key" -> :api_key
-    "oauth" -> :oauth
-    _ -> Keyword.get(existing_openai, :auth_mode, :oauth)
-  end
-
-openai_api_key =
-  if config_env() == :prod and openai_auth_mode != :api_key do
-    ""
-  else
-    System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
-  end
+openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
 
 # FERMIX_PROVIDER overlays the agent's provider selection. Invalid values
 # log a warning and fall through to whatever TOML / agent block already
-# carries (matches the OPENAI_AUTH_MODE pattern — env doesn't crash boot).
+# carries. Env mistakes don't crash boot.
 selected_provider =
   case System.get_env("FERMIX_PROVIDER") do
     nil ->
@@ -147,10 +135,10 @@ default_model_overlay =
     model -> model
   end
 
-# Apply default_model + reasoning_effort to the *selected* provider's
-# block (env > TOML). Selected provider falls back to :openai when no
-# agent-level provider is configured, matching RouteResolver's default.
-overlay_target = selected_provider || :openai
+# Apply default_model + reasoning_effort to the active provider's block
+# (env > TOML). FERMIX_PROVIDER wins when present; otherwise use the
+# provider already hydrated from FERMIX_HOME/config.toml.
+overlay_target = selected_provider || Keyword.get(merged_agent, :provider) || :openai
 
 apply_provider_overlay = fn provider, base ->
   if provider == overlay_target do
@@ -174,7 +162,8 @@ end
 
 merged_openai =
   existing_openai
-  |> Keyword.merge(auth_mode: openai_auth_mode, api_key: openai_api_key)
+  |> Keyword.delete(:auth_mode)
+  |> Keyword.merge(api_key: openai_api_key)
   |> then(&apply_provider_overlay.(:openai, &1))
 
 merged_openai_codex = apply_provider_overlay.(:openai_codex, existing_openai_codex)
@@ -204,13 +193,13 @@ memory_enabled =
     _ -> Keyword.get(existing_memory, :enabled, true)
   end
 
+memory_paths = FermixCore.Setup.ConfigStore.memory_paths()
+
 memory_database_path =
-  System.get_env("FERMIX_MEMORY_DB_PATH") ||
-    Keyword.get(
-      existing_memory,
-      :database_path,
-      Path.join(FermixCore.Setup.ConfigStore.fermix_home(), "memory.db")
-    )
+  System.get_env("FERMIX_MEMORY_DB_PATH") || memory_paths.database_path
+
+memory_prompt_base_dir =
+  System.get_env("FERMIX_MEMORY_PROMPT_DIR") || memory_paths.prompt_base_dir
 
 memory_extraction_debounce_seconds =
   case System.get_env("FERMIX_MEMORY_EXTRACTION_DEBOUNCE_SECONDS") do
@@ -224,6 +213,7 @@ config :fermix_core,
        Keyword.merge(existing_memory,
          enabled: memory_enabled,
          database_path: memory_database_path,
+         prompt_base_dir: memory_prompt_base_dir,
          extraction_debounce_seconds: memory_extraction_debounce_seconds
        )
 
@@ -384,7 +374,7 @@ if config_env() == :prod do
   # restarts can set SECRET_KEY_BASE explicitly.
   secret_key_base =
     System.get_env("SECRET_KEY_BASE") ||
-      (:crypto.strong_rand_bytes(48) |> Base.encode64())
+      :crypto.strong_rand_bytes(48) |> Base.encode64()
 
   host = System.get_env("PHX_HOST") || "localhost"
 

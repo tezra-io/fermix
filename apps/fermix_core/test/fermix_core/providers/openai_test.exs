@@ -138,6 +138,27 @@ defmodule FermixCore.Providers.OpenAITest do
       assert body["model"] == "gpt-5.4-mini"
     end
 
+    test "passes response_format through for schema-constrained extraction" do
+      response_format = %{
+        type: "json_schema",
+        json_schema: %{
+          name: "memory_candidates",
+          strict: true,
+          schema: %{type: "object", required: ["candidates"]}
+        }
+      }
+
+      stub_openai(self(), 200, success_body(~s({"candidates":[]})))
+
+      {:ok, _resp} =
+        chat([%{role: "user", content: "hi"}], response_format: response_format)
+
+      assert_received {:openai_request, body}
+      assert body["response_format"]["type"] == "json_schema"
+      assert body["response_format"]["json_schema"]["strict"] == true
+      assert body["response_format"]["json_schema"]["schema"]["required"] == ["candidates"]
+    end
+
     test "respects model option" do
       stub_openai(self(), 200, success_body("hi"))
 
@@ -323,149 +344,14 @@ defmodule FermixCore.Providers.OpenAITest do
     end
   end
 
-  # -- chat/2: OAuth auth_mode --
+  # -- chat/2: auth mode --
 
-  describe "chat/2 OAuth auth_mode" do
-    test "uses token from TokenManager when auth_mode is :oauth" do
-      # Start a TokenManager with a known token
-      dir = Path.join(System.tmp_dir!(), "fermix_oauth_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      auth_path = Path.join(dir, "auth.json")
-
-      File.write!(
-        auth_path,
-        Jason.encode!(%{
-          "tokens" => %{"access_token" => "oauth_test_token", "refresh_token" => "r"},
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
-        })
-      )
-
-      tm_name = :"tm_oauth_#{System.unique_integer([:positive])}"
-
-      start_supervised!(
-        {FermixCore.Auth.TokenManager,
-         name: tm_name, fermix_auth_path: auth_path, codex_auth_path: Path.join(dir, "nope.json")},
-        id: :test_tm
-      )
-
-      responses_body = %{
-        "output_text" => "from oauth",
-        "output" => [],
-        "model" => "gpt-5.4-mini",
-        "usage" => %{"input_tokens" => 10, "output_tokens" => 20}
-      }
-
-      Req.Test.stub(:openai, fn conn ->
-        [auth] = Plug.Conn.get_req_header(conn, "authorization")
-        send(self(), {:auth_header, auth})
-
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(200, Jason.encode!(responses_body))
-      end)
-
-      assert {:ok, resp} =
+  describe "chat/2 auth mode" do
+    test "rejects OAuth on the regular OpenAI provider" do
+      assert {:error, {:unsupported_auth_mode, :oauth}} =
                OpenAI.chat(
                  [%{role: "user", content: "hi"}],
                  auth_mode: :oauth,
-                 token_server: tm_name,
-                 responses_url: "http://localhost/responses",
-                 req_options: [plug: {Req.Test, :openai}]
-               )
-
-      assert resp.content == "from oauth"
-      assert resp.usage.prompt_tokens == 10
-      assert resp.usage.completion_tokens == 20
-      assert resp.tool_calls == []
-      assert_received {:auth_header, "Bearer oauth_test_token"}
-
-      File.rm_rf!(dir)
-    end
-
-    test "joins only leading system messages into Responses instructions" do
-      dir = Path.join(System.tmp_dir!(), "fermix_oauth_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
-      auth_path = Path.join(dir, "auth.json")
-
-      File.write!(
-        auth_path,
-        Jason.encode!(%{
-          "tokens" => %{"access_token" => "oauth_test_token", "refresh_token" => "r"},
-          "expires_at" => DateTime.utc_now() |> DateTime.add(3600) |> DateTime.to_iso8601()
-        })
-      )
-
-      tm_name = :"tm_oauth_#{System.unique_integer([:positive])}"
-
-      start_supervised!(
-        {FermixCore.Auth.TokenManager,
-         name: tm_name, fermix_auth_path: auth_path, codex_auth_path: Path.join(dir, "nope.json")},
-        id: :"test_tm_#{System.unique_integer([:positive])}"
-      )
-
-      responses_body = %{
-        "output_text" => "from oauth",
-        "output" => [],
-        "model" => "gpt-5.4-mini",
-        "usage" => %{"input_tokens" => 10, "output_tokens" => 20}
-      }
-
-      Req.Test.stub(:openai, fn conn ->
-        {:ok, req_body, conn} = Plug.Conn.read_body(conn)
-        send(self(), {:openai_request, Jason.decode!(req_body)})
-
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(200, Jason.encode!(responses_body))
-      end)
-
-      assert {:ok, _resp} =
-               OpenAI.chat(
-                 [
-                   %{role: "system", content: "SOUL bootstrap"},
-                   %{role: "system", content: "AGENTS bootstrap"},
-                   %{role: "user", content: "Hi"},
-                   %{role: "system", content: "Conversation checkpoint summary:\nprevious"},
-                   %{role: "assistant", content: "Earlier answer"}
-                 ],
-                 auth_mode: :oauth,
-                 token_server: tm_name,
-                 responses_url: "http://localhost/responses",
-                 req_options: [plug: {Req.Test, :openai}]
-               )
-
-      assert_received {:openai_request, body}
-      assert body["instructions"] == "SOUL bootstrap\n\nAGENTS bootstrap"
-
-      assert Enum.map(body["input"], & &1["role"]) == ["user", "user", "assistant"]
-
-      assert body["input"]
-             |> Enum.at(1)
-             |> get_in(["content", Access.at(0), "text"]) ==
-               "Conversation checkpoint summary:\nprevious"
-
-      File.rm_rf!(dir)
-    end
-
-    test "returns error when TokenManager has no token" do
-      tm_name = :"tm_empty_#{System.unique_integer([:positive])}"
-
-      dir =
-        Path.join(System.tmp_dir!(), "fermix_oauth_empty_#{System.unique_integer([:positive])}")
-
-      start_supervised!(
-        {FermixCore.Auth.TokenManager,
-         name: tm_name,
-         fermix_auth_path: Path.join(dir, "a.json"),
-         codex_auth_path: Path.join(dir, "b.json")},
-        id: :test_tm_empty
-      )
-
-      assert {:error, :no_token} =
-               OpenAI.chat(
-                 [%{role: "user", content: "hi"}],
-                 auth_mode: :oauth,
-                 token_server: tm_name,
                  req_options: [plug: {Req.Test, :openai}]
                )
     end

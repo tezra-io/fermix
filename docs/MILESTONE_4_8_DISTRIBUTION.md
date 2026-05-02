@@ -18,7 +18,7 @@ After M4.7, Fermix is a working dev project: clone the repo, run `mix deps.get`,
 |---------|-------|----------------------------------------|
 | Install | clone repo + Erlang/Elixir toolchain + `mix deps.get` | Single-command install. No language toolchain on the host. |
 | Run | `iex -S mix phx.server` in a foreground terminal | Background daemon. Survives reboot. Restarts on crash. |
-| Authenticate to OpenAI | `TokenManager` bootstraps from `~/.codex/auth.json` (Codex CLI must be installed and logged in) | Native Fermix auth profile; no Codex CLI dependency. |
+| Authenticate to providers | OpenAI uses `OPENAI_API_KEY`; Codex uses imported Codex CLI tokens | Provider-specific setup; regular OpenAI stays API-key only. |
 
 The roadmap fragments this across three places:
 - M3 shipped the `mix fermix.setup` wizard and the `fermix setup` release alias *concept* but not the release-binary distribution.
@@ -29,7 +29,7 @@ The roadmap fragments this across three places:
 
 1. A user runs one command (e.g. `brew install fermix` or `curl -fsSL https://fermix.sh/install | sh`) and gets a single executable on their PATH.
 2. They run `fermix setup` once. The wizard completes; the binary registers itself as a launchd / systemd service; the agent comes up under OS-level supervision and survives reboot.
-3. The wizard's OpenAI step offers **Sign in with OpenAI** or **Use API key**. OAuth opens the browser on desktop, falls back to a printed URL/code in headless sessions, and persists Fermix-owned provider state into `~/.fermix/auth.json`. Optional Codex CLI token import may exist, but `~/.codex` is not a runtime dependency.
+3. The wizard's provider step keeps regular OpenAI API-key auth separate from `openai_codex`. Codex setup imports CLI tokens into `~/.fermix/auth.json`; `~/.codex` is not a runtime dependency.
 4. `fermix upgrade` pulls the latest signed release and restarts the service in place.
 
 Non-goal: Windows desktop, mobile, multi-tenant cloud hosting. Those stay in M9 / Future.
@@ -46,7 +46,7 @@ Non-goal: Windows desktop, mobile, multi-tenant cloud hosting. Those stay in M9 
 | Cross-compile matrix | P0 | New | Build targets: `macos-aarch64`, `macos-x86_64`, `linux-aarch64`, `linux-x86_64`. Windows deferred. |
 | `fermix` CLI surface | P0 | New | Single binary with subcommands: `setup`, `run`, `service install`, `service uninstall`, `start`, `stop`, `restart`, `status`, `logs`, `upgrade`, `uninstall`, `version`, `doctor`. Routes to release-safe runtime modules; Mix tasks remain dev wrappers only. |
 | OS daemon integration | P0 | New | `fermix service install` writes a launchd `.plist` (macOS) or systemd unit (Linux) and enables it. Service units execute `fermix run`. `fermix service uninstall` removes them. Logs go to `~/.fermix/logs/fermix.log` with rotation. |
-| Native OpenAI auth | P0 | New | Wizard asks the user to choose OpenAI OAuth or API key. OAuth opens the browser when possible; in `--no-browser` / headless mode the same flow prints a URL and code (one flow, one UX branch on terminal capability — not a separate path). Tokens stored in `~/.fermix/auth.json`. Optional Codex CLI import is an onboarding convenience, not the source of truth. |
+| Provider auth setup | P0 | New | Wizard asks the user to choose a provider. Regular OpenAI uses API key. `openai_codex` imports Codex CLI tokens into `~/.fermix/auth.json`. |
 | `fermix upgrade` | P0 | New | Self-update for unmanaged installs: fetches the latest signed release manifest, downloads the platform-matching binary, verifies signature, swaps the executable atomically, restarts the service. Package-manager installs print the correct `brew` / `apt` command instead of overwriting managed files. |
 | Versioning + release manifest | P0 | New | Bump `mix.exs` version on every release. Publish a signed `releases.json` listing `(version, target, sha256, signature, url)` to the release channel. |
 | Release channel infrastructure | P0 | New | GitHub Releases as the source of truth. Optional `https://fermix.sh` redirect domain. Cosign or Minisign for signatures. |
@@ -118,7 +118,7 @@ Tailscale ships native packages for every OS, runs as a system daemon, has an ex
 2. **M4.8 does not require NIF work.** The current `apps/fermix_nif` implementation is a placeholder, not a tiktoken/crypto dependency. If native helpers become required before distribution, they must be validated per target and added to Burrito packaging explicitly.
 3. **The Phoenix listener is enabled explicitly in daemon mode.** Current runtime config only starts the endpoint server when `PHX_SERVER=true`; `fermix run` must either set the endpoint server config before boot or service templates must set `PHX_SERVER=true`.
 4. **The Phoenix listener can rebind on restart.** `fermix restart` stops the daemon and starts a new one; no rolling-upgrade story (single-node assumption holds through M9).
-5. **OpenAI OAuth permissibility is unresolved.** A browser-first OpenAI OAuth flow is the preferred UX, but use of any upstream Codex/OpenAI client flow must be confirmed before shipping it as P0. API-key auth remains a guaranteed path.
+5. **Regular OpenAI is API-key only.** OAuth token handling belongs to the separate `openai_codex` provider.
 6. **Setup must be release-safe.** `Mix.Tasks.Fermix.Setup` currently uses Mix APIs and should become a dev wrapper around runtime setup modules. The Burrito CLI must not rely on Mix being present at runtime.
 
 ---
@@ -181,8 +181,8 @@ M4.8 adds three layers on top of the existing M3/M4.7 codebase. Prompt, memory, 
 5. **`Fermix.CLI.Upgrade`** — fetches `releases.json`, picks the newest semver above current, verifies signature, downloads binary to `~/.fermix/.upgrade.tmp`, swaps via `rename(2)` (atomic on POSIX), restarts the service. Refuses to mutate package-manager-owned binaries.
 6. **`Fermix.CLI.Daemon`** — small control-socket protocol so `fermix status` can query the running BEAM without going through HTTP. User-scope socket at `~/.fermix/daemon.user.sock`; system-scope socket at `/var/run/fermix.sock` (root-owned, queries from non-root require sudo). Restricts file permissions to the owner, removes stale sockets on boot, and `fermix run` fails fast on EADDRINUSE rather than double-binding.
 7. **`FermixCore.Auth.Store`** (new) — versioned, provider-scoped `~/.fermix/auth.json` store with file locking, atomic writes, and `0600` permissions.
-8. **`FermixCore.Auth.OAuth`** (new) — OpenAI OAuth client. One device-code flow with a single runtime UX branch: open browser when `$DISPLAY` / `xdg-open` / `open` is available, otherwise print URL+code. Same endpoints, same poll loop, same persistence — not a separate code path.
-9. **`Setup.Wizard.OAuthStep`** — new wizard step inserted before `:provider_credentials` when the chosen auth mode is `:oauth`. Drives `Auth.OAuth`; API-key mode remains first class.
+8. **Codex import flow** — release-safe setup path that imports Codex CLI tokens into `Auth.Store` for `openai_codex`.
+9. **Provider credential step** — wizard step that keeps OpenAI API keys and Codex token import separate.
 10. **Burrito build config** in `mix.exs` — declares `releases: [fermix: [steps: [:assemble, &Burrito.wrap/1], burrito: [...]]]`. Native-helper hooks are added only if native helpers become required.
 11. **`scripts/release.sh`** — local cross-build orchestrator. CI uses the same script in matrix mode (one runner per target) and uploads to GitHub Releases.
 12. **`scripts/install.sh`** — POSIX install script served from the release channel. Detects platform, downloads, verifies, drops in PATH, runs `fermix setup`.
@@ -303,8 +303,8 @@ Suggested `~/.fermix/auth.json` shape:
 {
   "version": 1,
   "providers": {
-    "openai": {
-      "auth_mode": "oauth",
+    "openai_codex": {
+      "auth_mode": "chatgpt",
       "tokens": {
         "access_token": "...",
         "refresh_token": "..."
@@ -316,7 +316,7 @@ Suggested `~/.fermix/auth.json` shape:
 }
 ```
 
-Failures during OAuth (timeout, denial, network) raise back to the wizard with a clear message. The wizard re-prompts with the full menu (OAuth / API key / Codex import). There is no silent fallback from OAuth to API-key — the user explicitly re-chooses.
+Failures during Codex import (timeout, denial, network) raise back to the wizard with a clear message. The wizard re-prompts with the provider credential options; regular OpenAI API-key setup stays separate.
 
 ---
 
@@ -343,15 +343,14 @@ Goal: produce a single binary that boots Fermix on `aarch64-apple-darwin` (the d
 3. Generate `releases.json` from CI, publish to the same release.
 4. Manual verification: download signed binary on a fresh Linux VM, install, verify works.
 
-### Stage 3 — Native OAuth + drop `~/.codex` (P0)
+### Stage 3 — Provider Auth Cleanup (P0)
 
-1. Resolve the OpenAI OAuth compliance/client question. If it is not permitted, keep API-key mode as the P0 path and defer OAuth to a Fermix-owned compliant flow.
+1. Keep regular OpenAI API-key only.
 2. Implement `FermixCore.Auth.Store` with provider-scoped JSON, file locking, atomic writes, and `0600` permissions.
-3. Implement `FermixCore.Auth.OAuth` as a single device-code flow with one UX branch: browser-open vs URL+code printing, decided at start of flow from terminal capability + `--no-browser` flag.
-4. Add `:provider_auth_oauth` wizard step with choices: OAuth, API key, optional Codex CLI import.
-5. Modify `TokenManager.start_link/1` to read only Fermix-owned config/auth state (delete `load_from_codex`, `default_codex_path`, the bootstrap-fork path, and the M3-temporary comment).
-6. Migration: existing installs with only `~/.codex/auth.json` are detected at next `fermix setup`; the OpenAI step pre-selects "Import Codex CLI login" as the default option. If a running daemon hits a missing `~/.fermix/auth.json` post-upgrade, it fails loud with `OpenAI auth not configured — run \`fermix setup\`` and exits non-zero. No silent re-read of `~/.codex`.
-7. Tests: mock OAuth endpoints, assert wizard advances, assert browser/no-browser paths, assert tokens land in `~/.fermix/auth.json`, assert `TokenManager` no longer reads `~/.codex`.
+3. Implement Codex CLI import for the explicit `openai_codex` provider.
+4. Modify `TokenManager.start_link/1` to read only Fermix-owned `openai_codex` auth state, with a temporary read fallback for legacy imports.
+5. Migration: existing installs with only `~/.codex/auth.json` are detected at next `fermix setup`; the provider step offers "Import Codex CLI login" for `openai_codex`. If a running daemon hits a missing `~/.fermix/auth.json` post-upgrade, it fails loud with `Codex auth not configured — run \`fermix setup --import-codex\`` and exits non-zero.
+6. Tests: assert tokens land in `~/.fermix/auth.json` under `openai_codex`, regular OpenAI stays API-key only, and `TokenManager` no longer reads `~/.codex` at runtime.
 
 ### Stage 4 — OS daemon integration (P0)
 
@@ -419,12 +418,12 @@ All events written to `~/.fermix/traces/` per the existing `FermixCore.Trace` JS
 | Risk | Mitigation |
 |------|------------|
 | **Burrito packaging fails** for one of the 4 targets | Stage 1 validates `aarch64-apple-darwin` end-to-end before adding other targets. If a target is genuinely broken, document it and ship the others; expand later. If native helpers are added, validate them per target before including that target in the release matrix. |
-| **OpenAI OAuth via upstream/Codex flow is disallowed or unstable** | Validate before Stage 3 (open question §10.1). API-key mode remains a P0 path. OAuth ships only if the client/endpoint flow is compliant and supportable. |
+| **Codex import is unavailable or unstable** | API-key mode remains the regular OpenAI path. `openai_codex` setup fails loud and asks the user to re-import. |
 | **`fermix upgrade` corrupts an in-flight daemon** | Atomic swap via `rename(2)` after sig verify; daemon restarts via service unit, not in-process binary swap. Failures roll back to previous binary kept at `~/.fermix/.previous`. |
 | **launchd / systemd unit generation breaks on exotic distros** | Detect at runtime; if neither launchd nor systemd is found, `fermix service install` errors with a clear message and falls back to documenting how to write a custom unit. |
 | **`fermix upgrade` overwrites package-manager-owned files** | Detect install method before upgrade. Homebrew and apt installs should print the package-manager upgrade command and refuse self-overwrite. `/usr/local/bin` unmanaged installs may still require sudo for atomic replacement. |
 | **Signing key compromise** | Use Sigstore / Cosign with keyless OIDC (GitHub Actions identity) — no long-lived signing keys to leak. |
-| **Existing `~/.codex` users surprised by auth migration in Stage 3** | One-time migration/import prompt; documented in CHANGELOG; the wizard explicitly says Fermix now keeps its own auth profile and offers either import, OAuth, or API-key setup. |
+| **Existing `~/.codex` users surprised by auth migration in Stage 3** | One-time import prompt; documented in CHANGELOG; the wizard explicitly says Fermix now keeps its own `openai_codex` auth profile and offers either Codex import or regular OpenAI API-key setup. |
 
 ---
 
@@ -440,7 +439,7 @@ All events written to `~/.fermix/traces/` per the existing `FermixCore.Trace` JS
 
 ## 10. Open Questions
 
-1. **Which OpenAI OAuth endpoint/client is permitted for Fermix?** If an upstream/Codex-compatible flow is permitted, Stage 3 ships browser-first OAuth. If not, OAuth must wait for a compliant Fermix-owned flow and API-key mode remains the P0 path. **Owner: Sujeeth. Hard deadline: before Stage 3 kickoff.** If unresolved by then, Stage 3 ships API-key + Codex import only and OAuth slips to a follow-up milestone.
+1. **Should Fermix support any non-Codex OAuth path later?** Current implementation says no: regular OpenAI is API-key only and Codex OAuth belongs to `openai_codex`.
 2. **Cosign vs Minisign for release signing?** Cosign + GitHub OIDC has zero key management overhead but requires Sigstore infrastructure to verify. Minisign is simpler but needs a long-lived key. Recommendation: Cosign with keyless OIDC for v0.x; revisit if Sigstore proves flaky.
 3. **Where does the install script live?** `https://fermix.sh/install` requires a domain + redirect. `https://raw.githubusercontent.com/tezra-io/fermix/main/scripts/install.sh` works without one. Recommendation: ship via GitHub raw at first, add `fermix.sh` once a stable v1.0 lands.
 4. **Should `fermix doctor` make outbound network calls (e.g., probe OpenAI / Telegram reachability)?** Useful for diagnostics, slow on every run, and may surprise privacy-sensitive users. Recommendation: gate behind `--full` flag.
@@ -466,9 +465,9 @@ To keep the surgical-changes principle visible, here is the full list of code ch
 | `apps/fermix_core/lib/fermix_core/setup/runtime.ex` or equivalent (new) | Runtime setup implementation extracted from the Mix task. |
 | `apps/fermix_core/lib/mix/tasks/fermix.setup.ex` (modify) | Thin development wrapper around the runtime setup module. |
 | `apps/fermix_core/lib/fermix_core/auth/store.ex` (new) | Versioned provider auth store at `~/.fermix/auth.json` with locking, atomic writes, and `0600` permissions. |
-| `apps/fermix_core/lib/fermix_core/auth/oauth.ex` (new) | OpenAI OAuth device-code client. One flow, one UX branch (browser-open vs URL+code print). Subject to Stage 3 compliance decision. |
+| `apps/fermix_core/lib/fermix_core/auth/codex_import.ex` | Codex CLI token import into the `openai_codex` auth store. |
 | `apps/fermix_core/lib/fermix_core/auth/token_manager.ex` (modify) | Delete runtime `~/.codex` fallback (`load_from_codex`, `default_codex_path`, bootstrap-fork branch, and the M3-temporary comment). Read Fermix-owned config/auth state only. |
-| `apps/fermix_core/lib/fermix_core/setup/wizard.ex` (modify) | Add `:provider_auth_oauth` step in front of `:provider_credentials` when `auth_mode == :oauth`. |
+| `apps/fermix_core/lib/fermix_core/setup/wizard.ex` (modify) | Keep provider credential handling explicit: OpenAI API key vs Codex import. |
 | `apps/fermix_core/lib/fermix_core/application.ex` (modify) | Add `Fermix.CLI.Daemon` to the supervision tree (only when `start_daemon_socket: true`). |
 
 That's it. Nothing in prompt, memory, channel, or `fermix_nif` behavior changes for M4.8. `fermix_web` behavior stays the same, but packaged daemon startup must explicitly enable the Phoenix endpoint server.

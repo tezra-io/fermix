@@ -17,7 +17,6 @@ defmodule FermixCore.Setup.Runtime do
 
   @answer_keys [
     :openai_api_key,
-    :openai_auth_oauth,
     :provider,
     :default_model,
     :reasoning_effort,
@@ -61,7 +60,7 @@ defmodule FermixCore.Setup.Runtime do
       true ->
         with {:ok, extras} <- maybe_import_codex(report, opts, puts, prompt) do
           # Re-fetch the report — the codex import may have satisfied
-          # the openai provider check, leaving fewer required answers.
+          # the active provider check, leaving fewer required answers.
           {:ok, refreshed} = load_report()
           save_and_print(refreshed, opts ++ extras, puts, prompt)
         end
@@ -73,7 +72,7 @@ defmodule FermixCore.Setup.Runtime do
       Keyword.get(opts, :import_codex, false) ->
         run_codex_import(opts, puts)
 
-      not openai_missing?(report) ->
+      not provider_missing?(report) ->
         {:ok, []}
 
       Keyword.get(opts, :openai_api_key) not in [nil, ""] ->
@@ -100,15 +99,15 @@ defmodule FermixCore.Setup.Runtime do
     case CodexImport.import_tokens(import_opts) do
       {:ok, _entry} ->
         puts.("Imported OpenAI tokens from Codex CLI.")
-        {:ok, [openai_auth_oauth: true]}
+        {:ok, [provider: "openai_codex"]}
 
       {:error, reason} ->
         {:error, "codex import failed: #{inspect(reason)}"}
     end
   end
 
-  defp openai_missing?(%{failures: failures}) do
-    Enum.any?(failures, &(&1.component == "provider:openai"))
+  defp provider_missing?(%{failures: failures}) do
+    Enum.any?(failures, &(&1.component in ["provider:openai", "provider:openai_codex"]))
   end
 
   defp codex_path(opts) do

@@ -58,7 +58,7 @@ defmodule FermixCore.Auth.CodexImportTest do
 
       {:ok, raw} = File.read(fermix_path)
       data = Jason.decode!(raw)
-      assert data["providers"]["openai"]["tokens"]["access_token"] == "fresh_at"
+      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "fresh_at"
 
       File.rm_rf!(dir)
     end

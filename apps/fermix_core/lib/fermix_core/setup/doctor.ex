@@ -67,7 +67,7 @@ defmodule FermixCore.Setup.Doctor do
   defp probe_openai(opts) do
     config = provider_config(:openai)
 
-    case openai_bearer(config, opts) do
+    case openai_bearer(config) do
       {:error, _} = err ->
         err
 
@@ -93,12 +93,7 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
-  defp openai_bearer(config, opts) do
-    case Keyword.get(config, :auth_mode, :api_key) do
-      :oauth -> require_codex_token(opts)
-      :api_key -> bearer_from_api_key(Keyword.get(config, :api_key))
-    end
-  end
+  defp openai_bearer(config), do: bearer_from_api_key(Keyword.get(config, :api_key))
 
   defp bearer_from_api_key(value) when value in [nil, ""] do
     {:error, {:misconfigured, "openai provider has no api_key configured"}}

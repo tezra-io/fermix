@@ -4,9 +4,9 @@ defmodule FermixCore.Auth.CodexImport do
 
   Performs a single OAuth refresh against the Codex refresh token, then
   persists the refreshed tokens to `~/.fermix/auth.json` via
-  `FermixCore.Auth.Store`. The Codex file is never read again after
-  this — the refresh attempt is the sole authoritative validity test
-  per the M4.8 design.
+  `FermixCore.Auth.Store` under the `openai_codex` provider scope. The
+  Codex file is never read again after this — the refresh attempt is the
+  sole authoritative validity test per the M4.8 design.
 
   Refusing to ship a degraded path: if the refresh fails, this returns
   the failure reason. Callers (the wizard) re-prompt with the remaining
@@ -33,7 +33,7 @@ defmodule FermixCore.Auth.CodexImport do
     with {:ok, codex} <- read_codex(codex_path),
          {:ok, refreshed} <- RefreshClient.refresh(codex.refresh_token, req_options),
          entry <- to_entry(refreshed),
-         :ok <- Store.write(:openai, entry, fermix_path) do
+         :ok <- Store.write(:openai_codex, entry, fermix_path) do
       Logger.info("CodexImport: imported and persisted refreshed tokens to #{fermix_path}")
       {:ok, entry}
     end

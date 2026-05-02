@@ -84,8 +84,8 @@ Two existing codebases implement Codex tool calls correctly. We borrow shape, no
 | Codex tool-call adapter | P0 | Modify | Implement `to_provider_tools/1` (function-tool shape, `strict: false`), `parse_tool_calls/1` (read from SSE-accumulated `function_call` items), and `continue/3` (next-turn input = prior input + preserved output items + `function_call_output` items, keyed by API `call_id`). |
 | Codex SSE stream parser | P0 | New | Stateful accumulator that consumes `data:` lines, builds the final response item list (function_call args assembled from incremental `function_call_arguments.delta` events), terminates on `response.completed`. Module-private to `OpenAI.Codex`. |
 | Codex reasoning effort | P1 | New | Send `reasoning: %{effort: <level>}` in the request body when configured. Level read from adapter opts, sourced from agent definition or app config. |
-| Provider/model/effort persistence | P0 | New | `ConfigStore.normalize_openai/1` (and `normalize_anthropic/1` for parity) read/write `provider`, `default_model`, `reasoning_effort`. TOML render (`render_section`) emits them. |
-| Env-var overlays | P0 | New | `runtime.exs` overlays `FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT` on top of TOML — same pattern as the existing OpenAI auth_mode/api_key overlay. |
+| Provider/model/effort persistence | P0 | New | `ConfigStore.normalize_openai/1`, `normalize_openai_codex/1`, and `normalize_anthropic/1` read/write provider-specific settings. Provider selection lives under `[fermix_core.agent]`. |
+| Env-var overlays | P0 | New | `runtime.exs` overlays `FERMIX_PROVIDER`, `FERMIX_DEFAULT_MODEL`, `FERMIX_REASONING_EFFORT`, and provider API keys on top of TOML. |
 | Model catalog | P0 | New | `FermixCore.Providers.ModelCatalog` module exposing `models_for(provider)` returning `[{id, label}]`. Static lists per provider, plus a `:custom` escape hatch for the wizard. |
 | Wizard provider step | P0 | New | New `:provider` wizard step (extends `wizard_state.ex` `step` type). Asks: provider (radio), then model (single-select from catalog or custom), then reasoning effort (radio: `none | minimal | low | medium | high | xhigh`). Persists into `[fermix_core.providers.<provider>]` block. |
 | Wizard Codex disclaimer | P0 | New | When the user picks `:openai_codex`, surface the ChatGPT Plus auth requirement and the M4.10 tool-call support note inline, before model select. |
@@ -195,7 +195,6 @@ provider = "openai_codex"      # one of: openai | openai_codex | anthropic
 
 # Per-provider settings: only the selected one is live, others are dormant
 [fermix_core.providers.openai]
-auth_mode = "api_key"
 api_key = ""
 default_model = "gpt-5.5"
 reasoning_effort = "high"      # only meaningful for codex/responses
@@ -211,7 +210,7 @@ api_key = ""
 default_model = "claude-sonnet-4-6"
 ```
 
-Why each provider gets its own block (instead of one shared block): the three surfaces have different auth flows (API key vs OAuth vs API key), different default models, different live endpoints. Storing them separately means switching providers (re-running the wizard) doesn't clobber settings for the other two — useful when a user toggles between API-key OpenAI and Codex, or wants to keep an Anthropic fallback configured.
+Why each provider gets its own block (instead of one shared block): the three surfaces have different auth flows (API key vs Codex tokens vs API key), different default models, different live endpoints. Storing them separately means switching providers (re-running the wizard) doesn't clobber settings for the other two — useful when a user toggles between API-key OpenAI and Codex, or wants to keep an Anthropic fallback configured.
 
 `ConfigStore.normalize_agent/1` gains a `provider` field. `normalize_openai/1`, `normalize_openai_codex/1` (new), and `normalize_anthropic/1` each read their own block. `render_section/2` writes back only the blocks that have non-default values; unconfigured providers stay absent from the file.
 
@@ -219,7 +218,7 @@ Why each provider gets its own block (instead of one shared block): the three su
 
 ### 4.6 Env-var overlays
 
-`config/runtime.exs` adds (parallel to existing `OPENAI_AUTH_MODE` / `OPENAI_API_KEY`):
+`config/runtime.exs` adds provider/model/effort overlays:
 
 ```
 FERMIX_PROVIDER          → openai | openai_codex | anthropic    (overlays [fermix_core.agent].provider)
@@ -229,7 +228,7 @@ FERMIX_REASONING_EFFORT  → none | minimal | low | medium | high | xhigh   (ove
 
 The default-model and reasoning-effort overlays apply to the *selected* provider (resolved after `FERMIX_PROVIDER` overlay), so a single env-var trio gives a consistent override regardless of which provider is configured in TOML.
 
-Validation: invalid enum values log a warning and fall back to the TOML value (don't crash boot). Same fail-soft pattern as the existing `OPENAI_AUTH_MODE` overlay.
+Validation: invalid enum values log a warning and fall back to the TOML value (don't crash boot).
 
 ### 4.7 Model catalog
 

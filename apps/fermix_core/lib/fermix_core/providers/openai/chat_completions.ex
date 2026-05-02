@@ -84,11 +84,13 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     model = Keyword.fetch!(opts, :model)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
+    response_format = Keyword.get(opts, :response_format)
     {req_options, _opts} = Keyword.pop(opts, :req_options, [])
 
     body =
       %{model: model, messages: format_messages(messages), temperature: temperature}
       |> maybe_put_tools(to_provider_tools(capabilities))
+      |> maybe_put(:response_format, response_format)
 
     post(base_url, api_key, body, req_options, model, messages, capabilities)
   end
@@ -199,6 +201,8 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
   defp maybe_put_tools(body, []), do: body
   defp maybe_put_tools(body, tools) when is_list(tools), do: Map.put(body, :tools, tools)
+  defp maybe_put(body, _key, nil), do: body
+  defp maybe_put(body, key, value), do: Map.put(body, key, value)
 
   defp require_api_key!(opts) do
     case Keyword.get(opts, :api_key) do

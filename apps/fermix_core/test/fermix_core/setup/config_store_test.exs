@@ -36,6 +36,18 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            }
   end
 
+  test "memory_paths follow FERMIX_HOME and match the runtime memory layout" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert ConfigStore.memory_paths() == %{
+             database_path: Path.join(tmp_home, "memory.db"),
+             prompt_base_dir: Path.join(tmp_home, "memory")
+           }
+  end
+
   test "save/load round-trip preserves personalization and agent sections" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -171,7 +183,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     :ok =
       ConfigStore.save_snapshot(%{
         fermix_core: [
-          providers: [openai: [auth_mode: :oauth]],
+          providers: [openai: []],
           agent: [name: "fermix", provider: :openai_codex]
         ],
         fermix_channels: [],
@@ -207,7 +219,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             default_model: "gpt-5.5",
             reasoning_effort: :high
           ],
-          openai_codex: [default_model: "gpt-5.5", reasoning_effort: :xhigh],
+          openai_codex: [default_model: "gpt-5.5", reasoning_effort: :xhigh, store: true],
           anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-7"]
         ],
         agent: [name: "fermix", provider: :openai_codex]
@@ -224,6 +236,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ ~s(reasoning_effort = "high")
     assert contents =~ "[fermix_core.providers.openai_codex]"
     assert contents =~ ~s(reasoning_effort = "xhigh")
+    refute contents =~ "store ="
     assert contents =~ "[fermix_core.providers.anthropic]"
     assert contents =~ ~s(default_model = "claude-opus-4-7")
 
@@ -237,6 +250,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     openai_codex = Keyword.get(providers, :openai_codex, [])
     assert Keyword.get(openai_codex, :default_model) == "gpt-5.5"
     assert Keyword.get(openai_codex, :reasoning_effort) == :xhigh
+    refute Keyword.has_key?(openai_codex, :store)
 
     anthropic = Keyword.get(providers, :anthropic, [])
     assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
@@ -323,6 +337,31 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       |> Keyword.get(:openai, [])
 
     refute Keyword.has_key?(openai, :reasoning_effort)
+    assert Keyword.get(openai, :api_key) == "sk-x"
+  end
+
+  test "normalize_openai drops auth_mode from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openai]
+    auth_mode = "oauth"
+    api_key = "sk-x"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+
+    openai =
+      loaded.fermix_core
+      |> Keyword.get(:providers, [])
+      |> Keyword.get(:openai, [])
+
+    refute Keyword.has_key?(openai, :auth_mode)
     assert Keyword.get(openai, :api_key) == "sk-x"
   end
 
