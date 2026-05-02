@@ -77,8 +77,8 @@ Do not copy directly:
 | Shared main-agent context | Scheduled jobs must be reproducible and isolated. They can read shared memory by config, but they do not inherit the live main chat. | Avoid |
 | Unbounded continuous LLM loop | Expensive and unsafe. Watchers may run 24/7, but each LLM turn is a bounded job run. | Avoid |
 | Distributed scheduler cluster | Single-user daemon first. SQLite row locks / per-job locks are enough. | Later |
-| Complex calendar UI | CLI/capability control first. LiveView dashboard can follow. | M5/M6 |
-| Human approval UX | M5 governance owns interactive approval. M4.11 uses static capability policy and explicit job config. | M5 |
+| Complex calendar UI | CLI/capability control first. LiveView dashboard can follow. | M10/M6 |
+| Human approval UX | M10 governance owns interactive approval. M4.11 uses static capability policy and explicit job config. | M10 |
 
 ---
 

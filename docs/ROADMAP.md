@@ -270,23 +270,9 @@ See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
 
 ---
 
-## Milestone 5: Security & Governance
+## Milestone 5: _Reserved_
 
-**Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering.
-
-| Feature | Description | Priority | Type | Reference | Effort |
-|---------|-------------|----------|------|-----------|--------|
-| **Security policy** | Tool ACLs and operation enforcement | P0 | Rewrite | `src/security/policy.rs` | L |
-| **Approval manager** | `/approve` commands, auto_approve, always_ask | P0 | Rewrite | `src/security/mod.rs` | M |
-| **Sentinel engine** | LLM-based content filtering middleware | P1 | Rewrite | `src/security/sentinel/` | L |
-| **Content scanner** | Scan for secrets, PII, malicious content | P0 | Rewrite | `src/security/content_scanner.rs` | M |
-| **Leak detector** | Detect credential/secret leaks in agent output | P0 | Rewrite | `src/security/leak_detector.rs` | M |
-| **Secrets manager** | Secure credential storage | P1 | Rewrite | `src/security/secrets.rs` | M |
-| **Prompt guard** | Prompt injection detection | P1 | Rewrite | `src/security/prompt_guard.rs` | M |
-| **Audit logging** | Security event logging | P1 | Rewrite | `src/security/audit.rs` | S |
-| **E-stop** | Emergency stop for runaway agents | P1 | Rewrite | `src/security/estop.rs` | M |
-
-**Milestone 5 Total Effort:** ~8-10 weeks
+_Security & Governance was originally numbered M5; it has been moved to **M10** so feature exploration can run unconstrained first and security can be tightened against observed real-world usage rather than guessed-at threats. See M10 below._
 
 ---
 
@@ -406,6 +392,26 @@ See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
 | **Self-knowledge agent** | Persistent subagent with full Fermix codebase knowledge — can modify Fermix itself when user requests platform changes | P1 | New | N/A | L |
 
 **Milestone 9 Total Effort:** ~8-12 weeks
+
+---
+
+## Milestone 10: Security & Governance
+
+**Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering — added _last_ on purpose, after the feature surface has settled and we have observed real usage patterns. Earlier milestones (M4.9 capabilities, M4.11 scheduled agents) leave hooks (`requires_approval?`, `policy_class`, static-config gating) for M10 to bind to.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Security policy** | Tool ACLs and operation enforcement | P0 | Rewrite | `src/security/policy.rs` | L |
+| **Approval manager** | `/approve` commands, auto_approve, always_ask | P0 | Rewrite | `src/security/mod.rs` | M |
+| **Sentinel engine** | LLM-based content filtering middleware | P1 | Rewrite | `src/security/sentinel/` | L |
+| **Content scanner** | Scan for secrets, PII, malicious content | P0 | Rewrite | `src/security/content_scanner.rs` | M |
+| **Leak detector** | Detect credential/secret leaks in agent output | P0 | Rewrite | `src/security/leak_detector.rs` | M |
+| **Secrets manager** | Secure credential storage | P1 | Rewrite | `src/security/secrets.rs` | M |
+| **Prompt guard** | Prompt injection detection | P1 | Rewrite | `src/security/prompt_guard.rs` | M |
+| **Audit logging** | Security event logging | P1 | Rewrite | `src/security/audit.rs` | S |
+| **E-stop** | Emergency stop for runaway agents | P1 | Rewrite | `src/security/estop.rs` | M |
+
+**Milestone 10 Total Effort:** ~8-10 weeks
 
 ---
 
@@ -547,14 +553,14 @@ See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
 1. **Milestone 2** (Multi-Agent Orchestration) — unlocks delegation
 2. **Milestone 4** (Advanced Memory) — unlocks long-term context
 3. **Milestone 3** (WhatsApp, Discord, Signal, Slack, CLI) — core channels
-4. **Milestone 5** (Security core: policy, approval, content scanner) — production safety
-5. **Milestone 6** (Dashboard + CLI) — operational visibility
-6. **Milestone 8** (Production ops) — deployment readiness
-7. **Milestone 7** (Core tools) — essential feature parity
-8. **Milestone 9** (Differentiators) — unique value
+4. **Milestone 6** (Dashboard + CLI) — operational visibility
+5. **Milestone 8** (Production ops) — deployment readiness
+6. **Milestone 7** (Core tools) — essential feature parity
+7. **Milestone 9** (Differentiators) — unique value
+8. **Milestone 10** (Security core: policy, approval, content scanner) — tighten _after_ feature exploration; bind to the policy hooks already left by M4.9 / M4.11
 9. **Future** (Extended ecosystem) — demand-driven expansion
 
-**Total estimated time for core (M2–M9):** ~6-9 months full-time with AI assistance. Future items are demand-driven.
+**Total estimated time for core (M2–M10):** ~6-9 months full-time with AI assistance. Future items are demand-driven.
 
 ---
 
