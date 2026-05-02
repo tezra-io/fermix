@@ -58,6 +58,11 @@ defmodule FermixCore.Setup.RuntimeTest do
     File.mkdir_p!(home)
 
     Application.put_env(:fermix_core, :providers, openai: [])
+    # Pin agent.provider so the suite can't be polluted by a host
+    # ~/.fermix/config.toml that sets a non-default provider (e.g. dev
+    # using openai_codex). Tests that want to assert codex routing must
+    # override this explicitly.
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
 
     Application.put_env(
       :fermix_core,
@@ -139,8 +144,86 @@ defmodule FermixCore.Setup.RuntimeTest do
 
   defp puts_lines(agent), do: agent |> Agent.get(& &1) |> Enum.reverse()
 
+  describe "finalize probe wiring" do
+    test "skip_probe: true bypasses the probe entirely" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      refute Enum.any?(lines, &String.contains?(&1, "auth probe"))
+    end
+
+    test "probe pass emits an auth-probe line and returns :ok" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, collector} = puts_collector()
+      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", req_options: [plug: probe_plug]],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai/"))
+    end
+
+    test "probe auth_scope_mismatch (401) fails the run with a clear error message" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
+
+      assert {:error, message} =
+               Runtime.run(
+                 [openai_api_key: "sk-bad", req_options: [plug: probe_plug]],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert message =~ "auth probe failed"
+      assert message =~ "api.openai.com"
+    end
+
+    test "probe transient 5xx is inconclusive — run returns :ok with a warning line" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, collector} = puts_collector()
+      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 503, "service unavailable") end
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", req_options: [plug: probe_plug]],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      assert Enum.any?(lines, &String.contains?(&1, "auth probe inconclusive"))
+      assert Enum.any?(lines, &String.contains?(&1, "503"))
+    end
+  end
+
   describe "--import-codex" do
-    test "imports tokens, persists to fermix store, and marks openai oauth-configured" do
+    test "imports tokens, persists to fermix store, and selects openai_codex" do
       home = tmp_home()
       on_exit(fn -> File.rm_rf!(home) end)
 
@@ -164,10 +247,53 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert {:ok, raw} = File.read(fermix_auth)
       data = Jason.decode!(raw)
-      assert data["providers"]["openai"]["tokens"]["access_token"] == "imported_at"
+      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "imported_at"
 
       providers = Application.get_env(:fermix_core, :providers, [])
-      assert Keyword.get(providers[:openai], :auth_mode) == :oauth
+      refute Keyword.has_key?(providers[:openai], :auth_mode)
+
+      agent = Application.get_env(:fermix_core, :agent, [])
+      assert Keyword.get(agent, :provider) == :openai_codex
+
+      lines = puts_lines(collector)
+      assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
+    end
+
+    test "explicit --import-codex re-runs when openai_codex is already selected" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+
+      prepare(home)
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [],
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :medium]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      codex_path = write_codex_auth(home, "fresh_codex_rt")
+      fermix_auth = Path.join(home, "auth.json")
+
+      {puts, collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   import_codex: true,
+                   codex_auth_path: codex_path,
+                   fermix_auth_path: fermix_auth,
+                   req_options: [plug: &__MODULE__.success_plug/1],
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, raw} = File.read(fermix_auth)
+      data = Jason.decode!(raw)
+      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "imported_at"
+      assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "imported_rt"
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
@@ -197,6 +323,51 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert message =~ "codex import failed"
       refute File.exists?(fermix_auth)
+    end
+  end
+
+  describe "provided_answers/1 — provider/model/effort flags" do
+    test "extracts provider/default_model/reasoning_effort opts as answers" do
+      opts = [
+        provider: "openai_codex",
+        default_model: "gpt-5.5",
+        reasoning_effort: "high"
+      ]
+
+      assert answers = Runtime.provided_answers(opts)
+      assert Keyword.get(answers, :provider) == "openai_codex"
+      assert Keyword.get(answers, :default_model) == "gpt-5.5"
+      assert Keyword.get(answers, :reasoning_effort) == "high"
+    end
+
+    test "non-interactive run with provider/model/effort writes them through ConfigStore" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   openai_api_key: "sk-test",
+                   provider: "openai_codex",
+                   default_model: "gpt-5.5",
+                   reasoning_effort: "high",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      agent = snapshot.fermix_core |> Keyword.get(:agent, [])
+      providers = snapshot.fermix_core |> Keyword.get(:providers, [])
+      codex_block = Keyword.get(providers, :openai_codex, [])
+
+      assert Keyword.get(agent, :provider) == :openai_codex
+      assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
+      assert Keyword.get(codex_block, :reasoning_effort) == :high
     end
   end
 end

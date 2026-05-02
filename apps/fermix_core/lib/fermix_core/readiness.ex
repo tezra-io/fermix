@@ -12,7 +12,10 @@ defmodule FermixCore.Readiness do
   checks yet.
   """
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Config
+
+  require Logger
 
   @typedoc """
   Public readiness state.
@@ -31,7 +34,7 @@ defmodule FermixCore.Readiness do
     failures =
       Enum.reject(
         [
-          openai_failure(),
+          provider_failure(),
           telegram_failure(),
           whatsapp_failure(),
           discord_failure(),
@@ -65,6 +68,20 @@ defmodule FermixCore.Readiness do
     end
   end
 
+  defp provider_failure do
+    case active_provider() do
+      :openai -> openai_failure()
+      :openai_codex -> openai_codex_failure()
+      :anthropic -> anthropic_failure()
+      _other -> openai_failure()
+    end
+  end
+
+  defp active_provider do
+    Application.get_env(:fermix_core, :agent, [])
+    |> Keyword.get(:provider, :openai)
+  end
+
   defp openai_failure do
     case Config.provider(:openai) do
       {:ok, config} when is_list(config) ->
@@ -73,14 +90,45 @@ defmodule FermixCore.Readiness do
         else
           %{
             component: "provider:openai",
-            action: "Set OPENAI_API_KEY or configure OAuth credentials."
+            action: "Set OPENAI_API_KEY."
           }
         end
 
       _ ->
         %{
           component: "provider:openai",
-          action: "Set OPENAI_API_KEY or configure OAuth credentials."
+          action: "Set OPENAI_API_KEY."
+        }
+    end
+  end
+
+  defp openai_codex_failure do
+    if codex_configured?() do
+      nil
+    else
+      %{
+        component: "provider:openai_codex",
+        action: "Run mix fermix.setup --import-codex to import Codex OAuth tokens."
+      }
+    end
+  end
+
+  defp anthropic_failure do
+    case Config.provider(:anthropic) do
+      {:ok, config} when is_list(config) ->
+        if present?(Keyword.get(config, :api_key)) do
+          nil
+        else
+          %{
+            component: "provider:anthropic",
+            action: "Set ANTHROPIC_API_KEY."
+          }
+        end
+
+      _ ->
+        %{
+          component: "provider:anthropic",
+          action: "Set ANTHROPIC_API_KEY."
         }
     end
   end
@@ -204,15 +252,25 @@ defmodule FermixCore.Readiness do
   end
 
   defp openai_configured?(config) do
-    present?(Keyword.get(config, :api_key)) or oauth_configured?(config)
+    present?(Keyword.get(config, :api_key))
   end
 
-  defp oauth_configured?(config) do
-    Keyword.get(config, :auth_mode) == :oauth or
-      Enum.any?(
-        [:oauth_credentials, :credentials, :client_id, :access_token],
-        &present?(Keyword.get(config, &1))
-      )
+  defp codex_configured? do
+    Enum.any?([:openai_codex, :openai], fn provider ->
+      try do
+        case Store.read(provider) do
+          {:ok, entry} -> present?(entry.tokens.access_token)
+          {:error, _reason} -> false
+        end
+      rescue
+        e in ArgumentError ->
+          Logger.warning(
+            "Readiness: Auth.Store.read(#{inspect(provider)}) raised — auth.json may be malformed: #{Exception.message(e)}"
+          )
+
+          false
+      end
+    end)
   end
 
   defp configured?(config, keys) do

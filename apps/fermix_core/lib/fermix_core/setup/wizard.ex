@@ -4,6 +4,8 @@ defmodule FermixCore.Setup.Wizard do
   """
 
   alias FermixCore.Prompt.SetupSeeder
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Readiness
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
@@ -11,8 +13,14 @@ defmodule FermixCore.Setup.Wizard do
 
   require Logger
 
+  @type provider :: ModelCatalog.provider()
+  @type reasoning_effort :: :none | :minimal | :low | :medium | :high | :xhigh
+
   @type answer ::
           {:openai_api_key, String.t()}
+          | {:provider, provider() | String.t()}
+          | {:default_model, String.t()}
+          | {:reasoning_effort, reasoning_effort() | String.t()}
           | {:telegram_bot_token, String.t()}
           | {:whatsapp_access_token, String.t()}
           | {:whatsapp_phone_number_id, String.t()}
@@ -26,6 +34,17 @@ defmodule FermixCore.Setup.Wizard do
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
+
+  @setup_secret_paths [
+    openai_api_key: [:fermix_core, :providers, :openai, :api_key],
+    telegram_bot_token: [:fermix_channels, :telegram, :bot_token],
+    whatsapp_access_token: [:fermix_channels, :whatsapp, :access_token],
+    whatsapp_verify_token: [:fermix_channels, :whatsapp, :verify_token],
+    whatsapp_app_secret: [:fermix_channels, :whatsapp, :app_secret],
+    discord_bot_token: [:fermix_channels, :discord, :bot_token],
+    slack_bot_token: [:fermix_channels, :slack, :bot_token],
+    slack_signing_secret: [:fermix_channels, :slack, :signing_secret]
+  ]
 
   @type seeding_result :: %{
           name: :identity | :agents | :soul | :user | :memory,
@@ -69,12 +88,29 @@ defmodule FermixCore.Setup.Wizard do
     # for the token whenever it is unpersisted forces it onto disk where the
     # daemon will see it.
     persisted = persisted_snapshot()
+    provider_unset? = persisted_provider(persisted) == nil
 
     [
       %{
         key: :openai_api_key,
         label: "OpenAI API key",
         required?: missing_component?(state, "provider:openai")
+      },
+      %{
+        key: :provider,
+        label: "Provider (#{Enum.map_join(ModelCatalog.providers(), "/", &Atom.to_string/1)})",
+        required?: provider_unset?
+      },
+      %{
+        key: :default_model,
+        label: "Default model (e.g. #{ModelCatalog.default_model_for(:openai)})",
+        required?: provider_unset?
+      },
+      %{
+        key: :reasoning_effort,
+        label:
+          "Reasoning effort (#{Enum.map_join(ResponsesShared.valid_reasoning_efforts(), "/", &Atom.to_string/1)})",
+        required?: provider_unset?
       },
       %{
         key: :telegram_bot_token,
@@ -149,8 +185,11 @@ defmodule FermixCore.Setup.Wizard do
   def save_answers(%WizardState{} = state, answers) do
     snapshot =
       state.config_snapshot
+      |> drop_unanswered_env_only_secrets(answers)
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
-      |> put_openai_oauth(Keyword.get(answers, :openai_auth_oauth))
+      |> put_provider_selection(Keyword.get(answers, :provider))
+      |> put_default_model(Keyword.get(answers, :default_model))
+      |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -164,6 +203,25 @@ defmodule FermixCore.Setup.Wizard do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
   end
+
+  defp drop_unanswered_env_only_secrets(snapshot, answers) do
+    persisted = persisted_snapshot()
+
+    Enum.reduce(@setup_secret_paths, snapshot, fn {answer_key, path}, acc ->
+      cond do
+        answered?(answers, answer_key) ->
+          acc
+
+        not blank?(get_snapshot_value(persisted, path)) ->
+          acc
+
+        true ->
+          delete_snapshot_value(acc, path)
+      end
+    end)
+  end
+
+  defp answered?(answers, key), do: not blank?(Keyword.get(answers, key))
 
   @doc """
   Re-runs prompt-file seeding against the current persisted snapshot.
@@ -180,7 +238,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp build_state(snapshot, readiness) do
     %WizardState{
-      step: step_for(readiness.failures),
+      step: step_for(readiness.failures, snapshot),
       config_snapshot: snapshot,
       enabled_channels: enabled_channels(snapshot),
       validation_errors: readiness.failures,
@@ -188,17 +246,25 @@ defmodule FermixCore.Setup.Wizard do
     }
   end
 
-  defp step_for(failures) do
+  @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
+
+  defp step_for(failures, snapshot) do
+    components = Enum.map(failures, & &1.component) |> MapSet.new()
+
     cond do
-      Enum.any?(failures, &(&1.component == "provider:openai")) -> :provider
-      Enum.any?(failures, &(&1.component == "channel:telegram")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:whatsapp")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:discord")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:slack")) -> :channel
-      Enum.any?(failures, &(&1.component == "channel:signal")) -> :channel
-      Enum.any?(failures, &(&1.component == "personalization")) -> :personalization
+      Enum.any?(components, &String.starts_with?(&1, "provider:")) -> :provider
+      persisted_provider(snapshot) == nil -> :model
+      Enum.any?(@channel_components, &MapSet.member?(components, &1)) -> :channel
+      MapSet.member?(components, "personalization") -> :personalization
       true -> :review
     end
+  end
+
+  defp persisted_provider(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:agent, [])
+    |> Keyword.get(:provider)
   end
 
   defp enabled_channels(snapshot) do
@@ -246,6 +312,35 @@ defmodule FermixCore.Setup.Wizard do
   defp blank?(""), do: true
   defp blank?(_), do: false
 
+  defp get_snapshot_value(%{} = snapshot, [key | rest]) do
+    snapshot
+    |> Map.get(key, [])
+    |> get_snapshot_value(rest)
+  end
+
+  defp get_snapshot_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
+
+  defp get_snapshot_value(keyword, [key | rest]) when is_list(keyword) do
+    keyword
+    |> Keyword.get(key, [])
+    |> get_snapshot_value(rest)
+  end
+
+  defp get_snapshot_value(_value, _path), do: nil
+
+  defp delete_snapshot_value(%{} = snapshot, [key | rest]) do
+    Map.update(snapshot, key, [], &delete_snapshot_value(&1, rest))
+  end
+
+  defp delete_snapshot_value(keyword, [key]) when is_list(keyword),
+    do: Keyword.delete(keyword, key)
+
+  defp delete_snapshot_value(keyword, [key | rest]) when is_list(keyword) do
+    Keyword.update(keyword, key, [], &delete_snapshot_value(&1, rest))
+  end
+
+  defp delete_snapshot_value(value, _path), do: value
+
   defp restart_required?(snapshot) do
     case ConfigStore.load_runtime_config() do
       {:ok, persisted} ->
@@ -265,25 +360,111 @@ defmodule FermixCore.Setup.Wizard do
     openai =
       providers
       |> Keyword.get(:openai, [])
-      |> Keyword.put(:auth_mode, :api_key)
       |> Keyword.put(:api_key, api_key)
 
     Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
   end
 
-  defp put_openai_oauth(snapshot, true) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
+  defp put_provider_selection(snapshot, nil), do: snapshot
+  defp put_provider_selection(snapshot, ""), do: snapshot
 
-    openai =
-      providers
-      |> Keyword.get(:openai, [])
-      |> Keyword.put(:auth_mode, :oauth)
-      |> Keyword.delete(:api_key)
+  defp put_provider_selection(snapshot, value) do
+    provider = parse_provider!(value)
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    agent = Keyword.get(fermix_core, :agent, [])
 
-    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :agent, Keyword.put(agent, :provider, provider))
+    )
   end
 
-  defp put_openai_oauth(snapshot, _), do: snapshot
+  defp put_default_model(snapshot, nil), do: snapshot
+  defp put_default_model(snapshot, ""), do: snapshot
+
+  defp put_default_model(snapshot, value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> raise ArgumentError, "default_model cannot be blank"
+      trimmed -> update_active_provider_block(snapshot, :default_model, trimmed)
+    end
+  end
+
+  defp put_reasoning_effort(snapshot, nil), do: snapshot
+  defp put_reasoning_effort(snapshot, ""), do: snapshot
+
+  defp put_reasoning_effort(snapshot, value) do
+    effort = parse_reasoning_effort!(value)
+    provider = active_provider(snapshot)
+
+    if provider in [:openai, :openai_codex] do
+      update_active_provider_block(snapshot, :reasoning_effort, effort)
+    else
+      raise ArgumentError,
+            "reasoning_effort applies to :openai or :openai_codex providers only; selected provider is #{inspect(provider)}"
+    end
+  end
+
+  defp parse_provider!(value) when is_atom(value) do
+    if value in ModelCatalog.providers() do
+      value
+    else
+      raise ArgumentError,
+            "unknown provider #{inspect(value)}; expected one of #{inspect(ModelCatalog.providers())}"
+    end
+  end
+
+  defp parse_provider!(value) when is_binary(value) do
+    trimmed = value |> String.trim() |> String.downcase()
+
+    Enum.find(ModelCatalog.providers(), fn p -> Atom.to_string(p) == trimmed end) ||
+      raise ArgumentError,
+            "unknown provider #{inspect(value)}; expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &Atom.to_string/1)}"
+  end
+
+  defp parse_reasoning_effort!(value) when is_atom(value) do
+    valid = ResponsesShared.valid_reasoning_efforts()
+
+    if value in valid do
+      value
+    else
+      raise ArgumentError,
+            "invalid reasoning_effort #{inspect(value)}; expected one of #{inspect(valid)}"
+    end
+  end
+
+  defp parse_reasoning_effort!(value) when is_binary(value) do
+    trimmed = value |> String.trim() |> String.downcase()
+    valid = ResponsesShared.valid_reasoning_efforts()
+
+    Enum.find(valid, fn atom -> Atom.to_string(atom) == trimmed end) ||
+      raise ArgumentError,
+            "invalid reasoning_effort #{inspect(value)}; expected one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}"
+  end
+
+  defp active_provider(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:agent, [])
+    |> Keyword.get(:provider)
+    |> case do
+      nil -> :openai
+      provider -> provider
+    end
+  end
+
+  defp update_active_provider_block(snapshot, key, value) do
+    provider = active_provider(snapshot)
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    providers = Keyword.get(fermix_core, :providers, [])
+    block = providers |> Keyword.get(provider, []) |> Keyword.put(key, value)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :providers, Keyword.put(providers, provider, block))
+    )
+  end
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot
   defp put_telegram_bot_token(snapshot, ""), do: snapshot

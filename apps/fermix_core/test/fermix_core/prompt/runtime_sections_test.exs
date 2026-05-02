@@ -8,10 +8,10 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     content = RuntimeSections.build([])
 
     assert content =~ "## Runtime Contract"
-    assert content =~ "Tools are available through the tool registry"
+    assert content =~ "Capabilities are available through the capability registry"
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
-    assert content =~ "`invoke_skill`"
+    assert content =~ "Pick a skill capability by name"
   end
 
   test "build/1 renders a compact skill catalog from available skills" do
@@ -32,5 +32,24 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     assert content =~ "- coding-skill: capabilities=code, tests; tools=file_read, shell"
     refute content =~ "You write code."
+  end
+
+  test "build/1 renders 'default' for a skill with absent allowed_tools (nil)" do
+    skill = %AgentDefinition{
+      name: "loose-skill",
+      role: :sub,
+      persistent: false,
+      system_prompt: "Trust-default skill.",
+      capabilities: [],
+      allowed_tools: nil,
+      max_iterations: 10,
+      timeout_seconds: 60,
+      parent: nil,
+      delegates_to: []
+    }
+
+    content = RuntimeSections.build([skill])
+
+    assert content =~ "- loose-skill: capabilities=none; tools=default"
   end
 end

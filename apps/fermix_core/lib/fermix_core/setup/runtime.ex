@@ -12,11 +12,14 @@ defmodule FermixCore.Setup.Runtime do
 
   alias FermixCore.Auth.CodexImport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
 
   @answer_keys [
     :openai_api_key,
-    :openai_auth_oauth,
+    :provider,
+    :default_model,
+    :reasoning_effort,
     :telegram_bot_token,
     :whatsapp_access_token,
     :whatsapp_phone_number_id,
@@ -57,7 +60,7 @@ defmodule FermixCore.Setup.Runtime do
       true ->
         with {:ok, extras} <- maybe_import_codex(report, opts, puts, prompt) do
           # Re-fetch the report — the codex import may have satisfied
-          # the openai provider check, leaving fewer required answers.
+          # the active provider check, leaving fewer required answers.
           {:ok, refreshed} = load_report()
           save_and_print(refreshed, opts ++ extras, puts, prompt)
         end
@@ -66,11 +69,11 @@ defmodule FermixCore.Setup.Runtime do
 
   defp maybe_import_codex(report, opts, puts, prompt) do
     cond do
-      not openai_missing?(report) ->
-        {:ok, []}
-
       Keyword.get(opts, :import_codex, false) ->
         run_codex_import(opts, puts)
+
+      not provider_missing?(report) ->
+        {:ok, []}
 
       Keyword.get(opts, :openai_api_key) not in [nil, ""] ->
         {:ok, []}
@@ -96,15 +99,15 @@ defmodule FermixCore.Setup.Runtime do
     case CodexImport.import_tokens(import_opts) do
       {:ok, _entry} ->
         puts.("Imported OpenAI tokens from Codex CLI.")
-        {:ok, [openai_auth_oauth: true]}
+        {:ok, [provider: "openai_codex"]}
 
       {:error, reason} ->
         {:error, "codex import failed: #{inspect(reason)}"}
     end
   end
 
-  defp openai_missing?(%{failures: failures}) do
-    Enum.any?(failures, &(&1.component == "provider:openai"))
+  defp provider_missing?(%{failures: failures}) do
+    Enum.any?(failures, &(&1.component in ["provider:openai", "provider:openai_codex"]))
   end
 
   defp codex_path(opts) do
@@ -152,12 +155,43 @@ defmodule FermixCore.Setup.Runtime do
       {:ok, updated_report} ->
         puts.("Saved setup snapshot to #{updated_report.config_path}")
         print_report(updated_report, puts)
-        :ok
+        run_finalize_probe(updated_report, opts, puts)
 
       {:error, reason} ->
         {:error, "failed to save setup snapshot: #{inspect(reason)}"}
     end
   end
+
+  defp run_finalize_probe(%{status: :ready}, opts, puts) do
+    if Keyword.get(opts, :skip_probe, false) do
+      :ok
+    else
+      probe_opts = Keyword.take(opts, [:req_options, :token_server])
+
+      case Doctor.probe_active(probe_opts) do
+        {:ok, %{provider: provider, model: model, latency_ms: ms}} ->
+          puts.("auth probe: #{provider}/#{model} responded in #{ms}ms")
+          :ok
+
+        {:error, {:auth_scope_mismatch, surface, hint}} ->
+          {:error, "auth probe failed for #{surface}: #{hint}"}
+
+        {:error, {:misconfigured, message}} ->
+          puts.("auth probe skipped: #{message}")
+          :ok
+
+        {:error, {:server_error, status, _body}} ->
+          puts.("auth probe inconclusive: provider returned HTTP #{status}")
+          :ok
+
+        {:error, {:network, reason}} ->
+          puts.("auth probe inconclusive: network error #{inspect(reason)}")
+          :ok
+      end
+    end
+  end
+
+  defp run_finalize_probe(_report, _opts, _puts), do: :ok
 
   defp collect_answers(report, opts, prompt) do
     case provided_answers(opts) do

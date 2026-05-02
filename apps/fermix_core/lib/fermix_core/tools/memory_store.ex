@@ -4,10 +4,10 @@ defmodule FermixCore.Tools.MemoryStore do
   Uses ETS-backed Memory.Store scoped by conversation key.
   """
 
-  @behaviour FermixCore.Tools.Tool
+  @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Memory.Store
-  alias FermixCore.Tools.Tool
 
   @impl true
   @spec name() :: String.t()

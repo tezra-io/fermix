@@ -3,9 +3,9 @@ defmodule FermixCore.Tools.FileWrite do
   Write content to a file. Creates parent directories if needed.
   """
 
-  @behaviour FermixCore.Tools.Tool
+  @behaviour FermixCore.Capabilities.Builtin.Tool
 
-  alias FermixCore.Tools.Tool
+  alias FermixCore.Capabilities.Builtin.Tool
 
   @impl true
   @spec name() :: String.t()

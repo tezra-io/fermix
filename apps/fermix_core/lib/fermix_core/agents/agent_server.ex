@@ -8,7 +8,8 @@ defmodule FermixCore.Agents.AgentServer do
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.LifecycleTelemetry
-  alias FermixCore.Tools.Registry
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Providers.RouteResolver
 
   @type run_context :: %{
           optional(:task_context) => String.t() | nil,
@@ -88,7 +89,8 @@ defmodule FermixCore.Agents.AgentServer do
       parent_ref: parent_ref,
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
-      registry: Keyword.get(opts, :registry, Registry),
+      capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
+      adapter_overrides: Keyword.get(opts, :adapter_overrides, []),
       pending_task: nil,
       started_at: started_at,
       started_monotonic_ms: System.monotonic_time(:millisecond)
@@ -136,7 +138,8 @@ defmodule FermixCore.Agents.AgentServer do
           state.definition,
           state.session_id,
           state.provider,
-          state.registry,
+          state.capability_registry,
+          state.adapter_overrides,
           task,
           context
         )
@@ -231,7 +234,15 @@ defmodule FermixCore.Agents.AgentServer do
     :ok
   end
 
-  defp execute_task(definition, session_id, provider, registry, task, context) do
+  defp execute_task(
+         definition,
+         session_id,
+         provider,
+         capability_registry,
+         adapter_overrides,
+         task,
+         context
+       ) do
     messages = [
       %{role: "system", content: definition.system_prompt},
       %{role: "user", content: build_task_prompt(task, Map.get(context, :task_context))}
@@ -240,22 +251,57 @@ defmodule FermixCore.Agents.AgentServer do
     tool_context =
       context
       |> Map.get(:tool_context, %{})
-      |> Map.merge(%{agent_name: definition.name, session_id: session_id})
+      |> Map.merge(%{
+        agent_name: definition.name,
+        session_id: session_id,
+        capability_registry: capability_registry
+      })
 
-    loop_opts =
-      [
-        messages: messages,
-        tools: Registry.all_tools_for_llm(registry, definition.allowed_tools),
-        allowed_tools: definition.allowed_tools,
-        provider: provider,
-        max_iterations: definition.max_iterations,
-        context: tool_context,
-        registry: registry
-      ]
-      |> maybe_put(:model, definition.model)
-      |> maybe_put(:temperature, definition.temperature)
+    base = [
+      messages: messages,
+      allowed_tools: definition.allowed_tools,
+      policy: definition.policy,
+      trust: definition.trust,
+      max_iterations: definition.max_iterations,
+      context: tool_context,
+      capability_registry: capability_registry
+    ]
 
+    loop_opts = build_loop_opts(base, definition, provider, adapter_overrides)
     AgentLoop.run(loop_opts)
+  end
+
+  defp build_loop_opts(base, definition, provider, adapter_overrides) when is_atom(provider) do
+    if adapter_capable?(provider) do
+      base
+      |> Keyword.put(:adapter, provider)
+      |> Keyword.put(:adapter_opts, model: definition.model || "mock-model")
+    else
+      build_route_loop_opts(base, definition, adapter_overrides)
+    end
+  end
+
+  defp build_route_loop_opts(base, definition, adapter_overrides) do
+    overrides =
+      adapter_overrides
+      |> put_unless_nil(:provider, definition.provider)
+      |> put_unless_nil(:model, definition.model)
+      |> put_unless_nil(:temperature, definition.temperature)
+
+    {route_key, adapter_opts} = RouteResolver.resolve!(overrides)
+
+    base
+    |> Keyword.put(:route_key, route_key)
+    |> Keyword.put(:adapter_opts, adapter_opts)
+  end
+
+  defp put_unless_nil(opts, _key, nil), do: opts
+  defp put_unless_nil(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp adapter_capable?(nil), do: false
+
+  defp adapter_capable?(mod) when is_atom(mod) do
+    Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
   end
 
   defp build_task_prompt(task, nil), do: "Task:\n#{task}"
@@ -271,9 +317,6 @@ defmodule FermixCore.Agents.AgentServer do
     """
     |> String.trim()
   end
-
-  defp maybe_put(opts, _key, nil), do: opts
-  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp normalize_task_result({:ok, %{iterations: iterations} = result}),
     do: {{:ok, result}, true, iterations}

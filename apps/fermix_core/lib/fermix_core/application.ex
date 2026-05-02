@@ -11,6 +11,9 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
@@ -18,7 +21,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Store
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
-  alias FermixCore.Tools.Registry
   alias FermixCore.Trace
 
   @impl true
@@ -83,8 +85,10 @@ defmodule FermixCore.Application do
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Trace, trace_opts()},
         maybe_token_manager(),
-        SkillRegistry,
-        Registry,
+        CapabilityRegistry,
+        BuiltinSeeder,
+        {SkillRegistry, capability_registry: CapabilityRegistry},
+        {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
         ConversationStore,
         Store,
@@ -99,10 +103,7 @@ defmodule FermixCore.Application do
 
     opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
 
-    with {:ok, pid} <- Supervisor.start_link(children, opts) do
-      register_tools()
-      {:ok, pid}
-    end
+    Supervisor.start_link(children, opts)
   end
 
   defp run_cli(argv) do
@@ -114,30 +115,12 @@ defmodule FermixCore.Application do
       1
   end
 
-  defp register_tools do
-    tools = [
-      FermixCore.Tools.Shell,
-      FermixCore.Tools.FileRead,
-      FermixCore.Tools.FileWrite,
-      FermixCore.Tools.MemoryStore,
-      FermixCore.Tools.MemoryRecall,
-      FermixCore.Tools.Browser,
-      FermixCore.Tools.InvokeSkill
-    ]
-
-    Enum.each(tools, fn tool ->
-      case Registry.register(tool) do
-        :ok -> :ok
-        {:error, :already_registered} -> :ok
-      end
-    end)
-  end
-
   defp maybe_token_manager do
-    providers = Application.get_env(:fermix_core, :providers, [])
-    openai = Keyword.get(providers, :openai, [])
+    provider =
+      Application.get_env(:fermix_core, :agent, [])
+      |> Keyword.get(:provider, :openai)
 
-    if Keyword.get(openai, :auth_mode) == :oauth do
+    if provider == :openai_codex do
       [TokenManager]
     else
       []

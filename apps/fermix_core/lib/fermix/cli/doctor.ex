@@ -41,7 +41,10 @@ defmodule Fermix.CLI.Doctor do
       Checks.linger()
     ]
 
-    network = if full?, do: [Checks.binary_integrity(), Checks.upgrade_available?()], else: []
+    network =
+      if full?,
+        do: [Checks.binary_integrity(), Checks.upgrade_available?(), Checks.auth_probe()],
+        else: []
 
     Enum.reject(base ++ network, &is_nil/1)
   end
