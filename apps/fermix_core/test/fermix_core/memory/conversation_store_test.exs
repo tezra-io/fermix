@@ -1,19 +1,79 @@
 defmodule FermixCore.Memory.ConversationStoreTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+
+  defmodule FlakyRepo do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    @impl true
+    def init(opts) do
+      {:ok,
+       %{
+         test_pid: Keyword.fetch!(opts, :test_pid),
+         failures_remaining: Keyword.get(opts, :failures_remaining, 0)
+       }}
+    end
+
+    @impl true
+    def handle_call(:enabled?, _from, state), do: {:reply, true, state}
+
+    def handle_call({:insert_message, attrs}, _from, state) do
+      send(state.test_pid, {:insert_attempt, attrs.role, attrs.content})
+
+      if state.failures_remaining > 0 do
+        {:reply, {:error, :disk_busy},
+         %{state | failures_remaining: state.failures_remaining - 1}}
+      else
+        {:reply, {:ok, Map.put(attrs, :id, state.failures_remaining)}, state}
+      end
+    end
+  end
 
   @key {"telegram", "chat_123", :root}
   @key2 {"discord", "chat_456", :root}
 
   setup do
     name = :"conv_store_#{System.unique_integer([:positive])}"
-    start_supervised!({ConversationStore, name: name, max_messages: 5})
+    start_supervised!({ConversationStore, name: name, max_messages: 5, repo: nil})
     %{store: name}
   end
 
   defp sync(store), do: :sys.get_state(store)
+
+  defp wait_for_message_count(repo, selector, expected, attempts \\ 50)
+
+  defp wait_for_message_count(repo, selector, expected, attempts) when attempts > 0 do
+    case Repo.message_count(selector, server: repo) do
+      {:ok, ^expected} ->
+        :ok
+
+      _other ->
+        Process.sleep(10)
+        wait_for_message_count(repo, selector, expected, attempts - 1)
+    end
+  end
+
+  defp wait_for_message_count(repo, selector, expected, 0) do
+    flunk("timed out waiting for #{expected} persisted messages: #{inspect({repo, selector})}")
+  end
+
+  defp chat_selector(key) do
+    %{
+      agent_id: "main",
+      channel: elem(key, 0),
+      chat_id: elem(key, 1),
+      thread_scope: elem(key, 2),
+      kind: "chat_message"
+    }
+  end
 
   # --- add_message + get_history ---
 
@@ -219,6 +279,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       ConversationStore.add_message(@key, "user", "hello", server: store)
       ConversationStore.add_message(@key, "assistant", "hi there", server: store)
       sync(store)
+      wait_for_message_count(repo, chat_selector(@key), 2)
 
       assert :ok = GenServer.stop(store)
 
@@ -234,6 +295,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
     end
 
     test "backfills persisted history after cache eviction while keeping a rolling hot window", %{
+      repo: repo,
       store: store
     } do
       for i <- 1..8 do
@@ -241,6 +303,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       end
 
       sync(store)
+      wait_for_message_count(repo, chat_selector(@key), 8)
 
       :sys.replace_state(store, fn state ->
         %{state | conversations: %{}}
@@ -259,6 +322,7 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       store: store
     } do
       ConversationStore.add_message(@key, "user", "visible chat", server: store)
+      wait_for_message_count(repo, chat_selector(@key), 1)
 
       assert {:ok, _checkpoint} =
                Repo.insert_message(
@@ -284,12 +348,13 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       assert Enum.map(history, & &1.content) == ["visible chat"]
     end
 
-    test "telemetry marks durable writes and records sqlite write latency", %{
+    test "telemetry marks durable enqueue and async sqlite persistence", %{
       store: store
     } do
       ref =
         :telemetry_test.attach_event_handlers(self(), [
-          [:fermix, :memory, :message]
+          [:fermix, :memory, :message],
+          [:fermix, :memory, :message_persist]
         ])
 
       ConversationStore.add_message(@key, "user", "hello", server: store)
@@ -297,10 +362,81 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       assert_received {[:fermix, :memory, :message], ^ref, measurements, metadata}
       assert measurements.count == 1
       assert is_integer(measurements.duration_us)
-      assert is_integer(measurements.durable_write_us)
-      assert measurements.duration_us >= measurements.durable_write_us
-      assert measurements.durable_write_us >= 0
+      assert measurements.durable_write_us == 0
       assert metadata.durable? == true
+
+      assert_receive {[:fermix, :memory, :message_persist], ^ref, persist_measurements,
+                      persist_metadata}
+
+      assert persist_measurements.count == 1
+      assert is_integer(persist_measurements.duration_us)
+      assert persist_metadata.status == :ok
+      assert persist_metadata.attempt == 1
+    end
+
+    test "keeps in-memory history and returns when durable write fails", %{store: _store} do
+      repo = start_supervised!({FlakyRepo, test_pid: self(), failures_remaining: 10})
+      store = :"conversation_store_flaky_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: store,
+        start:
+          {ConversationStore, :start_link,
+           [
+             [
+               name: store,
+               max_messages: 5,
+               repo: repo,
+               durable_max_attempts: 1,
+               durable_retry_initial_ms: 0
+             ]
+           ]}
+      })
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   ConversationStore.add_message(@key, "user", "do not block reply",
+                     server: store
+                   )
+
+          assert [%{content: "do not block reply"}] =
+                   ConversationStore.get_history(@key, server: store)
+
+          assert_receive {:insert_attempt, "user", "do not block reply"}
+          Process.sleep(10)
+        end)
+
+      assert log =~ "conversation durable write failed after 1 attempts"
+    end
+
+    test "retries async durable writes after transient failure", %{store: _store} do
+      repo = start_supervised!({FlakyRepo, test_pid: self(), failures_remaining: 1})
+      store = :"conversation_store_retry_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: store,
+        start:
+          {ConversationStore, :start_link,
+           [
+             [
+               name: store,
+               max_messages: 5,
+               repo: repo,
+               durable_max_attempts: 2,
+               durable_retry_initial_ms: 0
+             ]
+           ]}
+      })
+
+      log =
+        capture_log(fn ->
+          assert :ok = ConversationStore.add_message(@key, "assistant", "retry me", server: store)
+          assert_receive {:insert_attempt, "assistant", "retry me"}
+          assert_receive {:insert_attempt, "assistant", "retry me"}
+        end)
+
+      assert log =~ "conversation durable write failed; retrying attempt 2/2"
     end
   end
 end
