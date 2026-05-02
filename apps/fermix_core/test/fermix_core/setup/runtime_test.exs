@@ -58,6 +58,11 @@ defmodule FermixCore.Setup.RuntimeTest do
     File.mkdir_p!(home)
 
     Application.put_env(:fermix_core, :providers, openai: [])
+    # Pin agent.provider so the suite can't be polluted by a host
+    # ~/.fermix/config.toml that sets a non-default provider (e.g. dev
+    # using openai_codex). Tests that want to assert codex routing must
+    # override this explicitly.
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
 
     Application.put_env(
       :fermix_core,
@@ -246,6 +251,46 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       providers = Application.get_env(:fermix_core, :providers, [])
       assert Keyword.get(providers[:openai], :auth_mode) == :oauth
+
+      lines = puts_lines(collector)
+      assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
+    end
+
+    test "explicit --import-codex re-runs even when openai is already oauth-configured" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+
+      prepare(home)
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :oauth],
+        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :medium]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      codex_path = write_codex_auth(home, "fresh_codex_rt")
+      fermix_auth = Path.join(home, "auth.json")
+
+      {puts, collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   import_codex: true,
+                   codex_auth_path: codex_path,
+                   fermix_auth_path: fermix_auth,
+                   req_options: [plug: &__MODULE__.success_plug/1],
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, raw} = File.read(fermix_auth)
+      data = Jason.decode!(raw)
+      assert data["providers"]["openai"]["tokens"]["access_token"] == "imported_at"
+      assert data["providers"]["openai"]["tokens"]["refresh_token"] == "imported_rt"
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
