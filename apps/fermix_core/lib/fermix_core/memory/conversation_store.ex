@@ -215,10 +215,13 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   defp configured_repo(nil), do: nil
-  defp configured_repo(repo) when is_pid(repo), do: if(Process.alive?(repo), do: repo)
+
+  defp configured_repo(repo) when is_pid(repo) do
+    if Process.alive?(repo), do: Repo.enabled_server(repo)
+  end
 
   defp configured_repo(repo) when is_atom(repo) do
-    if Process.whereis(repo), do: repo
+    Repo.enabled_server(repo)
   end
 
   defp start_persist_task(supervisor, ctx) do
@@ -235,12 +238,17 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
+  # `nil` means the caller explicitly opted out of supervision (test wiring,
+  # mostly). Anything else is a real supervisor and a missing/dead supervisor
+  # should surface as an error — we don't silently degrade to an unsupervised
+  # task because that hides the supervision-tree problem and lies in the
+  # `durable?` telemetry flag.
   defp start_child(nil, task), do: Task.start(task)
 
   defp start_child(supervisor, task) do
     Task.Supervisor.start_child(supervisor, task)
   catch
-    :exit, _reason -> Task.start(task)
+    :exit, reason -> {:error, {:task_supervisor_exit, reason}}
   end
 
   defp persist_message(ctx, attempt) do
