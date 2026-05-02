@@ -70,11 +70,11 @@ defmodule FermixCore.Setup.Runtime do
 
   defp maybe_import_codex(report, opts, puts, prompt) do
     cond do
-      not openai_missing?(report) ->
-        {:ok, []}
-
       Keyword.get(opts, :import_codex, false) ->
         run_codex_import(opts, puts)
+
+      not openai_missing?(report) ->
+        {:ok, []}
 
       Keyword.get(opts, :openai_api_key) not in [nil, ""] ->
         {:ok, []}
