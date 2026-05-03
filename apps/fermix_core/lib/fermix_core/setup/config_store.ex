@@ -65,7 +65,8 @@ defmodule FermixCore.Setup.ConfigStore do
           anthropic: Keyword.get(providers, :anthropic, [])
         ],
         personalization: Application.get_env(:fermix_core, :personalization, []),
-        agent: Application.get_env(:fermix_core, :agent, [])
+        agent: Application.get_env(:fermix_core, :agent, []),
+        jobs: Application.get_env(:fermix_core, :jobs, [])
       ],
       fermix_channels: [
         telegram: Application.get_env(:fermix_channels, :telegram, []),
@@ -110,6 +111,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
     apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
+    apply_jobs_config(Keyword.get(persisted.fermix_core, :jobs, []))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
     apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
@@ -180,7 +182,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:agent, [])
-          |> normalize_agent()
+          |> normalize_agent(),
+        jobs:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:jobs, [])
+          |> normalize_jobs()
       ],
       fermix_channels: [
         telegram:
@@ -228,7 +235,8 @@ defmodule FermixCore.Setup.ConfigStore do
       fermix_core: [
         providers: [openai: [], openai_codex: [], anthropic: []],
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
-        agent: [name: "fermix"]
+        agent: [name: "fermix"],
+        jobs: []
       ],
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
@@ -260,6 +268,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_jobs_config(jobs_config) do
+    merged =
+      Application.get_env(:fermix_core, :jobs, [])
+      |> Keyword.merge(jobs_config)
+
+    Application.put_env(:fermix_core, :jobs, merged)
+    :ok
+  end
+
   defp apply_channel_config(channel, channel_config) do
     merged =
       Application.get_env(:fermix_channels, channel, [])
@@ -274,6 +291,7 @@ defmodule FermixCore.Setup.ConfigStore do
     providers = Keyword.get(fermix_core, :providers, [])
     personalization = Keyword.get(fermix_core, :personalization, [])
     agent = Keyword.get(fermix_core, :agent, [])
+    jobs = Keyword.get(fermix_core, :jobs, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
@@ -292,6 +310,11 @@ defmodule FermixCore.Setup.ConfigStore do
         Keyword.get(providers, :anthropic, [])
       ),
       render_section(["fermix_core", "personalization"], personalization),
+      render_section(["fermix_core", "jobs"], Keyword.drop(jobs, [:default_delivery_target])),
+      render_section(
+        ["fermix_core", "jobs", "default_delivery_target"],
+        Keyword.get(jobs, :default_delivery_target, [])
+      ),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -375,7 +398,8 @@ defmodule FermixCore.Setup.ConfigStore do
         ],
         personalization:
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
-        agent: normalize_agent(get_in(document, ["fermix_core", "agent"]))
+        agent: normalize_agent(get_in(document, ["fermix_core", "agent"])),
+        jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"]))
       ],
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
@@ -539,6 +563,57 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(:name, normalize_string(lookup(config, "name", :name)))
     |> put_if_present(:provider, normalize_provider(lookup(config, "provider", :provider)))
   end
+
+  defp normalize_jobs(nil), do: []
+
+  defp normalize_jobs(config) do
+    []
+    |> put_if_present(
+      :default_delivery_mode,
+      normalize_delivery_mode(lookup(config, "default_delivery_mode", :default_delivery_mode))
+    )
+    |> put_if_present(
+      :default_delivery_target,
+      normalize_default_delivery_target(
+        lookup(config, "default_delivery_target", :default_delivery_target)
+      )
+    )
+  end
+
+  defp normalize_delivery_mode(:none), do: "none"
+  defp normalize_delivery_mode(:origin), do: "origin"
+  defp normalize_delivery_mode(:channel), do: "channel"
+  defp normalize_delivery_mode(:local), do: "local"
+  defp normalize_delivery_mode("none"), do: "none"
+  defp normalize_delivery_mode("origin"), do: "origin"
+  defp normalize_delivery_mode("channel"), do: "channel"
+  defp normalize_delivery_mode("local"), do: "local"
+  defp normalize_delivery_mode(_value), do: nil
+
+  defp normalize_default_delivery_target(nil), do: nil
+
+  defp normalize_default_delivery_target(target) when is_map(target) or is_list(target) do
+    [
+      platform: normalize_string(lookup(target, "platform", :platform)),
+      channel: normalize_string(lookup(target, "channel", :channel)),
+      chat_id: normalize_string(lookup(target, "chat_id", :chat_id)),
+      reply_target: normalize_string(lookup(target, "reply_target", :reply_target)),
+      target: normalize_string(lookup(target, "target", :target)),
+      recipient: normalize_string(lookup(target, "recipient", :recipient)),
+      channel_id: normalize_string(lookup(target, "channel_id", :channel_id)),
+      thread_ts: normalize_string(lookup(target, "thread_ts", :thread_ts)),
+      message_thread_id:
+        normalize_string(lookup(target, "message_thread_id", :message_thread_id)),
+      reply_to: normalize_string(lookup(target, "reply_to", :reply_to))
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> case do
+      [] -> nil
+      values -> values
+    end
+  end
+
+  defp normalize_default_delivery_target(_target), do: nil
 
   defp normalize_telegram(nil), do: []
 

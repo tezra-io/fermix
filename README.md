@@ -1,5 +1,14 @@
 # Fermix
 
+```text
+███████╗ ███████╗ ██████╗  ███╗   ███╗ ██╗ ██╗  ██╗
+██╔════╝ ██╔════╝ ██╔══██╗ ████╗ ████║ ██║ ╚██╗██╔╝
+█████╗   █████╗   ██████╔╝ ██╔████╔██║ ██║  ╚███╔╝
+██╔══╝   ██╔══╝   ██╔══██╗ ██║╚██╔╝██║ ██║  ██╔██╗
+██║      ███████╗ ██║  ██║ ██║ ╚═╝ ██║ ██║ ██╔╝ ██╗
+╚═╝      ╚══════╝ ╚═╝  ╚═╝ ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═╝
+```
+
 Elixir-native multi-agent AI platform that runs as a local daemon and reaches you through the chat channels you already use.
 
 ![License](https://img.shields.io/badge/license-proprietary-red)
@@ -7,9 +16,13 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 ![Erlang/OTP](https://img.shields.io/badge/otp-%E2%89%A5%2028-red)
 ![Status](https://img.shields.io/badge/status-alpha%20(pre--1.0)-yellow)
 
+<p align="center">
+  <img src="artifacts/fermix-cover.png" alt="Fermix cover: a luminous agent particle in a larger abstract system" width="960">
+</p>
+
 ## What is Fermix
 
-Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. Today the runtime drives OpenAI (chat completions, function calling, optional native OAuth); additional providers are on the roadmap. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
+Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. Today the runtime drives OpenAI API-key models and the separate `openai_codex` provider with Codex OAuth tokens; additional providers are on the roadmap. Fermix also runs scheduled background jobs for digests, watchers, reminders, and checks; each run is isolated, bounded, stored durably, and delivered through the configured channel layer. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
 
 ## Quick start
 
@@ -67,6 +80,21 @@ Runtime precedence is:
 1. compile-time defaults in `config/config.exs`
 2. persisted setup state from `config.toml`
 3. environment variable overrides applied in `config/runtime.exs`
+
+### Scheduled job delivery
+
+Scheduled jobs can deliver their final response to an explicit per-job target, or to a cron-specific default channel target stored in `config.toml`:
+
+```toml
+[fermix_core.jobs]
+default_delivery_mode = "channel"
+
+[fermix_core.jobs.default_delivery_target]
+platform = "telegram"
+chat_id = "8217352118"
+```
+
+`chat_id` is the external channel conversation id, such as a Telegram chat id; it is not a Fermix session id. Delivery settings are resolved into each job when the job is created, so changing the default later does not silently retarget existing jobs. Jobs can also set an optional `expires_at` ISO8601 timestamp; when it is reached, Fermix marks the job expired through scheduler state.
 
 ### Environment variables
 
@@ -171,10 +199,10 @@ One BEAM VM, all `:permanent` under OTP. The data flow is straight-line:
 
 ```
 channel adapter → FermixChannels.Dispatcher → FermixCore.Agents.MainAgent
-  → tool / skill execution → provider (OpenAI) → LLM → reply
+  → capability execution → provider → LLM → reply
 ```
 
-The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Tools.Registry`, and recurses up to a hard cap of 25 iterations. The current tool set is:
+The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a hard cap of 25 iterations. Built-in tools are capabilities, and installed skills are registered as capabilities as well. The current built-in capability set is:
 
 | Tool | Description |
 |------|-------------|
@@ -183,8 +211,13 @@ The agent loop calls the provider, parses tool calls, executes them through the 
 | `file_write` | Write files with auto mkdir |
 | `memory_store` | Store key-value facts |
 | `memory_recall` | Recall stored facts |
+| `memory_sources_list` | List visible memory sources, including scheduled-job sources |
 | `browser` | Drive a browser via the `agent-browser` CLI (snapshot, navigate, click, fill, screenshot) |
-| `invoke_skill` | Delegate a focused task to a supervised skill agent |
+| `schedule_job` | Create a durable scheduled job and memory source, with optional expiry |
+| `list_jobs` | List scheduled jobs |
+| `pause_job` | Pause a scheduled job |
+| `resume_job` | Resume a paused scheduled job |
+| `remove_job` | Remove a scheduled job |
 
 Observability:
 

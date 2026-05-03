@@ -12,6 +12,10 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
     assert content =~ "Pick a skill capability by name"
+    assert content =~ "cron-style requests"
+    assert content =~ "use `schedule_job`"
+    assert content =~ "Use `expires_at` for temporary"
+    assert content =~ "Do not use shell, browser, computer-use, or MCP automation"
   end
 
   test "build/1 renders a compact skill catalog from available skills" do
