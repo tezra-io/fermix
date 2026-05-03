@@ -12,6 +12,8 @@ defmodule FermixCore.Memory.Repo do
   @base_migration_version 1
   @fts_migration_version 2
   @resource_migration_version 3
+  @jobs_migration_version 4
+  @job_expiry_migration_version 5
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -130,6 +132,112 @@ defmodule FermixCore.Memory.Repo do
     ON resource_revisions(agent_id, resource_type, scope_id, created_at DESC);
   """
 
+  @jobs_schema_sql """
+  ALTER TABLE memories ADD COLUMN source_id TEXT;
+  ALTER TABLE memories ADD COLUMN source_type TEXT;
+  ALTER TABLE memories ADD COLUMN source_name TEXT;
+  ALTER TABLE memories ADD COLUMN source_description TEXT;
+  ALTER TABLE memories ADD COLUMN session_id TEXT;
+  ALTER TABLE memories ADD COLUMN run_id TEXT;
+
+  CREATE TABLE IF NOT EXISTS scheduled_jobs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    schedule_kind TEXT NOT NULL,
+    schedule_expr TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    next_run_at TEXT,
+    task_prompt TEXT NOT NULL,
+    skill_name TEXT,
+    session_mode TEXT NOT NULL DEFAULT 'isolated',
+    provider TEXT,
+    model TEXT,
+    max_iterations INTEGER NOT NULL DEFAULT 25,
+    timeout_seconds INTEGER,
+    inactivity_timeout_seconds INTEGER,
+    capability_policy_json TEXT,
+    allowed_tools_json TEXT,
+    memory_source_id TEXT NOT NULL REFERENCES memory_sources(id) ON DELETE RESTRICT,
+    memory_read_scopes_json TEXT,
+    memory_write_scope TEXT,
+    main_visible INTEGER NOT NULL DEFAULT 1,
+    delivery_mode TEXT NOT NULL DEFAULT 'none',
+    delivery_target_json TEXT,
+    silent_marker TEXT NOT NULL DEFAULT '[SILENT]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'scheduled',
+    last_run_at TEXT,
+    last_status TEXT,
+    last_error TEXT,
+    created_by_agent_id TEXT NOT NULL DEFAULT 'main',
+    created_by_session_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_state_next_run
+    ON scheduled_jobs(enabled, state, next_run_at);
+  CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_creator_state
+    ON scheduled_jobs(created_by_agent_id, state);
+
+  CREATE TABLE IF NOT EXISTS job_runs (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES scheduled_jobs(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    status TEXT NOT NULL,
+    claimed_at TEXT,
+    started_at TEXT,
+    completed_at TEXT,
+    prompt_snapshot TEXT,
+    job_config_snapshot_json TEXT,
+    capability_policy_snapshot_json TEXT,
+    output_ref TEXT,
+    final_response TEXT,
+    error TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'none',
+    delivery_error TEXT,
+    iterations INTEGER,
+    token_usage_json TEXT,
+    latency_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_job_runs_job_created
+    ON job_runs(job_id, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_job_runs_status_created
+    ON job_runs(status, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS memory_sources (
+    id TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    owner_agent_id TEXT NOT NULL DEFAULT 'main',
+    visibility TEXT NOT NULL DEFAULT 'main_visible',
+    schedule_summary TEXT,
+    status TEXT NOT NULL DEFAULT 'enabled',
+    last_run_at TEXT,
+    last_status TEXT,
+    memory_scope TEXT NOT NULL,
+    output_scope TEXT,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_memory_sources_owner_visibility
+    ON memory_sources(owner_agent_id, visibility, status);
+  """
+
+  @job_expiry_schema_sql """
+  ALTER TABLE scheduled_jobs ADD COLUMN expires_at TEXT;
+  CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_expires_at
+    ON scheduled_jobs(enabled, state, expires_at);
+  """
+
   @type message_attrs :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
@@ -165,6 +273,12 @@ defmodule FermixCore.Memory.Repo do
           optional(:confidence) => float(),
           optional(:promote_target) => String.t(),
           optional(:source_message_id) => integer() | nil,
+          optional(:source_id) => String.t() | nil,
+          optional(:source_type) => String.t() | nil,
+          optional(:source_name) => String.t() | nil,
+          optional(:source_description) => String.t() | nil,
+          optional(:session_id) => String.t() | nil,
+          optional(:run_id) => String.t() | nil,
           optional(:created_at) => DateTime.t(),
           optional(:updated_at) => DateTime.t()
         }
@@ -175,6 +289,10 @@ defmodule FermixCore.Memory.Repo do
           optional(:scope_type) => String.t(),
           optional(:scope_id) => String.t(),
           optional(:category) => String.t(),
+          optional(:source_id) => String.t(),
+          optional(:source_type) => String.t(),
+          optional(:session_id) => String.t(),
+          optional(:run_id) => String.t(),
           optional(:key) => String.t()
         }
 
@@ -184,6 +302,10 @@ defmodule FermixCore.Memory.Repo do
           optional(:scope_type) => String.t(),
           optional(:scope_id) => String.t(),
           optional(:category) => String.t(),
+          optional(:source_id) => String.t(),
+          optional(:source_type) => String.t(),
+          optional(:session_id) => String.t(),
+          optional(:run_id) => String.t(),
           required(:key) => String.t()
         }
 
@@ -213,6 +335,10 @@ defmodule FermixCore.Memory.Repo do
           required(:mutation_source) => String.t(),
           optional(:provenance) => map() | nil
         }
+
+  @type scheduled_job_attrs :: map()
+  @type job_run_attrs :: map()
+  @type memory_source_attrs :: map()
 
   @type message_row :: %{
           id: integer(),
@@ -267,6 +393,12 @@ defmodule FermixCore.Memory.Repo do
           confidence: float(),
           promote_target: String.t(),
           source_message_id: integer() | nil,
+          source_id: String.t() | nil,
+          source_type: String.t() | nil,
+          source_name: String.t() | nil,
+          source_description: String.t() | nil,
+          session_id: String.t() | nil,
+          run_id: String.t() | nil,
           created_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -283,6 +415,12 @@ defmodule FermixCore.Memory.Repo do
           confidence: float(),
           promote_target: String.t(),
           source_message_id: integer() | nil,
+          source_id: String.t() | nil,
+          source_type: String.t() | nil,
+          source_name: String.t() | nil,
+          source_description: String.t() | nil,
+          session_id: String.t() | nil,
+          run_id: String.t() | nil,
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
           rank: float()
@@ -313,6 +451,10 @@ defmodule FermixCore.Memory.Repo do
           provenance: map() | nil,
           created_at: DateTime.t()
         }
+
+  @type scheduled_job_row :: map()
+  @type job_run_row :: map()
+  @type memory_source_row :: map()
 
   @type state :: %{
           enabled: boolean(),
@@ -477,6 +619,90 @@ defmodule FermixCore.Memory.Repo do
     call({:revision_count, selector}, opts)
   end
 
+  @spec create_job_with_source(scheduled_job_attrs(), memory_source_attrs(), keyword()) ::
+          {:ok, scheduled_job_row()} | {:error, term()}
+  def create_job_with_source(job_attrs, source_attrs, opts \\ [])
+      when is_map(job_attrs) and is_map(source_attrs) do
+    call({:create_job_with_source, job_attrs, source_attrs}, opts)
+  end
+
+  @spec due_scheduled_jobs(DateTime.t(), keyword()) ::
+          {:ok, [scheduled_job_row()]} | {:error, term()}
+  def due_scheduled_jobs(%DateTime{} = now, opts \\ []) do
+    call({:due_scheduled_jobs, now, Keyword.get(opts, :limit, 20)}, opts)
+  end
+
+  @spec next_scheduled_job(keyword()) :: {:ok, scheduled_job_row() | nil} | {:error, term()}
+  def next_scheduled_job(opts \\ []) do
+    call(:next_scheduled_job, opts)
+  end
+
+  @spec claim_due_job(String.t(), scheduled_job_attrs(), job_run_attrs(), DateTime.t(), keyword()) ::
+          {:ok, {scheduled_job_row(), job_run_row()}} | {:error, term()}
+  def claim_due_job(id, job_attrs, run_attrs, %DateTime{} = now, opts \\ [])
+      when is_binary(id) and is_map(job_attrs) and is_map(run_attrs) do
+    call({:claim_due_job, id, job_attrs, run_attrs, now}, opts)
+  end
+
+  @spec upsert_scheduled_job(scheduled_job_attrs(), keyword()) ::
+          {:ok, scheduled_job_row()} | {:error, term()}
+  def upsert_scheduled_job(attrs, opts \\ []) when is_map(attrs) do
+    call({:upsert_scheduled_job, attrs}, opts)
+  end
+
+  @spec get_scheduled_job(String.t(), keyword()) ::
+          {:ok, scheduled_job_row()} | {:error, :not_found | term()}
+  def get_scheduled_job(id, opts \\ []) when is_binary(id) do
+    call({:get_scheduled_job, id}, opts)
+  end
+
+  @spec list_scheduled_jobs(map(), keyword()) :: {:ok, [scheduled_job_row()]} | {:error, term()}
+  def list_scheduled_jobs(selector \\ %{}, opts \\ []) when is_map(selector) do
+    call({:list_scheduled_jobs, selector}, opts)
+  end
+
+  @spec delete_scheduled_job(String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_scheduled_job(id, opts \\ []) when is_binary(id) do
+    call({:delete_scheduled_job, id}, opts)
+  end
+
+  @spec delete_scheduled_job_if_idle(String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_scheduled_job_if_idle(id, opts \\ []) when is_binary(id) do
+    call({:delete_scheduled_job_if_idle, id}, opts)
+  end
+
+  @spec upsert_job_run(job_run_attrs(), keyword()) :: {:ok, job_run_row()} | {:error, term()}
+  def upsert_job_run(attrs, opts \\ []) when is_map(attrs) do
+    call({:upsert_job_run, attrs}, opts)
+  end
+
+  @spec get_job_run(String.t(), keyword()) :: {:ok, job_run_row()} | {:error, :not_found | term()}
+  def get_job_run(id, opts \\ []) when is_binary(id) do
+    call({:get_job_run, id}, opts)
+  end
+
+  @spec list_job_runs(map(), keyword()) :: {:ok, [job_run_row()]} | {:error, term()}
+  def list_job_runs(selector \\ %{}, opts \\ []) when is_map(selector) do
+    call({:list_job_runs, selector, Keyword.get(opts, :limit, 20)}, opts)
+  end
+
+  @spec upsert_memory_source(memory_source_attrs(), keyword()) ::
+          {:ok, memory_source_row()} | {:error, term()}
+  def upsert_memory_source(attrs, opts \\ []) when is_map(attrs) do
+    call({:upsert_memory_source, attrs}, opts)
+  end
+
+  @spec get_memory_source(String.t(), keyword()) ::
+          {:ok, memory_source_row()} | {:error, :not_found | term()}
+  def get_memory_source(id, opts \\ []) when is_binary(id) do
+    call({:get_memory_source, id}, opts)
+  end
+
+  @spec list_memory_sources(map(), keyword()) :: {:ok, [memory_source_row()]} | {:error, term()}
+  def list_memory_sources(selector \\ %{}, opts \\ []) when is_map(selector) do
+    call({:list_memory_sources, selector}, opts)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -636,6 +862,81 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:create_job_with_source, job_attrs, source_attrs}, _from, state) do
+    reply = with_connection(state, &create_job_with_source_tx(&1, job_attrs, source_attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:due_scheduled_jobs, now, limit}, _from, state) do
+    reply = with_connection(state, &fetch_due_scheduled_jobs(&1, now, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:next_scheduled_job, _from, state) do
+    reply = with_connection(state, &fetch_next_scheduled_job/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_due_job, id, job_attrs, run_attrs, now}, _from, state) do
+    reply = with_connection(state, &claim_due_job_tx(&1, id, job_attrs, run_attrs, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:upsert_scheduled_job, attrs}, _from, state) do
+    reply = with_connection(state, &upsert_scheduled_job_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_scheduled_job, id}, _from, state) do
+    reply = with_connection(state, &fetch_scheduled_job(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_scheduled_jobs, selector}, _from, state) do
+    reply = with_connection(state, &fetch_scheduled_jobs(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:delete_scheduled_job, id}, _from, state) do
+    reply = with_connection(state, &delete_scheduled_job_row(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:delete_scheduled_job_if_idle, id}, _from, state) do
+    reply = with_connection(state, &delete_scheduled_job_if_idle_tx(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:upsert_job_run, attrs}, _from, state) do
+    reply = with_connection(state, &upsert_job_run_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_job_run, id}, _from, state) do
+    reply = with_connection(state, &fetch_job_run(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_job_runs, selector, limit}, _from, state) do
+    reply = with_connection(state, &fetch_job_runs(&1, selector, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:upsert_memory_source, attrs}, _from, state) do
+    reply = with_connection(state, &upsert_memory_source_row(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_memory_source, id}, _from, state) do
+    reply = with_connection(state, &fetch_memory_source(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_memory_sources, selector}, _from, state) do
+    reply = with_connection(state, &fetch_memory_sources(&1, selector))
+    {:reply, reply, state}
+  end
+
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, request)
@@ -680,7 +981,9 @@ defmodule FermixCore.Memory.Repo do
          {:ok, versions} <- migration_versions_for_conn(conn),
          :ok <- apply_base_migration(conn, versions),
          :ok <- apply_fts_migration(conn, versions),
-         :ok <- apply_resource_migration(conn, versions) do
+         :ok <- apply_resource_migration(conn, versions),
+         :ok <- apply_jobs_migration(conn, versions),
+         :ok <- apply_job_expiry_migration(conn, versions) do
       :ok
     end
   end
@@ -741,6 +1044,38 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@resource_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@resource_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_jobs_migration(conn, versions) do
+    if Enum.member?(versions, @jobs_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@jobs_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@jobs_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_job_expiry_migration(conn, versions) do
+    if Enum.member?(versions, @job_expiry_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@job_expiry_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_expiry_migration_version});
         COMMIT;
         """
       )
@@ -865,10 +1200,16 @@ defmodule FermixCore.Memory.Repo do
                confidence,
                promote_target,
                source_message_id,
+               source_id,
+               source_type,
+               source_name,
+               source_description,
+               session_id,
+               run_id,
                created_at,
                updated_at
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(agent_id, owner_id, scope_type, scope_id, key)
              DO UPDATE SET
                category = excluded.category,
@@ -876,6 +1217,12 @@ defmodule FermixCore.Memory.Repo do
                confidence = excluded.confidence,
                promote_target = excluded.promote_target,
                source_message_id = excluded.source_message_id,
+               source_id = excluded.source_id,
+               source_type = excluded.source_type,
+               source_name = excluded.source_name,
+               source_description = excluded.source_description,
+               session_id = excluded.session_id,
+               run_id = excluded.run_id,
                updated_at = excluded.updated_at
              """,
              memory_insert_params(memory)
@@ -1213,6 +1560,492 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  defp create_job_with_source_tx(conn, job_attrs, source_attrs) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
+         result <- create_job_with_source_in_tx(conn, job_attrs, source_attrs),
+         :ok <- finish_job_create(conn, result) do
+      result
+    else
+      {:error, :busy} -> {:error, :busy}
+      {:error, reason} -> rollback_job_create(conn, reason)
+    end
+  end
+
+  defp create_job_with_source_in_tx(conn, job_attrs, source_attrs) do
+    with {:ok, _source} <- upsert_memory_source_row(conn, source_attrs),
+         {:ok, job} <- upsert_scheduled_job_row(conn, job_attrs) do
+      {:ok, job}
+    end
+  end
+
+  defp finish_job_create(conn, {:ok, _job}) do
+    execute(conn, "COMMIT", [])
+  end
+
+  defp finish_job_create(_conn, {:error, reason}), do: {:error, reason}
+
+  defp rollback_job_create(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
+  end
+
+  defp fetch_due_scheduled_jobs(conn, now, limit) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM scheduled_jobs
+             WHERE enabled = 1
+               AND state = 'scheduled'
+               AND (
+                 (next_run_at IS NOT NULL AND next_run_at <= ?)
+                 OR (expires_at IS NOT NULL AND expires_at <= ?)
+               )
+             ORDER BY
+               CASE
+                 WHEN next_run_at IS NULL THEN expires_at
+                 WHEN expires_at IS NULL THEN next_run_at
+                 WHEN expires_at < next_run_at THEN expires_at
+                 ELSE next_run_at
+               END ASC,
+               id ASC
+             LIMIT ?
+             """,
+             [timestamp_string(now), timestamp_string(now), limit]
+           ) do
+      {:ok, Enum.map(rows, &scheduled_job_row/1)}
+    end
+  end
+
+  defp fetch_next_scheduled_job(conn) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM scheduled_jobs
+             WHERE enabled = 1
+               AND state = 'scheduled'
+               AND (next_run_at IS NOT NULL OR expires_at IS NOT NULL)
+             ORDER BY
+               CASE
+                 WHEN next_run_at IS NULL THEN expires_at
+                 WHEN expires_at IS NULL THEN next_run_at
+                 WHEN expires_at < next_run_at THEN expires_at
+                 ELSE next_run_at
+               END ASC,
+               id ASC
+             LIMIT 1
+             """,
+             []
+           ) do
+      case rows do
+        [row] -> {:ok, scheduled_job_row(row)}
+        [] -> {:ok, nil}
+      end
+    end
+  end
+
+  defp claim_due_job_tx(conn, id, job_attrs, run_attrs, now) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
+         result <- claim_due_job_in_tx(conn, id, job_attrs, run_attrs, now),
+         :ok <- finish_job_claim(conn, result) do
+      result
+    else
+      {:error, :busy} -> {:error, :busy}
+      {:error, reason} -> rollback_job_claim(conn, reason)
+    end
+  end
+
+  defp claim_due_job_in_tx(conn, id, job_attrs, run_attrs, now) do
+    with {:ok, due_job} <- fetch_claimable_due_job(conn, id, now),
+         :ok <- ensure_no_active_job_run(conn, id),
+         {:ok, claimed_job} <- upsert_scheduled_job_row(conn, Map.merge(due_job, job_attrs)),
+         {:ok, run} <- upsert_job_run_row(conn, run_attrs) do
+      {:ok, {claimed_job, run}}
+    end
+  end
+
+  defp fetch_claimable_due_job(conn, id, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM scheduled_jobs
+             WHERE id = ?
+               AND enabled = 1
+               AND state = 'scheduled'
+               AND (
+                 (next_run_at IS NOT NULL AND next_run_at <= ?)
+                 OR (expires_at IS NOT NULL AND expires_at <= ?)
+               )
+             LIMIT 1
+             """,
+             [id, timestamp_string(now), timestamp_string(now)]
+           ) do
+      case rows do
+        [row] -> {:ok, scheduled_job_row(row)}
+        [] -> {:error, :not_due}
+      end
+    end
+  end
+
+  defp ensure_no_active_job_run(conn, id) do
+    with {:ok, [[count]]} <-
+           query_all(
+             conn,
+             """
+             SELECT COUNT(*)
+             FROM job_runs
+             WHERE job_id = ?
+               AND status IN ('queued', 'running')
+             """,
+             [id]
+           ) do
+      if count == 0 do
+        :ok
+      else
+        {:error, :already_running}
+      end
+    end
+  end
+
+  defp finish_job_claim(conn, {:ok, {_job, _run}}) do
+    execute(conn, "COMMIT", [])
+  end
+
+  defp finish_job_claim(_conn, {:error, reason}), do: {:error, reason}
+
+  defp rollback_job_claim(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
+  end
+
+  defp delete_scheduled_job_if_idle_tx(conn, id) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
+         result <- delete_scheduled_job_if_idle_in_tx(conn, id),
+         :ok <- finish_scheduled_job_delete(conn, result) do
+      result
+    else
+      {:error, :busy} -> {:error, :busy}
+      {:error, reason} -> rollback_scheduled_job_delete(conn, reason)
+    end
+  end
+
+  defp delete_scheduled_job_if_idle_in_tx(conn, id) do
+    with {:ok, _job} <- fetch_scheduled_job(conn, id),
+         :ok <- ensure_job_idle_for_delete(conn, id) do
+      delete_scheduled_job_row(conn, id)
+    end
+  end
+
+  defp ensure_job_idle_for_delete(conn, id) do
+    case ensure_no_active_job_run(conn, id) do
+      :ok -> :ok
+      {:error, :already_running} -> {:error, :job_running}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp finish_scheduled_job_delete(conn, :ok) do
+    execute(conn, "COMMIT", [])
+  end
+
+  defp finish_scheduled_job_delete(_conn, {:error, reason}), do: {:error, reason}
+
+  defp rollback_scheduled_job_delete(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
+  end
+
+  defp upsert_scheduled_job_row(conn, attrs) do
+    job = normalize_scheduled_job_attrs(attrs)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO scheduled_jobs (
+               id,
+               name,
+               description,
+               schedule_kind,
+               schedule_expr,
+               timezone,
+               next_run_at,
+               task_prompt,
+               skill_name,
+               session_mode,
+               provider,
+               model,
+               max_iterations,
+               timeout_seconds,
+               inactivity_timeout_seconds,
+               capability_policy_json,
+               allowed_tools_json,
+               memory_source_id,
+               memory_read_scopes_json,
+               memory_write_scope,
+               main_visible,
+               delivery_mode,
+               delivery_target_json,
+               silent_marker,
+               enabled,
+               state,
+               last_run_at,
+               last_status,
+               last_error,
+               created_by_agent_id,
+               created_by_session_id,
+               expires_at,
+               created_at,
+               updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id)
+             DO UPDATE SET
+               name = excluded.name,
+               description = excluded.description,
+               schedule_kind = excluded.schedule_kind,
+               schedule_expr = excluded.schedule_expr,
+               timezone = excluded.timezone,
+               next_run_at = excluded.next_run_at,
+               task_prompt = excluded.task_prompt,
+               skill_name = excluded.skill_name,
+               session_mode = excluded.session_mode,
+               provider = excluded.provider,
+               model = excluded.model,
+               max_iterations = excluded.max_iterations,
+               timeout_seconds = excluded.timeout_seconds,
+               inactivity_timeout_seconds = excluded.inactivity_timeout_seconds,
+               capability_policy_json = excluded.capability_policy_json,
+               allowed_tools_json = excluded.allowed_tools_json,
+               memory_source_id = excluded.memory_source_id,
+               memory_read_scopes_json = excluded.memory_read_scopes_json,
+               memory_write_scope = excluded.memory_write_scope,
+               main_visible = excluded.main_visible,
+               delivery_mode = excluded.delivery_mode,
+               delivery_target_json = excluded.delivery_target_json,
+               silent_marker = excluded.silent_marker,
+               enabled = excluded.enabled,
+               state = excluded.state,
+               last_run_at = excluded.last_run_at,
+               last_status = excluded.last_status,
+               last_error = excluded.last_error,
+               created_by_agent_id = excluded.created_by_agent_id,
+               created_by_session_id = excluded.created_by_session_id,
+               expires_at = excluded.expires_at,
+               updated_at = excluded.updated_at
+             """,
+             scheduled_job_upsert_params(job)
+           ),
+         {:ok, row} <- fetch_scheduled_job(conn, job.id) do
+      {:ok, row}
+    end
+  end
+
+  defp fetch_scheduled_job(conn, id) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             "SELECT * FROM scheduled_jobs WHERE id = ? LIMIT 1",
+             [id]
+           ) do
+      case rows do
+        [row] -> {:ok, scheduled_job_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_scheduled_jobs(conn, selector) do
+    {where_sql, params} = scheduled_job_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM scheduled_jobs
+             WHERE #{where_sql}
+             ORDER BY created_at DESC, id ASC
+             """,
+             params
+           ) do
+      {:ok, Enum.map(rows, &scheduled_job_row/1)}
+    end
+  end
+
+  defp delete_scheduled_job_row(conn, id) do
+    execute(conn, "DELETE FROM scheduled_jobs WHERE id = ?", [id])
+  end
+
+  defp upsert_job_run_row(conn, attrs) do
+    run = normalize_job_run_attrs(attrs)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO job_runs (
+               id,
+               job_id,
+               session_id,
+               trigger,
+               status,
+               claimed_at,
+               started_at,
+               completed_at,
+               prompt_snapshot,
+               job_config_snapshot_json,
+               capability_policy_snapshot_json,
+               output_ref,
+               final_response,
+               error,
+               delivery_status,
+               delivery_error,
+               iterations,
+               token_usage_json,
+               latency_json,
+               created_at,
+               updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id)
+             DO UPDATE SET
+               job_id = excluded.job_id,
+               session_id = excluded.session_id,
+               trigger = excluded.trigger,
+               status = excluded.status,
+               claimed_at = excluded.claimed_at,
+               started_at = excluded.started_at,
+               completed_at = excluded.completed_at,
+               prompt_snapshot = excluded.prompt_snapshot,
+               job_config_snapshot_json = excluded.job_config_snapshot_json,
+               capability_policy_snapshot_json = excluded.capability_policy_snapshot_json,
+               output_ref = excluded.output_ref,
+               final_response = excluded.final_response,
+               error = excluded.error,
+               delivery_status = excluded.delivery_status,
+               delivery_error = excluded.delivery_error,
+               iterations = excluded.iterations,
+               token_usage_json = excluded.token_usage_json,
+               latency_json = excluded.latency_json,
+               updated_at = excluded.updated_at
+             """,
+             job_run_upsert_params(run)
+           ),
+         {:ok, row} <- fetch_job_run(conn, run.id) do
+      {:ok, row}
+    end
+  end
+
+  defp fetch_job_run(conn, id) do
+    with {:ok, rows} <- query_all(conn, "SELECT * FROM job_runs WHERE id = ? LIMIT 1", [id]) do
+      case rows do
+        [row] -> {:ok, job_run_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_job_runs(conn, selector, limit) do
+    {where_sql, params} = job_run_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM job_runs
+             WHERE #{where_sql}
+             ORDER BY created_at DESC, id ASC
+             LIMIT ?
+             """,
+             params ++ [limit]
+           ) do
+      {:ok, Enum.map(rows, &job_run_row/1)}
+    end
+  end
+
+  defp upsert_memory_source_row(conn, attrs) do
+    source = normalize_memory_source_attrs(attrs)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO memory_sources (
+               id,
+               source_type,
+               name,
+               description,
+               owner_agent_id,
+               visibility,
+               schedule_summary,
+               status,
+               last_run_at,
+               last_status,
+               memory_scope,
+               output_scope,
+               metadata_json,
+               created_at,
+               updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(id)
+             DO UPDATE SET
+               source_type = excluded.source_type,
+               name = excluded.name,
+               description = excluded.description,
+               owner_agent_id = excluded.owner_agent_id,
+               visibility = excluded.visibility,
+               schedule_summary = excluded.schedule_summary,
+               status = excluded.status,
+               last_run_at = excluded.last_run_at,
+               last_status = excluded.last_status,
+               memory_scope = excluded.memory_scope,
+               output_scope = excluded.output_scope,
+               metadata_json = excluded.metadata_json,
+               updated_at = excluded.updated_at
+             """,
+             memory_source_upsert_params(source)
+           ),
+         {:ok, row} <- fetch_memory_source(conn, source.id) do
+      {:ok, row}
+    end
+  end
+
+  defp fetch_memory_source(conn, id) do
+    with {:ok, rows} <-
+           query_all(conn, "SELECT * FROM memory_sources WHERE id = ? LIMIT 1", [id]) do
+      case rows do
+        [row] -> {:ok, memory_source_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_memory_sources(conn, selector) do
+    {where_sql, params} = memory_source_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM memory_sources
+             WHERE #{where_sql}
+             ORDER BY source_type ASC, name ASC, id ASC
+             """,
+             params
+           ) do
+      {:ok, Enum.map(rows, &memory_source_row/1)}
+    end
+  end
+
   defp query_all(conn, sql, params) do
     with_statement(conn, sql, fn stmt ->
       with :ok <- bind(stmt, params),
@@ -1282,6 +2115,12 @@ defmodule FermixCore.Memory.Repo do
       confidence: Map.get(attrs, :confidence, 1.0),
       promote_target: Map.get(attrs, :promote_target, "none"),
       source_message_id: Map.get(attrs, :source_message_id),
+      source_id: optional_string!(attrs, :source_id),
+      source_type: optional_string!(attrs, :source_type),
+      source_name: optional_string!(attrs, :source_name),
+      source_description: optional_string!(attrs, :source_description),
+      session_id: optional_string!(attrs, :session_id),
+      run_id: optional_string!(attrs, :run_id),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
       updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
     }
@@ -1325,6 +2164,93 @@ defmodule FermixCore.Memory.Repo do
       mutation_source: fetch_string!(attrs, :mutation_source),
       provenance: Map.get(attrs, :provenance),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now()))
+    }
+  end
+
+  defp normalize_scheduled_job_attrs(attrs) do
+    %{
+      id: fetch_string!(attrs, :id),
+      name: fetch_string!(attrs, :name),
+      description: optional_string!(attrs, :description),
+      schedule_kind: fetch_string!(attrs, :schedule_kind),
+      schedule_expr: fetch_string!(attrs, :schedule_expr),
+      timezone: fetch_string!(attrs, :timezone),
+      next_run_at: optional_timestamp_string(Map.get(attrs, :next_run_at)),
+      task_prompt: fetch_string!(attrs, :task_prompt),
+      skill_name: optional_string!(attrs, :skill_name),
+      session_mode: string_with_default!(attrs, :session_mode, "isolated"),
+      provider: optional_string!(attrs, :provider),
+      model: optional_string!(attrs, :model),
+      max_iterations: positive_integer_with_default!(attrs, :max_iterations, 25),
+      timeout_seconds: optional_positive_integer!(attrs, :timeout_seconds),
+      inactivity_timeout_seconds: optional_positive_integer!(attrs, :inactivity_timeout_seconds),
+      capability_policy:
+        list_of_strings!(Map.get(attrs, :capability_policy, []), :capability_policy),
+      allowed_tools: list_of_strings!(Map.get(attrs, :allowed_tools, []), :allowed_tools),
+      memory_source_id: fetch_string!(attrs, :memory_source_id),
+      memory_read_scopes:
+        list_of_strings!(Map.get(attrs, :memory_read_scopes, []), :memory_read_scopes),
+      memory_write_scope: optional_string!(attrs, :memory_write_scope),
+      main_visible?: bool_with_default!(attrs, :main_visible?, true),
+      delivery_mode: string_with_default!(attrs, :delivery_mode, "none"),
+      delivery_target: Map.get(attrs, :delivery_target),
+      silent_marker: string_with_default!(attrs, :silent_marker, "[SILENT]"),
+      enabled?: bool_with_default!(attrs, :enabled?, true),
+      state: string_with_default!(attrs, :state, "scheduled"),
+      last_run_at: optional_timestamp_string(Map.get(attrs, :last_run_at)),
+      last_status: optional_string!(attrs, :last_status),
+      last_error: optional_string!(attrs, :last_error),
+      created_by_agent_id: string_with_default!(attrs, :created_by_agent_id, "main"),
+      created_by_session_id: optional_string!(attrs, :created_by_session_id),
+      expires_at: optional_timestamp_string(Map.get(attrs, :expires_at)),
+      created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
+      updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
+    }
+  end
+
+  defp normalize_job_run_attrs(attrs) do
+    %{
+      id: fetch_string!(attrs, :id),
+      job_id: fetch_string!(attrs, :job_id),
+      session_id: fetch_string!(attrs, :session_id),
+      trigger: fetch_string!(attrs, :trigger),
+      status: fetch_string!(attrs, :status),
+      claimed_at: optional_timestamp_string(Map.get(attrs, :claimed_at)),
+      started_at: optional_timestamp_string(Map.get(attrs, :started_at)),
+      completed_at: optional_timestamp_string(Map.get(attrs, :completed_at)),
+      prompt_snapshot: optional_string!(attrs, :prompt_snapshot),
+      job_config_snapshot: Map.get(attrs, :job_config_snapshot),
+      capability_policy_snapshot: Map.get(attrs, :capability_policy_snapshot),
+      output_ref: optional_string!(attrs, :output_ref),
+      final_response: optional_string!(attrs, :final_response),
+      error: optional_string!(attrs, :error),
+      delivery_status: string_with_default!(attrs, :delivery_status, "none"),
+      delivery_error: optional_string!(attrs, :delivery_error),
+      iterations: optional_non_negative_integer!(attrs, :iterations),
+      token_usage: Map.get(attrs, :token_usage),
+      latency: Map.get(attrs, :latency),
+      created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
+      updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
+    }
+  end
+
+  defp normalize_memory_source_attrs(attrs) do
+    %{
+      id: fetch_string!(attrs, :id),
+      source_type: fetch_string!(attrs, :source_type),
+      name: fetch_string!(attrs, :name),
+      description: optional_string!(attrs, :description),
+      owner_agent_id: string_with_default!(attrs, :owner_agent_id, "main"),
+      visibility: string_with_default!(attrs, :visibility, "main_visible"),
+      schedule_summary: optional_string!(attrs, :schedule_summary),
+      status: string_with_default!(attrs, :status, "enabled"),
+      last_run_at: optional_timestamp_string(Map.get(attrs, :last_run_at)),
+      last_status: optional_string!(attrs, :last_status),
+      memory_scope: fetch_string!(attrs, :memory_scope),
+      output_scope: optional_string!(attrs, :output_scope),
+      metadata: Map.get(attrs, :metadata),
+      created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
+      updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
     }
   end
 
@@ -1427,6 +2353,12 @@ defmodule FermixCore.Memory.Repo do
       memory.confidence,
       memory.promote_target,
       memory.source_message_id,
+      memory.source_id,
+      memory.source_type,
+      memory.source_name,
+      memory.source_description,
+      memory.session_id,
+      memory.run_id,
       memory.created_at,
       memory.updated_at
     ]
@@ -1456,6 +2388,91 @@ defmodule FermixCore.Memory.Repo do
       revision.mutation_source,
       encode_metadata(revision.provenance),
       revision.created_at
+    ]
+  end
+
+  defp scheduled_job_upsert_params(job) do
+    [
+      job.id,
+      job.name,
+      job.description,
+      job.schedule_kind,
+      job.schedule_expr,
+      job.timezone,
+      job.next_run_at,
+      job.task_prompt,
+      job.skill_name,
+      job.session_mode,
+      job.provider,
+      job.model,
+      job.max_iterations,
+      job.timeout_seconds,
+      job.inactivity_timeout_seconds,
+      encode_metadata(job.capability_policy),
+      encode_metadata(job.allowed_tools),
+      job.memory_source_id,
+      encode_metadata(job.memory_read_scopes),
+      job.memory_write_scope,
+      bool_to_int(job.main_visible?),
+      job.delivery_mode,
+      encode_metadata(job.delivery_target),
+      job.silent_marker,
+      bool_to_int(job.enabled?),
+      job.state,
+      job.last_run_at,
+      job.last_status,
+      job.last_error,
+      job.created_by_agent_id,
+      job.created_by_session_id,
+      job.expires_at,
+      job.created_at,
+      job.updated_at
+    ]
+  end
+
+  defp job_run_upsert_params(run) do
+    [
+      run.id,
+      run.job_id,
+      run.session_id,
+      run.trigger,
+      run.status,
+      run.claimed_at,
+      run.started_at,
+      run.completed_at,
+      run.prompt_snapshot,
+      encode_metadata(run.job_config_snapshot),
+      encode_metadata(run.capability_policy_snapshot),
+      run.output_ref,
+      run.final_response,
+      run.error,
+      run.delivery_status,
+      run.delivery_error,
+      run.iterations,
+      encode_metadata(run.token_usage),
+      encode_metadata(run.latency),
+      run.created_at,
+      run.updated_at
+    ]
+  end
+
+  defp memory_source_upsert_params(source) do
+    [
+      source.id,
+      source.source_type,
+      source.name,
+      source.description,
+      source.owner_agent_id,
+      source.visibility,
+      source.schedule_summary,
+      source.status,
+      source.last_run_at,
+      source.last_status,
+      source.memory_scope,
+      source.output_scope,
+      encode_metadata(source.metadata),
+      source.created_at,
+      source.updated_at
     ]
   end
 
@@ -1498,6 +2515,40 @@ defmodule FermixCore.Memory.Repo do
       """,
       []
     }
+  end
+
+  defp scheduled_job_where_clause(selector) do
+    selector
+    |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn
+      {:enabled?, value}, params ->
+        {"enabled = ?", params ++ [bool_to_int(value)]}
+
+      {key, value}, params ->
+        {"#{scheduled_job_column_name(key)} = ?", params ++ [value]}
+    end)
+    |> join_where_clause()
+  end
+
+  defp job_run_where_clause(selector) do
+    selector
+    |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn {key, value}, params ->
+      {"#{job_run_column_name(key)} = ?", params ++ [value]}
+    end)
+    |> join_where_clause()
+  end
+
+  defp memory_source_where_clause(selector) do
+    selector
+    |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn {key, value}, params ->
+      {"#{memory_source_column_name(key)} = ?", params ++ [value]}
+    end)
+    |> join_where_clause()
   end
 
   defp revision_attrs_for_commit(revision, current) do
@@ -1579,14 +2630,56 @@ defmodule FermixCore.Memory.Repo do
 
   defp column_name(:key), do: "\"key\""
 
-  defp column_name(key) when key in [:agent_id, :owner_id, :scope_type, :scope_id, :category] do
+  defp column_name(key)
+       when key in [
+              :agent_id,
+              :owner_id,
+              :scope_type,
+              :scope_id,
+              :category,
+              :source_id,
+              :source_type,
+              :session_id,
+              :run_id
+            ] do
     Atom.to_string(key)
   end
 
   defp search_memory_column_name(:key), do: "\"key\""
 
   defp search_memory_column_name(key)
-       when key in [:agent_id, :owner_id, :scope_type, :scope_id, :category] do
+       when key in [
+              :agent_id,
+              :owner_id,
+              :scope_type,
+              :scope_id,
+              :category,
+              :source_id,
+              :source_type,
+              :session_id,
+              :run_id
+            ] do
+    Atom.to_string(key)
+  end
+
+  defp scheduled_job_column_name(key)
+       when key in [
+              :id,
+              :state,
+              :schedule_kind,
+              :created_by_agent_id,
+              :memory_source_id,
+              :delivery_mode
+            ] do
+    Atom.to_string(key)
+  end
+
+  defp job_run_column_name(key) when key in [:id, :job_id, :session_id, :trigger, :status] do
+    Atom.to_string(key)
+  end
+
+  defp memory_source_column_name(key)
+       when key in [:id, :source_type, :owner_agent_id, :visibility, :status] do
     Atom.to_string(key)
   end
 
@@ -1647,7 +2740,13 @@ defmodule FermixCore.Memory.Repo do
          promote_target,
          source_message_id,
          created_at,
-         updated_at
+         updated_at,
+         source_id,
+         source_type,
+         source_name,
+         source_description,
+         session_id,
+         run_id
        ]) do
     %{
       id: id,
@@ -1661,6 +2760,12 @@ defmodule FermixCore.Memory.Repo do
       confidence: confidence * 1.0,
       promote_target: promote_target,
       source_message_id: source_message_id,
+      source_id: source_id,
+      source_type: source_type,
+      source_name: source_name,
+      source_description: source_description,
+      session_id: session_id,
+      run_id: run_id,
       created_at: parse_timestamp!(created_at),
       updated_at: parse_timestamp!(updated_at)
     }
@@ -1712,6 +2817,12 @@ defmodule FermixCore.Memory.Repo do
          source_message_id,
          created_at,
          updated_at,
+         source_id,
+         source_type,
+         source_name,
+         source_description,
+         session_id,
+         run_id,
          rank
        ]) do
     memory_row([
@@ -1727,7 +2838,13 @@ defmodule FermixCore.Memory.Repo do
       promote_target,
       source_message_id,
       created_at,
-      updated_at
+      updated_at,
+      source_id,
+      source_type,
+      source_name,
+      source_description,
+      session_id,
+      run_id
     ])
     |> Map.put(:rank, rank * 1.0)
   end
@@ -1784,6 +2901,164 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
+  defp scheduled_job_row([
+         id,
+         name,
+         description,
+         schedule_kind,
+         schedule_expr,
+         timezone,
+         next_run_at,
+         task_prompt,
+         skill_name,
+         session_mode,
+         provider,
+         model,
+         max_iterations,
+         timeout_seconds,
+         inactivity_timeout_seconds,
+         capability_policy_json,
+         allowed_tools_json,
+         memory_source_id,
+         memory_read_scopes_json,
+         memory_write_scope,
+         main_visible,
+         delivery_mode,
+         delivery_target_json,
+         silent_marker,
+         enabled,
+         state,
+         last_run_at,
+         last_status,
+         last_error,
+         created_by_agent_id,
+         created_by_session_id,
+         created_at,
+         updated_at,
+         expires_at
+       ]) do
+    %{
+      id: id,
+      name: name,
+      description: description,
+      schedule_kind: schedule_kind,
+      schedule_expr: schedule_expr,
+      timezone: timezone,
+      next_run_at: parse_optional_timestamp(next_run_at),
+      task_prompt: task_prompt,
+      skill_name: skill_name,
+      session_mode: session_mode,
+      provider: provider,
+      model: model,
+      max_iterations: max_iterations,
+      timeout_seconds: timeout_seconds,
+      inactivity_timeout_seconds: inactivity_timeout_seconds,
+      capability_policy: decode_metadata(capability_policy_json) || [],
+      allowed_tools: decode_metadata(allowed_tools_json) || [],
+      memory_source_id: memory_source_id,
+      memory_read_scopes: decode_metadata(memory_read_scopes_json) || [],
+      memory_write_scope: memory_write_scope,
+      main_visible?: int_to_bool(main_visible),
+      delivery_mode: delivery_mode,
+      delivery_target: decode_metadata(delivery_target_json),
+      silent_marker: silent_marker,
+      enabled?: int_to_bool(enabled),
+      state: state,
+      last_run_at: parse_optional_timestamp(last_run_at),
+      last_status: last_status,
+      last_error: last_error,
+      created_by_agent_id: created_by_agent_id,
+      created_by_session_id: created_by_session_id,
+      expires_at: parse_optional_timestamp(expires_at),
+      created_at: parse_timestamp!(created_at),
+      updated_at: parse_timestamp!(updated_at)
+    }
+  end
+
+  defp job_run_row([
+         id,
+         job_id,
+         session_id,
+         trigger,
+         status,
+         claimed_at,
+         started_at,
+         completed_at,
+         prompt_snapshot,
+         job_config_snapshot_json,
+         capability_policy_snapshot_json,
+         output_ref,
+         final_response,
+         error,
+         delivery_status,
+         delivery_error,
+         iterations,
+         token_usage_json,
+         latency_json,
+         created_at,
+         updated_at
+       ]) do
+    %{
+      id: id,
+      job_id: job_id,
+      session_id: session_id,
+      trigger: trigger,
+      status: status,
+      claimed_at: parse_optional_timestamp(claimed_at),
+      started_at: parse_optional_timestamp(started_at),
+      completed_at: parse_optional_timestamp(completed_at),
+      prompt_snapshot: prompt_snapshot,
+      job_config_snapshot: decode_metadata(job_config_snapshot_json),
+      capability_policy_snapshot: decode_metadata(capability_policy_snapshot_json),
+      output_ref: output_ref,
+      final_response: final_response,
+      error: error,
+      delivery_status: delivery_status,
+      delivery_error: delivery_error,
+      iterations: iterations,
+      token_usage: decode_metadata(token_usage_json),
+      latency: decode_metadata(latency_json),
+      created_at: parse_timestamp!(created_at),
+      updated_at: parse_timestamp!(updated_at)
+    }
+  end
+
+  defp memory_source_row([
+         id,
+         source_type,
+         name,
+         description,
+         owner_agent_id,
+         visibility,
+         schedule_summary,
+         status,
+         last_run_at,
+         last_status,
+         memory_scope,
+         output_scope,
+         metadata_json,
+         created_at,
+         updated_at
+       ]) do
+    %{
+      id: id,
+      source_type: source_type,
+      name: name,
+      description: description,
+      owner_agent_id: owner_agent_id,
+      visibility: visibility,
+      schedule_summary: schedule_summary,
+      status: status,
+      last_run_at: parse_optional_timestamp(last_run_at),
+      last_status: last_status,
+      memory_scope: memory_scope,
+      output_scope: output_scope,
+      metadata: decode_metadata(metadata_json),
+      created_at: parse_timestamp!(created_at),
+      updated_at: parse_timestamp!(updated_at)
+    }
+  end
+
   defp encode_metadata(nil), do: nil
   defp encode_metadata(metadata), do: Jason.encode!(metadata)
 
@@ -1793,10 +3068,16 @@ defmodule FermixCore.Memory.Repo do
   defp timestamp_string(%DateTime{} = value), do: DateTime.to_iso8601(value)
   defp timestamp_string(value) when is_binary(value), do: value
 
+  defp optional_timestamp_string(nil), do: nil
+  defp optional_timestamp_string(value), do: timestamp_string(value)
+
   defp parse_timestamp!(value) do
     {:ok, timestamp, _offset} = DateTime.from_iso8601(value)
     timestamp
   end
+
+  defp parse_optional_timestamp(nil), do: nil
+  defp parse_optional_timestamp(value), do: parse_timestamp!(value)
 
   defp fetch_string!(attrs, key) do
     value = Map.fetch!(attrs, key)
@@ -1836,6 +3117,40 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  defp optional_non_negative_integer!(attrs, key) do
+    case Map.get(attrs, key) do
+      nil -> nil
+      value -> non_negative_integer_value!(key, value)
+    end
+  end
+
+  defp positive_integer_with_default!(attrs, key, default) do
+    case Map.get(attrs, key, default) do
+      nil -> default
+      value -> positive_integer_value!(key, value)
+    end
+  end
+
+  defp string_with_default!(attrs, key, default) do
+    case Map.get(attrs, key, default) do
+      nil -> default
+      value -> fetch_string_value!(key, value)
+    end
+  end
+
+  defp bool_with_default!(attrs, key, default) do
+    case Map.get(attrs, key, default) do
+      nil ->
+        default
+
+      value when is_boolean(value) ->
+        value
+
+      value ->
+        raise ArgumentError, "expected #{inspect(key)} to be a boolean, got: #{inspect(value)}"
+    end
+  end
+
   defp non_negative_integer_value!(_key, value) when is_integer(value) and value >= 0, do: value
 
   defp non_negative_integer_value!(key, value) do
@@ -1849,4 +3164,26 @@ defmodule FermixCore.Memory.Repo do
     raise ArgumentError,
           "expected #{inspect(key)} to be a positive integer, got: #{inspect(value)}"
   end
+
+  defp list_of_strings!(values, _key) when is_list(values) do
+    Enum.map(values, fn
+      value when is_binary(value) -> value
+      other -> raise ArgumentError, "expected list of strings, got: #{inspect(other)}"
+    end)
+  end
+
+  defp list_of_strings!(value, key) do
+    raise ArgumentError,
+          "expected #{inspect(key)} to be a list of strings, got: #{inspect(value)}"
+  end
+
+  defp bool_to_int(true), do: 1
+  defp bool_to_int(false), do: 0
+
+  defp bool_to_int(value) do
+    raise ArgumentError, "expected boolean, got: #{inspect(value)}"
+  end
+
+  defp int_to_bool(0), do: false
+  defp int_to_bool(1), do: true
 end

@@ -14,10 +14,12 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
+  alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Scheduler
+  alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
@@ -93,10 +95,12 @@ defmodule FermixCore.Application do
         ConversationStore,
         Store,
         ExtractionDebouncer,
-        Scheduler,
+        MemoryScheduler,
         BootReport,
         AgentSupervisor,
         MainAgent,
+        JobRunnerSupervisor,
+        {JobScheduler, jobs_scheduler_opts()},
         maybe_daemon_socket()
       ]
       |> List.flatten()
@@ -138,6 +142,10 @@ defmodule FermixCore.Application do
   defp trace_opts do
     trace_config = Application.get_env(:fermix_core, :trace, [])
     [base_dir: Keyword.get(trace_config, :base_dir, default_trace_dir())]
+  end
+
+  defp jobs_scheduler_opts do
+    Application.get_env(:fermix_core, :jobs, [])
   end
 
   defp setup_file_logger do

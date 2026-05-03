@@ -38,6 +38,7 @@ defmodule FermixCore.AgentLoop do
           loop_detection_window: pos_integer(),
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
+          activity_callback: (term() -> any()) | nil,
           context: map(),
           capability_registry: GenServer.server()
         ]
@@ -87,7 +88,8 @@ defmodule FermixCore.AgentLoop do
       iteration: 0,
       total_tokens: 0,
       compaction: compaction_state(opts),
-      loop_detector: loop_detector_state(opts)
+      loop_detector: loop_detector_state(opts),
+      activity_callback: Keyword.get(opts, :activity_callback)
     }
   end
 
@@ -136,7 +138,9 @@ defmodule FermixCore.AgentLoop do
   defp initial_chat(state) do
     with {:ok, state} <- compact_state_messages(state),
          start = System.monotonic_time(:millisecond),
+         :ok <- emit_activity(state, :provider_start),
          {:ok, turn} <- state.adapter.chat(state.messages, state.capabilities, state.adapter_opts) do
+      emit_activity(state, :provider_response)
       duration_ms = System.monotonic_time(:millisecond) - start
       emit_telemetry(state.iteration + 1, duration_ms, turn.tool_calls != [])
 
@@ -191,8 +195,11 @@ defmodule FermixCore.AgentLoop do
   defp continuation_call(provider_state, tool_results, _warning, state) do
     start = System.monotonic_time(:millisecond)
 
+    emit_activity(state, :provider_start)
+
     case state.adapter.continue(provider_state, tool_results, state.adapter_opts) do
       {:ok, next_turn} ->
+        emit_activity(state, :provider_response)
         duration_ms = System.monotonic_time(:millisecond) - start
         emit_telemetry(state.iteration + 1, duration_ms, next_turn.tool_calls != [])
 
@@ -217,11 +224,16 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
+    emit_activity(state, {:tool_start, name})
+
     case parse_arguments(arguments_raw) do
       {:ok, arguments} ->
-        invoke_capability(name, arguments, state)
+        output = invoke_capability(name, arguments, state)
+        emit_activity(state, {:tool_finish, name})
+        output
 
       {:error, reason} ->
+        emit_activity(state, {:tool_finish, name})
         reason
     end
   end
@@ -422,4 +434,15 @@ defmodule FermixCore.AgentLoop do
       %{iteration: iteration, has_tool_calls: has_tool_calls}
     )
   end
+
+  defp emit_activity(%{activity_callback: callback}, event) when is_function(callback, 1) do
+    callback.(event)
+    :ok
+  rescue
+    error ->
+      Logger.warning("AgentLoop activity callback raised: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp emit_activity(_state, _event), do: :ok
 end
