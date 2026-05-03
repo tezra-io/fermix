@@ -31,6 +31,13 @@ config :fermix_core, :memory,
   owner_id: "default",
   agent_id: "main"
 
+config :fermix_core, :jobs,
+  scheduler_enabled: false,
+  reconciliation_interval_ms: 60_000,
+  default_timeout_ms: 1_800_000,
+  delivery_timeout_ms: 60_000,
+  delivery_channels: %{}
+
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.join(System.tmp_dir!(), "fermix-test-bootstrap"),
   accounting_enabled: true
