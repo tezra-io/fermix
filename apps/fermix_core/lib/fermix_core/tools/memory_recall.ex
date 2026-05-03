@@ -117,6 +117,14 @@ defmodule FermixCore.Tools.MemoryRecall do
   end
 
   defp lexical_search(search, args, context) do
+    if scheduled_job_current_scope?(args, context) do
+      scheduled_job_memory_search(search, args, context)
+    else
+      general_lexical_search(search, args, context)
+    end
+  end
+
+  defp general_lexical_search(search, args, context) do
     opts =
       [
         repo: Map.get(context, :memory_repo, Repo),
@@ -140,6 +148,55 @@ defmodule FermixCore.Tools.MemoryRecall do
     end
   end
 
+  defp scheduled_job_memory_search(search, args, context) do
+    cond do
+      Map.get(args, "source", "memories") in ["history", "all"] ->
+        {:ok,
+         Tool.error(
+           "Scheduled jobs cannot access conversation history; use source=memories scoped to job:self."
+         )}
+
+      not Enum.member?(Map.get(context, :memory_read_scopes, []), "job:self") ->
+        {:ok, Tool.error("Scheduled job memory scope is not configured.")}
+
+      not is_binary(Map.get(context, :memory_source_id)) ->
+        {:ok, Tool.error("Scheduled job memory source is missing.")}
+
+      true ->
+        search_scheduled_job_memories(search, args, context)
+    end
+  end
+
+  defp search_scheduled_job_memories(search, _args, context) do
+    selector = %{
+      agent_id: Map.get(context, :memory_agent_id, Config.agent_id()),
+      owner_id: Map.get(context, :memory_owner_id, Config.owner_id()),
+      scope_type: "job",
+      scope_id: Map.fetch!(context, :memory_source_id)
+    }
+
+    case Repo.search_memories(search,
+           server: Map.get(context, :memory_repo, Repo),
+           selector: selector,
+           limit: 10
+         ) do
+      {:ok, []} ->
+        {:ok, Tool.success("No lexical matches found for: #{search}")}
+
+      {:ok, results} ->
+        results = Enum.map(results, &Map.put(&1, :source, :memories))
+        {:ok, Tool.success(Enum.map_join(results, "\n", &format_search_result/1))}
+
+      {:error, reason} ->
+        {:ok, Tool.error("memory search failed: #{inspect(reason)}")}
+    end
+  end
+
+  defp scheduled_job_current_scope?(args, context) do
+    Map.get(args, "scope", "current") == "current" and
+      match?({:scheduled_job, _job_id, _run_id}, Map.get(context, :conversation_key))
+  end
+
   defp run_search(search, opts) do
     {:ok, Search.query(search, opts)}
   rescue
@@ -156,7 +213,7 @@ defmodule FermixCore.Tools.MemoryRecall do
 
   defp format_search_result(%{source: :memories} = result) do
     "[memories rank=#{format_rank(result.rank)}] scope=#{result.scope_type} " <>
-      "key=#{result.key} category=#{result.category} value=#{result.value}"
+      "key=#{result.key} category=#{result.category} #{source_metadata(result)} value=#{result.value}"
   end
 
   defp format_search_result(%{source: :messages} = result) do
@@ -168,4 +225,27 @@ defmodule FermixCore.Tools.MemoryRecall do
   defp format_rank(rank) when is_float(rank) do
     :erlang.float_to_binary(rank, decimals: 4)
   end
+
+  defp source_metadata(result) do
+    [
+      {"source_id", result.source_id || "main"},
+      {"source_type", result.source_type || "main_agent"},
+      {"source_name", result.source_name || "Main Agent"},
+      {"source_description", result.source_description},
+      {"session_id", result.session_id},
+      {"run_id", result.run_id}
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == "" end)
+    |> Enum.map_join(" ", fn {key, value} -> "#{key}=#{format_metadata_value(value)}" end)
+  end
+
+  defp format_metadata_value(value) when is_binary(value) do
+    if String.contains?(value, " ") do
+      inspect(value)
+    else
+      value
+    end
+  end
+
+  defp format_metadata_value(value), do: inspect(value)
 end

@@ -414,6 +414,8 @@ defmodule FermixCore.Memory.ConversationStoreTest do
          %{store: _store} do
       repo = start_supervised!({FlakyRepo, test_pid: self(), failures_remaining: 0})
       store = :"conversation_store_no_sup_#{System.unique_integer([:positive])}"
+      chat_id = "chat_no_sup_#{System.unique_integer([:positive])}"
+      key = {"telegram", chat_id, :root}
 
       # Pass a non-existent supervisor atom so Task.Supervisor.start_child/2
       # exits and start_persist_task/2 has to surface the failure.
@@ -441,11 +443,11 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       log =
         capture_log(fn ->
           assert :ok =
-                   ConversationStore.add_message(@key, "user", "no sup here", server: store)
+                   ConversationStore.add_message(key, "user", "no sup here", server: store)
         end)
 
-      assert_received {[:fermix, :memory, :message], ^ref, _measurements, metadata}
-      assert metadata.durable? == false
+      assert_receive {[:fermix, :memory, :message], ^ref, _measurements,
+                      %{channel: "telegram", chat_id: ^chat_id, durable?: false}}
 
       assert log =~ "failed to start conversation durable write task"
       assert log =~ "task_supervisor_exit"

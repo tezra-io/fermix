@@ -69,6 +69,20 @@ config :fermix_core, :memory,
   owner_id: "default",
   agent_id: "main"
 
+config :fermix_core, :jobs,
+  scheduler_enabled: true,
+  reconciliation_interval_ms: 60_000,
+  default_timeout_ms: 1_800_000,
+  delivery_timeout_ms: 60_000,
+  delivery_channels: %{
+    "telegram" => FermixChannels.Telegram,
+    "slack" => FermixChannels.Slack,
+    "discord" => FermixChannels.Discord,
+    "signal" => FermixChannels.Signal,
+    "whatsapp" => FermixChannels.WhatsApp,
+    "cli" => FermixChannels.CLI
+  }
+
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.expand("~/.fermix/bootstrap"),
   accounting_enabled: true

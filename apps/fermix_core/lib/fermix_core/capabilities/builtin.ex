@@ -16,6 +16,12 @@ defmodule FermixCore.Capabilities.Builtin do
     "file_write" => %{policy_class: :read_write, requires_approval?: false},
     "memory_recall" => %{policy_class: :read_only, requires_approval?: false},
     "memory_store" => %{policy_class: :read_write, requires_approval?: false},
+    "schedule_job" => %{policy_class: :read_write, requires_approval?: false},
+    "list_jobs" => %{policy_class: :read_only, requires_approval?: false},
+    "pause_job" => %{policy_class: :read_write, requires_approval?: false},
+    "resume_job" => %{policy_class: :read_write, requires_approval?: false},
+    "remove_job" => %{policy_class: :read_write, requires_approval?: false},
+    "memory_sources_list" => %{policy_class: :read_only, requires_approval?: false},
     "browser" => %{policy_class: :network, requires_approval?: false}
   }
 
