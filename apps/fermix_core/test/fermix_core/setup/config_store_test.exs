@@ -7,10 +7,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     fermix_home = System.get_env("FERMIX_HOME")
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
+    jobs = Application.get_env(:fermix_core, :jobs, [])
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
+      Application.put_env(:fermix_core, :jobs, jobs)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -122,6 +124,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     Application.put_env(:fermix_core, :personalization, [])
     Application.put_env(:fermix_core, :agent, [])
+    Application.put_env(:fermix_core, :jobs, [])
     Application.put_env(:fermix_channels, :telegram, [])
 
     :ok =
@@ -133,7 +136,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             timezone: "Asia/Singapore",
             communication_style: "blunt"
           ],
-          agent: [name: "aira"]
+          agent: [name: "aira"],
+          jobs: [
+            default_delivery_mode: "channel",
+            default_delivery_target: [platform: "telegram", chat_id: "8217352118"]
+          ]
         ],
         fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
         fermix_web: []
@@ -141,20 +148,77 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     Application.put_env(:fermix_core, :personalization, [])
     Application.put_env(:fermix_core, :agent, [])
+    Application.put_env(:fermix_core, :jobs, [])
     Application.put_env(:fermix_channels, :telegram, [])
 
     assert :ok = ConfigStore.bootstrap_runtime_config()
 
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
+    jobs = Application.get_env(:fermix_core, :jobs, [])
     telegram = Application.get_env(:fermix_channels, :telegram, [])
 
     assert Keyword.get(personalization, :user_name) == "Sujeeth"
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+    assert Keyword.get(jobs, :default_delivery_mode) == "channel"
+
+    assert Keyword.get(jobs, :default_delivery_target) == [
+             platform: "telegram",
+             chat_id: "8217352118"
+           ]
+
     assert Keyword.get(telegram, :bot_token) == "bot-token"
     assert Keyword.get(telegram, :enabled) == true
+  end
+
+  test "save/load round-trips cron job default delivery config" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        agent: [name: "fermix", provider: :openai_codex],
+        jobs: [
+          default_delivery_mode: "channel",
+          default_delivery_target: [
+            platform: "telegram",
+            chat_id: "8217352118",
+            thread_ts: "42"
+          ],
+          delivery_channels: %{"telegram" => FermixChannels.Telegram}
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.jobs]"
+    assert contents =~ ~s(default_delivery_mode = "channel")
+    assert contents =~ "[fermix_core.jobs.default_delivery_target]"
+    assert contents =~ ~s(platform = "telegram")
+    assert contents =~ ~s(chat_id = "8217352118")
+    assert contents =~ ~s(thread_ts = "42")
+    refute contents =~ "delivery_channels"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    jobs = Keyword.get(loaded.fermix_core, :jobs, [])
+
+    assert Keyword.get(jobs, :default_delivery_mode) == "channel"
+
+    assert Keyword.get(jobs, :default_delivery_target) == [
+             platform: "telegram",
+             chat_id: "8217352118",
+             thread_ts: "42"
+           ]
   end
 
   test "bootstrap_runtime_config is a no-op when no TOML exists" do

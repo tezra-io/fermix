@@ -135,6 +135,101 @@ defmodule FermixCore.Tools.MemoryRecallTest do
       assert result.output =~ "timezone handling"
     end
 
+    test "includes job source metadata for scheduled job memory", %{context: context, repo: repo} do
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "job",
+                   scope_id: "job:daily_digest",
+                   category: "job_run_summary",
+                   key: "latest",
+                   value: "The daily digest found a queue regression.",
+                   source_id: "job:daily_digest",
+                   source_type: "scheduled_job",
+                   source_name: "Daily Digest",
+                   source_description: "Runs every morning.",
+                   session_id: "cron_daily_digest_20260502_080000",
+                   run_id: "run_123"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "queue regression", "scope" => "all"},
+                 context
+               )
+
+      assert result.success == true
+      assert result.output =~ "source_id=job:daily_digest"
+      assert result.output =~ "source_type=scheduled_job"
+      assert result.output =~ "source_name=\"Daily Digest\""
+      assert result.output =~ "source_description=\"Runs every morning.\""
+      assert result.output =~ "session_id=cron_daily_digest_20260502_080000"
+      assert result.output =~ "run_id=run_123"
+    end
+
+    test "scheduled job current scope searches its own job memory", %{
+      context: base_context,
+      repo: repo
+    } do
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "job",
+                   scope_id: "job:daily_digest",
+                   category: "job_run_summary",
+                   key: "latest",
+                   value: "The digest found a storage warning.",
+                   source_id: "job:daily_digest",
+                   source_type: "scheduled_job",
+                   source_name: "Daily Digest",
+                   source_description: "Runs every morning.",
+                   session_id: "cron_daily_digest_20260502_080000",
+                   run_id: "run_123"
+                 },
+                 server: repo
+               )
+
+      context =
+        Map.merge(base_context, %{
+          conversation_key: {:scheduled_job, "daily_digest", "run_456"},
+          memory_source_id: "job:daily_digest",
+          memory_read_scopes: ["job:self"]
+        })
+
+      assert {:ok, result} =
+               MemoryRecall.execute(%{"search" => "storage warning"}, context)
+
+      assert result.success == true
+      assert result.output =~ "The digest found a storage warning."
+      assert result.output =~ "source_name=\"Daily Digest\""
+    end
+
+    test "scheduled job current scope rejects history search explicitly", %{
+      context: base_context
+    } do
+      context =
+        Map.merge(base_context, %{
+          conversation_key: {:scheduled_job, "daily_digest", "run_456"},
+          memory_source_id: "job:daily_digest",
+          memory_read_scopes: ["job:self"]
+        })
+
+      assert {:ok, result} =
+               MemoryRecall.execute(
+                 %{"search" => "timezone", "source" => "history"},
+                 context
+               )
+
+      assert result.success == false
+      assert result.error =~ "Scheduled jobs cannot access conversation history"
+    end
+
     test "respects owner scope and history source filters", %{context: context, repo: repo} do
       assert {:ok, _memory} =
                Repo.upsert_memory(

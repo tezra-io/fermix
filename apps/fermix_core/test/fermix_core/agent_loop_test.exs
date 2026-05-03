@@ -1,6 +1,8 @@
 defmodule FermixCore.AgentLoopTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.AgentLoop
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Builtin.Tool
@@ -315,6 +317,26 @@ defmodule FermixCore.AgentLoopTest do
       set_mock_responses([{:error, "connection refused"}])
 
       assert {:error, "connection refused"} = run_loop(capability_registry: registry)
+    end
+  end
+
+  describe "run/1 activity callback" do
+    test "logs callback failures without failing the loop", %{registry: registry} do
+      set_mock_responses([turn("Hello there!")])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, result} =
+                   run_loop(
+                     capability_registry: registry,
+                     activity_callback: fn _event -> raise "callback failed" end
+                   )
+
+          assert result.response == "Hello there!"
+        end)
+
+      assert log =~ "AgentLoop activity callback raised"
+      assert log =~ "callback failed"
     end
   end
 

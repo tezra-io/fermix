@@ -169,6 +169,7 @@ One row per configured job.
   schedule_expr: "0 8 * * *",
   timezone: "America/New_York",
   next_run_at: ~U[2026-04-30 12:00:00Z],
+  expires_at: nil | DateTime.t(),
 
   task_prompt: "Summarize overnight AI infrastructure news and highlight what matters.",
   skill_name: "research-digest",
@@ -307,10 +308,11 @@ Synchronous inside scheduler only until it hands off to a runner.
 
 1. Acquire scheduler tick lock or per-job claim.
 2. Load due jobs.
-3. For recurring jobs, advance `next_run_at` before starting the run.
-4. Insert `job_runs(status: :queued)` or update a pre-created run.
-5. Start `JobRunner` under `JobRunnerSupervisor`.
-6. Return scheduler GenServer to idle immediately.
+3. If `expires_at` has passed, mark the job and memory source as expired without starting a run.
+4. For recurring jobs, advance `next_run_at` before starting the run.
+5. Insert `job_runs(status: :queued)` or update a pre-created run.
+6. Start `JobRunner` under `JobRunnerSupervisor`.
+7. Return scheduler GenServer to idle immediately.
 
 The scheduler process must not block on LLM execution.
 
@@ -340,15 +342,17 @@ Asynchronous.
 
 ### 6.5 On Success
 
-Mostly synchronous finalization; delivery can be async.
+Mostly synchronous finalization. Delivery is attempted after output and status
+are durable, is bounded by `delivery_timeout_ms`, and is tracked separately from
+LLM run status.
 
 1. Save full output artifact.
 2. Update `job_runs(status: :ok, final_response, output_ref, token_usage, iterations)`.
 3. Write/update durable job summary memory under `source_id = "job:<job_id>"`.
 4. Update `scheduled_jobs.last_run_at`, `last_status`, `last_error`.
 5. Update `memory_sources.last_run_at`, `last_status`.
-6. If final response starts with `[SILENT]`, mark delivery `:skipped`.
-7. Otherwise enqueue delivery.
+6. If trimmed final response equals `[SILENT]`, mark delivery `:skipped`.
+7. Otherwise attempt configured delivery and record delivery status.
 
 The run should be considered complete once output and status are durable. Delivery failure is tracked separately and should not turn a successful LLM run into a failed run.
 
@@ -360,7 +364,7 @@ Synchronous finalization.
 2. Update `job_runs(status: :error | :timeout, error)`.
 3. Update `scheduled_jobs.last_status`, `last_error`.
 4. Update `memory_sources.last_status`.
-5. Enqueue failure notification if configured.
+5. Attempt failure notification if configured.
 
 For recurring jobs, do not immediately retry by default. The next occurrence should be controlled by schedule unless an explicit retry policy exists.
 
@@ -422,7 +426,7 @@ Latency needs to be designed, not accidental.
 | Output durable after AgentLoop returns | < 1s | Write artifact + run status synchronously. |
 | Memory source status update | < 1s after run finalization | Main agent can see latest job health quickly. |
 | Memory recall visibility | < 5s for summary memory | Full extraction/embedding can lag, but a run summary should be immediately queryable. |
-| Delivery after success | best effort p95 < 5s | Failure tracked separately from run success. |
+| Delivery after success | best effort p95 < 5s | Failure tracked separately from run success; channel calls have a hard delivery timeout so runners cannot wedge after a completed AgentLoop run. |
 
 Scheduler design:
 
@@ -574,7 +578,7 @@ fermix jobs show <job_id>
 ### Capabilities
 
 ```text
-schedule_job(schedule, task, name?, description?, skill?, delivery?, policy?)
+schedule_job(schedule, task, name?, description?, skill?, delivery?, policy?, expires_at?, timeout_seconds?, inactivity_timeout_seconds?)
 list_jobs(status?)
 update_job(job_id, patch)
 pause_job(job_id, reason?)
@@ -588,11 +592,23 @@ memory_sources_list()
 ### Config Example
 
 ```toml
+[fermix_core.jobs]
+# Cron-specific default delivery. New jobs created without delivery arguments
+# resolve this into their own job row at creation time.
+default_delivery_mode = "channel"
+
+[fermix_core.jobs.default_delivery_target]
+platform = "telegram"
+chat_id = "8217352118"
+
 [jobs.daily_research_digest]
 name = "Daily Research Digest"
 description = "Summarizes overnight AI infrastructure news."
 schedule = "0 8 * * *"
 timezone = "America/New_York"
+# Optional ISO8601 datetime. When reached, Fermix marks the job expired
+# without asking the job agent to remove itself.
+expires_at = "2026-05-02T16:00:00Z"
 task = "Summarize overnight AI infrastructure news and highlight what matters."
 skill = "research-digest"
 
@@ -605,6 +621,7 @@ model = "gpt-5.4-mini"
 max_iterations = 40
 timeout_seconds = 900
 inactivity_timeout_seconds = 600
+# If omitted, Fermix still applies a daemon-level wall-clock watchdog.
 
 allowed_tools = ["browser", "memory_recall", "memory_store"]
 policy = ["read_only", "network"]
@@ -613,9 +630,14 @@ memory_read_scopes = ["job:self"]
 memory_write_scope = "job:self"
 main_visible = true
 
-delivery = "origin"
+# Optional per-job override. If omitted, the cron default above is used.
+delivery = "channel"
 silent_marker = "[SILENT]"
 ```
+
+Delivery precedence is explicit job settings first, then the cron default in
+`[fermix_core.jobs]`, then no delivery. Defaults are resolved at job creation so
+editing the default later does not silently retarget existing jobs.
 
 ---
 
@@ -661,6 +683,7 @@ Ship gate: main agent can answer "what did my daily digest find?" with provenanc
 ### Stage 5 — Delivery
 
 - Scheduler-owned delivery to origin/channel/local.
+- Cron default delivery target resolved at job creation.
 - `[SILENT]` suppression.
 - Delivery status tracked separately from run status.
 
@@ -690,7 +713,7 @@ Ship gate: daemon restart does not duplicate recurring runs; job status and outp
 - Agent isolation: job run does not include main chat history.
 - Capability policy: cron management and messaging disabled by default.
 - Memory provenance: entries include source metadata; recall returns name/type/description.
-- Delivery: success, `[SILENT]`, delivery failure, local-only.
+- Delivery: success, `[SILENT]`, delivery failure, local-only, default target precedence.
 - Timeout: inactivity timeout fires; active tool stream does not falsely timeout.
 
 ---
@@ -707,4 +730,3 @@ Ship gate: daemon restart does not duplicate recurring runs; job status and outp
 - [ ] One-shot jobs run once and do not duplicate after success.
 - [ ] Latency targets in §8 are covered by tests or telemetry assertions.
 - [ ] `mix test`, `mix format --check-formatted`, and relevant integration tests are green.
-

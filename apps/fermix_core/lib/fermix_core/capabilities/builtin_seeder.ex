@@ -24,6 +24,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.FileWrite,
     FermixCore.Tools.MemoryStore,
     FermixCore.Tools.MemoryRecall,
+    FermixCore.Tools.ScheduleJob,
+    FermixCore.Tools.ListJobs,
+    FermixCore.Tools.PauseJob,
+    FermixCore.Tools.ResumeJob,
+    FermixCore.Tools.RemoveJob,
+    FermixCore.Tools.MemorySourcesList,
     FermixCore.Tools.Browser
   ]
 
