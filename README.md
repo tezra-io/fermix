@@ -1,5 +1,3 @@
-# Fermix
-
 ```text
 ███████╗ ███████╗ ██████╗  ███╗   ███╗ ██╗ ██╗  ██╗
 ██╔════╝ ██╔════╝ ██╔══██╗ ████╗ ████║ ██║ ╚██╗██╔╝
@@ -16,9 +14,6 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 ![Erlang/OTP](https://img.shields.io/badge/otp-%E2%89%A5%2028-red)
 ![Status](https://img.shields.io/badge/status-alpha%20(pre--1.0)-yellow)
 
-<p align="center">
-  <img src="artifacts/fermix-cover.png" alt="Fermix cover: a luminous agent particle in a larger abstract system" width="960">
-</p>
 
 ## What is Fermix
 
