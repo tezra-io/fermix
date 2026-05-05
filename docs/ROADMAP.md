@@ -209,13 +209,37 @@ See `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` for the full design.
 | **Anthropic adapter scaffold** | Real `to_provider_tools` (input_schema rename); `chat/3` returns `{:error, :not_implemented}` until tokens land | P1 | New | N/A | S |
 | **Per-skill `provider:` override** | Optional frontmatter field; lets skills pin a specific provider | P1 | New | N/A | S |
 | **Telemetry uniformity** | `[:fermix, :capability, :exec]` across all kinds; replaces per-tool/per-skill events with overlap during migration | P1 | Refactor | N/A | S |
-| **Removal of `Tools.Registry`, `Tools.Tool`, `Tools.InvokeSkill`** | After Stage 4 cutover; no deprecation shim — fermix has 3 baked skills, no external consumers | P0 | Removal | N/A | S |
+| **Removal of `Tools.Registry`, `Tools.Tool`, `Tools.InvokeSkill`** | After Stage 4 cutover; no deprecation shim — pre-release system, no external consumers | P0 | Removal | N/A | S |
 
-**Migration safety:** Stages 1–4 run old + new registries side-by-side; old path deletion happens only at Stage 4 ship gate. Behaviour fixtures pin OpenAI request bodies for each baked skill across the migration. End-to-end Telegram smoke test required at every stage gate.
+**Migration safety:** Stages 1–4 run old + new registries side-by-side; old path deletion happens only at Stage 4 ship gate. Behaviour fixtures pin OpenAI request bodies for representative skill fixtures across the migration. End-to-end Telegram smoke test required at every stage gate.
 
 **Multi-provider note:** The `Additional Providers (Ongoing)` section's "OpenAI Responses API unification" item is absorbed by this milestone. The `Reliable wrapper`, `Router provider`, and concrete `Anthropic`, `Gemini`, `OpenRouter`, `Ollama` adapters remain separate work items — M4.9 only delivers the abstraction layer they will plug into.
 
 **Milestone 4.9 Total Effort:** ~3-4 weeks
+
+---
+
+## Default Skill Set — Initial Release
+
+**Goal:** Define the small set of Fermix-owned skills that ship with the first install.
+
+This is a product decision, not a capability-system milestone. M2 and M4.9 provide the skill runtime, registry, policy, and direct skill-as-capability invocation. This section owns the actual default skill catalog.
+
+Default skills should be:
+
+- Few enough that the main agent can choose confidently.
+- Product-shaped, not generic role labels.
+- Backed by checked-in `SKILL.md` files under the release `priv/skills` tree.
+- Tested through `SkillRegistry`, `CapabilityRegistry`, sub-agent invocation, and journal output.
+- Documented in README with only the skill name, intended use, and capability boundary.
+
+Initial skill names and contents are TBD.
+
+Out of scope:
+
+- User-created skill tooling; that remains under Milestone 7's `skill_create`.
+- Third-party/plugin skill installation; that remains a follow-on unlocked by M4.9.
+- Large catalogs of overlapping specialist skills.
 
 ---
 
