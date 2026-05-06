@@ -1,5 +1,7 @@
 defmodule FermixCore.Providers.OpenAI.CodexTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
+
+  import ExUnit.CaptureLog
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Providers.OpenAI.Codex
@@ -25,6 +27,26 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     def handle_call(:refresh, _from, %{refreshed: refreshed} = state) do
       {:reply, {:ok, refreshed}, %{state | current: refreshed}}
     end
+  end
+
+  defmodule InvalidatedTokenServer do
+    @moduledoc false
+    use GenServer
+
+    def init(token), do: {:ok, token}
+    def handle_call(:get_token, _from, t), do: {:reply, {:ok, t}, t}
+    def handle_call(:refresh, _from, t), do: {:reply, {:error, :auth_invalidated}, t}
+  end
+
+  defmodule FailingRefreshTokenServer do
+    @moduledoc false
+    use GenServer
+
+    def init(state), do: {:ok, state}
+    def handle_call(:get_token, _from, %{token: token} = state), do: {:reply, {:ok, token}, state}
+
+    def handle_call(:refresh, _from, %{reason: reason} = state),
+      do: {:reply, {:error, reason}, state}
   end
 
   # JWT with payload {"sub":"usr_1"} — base64url-encoded, no padding.
@@ -113,6 +135,37 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert turn.model == "gpt-5"
     end
 
+    test "logs debug context when the token is not a decodable JWT account id source" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "chatgpt-account-id") == []
+
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      previous_level = Logger.level()
+      Logger.configure(level: :debug)
+
+      log =
+        try do
+          capture_log([level: :debug], fn ->
+            assert {:ok, _turn} =
+                     Codex.chat([%{role: "user", content: "x"}], [],
+                       access_token: "not-a-jwt",
+                       model: "gpt-5",
+                       base_url: "https://chatgpt.test/codex/responses",
+                       req_options: [plug: {Req.Test, __MODULE__}]
+                     )
+          end)
+        after
+          Logger.configure(level: previous_level)
+        end
+
+      assert log =~ "Codex account id decode skipped"
+      assert log =~ "missing_payload"
+    end
+
     test "raises ArgumentError when token_server returns {:error, _}" do
       stub_server = :"codex_test_stub_token_server_#{System.unique_integer([:positive])}"
 
@@ -145,6 +198,39 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
 
       assert message == "Codex API error: 401"
+    end
+
+    test "provider telemetry includes the agent when supplied" do
+      telemetry_id = "codex-provider-agent-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        telemetry_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, test_pid ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("hello"))
+      end)
+
+      {:ok, _turn} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          agent: "main",
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+      assert metadata.agent == "main"
     end
 
     test "refreshes token and retries once when Codex invalidates cached bearer" do
@@ -199,6 +285,77 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert turn.content == "refreshed"
       assert_receive {:attempt, 1, ["Bearer " <> ^old_token]}, 500
       assert_receive {:attempt, 2, ["Bearer " <> ^new_token]}, 500
+    end
+
+    test "surfaces a recovery message when TokenManager reports auth_invalidated" do
+      token_server = :"codex_invalidated_token_server_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        GenServer.start_link(
+          InvalidatedTokenServer,
+          "header.eyJzdWIiOiJ1c3JfMSJ9.sig",
+          name: token_server
+        )
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(
+          conn,
+          401,
+          Jason.encode!(%{
+            "error" => %{
+              "code" => "token_invalidated",
+              "message" => "Your authentication token has been invalidated."
+            }
+          })
+        )
+      end)
+
+      {:error, message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          token_server: token_server,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert message =~ "Codex auth invalidated"
+      assert message =~ "fermix auth login"
+    end
+
+    test "surfaces refresh failures instead of returning the original 401" do
+      token_server = :"codex_refresh_failure_token_server_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        GenServer.start_link(
+          FailingRefreshTokenServer,
+          %{token: "header.eyJzdWIiOiJ1c3JfMSJ9.sig", reason: {:network, :timeout}},
+          name: token_server
+        )
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(
+          conn,
+          401,
+          Jason.encode!(%{
+            "error" => %{
+              "code" => "token_invalidated",
+              "message" => "Your authentication token has been invalidated."
+            }
+          })
+        )
+      end)
+
+      {:error, message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          token_server: token_server,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert message =~ "Codex token refresh failed"
+      assert message =~ ":timeout"
+      refute message == "Codex API error: 401"
     end
   end
 

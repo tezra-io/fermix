@@ -327,6 +327,42 @@ _Security & Governance was originally numbered M5; it has been moved to **M10** 
 
 **Goal:** Port all 47 RustyClaw tools for feature parity.
 
+### Capability Instructions and Fermix Self-Knowledge
+
+Milestone 7 adds many tools, so tool-use knowledge must become a first-class part
+of the capability system, not something stored in user memory or scattered across
+ad hoc prompt prose.
+
+`CapabilityRegistry` should be the source of truth for capability-level
+instructions:
+
+- what the capability does
+- when the main agent should use it
+- required and optional arguments
+- delivery, side-effect, and safety rules
+- compact examples for common calls
+- expected failure modes and operator-visible errors
+
+The main-agent runtime prompt should summarize broad routing rules only. Detailed
+tool behavior should be generated from capability metadata and provider tool
+schemas so the model receives the right instructions at call time. For example,
+`schedule_job` should carry the rule that channel-originated jobs which need to
+report back to the same chat use `delivery_mode = "origin"`; that knowledge
+belongs with the capability, not with `USER.md` or `MEMORY.md`.
+
+For broader Fermix system knowledge, add a Fermix-owned manual/self-knowledge
+skill or capability that can explain how agents, channels, memory, jobs, config,
+and tools fit together. This manual is for higher-level operating knowledge. It
+must not replace capability-local instructions needed for correct tool calls.
+
+Stage gate before expanding the M7 tool catalog:
+
+- every new capability has registry-owned usage guidance and schema docs
+- the main agent prompt is generated from compact capability summaries
+- full capability documentation is available on demand without bloating every
+  request context
+- tests cover at least one realistic main-agent tool-call path per tool family
+
 ### File & Code Tools
 
 | Feature | Description | Priority | Type | Reference | Effort |

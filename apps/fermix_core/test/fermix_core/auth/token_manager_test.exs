@@ -65,7 +65,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       File.rm_rf!(dir)
     end
 
-    test "loads legacy openai-scoped Codex tokens" do
+    test "does not load openai provider tokens as Codex credentials" do
       dir = tmp_dir()
 
       fermix_path =
@@ -81,7 +81,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         })
 
       name = start_manager(fermix_auth_path: fermix_path)
-      assert {:ok, "legacy_nested"} = TokenManager.get_token(name)
+      assert {:error, :no_token} = TokenManager.get_token(name)
 
       File.rm_rf!(dir)
     end
@@ -183,6 +183,50 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "new_rt"
 
       File.rm_rf!(dir)
+    end
+  end
+
+  describe "permanent refresh failures" do
+    def permanent_401_plug(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        401,
+        Jason.encode!(%{
+          "error" => %{
+            "code" => "refresh_token_reused",
+            "message" => "Already used"
+          }
+        })
+      )
+    end
+
+    test "marks state invalidated and surfaces :auth_invalidated to callers" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name =
+        start_manager(
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_401_plug/1]
+        )
+
+      assert {:ok, "AT"} = TokenManager.get_token(name)
+      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      # subsequent refresh attempts short-circuit instead of re-hitting the network
+      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
     end
   end
 

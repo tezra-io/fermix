@@ -25,6 +25,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Capabilities are available through the capability registry for shell commands, file access, memory, browser actions, scheduled jobs, and skills.
     - Use direct built-in capabilities when the task is narrow and the required capability is obvious.
     - For reminders, recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks, use `schedule_job`.
+    - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
     - Do not use shell, browser, computer-use, or MCP automation to create a Fermix scheduled job unless the user explicitly asks to modify an external scheduler.
     - Pick a skill capability by name when a specialized skill is a better fit than handling the work directly.

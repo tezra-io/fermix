@@ -16,6 +16,7 @@ defmodule FermixCore.Setup.Doctor do
   Inject `req_options: [plug: ...]` to stub HTTP in tests.
   """
 
+  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Providers.ModelCatalog
 
@@ -118,9 +119,8 @@ defmodule FermixCore.Setup.Doctor do
             %{type: "message", role: "user", content: [%{type: "input_text", text: "."}]}
           ],
           instructions: "ping",
-          max_output_tokens: 1,
           store: false,
-          stream: false
+          stream: true
         }
 
         headers = [
@@ -237,22 +237,37 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp require_codex_token(opts) do
-    server = Keyword.get(opts, :token_server, TokenManager)
-
-    try do
-      classify_token(TokenManager.get_token(server))
-    catch
-      :exit, {:noproc, _} ->
-        {:error,
-         {:misconfigured,
-          "TokenManager not running — `fermix doctor --full` cannot probe OAuth providers " <>
-            "from the CLI process. Run the probe from the daemon (e.g. via the LiveView " <>
-            "setup screen) or configure an api_key provider."}}
+    case Process.whereis(TokenManager) do
+      nil -> CodexToken.get_token(opts)
+      _pid -> TokenManager.get_token(TokenManager)
     end
+    |> classify_token()
   end
 
   defp classify_token({:ok, token}) when is_binary(token) and token != "", do: {:ok, token}
   defp classify_token({:ok, _}), do: {:error, {:misconfigured, "Codex token is empty"}}
+
+  defp classify_token({:error, :no_auth_file}),
+    do:
+      {:error,
+       {:misconfigured, "Codex token missing; run `fermix auth login`, then restart the daemon."}}
+
+  defp classify_token({:error, {:provider_missing, :openai_codex}}),
+    do:
+      {:error,
+       {:misconfigured, "Codex token missing; run `fermix auth login`, then restart the daemon."}}
+
+  defp classify_token({:error, :no_token}),
+    do:
+      {:error,
+       {:misconfigured,
+        "TokenManager has no Codex token loaded; run `fermix auth login`, then restart the daemon."}}
+
+  defp classify_token({:error, :auth_invalidated}),
+    do:
+      {:error,
+       {:misconfigured,
+        "Codex OAuth token was invalidated; run `fermix auth login`, then restart the daemon."}}
 
   defp classify_token({:error, reason}),
     do: {:error, {:misconfigured, "Codex token unavailable: #{inspect(reason)}"}}

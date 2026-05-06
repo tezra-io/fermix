@@ -74,7 +74,7 @@ defmodule FermixCore.Providers.OpenAI do
       |> handle_completions_response()
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms)
+    emit_telemetry(result, model, duration_ms, Keyword.get(opts, :agent))
     result
   end
 
@@ -173,7 +173,7 @@ defmodule FermixCore.Providers.OpenAI do
     end
   end
 
-  defp emit_telemetry(result, model, duration_ms) do
+  defp emit_telemetry(result, model, duration_ms, agent) do
     {status, tokens} =
       case result do
         {:ok, resp} ->
@@ -183,11 +183,11 @@ defmodule FermixCore.Providers.OpenAI do
           {:error, %{}}
       end
 
-    :telemetry.execute(
-      [:fermix, :provider, :call],
-      %{duration_ms: duration_ms},
+    metadata =
       %{provider: :openai, model: model, status: status, tokens: tokens, reasoning_effort: nil}
-    )
+      |> maybe_add_field(:agent, agent)
+
+    :telemetry.execute([:fermix, :provider, :call], %{duration_ms: duration_ms}, metadata)
   end
 
   defp api_key do

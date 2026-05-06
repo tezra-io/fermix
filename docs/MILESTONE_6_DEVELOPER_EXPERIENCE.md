@@ -223,9 +223,19 @@ CLI commands that need live process state should ask the running daemon to evalu
   provider: %{active: atom() | nil, model: String.t() | nil, auth_mode: atom() | nil},
   channels: [%{name: String.t(), status: atom(), enabled: boolean(), mode: atom() | nil}],
   memory: %{database_path: String.t(), repo: atom(), conversation_store: atom(), store: atom()},
-  jobs: %{scheduled: integer(), running: integer(), paused: integer(), failed_recent: integer()},
+  jobs: %{
+    scheduled: integer(),
+    running: integer(),
+    paused: integer(),
+    failed_recent: integer(),
+    next: %{id: String.t(), name: String.t() | nil, next_run_at: DateTime.t(), state: String.t()} | nil,
+    status: :ready | :unavailable,
+    error: String.t() | nil
+  },
   agents: %{
     main: %{
+      health: :online | :unknown,
+      activity: :idle | :running | :unknown,
       status: :idle | :running | :unknown,
       active_conversations: non_neg_integer(),
       pending_conversations: non_neg_integer()
@@ -245,6 +255,8 @@ Add `MainAgent.status/1` returning:
 ```elixir
 %{
   name: "main",
+  health: :online,
+  activity: :idle | :running,
   status: :idle | :running,
   pid: pid() | nil,
   active_conversations: non_neg_integer(),
@@ -257,6 +269,8 @@ Add `MainAgent.status/1` returning:
   memory: %{extraction_enabled: boolean(), agent_id: String.t(), owner_id: String.t()}
 }
 ```
+
+`health` means the MainAgent process answered the status call. `activity` means whether it currently has in-flight work. `status` stays as the activity value for Stage 1 CLI compatibility; dashboards must present health and activity separately so an idle but healthy main agent is not shown as inactive or broken.
 
 This is an operational status API, not a conversation inspector. It must not expose message contents, user text, tool arguments, or full conversation keys. Skill workers continue to come from `AgentSupervisor.list_agents/1`.
 

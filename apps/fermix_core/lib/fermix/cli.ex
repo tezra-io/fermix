@@ -9,7 +9,11 @@ defmodule Fermix.CLI do
   rather than a silent stub.
   """
 
+  alias Fermix.CLI.AgentsCommand
+  alias Fermix.CLI.AuthCommand
+  alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.Doctor
+  alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
@@ -42,12 +46,16 @@ defmodule Fermix.CLI do
   defp dispatch(cmd, _rest) when cmd in @help_flags, do: usage(0)
   defp dispatch(cmd, _rest) when cmd in @version_flags, do: Version.run()
   defp dispatch("setup", rest), do: Setup.run(rest)
+  defp dispatch("auth", rest), do: AuthCommand.run(rest)
   defp dispatch("run", rest), do: Run.run(rest)
   defp dispatch("service", rest), do: ServiceCommand.run(rest)
   defp dispatch("start", rest), do: StartCommand.run(rest)
   defp dispatch("stop", rest), do: StopCommand.run(rest)
   defp dispatch("restart", rest), do: RestartCommand.run(rest)
   defp dispatch("status", rest), do: StatusCommand.run(rest)
+  defp dispatch("health", rest), do: HealthCommand.run(rest)
+  defp dispatch("agents", rest), do: AgentsCommand.run(rest)
+  defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
@@ -61,17 +69,23 @@ defmodule Fermix.CLI do
     fermix — Elixir-native multi-agent platform
 
     Usage:
-      fermix setup [--print-state] [--import-codex] [--openai-api-key VALUE]
+      fermix setup [--print-state] [--reconfigure] [--import-codex] [--openai-api-key VALUE]
                    [--provider openai|openai_codex|anthropic]
                    [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
                    [--telegram-bot-token VALUE] ...
+      fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
+      fermix auth   status
+      fermix auth   logout
       fermix run                        Start the daemon in the foreground
       fermix service install   [--user|--system]   Install OS service unit
       fermix service uninstall [--user|--system]   Remove OS service unit
       fermix start             [--user|--system]   Start the installed OS service
       fermix stop              [--user|--system]   Stop the installed OS service
       fermix restart           [--user|--system]   Restart the installed OS service
-      fermix status                                Show running daemon status
+      fermix status [--full] [--json]             Show daemon and overview status
+      fermix health [--json]                      Show daemon-evaluated health
+      fermix agents [--json]                      Show main-agent and worker status
+      fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix doctor  [--full]                      Run post-install diagnostics

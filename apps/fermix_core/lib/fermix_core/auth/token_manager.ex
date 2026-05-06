@@ -11,7 +11,7 @@ defmodule FermixCore.Auth.TokenManager do
 
   use GenServer
 
-  alias FermixCore.Auth.RefreshClient
+  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Store
 
   require Logger
@@ -50,10 +50,11 @@ defmodule FermixCore.Auth.TokenManager do
       expires_at: nil,
       fermix_path: fermix_path,
       req_options: req_options,
-      refresh_timer: nil
+      refresh_timer: nil,
+      invalidated: false
     }
 
-    case read_entry(fermix_path) do
+    case CodexToken.read_entry(fermix_path) do
       {:ok, entry} ->
         state = apply_entry(state, entry)
         Logger.info("TokenManager: loaded tokens, expires #{inspect(state.expires_at)}")
@@ -66,12 +67,20 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   @impl true
+  def handle_call(:get_token, _from, %{invalidated: true} = state) do
+    {:reply, {:error, :auth_invalidated}, state}
+  end
+
   def handle_call(:get_token, _from, %{access_token: nil} = state) do
     {:reply, {:error, :no_token}, state}
   end
 
   def handle_call(:get_token, _from, state) do
     {:reply, {:ok, state.access_token}, state}
+  end
+
+  def handle_call(:refresh, _from, %{invalidated: true} = state) do
+    {:reply, {:error, :auth_invalidated}, state}
   end
 
   def handle_call(:refresh, _from, state) do
@@ -88,6 +97,12 @@ defmodule FermixCore.Auth.TokenManager do
         Logger.info("TokenManager: refreshed successfully")
         {:noreply, state}
 
+      # Permanent failure — token chain is dead; stop retrying. The user
+      # must rotate credentials (`fermix auth login`) and restart the
+      # daemon. The error was already logged by do_refresh/1.
+      {:error, :auth_invalidated, state} ->
+        {:noreply, state}
+
       {:error, reason, state} ->
         Logger.error("TokenManager: refresh failed — #{inspect(reason)}")
         timer = Process.send_after(self(), :refresh, @retry_backoff_ms)
@@ -97,33 +112,29 @@ defmodule FermixCore.Auth.TokenManager do
 
   # --- Internals ---
 
-  defp read_entry(path) do
-    case Store.read(:openai_codex, path) do
-      {:ok, entry} ->
-        {:ok, entry}
-
-      {:error, {:provider_missing, :openai_codex}} ->
-        Store.read(:openai, path)
-
-      {:error, _reason} = err ->
-        err
-    end
-  end
-
   defp do_refresh(%{refresh_token: nil} = state) do
     {:error, :no_refresh_token, state}
   end
 
   defp do_refresh(state) do
-    case RefreshClient.refresh(state.refresh_token, state.req_options) do
-      {:ok, tokens} ->
+    entry = entry_from_state(state)
+
+    case CodexToken.refresh_entry(entry, state.fermix_path, state.req_options) do
+      {:ok, entry} ->
         state =
           state
-          |> apply_tokens(tokens)
+          |> apply_entry(entry)
           |> schedule_refresh()
 
-        persist(state)
         {:ok, state}
+
+      {:error, {:permanent, status, body}} ->
+        Logger.error(
+          "TokenManager: refresh permanently failed (HTTP #{status}: #{inspect(body)}). " <>
+            "Recover with `fermix auth login`, then restart the daemon."
+        )
+
+        {:error, :auth_invalidated, %{state | invalidated: true, refresh_timer: nil}}
 
       {:error, reason} ->
         {:error, reason, state}
@@ -136,15 +147,6 @@ defmodule FermixCore.Auth.TokenManager do
       | access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at: expires_at
-    }
-  end
-
-  defp apply_tokens(state, tokens) do
-    %{
-      state
-      | access_token: tokens.access_token,
-        refresh_token: tokens.refresh_token || state.refresh_token,
-        expires_at: tokens.expires_at
     }
   end
 
@@ -163,23 +165,15 @@ defmodule FermixCore.Auth.TokenManager do
     end
   end
 
-  defp persist(state) do
-    entry = %{
+  defp entry_from_state(state) do
+    %{
       auth_mode: "chatgpt",
       tokens: %{
         access_token: state.access_token,
         refresh_token: state.refresh_token
       },
       expires_at: state.expires_at,
-      last_refresh: DateTime.utc_now()
+      last_refresh: nil
     }
-
-    case Store.write(:openai_codex, entry, state.fermix_path) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("TokenManager: failed to persist — #{inspect(reason)}")
-    end
   end
 end
