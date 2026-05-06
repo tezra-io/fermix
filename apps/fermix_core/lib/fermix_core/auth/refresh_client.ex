@@ -47,6 +47,12 @@ defmodule FermixCore.Auth.RefreshClient do
       {:ok, %{status: 200, body: body}} ->
         parse_token_response(body)
 
+      # 4xx is permanent — the OAuth server told us exactly what's wrong
+      # (refresh_token_reused, invalid_grant, etc.). Retrying with the
+      # same dead refresh token can never succeed.
+      {:ok, %{status: status, body: body}} when status >= 400 and status < 500 ->
+        {:error, {:permanent, status, body}}
+
       {:ok, %{status: status}} when attempt < @max_attempts ->
         Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} got #{status}")
         Process.sleep(@retry_base_ms * attempt)

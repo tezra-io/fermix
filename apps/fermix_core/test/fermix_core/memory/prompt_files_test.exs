@@ -230,6 +230,30 @@ defmodule FermixCore.Memory.PromptFilesTest do
     assert memory_text in [nil, ""]
   end
 
+  test "rebuild/2 keeps job run summaries out of prompt files", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "job",
+      scope_id: "job:daily_digest",
+      category: "job_run_summary",
+      key: "latest",
+      value: "Daily digest output",
+      promote_target: "none",
+      source_id: "job:daily_digest",
+      source_type: "scheduled_job",
+      source_name: "Daily Digest"
+    })
+
+    assert {:ok, %{user: nil, memory: nil}} = PromptFiles.rebuild(agent_id, owner_id)
+    assert File.read!(PromptFiles.user_path(agent_id)) == ""
+    assert File.read!(PromptFiles.memory_path(agent_id)) == ""
+  end
+
   test "rebuild/4 commits prompt file revisions with extraction provenance and dedupes unchanged output",
        %{
          agent_id: agent_id,

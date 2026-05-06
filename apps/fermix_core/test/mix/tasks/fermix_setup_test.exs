@@ -102,7 +102,12 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     restart_global_memory_repo!()
 
     Application.put_env(:fermix_core, :providers,
-      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+      openai: [
+        auth_mode: :api_key,
+        api_key: "sk-test-123",
+        default_model: "gpt-5.5",
+        reasoning_effort: :high
+      ]
     )
 
     Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
@@ -118,7 +123,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     :ok =
       ConfigStore.save_snapshot(%{
         fermix_core: [
-          providers: [openai: [auth_mode: :api_key, api_key: "sk-test-123"]],
+          providers: [
+            openai: [
+              auth_mode: :api_key,
+              api_key: "sk-test-123",
+              default_model: "gpt-5.5",
+              reasoning_effort: :high
+            ]
+          ],
           personalization: [
             user_name: "Test",
             timezone: "UTC",
@@ -140,6 +152,51 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert File.exists?(BootstrapPaths.identity_path("main"))
     assert File.exists?(BootstrapPaths.agents_path("main"))
     assert File.exists?(BootstrapPaths.soul_path("main"))
+  end
+
+  test "accepts provider model and reasoning flags through the Mix wrapper" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [api_key: "sk-test-123", default_model: "gpt-5.5", reasoning_effort: :high]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: true, mode: :webhook)
+
+    Application.put_env(:fermix_core, :personalization,
+      user_name: "Test",
+      timezone: "UTC",
+      communication_style: "neutral and direct"
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+    Mix.Task.reenable("fermix.setup")
+
+    SetupTask.run([
+      "--provider",
+      "openai_codex",
+      "--default-model",
+      "gpt-5.5",
+      "--reasoning-effort",
+      "high",
+      "--telegram-bot-token",
+      "bot-token",
+      "--skip-probe"
+    ])
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    agent = Keyword.get(persisted.fermix_core, :agent, [])
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+    codex = Keyword.get(providers, :openai_codex, [])
+
+    assert Keyword.get(agent, :provider) == :openai_codex
+    assert Keyword.get(codex, :default_model) == "gpt-5.5"
+    assert Keyword.get(codex, :reasoning_effort) == :high
   end
 
   defp restart_global_memory_repo! do

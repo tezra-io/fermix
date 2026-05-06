@@ -17,6 +17,11 @@ defmodule Fermix.CLI.Daemon do
 
   use GenServer
 
+  alias FermixCore.Health
+  alias FermixCore.Introspection.Agents
+  alias FermixCore.Introspection.Capabilities
+  alias FermixCore.Introspection.Overview
+  alias FermixCore.Introspection.Wire
   alias FermixCore.Trace
 
   require Logger
@@ -154,9 +159,24 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp handle_request(line, state) do
+    # The local control socket has no per-request auth; the trust boundary is
+    # the 0600 socket file under FERMIX_HOME. Keep new methods read-only unless
+    # explicit auth or operator confirmation is added at this boundary.
     case Jason.decode(line) do
       {:ok, %{"method" => "status"}} ->
         status_reply(state)
+
+      {:ok, %{"method" => "overview"}} ->
+        overview_reply(state)
+
+      {:ok, %{"method" => "health"}} ->
+        health_reply()
+
+      {:ok, %{"method" => "agents"}} ->
+        agents_reply()
+
+      {:ok, %{"method" => "capabilities"} = request} ->
+        capabilities_reply(request)
 
       {:ok, %{"method" => "shutdown"}} ->
         Trace.record(:agent_event, "daemon", %{event: "shutdown_requested"})
@@ -173,6 +193,45 @@ defmodule Fermix.CLI.Daemon do
   defp status_reply(state) do
     %{
       status: "ok",
+      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
+      uptime_ms: System.monotonic_time(:millisecond) - state.started_at_ms,
+      pid: System.pid()
+    }
+  end
+
+  defp overview_reply(state) do
+    with {:ok, overview} <- Overview.snapshot(daemon: daemon_snapshot(state)) do
+      %{status: "ok", overview: Wire.json_safe(overview)}
+    else
+      {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  defp health_reply do
+    %{status: "ok", health: Health.report() |> Wire.json_safe()}
+  end
+
+  defp agents_reply do
+    with {:ok, agents} <- Agents.snapshot() do
+      %{status: "ok", agents: Wire.json_safe(agents)}
+    else
+      {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  defp capabilities_reply(request) do
+    kind = request |> Map.get("params", %{}) |> Map.get("kind", "all")
+
+    with {:ok, capabilities} <- Capabilities.snapshot(kind: kind) do
+      %{status: "ok", capabilities: Wire.json_safe(capabilities)}
+    else
+      {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  defp daemon_snapshot(state) do
+    %{
+      status: :running,
       version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
       uptime_ms: System.monotonic_time(:millisecond) - state.started_at_ms,
       pid: System.pid()

@@ -73,6 +73,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       tools: tools,
       capabilities: capabilities,
       instructions: resolved_instructions,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -120,6 +121,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       tools: tools,
       capabilities: caps,
       instructions: instructions,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -184,9 +186,12 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         {:ok, refreshed_token} ->
           request_once(url, request_body, refreshed_token, req_options)
 
+        {:error, :auth_invalidated} ->
+          {:auth_invalidated, response_body}
+
         {:error, reason} ->
           Logger.error("Codex token refresh after invalidation failed: #{inspect(reason)}")
-          response
+          {:refresh_failed, reason}
       end
     else
       response
@@ -194,6 +199,19 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   end
 
   defp maybe_refresh_and_retry(response, _url, _body, _auth, _req_options), do: response
+
+  defp handle_response({:auth_invalidated, body}, _turn_state) do
+    Logger.error("Codex auth invalidated and refresh exhausted: #{inspect(body)}")
+
+    {:error,
+     "Codex auth invalidated. Run `fermix auth login` to mint fresh tokens, " <>
+       "then restart the daemon."}
+  end
+
+  defp handle_response({:refresh_failed, reason}, _turn_state) do
+    Logger.error("Codex token refresh failed: #{inspect(reason)}")
+    {:error, "Codex token refresh failed: #{inspect(reason)}"}
+  end
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
     parsed = parse_body_to_map(body)
@@ -245,14 +263,45 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @account_id_claims ["account_id", "accountId", "sub", "https://api.openai.com/account_id"]
 
   defp decode_jwt_account_id(token) when is_binary(token) do
-    with [_, payload | _] <- String.split(token, "."),
-         {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, claims} <- Jason.decode(decoded) do
-      Enum.find_value(@account_id_claims, &nonempty_string(claims[&1]))
-    else
-      _ -> nil
+    case account_id_from_jwt(token) do
+      {:ok, account_id} ->
+        account_id
+
+      {:error, reason} ->
+        Logger.debug("Codex account id decode skipped: #{inspect(reason)}")
+        nil
     end
   end
+
+  defp account_id_from_jwt(token) do
+    case String.split(token, ".") do
+      [_, payload | _] -> account_id_from_payload(payload)
+      _parts -> {:error, :missing_payload}
+    end
+  end
+
+  defp account_id_from_payload(payload) do
+    case Base.url_decode64(payload, padding: false) do
+      {:ok, decoded} -> account_id_from_decoded_payload(decoded)
+      :error -> {:error, :invalid_payload_base64}
+    end
+  end
+
+  defp account_id_from_decoded_payload(decoded) do
+    case Jason.decode(decoded) do
+      {:ok, claims} -> account_id_from_claims(claims)
+      {:error, reason} -> {:error, {:invalid_payload_json, reason}}
+    end
+  end
+
+  defp account_id_from_claims(claims) when is_map(claims) do
+    case Enum.find_value(@account_id_claims, &nonempty_string(claims[&1])) do
+      nil -> {:error, :missing_account_id_claim}
+      account_id -> {:ok, account_id}
+    end
+  end
+
+  defp account_id_from_claims(_claims), do: {:error, :invalid_payload_claims}
 
   defp nonempty_string(value) when is_binary(value) and value != "", do: value
   defp nonempty_string(_), do: nil
@@ -418,6 +467,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end
 end

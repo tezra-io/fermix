@@ -65,6 +65,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       input: input,
       tools: tools,
       capabilities: capabilities,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -100,6 +101,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       input: next_input,
       tools: tools,
       capabilities: caps,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -228,6 +230,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end
 end
