@@ -167,22 +167,54 @@ defmodule FermixChannels.TelegramTest do
       assert body["text"] == "hello"
     end
 
-    test "sends without parse_mode by default" do
+    test "renders common markdown as Telegram HTML by default" do
       stub_telegram(self(), 200, %{"ok" => true})
 
-      :ok = send_msg("123", "hello")
+      text = """
+      **Title**
+      - *first* item
+      - _second_ with `code`
+      1. link to [Fermix](https://example.com?q=1&x=2)
+      ~~done~~
+      ```elixir
+      IO.puts("<ok>")
+      ```
+      """
+
+      assert :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body}
+      assert body["parse_mode"] == "HTML"
+
+      assert body["text"] ==
+               """
+               <b>Title</b>
+               • <i>first</i> item
+               • <i>second</i> with <code>code</code>
+               1. link to <a href="https://example.com?q=1&amp;x=2">Fermix</a>
+               <s>done</s>
+               <pre><code class="language-elixir">IO.puts(&quot;&lt;ok&gt;&quot;)</code></pre>
+               """
+    end
+
+    test "can send plain text without Telegram parse mode" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      :ok = send_msg("123", "hello **world** <3", format: :plain)
 
       assert_received {:telegram_request, _path, body}
       refute Map.has_key?(body, "parse_mode")
+      assert body["text"] == "hello **world** <3"
     end
 
     test "respects parse_mode option" do
       stub_telegram(self(), 200, %{"ok" => true})
 
-      :ok = send_msg("123", "hello", parse_mode: "HTML")
+      :ok = send_msg("123", "hello **world**", parse_mode: "MarkdownV2")
 
       assert_received {:telegram_request, _path, body}
-      assert body["parse_mode"] == "HTML"
+      assert body["parse_mode"] == "MarkdownV2"
+      assert body["text"] == "hello **world**"
     end
 
     test "includes reply_to_message_id when reply_to given" do
@@ -295,6 +327,27 @@ defmodule FermixChannels.TelegramTest do
       assert :ok = reply.("thread reply")
       assert_received {:telegram_request, _path, body}
       assert body["message_thread_id"] == 456
+    end
+
+    test "reply function renders markdown bold for Telegram" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      message =
+        Message.new!(%{
+          id: "42",
+          content: "hello",
+          sender: "alice",
+          channel: "telegram",
+          chat_id: "123",
+          reply_target: "123"
+        })
+
+      reply = Telegram.build_reply(message)
+
+      assert :ok = reply.("answer with **bold**")
+      assert_received {:telegram_request, _path, body}
+      assert body["parse_mode"] == "HTML"
+      assert body["text"] == "answer with <b>bold</b>"
     end
   end
 
