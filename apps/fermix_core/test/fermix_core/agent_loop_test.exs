@@ -338,6 +338,15 @@ defmodule FermixCore.AgentLoopTest do
       assert log =~ "AgentLoop activity callback raised"
       assert log =~ "callback failed"
     end
+
+    test "passes agent name into adapter opts for provider telemetry", %{registry: registry} do
+      set_mock_responses([turn("Hello there!")])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry)
+
+      [{_messages, _capabilities, opts}] = mock_calls()
+      assert opts[:agent] == "test"
+    end
   end
 
   # -- Capability not found --

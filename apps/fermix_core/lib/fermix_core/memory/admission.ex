@@ -207,6 +207,8 @@ defmodule FermixCore.Memory.Admission do
     end
   end
 
+  defp prompt_target(_category, "job"), do: "none"
+
   defp scope_id("owner", ctx), do: ctx.owner_id
   defp scope_id("agent", ctx), do: ctx.agent_id
 

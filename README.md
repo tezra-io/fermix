@@ -56,17 +56,17 @@ For contributors and anyone who wants to run against unreleased code. See [Devel
 
 ## Configure
 
-`fermix setup` is the single entry point for first-run configuration. It is interactive by default and accepts non-interactive flags (`--openai-api-key`, `--telegram-bot-token`, …) for scripted installs. It writes a typed snapshot to:
+`fermix setup` is the single entry point for first-run configuration. It is interactive when required and accepts non-interactive flags (`--openai-api-key`, `--telegram-bot-token`, …) for scripted installs. Once setup is complete, no-arg reruns stay idempotent and only seed missing prompt files; use `fermix setup --reconfigure` to force the provider/model/effort prompts again. It writes a typed snapshot to:
 
 - `FERMIX_HOME/config.toml` (default `FERMIX_HOME` is `~/.fermix`)
 
 It also creates the workspace roots the runtime expects:
 
-- `~/.fermix/skills`
-- `~/.fermix/journals`
-- `~/.fermix/traces`
-- `~/.fermix/logs`
-- `~/.fermix/auth.json` (when `openai_codex` is selected; `0600`)
+- `$FERMIX_HOME/skills`
+- `$FERMIX_HOME/journals`
+- `$FERMIX_HOME/traces`
+- `$FERMIX_HOME/logs`
+- `$FERMIX_HOME/auth.json` (when `openai_codex` is selected; `0600`)
 
 Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`.
 
@@ -162,7 +162,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 
 | Command | Description |
 |---------|-------------|
-| `fermix setup` | Run the interactive (or flag-driven) configuration wizard |
+| `fermix setup [--reconfigure]` | Run the interactive (or flag-driven) configuration wizard |
 | `fermix run` | Start the daemon in the foreground (used by service units) |
 | `fermix service install [--user\|--system]` | Write and enable the OS service unit |
 | `fermix service uninstall [--user\|--system]` | Remove the OS service unit |

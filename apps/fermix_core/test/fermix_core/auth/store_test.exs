@@ -50,7 +50,7 @@ defmodule FermixCore.Auth.StoreTest do
       assert %DateTime{} = entry.expires_at
     end
 
-    test "migrates flat M3-era shape into openai provider" do
+    test "migrates flat M3-era shape into openai_codex provider" do
       path = tmp_path()
 
       flat = %{
@@ -60,8 +60,9 @@ defmodule FermixCore.Auth.StoreTest do
       }
 
       File.write!(path, Jason.encode!(flat))
-      assert {:ok, entry} = Store.read(:openai, path)
+      assert {:ok, entry} = Store.read(:openai_codex, path)
       assert entry.tokens.access_token == "AT"
+      assert {:error, {:provider_missing, :openai}} = Store.read(:openai, path)
     end
 
     test "returns provider_missing when provider not present" do
@@ -157,6 +158,57 @@ defmodule FermixCore.Auth.StoreTest do
 
       tmp_pattern = Path.dirname(path) |> Path.join("#{Path.basename(path)}.tmp.*")
       assert Path.wildcard(tmp_pattern) == []
+    end
+  end
+
+  describe "delete_provider/2" do
+    test "removes a provider, preserves others, and writes with 0600 permissions" do
+      path = tmp_path()
+
+      File.write!(
+        path,
+        Jason.encode!(%{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "auth_mode" => "api_key",
+              "tokens" => %{"access_token" => "sk-test", "refresh_token" => nil}
+            },
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"}
+            }
+          }
+        })
+      )
+
+      assert :ok = Store.delete_provider(:openai_codex, path)
+
+      data = path |> File.read!() |> Jason.decode!()
+      refute Map.has_key?(data["providers"], "openai_codex")
+      assert data["providers"]["openai"]["tokens"]["access_token"] == "sk-test"
+      assert {:ok, %{mode: mode}} = File.stat(path)
+      assert Bitwise.band(mode, 0o777) == 0o600
+
+      tmp_pattern = Path.dirname(path) |> Path.join("#{Path.basename(path)}.tmp.*")
+      assert Path.wildcard(tmp_pattern) == []
+    end
+
+    test "deleting openai_codex from flat M3-era shape prevents stale token resurrection" do
+      path = tmp_path()
+
+      File.write!(
+        path,
+        Jason.encode!(%{
+          "auth_mode" => "chatgpt",
+          "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
+          "expires_at" => future_iso8601(3600)
+        })
+      )
+
+      assert :ok = Store.delete_provider(:openai_codex, path)
+      assert {:error, {:provider_missing, :openai_codex}} = Store.read(:openai_codex, path)
+      assert {:error, {:provider_missing, :openai}} = Store.read(:openai, path)
     end
   end
 end

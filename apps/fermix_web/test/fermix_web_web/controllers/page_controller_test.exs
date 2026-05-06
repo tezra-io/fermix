@@ -3,11 +3,88 @@ defmodule FermixWebWeb.PageControllerTest do
 
   alias FermixCore.Setup.BootReport
 
+  defmodule FakeHomeSnapshot do
+    def snapshot do
+      {:ok,
+       %{
+         overview: %{
+           readiness: %{status: :ready, failures: []},
+           provider: %{active: :openai, model: "gpt-5.4-mini"},
+           agents: %{
+             main: %{
+               health: :online,
+               activity: :idle,
+               status: :idle,
+               active_conversations: 0,
+               pending_conversations: 0
+             },
+             skill_workers: 1,
+             running_skill_workers: 1
+           },
+           jobs: %{
+             scheduled: 1,
+             running: 0,
+             paused: 0,
+             failed_recent: 0,
+             status: :ready,
+             error: nil
+           }
+         },
+         agents: %{
+           main: %{
+             name: "main",
+             health: :online,
+             activity: :idle,
+             status: :idle,
+             active_conversations: 0,
+             pending_conversations: 0,
+             provider: :openai_codex,
+             model: nil
+           },
+           skill_workers: [
+             %{
+               name: "research",
+               role: :worker,
+               session_id: "session-1",
+               status: :running,
+               parent: "main"
+             }
+           ],
+           counts: %{skill_workers: 1, running_skill_workers: 1}
+         },
+         jobs: %{
+           status: :ready,
+           error: nil,
+           counts: %{disabled: 0, paused: 0, running: 0, scheduled: 1, total: 1},
+           jobs: [
+             %{
+               id: "daily_digest",
+               name: "Daily Digest",
+               state: "scheduled",
+               enabled?: true,
+               schedule_expr: "every 15 minutes",
+               next_run_at: ~U[2026-05-05 12:00:00Z],
+               last_status: "ok",
+               delivery_mode: "origin"
+             }
+           ]
+         }
+       }}
+    end
+  end
+
+  defmodule BrokenHomeSnapshot do
+    def snapshot do
+      {:error, {:badmatch, self(), "/Users/sujshe/.fermix-dev/auth.json"}}
+    end
+  end
+
   setup do
     provider_config = Application.get_env(:fermix_core, :providers)
     telegram_config = Application.get_env(:fermix_channels, :telegram)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
+    home_snapshot = Application.get_env(:fermix_web, :home_snapshot)
 
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
@@ -22,6 +99,7 @@ defmodule FermixWebWeb.PageControllerTest do
       restore_env(:fermix_channels, :telegram, telegram_config)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
+      restore_env(:fermix_web, :home_snapshot, home_snapshot)
       BootReport.refresh()
     end)
 
@@ -41,11 +119,45 @@ defmodule FermixWebWeb.PageControllerTest do
   test "GET / renders home when readiness is complete", %{conn: conn} do
     Application.put_env(:fermix_core, :providers, openai: [api_key: "test-key"])
     Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+    Application.put_env(:fermix_web, :home_snapshot, FakeHomeSnapshot)
     BootReport.refresh()
 
     conn = get(conn, ~p"/")
+    body = html_response(conn, 200)
 
-    assert html_response(conn, 200) =~ "Peace of mind from prototype to production"
+    assert body =~ "Fermix"
+    assert body =~ "Agent runtime ready"
+    assert body =~ "Main agent"
+    assert body =~ "Health"
+    assert body =~ "online"
+    assert body =~ "Activity"
+    assert body =~ "idle"
+    assert body =~ "Subagents"
+    assert body =~ "research"
+    assert body =~ "Scheduled jobs"
+    assert body =~ "Daily Digest"
+    assert body =~ "gpt-5.4-mini"
+    assert body =~ "Open setup"
+    assert body =~ ~s(href="/health/ready?pretty=1")
+    assert body =~ ~s(href="/health/live?pretty=1")
+    refute body =~ "Phoenix Framework"
+    refute body =~ "Peace of mind from prototype to production"
+  end
+
+  test "GET / renders a safe error when runtime snapshot fails", %{conn: conn} do
+    Application.put_env(:fermix_core, :providers, openai: [api_key: "test-key"])
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+    Application.put_env(:fermix_web, :home_snapshot, BrokenHomeSnapshot)
+    BootReport.refresh()
+
+    conn = get(conn, ~p"/")
+    body = html_response(conn, 200)
+
+    assert body =~ "Runtime snapshot unavailable"
+    assert body =~ "Runtime introspection is unavailable"
+    refute body =~ "badmatch"
+    refute body =~ "/Users/sujshe"
+    refute body =~ "#PID"
   end
 
   test "GET /setup renders actionable setup guidance when readiness is incomplete", %{conn: conn} do

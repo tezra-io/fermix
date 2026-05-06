@@ -343,7 +343,15 @@ defmodule FermixCore.Agents.MainAgentTest do
     }
 
     opts
-    |> Keyword.take([:thread_ts, :thread_scope, :metadata, :chat_mode])
+    |> Keyword.take([
+      :thread_ts,
+      :thread_scope,
+      :metadata,
+      :chat_mode,
+      :typing_fn,
+      :typing_interval_ms,
+      :typing_timeout_ms
+    ])
     |> Enum.into(message)
   end
 
@@ -496,6 +504,36 @@ defmodule FermixCore.Agents.MainAgentTest do
 
   # -- Client API --
 
+  describe "status/1" do
+    test "reports active request counts without exposing message content", %{agent: agent} do
+      MockProvider.set_responses([{:block, :status_probe, mock_response("done")}])
+
+      msg = make_message("private status content")
+      assert :ok = MainAgent.handle_message(msg, agent)
+
+      assert_receive {:mock_provider_blocked, :status_probe, provider_pid}, 5_000
+
+      status = MainAgent.status(agent)
+
+      assert status.name == "main"
+      assert status.health == :online
+      assert status.activity == :running
+      assert status.status == :running
+      assert is_pid(status.pid)
+      assert status.active_conversations == 1
+      assert status.pending_conversations == 0
+      assert status.active_requests == 1
+      assert status.pending_requests == 0
+      assert status.available_skills == []
+      assert status.memory.agent_id == "main"
+      assert status.memory.owner_id == "default"
+      refute inspect(status) =~ "private status content"
+
+      send(provider_pid, {:continue, :status_probe})
+      assert_receive {:reply, "done"}, 5_000
+    end
+  end
+
   describe "handle_message/2" do
     test "returns response via reply_fn", %{agent: agent} do
       MockProvider.set_responses([mock_response("Hello back!")])
@@ -504,6 +542,72 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert :ok = MainAgent.handle_message(msg, agent)
 
       assert_receive {:reply, "Hello back!"}, 5_000
+    end
+
+    test "runs typing_fn while a request is active and stops after reply", %{agent: agent} do
+      test_pid = self()
+
+      MockProvider.set_responses([{:block, :typing_probe, mock_response("done")}])
+
+      msg =
+        make_message("Slow request",
+          typing_interval_ms: 20,
+          typing_timeout_ms: 500,
+          typing_fn: fn ->
+            send(test_pid, :typing_tick)
+            :ok
+          end
+        )
+
+      assert :ok = MainAgent.handle_message(msg, agent)
+
+      assert_receive :typing_tick, 500
+      assert_receive {:mock_provider_blocked, :typing_probe, provider_pid}, 5_000
+      assert_receive :typing_tick, 200
+
+      send(provider_pid, {:continue, :typing_probe})
+      assert_receive {:reply, "done"}, 5_000
+      refute_receive :typing_tick, 100
+    end
+
+    test "continues the request when typing_fn reports an expected adapter error", %{agent: agent} do
+      MockProvider.set_responses([mock_response("done")])
+
+      msg =
+        make_message("Request with typing transport failure",
+          typing_fn: fn -> {:error, %Req.TransportError{reason: :econnrefused}} end
+        )
+
+      assert :ok = MainAgent.handle_message(msg, agent)
+      assert_receive {:reply, "done"}, 5_000
+    end
+
+    test "does not swallow unexpected typing_fn exceptions as healthy requests", %{agent: agent} do
+      test_pid = self()
+      MockProvider.set_responses([{:block, :typing_raise_probe, mock_response("done")}])
+
+      msg =
+        make_message("Request with broken typing callback",
+          typing_fn: fn ->
+            send(test_pid, :typing_called)
+            raise ArgumentError, "broken typing callback"
+          end
+        )
+
+      capture_log(fn ->
+        assert :ok = MainAgent.handle_message(msg, agent)
+        assert_receive :typing_called, 500
+        assert eventually(fn -> MainAgent.status(agent).active_requests == 0 end)
+      end)
+
+      refute_receive {:reply, _response}, 100
+
+      receive do
+        {:mock_provider_blocked, :typing_raise_probe, provider_pid} ->
+          send(provider_pid, {:continue, :typing_raise_probe})
+      after
+        0 -> :ok
+      end
     end
 
     test "stores user and assistant messages in conversation store", %{

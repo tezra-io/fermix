@@ -58,7 +58,12 @@ defmodule FermixCore.Tools.ScheduleJob do
           minimum: 1,
           description: "Optional timeout when the provider/tool loop stops making progress."
         },
-        delivery_mode: %{type: "string", enum: ["none", "origin", "channel", "local"]},
+        delivery_mode: %{
+          type: "string",
+          enum: ["none", "origin", "channel", "local"],
+          description:
+            ~s(Optional delivery_mode. Use "origin" when a channel request should report back to the same chat, "channel" only with an explicit delivery_target or configured default, and "none" for silent jobs.)
+        },
         delivery_target: %{type: "object"}
       }
     }

@@ -82,7 +82,7 @@ defmodule FermixCore.AgentLoop do
       allowed_tools: allowed_tools,
       capability_registry: capability_registry,
       adapter: adapter,
-      adapter_opts: build_adapter_opts(opts, route_key),
+      adapter_opts: build_adapter_opts(opts, route_key, Keyword.get(opts, :context, %{})),
       max_iter: Keyword.get(opts, :max_iterations, @max_iterations),
       context: Keyword.get(opts, :context, %{}),
       iteration: 0,
@@ -124,16 +124,21 @@ defmodule FermixCore.AgentLoop do
        when is_list(capabilities),
        do: capabilities
 
-  defp build_adapter_opts(opts, route_key) do
-    Keyword.merge(
-      [
-        model: route_key.model,
-        base_url: route_key.base_url,
-        temperature: Keyword.get(opts, :temperature, 0.7)
-      ],
-      Keyword.get(opts, :adapter_opts, [])
-    )
+  defp build_adapter_opts(opts, route_key, context) do
+    [
+      model: route_key.model,
+      base_url: route_key.base_url,
+      temperature: Keyword.get(opts, :temperature, 0.7)
+    ]
+    |> maybe_put_adapter_opt(:agent, context_agent(context))
+    |> Keyword.merge(Keyword.get(opts, :adapter_opts, []))
   end
+
+  defp maybe_put_adapter_opt(opts, _key, nil), do: opts
+  defp maybe_put_adapter_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp context_agent(%{agent_name: agent}) when is_binary(agent) or is_atom(agent), do: agent
+  defp context_agent(_context), do: nil
 
   defp initial_chat(state) do
     with {:ok, state} <- compact_state_messages(state),

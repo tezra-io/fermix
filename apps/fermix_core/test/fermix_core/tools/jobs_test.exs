@@ -98,6 +98,8 @@ defmodule FermixCore.Tools.JobsTest do
              "Keep lifecycle timing in schedule and expires_at"
 
     assert params.properties.expires_at.description =~ "temporary"
+    assert params.properties.delivery_mode.description =~ "delivery_mode"
+    assert params.properties.delivery_mode.description =~ "origin"
 
     assert {:ok, created} =
              ScheduleJob.execute(
@@ -261,11 +263,29 @@ defmodule FermixCore.Tools.JobsTest do
   test "schedule_job returns a tool error instead of raising for invalid input", %{
     context: context
   } do
+    telemetry_id = "schedule-job-error-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      telemetry_id,
+      [:fermix, :tool, :exec],
+      fn event, measurements, metadata, test_pid ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      self()
+    )
+
+    on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
     assert {:ok, result} =
              ScheduleJob.execute(%{"name" => "Bad", "schedule" => "sometimes"}, context)
 
     assert result.success == false
     assert result.error == "Missing required parameter: task"
+
+    assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+    assert metadata.tool == "schedule_job"
+    assert metadata.success == false
+    assert metadata.error == "Missing required parameter: task"
   end
 
   test "schedule_job rejects channel mode without a delivery target", %{context: context} do

@@ -14,6 +14,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "Pick a skill capability by name"
     assert content =~ "cron-style requests"
     assert content =~ "use `schedule_job`"
+    assert content =~ "For channel-originated jobs that should report back to the same chat"
     assert content =~ "Use `expires_at` for temporary"
     assert content =~ "Do not use shell, browser, computer-use, or MCP automation"
   end

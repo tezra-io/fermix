@@ -88,6 +88,23 @@ defmodule FermixCore.Setup.WizardTest do
            end)
   end
 
+  test "report marks restart required when persisted config cannot be read" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(Path.join(tmp_home, "config.toml"))
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+    assert Wizard.report().restart_required?
+  end
+
   test "report surfaces enabled whatsapp, discord, slack, and signal channel failures" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]
@@ -170,7 +187,33 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
   end
 
-  test "prompts omit provider/model/effort once agent.provider is persisted to TOML" do
+  test "provider prompt defaults to configured provider when TOML has not persisted it yet" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-wizard-provider-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high]],
+          agent: [name: "fermix"],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+    prompt = Wizard.report().wizard |> Wizard.prompts() |> Enum.find(&(&1.key == :provider))
+
+    assert prompt.default == :openai_codex
+    assert prompt.label =~ "blank = openai_codex"
+  end
+
+  test "prompts omit provider/model/effort once provider settings are persisted to TOML" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-wizard-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
@@ -179,7 +222,14 @@ defmodule FermixCore.Setup.WizardTest do
     :ok =
       ConfigStore.save_snapshot(%{
         fermix_core: [
-          providers: [openai: [auth_mode: :api_key, api_key: "sk-test-123"]],
+          providers: [
+            openai: [
+              auth_mode: :api_key,
+              api_key: "sk-test-123",
+              default_model: "gpt-5.5",
+              reasoning_effort: :high
+            ]
+          ],
           agent: [name: "fermix", provider: :openai],
           personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
         ],
@@ -194,6 +244,65 @@ defmodule FermixCore.Setup.WizardTest do
     refute Enum.any?(prompts, &(&1.key == :provider))
     refute Enum.any?(prompts, &(&1.key == :default_model))
     refute Enum.any?(prompts, &(&1.key == :reasoning_effort))
+  end
+
+  test "prompts for missing model and effort when only agent.provider is persisted" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-wizard-model-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [api_key: "sk-test-123"]],
+          agent: [name: "fermix", provider: :openai],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    prompts = Wizard.report().wizard |> Wizard.prompts()
+
+    refute Enum.any?(prompts, &(&1.key == :provider))
+    assert Enum.any?(prompts, &(&1.key == :default_model and &1.required?))
+    assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
+  end
+
+  test "prompts for missing OpenAI API key when env-only auth makes readiness pass" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-wizard-auth-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [default_model: "gpt-5.5", reasoning_effort: :high]],
+          agent: [name: "fermix", provider: :openai],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [api_key: "sk-env-only", default_model: "gpt-5.5", reasoning_effort: :high]
+    )
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+    Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+
+    report = Wizard.report()
+
+    assert report.status == :ready
+    assert Enum.any?(Wizard.prompts(report.wizard), &(&1.key == :openai_api_key and &1.required?))
   end
 
   test "report routes to :personalization step when only personalization is missing" do
