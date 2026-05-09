@@ -65,7 +65,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       File.rm_rf!(dir)
     end
 
-    test "loads legacy openai-scoped Codex tokens" do
+    test "does not load openai provider tokens as Codex credentials" do
       dir = tmp_dir()
 
       fermix_path =
@@ -81,7 +81,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         })
 
       name = start_manager(fermix_auth_path: fermix_path)
-      assert {:ok, "legacy_nested"} = TokenManager.get_token(name)
+      assert {:error, :no_token} = TokenManager.get_token(name)
 
       File.rm_rf!(dir)
     end
@@ -186,6 +186,50 @@ defmodule FermixCore.Auth.TokenManagerTest do
     end
   end
 
+  describe "permanent refresh failures" do
+    def permanent_401_plug(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        401,
+        Jason.encode!(%{
+          "error" => %{
+            "code" => "refresh_token_reused",
+            "message" => "Already used"
+          }
+        })
+      )
+    end
+
+    test "marks state invalidated and surfaces :auth_invalidated to callers" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name =
+        start_manager(
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_401_plug/1]
+        )
+
+      assert {:ok, "AT"} = TokenManager.get_token(name)
+      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      # subsequent refresh attempts short-circuit instead of re-hitting the network
+      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+    end
+  end
+
   describe "scheduled refresh" do
     test "stays alive when scheduled refresh fires and fails" do
       dir = tmp_dir()
@@ -206,6 +250,115 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert {:ok, "soon"} = TokenManager.get_token(name)
       Process.sleep(1_500)
       assert Process.whereis(name) |> Process.alive?()
+
+      File.rm_rf!(dir)
+    end
+  end
+
+  describe "reload/1" do
+    test "re-reads tokens from disk and replaces the in-memory access token" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "stale_at", "refresh_token" => "stale_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "stale_at"} = TokenManager.get_token(name)
+
+      File.write!(
+        fermix_path,
+        Jason.encode!(%{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "fresh_at", "refresh_token" => "fresh_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+      )
+
+      assert {:ok, "fresh_at"} = TokenManager.reload(name)
+      assert {:ok, "fresh_at"} = TokenManager.get_token(name)
+
+      File.rm_rf!(dir)
+    end
+
+    test "clears invalidated state so subsequent get_token calls succeed" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name =
+        start_manager(
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_401_plug/1]
+        )
+
+      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+
+      File.write!(
+        fermix_path,
+        Jason.encode!(%{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "recovered_at", "refresh_token" => "recovered_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+      )
+
+      assert {:ok, "recovered_at"} = TokenManager.reload(name)
+      assert {:ok, "recovered_at"} = TokenManager.get_token(name)
+
+      File.rm_rf!(dir)
+    end
+
+    test "returns error and preserves cached state when disk read fails" do
+      dir = tmp_dir()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      name = start_manager(fermix_auth_path: fermix_path)
+      assert {:ok, "AT"} = TokenManager.get_token(name)
+
+      File.rm!(fermix_path)
+      assert {:error, :no_auth_file} = TokenManager.reload(name)
+      assert {:ok, "AT"} = TokenManager.get_token(name)
 
       File.rm_rf!(dir)
     end

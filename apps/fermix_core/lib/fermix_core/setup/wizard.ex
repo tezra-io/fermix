@@ -81,6 +81,20 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec prompts(WizardState.t()) :: [map()]
   def prompts(%WizardState{} = state) do
+    state
+    |> prompt_specs()
+    |> Enum.filter(& &1.required?)
+  end
+
+  @spec reconfigure_prompts(WizardState.t()) :: [map()]
+  def reconfigure_prompts(%WizardState{} = state) do
+    state
+    |> prompt_specs()
+    |> Enum.filter(&(&1.key in [:provider, :default_model, :reasoning_effort]))
+    |> Enum.map(&Map.put(&1, :required?, true))
+  end
+
+  defp prompt_specs(%WizardState{} = state) do
     # Channel-secret prompts read from the persisted TOML snapshot rather than
     # the merged Application env. A token surfaced only via env vars (e.g. the
     # operator's shell) would satisfy readiness during `fermix setup` but
@@ -88,30 +102,71 @@ defmodule FermixCore.Setup.Wizard do
     # for the token whenever it is unpersisted forces it onto disk where the
     # daemon will see it.
     persisted = persisted_snapshot()
-    provider_unset? = persisted_provider(persisted) == nil
+    persisted_provider = persisted_provider(persisted)
 
+    prompt_provider =
+      persisted_provider || valid_provider(configured_provider(state.config_snapshot)) || :openai
+
+    context = prompt_context(state, persisted, persisted_provider, prompt_provider)
+
+    provider_prompts(context) ++ channel_prompts(context) ++ personalization_prompts(context)
+  end
+
+  defp prompt_context(state, persisted, persisted_provider, prompt_provider) do
+    provider_unset? = persisted_provider == nil
+    provider_block = provider_config(persisted, prompt_provider)
+    model_unset? = provider_unset? or blank?(Keyword.get(provider_block, :default_model))
+    effort_unset? = provider_unset? or blank?(Keyword.get(provider_block, :reasoning_effort))
+    openai_api_key_unset? = openai_api_key_unpersisted?(persisted, persisted_provider)
+    default_model = ModelCatalog.default_model_for(prompt_provider)
+
+    %{
+      state: state,
+      persisted: persisted,
+      prompt_provider: prompt_provider,
+      provider_unset?: provider_unset?,
+      model_unset?: model_unset?,
+      effort_unset?: effort_unset?,
+      openai_api_key_unset?: openai_api_key_unset?,
+      default_model: default_model
+    }
+  end
+
+  defp provider_prompts(context) do
     [
+      %{
+        key: :provider,
+        label:
+          "Provider (#{Enum.map_join(ModelCatalog.providers(), "/", &Atom.to_string/1)}; blank = #{context.prompt_provider})",
+        default: context.prompt_provider,
+        required?: context.provider_unset?
+      },
       %{
         key: :openai_api_key,
         label: "OpenAI API key",
-        required?: missing_component?(state, "provider:openai")
-      },
-      %{
-        key: :provider,
-        label: "Provider (#{Enum.map_join(ModelCatalog.providers(), "/", &Atom.to_string/1)})",
-        required?: provider_unset?
+        required?:
+          missing_component?(context.state, "provider:openai") or context.openai_api_key_unset?
       },
       %{
         key: :default_model,
-        label: "Default model (e.g. #{ModelCatalog.default_model_for(:openai)})",
-        required?: provider_unset?
+        label: "Default model (blank = #{context.default_model})",
+        default: context.default_model,
+        required?: context.model_unset?
       },
       %{
         key: :reasoning_effort,
         label:
-          "Reasoning effort (#{Enum.map_join(ResponsesShared.valid_reasoning_efforts(), "/", &Atom.to_string/1)})",
-        required?: provider_unset?
-      },
+          "Reasoning effort (#{Enum.map_join(ResponsesShared.valid_reasoning_efforts(), "/", &Atom.to_string/1)}; blank = high)",
+        default: :high,
+        required?:
+          (context.provider_unset? or context.prompt_provider in [:openai, :openai_codex]) and
+            context.effort_unset?
+      }
+    ]
+  end
+
+  defp channel_prompts(%{persisted: persisted}) do
+    [
       %{
         key: :telegram_bot_token,
         label: "Telegram bot token",
@@ -161,7 +216,12 @@ defmodule FermixCore.Setup.Wizard do
         key: :signal_account,
         label: "Signal account",
         required?: channel_field_unpersisted?(persisted, :signal, :account, false)
-      },
+      }
+    ]
+  end
+
+  defp personalization_prompts(%{state: state}) do
+    [
       %{
         key: :user_name,
         label: "Your name",
@@ -178,7 +238,6 @@ defmodule FermixCore.Setup.Wizard do
         required?: missing_component?(state, "personalization")
       }
     ]
-    |> Enum.filter(& &1.required?)
   end
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
@@ -267,6 +326,34 @@ defmodule FermixCore.Setup.Wizard do
     |> Keyword.get(:provider)
   end
 
+  defp configured_provider(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:agent, [])
+    |> Keyword.get(:provider)
+  end
+
+  defp valid_provider(provider) when provider in [:openai, :openai_codex, :anthropic],
+    do: provider
+
+  defp valid_provider(_provider), do: nil
+
+  defp provider_config(snapshot, provider) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:providers, [])
+    |> Keyword.get(provider, [])
+  end
+
+  defp openai_api_key_unpersisted?(persisted, :openai) do
+    persisted
+    |> provider_config(:openai)
+    |> Keyword.get(:api_key)
+    |> blank?()
+  end
+
+  defp openai_api_key_unpersisted?(_persisted, _provider), do: false
+
   defp enabled_channels(snapshot) do
     channels = Map.get(snapshot, :fermix_channels, [])
 
@@ -347,7 +434,7 @@ defmodule FermixCore.Setup.Wizard do
         ConfigStore.persistable_snapshot(snapshot) != ConfigStore.persistable_snapshot(persisted)
 
       {:error, _reason} ->
-        false
+        true
     end
   end
 

@@ -65,6 +65,7 @@ mix format --check-formatted
 - `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` — M4.9 design (shipped) — `Capability`/`Adapter` behaviours, `CapabilityRegistry`, MCP outbound
 - `docs/MILESTONE_4_10_CODEX_PARITY.md` — M4.10 design (shipped) — Codex tool calls, provider/model/effort persistence, wizard step, doctor auth probe
 - `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` — M4.11 design (draft) — cron jobs, persistent memory sources, isolated runs
+- `docs/MILESTONE_7_ADVANCED_TOOLS.md` — M7 design — keyless built-in tool catalog (file/git/web/delegate/skill_create), capability metadata + dynamic prompt summary, self-knowledge skill
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.

@@ -5,6 +5,8 @@ defmodule FermixCore.Providers.OpenAI do
 
   @behaviour FermixCore.Providers.Provider
 
+  alias FermixCore.Net.HttpClient
+
   require Logger
 
   @base_url "https://api.openai.com/v1"
@@ -70,11 +72,11 @@ defmodule FermixCore.Providers.OpenAI do
         headers: [{"authorization", "Bearer #{key}"}]
       )
       |> Req.merge(req_options)
-      |> Req.request()
+      |> HttpClient.request("OpenAI base")
       |> handle_completions_response()
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms)
+    emit_telemetry(result, model, duration_ms, Keyword.get(opts, :agent))
     result
   end
 
@@ -173,7 +175,7 @@ defmodule FermixCore.Providers.OpenAI do
     end
   end
 
-  defp emit_telemetry(result, model, duration_ms) do
+  defp emit_telemetry(result, model, duration_ms, agent) do
     {status, tokens} =
       case result do
         {:ok, resp} ->
@@ -183,11 +185,11 @@ defmodule FermixCore.Providers.OpenAI do
           {:error, %{}}
       end
 
-    :telemetry.execute(
-      [:fermix, :provider, :call],
-      %{duration_ms: duration_ms},
+    metadata =
       %{provider: :openai, model: model, status: status, tokens: tokens, reasoning_effort: nil}
-    )
+      |> maybe_add_field(:agent, agent)
+
+    :telemetry.execute([:fermix, :provider, :call], %{duration_ms: duration_ms}, metadata)
   end
 
   defp api_key do

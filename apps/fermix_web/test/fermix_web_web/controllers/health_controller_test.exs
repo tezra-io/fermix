@@ -46,6 +46,16 @@ defmodule FermixWebWeb.HealthControllerTest do
       assert body["version"] == "0.1.0"
       assert is_binary(body["timestamp"])
     end
+
+    test "pretty=1 returns indented JSON for browser reads", %{conn: conn} do
+      conn = get(conn, ~p"/health/live?pretty=1")
+      body = json_response(conn, 200)
+
+      assert body["status"] == "ok"
+      assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
+      assert conn.resp_body =~ "{\n"
+      assert conn.resp_body =~ "\n  \""
+    end
   end
 
   describe "GET /health/ready" do
@@ -88,6 +98,24 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert body["memory"]["conversation_store"] == "ready"
       assert body["memory"]["store"] == "ready"
+    end
+
+    test "pretty=1 returns indented readiness JSON without changing status", %{conn: conn} do
+      Application.put_env(:fermix_core, :providers, [])
+      Application.delete_env(:fermix_channels, :telegram)
+      Application.put_env(:fermix_channels, :whatsapp, enabled: false)
+      Application.put_env(:fermix_channels, :discord, enabled: false)
+      Application.put_env(:fermix_channels, :slack, enabled: false)
+      Application.put_env(:fermix_channels, :signal, enabled: false)
+      BootReport.refresh()
+
+      conn = get(conn, ~p"/health/ready?pretty=1")
+      body = json_response(conn, 503)
+
+      assert body["status"] == "setup_required"
+      assert get_resp_header(conn, "content-type") == ["application/json; charset=utf-8"]
+      assert conn.resp_body =~ "{\n"
+      assert conn.resp_body =~ "\n  \""
     end
 
     test "returns degraded when a configured long-running channel process is unavailable", %{

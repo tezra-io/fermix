@@ -4,10 +4,37 @@ defmodule Fermix.CLI.DaemonTest do
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
 
+  defmodule TestCLIBridge do
+    def default_timeout_ms, do: 120_000
+
+    def dispatch_input_sync(content, opts) do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, {:bridge_call, content, opts})
+
+      case Application.get_env(:fermix_core, :daemon_bridge_result, :ok) do
+        :ok ->
+          {:ok,
+           %{
+             response: "daemon reply: #{content}",
+             session_id: Keyword.get(opts, :session_id, "cli")
+           }}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
   setup do
+    previous_bridge = Application.get_env(:fermix_core, :cli_channel_bridge)
+    previous_pid = Application.get_env(:fermix_core, :daemon_test_pid)
+    previous_result = Application.get_env(:fermix_core, :daemon_bridge_result)
     {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.TaskSup)
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "fermix.sock")
+    Application.put_env(:fermix_core, :cli_channel_bridge, TestCLIBridge)
+    Application.put_env(:fermix_core, :daemon_test_pid, self())
+    Application.put_env(:fermix_core, :daemon_bridge_result, :ok)
 
     {:ok, daemon} =
       Daemon.start_link(
@@ -18,6 +45,9 @@ defmodule Fermix.CLI.DaemonTest do
 
     on_exit(fn ->
       if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      restore_app_env(:cli_channel_bridge, previous_bridge)
+      restore_app_env(:daemon_test_pid, previous_pid)
+      restore_app_env(:daemon_bridge_result, previous_result)
       File.rm_rf(socket_dir)
     end)
 
@@ -100,6 +130,58 @@ defmodule Fermix.CLI.DaemonTest do
              Client.status(socket_path: socket_path, timeout: 1_000)
   end
 
+  test "agent_message routes the prompt through the configured CLI bridge", %{
+    socket_path: socket_path
+  } do
+    assert {:ok, reply} =
+             Client.agent_message(
+               %{"content" => "hello", "session_id" => "daemon-test", "timeout_ms" => 1_000},
+               socket_path: socket_path,
+               timeout: 2_000
+             )
+
+    assert reply["status"] == "ok"
+    assert reply["response"] == "daemon reply: hello"
+    assert reply["session_id"] == "daemon-test"
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :session_id) == "daemon-test"
+    assert Keyword.get(opts, :timeout_ms) == 1_000
+  end
+
+  test "agent_message returns empty input errors without calling the bridge", %{
+    socket_path: socket_path
+  } do
+    assert {:ok, reply} =
+             Client.agent_message(%{"content" => "   "},
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert reply["status"] == "error"
+    assert reply["error"] == "empty_input"
+    refute_received {:bridge_call, _, _}
+  end
+
+  test "agent_message returns bridge errors with the normalized session id", %{
+    socket_path: socket_path
+  } do
+    Application.put_env(:fermix_core, :daemon_bridge_result, {:error, :timeout})
+
+    assert {:ok, reply} =
+             Client.agent_message(
+               %{"content" => "hello", "session_id" => "daemon-test"},
+               socket_path: socket_path,
+               timeout: 1_000
+             )
+
+    assert reply["status"] == "error"
+    assert reply["error"] == "timeout"
+    assert reply["session_id"] == "daemon-test"
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :session_id) == "daemon-test"
+  end
+
   defp mkdir! do
     path =
       Path.join(
@@ -110,4 +192,7 @@ defmodule Fermix.CLI.DaemonTest do
     File.mkdir_p!(path)
     path
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_app_env(key, value), do: Application.put_env(:fermix_core, key, value)
 end

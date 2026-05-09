@@ -11,6 +11,10 @@ defmodule FermixCore.Setup.Runtime do
   """
 
   alias FermixCore.Auth.CodexImport
+  alias FermixCore.Auth.CodexLogin
+  alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.TokenManager
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
@@ -54,6 +58,7 @@ defmodule FermixCore.Setup.Runtime do
 
       report.status == :ready and provided_answers(opts) == [] and
         Wizard.prompts(report.wizard) == [] and
+        not Keyword.get(opts, :reconfigure, false) and
           not Keyword.get(opts, :import_codex, false) ->
         seed_and_print(report, puts)
 
@@ -154,55 +159,279 @@ defmodule FermixCore.Setup.Runtime do
     case Wizard.save_answers(report.wizard, answers) do
       {:ok, updated_report} ->
         puts.("Saved setup snapshot to #{updated_report.config_path}")
-        print_report(updated_report, puts)
-        run_finalize_probe(updated_report, opts, puts)
+
+        with {:ok, authed_report} <- ensure_codex_auth(updated_report, opts, puts) do
+          print_report(authed_report, puts)
+          run_finalize_probe(authed_report, opts, puts, prompt)
+        end
 
       {:error, reason} ->
         {:error, "failed to save setup snapshot: #{inspect(reason)}"}
     end
   end
 
-  defp run_finalize_probe(%{status: :ready}, opts, puts) do
-    if Keyword.get(opts, :skip_probe, false) do
-      :ok
-    else
-      probe_opts = Keyword.take(opts, [:req_options, :token_server])
+  defp ensure_codex_auth(report, opts, puts) do
+    cond do
+      Keyword.get(opts, :skip_probe, false) ->
+        {:ok, report}
 
-      case Doctor.probe_active(probe_opts) do
-        {:ok, %{provider: provider, model: model, latency_ms: ms}} ->
-          puts.("auth probe: #{provider}/#{model} responded in #{ms}ms")
-          :ok
+      selected_codex_provider?(Keyword.get(opts, :provider)) or active_provider() == :openai_codex ->
+        ensure_codex_token(report, opts, puts)
 
-        {:error, {:auth_scope_mismatch, surface, hint}} ->
-          {:error, "auth probe failed for #{surface}: #{hint}"}
-
-        {:error, {:misconfigured, message}} ->
-          puts.("auth probe skipped: #{message}")
-          :ok
-
-        {:error, {:server_error, status, _body}} ->
-          puts.("auth probe inconclusive: provider returned HTTP #{status}")
-          :ok
-
-        {:error, {:network, reason}} ->
-          puts.("auth probe inconclusive: network error #{inspect(reason)}")
-          :ok
-      end
+      true ->
+        {:ok, report}
     end
   end
 
-  defp run_finalize_probe(_report, _opts, _puts), do: :ok
+  defp ensure_codex_token(report, opts, puts) do
+    token_opts =
+      []
+      |> maybe_put(:fermix_auth_path, Keyword.get(opts, :fermix_auth_path))
+      |> maybe_put(:refresh_req_options, Keyword.get(opts, :refresh_req_options))
+
+    case CodexToken.get_token(token_opts) do
+      {:ok, _token} ->
+        {:ok, report}
+
+      {:error, reason} when reason in [:no_auth_file] ->
+        run_codex_login(opts, puts)
+
+      {:error, {:provider_missing, :openai_codex}} ->
+        run_codex_login(opts, puts)
+
+      {:error, reason} ->
+        {:error, "codex token unavailable: #{inspect(reason)}"}
+    end
+  end
+
+  defp run_finalize_probe(%{status: :ready}, opts, puts, prompt) do
+    if Keyword.get(opts, :skip_probe, false) do
+      :ok
+    else
+      probe_opts = Keyword.take(opts, [:fermix_auth_path, :refresh_req_options, :req_options])
+
+      probe_opts
+      |> Doctor.probe_active()
+      |> handle_probe_result(probe_opts, opts, puts, prompt)
+    end
+  end
+
+  defp run_finalize_probe(_report, _opts, _puts, _prompt), do: :ok
+
+  defp handle_probe_result(
+         {:ok, %{provider: provider, model: model, latency_ms: ms}},
+         _probe_opts,
+         _opts,
+         puts,
+         _prompt
+       ) do
+    puts.("auth probe: #{provider}/#{model} responded in #{ms}ms")
+    :ok
+  end
+
+  defp handle_probe_result(
+         {:error, {:auth_scope_mismatch, surface, hint}},
+         probe_opts,
+         opts,
+         puts,
+         prompt
+       ) do
+    recover_codex_probe(surface, hint, probe_opts, opts, puts, prompt)
+  end
+
+  defp handle_probe_result({:error, {:misconfigured, message}}, _probe_opts, _opts, puts, _prompt) do
+    handle_misconfigured_probe(message, puts)
+  end
+
+  defp handle_probe_result(
+         {:error, {:server_error, status, _body}},
+         _probe_opts,
+         _opts,
+         puts,
+         _prompt
+       ) do
+    puts.("auth probe inconclusive: provider returned HTTP #{status}")
+    :ok
+  end
+
+  defp handle_probe_result({:error, {:network, reason}}, _probe_opts, _opts, puts, _prompt) do
+    puts.("auth probe inconclusive: network error #{inspect(reason)}")
+    :ok
+  end
+
+  defp handle_misconfigured_probe(message, puts) do
+    case active_provider() do
+      :openai_codex ->
+        {:error, "auth probe failed: #{message}"}
+
+      _provider ->
+        puts.("auth probe skipped: #{message}")
+        :ok
+    end
+  end
+
+  defp recover_codex_probe(surface, hint, probe_opts, opts, puts, prompt) do
+    case active_provider() do
+      :openai_codex ->
+        prompt
+        |> ask_codex_recovery?()
+        |> continue_codex_recovery(surface, hint, probe_opts, opts, puts)
+
+      _provider ->
+        {:error, "auth probe failed for #{surface}: #{hint}"}
+    end
+  end
+
+  defp ask_codex_recovery?(prompt) do
+    ask_yes_no(prompt, "Codex OAuth token rejected. Start ChatGPT OAuth login now? [Y/n]: ", true)
+  end
+
+  defp continue_codex_recovery(true, surface, hint, probe_opts, opts, puts) do
+    puts.("Codex OAuth token rejected; starting ChatGPT OAuth login.")
+
+    with {:ok, _report} <- run_codex_login(opts, puts) do
+      rerun_codex_probe(probe_opts, surface, hint, puts)
+    end
+  end
+
+  defp continue_codex_recovery(false, surface, hint, _probe_opts, _opts, _puts) do
+    {:error, "auth probe failed for #{surface}: #{hint}"}
+  end
+
+  defp rerun_codex_probe(probe_opts, surface, hint, puts) do
+    case Doctor.probe_active(probe_opts) do
+      {:ok, %{provider: provider, model: model, latency_ms: ms}} ->
+        puts.("auth probe: #{provider}/#{model} responded in #{ms}ms")
+        :ok
+
+      {:error, {:auth_scope_mismatch, _surface, _hint}} ->
+        {:error, "auth probe failed for #{surface}: #{hint}"}
+
+      {:error, reason} ->
+        {:error, "auth probe failed after Codex OAuth login: #{inspect(reason)}"}
+    end
+  end
+
+  defp run_codex_login(opts, puts) do
+    puts.("Opening ChatGPT OAuth login for openai_codex.")
+
+    login_opts =
+      []
+      |> maybe_put(:fermix_auth_path, Keyword.get(opts, :fermix_auth_path))
+      |> maybe_put(:no_browser, Keyword.get(opts, :no_browser))
+      |> maybe_put(:oauth_opener, Keyword.get(opts, :oauth_opener))
+      |> maybe_put(:oauth_port, Keyword.get(opts, :oauth_port) || Keyword.get(opts, :port))
+      |> maybe_put(:oauth_timeout_ms, Keyword.get(opts, :oauth_timeout_ms))
+      |> maybe_put(:timeout, Keyword.get(opts, :timeout))
+      |> maybe_put(:oauth_req_options, Keyword.get(opts, :oauth_req_options))
+      |> Keyword.put(:puts, puts)
+
+    case CodexLogin.login(login_opts) do
+      {:ok, _entry} ->
+        puts.("Stored ChatGPT OAuth credentials for openai_codex.")
+
+        with :ok <- reload_token_manager_if_running() do
+          load_report()
+        end
+
+      {:error, reason} ->
+        {:error, "codex oauth login failed: #{inspect(reason)}"}
+    end
+  end
+
+  # The supervised TokenManager (started when provider is :openai_codex)
+  # caches the loaded access token in memory. After a fresh OAuth login
+  # writes new tokens to disk, push them into the GenServer so the
+  # finalize probe — and any subsequent provider call — sees the new
+  # credentials instead of the rejected ones.
+  defp reload_token_manager_if_running do
+    case Process.whereis(TokenManager) do
+      nil ->
+        :ok
+
+      _pid ->
+        case TokenManager.reload(TokenManager) do
+          {:ok, _token} -> :ok
+          {:error, reason} -> {:error, "token manager reload failed: #{inspect(reason)}"}
+        end
+    end
+  end
+
+  defp selected_codex_provider?(:openai_codex), do: true
+  defp selected_codex_provider?("openai_codex"), do: true
+  defp selected_codex_provider?(_provider), do: false
+
+  defp active_provider do
+    :fermix_core
+    |> Application.get_env(:agent, [])
+    |> Keyword.get(:provider, :openai)
+  end
 
   defp collect_answers(report, opts, prompt) do
-    case provided_answers(opts) do
-      [] -> Enum.flat_map(Wizard.prompts(report.wizard), &interactive_answer(&1, prompt))
-      provided -> provided
+    provided = provided_answers(opts)
+
+    Enum.reduce(prompt_plan(report, opts), provided, fn prompt_info, answers ->
+      prompt_info = prompt_for_answers(prompt_info, answers)
+
+      cond do
+        answered?(answers, prompt_info.key) -> answers
+        irrelevant_prompt?(prompt_info, answers) -> answers
+        true -> answers ++ interactive_answer(prompt_info, prompt)
+      end
+    end)
+  end
+
+  defp prompt_plan(report, opts) do
+    if Keyword.get(opts, :reconfigure, false) do
+      Wizard.reconfigure_prompts(report.wizard)
+    else
+      Wizard.prompts(report.wizard)
     end
+  end
+
+  defp interactive_answer(%{key: key, label: label, default: default}, prompt) do
+    value = label |> prompt.() |> to_string() |> String.trim()
+    if value == "", do: [{key, default}], else: [{key, value}]
   end
 
   defp interactive_answer(%{key: key, label: label}, prompt) do
     value = label |> prompt.() |> to_string() |> String.trim()
     if value == "", do: [], else: [{key, value}]
+  end
+
+  defp answered?(answers, key), do: Keyword.get(answers, key) not in [nil, ""]
+
+  defp irrelevant_prompt?(%{key: :openai_api_key}, answers) do
+    selected_provider(answers) in [:openai_codex, :anthropic]
+  end
+
+  defp irrelevant_prompt?(%{key: :reasoning_effort}, answers) do
+    selected_provider(answers) == :anthropic
+  end
+
+  defp irrelevant_prompt?(_prompt, _answers), do: false
+
+  defp prompt_for_answers(%{key: :default_model} = prompt_info, answers) do
+    case selected_provider(answers) do
+      provider when provider in [:openai, :openai_codex, :anthropic] ->
+        default = ModelCatalog.default_model_for(provider)
+        %{prompt_info | label: "Default model (blank = #{default})", default: default}
+
+      _provider ->
+        prompt_info
+    end
+  end
+
+  defp prompt_for_answers(prompt_info, _answers), do: prompt_info
+
+  defp selected_provider(answers) do
+    case Keyword.get(answers, :provider) do
+      provider when provider in [:openai, :openai_codex, :anthropic] -> provider
+      "openai" -> :openai
+      "openai_codex" -> :openai_codex
+      "anthropic" -> :anthropic
+      _value -> nil
+    end
   end
 
   @spec provided_answers(keyword()) :: keyword()

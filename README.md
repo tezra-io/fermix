@@ -1,5 +1,3 @@
-# Fermix
-
 ```text
 ███████╗ ███████╗ ██████╗  ███╗   ███╗ ██╗ ██╗  ██╗
 ██╔════╝ ██╔════╝ ██╔══██╗ ████╗ ████║ ██║ ╚██╗██╔╝
@@ -16,9 +14,6 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 ![Erlang/OTP](https://img.shields.io/badge/otp-%E2%89%A5%2028-red)
 ![Status](https://img.shields.io/badge/status-alpha%20(pre--1.0)-yellow)
 
-<p align="center">
-  <img src="artifacts/fermix-cover.png" alt="Fermix cover: a luminous agent particle in a larger abstract system" width="960">
-</p>
 
 ## What is Fermix
 
@@ -61,17 +56,17 @@ For contributors and anyone who wants to run against unreleased code. See [Devel
 
 ## Configure
 
-`fermix setup` is the single entry point for first-run configuration. It is interactive by default and accepts non-interactive flags (`--openai-api-key`, `--telegram-bot-token`, …) for scripted installs. It writes a typed snapshot to:
+`fermix setup` is the single entry point for first-run configuration. It is interactive when required and accepts non-interactive flags (`--openai-api-key`, `--telegram-bot-token`, …) for scripted installs. Once setup is complete, no-arg reruns stay idempotent and only seed missing prompt files; use `fermix setup --reconfigure` to force the provider/model/effort prompts again. It writes a typed snapshot to:
 
 - `FERMIX_HOME/config.toml` (default `FERMIX_HOME` is `~/.fermix`)
 
 It also creates the workspace roots the runtime expects:
 
-- `~/.fermix/skills`
-- `~/.fermix/journals`
-- `~/.fermix/traces`
-- `~/.fermix/logs`
-- `~/.fermix/auth.json` (when `openai_codex` is selected; `0600`)
+- `$FERMIX_HOME/skills`
+- `$FERMIX_HOME/journals`
+- `$FERMIX_HOME/traces`
+- `$FERMIX_HOME/logs`
+- `$FERMIX_HOME/auth.json` (when `openai_codex` is selected; `0600`)
 
 Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`.
 
@@ -128,6 +123,7 @@ In dev/test these default to empty strings.
 fermix service install [--user|--system]   # write and enable the unit
 fermix start                               # start the installed service
 fermix status                              # ask the daemon over its control socket
+fermix ask "say pong"                      # send one local prompt to MainAgent
 fermix logs -f                             # tail ~/.fermix/logs/fermix.log
 fermix stop
 fermix restart
@@ -167,7 +163,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 
 | Command | Description |
 |---------|-------------|
-| `fermix setup` | Run the interactive (or flag-driven) configuration wizard |
+| `fermix setup [--reconfigure]` | Run the interactive (or flag-driven) configuration wizard |
 | `fermix run` | Start the daemon in the foreground (used by service units) |
 | `fermix service install [--user\|--system]` | Write and enable the OS service unit |
 | `fermix service uninstall [--user\|--system]` | Remove the OS service unit |
@@ -175,6 +171,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix stop [--user\|--system]` | Stop the installed OS service |
 | `fermix restart [--user\|--system]` | Restart the installed OS service |
 | `fermix status` | Print running daemon status via the control socket (exit `3` if not running) |
+| `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
 | `fermix logs [-f] [-n LINES]` | Show or follow the daemon log file |
 | `fermix upgrade [--check]` | Self-update from signed releases (cosign-verified, atomic swap) |
 | `fermix doctor [--full]` | Post-install diagnostics; `--full` adds network checks |
@@ -202,13 +199,28 @@ channel adapter → FermixChannels.Dispatcher → FermixCore.Agents.MainAgent
   → capability execution → provider → LLM → reply
 ```
 
-The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a hard cap of 25 iterations. Built-in tools are capabilities, and installed skills are registered as capabilities as well. The current built-in capability set is:
+The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a hard cap of 25 iterations. Built-in tools are capabilities, and installed skills are registered as capabilities as well.
+
+Built-in tools ship inside Fermix. They are always available when registered; users do not install or remove them. Skills are different: they live under the Fermix skills directories (`priv/skills`, `~/.fermix/skills`, and plugin roots), and each skill carries its own instructions and allowed-tool boundary.
+
+The current built-in capability set is:
 
 | Tool | Description |
 |------|-------------|
 | `shell` | Execute system commands with timeout |
 | `file_read` | Read files with offset/limit |
 | `file_write` | Write files with auto mkdir |
+| `file_edit` | Replace one unique string anchor in a file |
+| `glob_search` | Find files with bounded glob matching |
+| `content_search` | Search file contents without shelling out |
+| `git_read` | Inspect git status, logs, branches, diffs, and objects |
+| `git_write` | Stage, commit, checkout, or pull changes; push is deferred to M10 approval |
+| `web_fetch` | Fetch a public URL and return markdown-light text |
+| `web_search` | Search the public web through the keyless DuckDuckGo HTML backend |
+| `delegate` | Ask another configured model for one bounded answer |
+| `skill_create` | Scaffold a local skill with starter eval cases |
+| `model_routing_config` | Read or update local model-routing config |
+| `tool_help` | Return full docs for one registered capability |
 | `memory_store` | Store key-value facts |
 | `memory_recall` | Recall stored facts |
 | `memory_sources_list` | List visible memory sources, including scheduled-job sources |
@@ -242,6 +254,16 @@ mix test --only integration
 `mix quality` is the canonical "does everything pass" command. The git pre-commit hook enforces format, compile, credo, and tests.
 
 For dev iteration against the channels and Phoenix endpoint, `mix phx.server` boots the umbrella without going through the CLI dispatcher.
+
+`mix phx.server` does not enable the release daemon control socket. Use the running IEx shell for direct local agent calls, or run the release command path with `fermix run` when testing `fermix ask`, `fermix status`, `fermix health`, and other socket-backed CLI commands.
+
+Local one-shot agent checks:
+
+```bash
+fermix ask "say pong"
+fermix ask --session scenario-web-fetch "validate web_fetch localhost rejection"
+echo "summarize current health" | fermix ask --stdin --json
+```
 
 ## Resource history CLI
 

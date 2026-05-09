@@ -28,7 +28,18 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
   @callback name() :: String.t()
   @callback description() :: String.t()
   @callback parameters() :: map()
+  @callback when_to_use() :: String.t()
+  @callback examples() :: [map()]
+  @callback failure_modes() :: [map()]
+  @callback requires_setup() :: nil | map()
+  @callback category() :: atom()
   @callback execute(map(), context()) :: {:ok, tool_result()} | {:error, term()}
+
+  @optional_callbacks when_to_use: 0,
+                      examples: 0,
+                      failure_modes: 0,
+                      requires_setup: 0,
+                      category: 0
 
   @spec success(String.t()) :: tool_result()
   def success(output) when is_binary(output) do

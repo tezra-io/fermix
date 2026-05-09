@@ -20,6 +20,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Net.HttpClient
 
   require Logger
 
@@ -85,6 +86,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     temperature = Keyword.get(opts, :temperature, @default_temperature)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     response_format = Keyword.get(opts, :response_format)
+    agent = Keyword.get(opts, :agent)
     {req_options, _opts} = Keyword.pop(opts, :req_options, [])
 
     body =
@@ -92,10 +94,10 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       |> maybe_put_tools(to_provider_tools(capabilities))
       |> maybe_put(:response_format, response_format)
 
-    post(base_url, api_key, body, req_options, model, messages, capabilities)
+    post(base_url, api_key, body, req_options, model, messages, capabilities, agent)
   end
 
-  defp post(base_url, api_key, body, req_options, model, prior_messages, capabilities) do
+  defp post(base_url, api_key, body, req_options, model, prior_messages, capabilities, agent) do
     start = System.monotonic_time(:millisecond)
 
     result =
@@ -106,11 +108,11 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
         headers: [{"authorization", "Bearer #{api_key}"}]
       )
       |> Req.merge(req_options)
-      |> Req.request()
+      |> HttpClient.request("OpenAI ChatCompletions")
       |> handle_response(model, prior_messages, capabilities)
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms)
+    emit_telemetry(result, model, duration_ms, agent)
     result
   end
 
@@ -211,7 +213,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     end
   end
 
-  defp emit_telemetry(result, model, duration_ms) do
+  defp emit_telemetry(result, model, duration_ms, agent) do
     {status, tokens} =
       case result do
         {:ok, resp} ->
@@ -232,6 +234,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
         tokens: tokens,
         reasoning_effort: nil
       }
+      |> maybe_put(:agent, agent)
     )
   end
 end

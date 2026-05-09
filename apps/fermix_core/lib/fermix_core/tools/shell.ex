@@ -44,6 +44,32 @@ defmodule FermixCore.Tools.Shell do
   end
 
   @impl true
+  def when_to_use do
+    "Run a shell command only when no narrower Fermix built-in capability owns the verb."
+  end
+
+  @impl true
+  def examples do
+    [%{args: %{"command" => "mix test", "timeout_ms" => 120_000}, note: "run a repo command"}]
+  end
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "invalid_command", description: "command is absent or blank"},
+      %{tag: "invalid_working_dir", description: "working_dir does not exist"},
+      %{tag: "timeout", description: "command exceeded timeout_ms"},
+      %{tag: "exit_nonzero", description: "command exited with a non-zero code"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :system
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)

@@ -55,6 +55,32 @@ defmodule FermixCore.Tools.Browser do
   end
 
   @impl true
+  def when_to_use do
+    "Control an already configured browser for navigation, snapshots, clicks, form fills, or screenshots."
+  end
+
+  @impl true
+  def examples do
+    [%{args: %{"action" => "navigate", "url" => "https://example.com"}, note: "open a page"}]
+  end
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "invalid_action", description: "action is not one of the supported browser verbs"},
+      %{tag: "missing_action_arg", description: "the selected action is missing a required arg"},
+      %{tag: "binary_missing", description: "agent-browser is not installed or not on PATH"},
+      %{tag: "timeout", description: "agent-browser exceeded timeout_ms"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :web
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)

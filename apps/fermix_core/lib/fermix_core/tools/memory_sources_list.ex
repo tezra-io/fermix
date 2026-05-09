@@ -26,6 +26,28 @@ defmodule FermixCore.Tools.MemorySourcesList do
   end
 
   @impl true
+  def when_to_use do
+    "List durable memory sources and provenance before reasoning about where memories came from."
+  end
+
+  @impl true
+  def examples, do: [%{args: %{"status" => "active"}, note: "list active memory sources"}]
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "registry_failed", description: "memory-source registry query failed"},
+      %{tag: "invalid_filter", description: "status or source_type filter is invalid"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :memory
+
+  @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end

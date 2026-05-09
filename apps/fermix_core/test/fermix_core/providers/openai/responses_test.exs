@@ -182,6 +182,37 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
 
       assert message == "OpenAI Responses API error: 500"
     end
+
+    test "provider telemetry includes the agent when supplied" do
+      telemetry_id = "responses-provider-agent-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        telemetry_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, test_pid ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      {:ok, _turn} =
+        Responses.chat([%{role: "user", content: "x"}], [],
+          agent: "main",
+          api_key: "sk-test",
+          model: "gpt-5.4-mini",
+          base_url: "https://api.openai.com/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
+      assert metadata.agent == "main"
+    end
   end
 
   describe "continue/3" do

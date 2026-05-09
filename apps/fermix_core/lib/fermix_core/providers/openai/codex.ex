@@ -31,6 +31,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
@@ -73,6 +74,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       tools: tools,
       capabilities: capabilities,
       instructions: resolved_instructions,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -120,6 +122,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       tools: tools,
       capabilities: caps,
       instructions: instructions,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -164,11 +167,53 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     result
   end
 
+  # SSE responses are consumed via Req's `:into` callback so the parser
+  # runs incrementally and `receive_timeout` measures gaps between
+  # chunks, not the whole turn. Without this, `Req.request()` buffers the
+  # entire SSE body and the default 15 s receive_timeout fires while
+  # Codex is still reasoning, surfacing as a `:closed` transport error.
+  # The HttpClient wrapper retries once on stale-pool transport errors
+  # (`:closed`, `:econnrefused`) so the first request after macOS sleep
+  # recovers transparently.
   defp request_once(url, body, token, req_options) do
-    Req.new(url: url, method: :post, json: body, headers: build_headers(token))
+    Req.new(
+      url: url,
+      method: :post,
+      json: body,
+      headers: build_headers(token),
+      receive_timeout: 60_000,
+      connect_options: [timeout: 5_000],
+      into: &collect_sse/2
+    )
     |> Req.merge(req_options)
-    |> Req.request()
+    |> HttpClient.request("Codex")
+    |> finalize_streamed_body()
   end
+
+  defp collect_sse({:data, chunk}, {req, response}) when is_binary(chunk) do
+    if response.status in 200..299 do
+      state = current_sse_state(response) |> SSEParser.feed(chunk)
+      {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
+    else
+      body = ensure_binary_body(response.body)
+      {:cont, {req, %{response | body: body <> chunk}}}
+    end
+  end
+
+  defp current_sse_state(%{private: %{codex_sse_state: %SSEParser{} = state}}), do: state
+  defp current_sse_state(_response), do: SSEParser.new()
+
+  defp ensure_binary_body(body) when is_binary(body), do: body
+  defp ensure_binary_body(_body), do: ""
+
+  defp finalize_streamed_body({:ok, %Req.Response{private: private} = response}) do
+    case Map.get(private, :codex_sse_state) do
+      %SSEParser{} = state -> {:ok, %{response | body: SSEParser.finalize(state)}}
+      nil -> {:ok, response}
+    end
+  end
+
+  defp finalize_streamed_body(other), do: other
 
   defp maybe_refresh_and_retry(
          {:ok, %Req.Response{status: 401, body: response_body}} = response,
@@ -184,9 +229,12 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         {:ok, refreshed_token} ->
           request_once(url, request_body, refreshed_token, req_options)
 
+        {:error, :auth_invalidated} ->
+          {:auth_invalidated, response_body}
+
         {:error, reason} ->
           Logger.error("Codex token refresh after invalidation failed: #{inspect(reason)}")
-          response
+          {:refresh_failed, reason}
       end
     else
       response
@@ -194,6 +242,19 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   end
 
   defp maybe_refresh_and_retry(response, _url, _body, _auth, _req_options), do: response
+
+  defp handle_response({:auth_invalidated, body}, _turn_state) do
+    Logger.error("Codex auth invalidated and refresh exhausted: #{inspect(body)}")
+
+    {:error,
+     "Codex auth invalidated. Run `fermix auth login` to mint fresh tokens, " <>
+       "then restart the daemon."}
+  end
+
+  defp handle_response({:refresh_failed, reason}, _turn_state) do
+    Logger.error("Codex token refresh failed: #{inspect(reason)}")
+    {:error, "Codex token refresh failed: #{inspect(reason)}"}
+  end
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
     parsed = parse_body_to_map(body)
@@ -230,13 +291,29 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
     Logger.error("Codex transport error: #{inspect(reason)}")
-    {:error, reason}
+    {:error, transport_error_message(reason)}
   end
 
   defp handle_response({:error, reason}, _turn_state) do
     Logger.error("Codex request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp transport_error_message(:closed) do
+    "Codex stream closed by peer mid-response. Retry; if it persists, lower " <>
+      "reasoning_effort or check ChatGPT account status."
+  end
+
+  defp transport_error_message(:timeout) do
+    "Codex stream had no data for 60s. Lower reasoning_effort, or pass " <>
+      "req_options: [receive_timeout: ms] to extend the between-chunk window."
+  end
+
+  defp transport_error_message(:econnrefused) do
+    "Codex endpoint refused the connection (chatgpt.com unreachable from this host)."
+  end
+
+  defp transport_error_message(reason), do: "Codex transport error: #{inspect(reason)}"
 
   defp parse_body_to_map(body) when is_binary(body), do: SSEParser.parse(body)
   defp parse_body_to_map(body) when is_map(body), do: body
@@ -245,14 +322,45 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @account_id_claims ["account_id", "accountId", "sub", "https://api.openai.com/account_id"]
 
   defp decode_jwt_account_id(token) when is_binary(token) do
-    with [_, payload | _] <- String.split(token, "."),
-         {:ok, decoded} <- Base.url_decode64(payload, padding: false),
-         {:ok, claims} <- Jason.decode(decoded) do
-      Enum.find_value(@account_id_claims, &nonempty_string(claims[&1]))
-    else
-      _ -> nil
+    case account_id_from_jwt(token) do
+      {:ok, account_id} ->
+        account_id
+
+      {:error, reason} ->
+        Logger.debug("Codex account id decode skipped: #{inspect(reason)}")
+        nil
     end
   end
+
+  defp account_id_from_jwt(token) do
+    case String.split(token, ".") do
+      [_, payload | _] -> account_id_from_payload(payload)
+      _parts -> {:error, :missing_payload}
+    end
+  end
+
+  defp account_id_from_payload(payload) do
+    case Base.url_decode64(payload, padding: false) do
+      {:ok, decoded} -> account_id_from_decoded_payload(decoded)
+      :error -> {:error, :invalid_payload_base64}
+    end
+  end
+
+  defp account_id_from_decoded_payload(decoded) do
+    case Jason.decode(decoded) do
+      {:ok, claims} -> account_id_from_claims(claims)
+      {:error, reason} -> {:error, {:invalid_payload_json, reason}}
+    end
+  end
+
+  defp account_id_from_claims(claims) when is_map(claims) do
+    case Enum.find_value(@account_id_claims, &nonempty_string(claims[&1])) do
+      nil -> {:error, :missing_account_id_claim}
+      account_id -> {:ok, account_id}
+    end
+  end
+
+  defp account_id_from_claims(_claims), do: {:error, :invalid_payload_claims}
 
   defp nonempty_string(value) when is_binary(value) and value != "", do: value
   defp nonempty_string(_), do: nil
@@ -418,6 +526,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end
 end

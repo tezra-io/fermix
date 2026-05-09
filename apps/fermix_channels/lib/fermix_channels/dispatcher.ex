@@ -16,9 +16,17 @@ defmodule FermixChannels.Dispatcher do
     agent = Keyword.fetch!(opts, :agent)
     agent_server = Keyword.fetch!(opts, :agent_server)
     transcription_opts = Keyword.get(opts, :transcription, [])
+    reply_fn_override = Keyword.get(opts, :reply_fn)
 
     Enum.reduce_while(messages, :ok, fn message, :ok ->
-      case dispatch_message(channel, message, agent, agent_server, transcription_opts) do
+      case dispatch_message(
+             channel,
+             message,
+             agent,
+             agent_server,
+             transcription_opts,
+             reply_fn_override
+           ) do
         :ok ->
           {:cont, :ok}
 
@@ -27,6 +35,22 @@ defmodule FermixChannels.Dispatcher do
       end
     end)
   end
+
+  defp build_reply_fn(_channel, _message, reply_fn) when is_function(reply_fn, 1) do
+    fn text ->
+      case reply_fn.(text) do
+        :ok ->
+          :ok
+
+        {:error, reason} = error ->
+          Logger.error("Channel reply delivery failed: #{inspect(reason)}")
+          error
+      end
+    end
+  end
+
+  defp build_reply_fn(channel, %Message{} = message, _reply_fn),
+    do: build_reply_fn(channel, message)
 
   defp build_reply_fn(channel, %Message{} = message) do
     reply_fn = channel.build_reply(message)
@@ -43,10 +67,23 @@ defmodule FermixChannels.Dispatcher do
     end
   end
 
+  defp build_typing_fn(channel, %Message{reply_target: reply_target}) do
+    if function_exported?(channel, :start_typing, 1) do
+      fn -> channel.start_typing(reply_target) end
+    end
+  end
+
   defp to_agent_message(%{__struct__: _} = message), do: Map.from_struct(message)
   defp to_agent_message(message) when is_map(message), do: message_attrs(message)
 
-  defp dispatch_message(channel, message, agent, agent_server, transcription_opts) do
+  defp dispatch_message(
+         channel,
+         message,
+         agent,
+         agent_server,
+         transcription_opts,
+         reply_fn_override
+       ) do
     with {:ok, message} <-
            FermixCore.Transcription.maybe_transcribe_message(
              channel,
@@ -54,8 +91,15 @@ defmodule FermixChannels.Dispatcher do
              transcription_opts
            ),
          {:ok, reply_message} <- normalize_message(message) do
-      reply_fn = build_reply_fn(channel, reply_message)
-      agent_message = message |> to_agent_message() |> Map.put(:reply_fn, reply_fn)
+      reply_fn = build_reply_fn(channel, reply_message, reply_fn_override)
+      typing_fn = build_typing_fn(channel, reply_message)
+
+      agent_message =
+        message
+        |> to_agent_message()
+        |> Map.put(:reply_fn, reply_fn)
+        |> maybe_put_typing_fn(typing_fn)
+
       handle_agent_delivery(agent.handle_message(agent_message, agent_server))
     else
       {:error, {:invalid_message, _field}} = error ->
@@ -67,6 +111,12 @@ defmodule FermixChannels.Dispatcher do
         error
     end
   end
+
+  defp maybe_put_typing_fn(message, typing_fn) when is_function(typing_fn, 0) do
+    Map.put(message, :typing_fn, typing_fn)
+  end
+
+  defp maybe_put_typing_fn(message, _typing_fn), do: message
 
   defp handle_agent_delivery(:ok), do: :ok
 

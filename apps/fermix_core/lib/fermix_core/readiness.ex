@@ -256,21 +256,17 @@ defmodule FermixCore.Readiness do
   end
 
   defp codex_configured? do
-    Enum.any?([:openai_codex, :openai], fn provider ->
-      try do
-        case Store.read(provider) do
-          {:ok, entry} -> present?(entry.tokens.access_token)
-          {:error, _reason} -> false
-        end
-      rescue
-        e in ArgumentError ->
-          Logger.warning(
-            "Readiness: Auth.Store.read(#{inspect(provider)}) raised — auth.json may be malformed: #{Exception.message(e)}"
-          )
+    case Store.read(:openai_codex) do
+      {:ok, entry} -> present?(entry.tokens.access_token)
+      {:error, _reason} -> false
+    end
+  rescue
+    e in ArgumentError ->
+      Logger.warning(
+        "Readiness: Auth.Store.read(:openai_codex) raised — auth.json may be malformed: #{Exception.message(e)}"
+      )
 
-          false
-      end
-    end)
+      false
   end
 
   defp configured?(config, keys) do

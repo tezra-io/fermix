@@ -105,5 +105,36 @@ defmodule FermixCore.ReadinessTest do
       refute Enum.any?(report.failures, &(&1.component == "provider:openai"))
       refute Enum.any?(report.failures, &(&1.component == "provider:openai_codex"))
     end
+
+    test "openai provider auth does not satisfy openai_codex readiness" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      assert :ok =
+               Store.write(:openai, %{
+                 auth_mode: "chatgpt",
+                 tokens: %{access_token: "stale-openai-at", refresh_token: "stale-openai-rt"},
+                 expires_at: DateTime.utc_now() |> DateTime.add(3600),
+                 last_refresh: nil
+               })
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, &(&1.component == "provider:openai_codex"))
+    end
   end
 end

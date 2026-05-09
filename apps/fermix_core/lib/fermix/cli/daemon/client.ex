@@ -16,13 +16,19 @@ defmodule Fermix.CLI.Daemon.Client do
   @spec shutdown(keyword()) :: {:ok, map()} | {:error, term()}
   def shutdown(opts \\ []), do: request("shutdown", opts)
 
+  @spec agent_message(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def agent_message(params, opts \\ []) when is_map(params) do
+    opts = Keyword.put(opts, :params, params)
+    request("agent_message", opts)
+  end
+
   @spec request(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def request(method, opts \\ []) when is_binary(method) do
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
     timeout = Keyword.get(opts, :timeout, @default_timeout_ms)
 
     case connect(socket_path, timeout) do
-      {:ok, conn} -> exchange(conn, method, timeout)
+      {:ok, conn} -> exchange(conn, method, opts, timeout)
       {:error, reason} -> classify(reason)
     end
   end
@@ -36,8 +42,8 @@ defmodule Fermix.CLI.Daemon.Client do
     )
   end
 
-  defp exchange(conn, method, timeout) do
-    payload = Jason.encode!(%{"method" => method}) <> "\n"
+  defp exchange(conn, method, opts, timeout) do
+    payload = Jason.encode!(request_payload(method, opts)) <> "\n"
 
     try do
       with :ok <- :gen_tcp.send(conn, payload),
@@ -48,6 +54,14 @@ defmodule Fermix.CLI.Daemon.Client do
       end
     after
       :gen_tcp.close(conn)
+    end
+  end
+
+  @spec request_payload(String.t(), keyword()) :: map()
+  defp request_payload(method, opts) do
+    case Keyword.get(opts, :params, %{}) do
+      params when params == %{} -> %{"method" => method}
+      params when is_map(params) -> %{"method" => method, "params" => params}
     end
   end
 

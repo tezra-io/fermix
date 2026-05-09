@@ -271,7 +271,7 @@ defmodule FermixWebWeb.IntegrationTest do
         }
       }
 
-      conn = post(conn, ~p"/webhook/telegram", payload)
+      conn = post(conn, "/webhook/telegram", payload)
 
       assert conn.status == 404
     end

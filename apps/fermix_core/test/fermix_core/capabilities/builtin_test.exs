@@ -12,7 +12,12 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       assert cap.policy_class == :exec
       assert cap.requires_approval? == false
       assert cap.executor == {FermixCore.Tools.Shell, :execute, []}
-      assert cap.metadata == %{tool_module: FermixCore.Tools.Shell}
+      assert cap.metadata.tool_module == FermixCore.Tools.Shell
+      assert cap.metadata.when_to_use =~ "shell command"
+      assert cap.metadata.category == :system
+      assert is_list(cap.metadata.examples)
+      assert is_list(cap.metadata.failure_modes)
+      assert cap.metadata.requires_setup == nil
       assert cap.parameters[:type] == "object"
     end
 

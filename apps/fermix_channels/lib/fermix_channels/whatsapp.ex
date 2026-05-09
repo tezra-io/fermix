@@ -12,6 +12,7 @@ defmodule FermixChannels.WhatsApp do
   require Logger
 
   alias FermixChannels.Message
+  alias FermixCore.Net.HttpClient
 
   @graph_api_base "https://graph.facebook.com"
   @default_graph_version "v19.0"
@@ -72,7 +73,7 @@ defmodule FermixChannels.WhatsApp do
       result =
         Req.new(url: url, method: :post, json: body, auth: {:bearer, config.access_token})
         |> Req.merge(config.req_options)
-        |> Req.request()
+        |> HttpClient.request("WhatsApp send")
 
       handle_send_response(result)
     end

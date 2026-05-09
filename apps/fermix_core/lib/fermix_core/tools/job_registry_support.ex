@@ -14,7 +14,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     :telemetry.execute(
       [:fermix, :tool, :exec],
       %{duration_ms: duration},
-      %{tool: tool_name, agent: agent, success: success}
+      telemetry_metadata(tool_name, agent, result, success)
     )
 
     result
@@ -124,6 +124,22 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   defp timestamp(nil), do: nil
   defp timestamp(%DateTime{} = value), do: DateTime.to_iso8601(value)
+
+  defp telemetry_metadata(tool_name, agent, result, success) do
+    %{tool: tool_name, agent: agent, success: success}
+    |> maybe_put_error(result)
+  end
+
+  defp maybe_put_error(metadata, {:ok, %{success: false, error: error}})
+       when is_binary(error) do
+    Map.put(metadata, :error, error)
+  end
+
+  defp maybe_put_error(metadata, {:error, reason}) do
+    Map.put(metadata, :error, format_error(reason))
+  end
+
+  defp maybe_put_error(metadata, _result), do: metadata
 
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error({:invalid_schedule, expr}), do: "Invalid schedule: #{expr}"

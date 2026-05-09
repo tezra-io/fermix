@@ -12,9 +12,14 @@ defmodule FermixChannels.Telegram do
   require Logger
 
   alias FermixChannels.Message
+  alias FermixCore.Net.HttpClient
 
   @bot_api_base "https://api.telegram.org"
   @max_message_length 4096
+  @bullet_markdown_pattern ~r/^(\s*)[-*]\s+/u
+  @fenced_code_pattern ~r/```([A-Za-z0-9_+-]*)\n([\s\S]*?)```/u
+  @inline_markdown_pattern ~r/(\[[^\]\n]+?\]\([^\)\n]+?\)|`[^`\n]+?`|\*\*[^*\n]+?\*\*|~~[^~\n]+?~~|\*[^*\n]+?\*|_[^_\n]+?_)/u
+  @link_markdown_pattern ~r/^\[([^\]\n]+)\]\(([^\)\n]+)\)$/u
 
   # -- Behaviour Callbacks --
 
@@ -84,7 +89,7 @@ defmodule FermixChannels.Telegram do
 
       case Req.new(url: url, method: :post, json: body)
            |> Req.merge(req_options(opts))
-           |> Req.request() do
+           |> HttpClient.request("Telegram sendChatAction") do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end
@@ -96,6 +101,7 @@ defmodule FermixChannels.Telegram do
   defp post_send_message(chat_id, text, opts) do
     with {:ok, token} <- get_bot_token() do
       url = "#{@bot_api_base}/bot#{token}/sendMessage"
+      {text, opts} = prepare_outbound_text(text, opts)
 
       body =
         %{chat_id: chat_id, text: text}
@@ -106,7 +112,7 @@ defmodule FermixChannels.Telegram do
       result =
         Req.new(url: url, method: :post, json: body)
         |> Req.merge(req_options(opts))
-        |> Req.request()
+        |> HttpClient.request("Telegram sendMessage")
 
       case result do
         {:ok, %{status: 200}} ->
@@ -121,6 +127,147 @@ defmodule FermixChannels.Telegram do
           {:error, reason}
       end
     end
+  end
+
+  defp prepare_outbound_text(text, opts) do
+    cond do
+      Keyword.has_key?(opts, :parse_mode) ->
+        {text, opts}
+
+      Keyword.get(opts, :format, :telegram_html) == :plain ->
+        {text, opts}
+
+      true ->
+        {basic_markdown_to_html(text), Keyword.put(opts, :parse_mode, "HTML")}
+    end
+  end
+
+  defp basic_markdown_to_html(text) do
+    case Regex.run(@fenced_code_pattern, text, return: :index) do
+      nil ->
+        render_markdown_lines(text)
+
+      [{start, length}, {lang_start, lang_length}, {body_start, body_length}] ->
+        prefix = binary_part(text, 0, start)
+        lang = binary_part(text, lang_start, lang_length)
+        body = binary_part(text, body_start, body_length)
+        suffix_start = start + length
+        suffix_length = byte_size(text) - suffix_start
+
+        render_markdown_lines(prefix) <>
+          render_code_block(lang, body) <>
+          basic_markdown_to_html(binary_part(text, suffix_start, suffix_length))
+    end
+  end
+
+  defp render_markdown_lines(text) do
+    text
+    |> String.split("\n", trim: false)
+    |> Enum.map_join("\n", &render_markdown_line/1)
+  end
+
+  defp render_markdown_line(line) do
+    line
+    |> normalize_bullet_marker()
+    |> render_inline_markdown()
+  end
+
+  defp normalize_bullet_marker(line) do
+    case Regex.run(@bullet_markdown_pattern, line) do
+      [marker, indent] ->
+        rest_start = byte_size(marker)
+        indent <> "• " <> binary_part(line, rest_start, byte_size(line) - rest_start)
+
+      nil ->
+        line
+    end
+  end
+
+  defp render_inline_markdown(text) do
+    @inline_markdown_pattern
+    |> Regex.split(text, include_captures: true, trim: false)
+    |> Enum.map_join(&render_inline_segment/1)
+  end
+
+  defp render_inline_segment(segment) do
+    cond do
+      markdown_link_segment?(segment) ->
+        render_markdown_link(segment)
+
+      wrapped_markdown_segment?(segment, "**") ->
+        render_wrapped_markdown("b", segment, 2)
+
+      wrapped_markdown_segment?(segment, "~~") ->
+        render_wrapped_markdown("s", segment, 2)
+
+      wrapped_markdown_segment?(segment, "`") ->
+        render_wrapped_markdown("code", segment, 1)
+
+      wrapped_markdown_segment?(segment, "*") ->
+        render_wrapped_markdown("i", segment, 1)
+
+      wrapped_markdown_segment?(segment, "_") ->
+        render_wrapped_markdown("i", segment, 1)
+
+      true ->
+        html_escape(segment)
+    end
+  end
+
+  defp render_markdown_link(segment) do
+    [_, text, url] = Regex.run(@link_markdown_pattern, segment)
+    ~s(<a href="#{html_escape(url)}">#{html_escape(text)}</a>)
+  end
+
+  defp render_wrapped_markdown(tag, segment, marker_size) do
+    inner_size = byte_size(segment) - marker_size * 2
+
+    <<_::binary-size(marker_size), inner::binary-size(inner_size), _::binary-size(marker_size)>> =
+      segment
+
+    "<#{tag}>" <> html_escape(inner) <> "</#{tag}>"
+  end
+
+  defp render_code_block(lang, body) do
+    body = body |> trim_code_block_newline() |> html_escape()
+
+    case String.trim(lang) do
+      "" ->
+        "<pre><code>" <> body <> "</code></pre>"
+
+      lang ->
+        ~s(<pre><code class="language-#{html_escape(lang)}">#{body}</code></pre>)
+    end
+  end
+
+  defp trim_code_block_newline(body) do
+    cond do
+      String.ends_with?(body, "\r\n") ->
+        binary_part(body, 0, byte_size(body) - 2)
+
+      String.ends_with?(body, "\n") ->
+        binary_part(body, 0, byte_size(body) - 1)
+
+      true ->
+        body
+    end
+  end
+
+  defp markdown_link_segment?(segment) do
+    Regex.match?(@link_markdown_pattern, segment)
+  end
+
+  defp wrapped_markdown_segment?(segment, marker) do
+    byte_size(segment) > byte_size(marker) * 2 and String.starts_with?(segment, marker) and
+      String.ends_with?(segment, marker)
+  end
+
+  defp html_escape(text) do
+    text
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+    |> String.replace("\"", "&quot;")
   end
 
   defp maybe_put_parse_mode(body, opts) do

@@ -41,6 +41,28 @@ defmodule FermixCore.Tools.FileRead do
   end
 
   @impl true
+  def when_to_use, do: "Read file contents from a known path with optional line bounds."
+
+  @impl true
+  def examples,
+    do: [%{args: %{"path" => "README.md", "limit" => 80}, note: "read the top of a file"}]
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "missing_path", description: "path is absent or blank"},
+      %{tag: "not_found", description: "file does not exist"},
+      %{tag: "invalid_path", description: "path contains traversal or null bytes"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :file
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
