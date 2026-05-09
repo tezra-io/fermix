@@ -153,6 +153,38 @@ defmodule FermixChannels.DispatcherTest do
     assert_received {:reply_built_and_sent, "message-1", "chat-1", "reply"}
   end
 
+  test "uses explicit reply_fn override when provided" do
+    message =
+      Message.new!(%{
+        id: "message-override",
+        content: "hello",
+        sender: "operator",
+        channel: "cli",
+        chat_id: "cli",
+        reply_target: "cli"
+      })
+
+    test_pid = self()
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: test_pid,
+               reply_fn: fn text ->
+                 send(test_pid, {:captured_reply, text})
+                 :ok
+               end
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.content == "hello"
+    assert is_function(agent_message.reply_fn, 1)
+
+    assert :ok = agent_message.reply_fn.("reply")
+    assert_receive {:captured_reply, "reply"}
+  end
+
   test "adds channel typing runtime when the channel supports typing indicators" do
     message =
       Message.new!(%{
