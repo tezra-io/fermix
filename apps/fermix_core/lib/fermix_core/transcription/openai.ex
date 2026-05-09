@@ -3,6 +3,8 @@ defmodule FermixCore.Transcription.OpenAI do
 
   require Logger
 
+  alias FermixCore.Net.HttpClient
+
   @base_url "https://api.openai.com/v1"
   @default_model "whisper-1"
 
@@ -16,7 +18,7 @@ defmodule FermixCore.Transcription.OpenAI do
           Req.new(url: url, method: :post, form_multipart: fields)
           |> Req.Request.put_header("authorization", "Bearer #{token}")
           |> Req.merge(Keyword.get(opts, :req_options, []))
-          |> Req.request()
+          |> HttpClient.request("OpenAI Whisper")
 
         handle_response(result)
 

@@ -66,7 +66,8 @@ defmodule FermixCore.Setup.ConfigStore do
         ],
         personalization: Application.get_env(:fermix_core, :personalization, []),
         agent: Application.get_env(:fermix_core, :agent, []),
-        jobs: Application.get_env(:fermix_core, :jobs, [])
+        jobs: Application.get_env(:fermix_core, :jobs, []),
+        routing: Application.get_env(:fermix_core, :routing, [])
       ],
       fermix_channels: [
         telegram: Application.get_env(:fermix_channels, :telegram, []),
@@ -112,6 +113,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
     apply_jobs_config(Keyword.get(persisted.fermix_core, :jobs, []))
+    apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
     apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
@@ -187,7 +189,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:jobs, [])
-          |> normalize_jobs()
+          |> normalize_jobs(),
+        routing:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:routing, [])
+          |> normalize_routing()
       ],
       fermix_channels: [
         telegram:
@@ -236,7 +243,8 @@ defmodule FermixCore.Setup.ConfigStore do
         providers: [openai: [], openai_codex: [], anthropic: []],
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
         agent: [name: "fermix"],
-        jobs: []
+        jobs: [],
+        routing: []
       ],
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
@@ -277,6 +285,11 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_routing_config(routing_config) do
+    Application.put_env(:fermix_core, :routing, routing_config)
+    :ok
+  end
+
   defp apply_channel_config(channel, channel_config) do
     merged =
       Application.get_env(:fermix_channels, channel, [])
@@ -292,10 +305,13 @@ defmodule FermixCore.Setup.ConfigStore do
     personalization = Keyword.get(fermix_core, :personalization, [])
     agent = Keyword.get(fermix_core, :agent, [])
     jobs = Keyword.get(fermix_core, :jobs, [])
+    routing = Keyword.get(fermix_core, :routing, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
       "# Managed by mix fermix.setup",
+      "# Built-in tools ship inside Fermix and are always available when registered.",
+      "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
       render_section(["fermix_core", "agent"], agent),
       render_section(
         ["fermix_core", "providers", "openai"],
@@ -315,6 +331,7 @@ defmodule FermixCore.Setup.ConfigStore do
         ["fermix_core", "jobs", "default_delivery_target"],
         Keyword.get(jobs, :default_delivery_target, [])
       ),
+      render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -399,7 +416,8 @@ defmodule FermixCore.Setup.ConfigStore do
         personalization:
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
         agent: normalize_agent(get_in(document, ["fermix_core", "agent"])),
-        jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"]))
+        jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
+        routing: normalize_routing(get_in(document, ["fermix_core", "routing"]))
       ],
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
@@ -577,6 +595,36 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_default_delivery_target(
         lookup(config, "default_delivery_target", :default_delivery_target)
       )
+    )
+  end
+
+  defp normalize_routing(nil), do: []
+
+  defp normalize_routing(config) do
+    []
+    |> put_if_present(
+      :delegate_model,
+      normalize_string(lookup(config, "delegate_model", :delegate_model))
+    )
+    |> put_if_present(
+      :default_provider,
+      normalize_string(lookup(config, "default_provider", :default_provider))
+    )
+    |> put_if_present(
+      :default_model,
+      normalize_string(lookup(config, "default_model", :default_model))
+    )
+    |> put_if_present(
+      :coding_model,
+      normalize_string(lookup(config, "coding_model", :coding_model))
+    )
+    |> put_if_present(
+      :research_model,
+      normalize_string(lookup(config, "research_model", :research_model))
+    )
+    |> put_if_present(
+      :review_model,
+      normalize_string(lookup(config, "review_model", :review_model))
     )
   end
 

@@ -37,6 +37,9 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Providers.RouteResolver
 
+  @typing_interval_ms 4_000
+  @typing_timeout_ms 300_000
+
   @type thread_scope :: :root | String.t() | integer()
 
   @type channel_message :: %{
@@ -45,6 +48,9 @@ defmodule FermixCore.Agents.MainAgent do
           :channel => String.t(),
           :chat_id => String.t(),
           :reply_fn => (String.t() -> any()),
+          optional(:typing_fn) => (-> any()),
+          optional(:typing_interval_ms) => pos_integer(),
+          optional(:typing_timeout_ms) => pos_integer(),
           optional(:thread_ts) => String.t() | integer() | nil,
           optional(:thread_scope) => thread_scope() | nil
         }
@@ -72,6 +78,26 @@ defmodule FermixCore.Agents.MainAgent do
           pending: pending_request() | nil
         }
 
+  @type status :: %{
+          name: String.t(),
+          health: :online,
+          activity: :idle | :running,
+          status: :idle | :running,
+          pid: pid(),
+          active_conversations: non_neg_integer(),
+          pending_conversations: non_neg_integer(),
+          active_requests: non_neg_integer(),
+          pending_requests: non_neg_integer(),
+          available_skills: [String.t()],
+          provider: atom() | nil,
+          model: String.t() | nil,
+          memory: %{
+            extraction_enabled: boolean(),
+            agent_id: String.t(),
+            owner_id: String.t()
+          }
+        }
+
   # --- Client API ---
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -95,6 +121,11 @@ defmodule FermixCore.Agents.MainAgent do
       when is_binary(content) and is_binary(sender) and is_binary(channel) and
              is_binary(chat_id) and is_function(reply_fn, 1) do
     GenServer.cast(server, {:handle_message, msg})
+  end
+
+  @spec status(GenServer.server()) :: status()
+  def status(server \\ __MODULE__) do
+    GenServer.call(server, :status)
   end
 
   @spec reload_skills(GenServer.server()) :: {:ok, [String.t()]} | {:error, term()}
@@ -215,6 +246,11 @@ defmodule FermixCore.Agents.MainAgent do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    {:reply, status_from_state(state), state}
   end
 
   @impl true
@@ -459,6 +495,12 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   defp process_message(msg, state) do
+    with_typing_indicator(msg, fn ->
+      run_message_loop(msg, state)
+    end)
+  end
+
+  defp run_message_loop(msg, state) do
     start = System.monotonic_time(:millisecond)
     conversation_key = conversation_key(msg)
     prompt_context = load_prompt_context!(state.memory_agent_id, state.available_skills)
@@ -540,6 +582,102 @@ defmodule FermixCore.Agents.MainAgent do
         deliver_reply(msg, "Sorry, I encountered an error processing your message.")
     end
   end
+
+  defp with_typing_indicator(%{typing_fn: typing_fn} = msg, fun)
+       when is_function(typing_fn, 0) and is_function(fun, 0) do
+    pid =
+      spawn_link(fn ->
+        typing_loop(
+          typing_fn,
+          positive_integer(Map.get(msg, :typing_interval_ms), @typing_interval_ms),
+          monotonic_ms() + positive_integer(Map.get(msg, :typing_timeout_ms), @typing_timeout_ms)
+        )
+      end)
+
+    try do
+      fun.()
+    after
+      stop_typing_loop(pid)
+    end
+  end
+
+  defp with_typing_indicator(_msg, fun) when is_function(fun, 0), do: fun.()
+
+  defp typing_loop(typing_fn, interval_ms, deadline_ms) do
+    case emit_typing(typing_fn) do
+      :ok ->
+        wait_for_next_typing_tick(typing_fn, interval_ms, deadline_ms)
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  defp wait_for_next_typing_tick(typing_fn, interval_ms, deadline_ms) do
+    now = monotonic_ms()
+
+    if now >= deadline_ms do
+      :ok
+    else
+      receive do
+        :stop -> :ok
+      after
+        min(interval_ms, deadline_ms - now) ->
+          typing_loop(typing_fn, interval_ms, deadline_ms)
+      end
+    end
+  end
+
+  defp emit_typing(typing_fn) do
+    case typing_fn.() do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.warning("Typing indicator failed: #{inspect(reason)}")
+        error
+
+      other ->
+        Logger.warning("Typing indicator returned unexpected result: #{inspect(other)}")
+        {:error, other}
+    end
+  rescue
+    error in [Req.TransportError] ->
+      Logger.warning("Typing indicator transport failed: #{Exception.message(error)}")
+      {:error, error}
+  catch
+    :exit, {:noproc, _details} = reason ->
+      Logger.warning("Typing indicator adapter unavailable: #{inspect(reason)}")
+      {:error, reason}
+
+    :exit, :noproc ->
+      Logger.warning("Typing indicator adapter unavailable: :noproc")
+      {:error, :noproc}
+  end
+
+  defp stop_typing_loop(pid) when is_pid(pid) do
+    ref = Process.monitor(pid)
+    send(pid, :stop)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} ->
+        :ok
+    after
+      100 ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          100 -> :ok
+        end
+    end
+  end
+
+  defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
+  defp positive_integer(_value, default), do: default
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   defp deliver_reply(msg, response) do
     case msg.reply_fn.(response) do
@@ -696,6 +834,83 @@ defmodule FermixCore.Agents.MainAgent do
         {:error, {:skill_registry_unavailable, reason}}
     end
   end
+
+  defp status_from_state(state) do
+    counts = conversation_counts(state.conversations)
+    activity = request_activity(counts)
+
+    %{
+      name: "main",
+      health: :online,
+      activity: activity,
+      status: activity,
+      pid: self(),
+      active_conversations: counts.active_conversations,
+      pending_conversations: counts.pending_conversations,
+      active_requests: counts.active_requests,
+      pending_requests: counts.pending_requests,
+      available_skills: skill_names(state.available_skills),
+      provider: Keyword.get(state.adapter_overrides, :provider) || provider_name(state.provider),
+      model: Keyword.get(state.adapter_overrides, :model),
+      memory: %{
+        extraction_enabled: state.extraction_enabled,
+        agent_id: state.memory_agent_id,
+        owner_id: state.memory_owner_id
+      }
+    }
+  end
+
+  defp request_activity(%{active_requests: active_requests}) when active_requests > 0,
+    do: :running
+
+  defp request_activity(%{active_requests: active_requests}) when active_requests == 0, do: :idle
+
+  defp conversation_counts(conversations) when is_map(conversations) do
+    Enum.reduce(
+      conversations,
+      %{
+        active_conversations: 0,
+        pending_conversations: 0,
+        active_requests: 0,
+        pending_requests: 0
+      },
+      fn {_key, runtime}, counts ->
+        active? = Map.get(runtime, :active) != nil
+        pending? = Map.get(runtime, :pending) != nil
+
+        counts
+        |> increment_if(:active_conversations, active?)
+        |> increment_if(:pending_conversations, pending?)
+        |> increment_if(:active_requests, active?)
+        |> increment_if(:pending_requests, pending?)
+      end
+    )
+  end
+
+  defp increment_if(counts, key, true), do: Map.update!(counts, key, &(&1 + 1))
+  defp increment_if(counts, _key, false), do: counts
+
+  defp skill_names(skills) when is_list(skills) do
+    skills
+    |> Enum.map(&Map.get(&1, :name))
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort()
+  end
+
+  defp provider_name(FermixCore.Providers.OpenAI), do: :openai
+  defp provider_name(FermixCore.Providers.OpenAI.Responses), do: :openai
+  defp provider_name(FermixCore.Providers.OpenAI.ChatCompletions), do: :openai
+  defp provider_name(FermixCore.Providers.OpenAI.Codex), do: :openai_codex
+  defp provider_name(FermixCore.Providers.Anthropic.Messages), do: :anthropic
+
+  defp provider_name(provider) when is_atom(provider) do
+    case Atom.to_string(provider) do
+      "Elixir." <> _module_name -> nil
+      _provider_atom -> provider
+    end
+  end
+
+  defp provider_name(_provider), do: nil
 
   defp safe_skill_registry_call(fun) do
     {:ok, fun.()}

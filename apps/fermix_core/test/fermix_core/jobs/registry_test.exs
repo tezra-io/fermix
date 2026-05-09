@@ -72,7 +72,7 @@ defmodule FermixCore.Jobs.RegistryTest do
              Registry.create_job(
                %{
                  name: "One Shot Reminder",
-                 schedule: "2026-05-03T12:00:00Z",
+                 schedule: "2099-05-03T12:00:00Z",
                  task_prompt: "Remind me to review the launch notes."
                },
                repo: repo

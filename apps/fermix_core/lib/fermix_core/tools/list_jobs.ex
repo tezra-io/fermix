@@ -28,6 +28,26 @@ defmodule FermixCore.Tools.ListJobs do
   end
 
   @impl true
+  def when_to_use, do: "List Fermix scheduled jobs and inspect their current states."
+
+  @impl true
+  def examples, do: [%{args: %{"state" => "scheduled"}, note: "list active scheduled jobs"}]
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "registry_failed", description: "job registry query failed"},
+      %{tag: "invalid_state", description: "state filter is not a string"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :scheduling
+
+  @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), context, fn ->
       opts = [repo: Support.repo(context)]

@@ -1,6 +1,7 @@
 defmodule FermixCore.Setup.DoctorTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
 
   setup do
@@ -25,6 +26,38 @@ defmodule FermixCore.Setup.DoctorTest do
 
   defp set_active(provider) do
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: provider)
+  end
+
+  defp tmp_dir do
+    Path.join(System.tmp_dir!(), "fermix_doctor_#{System.unique_integer([:positive])}")
+  end
+
+  defp future_iso8601(seconds) do
+    DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp write_codex_auth(dir, access_token, refresh_token \\ "refresh-token") do
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "auth.json")
+
+    File.write!(
+      path,
+      Jason.encode!(%{
+        "version" => 1,
+        "providers" => %{
+          "openai_codex" => %{
+            "auth_mode" => "chatgpt",
+            "tokens" => %{
+              "access_token" => access_token,
+              "refresh_token" => refresh_token
+            },
+            "expires_at" => future_iso8601(3600)
+          }
+        }
+      })
+    )
+
+    path
   end
 
   describe "active_provider/0" do
@@ -190,64 +223,84 @@ defmodule FermixCore.Setup.DoctorTest do
   end
 
   describe "probe_provider/2 — :openai_codex" do
-    test "uses bearer token from injected token_server" do
+    test "uses bearer token from Auth.Store without a running TokenManager" do
+      dir = tmp_dir()
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      auth_path = write_codex_auth(dir, "store-bearer-xyz")
       put_provider(:openai_codex, default_model: "gpt-5.5")
-      {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, "oauth-bearer-xyz")
 
       plug = fn conn ->
-        assert ["Bearer oauth-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
-        assert ["responses=experimental"] = Plug.Conn.get_req_header(conn, "openai-beta")
-        assert ["pi"] = Plug.Conn.get_req_header(conn, "originator")
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert decoded["stream"] == true
+        assert decoded["store"] == false
+        refute Map.has_key?(decoded, "max_output_tokens")
+        assert ["Bearer store-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
         Plug.Conn.send_resp(conn, 200, "{}")
       end
 
       assert {:ok, %{provider: :openai_codex, model: "gpt-5.5"}} =
                Doctor.probe_provider(:openai_codex,
-                 req_options: [plug: plug],
-                 token_server: server
+                 fermix_auth_path: auth_path,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "uses a running TokenManager instead of refreshing directly from disk" do
+      dir = tmp_dir()
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      auth_path = write_codex_auth(dir, "manager-bearer-xyz")
+      put_provider(:openai_codex, default_model: "gpt-5.5")
+
+      start_supervised!({TokenManager, [fermix_auth_path: auth_path]}, id: :doctor_token_manager)
+      File.rm!(auth_path)
+
+      plug = fn conn ->
+        assert ["Bearer manager-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, "{}")
+      end
+
+      assert {:ok, %{provider: :openai_codex, model: "gpt-5.5"}} =
+               Doctor.probe_provider(:openai_codex,
+                 fermix_auth_path: auth_path,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "returns misconfigured when Auth.Store has no token" do
+      dir = tmp_dir()
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      put_provider(:openai_codex, default_model: "gpt-5.5")
+
+      assert {:error, {:misconfigured, message}} =
+               Doctor.probe_provider(:openai_codex,
+                 fermix_auth_path: Path.join(dir, "missing-auth.json")
                )
 
-      GenServer.stop(server)
-    end
-
-    test "returns misconfigured when token_server has no token" do
-      put_provider(:openai_codex, default_model: "gpt-5.5")
-      {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, :no_token)
-
-      assert {:error, {:misconfigured, message}} =
-               Doctor.probe_provider(:openai_codex, token_server: server)
-
       assert message =~ "Codex token"
-      GenServer.stop(server)
-    end
-
-    test "returns misconfigured (not :noproc exit) when token_server is a dead pid" do
-      put_provider(:openai_codex, default_model: "gpt-5.5")
-      {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, "oauth-bearer-xyz")
-      GenServer.stop(server)
-      refute Process.alive?(server)
-
-      assert {:error, {:misconfigured, message}} =
-               Doctor.probe_provider(:openai_codex, token_server: server)
-
-      assert message =~ "TokenManager not running"
     end
 
     test "returns auth_scope_mismatch on 401 with codex-specific hint" do
+      dir = tmp_dir()
+      on_exit(fn -> File.rm_rf!(dir) end)
+
+      auth_path = write_codex_auth(dir, "oauth-stale")
       put_provider(:openai_codex, default_model: "gpt-5.5")
-      {:ok, server} = GenServer.start_link(__MODULE__.TokenStub, "oauth-stale")
 
       plug = fn conn -> Plug.Conn.send_resp(conn, 401, "unauthorized") end
 
       assert {:error, {:auth_scope_mismatch, surface, hint}} =
                Doctor.probe_provider(:openai_codex,
-                 req_options: [plug: plug],
-                 token_server: server
+                 fermix_auth_path: auth_path,
+                 req_options: [plug: plug]
                )
 
       assert surface =~ "Codex"
       assert hint =~ "fermix setup --import-codex"
-      GenServer.stop(server)
     end
   end
 
@@ -274,22 +327,5 @@ defmodule FermixCore.Setup.DoctorTest do
       assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
                Doctor.probe_provider(:openai, req_options: [adapter: adapter])
     end
-  end
-
-  defmodule TokenStub do
-    use GenServer
-
-    @impl true
-    def init(state), do: {:ok, state}
-
-    @impl true
-    def handle_call(:get_token, _from, "oauth-bearer-xyz" = state),
-      do: {:reply, {:ok, state}, state}
-
-    def handle_call(:get_token, _from, "oauth-stale" = state),
-      do: {:reply, {:ok, state}, state}
-
-    def handle_call(:get_token, _from, :no_token = state),
-      do: {:reply, {:error, :no_token}, state}
   end
 end

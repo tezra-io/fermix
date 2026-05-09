@@ -6,6 +6,14 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   # equivalent to what `OpenAI.Responses` receives synchronously, so the
   # downstream `ResponsesShared.build_turn/5` can be reused.
   #
+  # Two entry points:
+  #
+  #   * `parse/1` — single-shot, takes the full SSE body as a binary.
+  #   * `new/0` + `feed/2` + `finalize/1` — incremental, for use inside a
+  #     `Req` `:into` callback. `feed/2` carries a `leftover` buffer for
+  #     partial events that straddle chunk boundaries; `finalize/1` drains
+  #     any tail and produces the body-shaped map.
+  #
   # Event grammar handled (others are ignored):
   #
   #   * `response.created`                     — capture model
@@ -34,22 +42,47 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
             arg_buffers: %{},
             text_buffers: %{},
             usage: %{},
-            model: nil
+            model: nil,
+            leftover: ""
 
   @type t :: %__MODULE__{}
 
+  @spec new() :: t()
+  def new, do: %__MODULE__{}
+
   @spec parse(binary()) :: %{required(String.t()) => term()}
   def parse(body) when is_binary(body) do
-    body
-    |> events()
-    |> Enum.reduce(%__MODULE__{}, &reduce_event/2)
-    |> finalize()
+    new() |> feed(body) |> finalize()
   end
 
-  defp events(body) do
-    body
-    |> String.split("\n\n", trim: true)
-    |> Enum.flat_map(&decode_chunk/1)
+  @spec feed(t(), binary()) :: t()
+  def feed(%__MODULE__{} = state, chunk) when is_binary(chunk) do
+    buffer = state.leftover <> chunk
+    {complete, leftover} = split_complete_events(buffer)
+
+    events = Enum.flat_map(complete, &decode_chunk/1)
+    state = Enum.reduce(events, state, &reduce_event/2)
+    %{state | leftover: leftover}
+  end
+
+  @spec finalize(t()) :: %{required(String.t()) => term()}
+  def finalize(%__MODULE__{leftover: ""} = state), do: build_body(state)
+
+  def finalize(%__MODULE__{leftover: tail} = state) do
+    events = decode_chunk(tail)
+    state = Enum.reduce(events, %{state | leftover: ""}, &reduce_event/2)
+    build_body(state)
+  end
+
+  defp split_complete_events(buffer) do
+    case String.split(buffer, "\n\n") do
+      [single] ->
+        {[], single}
+
+      parts ->
+        {complete, [last]} = Enum.split(parts, length(parts) - 1)
+        {complete, last}
+    end
   end
 
   defp decode_chunk(chunk) do
@@ -141,7 +174,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
     Map.update(buffers, idx, delta, &(&1 <> delta))
   end
 
-  defp finalize(state) do
+  defp build_body(state) do
     output =
       state.items
       |> Enum.sort_by(fn {idx, _item} -> idx end)
