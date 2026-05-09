@@ -20,6 +20,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Net.HttpClient
 
   require Logger
 
@@ -107,7 +108,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
         headers: [{"authorization", "Bearer #{api_key}"}]
       )
       |> Req.merge(req_options)
-      |> Req.request()
+      |> HttpClient.request("OpenAI ChatCompletions")
       |> handle_response(model, prior_messages, capabilities)
 
     duration_ms = System.monotonic_time(:millisecond) - start

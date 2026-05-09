@@ -31,6 +31,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
@@ -166,11 +167,53 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     result
   end
 
+  # SSE responses are consumed via Req's `:into` callback so the parser
+  # runs incrementally and `receive_timeout` measures gaps between
+  # chunks, not the whole turn. Without this, `Req.request()` buffers the
+  # entire SSE body and the default 15 s receive_timeout fires while
+  # Codex is still reasoning, surfacing as a `:closed` transport error.
+  # The HttpClient wrapper retries once on stale-pool transport errors
+  # (`:closed`, `:econnrefused`) so the first request after macOS sleep
+  # recovers transparently.
   defp request_once(url, body, token, req_options) do
-    Req.new(url: url, method: :post, json: body, headers: build_headers(token))
+    Req.new(
+      url: url,
+      method: :post,
+      json: body,
+      headers: build_headers(token),
+      receive_timeout: 60_000,
+      connect_options: [timeout: 5_000],
+      into: &collect_sse/2
+    )
     |> Req.merge(req_options)
-    |> Req.request()
+    |> HttpClient.request("Codex")
+    |> finalize_streamed_body()
   end
+
+  defp collect_sse({:data, chunk}, {req, response}) when is_binary(chunk) do
+    if response.status in 200..299 do
+      state = current_sse_state(response) |> SSEParser.feed(chunk)
+      {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
+    else
+      body = ensure_binary_body(response.body)
+      {:cont, {req, %{response | body: body <> chunk}}}
+    end
+  end
+
+  defp current_sse_state(%{private: %{codex_sse_state: %SSEParser{} = state}}), do: state
+  defp current_sse_state(_response), do: SSEParser.new()
+
+  defp ensure_binary_body(body) when is_binary(body), do: body
+  defp ensure_binary_body(_body), do: ""
+
+  defp finalize_streamed_body({:ok, %Req.Response{private: private} = response}) do
+    case Map.get(private, :codex_sse_state) do
+      %SSEParser{} = state -> {:ok, %{response | body: SSEParser.finalize(state)}}
+      nil -> {:ok, response}
+    end
+  end
+
+  defp finalize_streamed_body(other), do: other
 
   defp maybe_refresh_and_retry(
          {:ok, %Req.Response{status: 401, body: response_body}} = response,
@@ -248,13 +291,29 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
     Logger.error("Codex transport error: #{inspect(reason)}")
-    {:error, reason}
+    {:error, transport_error_message(reason)}
   end
 
   defp handle_response({:error, reason}, _turn_state) do
     Logger.error("Codex request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp transport_error_message(:closed) do
+    "Codex stream closed by peer mid-response. Retry; if it persists, lower " <>
+      "reasoning_effort or check ChatGPT account status."
+  end
+
+  defp transport_error_message(:timeout) do
+    "Codex stream had no data for 60s. Lower reasoning_effort, or pass " <>
+      "req_options: [receive_timeout: ms] to extend the between-chunk window."
+  end
+
+  defp transport_error_message(:econnrefused) do
+    "Codex endpoint refused the connection (chatgpt.com unreachable from this host)."
+  end
+
+  defp transport_error_message(reason), do: "Codex transport error: #{inspect(reason)}"
 
   defp parse_body_to_map(body) when is_binary(body), do: SSEParser.parse(body)
   defp parse_body_to_map(body) when is_map(body), do: body
