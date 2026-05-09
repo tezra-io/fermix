@@ -323,93 +323,104 @@ _Security & Governance was originally numbered M5; it has been moved to **M10** 
 
 ---
 
-## Milestone 7: Advanced Tools
+## Milestone 7: Advanced Tools — Built-in Capability Catalog — _Shipped_
 
-**Goal:** Port all 47 RustyClaw tools for feature parity.
+**Goal:** ship the canonical Fermix built-in tool catalog so the agent stops reaching for `shell` for verbs Fermix should own; upgrade `Capability` metadata + dynamic prompt summary so the registry stays steerable as the catalog grows; ship a static self-knowledge skill.
+
+**Shipped notes:** M7 keeps the catalog keyless in v1. It does not add cron-named duplicates because M4.11's job tool names are canonical. `git_push` remains deferred to M10 approval flow, and `http_request` remains deferred to the pluggable backend/config milestone.
+
+See `docs/MILESTONE_7_ADVANCED_TOOLS.md` for the full design.
+
+**Scope narrowed from "port all 47 RustyClaw tools."** M4.11 already shipped the canonical job/memory tools (`schedule_job`, `list_jobs`, `pause_job`, `resume_job`, `remove_job`, `memory_recall`, `memory_store`, `memory_sources_list`); the RustyClaw `cron_*` and `schedule` names are not added — they would duplicate M4.11 under different names. Extended-tool ports (SOP suite, hardware, composio, PDF/screenshot, etc.) move to "Future" — demand-driven, not part of M7.
+
+**Every M7 built-in is keyless in v1.** No setup wizard prompts, no `[fermix_core.tools]` TOML section, no per-tool API-key persistence, no `BuiltinSeeder.reseed/1`. `web_search` ships with one backend (DuckDuckGo HTML SERP scrape — keyless, layout-fragile). The "pluggable backend per capability + paid alternatives + wizard surface for API keys" UX is its own future milestone (see "Pluggable Capability Backends" below).
+
+### Built-ins added by M7
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Capability metadata schema** | `when_to_use`, `examples`, `failure_modes`, `requires_setup`, `category` keys on `Capability.metadata`; existing 12 tools migrated | P0 | New | M7 §4.1 | S |
+| **`tool_help` capability** | On-demand expansion of full per-tool docs (description + parameters + examples + failure modes) | P0 | New | M7 §4.6 | S |
+| **`file_edit`** | Unique-anchor string replacement, atomic write | P0 | Port | `src/tools/file_edit.rs` | S |
+| **`glob_search`** | File pattern matching with bounded results | P1 | Port | `src/tools/glob_search.rs` | S |
+| **`content_search`** | Pure-Elixir grep across the workspace | P1 | Port | `src/tools/content_search.rs` | S |
+| **`git_read` / `git_write`** | Two tools, one per `policy_class` band — split because the registry filters at capability level, not per action. `git_push` deferred to M10 (needs `requires_approval?: true`, but the registry strips approval-required capabilities by default and AgentLoop has no opt-in path in M7). | P1 | Port (split) | `src/tools/git_operations.rs` | S |
+| **`web_fetch`** | HTTP GET + HTML→markdown via Floki, keyless. All outbound URLs (initial + redirects) gated by `NetGuard`. | P0 | Port | `src/tools/web_fetch.rs` | S |
+| **`web_search`** | DuckDuckGo HTML SERP scrape backend, keyless. One backend in M7 — pluggable backends + paid alternatives are the future "Pluggable Capability Backends" milestone. Failure contract is loud (`:rate_limited`, `:parser_changed`), not silent. | P0 | New | `src/tools/web_search_tool.rs` (shape only) | S |
+| **`NetGuard` module** | Shared outbound-network safety contract. Hardcoded "public HTTP(S) only" rules: scheme allowlist, IP-literal block (RFC 1918 + loopback + link-local + IPv6), DNS resolution + recheck of every resolved address, redirect re-validation per hop, sensitive-header redaction. Used by `web_fetch` and `web_search`. | P0 | New | M7 §4.3a | S |
+| **`delegate`** | Single-turn delegation to another model; `:external_api` policy class, recursion-guarded | P1 | Port | `src/tools/delegate.rs` | S |
+| **`skill_create`** | Scaffold a `~/.fermix/skills/<name>/SKILL.md` | P1 | Port | `src/tools/skill_create.rs` | S |
+| **`model_routing_config`** | Read/update `[fermix_core.routing]` via `ConfigStore` | P1 | Port | `src/tools/model_routing_config.rs` | S |
+
+### Runtime plumbing M7 also lands
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **`RuntimeSections.capability_summary/0`** | Dynamic prompt summary generated from capability metadata; replaces hand-listed tool block in `agents.md.eex` | P0 | New | M7 §4.5 | S |
+| **Self-knowledge skill** | Static `priv/skills/self_knowledge/SKILL.md` answering "what is Fermix" / "how do agents/jobs/memory/channels fit together" | P0 | New | M7 §4.7 | S |
 
 ### Capability Instructions and Fermix Self-Knowledge
 
-Milestone 7 adds many tools, so tool-use knowledge must become a first-class part
-of the capability system, not something stored in user memory or scattered across
-ad hoc prompt prose.
+Tool-use knowledge is owned by `CapabilityRegistry` via `Capability.metadata` (new schema in M7 §4.1). The main-agent runtime prompt summarizes broad routing rules; detailed tool behavior is generated by `RuntimeSections.capability_summary/0` (M7 §4.5) plus on-demand `tool_help` (M7 §4.6). Higher-level "how Fermix works" knowledge lives in the static self-knowledge skill (M7 §4.7), not in user memory or prompt prose.
 
-`CapabilityRegistry` should be the source of truth for capability-level
-instructions:
+**Stage gate before expanding the M7 tool catalog (or shipping `Default Skill Set`):**
 
-- what the capability does
-- when the main agent should use it
-- required and optional arguments
-- delivery, side-effect, and safety rules
-- compact examples for common calls
-- expected failure modes and operator-visible errors
+- every new capability has `metadata.when_to_use` + at least one example
+- the main agent prompt is generated from `capability_summary/0`, not hand-listed tool blocks
+- full capability documentation reachable via `tool_help`, not in the base prompt
+- tests cover at least one realistic main-agent tool-call path per tool family (M7 §7.3 manual steering check)
 
-The main-agent runtime prompt should summarize broad routing rules only. Detailed
-tool behavior should be generated from capability metadata and provider tool
-schemas so the model receives the right instructions at call time. For example,
-`schedule_job` should carry the rule that channel-originated jobs which need to
-report back to the same chat use `delivery_mode = "origin"`; that knowledge
-belongs with the capability, not with `USER.md` or `MEMORY.md`.
+**Milestone 7 shipped:** built-in catalog, metadata schema, dynamic prompt summary, `tool_help`, self-knowledge skill, and user-facing built-in vs skill docs are implemented. Stage 3's accepted residual gap remains: DNS preflight blocks private resolutions, but full IP-pinned rebinding defense is still M10 security work.
 
-For broader Fermix system knowledge, add a Fermix-owned manual/self-knowledge
-skill or capability that can explain how agents, channels, memory, jobs, config,
-and tools fit together. This manual is for higher-level operating knowledge. It
-must not replace capability-local instructions needed for correct tool calls.
+---
 
-Stage gate before expanding the M7 tool catalog:
+## Milestone 7.1: Conversation Lifecycle — Threshold Compaction & Channel Commands
 
-- every new capability has registry-owned usage guidance and schema docs
-- the main agent prompt is generated from compact capability summaries
-- full capability documentation is available on demand without bloating every
-  request context
-- tests cover at least one realistic main-agent tool-call path per tool family
-
-### File & Code Tools
+**Goal:** Operators can configure a context-window utilization threshold (e.g., `0.9` = compact when the conversation reaches 90 % of the model's context window), and end-users can drive conversation lifecycle from any channel via `/compact`, `/new`, and `/clear`. Today `Memory.Compactor` only runs when the agent loop opts into it; there is no auto-trigger tied to the model's context window, and channels have no command surface at all — every message is forwarded to `MainAgent` as raw user content.
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|
-| **file_edit** | Precise text replacement in files | P0 | Rewrite | `src/tools/file_edit.rs` | M |
-| **git_operations** | Git commands (commit, push, branch, etc.) | P1 | Rewrite | `src/tools/git_operations.rs` | M |
-| **glob_search** | Fast file pattern matching | P1 | Rewrite | `src/tools/glob_search.rs` | S |
-| **content_search** | Grep-like content search | P1 | Rewrite | `src/tools/content_search.rs` | M |
+| **Per-model context-window catalog** | Canonical `max_input_tokens` per model id, sourced from `Providers.ModelCatalog` (extends what M4.10 introduced for routing). Fallback policy for unknown models. | P0 | Modify | `apps/fermix_core/lib/fermix_core/providers/model_catalog.ex` | S |
+| **`compaction.threshold` config key** | Float in `[0.1, 1.0]` in `[fermix_core.compaction]`, default `0.9`. Validated by `ConfigStore`. Wizard-writable. | P0 | New | `Memory.Compactor` | S |
+| **Threshold-driven auto-compaction** | After each `MainAgent` turn, if `tokens_used / context_window >= threshold`, run `Compactor.compact/2` for the conversation key before the next turn. Telemetry: `[:fermix, :compaction, :auto]` with reason. | P0 | New | `Memory.Compactor` | M |
+| **Channel command surface** | Shared parser+dispatcher in `fermix_channels` that recognizes leading `/<cmd>` (and `/<cmd>@bot` on Telegram) on inbound messages **before** they reach `MainAgent`. Pluggable command handlers receive normalized `Message.t()` + a `reply_fn`. | P0 | New | N/A | M |
+| **`/compact` command** | Force-immediate `Compactor.compact/2` for the conversation; replies with before/after token counts. Bypasses the threshold check for one turn. | P0 | New | N/A | S |
+| **`/new` & `/clear` commands** | Wipe the `ConversationStore` history for the current `conversation_key`, plus any provider-side per-conversation state (Codex `provider_state`, OpenAI Responses prior-input cache). Aliases of one another. Replies with a fresh-session marker. | P0 | New | `Memory.ConversationStore`, `MainAgent` | M |
+| **Command authorization model** | Per-channel allow-list: which sender ids may run `/new`, `/clear`, `/compact`. Default: only the chat owner (operator) where the channel exposes that signal; otherwise everyone in 1:1 chats, no-one in groups. | P0 | New | N/A | S |
+| **Local CLI parity** | `fermix ask /compact` and `fermix ask /new` go through the same channel-command surface (since `fermix ask` already dispatches via `FermixChannels.CLI`). | P1 | New | M7 review | XS |
 
-### Web & Network Tools
+### Open design questions
 
-| Feature | Description | Priority | Type | Reference | Effort |
-|---------|-------------|----------|------|-----------|--------|
-| **web_fetch** | HTTP fetch + content extraction | P0 | Rewrite | `src/tools/web_fetch.rs` | M |
-| **web_search_tool** | DuckDuckGo/web search | P1 | Rewrite | `src/tools/web_search_tool.rs` | M |
-| **http_request** | Generic HTTP client tool | P1 | Rewrite | `src/tools/http_request.rs` | M |
-| **browser** | Builtin computer-use tool via [agent-browser](https://github.com/vercel-labs/agent-browser) CLI — native Rust, accessibility tree snapshots with refs, no Playwright dependency. Needs auto-update mechanism for external engine | P0 | New | N/A | M |
+- **Auto-compaction policy.** Compactor today produces a single summary message. Options under threshold: (a) full single-summary replacement; (b) keep last N turns verbatim + summarize older; (c) hybrid that always preserves the system prompt + the active tool-call thread. Pick one for v1; the others are follow-ups.
+- **Threshold scope.** Per-conversation only, or also per-skill/per-channel overrides? Default to global with `conversation_key` carrying the actual ratio measurement.
+- **Codex provider_state lifecycle.** Codex's `prior_input` is replayed across turns and is what actually drives token growth. `/new` must reset it; auto-compaction must rewrite it. Confirm the rewrite path doesn't drop replayable reasoning items needed for tool-call continuity.
+- **Command syntax cross-channel.** Telegram uses `/cmd@botname` for group disambiguation; Slack uses `/cmd` as a true slash command (separate webhook); Discord uses application commands; WhatsApp/Signal have no native slash. v1 should be plain `/cmd` at message start in the inbound text payload, with Telegram's `@botname` suffix stripped — full slash-command-API integration is per-channel follow-up work.
+- **`/help` and command discovery.** Out of scope or in scope? At minimum `/help` should list available commands; otherwise users have to read the docs to know `/compact` exists.
+- **Permission model edge cases.** What about scheduled jobs that originate from a channel — should the job's reply path inherit the originator's permission to run `/new` on its own conversation? Probably yes, but worth stating.
 
-### Delegation & Orchestration Tools
+### Why a separate milestone
 
-| Feature | Description | Priority | Type | Reference | Effort |
-|---------|-------------|----------|------|-----------|--------|
-| **delegate** | Single-turn delegation to another model | P1 | Rewrite | `src/tools/delegate.rs` | M |
-| **schedule** | Schedule future tasks | P1 | Rewrite | `src/tools/schedule.rs` | M |
+These are three coherent features that depend on each other:
 
-### Cron Management Tools
+1. Auto-compaction needs a per-model context-window number and a threshold config key.
+2. `/compact` needs a channel-command surface to trigger compaction without going through the LLM.
+3. `/new` and `/clear` need the same surface, plus provider-state wipe coordination.
 
-| Feature | Description | Priority | Type | Reference | Effort |
-|---------|-------------|----------|------|-----------|--------|
-| **cron_add** | Add cron job | P1 | Rewrite | `src/tools/cron_add.rs` | S |
-| **cron_list** | List cron jobs | P1 | Rewrite | `src/tools/cron_list.rs` | S |
-| **cron_remove** | Remove cron job | P1 | Rewrite | `src/tools/cron_remove.rs` | S |
-| **cron_update** | Update cron job | P1 | Rewrite | `src/tools/cron_update.rs` | S |
+Folding any one into M4.11 (Scheduled Agents) or M6 (DX) means designing the channel-command pipeline twice. Splitting auto-compaction from the user-driven commands ships a half-feature where operators can set a threshold but users can't manually trigger it.
 
-### Skill Management Tools
+**Depends on M4.11:** the `/new` wipe path needs to handle scheduled-job conversation keys correctly (they share `ConversationStore` infrastructure), so M4.11's source-aware memory shape should land first.
 
-| Feature | Description | Priority | Type | Reference | Effort |
-|---------|-------------|----------|------|-----------|--------|
-| **skill_create** | Create new skill template | P1 | Rewrite | `src/tools/skill_create.rs` | M |
+**Milestone 7.1 Total Agent Wall-Clock:** ~6–9 hours. Channel-command parser + per-channel `@botname` handling is the only realistic source of variance.
 
-### Configuration Tools
+---
 
-| Feature | Description | Priority | Type | Reference | Effort |
-|---------|-------------|----------|------|-----------|--------|
-| **model_routing_config** | Configure model routing | P1 | Rewrite | `src/tools/model_routing_config.rs` | M |
+## Milestone 7+: Pluggable Capability Backends — _Reserved (operator-scoped)_
 
-**Milestone 7 Total Effort:** ~8-12 weeks (can parallelize by category)
+**Goal:** Per-capability backend choice (e.g., `web_search` → Parallel REST | Tavily | DDG-default), API-key wizard surface, `[fermix_core.tools.<name>]` TOML schema with `ConfigStore` round-trip, `BuiltinSeeder.reseed/1` for live re-registration after the wizard writes a key, daemon control-socket `:reseed_builtins` request, doctor probes per backend, **and `http_request` tool** (deferred from M7 because it requires per-tool `[http_request].allowed_domains` config that this milestone provides — see RustyClaw `src/tools/http_request.rs:47`). This milestone also owns bounded DNS preflight behavior for `NetGuard`-backed tools: explicit DNS lookup timeouts and, if measurements show repeated resolver cost, a small per-daemon cache for successful public resolutions.
+
+Separately tracked: **`git_push`** is deferred to **M10** (Security & Governance), not here. It's not a per-tool config problem — it's an approval-flow problem. M10 owns the `requires_approval?: true` exposure path (`include_approval_required?: true` opt threading through AgentLoop, `/approve` UX, etc.) which `git_push` and any future approval-gated capability need.
+
+Not part of M7 — folding even a stripped-down version into M7 means designing the same plumbing twice when this milestone properly lands. Operator is preparing a separate design doc.
 
 ---
 
@@ -593,7 +604,7 @@ Stage gate before expanding the M7 tool catalog:
 - Advanced memory (Hermes extraction, Honcho AI/wiki-style, gist, compaction, SQLite)
 - Security core (policy, approval, content scanner, leak detector, Sentinel, prompt guard, e-stop)
 - LiveView dashboard, CLI, cron scheduler
-- Core tools (file_edit, web_fetch, browser, git, delegate, web search, model routing, cron, skill_create)
+- Core tools (file_edit, web_fetch, web_search, browser, git_read/git_write, delegate, model_routing_config, skill_create, NetGuard) — cron-named scheduling tools shipped under M4.11; `git_push` and `http_request` deferred (M10 and M7+ respectively)
 - Production ops (telemetry, health checks, logging, clustering, rate limiting)
 - Core providers (OpenRouter, Ollama, Gemini, Compatible, Reliable, Router)
 - Differentiators (heartbeat, reactions, smart presence, multi-workspace, visual context, self-knowledge agent)
