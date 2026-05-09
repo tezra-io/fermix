@@ -47,6 +47,15 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
+  @spec delete_provider(provider(), Path.t()) :: :ok | {:error, term()}
+  def delete_provider(provider, path \\ default_path()) when is_atom(provider) do
+    with {:ok, current} <- read_existing(path),
+         {:ok, updated} <- remove_provider(current, provider),
+         :ok <- atomic_write(path, encode(updated)) do
+      :ok
+    end
+  end
+
   @spec path() :: Path.t()
   def path, do: default_path()
 
@@ -57,10 +66,10 @@ defmodule FermixCore.Auth.Store do
 
   defp providers_map(%{"providers" => providers}) when is_map(providers), do: {:ok, providers}
 
-  # Migration: M3-era flat shape — one provider implicit at the top level.
-  # TokenManager now reads these as legacy Codex tokens via its openai fallback.
+  # Migration: M3-era flat shape — one ChatGPT OAuth provider implicit at
+  # the top level. It belongs to openai_codex, not api-key openai.
   defp providers_map(%{"tokens" => _} = flat),
-    do: {:ok, %{"openai" => flat}}
+    do: {:ok, %{"openai_codex" => flat}}
 
   defp providers_map(_), do: {:error, :no_providers}
 
@@ -104,7 +113,7 @@ defmodule FermixCore.Auth.Store do
       {:ok, raw} ->
         case Jason.decode(raw) do
           {:ok, %{"providers" => _} = data} -> {:ok, data}
-          {:ok, %{"tokens" => _} = flat} -> {:ok, %{"providers" => %{"openai" => flat}}}
+          {:ok, %{"tokens" => _} = flat} -> {:ok, legacy_codex_doc(flat)}
           {:ok, _} -> {:ok, empty_doc()}
           {:error, _} -> {:ok, empty_doc()}
         end
@@ -117,7 +126,29 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
+  defp read_existing(path) do
+    case File.read(path) do
+      {:ok, raw} ->
+        case Jason.decode(raw) do
+          {:ok, %{"providers" => providers} = data} when is_map(providers) -> {:ok, data}
+          {:ok, %{"tokens" => _} = flat} -> {:ok, legacy_codex_doc(flat)}
+          {:ok, _} -> {:error, :no_providers}
+          {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, :enoent} ->
+        {:error, :no_auth_file}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp empty_doc, do: %{"version" => @schema_version, "providers" => %{}}
+
+  defp legacy_codex_doc(flat),
+    do: %{"version" => @schema_version, "providers" => %{"openai_codex" => flat}}
 
   defp put_provider(doc, provider, entry) do
     serialized = %{
@@ -133,6 +164,18 @@ defmodule FermixCore.Auth.Store do
     providers = Map.put(Map.get(doc, "providers", %{}), Atom.to_string(provider), serialized)
     %{"version" => @schema_version, "providers" => providers}
   end
+
+  defp remove_provider(%{"providers" => providers}, provider) when is_map(providers) do
+    key = Atom.to_string(provider)
+
+    if Map.has_key?(providers, key) do
+      {:ok, %{"version" => @schema_version, "providers" => Map.delete(providers, key)}}
+    else
+      {:error, {:provider_missing, provider}}
+    end
+  end
+
+  defp remove_provider(_doc, _provider), do: {:error, :no_providers}
 
   defp encode(doc), do: Jason.encode!(doc, pretty: true) <> "\n"
 

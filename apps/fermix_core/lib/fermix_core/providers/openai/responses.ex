@@ -31,6 +31,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
   require Logger
@@ -65,6 +66,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       input: input,
       tools: tools,
       capabilities: capabilities,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -100,6 +102,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       input: next_input,
       tools: tools,
       capabilities: caps,
+      agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort
     }
 
@@ -135,7 +138,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         ]
       )
       |> Req.merge(req_options)
-      |> Req.request()
+      |> HttpClient.request("OpenAI Responses")
       |> handle_response(turn_state)
 
     duration_ms = System.monotonic_time(:millisecond) - start
@@ -228,6 +231,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end
 end

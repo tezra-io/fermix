@@ -150,6 +150,8 @@ defmodule FermixCore.Agents.SkillRegistry do
     |> Path.wildcard()
   end
 
+  defp list_skill_paths(nil), do: []
+
   defp load_definition(path, dirs) do
     with {:ok, contents} <- read_skill_file(path),
          {:ok, attrs, system_prompt} <- split_frontmatter(contents),

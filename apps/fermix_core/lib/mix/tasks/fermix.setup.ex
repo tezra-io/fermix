@@ -15,6 +15,9 @@ defmodule Mix.Tasks.Fermix.Setup do
 
   @switches [
     openai_api_key: :string,
+    provider: :string,
+    default_model: :string,
+    reasoning_effort: :string,
     telegram_bot_token: :string,
     whatsapp_access_token: :string,
     whatsapp_phone_number_id: :string,
@@ -26,7 +29,12 @@ defmodule Mix.Tasks.Fermix.Setup do
     slack_signing_secret: :string,
     signal_account: :string,
     print_state: :boolean,
-    import_codex: :boolean
+    reconfigure: :boolean,
+    import_codex: :boolean,
+    no_browser: :boolean,
+    skip_probe: :boolean,
+    port: :integer,
+    timeout: :integer
   ]
 
   @impl true

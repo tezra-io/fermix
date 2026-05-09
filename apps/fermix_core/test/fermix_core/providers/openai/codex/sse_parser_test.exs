@@ -141,4 +141,74 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
       assert result["model"] == "gpt-5"
     end
   end
+
+  describe "feed/2 + finalize/1 — streaming API" do
+    @sse_body """
+    data: {"type":"response.created","response":{"model":"gpt-5"}}
+
+    data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","content":[]}}
+
+    data: {"type":"response.output_text.delta","output_index":0,"delta":"hi "}
+
+    data: {"type":"response.output_text.delta","output_index":0,"delta":"world"}
+
+    data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_1","content":[]}}
+
+    data: {"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":3}}}
+
+    data: [DONE]
+
+    """
+
+    test "single feed reproduces parse/1 result" do
+      streamed = SSEParser.new() |> SSEParser.feed(@sse_body) |> SSEParser.finalize()
+      assert streamed == SSEParser.parse(@sse_body)
+    end
+
+    test "byte-by-byte feed reproduces parse/1 result" do
+      streamed =
+        @sse_body
+        |> :binary.bin_to_list()
+        |> Enum.reduce(SSEParser.new(), fn byte, acc ->
+          SSEParser.feed(acc, <<byte>>)
+        end)
+        |> SSEParser.finalize()
+
+      assert streamed == SSEParser.parse(@sse_body)
+    end
+
+    test "chunks straddling event boundaries reproduce parse/1 result" do
+      mid = div(byte_size(@sse_body), 2)
+      <<first::binary-size(mid), rest::binary>> = @sse_body
+
+      streamed =
+        SSEParser.new()
+        |> SSEParser.feed(first)
+        |> SSEParser.feed(rest)
+        |> SSEParser.finalize()
+
+      assert streamed == SSEParser.parse(@sse_body)
+    end
+
+    test "buffer holds partial event until next feed completes it" do
+      # Split right inside the JSON of the second event.
+      partial_first = "data: {\"type\":\"response.created\",\"response\":{\"model\":"
+      rest_first = "\"gpt-5\"}}\n\ndata: [DONE]\n\n"
+
+      state = SSEParser.new() |> SSEParser.feed(partial_first)
+      assert state.leftover == partial_first
+      assert state.model == nil
+
+      finalized = state |> SSEParser.feed(rest_first) |> SSEParser.finalize()
+      assert finalized["model"] == "gpt-5"
+    end
+
+    test "finalize drains a tail without trailing blank line" do
+      # Truncated stream — no trailing \n\n on the last event.
+      truncated = "data: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5\"}}"
+
+      finalized = SSEParser.new() |> SSEParser.feed(truncated) |> SSEParser.finalize()
+      assert finalized["model"] == "gpt-5"
+    end
+  end
 end

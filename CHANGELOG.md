@@ -6,6 +6,54 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+- `Providers.OpenAI.Codex` no longer hangs on long Codex turns and surfaces
+  `:closed` from the daemon. The SSE response is now consumed via a `Req`
+  `:into` callback that feeds `SSEParser` incrementally; `receive_timeout`
+  (60s) measures gaps between chunks rather than the whole turn, and a
+  5s `connect_options[:timeout]` bounds TCP/TLS handshake. Bare
+  `Req.TransportError` reasons (`:closed`, `:timeout`, `:econnrefused`)
+  are mapped to actionable operator-readable messages instead of the raw
+  atom. `SSEParser` gains `new/0`, `feed/2`, and `finalize/1` for
+  incremental parsing; the existing `parse/1` is preserved.
+- New `FermixCore.Net.HttpClient.request/2` wraps `Req.request/1` with a
+  single retry on stale-pool transport errors (`:closed`,
+  `:econnrefused`). Fixes the "first message after macOS sleep fails,
+  second works" failure mode: Finch's pooled HTTPS connections to
+  long-lived API hosts (api.openai.com, chatgpt.com, api.telegram.org,
+  discord.com, slack.com, graph.facebook.com) go silently dead during
+  long idle periods and the first request hits an RST'd connection.
+  `:timeout` deliberately does NOT retry — a slow server should not be
+  hammered. All four OpenAI provider POST sites (`Providers.OpenAI`,
+  `Providers.OpenAI.Responses`, `Providers.OpenAI.ChatCompletions`,
+  `Providers.OpenAI.Codex`), the Whisper transcription POST
+  (`Transcription.OpenAI`), and the five channel-send POSTs (Telegram
+  `sendMessage` + `sendChatAction`, Discord, Slack, WhatsApp) now route
+  through it.
+
+### Added — M7 (Advanced Tools)
+- Built-in catalog expanded with `file_edit`, `glob_search`, `content_search`,
+  `git_read`, `git_write`, `web_fetch`, `web_search`, `delegate`,
+  `skill_create`, `model_routing_config`, and `tool_help`.
+- Capability metadata schema for built-ins: `when_to_use`, `examples`,
+  `failure_modes`, `requires_setup`, and `category`. Runtime prompts now
+  generate a compact built-in catalog from this metadata.
+- `FermixCore.Net.Guard` for public HTTP(S)-only outbound validation and
+  sensitive-header redaction, plus `FermixCore.Tools.HtmlText` for
+  markdown-light HTML extraction.
+- Keyless `web_search` using DuckDuckGo HTML results with loud
+  `rate_limited` and `parser_changed` failure contracts.
+- Core `self_knowledge` skill explaining Fermix architecture, built-ins,
+  skills, jobs, memory, and channels.
+- Starter eval fixtures for M7 built-in tool-selection checks and the
+  self-knowledge skill.
+
+### Changed — M7
+- `ConfigStore` now round-trips `[fermix_core.routing]` for local routing
+  preferences used by `model_routing_config`.
+- Wizard-written `config.toml` now documents the built-in-tool vs skill
+  distinction in comments.
+
 ### Added — M4.10 (Codex Parity & Provider Selection)
 - `Providers.OpenAI.Codex` adapter now implements the full Responses
   tool-call lifecycle over SSE — `chat/3` posts `tools`, `parse_tool_calls/1`

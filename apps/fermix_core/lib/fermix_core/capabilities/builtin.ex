@@ -14,6 +14,17 @@ defmodule FermixCore.Capabilities.Builtin do
     "shell" => %{policy_class: :exec, requires_approval?: false},
     "file_read" => %{policy_class: :read_only, requires_approval?: false},
     "file_write" => %{policy_class: :read_write, requires_approval?: false},
+    "file_edit" => %{policy_class: :read_write, requires_approval?: false},
+    "glob_search" => %{policy_class: :read_only, requires_approval?: false},
+    "content_search" => %{policy_class: :read_only, requires_approval?: false},
+    "git_read" => %{policy_class: :read_only, requires_approval?: false},
+    "git_write" => %{policy_class: :read_write, requires_approval?: false},
+    "web_fetch" => %{policy_class: :network, requires_approval?: false},
+    "web_search" => %{policy_class: :network, requires_approval?: false},
+    "delegate" => %{policy_class: :external_api, requires_approval?: false},
+    "skill_create" => %{policy_class: :read_write, requires_approval?: false},
+    "model_routing_config" => %{policy_class: :read_write, requires_approval?: false},
+    "tool_help" => %{policy_class: :read_only, requires_approval?: false},
     "memory_recall" => %{policy_class: :read_only, requires_approval?: false},
     "memory_store" => %{policy_class: :read_write, requires_approval?: false},
     "schedule_job" => %{policy_class: :read_write, requires_approval?: false},
@@ -38,7 +49,26 @@ defmodule FermixCore.Capabilities.Builtin do
       executor: {tool_module, :execute, []},
       policy_class: defaults.policy_class,
       requires_approval?: Map.get(defaults, :requires_approval?, false),
-      metadata: %{tool_module: tool_module}
+      metadata: metadata(tool_module)
     })
+  end
+
+  defp metadata(tool_module) do
+    %{
+      tool_module: tool_module,
+      when_to_use: callback_or(tool_module, :when_to_use, tool_module.description()),
+      examples: callback_or(tool_module, :examples, []),
+      failure_modes: callback_or(tool_module, :failure_modes, []),
+      requires_setup: callback_or(tool_module, :requires_setup, nil),
+      category: callback_or(tool_module, :category, :system)
+    }
+  end
+
+  defp callback_or(module, function, default) do
+    if function_exported?(module, function, 0) do
+      apply(module, function, [])
+    else
+      default
+    end
   end
 end

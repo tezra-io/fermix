@@ -13,6 +13,7 @@ defmodule FermixChannels.Discord do
   require Logger
 
   alias FermixChannels.Message
+  alias FermixCore.Net.HttpClient
 
   @api_base "https://discord.com/api/v10"
 
@@ -59,7 +60,7 @@ defmodule FermixChannels.Discord do
         Req.new(url: url, method: :post, json: body)
         |> Req.Request.put_header("authorization", "Bot #{token}")
         |> Req.merge(req_options(opts))
-        |> Req.request()
+        |> HttpClient.request("Discord sendMessage")
 
       handle_send_response(result)
     end
