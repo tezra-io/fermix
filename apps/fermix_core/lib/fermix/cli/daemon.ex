@@ -160,34 +160,31 @@ defmodule Fermix.CLI.Daemon do
 
   defp handle_request(line, state) do
     # The local control socket has no per-request auth; the trust boundary is
-    # the 0600 socket file under FERMIX_HOME. Keep new methods read-only unless
-    # explicit auth or operator confirmation is added at this boundary.
+    # the 0600 socket file under FERMIX_HOME. `agent_message` is a deliberate
+    # operator action from `fermix ask`, and can trigger LLM/tool work.
     case Jason.decode(line) do
-      {:ok, %{"method" => "status"}} ->
-        status_reply(state)
-
-      {:ok, %{"method" => "overview"}} ->
-        overview_reply(state)
-
-      {:ok, %{"method" => "health"}} ->
-        health_reply()
-
-      {:ok, %{"method" => "agents"}} ->
-        agents_reply()
-
-      {:ok, %{"method" => "capabilities"} = request} ->
-        capabilities_reply(request)
-
-      {:ok, %{"method" => "shutdown"}} ->
-        Trace.record(:agent_event, "daemon", %{event: "shutdown_requested"})
-        %{status: "shutting_down"}
-
-      {:ok, %{"method" => method}} ->
-        %{status: "error", reason: "unknown method", method: method}
+      {:ok, %{"method" => method} = request} ->
+        handle_method(method, request, state)
 
       _ ->
         %{status: "error", reason: "invalid request"}
     end
+  end
+
+  defp handle_method("status", _request, state), do: status_reply(state)
+  defp handle_method("overview", _request, state), do: overview_reply(state)
+  defp handle_method("health", _request, _state), do: health_reply()
+  defp handle_method("agents", _request, _state), do: agents_reply()
+  defp handle_method("capabilities", request, _state), do: capabilities_reply(request)
+  defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
+
+  defp handle_method("shutdown", _request, _state) do
+    Trace.record(:agent_event, "daemon", %{event: "shutdown_requested"})
+    %{status: "shutting_down"}
+  end
+
+  defp handle_method(method, _request, _state) do
+    %{status: "error", reason: "unknown method", method: method}
   end
 
   defp status_reply(state) do
@@ -228,6 +225,65 @@ defmodule Fermix.CLI.Daemon do
       {:error, reason} -> %{status: "error", reason: inspect(reason)}
     end
   end
+
+  defp agent_message_reply(request) do
+    params = Map.get(request, "params", %{})
+    content = params |> Map.get("content", "") |> to_string() |> String.trim()
+    session_id = normalize_session_id(Map.get(params, "session_id"))
+
+    timeout_ms =
+      normalize_timeout_ms(
+        Map.get(params, "timeout_ms"),
+        cli_channel_bridge().default_timeout_ms()
+      )
+
+    if content == "" do
+      %{status: "error", error: "empty_input", session_id: session_id}
+    else
+      cli_bridge_reply(content, session_id: session_id, timeout_ms: timeout_ms)
+    end
+  end
+
+  defp cli_bridge_reply(content, opts) do
+    session_id = Keyword.fetch!(opts, :session_id)
+
+    case cli_channel_bridge().dispatch_input_sync(content, opts) do
+      {:ok, %{response: response, session_id: session_id}} ->
+        %{status: "ok", response: response, session_id: session_id}
+
+      {:error, reason} ->
+        %{
+          status: "error",
+          error: reason_to_string(reason),
+          session_id: session_id
+        }
+    end
+  end
+
+  defp cli_channel_bridge,
+    do: Application.get_env(:fermix_core, :cli_channel_bridge, default_cli_channel_bridge())
+
+  defp default_cli_channel_bridge do
+    Module.concat(["FermixChannels", "CLI"])
+  end
+
+  defp normalize_session_id(nil), do: "cli"
+
+  defp normalize_session_id(session_id) do
+    session_id = session_id |> to_string() |> String.trim()
+    if session_id == "", do: "cli", else: session_id
+  end
+
+  defp normalize_timeout_ms(timeout_ms, _default_timeout_ms)
+       when is_integer(timeout_ms) and timeout_ms >= 0 do
+    timeout_ms
+  end
+
+  defp normalize_timeout_ms(_timeout_ms, default_timeout_ms), do: default_timeout_ms
+
+  defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_to_string(reason) when is_binary(reason), do: reason
+  defp reason_to_string(reason), do: inspect(reason)
 
   defp daemon_snapshot(state) do
     %{

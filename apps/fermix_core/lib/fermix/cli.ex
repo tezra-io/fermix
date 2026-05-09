@@ -12,6 +12,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.AgentsCommand
   alias Fermix.CLI.AuthCommand
   alias Fermix.CLI.CapabilitiesCommand
+  alias Fermix.CLI.ChatCommand
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
@@ -47,6 +48,8 @@ defmodule Fermix.CLI do
   defp dispatch(cmd, _rest) when cmd in @version_flags, do: Version.run()
   defp dispatch("setup", rest), do: Setup.run(rest)
   defp dispatch("auth", rest), do: AuthCommand.run(rest)
+  defp dispatch("ask", rest), do: ChatCommand.run(rest)
+  defp dispatch("chat", rest), do: ChatCommand.run(rest)
   defp dispatch("run", rest), do: Run.run(rest)
   defp dispatch("service", rest), do: ServiceCommand.run(rest)
   defp dispatch("start", rest), do: StartCommand.run(rest)
@@ -76,6 +79,8 @@ defmodule Fermix.CLI do
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status
       fermix auth   logout
+      fermix ask    [--stdin] [--session ID] [--timeout MS] [--json] MESSAGE...
+      fermix chat   [--stdin] [--session ID] [--timeout MS] [--json] MESSAGE...
       fermix run                        Start the daemon in the foreground
       fermix service install   [--user|--system]   Install OS service unit
       fermix service uninstall [--user|--system]   Remove OS service unit
