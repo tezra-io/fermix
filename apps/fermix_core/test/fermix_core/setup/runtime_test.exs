@@ -2,6 +2,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Runtime
@@ -466,6 +467,58 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Codex OAuth token rejected"))
+      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai_codex/gpt-5.5"))
+    end
+
+    test "OAuth recovery reloads a running TokenManager so the retry probe sees fresh tokens" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      auth_path = write_fermix_codex_auth(home, "stale_at")
+      port = pick_free_port()
+      {puts, collector} = puts_collector()
+      {:ok, seen_tokens} = Agent.start_link(fn -> [] end)
+
+      probe_plug = fn conn ->
+        [authorization] = Plug.Conn.get_req_header(conn, "authorization")
+        Agent.update(seen_tokens, &[authorization | &1])
+
+        case authorization do
+          "Bearer stale_at" -> Plug.Conn.send_resp(conn, 401, "unauthorized")
+          "Bearer oauth_at" -> Plug.Conn.send_resp(conn, 200, "{}")
+        end
+      end
+
+      # Start TokenManager pointing at the same auth file the wizard writes.
+      # In production the daemon supervises TokenManager when provider is
+      # :openai_codex, and the wizard's recovery flow must keep its
+      # in-memory cache in sync with the post-OAuth on-disk tokens.
+      start_supervised!({TokenManager, fermix_auth_path: auth_path})
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "openai_codex",
+                   default_model: "gpt-5.5",
+                   reasoning_effort: "high",
+                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
+                   fermix_auth_path: auth_path,
+                   oauth_port: port,
+                   oauth_opener: oauth_opener(port, self()),
+                   oauth_timeout_ms: 5_000,
+                   oauth_req_options: [plug: &__MODULE__.oauth_exchange_plug/1],
+                   req_options: [plug: probe_plug]
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert_received {:oauth_opened, _url}
+      assert Agent.get(seen_tokens, &Enum.reverse/1) == ["Bearer stale_at", "Bearer oauth_at"]
+      assert {:ok, "oauth_at"} = TokenManager.get_token(TokenManager)
+
+      lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai_codex/gpt-5.5"))
     end
 

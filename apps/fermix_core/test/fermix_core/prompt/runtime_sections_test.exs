@@ -2,6 +2,8 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Registry
   alias FermixCore.Prompt.RuntimeSections
 
   test "build/1 renders runtime guidance and an empty skill snapshot" do
@@ -9,6 +11,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     assert content =~ "## Runtime Contract"
     assert content =~ "Capabilities are available through the capability registry"
+    assert content =~ "## Built-in Capability Catalog"
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
     assert content =~ "Pick a skill capability by name"
@@ -16,7 +19,19 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "use `schedule_job`"
     assert content =~ "For channel-originated jobs that should report back to the same chat"
     assert content =~ "Use `expires_at` for temporary"
-    assert content =~ "Do not use shell, browser, computer-use, or MCP automation"
+    assert content =~ "Prefer direct Fermix built-ins over shell"
+  end
+
+  test "capability_summary/1 renders registered built-ins from metadata" do
+    name = :"runtime_caps_#{System.unique_integer([:positive])}"
+    start_supervised!({Registry, name: name})
+    :ok = Registry.register(name, Builtin.from_tool_module(FermixCore.Tools.ContentSearch))
+
+    content = RuntimeSections.capability_summary(name)
+
+    assert content =~ "### File & Code"
+    assert content =~ "`content_search`"
+    assert content =~ "Search file contents"
   end
 
   test "build/1 renders a compact skill catalog from available skills" do

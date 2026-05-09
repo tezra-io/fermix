@@ -41,6 +41,29 @@ defmodule FermixCore.Tools.FileWrite do
   end
 
   @impl true
+  def when_to_use, do: "Write or overwrite a file when replacing the full contents is intended."
+
+  @impl true
+  def examples do
+    [%{args: %{"path" => "notes.txt", "content" => "hello"}, note: "write a complete file"}]
+  end
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "missing_parameters", description: "path or content is absent"},
+      %{tag: "invalid_path", description: "path contains traversal or null bytes"},
+      %{tag: "write_failed", description: "filesystem write failed"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :file
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)

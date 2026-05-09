@@ -70,6 +70,40 @@ defmodule FermixCore.Tools.ScheduleJob do
   end
 
   @impl true
+  def when_to_use do
+    "Create a Fermix scheduled job for reminders, recurring checks, digests, watchers, or later work."
+  end
+
+  @impl true
+  def examples do
+    [
+      %{
+        args: %{
+          "name" => "daily_digest",
+          "schedule" => "daily at 8am",
+          "task" => "Send a digest."
+        },
+        note: "schedule recurring Fermix work"
+      }
+    ]
+  end
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "missing_parameters", description: "name, schedule, or task is absent"},
+      %{tag: "invalid_schedule", description: "schedule expression cannot be parsed"},
+      %{tag: "invalid_delivery", description: "delivery_mode or delivery_target is invalid"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :scheduling
+
+  @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end

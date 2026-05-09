@@ -524,7 +524,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert status.pending_conversations == 0
       assert status.active_requests == 1
       assert status.pending_requests == 0
-      assert status.available_skills == []
+      assert status.available_skills == ["self_knowledge"]
       assert status.memory.agent_id == "main"
       assert status.memory.owner_id == "default"
       refute inspect(status) =~ "private status content"
@@ -1117,7 +1117,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       [{messages_without_reload, _opts}] = MockProvider.get_calls()
       refute runtime_message(messages_without_reload).content =~ "coding-skill"
 
-      assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
+      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
       MockProvider.reset_calls()
 
       MainAgent.handle_message(make_message("after reload"), agent)
@@ -1136,7 +1136,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       journal_dir: journal_dir
     } do
       write_skill(skills_dir, "coding-skill", "You solve code tasks.")
-      assert {:ok, ["coding-skill"]} = MainAgent.reload_skills(agent)
+      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
 
       MockProvider.set_responses([
         mock_response("",

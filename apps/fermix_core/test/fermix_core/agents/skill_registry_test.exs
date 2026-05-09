@@ -35,7 +35,10 @@ defmodule FermixCore.Agents.SkillRegistryTest do
     registry =
       start_supervised!(
         {SkillRegistry,
-         name: :"skill_registry_#{suffix}", skills_dir: skills_dir, seed_defaults: false}
+         name: :"skill_registry_#{suffix}",
+         skills_dir: skills_dir,
+         core_dir: nil,
+         seed_defaults: false}
       )
 
     on_exit(fn -> File.rm_rf!(skills_dir) end)
@@ -132,6 +135,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           {SkillRegistry,
            name: :"seeded_skill_registry_#{System.unique_integer([:positive])}",
            skills_dir: skills_dir,
+           core_dir: nil,
            bundled_dir: bundled,
            seed_defaults: true},
           id: :"seeded_skill_registry_child_#{System.unique_integer([:positive])}"
@@ -175,6 +179,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           {SkillRegistry,
            name: :"classifier_local_#{System.unique_integer([:positive])}",
            skills_dir: local,
+           core_dir: nil,
            seed_defaults: false},
           id: :"classifier_local_child_#{System.unique_integer([:positive])}"
         )
@@ -195,6 +200,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           {SkillRegistry,
            name: :"classifier_plugin_#{System.unique_integer([:positive])}",
            skills_dir: local,
+           core_dir: nil,
            plugin_dir: plugin_dir,
            seed_defaults: false},
           id: :"classifier_plugin_child_#{System.unique_integer([:positive])}"
@@ -216,6 +222,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           {SkillRegistry,
            name: :"classifier_nested_#{System.unique_integer([:positive])}",
            skills_dir: local,
+           core_dir: nil,
            plugin_dir: plugin_dir,
            seed_defaults: false},
           id: :"classifier_nested_child_#{System.unique_integer([:positive])}"
@@ -252,6 +259,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           {SkillRegistry,
            name: :"skill_collide_#{System.unique_integer([:positive])}",
            skills_dir: skills_dir,
+           core_dir: nil,
            seed_defaults: false,
            capability_registry: cap_registry},
           id: :"skill_collide_child_#{System.unique_integer([:positive])}"
@@ -278,6 +286,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           {SkillRegistry,
            name: :"skill_with_caps_#{System.unique_integer([:positive])}",
            skills_dir: skills_dir,
+           core_dir: nil,
            seed_defaults: false,
            capability_registry: cap_registry},
           id: :"skill_with_caps_child_#{System.unique_integer([:positive])}"

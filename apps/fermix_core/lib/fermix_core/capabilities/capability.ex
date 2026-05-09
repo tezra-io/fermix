@@ -11,6 +11,14 @@ defmodule FermixCore.Capabilities.Capability do
   no behaviour callbacks — skill and MCP capabilities are constructed from
   runtime data (SKILL.md frontmatter, `tools/list` responses), so a struct
   with a runtime executor reference fits all three kinds.
+
+  Built-in M7 tools populate a stable metadata schema:
+
+    * `:when_to_use` — one-sentence routing hint used by runtime prompt summaries.
+    * `:examples` — list of `%{args: map(), note: String.t()}` examples for `tool_help`.
+    * `:failure_modes` — list of JSON-safe `%{tag: String.t(), description: String.t()}` maps.
+    * `:requires_setup` — `nil` for keyless tools; reserved for future setup-gated built-ins.
+    * `:category` — prompt grouping atom such as `:file`, `:web`, `:git`, or `:memory`.
   """
 
   @type kind :: :builtin | :skill | :mcp

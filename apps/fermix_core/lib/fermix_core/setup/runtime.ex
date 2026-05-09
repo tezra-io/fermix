@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Auth.CodexImport
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
@@ -328,10 +329,31 @@ defmodule FermixCore.Setup.Runtime do
     case CodexLogin.login(login_opts) do
       {:ok, _entry} ->
         puts.("Stored ChatGPT OAuth credentials for openai_codex.")
-        load_report()
+
+        with :ok <- reload_token_manager_if_running() do
+          load_report()
+        end
 
       {:error, reason} ->
         {:error, "codex oauth login failed: #{inspect(reason)}"}
+    end
+  end
+
+  # The supervised TokenManager (started when provider is :openai_codex)
+  # caches the loaded access token in memory. After a fresh OAuth login
+  # writes new tokens to disk, push them into the GenServer so the
+  # finalize probe — and any subsequent provider call — sees the new
+  # credentials instead of the rejected ones.
+  defp reload_token_manager_if_running do
+    case Process.whereis(TokenManager) do
+      nil ->
+        :ok
+
+      _pid ->
+        case TokenManager.reload(TokenManager) do
+          {:ok, _token} -> :ok
+          {:error, reason} -> {:error, "token manager reload failed: #{inspect(reason)}"}
+        end
     end
   end
 
