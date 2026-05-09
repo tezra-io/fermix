@@ -12,6 +12,7 @@ defmodule FermixChannels.Slack do
   require Logger
 
   alias FermixChannels.Message
+  alias FermixCore.Net.HttpClient
 
   @api_base "https://slack.com/api"
   @max_signature_age_seconds 300
@@ -56,7 +57,7 @@ defmodule FermixChannels.Slack do
         Req.new(url: "#{@api_base}/chat.postMessage", method: :post, json: body)
         |> Req.Request.put_header("authorization", "Bearer #{token}")
         |> Req.merge(req_options(opts))
-        |> Req.request()
+        |> HttpClient.request("Slack chat.postMessage")
 
       handle_send_response(result)
     end

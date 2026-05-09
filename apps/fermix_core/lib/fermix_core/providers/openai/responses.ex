@@ -31,6 +31,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @behaviour FermixCore.Providers.Adapter
 
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
   require Logger
@@ -137,7 +138,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         ]
       )
       |> Req.merge(req_options)
-      |> Req.request()
+      |> HttpClient.request("OpenAI Responses")
       |> handle_response(turn_state)
 
     duration_ms = System.monotonic_time(:millisecond) - start
