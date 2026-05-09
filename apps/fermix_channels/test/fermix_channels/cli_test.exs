@@ -13,6 +13,18 @@ defmodule FermixChannels.CLITest do
     end
   end
 
+  defmodule ReplyAgent do
+    def handle_message(message, test_pid) do
+      send(test_pid, {:sync_agent_message, message})
+      message.reply_fn.("reply: #{message.content}")
+      :ok
+    end
+  end
+
+  defmodule SilentAgent do
+    def handle_message(_message, _test_pid), do: :ok
+  end
+
   describe "parse_input/2" do
     test "normalizes CLI input into a channel message" do
       assert {:ok, [%Message{} = message]} = CLI.parse_input("hello", sender: "operator")
@@ -23,6 +35,17 @@ defmodule FermixChannels.CLITest do
       assert message.channel == "cli"
       assert message.chat_id == "cli"
       assert message.reply_target == "cli"
+      assert message.metadata == %{source: :cli}
+    end
+
+    test "accepts a custom session id" do
+      assert {:ok, [%Message{} = message]} =
+               CLI.parse_input("hello", sender: "operator", session_id: "scenario-1")
+
+      assert message.content == "hello"
+      assert message.channel == "cli"
+      assert message.chat_id == "scenario-1"
+      assert message.reply_target == "scenario-1"
       assert message.metadata == %{source: :cli}
     end
 
@@ -65,6 +88,42 @@ defmodule FermixChannels.CLITest do
                )
 
       refute_received {:handled_message, _message}
+    end
+  end
+
+  describe "dispatch_input_sync/2" do
+    test "reuses the CLI channel and captures one reply" do
+      assert {:ok, %{response: "reply: hello", session_id: "scenario-1"}} =
+               CLI.dispatch_input_sync("hello",
+                 sender: "operator",
+                 session_id: "scenario-1",
+                 timeout_ms: 1_000,
+                 agent: ReplyAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:sync_agent_message, message}
+      assert message.content == "hello"
+      assert message.sender == "operator"
+      assert message.channel == "cli"
+      assert message.chat_id == "scenario-1"
+      assert message.metadata == %{source: :cli}
+    end
+
+    test "returns parser and timeout errors" do
+      assert {:error, :empty_input} =
+               CLI.dispatch_input_sync("   ",
+                 agent: ReplyAgent,
+                 agent_server: self(),
+                 timeout_ms: 1_000
+               )
+
+      assert {:error, :timeout} =
+               CLI.dispatch_input_sync("hello",
+                 agent: SilentAgent,
+                 agent_server: self(),
+                 timeout_ms: 10
+               )
     end
   end
 

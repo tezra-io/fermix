@@ -16,6 +16,12 @@ defmodule Fermix.CLI.Daemon.Client do
   @spec shutdown(keyword()) :: {:ok, map()} | {:error, term()}
   def shutdown(opts \\ []), do: request("shutdown", opts)
 
+  @spec agent_message(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def agent_message(params, opts \\ []) when is_map(params) do
+    opts = Keyword.put(opts, :params, params)
+    request("agent_message", opts)
+  end
+
   @spec request(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def request(method, opts \\ []) when is_binary(method) do
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
