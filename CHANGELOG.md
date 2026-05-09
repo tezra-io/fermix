@@ -6,6 +6,29 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M7 (Advanced Tools)
+- Built-in catalog expanded with `file_edit`, `glob_search`, `content_search`,
+  `git_read`, `git_write`, `web_fetch`, `web_search`, `delegate`,
+  `skill_create`, `model_routing_config`, and `tool_help`.
+- Capability metadata schema for built-ins: `when_to_use`, `examples`,
+  `failure_modes`, `requires_setup`, and `category`. Runtime prompts now
+  generate a compact built-in catalog from this metadata.
+- `FermixCore.Net.Guard` for public HTTP(S)-only outbound validation and
+  sensitive-header redaction, plus `FermixCore.Tools.HtmlText` for
+  markdown-light HTML extraction.
+- Keyless `web_search` using DuckDuckGo HTML results with loud
+  `rate_limited` and `parser_changed` failure contracts.
+- Core `self_knowledge` skill explaining Fermix architecture, built-ins,
+  skills, jobs, memory, and channels.
+- Starter eval fixtures for M7 built-in tool-selection checks and the
+  self-knowledge skill.
+
+### Changed — M7
+- `ConfigStore` now round-trips `[fermix_core.routing]` for local routing
+  preferences used by `model_routing_config`.
+- Wizard-written `config.toml` now documents the built-in-tool vs skill
+  distinction in comments.
+
 ### Added — M4.10 (Codex Parity & Provider Selection)
 - `Providers.OpenAI.Codex` adapter now implements the full Responses
   tool-call lifecycle over SSE — `chat/3` posts `tools`, `parse_tool_calls/1`

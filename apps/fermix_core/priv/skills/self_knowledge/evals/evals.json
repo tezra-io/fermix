@@ -1,0 +1,21 @@
+{
+  "skill": "self_knowledge",
+  "cases": [
+    {
+      "name": "what_is_fermix",
+      "prompt": "What is Fermix?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "explains Fermix as an Elixir-native multi-agent platform"
+      ]
+    },
+    {
+      "name": "builtins_vs_skills",
+      "prompt": "What is the difference between a Fermix built-in tool and a skill?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "distinguishes built-ins shipped with the binary from skills under skills directories"
+      ]
+    }
+  ]
+}
