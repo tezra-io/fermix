@@ -25,6 +25,26 @@ defmodule FermixCore.Tools.PauseJob do
   end
 
   @impl true
+  def when_to_use, do: "Pause an existing Fermix scheduled job without deleting it."
+
+  @impl true
+  def examples, do: [%{args: %{"job_id" => "job_123"}, note: "pause one job"}]
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "missing_job_id", description: "job_id is absent or blank"},
+      %{tag: "not_found", description: "job id does not exist"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :scheduling
+
+  @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end

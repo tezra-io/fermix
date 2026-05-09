@@ -90,7 +90,7 @@ defmodule FermixCore.Prompt.SetupSeeder do
         resource_type: :user_md,
         path: PromptFiles.user_path(agent_id),
         assigns: user_assigns,
-        wizard_inputs: Map.keys(user_assigns)
+        wizard_inputs: [:user_name, :timezone, :communication_style]
       },
       %{
         name: :memory,

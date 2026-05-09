@@ -37,6 +37,11 @@ defmodule FermixCore.Auth.TokenManager do
     GenServer.call(server, :refresh, 15_000)
   end
 
+  @spec reload(GenServer.server()) :: {:ok, String.t()} | {:error, term()}
+  def reload(server \\ __MODULE__) do
+    GenServer.call(server, :reload, 5_000)
+  end
+
   # --- Server Callbacks ---
 
   @impl true
@@ -87,6 +92,24 @@ defmodule FermixCore.Auth.TokenManager do
     case do_refresh(state) do
       {:ok, state} -> {:reply, {:ok, state.access_token}, state}
       {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call(:reload, _from, state) do
+    case CodexToken.read_entry(state.fermix_path) do
+      {:ok, entry} ->
+        state =
+          state
+          |> Map.put(:invalidated, false)
+          |> apply_entry(entry)
+          |> schedule_refresh()
+
+        Logger.info("TokenManager: reloaded tokens, expires #{inspect(state.expires_at)}")
+        {:reply, {:ok, state.access_token}, state}
+
+      {:error, reason} ->
+        Logger.warning("TokenManager: reload failed — #{inspect(reason)}")
+        {:reply, {:error, reason}, state}
     end
   end
 

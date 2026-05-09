@@ -59,6 +59,31 @@ defmodule FermixCore.Tools.MemoryRecall do
   end
 
   @impl true
+  def when_to_use do
+    "Recall durable memory facts or run lexical memory search before answering from remembered context."
+  end
+
+  @impl true
+  def examples do
+    [%{args: %{"search" => "project preferences"}, note: "search durable memories"}]
+  end
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "not_found", description: "a specific memory key does not exist"},
+      %{tag: "missing_context", description: "conversation context is unavailable"},
+      %{tag: "search_failed", description: "lexical search rejected invalid options"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :memory
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)

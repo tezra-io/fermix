@@ -25,6 +25,26 @@ defmodule FermixCore.Tools.RemoveJob do
   end
 
   @impl true
+  def when_to_use, do: "Remove a Fermix scheduled job and tombstone its memory source."
+
+  @impl true
+  def examples, do: [%{args: %{"job_id" => "job_123"}, note: "delete one scheduled job"}]
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "missing_job_id", description: "job_id is absent or blank"},
+      %{tag: "not_found", description: "job id does not exist"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :scheduling
+
+  @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end

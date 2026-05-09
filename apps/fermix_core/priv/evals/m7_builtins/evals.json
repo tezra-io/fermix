@@ -1,0 +1,44 @@
+{
+  "suite": "m7_builtins",
+  "cases": [
+    {
+      "name": "content_search_for_todo",
+      "prompt": "Find every TODO under apps/",
+      "expectations": [
+        "tool:exec content_search",
+        "no shell fallback"
+      ]
+    },
+    {
+      "name": "web_fetch_known_url",
+      "prompt": "Summarize https://hexdocs.pm/req/Req.html",
+      "expectations": [
+        "tool:exec web_fetch",
+        "no curl fallback"
+      ]
+    },
+    {
+      "name": "web_search_unknown_url",
+      "prompt": "Search the web for the current Tavily pricing",
+      "expectations": [
+        "tool:exec web_search",
+        "no guessed web_fetch URL"
+      ]
+    },
+    {
+      "name": "git_status",
+      "prompt": "Show me the git status of this repo",
+      "expectations": [
+        "tool:exec git_read",
+        "no shell fallback"
+      ]
+    },
+    {
+      "name": "tool_help",
+      "prompt": "What parameters does content_search take?",
+      "expectations": [
+        "tool:exec tool_help"
+      ]
+    }
+  ]
+}

@@ -39,6 +39,29 @@ defmodule FermixCore.Tools.MemoryStore do
   end
 
   @impl true
+  def when_to_use, do: "Store a durable user or conversation fact in Fermix memory."
+
+  @impl true
+  def examples do
+    [%{args: %{"key" => "timezone", "value" => "America/New_York"}, note: "remember a fact"}]
+  end
+
+  @impl true
+  def failure_modes do
+    [
+      %{tag: "missing_parameters", description: "key or value is absent"},
+      %{tag: "missing_context", description: "conversation context is unavailable"},
+      %{tag: "store_failed", description: "memory backend rejected the write"}
+    ]
+  end
+
+  @impl true
+  def requires_setup, do: nil
+
+  @impl true
+  def category, do: :memory
+
+  @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
