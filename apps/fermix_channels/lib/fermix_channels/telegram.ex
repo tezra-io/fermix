@@ -12,6 +12,7 @@ defmodule FermixChannels.Telegram do
   require Logger
 
   alias FermixChannels.Message
+  alias FermixCore.Net.HttpClient
 
   @bot_api_base "https://api.telegram.org"
   @max_message_length 4096
@@ -88,7 +89,7 @@ defmodule FermixChannels.Telegram do
 
       case Req.new(url: url, method: :post, json: body)
            |> Req.merge(req_options(opts))
-           |> Req.request() do
+           |> HttpClient.request("Telegram sendChatAction") do
         {:ok, _} -> :ok
         {:error, reason} -> {:error, reason}
       end
@@ -111,7 +112,7 @@ defmodule FermixChannels.Telegram do
       result =
         Req.new(url: url, method: :post, json: body)
         |> Req.merge(req_options(opts))
-        |> Req.request()
+        |> HttpClient.request("Telegram sendMessage")
 
       case result do
         {:ok, %{status: 200}} ->

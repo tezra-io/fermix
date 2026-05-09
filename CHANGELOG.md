@@ -6,6 +6,31 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Fixed
+- `Providers.OpenAI.Codex` no longer hangs on long Codex turns and surfaces
+  `:closed` from the daemon. The SSE response is now consumed via a `Req`
+  `:into` callback that feeds `SSEParser` incrementally; `receive_timeout`
+  (60s) measures gaps between chunks rather than the whole turn, and a
+  5s `connect_options[:timeout]` bounds TCP/TLS handshake. Bare
+  `Req.TransportError` reasons (`:closed`, `:timeout`, `:econnrefused`)
+  are mapped to actionable operator-readable messages instead of the raw
+  atom. `SSEParser` gains `new/0`, `feed/2`, and `finalize/1` for
+  incremental parsing; the existing `parse/1` is preserved.
+- New `FermixCore.Net.HttpClient.request/2` wraps `Req.request/1` with a
+  single retry on stale-pool transport errors (`:closed`,
+  `:econnrefused`). Fixes the "first message after macOS sleep fails,
+  second works" failure mode: Finch's pooled HTTPS connections to
+  long-lived API hosts (api.openai.com, chatgpt.com, api.telegram.org,
+  discord.com, slack.com, graph.facebook.com) go silently dead during
+  long idle periods and the first request hits an RST'd connection.
+  `:timeout` deliberately does NOT retry — a slow server should not be
+  hammered. All four OpenAI provider POST sites (`Providers.OpenAI`,
+  `Providers.OpenAI.Responses`, `Providers.OpenAI.ChatCompletions`,
+  `Providers.OpenAI.Codex`), the Whisper transcription POST
+  (`Transcription.OpenAI`), and the five channel-send POSTs (Telegram
+  `sendMessage` + `sendChatAction`, Discord, Slack, WhatsApp) now route
+  through it.
+
 ### Added — M7 (Advanced Tools)
 - Built-in catalog expanded with `file_edit`, `glob_search`, `content_search`,
   `git_read`, `git_write`, `web_fetch`, `web_search`, `delegate`,

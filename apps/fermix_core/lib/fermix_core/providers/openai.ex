@@ -5,6 +5,8 @@ defmodule FermixCore.Providers.OpenAI do
 
   @behaviour FermixCore.Providers.Provider
 
+  alias FermixCore.Net.HttpClient
+
   require Logger
 
   @base_url "https://api.openai.com/v1"
@@ -70,7 +72,7 @@ defmodule FermixCore.Providers.OpenAI do
         headers: [{"authorization", "Bearer #{key}"}]
       )
       |> Req.merge(req_options)
-      |> Req.request()
+      |> HttpClient.request("OpenAI base")
       |> handle_completions_response()
 
     duration_ms = System.monotonic_time(:millisecond) - start
