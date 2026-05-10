@@ -8,11 +8,15 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     jobs = Application.get_env(:fermix_core, :jobs, [])
+    compaction = Application.get_env(:fermix_core, :compaction, [])
+    memory = Application.get_env(:fermix_core, :memory, [])
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :jobs, jobs)
+      Application.put_env(:fermix_core, :compaction, compaction)
+      Application.put_env(:fermix_core, :memory, memory)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -89,9 +93,109 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(agent, :name) == "aira"
   end
 
+  test "save/load round-trips compaction config with float threshold" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        agent: [name: "fermix"],
+        compaction: [enabled: true, threshold: 0.85]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.compaction]"
+    assert contents =~ "enabled = true"
+    assert contents =~ "threshold = 0.85"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    compaction = Keyword.get(loaded.fermix_core, :compaction, [])
+
+    assert Keyword.get(compaction, :enabled) == true
+    assert Keyword.get(compaction, :threshold) == 0.85
+  end
+
+  test "save/load round-trips memory.extraction_timeout_ms" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        agent: [name: "fermix"],
+        memory: [extraction_timeout_ms: 90_000]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.memory]"
+    assert contents =~ "extraction_timeout_ms = 90000"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    memory = Keyword.get(loaded.fermix_core, :memory, [])
+    assert Keyword.get(memory, :extraction_timeout_ms) == 90_000
+  end
+
+  test "apply_snapshot merges memory config without wiping non-persisted keys" do
+    Application.put_env(:fermix_core, :memory,
+      extraction_enabled: false,
+      agent_id: "stable-agent",
+      extraction_timeout_ms: 1_000
+    )
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [
+        memory: [extraction_timeout_ms: 90_000]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    memory = Application.get_env(:fermix_core, :memory, [])
+
+    assert Keyword.get(memory, :extraction_timeout_ms) == 90_000
+    assert Keyword.get(memory, :extraction_enabled) == false
+    assert Keyword.get(memory, :agent_id) == "stable-agent"
+  end
+
+  test "load_runtime_config rejects non-positive extraction_timeout_ms from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.memory]
+    extraction_timeout_ms = 0
+    """)
+
+    assert_raise ArgumentError, ~r/extraction_timeout_ms/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
   test "apply_snapshot writes personalization and agent into Application env" do
     Application.put_env(:fermix_core, :personalization, [])
     Application.put_env(:fermix_core, :agent, [])
+    Application.put_env(:fermix_core, :compaction, [])
 
     ConfigStore.apply_snapshot(%{
       fermix_core: [
@@ -100,7 +204,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           timezone: "Asia/Singapore",
           communication_style: "blunt"
         ],
-        agent: [name: "aira"]
+        agent: [name: "aira"],
+        compaction: [enabled: false, threshold: 0.5]
       ],
       fermix_channels: [],
       fermix_web: []
@@ -108,11 +213,14 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
+    compaction = Application.get_env(:fermix_core, :compaction, [])
 
     assert Keyword.get(personalization, :user_name) == "Sujeeth"
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+    assert Keyword.get(compaction, :enabled) == false
+    assert Keyword.get(compaction, :threshold) == 0.5
   end
 
   test "bootstrap_runtime_config hydrates Application env from the persisted TOML" do
@@ -219,6 +327,63 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              chat_id: "8217352118",
              thread_ts: "42"
            ]
+  end
+
+  test "save/load round-trips per-channel command authorization config" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [providers: [openai: []], agent: [name: "fermix"]],
+      fermix_channels: [
+        telegram: [
+          enabled: true,
+          mode: :webhook,
+          owner_user_id: "111",
+          command_allowlist: ["222", "333"]
+        ],
+        signal: [owner_user_id: "+15550001111", command_allowlist: ["+15552223333"]]
+      ],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(owner_user_id = "111")
+    assert contents =~ ~s(command_allowlist = ["222", "333"])
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    channels = loaded.fermix_channels
+
+    assert Keyword.get(channels[:telegram], :owner_user_id) == "111"
+    assert Keyword.get(channels[:telegram], :command_allowlist) == ["222", "333"]
+    assert Keyword.get(channels[:signal], :owner_user_id) == "+15550001111"
+    assert Keyword.get(channels[:signal], :command_allowlist) == ["+15552223333"]
+  end
+
+  test "load preserves absent ingress allowlists for owner-user defaults" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_channels.telegram]
+    enabled = true
+    owner_user_id = "111"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    telegram = loaded.fermix_channels[:telegram]
+
+    refute Keyword.has_key?(telegram, :allowed_user_ids)
+    assert Keyword.get(telegram, :owner_user_id) == "111"
   end
 
   test "bootstrap_runtime_config is a no-op when no TOML exists" do
@@ -427,6 +592,25 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     refute Keyword.has_key?(openai, :auth_mode)
     assert Keyword.get(openai, :api_key) == "sk-x"
+  end
+
+  test "load_runtime_config rejects invalid compaction values from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.compaction]
+    enabled = "true"
+    threshold = 1.2
+    """)
+
+    assert_raise ArgumentError, ~r/compaction/, fn ->
+      ConfigStore.load_runtime_config()
+    end
   end
 
   test "apply_snapshot puts all three provider blocks into Application env" do

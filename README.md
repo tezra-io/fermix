@@ -180,6 +180,45 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 
 `fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails.
 
+## Channel command reference
+
+Plain-text commands work in every channel through the shared dispatcher, and locally through `fermix ask` / `fermix chat`.
+
+| Command | Description |
+|---------|-------------|
+| `/compact` | Summarize the current conversation window now and keep the summary in history |
+| `/new` | Clear the current conversation history only |
+| `/clear` | Alias for `/new` |
+| `/help` | List available commands |
+| `/whoami` | Show the stable channel user id used for command authorization |
+
+Outside the local CLI, mutating commands require a per-channel owner. For a
+single-user channel, `owner_user_id` is enough; it also becomes the default
+ingress allowlist unless you explicitly set `allowed_user_ids` or
+`allowed_sender_ids`:
+
+```toml
+[fermix_channels.telegram]
+owner_user_id = "123456789"
+command_allowlist = ["987654321"]
+```
+
+If `owner_user_id` is absent, Fermix can derive the command owner from a single
+configured ingress allowlist entry. Multiple allowed users still require an
+explicit `owner_user_id` or `command_allowlist`. Use `/whoami` from the target
+account to discover the id, then persist it with `fermix setup --reconfigure` or
+by editing `~/.fermix/config.toml`.
+
+Automatic conversation compaction is controlled by:
+
+```toml
+[fermix_core.compaction]
+enabled = true
+threshold = 0.85
+```
+
+After each agent turn, Fermix estimates the conversation tokens for that conversation key. When usage reaches `threshold * model_context_window`, it summarizes older messages and replaces the stored conversation history with the summary plus recent turns. `/new` only clears the conversation window; long-term memory, resource revisions, and scheduled jobs are preserved.
+
 ## Architecture
 
 ![Fermix architecture](docs/architecture.png)

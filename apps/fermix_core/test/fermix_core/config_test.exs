@@ -86,6 +86,49 @@ defmodule FermixCore.ConfigTest do
     end
   end
 
+  describe "channel command and ingress ids" do
+    test "defaults ingress allowlist to owner_user_id when channel allowlist is absent" do
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "111")
+
+      assert Config.channel_ingress_user_ids(:telegram) == ["111"]
+      assert Config.channel_command_owner_user_id(:telegram) == "111"
+    after
+      Application.delete_env(:fermix_channels, :telegram)
+    end
+
+    test "preserves explicitly configured ingress allowlists" do
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "111",
+        allowed_user_ids: []
+      )
+
+      assert Config.channel_ingress_user_ids(:telegram) == []
+    after
+      Application.delete_env(:fermix_channels, :telegram)
+    end
+
+    test "derives command owner from a single explicit ingress id" do
+      Application.put_env(:fermix_channels, :telegram, allowed_user_ids: [111])
+      Application.put_env(:fermix_channels, :signal, allowed_sender_ids: ["+15551234567"])
+
+      assert Config.channel_command_owner_user_id(:telegram) == "111"
+      assert Config.channel_command_owner_user_id(:signal) == "+15551234567"
+    after
+      Application.delete_env(:fermix_channels, :telegram)
+      Application.delete_env(:fermix_channels, :signal)
+    end
+
+    test "does not derive command owner from empty or multi-user ingress allowlists" do
+      Application.put_env(:fermix_channels, :telegram, allowed_user_ids: [])
+      assert Config.channel_command_owner_user_id(:telegram) == nil
+
+      Application.put_env(:fermix_channels, :telegram, allowed_user_ids: ["111", "222"])
+      assert Config.channel_command_owner_user_id(:telegram) == nil
+    after
+      Application.delete_env(:fermix_channels, :telegram)
+    end
+  end
+
   describe "get/2" do
     test "returns configured value" do
       Application.put_env(:fermix_core, :max_conversation_history, 50)

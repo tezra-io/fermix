@@ -37,6 +37,38 @@ defmodule FermixCore.Memory.ConversationStoreTest do
     end
   end
 
+  defmodule BlockingRepo do
+    use GenServer
+
+    def start_link(opts) do
+      GenServer.start_link(__MODULE__, opts)
+    end
+
+    @impl true
+    def init(opts) do
+      {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid), next_id: 0}}
+    end
+
+    @impl true
+    def handle_call(:enabled?, _from, state), do: {:reply, true, state}
+
+    def handle_call({:delete_messages, selector}, _from, state) do
+      send(state.test_pid, {:delete_started, self(), selector})
+
+      receive do
+        :continue_delete -> :ok
+      end
+
+      {:reply, :ok, state}
+    end
+
+    def handle_call({:insert_message, attrs}, _from, state) do
+      next_id = state.next_id + 1
+      send(state.test_pid, {:insert_message, attrs.content})
+      {:reply, {:ok, Map.put(attrs, :id, next_id)}, %{state | next_id: next_id}}
+    end
+  end
+
   @key {"telegram", "chat_123", :root}
   @key2 {"discord", "chat_456", :root}
 
@@ -122,6 +154,28 @@ defmodule FermixCore.Memory.ConversationStoreTest do
     # Oldest dropped, newest kept
     assert "msg_4" == hd(history).content
     assert "msg_8" == List.last(history).content
+  end
+
+  test "replace_history swaps the cached conversation atomically", %{store: store} do
+    ConversationStore.add_message(@key, "user", "old one", server: store)
+    ConversationStore.add_message(@key, "assistant", "old two", server: store)
+
+    assert :ok =
+             ConversationStore.replace_history(
+               @key,
+               [
+                 %{role: "system", content: "Conversation checkpoint summary:\nold one/two"},
+                 %{role: "user", content: "latest question"}
+               ],
+               server: store
+             )
+
+    history = ConversationStore.get_history(@key, server: store)
+
+    assert Enum.map(history, & &1.content) == [
+             "Conversation checkpoint summary:\nold one/two",
+             "latest question"
+           ]
   end
 
   # --- get_history with limit ---
@@ -372,6 +426,72 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       assert is_integer(persist_measurements.duration_us)
       assert persist_metadata.status == :ok
       assert persist_metadata.attempt == 1
+    end
+
+    test "replace_history swaps sqlite-backed chat history", %{repo: repo, store: store} do
+      ConversationStore.add_message(@key, "user", "old", server: store)
+      wait_for_message_count(repo, chat_selector(@key), 1)
+
+      assert :ok =
+               ConversationStore.replace_history(
+                 @key,
+                 [
+                   %{role: "system", content: "Conversation checkpoint summary:\nold"},
+                   %{role: "user", content: "new"}
+                 ],
+                 server: store
+               )
+
+      assert Enum.map(ConversationStore.get_history(@key, server: store), & &1.content) == [
+               "Conversation checkpoint summary:\nold",
+               "new"
+             ]
+
+      wait_for_message_count(repo, chat_selector(@key), 2)
+
+      assert {:ok, rows} = Repo.get_messages(chat_selector(@key), server: repo, limit: 10)
+      assert Enum.map(rows, & &1.content) == ["Conversation checkpoint summary:\nold", "new"]
+    end
+
+    test "replace_history returns after cache update while durable replacement runs async" do
+      repo = start_supervised!({BlockingRepo, test_pid: self()})
+      store = :"conversation_store_async_replace_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: store,
+        start:
+          {ConversationStore, :start_link,
+           [[name: store, max_messages: 5, repo: repo, durable_task_supervisor: nil]]}
+      })
+
+      task =
+        Task.async(fn ->
+          ConversationStore.replace_history(
+            @key,
+            [
+              %{role: "system", content: "Conversation checkpoint summary:\nold"},
+              %{role: "user", content: "new"}
+            ],
+            server: store
+          )
+        end)
+
+      assert_receive {:delete_started, ^repo, _selector}
+
+      result_before_release = Task.yield(task, 100)
+
+      assert Enum.map(ConversationStore.get_history(@key, server: store), & &1.content) == [
+               "Conversation checkpoint summary:\nold",
+               "new"
+             ]
+
+      send(repo, :continue_delete)
+      _result_after_release = result_before_release || Task.await(task, 1_000)
+
+      assert_receive {:insert_message, "Conversation checkpoint summary:\nold"}
+      assert_receive {:insert_message, "new"}
+
+      assert result_before_release == {:ok, :ok}
     end
 
     test "keeps in-memory history and returns when durable write fails", %{store: _store} do

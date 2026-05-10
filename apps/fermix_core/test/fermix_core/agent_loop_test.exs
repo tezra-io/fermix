@@ -157,6 +157,45 @@ defmodule FermixCore.AgentLoopTest do
     AgentLoop.run(Keyword.merge(defaults, opts))
   end
 
+  defp stub_summary(summary) do
+    test_pid = self()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:summary_request, body})
+
+      Req.Test.json(conn, %{
+        "model" => "gpt-5.4-mini",
+        "output" => [
+          %{
+            "type" => "message",
+            "id" => "msg_summary",
+            "content" => [%{"type" => "output_text", "text" => summary}]
+          }
+        ],
+        "usage" => %{"input_tokens" => 9, "output_tokens" => 3}
+      })
+    end)
+  end
+
+  defp route_key do
+    %{
+      provider: :openai,
+      model: "gpt-5.4-mini",
+      auth_mode: :api_key,
+      base_url: "https://api.openai.com/v1"
+    }
+  end
+
+  defp summary_adapter_opts do
+    [
+      api_key: "sk-test",
+      model: "gpt-5.4-mini",
+      base_url: "https://api.openai.com/v1",
+      req_options: [plug: {Req.Test, __MODULE__}]
+    ]
+  end
+
   setup do
     name = :"capreg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name})
@@ -180,6 +219,37 @@ defmodule FermixCore.AgentLoopTest do
 
       assert {:ok, result} = run_loop(capability_registry: registry)
       assert result.total_tokens == 42
+    end
+
+    test "uses resolved route when compacting initial messages", %{registry: registry} do
+      stub_summary("summary from route")
+      set_mock_responses([turn("Hello after compaction")])
+
+      messages = [
+        %{role: "system", content: "base prompt"},
+        %{role: "user", content: String.duplicate("older turn ", 80)},
+        %{role: "assistant", content: String.duplicate("older response ", 80)},
+        %{role: "user", content: "latest question"}
+      ]
+
+      assert {:ok, result} =
+               run_loop(
+                 capability_registry: registry,
+                 messages: messages,
+                 route_key: route_key(),
+                 adapter_opts: summary_adapter_opts(),
+                 compaction_enabled: true,
+                 compaction_token_budget: 60,
+                 compaction_persist_checkpoints: false
+               )
+
+      assert result.response == "Hello after compaction"
+      assert_received {:summary_request, body}
+      assert Jason.decode!(body)["model"] == "gpt-5.4-mini"
+
+      [{compacted_messages, _capabilities, _opts}] = mock_calls()
+      assert Enum.any?(compacted_messages, &(&1.content =~ "summary from route"))
+      refute Enum.any?(compacted_messages, &(&1.content =~ "older response older response"))
     end
   end
 

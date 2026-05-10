@@ -82,6 +82,7 @@ defmodule FermixCore.AgentLoop do
       allowed_tools: allowed_tools,
       capability_registry: capability_registry,
       adapter: adapter,
+      route_key: route_key,
       adapter_opts: build_adapter_opts(opts, route_key, Keyword.get(opts, :context, %{})),
       max_iter: Keyword.get(opts, :max_iterations, @max_iterations),
       context: Keyword.get(opts, :context, %{}),
@@ -298,8 +299,7 @@ defmodule FermixCore.AgentLoop do
       token_budget: state.compaction.token_budget,
       persist_checkpoints: state.compaction.persist_checkpoints,
       cache: state.compaction.cache,
-      provider: FermixCore.Providers.OpenAI,
-      model: Keyword.fetch!(state.adapter_opts, :model),
+      route: {state.route_key, state.adapter_opts},
       context: state.context
     ]
 
