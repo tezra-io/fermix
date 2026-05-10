@@ -35,7 +35,7 @@ defmodule FermixChannels.CLITest do
       assert message.channel == "cli"
       assert message.chat_id == "cli"
       assert message.reply_target == "cli"
-      assert message.metadata == %{source: :cli}
+      assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
     end
 
     test "accepts a custom session id" do
@@ -46,7 +46,7 @@ defmodule FermixChannels.CLITest do
       assert message.channel == "cli"
       assert message.chat_id == "scenario-1"
       assert message.reply_target == "scenario-1"
-      assert message.metadata == %{source: :cli}
+      assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
     end
 
     test "rejects blank input" do
@@ -107,7 +107,7 @@ defmodule FermixChannels.CLITest do
       assert message.sender == "operator"
       assert message.channel == "cli"
       assert message.chat_id == "scenario-1"
-      assert message.metadata == %{source: :cli}
+      assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
     end
 
     test "returns parser and timeout errors" do

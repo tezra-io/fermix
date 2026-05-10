@@ -142,7 +142,13 @@ defmodule FermixCore.Setup.WizardTest do
 
     {:ok, report} =
       Wizard.report().wizard
-      |> Wizard.save_answers(openai_api_key: "sk-test-123", telegram_bot_token: "bot-token")
+      |> Wizard.save_answers(
+        openai_api_key: "sk-test-123",
+        telegram_bot_token: "bot-token",
+        telegram_owner_user_id: "111",
+        compaction_threshold: "0.8",
+        extraction_timeout_ms: "120000"
+      )
 
     assert report.status == :ready
     assert File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.providers.openai]"
@@ -154,6 +160,8 @@ defmodule FermixCore.Setup.WizardTest do
     assert {:ok, persisted} = ConfigStore.load_runtime_config()
 
     openai = persisted.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
+    compaction = Keyword.get(persisted.fermix_core, :compaction, [])
+    memory = Keyword.get(persisted.fermix_core, :memory, [])
     telegram = Keyword.get(persisted.fermix_channels, :telegram, [])
 
     refute Keyword.has_key?(openai, :auth_mode)
@@ -161,7 +169,10 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :enabled) == true
     assert Keyword.get(telegram, :mode) == :webhook
     assert Keyword.get(telegram, :bot_token) == "bot-token"
-    assert Keyword.get(telegram, :allowed_user_ids) == []
+    assert Keyword.get(telegram, :owner_user_id) == "111"
+    refute Keyword.has_key?(telegram, :allowed_user_ids)
+    assert Keyword.get(compaction, :threshold) == 0.8
+    assert Keyword.get(memory, :extraction_timeout_ms) == 120_000
   end
 
   test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do

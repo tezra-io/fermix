@@ -311,7 +311,7 @@ defmodule FermixChannels.Telegram do
           chat_id: chat_id,
           reply_target: chat_id,
           thread_ts: msg["message_thread_id"],
-          metadata: %{chat_type: get_in(msg, ["chat", "type"])}
+          metadata: %{chat_type: get_in(msg, ["chat", "type"]), user_id: to_string(user_id)}
         })
 
       {:ok, [message]}
@@ -321,13 +321,9 @@ defmodule FermixChannels.Telegram do
   end
 
   defp authorized_user?(user_id) do
-    allowed =
-      case FermixCore.Config.channel(:telegram) do
-        {:ok, config} -> Keyword.get(config, :allowed_user_ids, [])
-        _ -> []
-      end
+    allowed = FermixCore.Config.channel_ingress_user_ids(:telegram)
 
-    allowed == [] or user_id in allowed
+    allowed == [] or to_string(user_id) in allowed
   end
 
   defp split_message(text) when is_binary(text) do

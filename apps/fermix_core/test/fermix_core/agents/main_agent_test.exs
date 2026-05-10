@@ -419,6 +419,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     prompt_dir = Path.join(System.tmp_dir!(), "fermix-prompt-memory-#{suffix}")
     bootstrap_dir = Path.join(System.tmp_dir!(), "fermix-bootstrap-#{suffix}")
     previous_memory_config = Application.get_env(:fermix_core, :memory, [])
+    previous_compaction_config = Application.get_env(:fermix_core, :compaction, [])
     previous_bootstrap_config = Application.get_env(:fermix_core, :prompt_bootstrap, [])
 
     File.mkdir_p!(skills_dir)
@@ -480,6 +481,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_memory_config)
+      Application.put_env(:fermix_core, :compaction, previous_compaction_config)
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
       MockProvider.cleanup()
       File.rm_rf!(skills_dir)
@@ -499,6 +501,48 @@ defmodule FermixCore.Agents.MainAgentTest do
       journal_dir: journal_dir,
       prompt_dir: prompt_dir,
       bootstrap_dir: bootstrap_dir
+    }
+  end
+
+  defp stub_chat_and_summary(summary) do
+    test_pid = self()
+    Req.Test.set_req_test_to_shared()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      decoded = Jason.decode!(body)
+      kind = request_kind(decoded)
+      send(test_pid, {:provider_request, kind, decoded})
+
+      response =
+        case kind do
+          :summary -> chat_completion_response(summary, decoded["model"])
+          :chat -> chat_completion_response("assistant reply", decoded["model"])
+        end
+
+      Req.Test.json(conn, response)
+    end)
+  end
+
+  defp request_kind(%{"messages" => messages}) do
+    if Enum.any?(messages, &(get_in(&1, ["content"]) =~ "Summarize older conversation")) do
+      :summary
+    else
+      :chat
+    end
+  end
+
+  defp request_kind(_decoded), do: :chat
+
+  defp chat_completion_response(content, model) do
+    %{
+      "model" => model || "custom-small",
+      "choices" => [
+        %{
+          "message" => %{"role" => "assistant", "content" => content}
+        }
+      ],
+      "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8}
     }
   end
 
@@ -630,6 +674,138 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert user_msg.content == "How are you?"
       assert assistant_msg.role == "assistant"
       assert assistant_msg.content == "I'm fine"
+    end
+
+    test "auto-compacts stored history after a turn when threshold is crossed", %{
+      capability_registry: capability_registry,
+      skill_registry: skill_registry,
+      agent_supervisor: agent_supervisor,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor,
+      journal_dir: journal_dir
+    } do
+      stub_chat_and_summary("auto summary")
+
+      memory_config = Application.get_env(:fermix_core, :memory, [])
+
+      # Disable the M4 in-loop compactor so this test isolates M7.1 post-turn
+      # durable history compaction.
+      Application.put_env(
+        :fermix_core,
+        :memory,
+        Keyword.put(memory_config, :compaction_enabled, false)
+      )
+
+      Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.1)
+
+      agent_name = :"auto_compaction_agent_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {MainAgent,
+         [
+           name: agent_name,
+           provider: nil,
+           adapter_overrides: [
+             provider: :openai,
+             model: "custom-small",
+             base_url: "https://openrouter.ai/api/v1",
+             api_key: "sk-test",
+             req_options: [plug: {Req.Test, __MODULE__}]
+           ],
+           capability_registry: capability_registry,
+           agent_supervisor: agent_supervisor,
+           skill_registry: skill_registry,
+           conversation_store: conv_store,
+           task_supervisor: task_supervisor,
+           journal_base_dir: journal_dir,
+           extraction_enabled: false
+         ]},
+        id: agent_name
+      )
+
+      chat_id = "auto_chat_#{System.unique_integer([:positive])}"
+      long_content = String.duplicate("older turn ", 25_000)
+
+      assert :ok =
+               MainAgent.handle_message(
+                 make_message(long_content, chat_id: chat_id),
+                 agent_name
+               )
+
+      assert_receive {:provider_request, :chat, _decoded}, 5_000
+      assert_receive {:reply, "assistant reply"}, 5_000
+      assert_receive {:provider_request, :summary, _decoded}, 5_000
+
+      assert eventually(fn ->
+               history =
+                 ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store)
+
+               Enum.any?(history, &(&1.content =~ "auto summary")) and
+                 not Enum.any?(history, &(&1.content == long_content))
+             end)
+
+      history = ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store)
+      assert Enum.map(history, & &1.role) == ["system", "assistant"]
+      assert List.last(history).content == "assistant reply"
+    end
+
+    test "auto-compaction follows direct adapter wiring", %{
+      agent: agent,
+      conv_store: conv_store
+    } do
+      memory_config = Application.get_env(:fermix_core, :memory, [])
+
+      Application.put_env(
+        :fermix_core,
+        :memory,
+        Keyword.put(memory_config, :compaction_enabled, false)
+      )
+
+      Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.1)
+
+      MockProvider.set_responses([
+        mock_response("assistant reply"),
+        mock_response("direct summary")
+      ])
+
+      chat_id = "direct_auto_chat_#{System.unique_integer([:positive])}"
+      long_content = String.duplicate("direct adapter turn ", 25_000)
+
+      assert :ok =
+               MainAgent.handle_message(
+                 make_message(long_content, chat_id: chat_id),
+                 agent
+               )
+
+      assert_receive {:mock_provider_called, ^long_content, _pid, _messages, _opts}, 5_000
+      assert_receive {:reply, "assistant reply"}, 5_000
+      assert_receive {:mock_provider_called, summary_prompt, _pid, _messages, summary_opts}, 5_000
+
+      assert summary_prompt =~ "Older messages:"
+      refute Keyword.has_key?(summary_opts, :temperature)
+
+      assert eventually(fn ->
+               history =
+                 ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store)
+
+               Enum.any?(history, &(&1.content =~ "direct summary")) and
+                 not Enum.any?(history, &(&1.content == long_content))
+             end)
+    end
+
+    test "bounds remembered auto-compaction failures", %{agent: agent} do
+      for index <- 1..600 do
+        assert :ok =
+                 GenServer.call(
+                   agent,
+                   {:record_auto_compaction_failure, {"telegram", "chat-#{index}", :root}, index}
+                 )
+      end
+
+      state = :sys.get_state(agent)
+      assert map_size(state.compaction_failures) <= 512
+      refute Map.has_key?(state.compaction_failures, {"telegram", "chat-1", :root})
+      assert Map.has_key?(state.compaction_failures, {"telegram", "chat-600", :root})
     end
 
     test "includes conversation history in LLM messages", %{

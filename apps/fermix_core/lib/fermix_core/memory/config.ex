@@ -10,7 +10,7 @@ defmodule FermixCore.Memory.Config do
 
   @prompt_user_token_cap 800
   @prompt_memory_token_cap 1600
-  @extraction_timeout_ms 5_000
+  @extraction_timeout_ms 90_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75
   @extraction_debounce_seconds 60

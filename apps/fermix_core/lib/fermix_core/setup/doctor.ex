@@ -18,10 +18,31 @@ defmodule FermixCore.Setup.Doctor do
 
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
 
   @type provider :: :openai | :openai_codex | :anthropic
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
+  @type compaction_report :: %{
+          enabled: boolean(),
+          threshold: float(),
+          provider: provider(),
+          model: String.t(),
+          context_window: pos_integer(),
+          compact_at_tokens: non_neg_integer(),
+          catalog: [model_window()]
+        }
+  @type command_owner_report :: %{
+          channel: atom(),
+          enabled: boolean(),
+          owner_user_id: String.t() | nil,
+          command_allowlist: [String.t()]
+        }
+  @type model_window :: %{
+          provider: provider(),
+          model: String.t(),
+          context_window: pos_integer()
+        }
   @type probe_error ::
           {:misconfigured, reason :: String.t()}
           | {:auth_scope_mismatch, surface :: String.t(), hint :: String.t()}
@@ -31,6 +52,7 @@ defmodule FermixCore.Setup.Doctor do
   @openai_default_url "https://api.openai.com/v1/responses"
   @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
+  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])
@@ -47,6 +69,40 @@ defmodule FermixCore.Setup.Doctor do
   def probe_active(opts \\ []) do
     provider = active_provider()
     probe_provider(provider, opts)
+  end
+
+  @spec compaction_report() :: compaction_report()
+  def compaction_report do
+    config = Application.get_env(:fermix_core, :compaction, []) |> CompactionConfig.normalize()
+    provider = active_provider()
+    config_for_provider = provider_config(provider)
+    model = effective_model(config_for_provider, provider)
+    context_window = ModelCatalog.context_window_for(provider, model)
+    threshold = CompactionConfig.threshold(config)
+
+    %{
+      enabled: CompactionConfig.enabled?(config),
+      threshold: threshold,
+      provider: provider,
+      model: model,
+      context_window: context_window,
+      compact_at_tokens: trunc(threshold * context_window),
+      catalog: catalog_windows()
+    }
+  end
+
+  @spec command_owner_report() :: [command_owner_report()]
+  def command_owner_report do
+    Enum.map(@command_channels, fn channel ->
+      config = Application.get_env(:fermix_channels, channel, [])
+
+      %{
+        channel: channel,
+        enabled: Keyword.get(config, :enabled, false) == true,
+        owner_user_id: FermixCore.Config.channel_command_owner_user_id(channel),
+        command_allowlist: FermixCore.Config.channel_command_allowlist(channel)
+      }
+    end)
   end
 
   @spec active_provider() :: provider()
@@ -230,6 +286,13 @@ defmodule FermixCore.Setup.Doctor do
 
   defp effective_model(config, provider) do
     Keyword.get(config, :default_model) || ModelCatalog.default_model_for(provider)
+  end
+
+  defp catalog_windows do
+    for provider <- ModelCatalog.providers(),
+        {model, _label, context_window} <- ModelCatalog.models_for(provider) do
+      %{provider: provider, model: model, context_window: context_window}
+    end
   end
 
   defp base_url(config, _provider, default) do

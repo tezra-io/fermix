@@ -38,6 +38,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.service_unit(),
       Checks.daemon_socket(),
       Checks.recent_log_activity(),
+      Checks.compaction_config(),
+      Checks.command_owner_config(),
       Checks.linger()
     ]
 

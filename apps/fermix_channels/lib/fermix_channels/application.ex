@@ -5,9 +5,14 @@ defmodule FermixChannels.Application do
 
   alias FermixCore.Readiness
 
+  require Logger
+
+  @command_owner_channels [:telegram, :whatsapp, :discord, :slack, :signal]
+
   @impl true
   def start(_type, _args) do
     readiness = Readiness.report()
+    warn_missing_command_owners(readiness)
 
     children =
       []
@@ -24,6 +29,18 @@ defmodule FermixChannels.Application do
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
   end
+
+  @doc false
+  @spec warn_missing_command_owners(Readiness.report()) :: :ok
+  def warn_missing_command_owners(%{status: :ready}) do
+    @command_owner_channels
+    |> Enum.filter(&missing_command_owner?/1)
+    |> Enum.each(&log_missing_command_owner/1)
+
+    :ok
+  end
+
+  def warn_missing_command_owners(_readiness_report), do: :ok
 
   @doc false
   @spec polling_children(keyword(), Readiness.report()) :: [{FermixChannels.Telegram.Poller, []}]
@@ -62,4 +79,18 @@ defmodule FermixChannels.Application do
   end
 
   def subprocess_children(config, _readiness_report) when is_list(config), do: []
+
+  defp missing_command_owner?(channel) do
+    config = Application.get_env(:fermix_channels, channel, [])
+
+    Keyword.get(config, :enabled, false) == true and
+      is_nil(FermixCore.Config.channel_command_owner_user_id(channel))
+  end
+
+  defp log_missing_command_owner(channel) do
+    Logger.warning(
+      "#{channel} ingress is enabled but no command owner is configured; " <>
+        "run /whoami from that channel and set fermix_channels.#{channel}.owner_user_id"
+    )
+  end
 end

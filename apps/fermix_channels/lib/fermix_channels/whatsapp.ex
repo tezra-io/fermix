@@ -154,6 +154,8 @@ defmodule FermixChannels.WhatsApp do
       metadata: %{
         phone_number_id: phone_number_id,
         sender_id: sender_id,
+        user_id: sender_id,
+        chat_type: "private",
         timestamp: Map.get(message, "timestamp"),
         message_type: type
       },
@@ -209,13 +211,7 @@ defmodule FermixChannels.WhatsApp do
   end
 
   defp allowed_sender_ids do
-    with {:ok, config} <- FermixCore.Config.channel(:whatsapp) do
-      config
-      |> Keyword.get(:allowed_sender_ids, [])
-      |> Enum.map(&to_string/1)
-    else
-      _ -> []
-    end
+    FermixCore.Config.channel_ingress_user_ids(:whatsapp)
   end
 
   defp ingress_enabled? do

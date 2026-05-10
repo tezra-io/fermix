@@ -83,6 +83,7 @@ defmodule FermixChannels.TelegramTest do
       assert msg.content == "hello"
       assert msg.sender == "alice"
       assert msg.chat_id == "123"
+      assert msg.metadata.user_id == "111"
     end
 
     test "returns {:ok, []} for unauthorized user" do
@@ -150,6 +151,28 @@ defmodule FermixChannels.TelegramTest do
       payload = message_payload()
       assert {:ok, [msg]} = Telegram.parse_update(payload)
       assert msg.sender == "alice"
+    end
+
+    test "defaults ingress allowlist to owner_user_id when allowed_user_ids is not configured" do
+      Application.put_env(:fermix_channels, :telegram,
+        bot_token: "test-bot-token",
+        owner_user_id: "111"
+      )
+
+      assert {:ok, [msg]} = Telegram.parse_update(message_payload())
+      assert msg.sender == "alice"
+
+      payload =
+        message_payload(%{
+          "message" => %{
+            "message_id" => 43,
+            "text" => "hello bot",
+            "chat" => %{"id" => 123_456},
+            "from" => %{"id" => 222, "username" => "bob", "first_name" => "Bob"}
+          }
+        })
+
+      assert {:ok, []} = Telegram.parse_update(payload)
     end
   end
 

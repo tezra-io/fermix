@@ -54,8 +54,7 @@ config :fermix_core,
 config :fermix_channels,
   telegram: [
     enabled: false,
-    bot_token: "test-token",
-    allowed_user_ids: []
+    bot_token: "test-token"
   ]
 
 config :phoenix, :plug_init_mode, :runtime

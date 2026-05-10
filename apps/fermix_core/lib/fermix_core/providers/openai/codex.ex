@@ -305,8 +305,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   end
 
   defp transport_error_message(:timeout) do
-    "Codex stream had no data for 60s. Lower reasoning_effort, or pass " <>
-      "req_options: [receive_timeout: ms] to extend the between-chunk window."
+    "Codex stream had no data for the configured receive_timeout. Lower " <>
+      "reasoning_effort, raise [fermix_core.memory] extraction_timeout_ms " <>
+      "(for extraction calls), or pass req_options: [receive_timeout: ms] " <>
+      "to extend the between-chunk window."
   end
 
   defp transport_error_message(:econnrefused) do

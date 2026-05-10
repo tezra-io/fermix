@@ -412,6 +412,8 @@ Folding any one into M4.11 (Scheduled Agents) or M6 (DX) means designing the cha
 
 **Milestone 7.1 Total Agent Wall-Clock:** ~6–9 hours. Channel-command parser + per-channel `@botname` handling is the only realistic source of variance.
 
+See `docs/MILESTONE_7_1_CONVERSATION_LIFECYCLE.md` for the full design.
+
 ---
 
 ## Milestone 7+: Pluggable Capability Backends — _Reserved (operator-scoped)_
@@ -420,7 +422,9 @@ Folding any one into M4.11 (Scheduled Agents) or M6 (DX) means designing the cha
 
 Separately tracked: **`git_push`** is deferred to **M10** (Security & Governance), not here. It's not a per-tool config problem — it's an approval-flow problem. M10 owns the `requires_approval?: true` exposure path (`include_approval_required?: true` opt threading through AgentLoop, `/approve` UX, etc.) which `git_push` and any future approval-gated capability need.
 
-Not part of M7 — folding even a stripped-down version into M7 means designing the same plumbing twice when this milestone properly lands. Operator is preparing a separate design doc.
+Not part of M7 — folding even a stripped-down version into M7 means designing the same plumbing twice when this milestone properly lands.
+
+See `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` for the full design.
 
 ---
 
@@ -461,8 +465,11 @@ Not part of M7 — folding even a stripped-down version into M7 means designing 
 | **Multi-workspace** | Support multiple isolated agent workspaces | P1 | New | `docs/MAIN_AGENT_DESIGN.md` | L |
 | **Visual context** | Screenshot analysis, image understanding | P1 | New | N/A | M |
 | **Self-knowledge agent** | Persistent subagent with full Fermix codebase knowledge — can modify Fermix itself when user requests platform changes | P1 | New | N/A | L |
+| **Realtime local voice companion** | Native macOS floating pet that opens a click-to-talk OpenAI Realtime session through the local daemon; command-word and always-listening modes are later opt-in phases | P1 | New | `docs/MILESTONE_9_1_REALTIME_VOICE.md` | L |
 
 **Milestone 9 Total Effort:** ~8-12 weeks
+
+See `docs/MILESTONE_9_1_REALTIME_VOICE.md` for the full design.
 
 ---
 
@@ -571,7 +578,7 @@ Not part of M7 — folding even a stripped-down version into M7 means designing 
 
 | Feature | Description | Type | Reference | Effort |
 |---------|-------------|------|-----------|--------|
-| **Voice storytelling** | TTS integration for narratives | New | OpenClaw AGENTS.md | M |
+| **Voice storytelling** | TTS integration for narratives; interactive live voice is tracked separately in M9.1 | New | OpenClaw AGENTS.md | M |
 | **Agent personality** | Configurable tone/style per workspace | New | N/A | M |
 | **Context awareness** | Time-of-day, location-based behavior | New | N/A | M |
 | **Axon integration** | Agent-to-agent mesh protocol | Hybrid | `projects/agent-mesh` | XL |
@@ -607,13 +614,13 @@ Not part of M7 — folding even a stripped-down version into M7 means designing 
 - Core tools (file_edit, web_fetch, web_search, browser, git_read/git_write, delegate, model_routing_config, skill_create, NetGuard) — cron-named scheduling tools shipped under M4.11; `git_push` and `http_request` deferred (M10 and M7+ respectively)
 - Production ops (telemetry, health checks, logging, clustering, rate limiting)
 - Core providers (OpenRouter, Ollama, Gemini, Compatible, Reliable, Router)
-- Differentiators (heartbeat, reactions, smart presence, multi-workspace, visual context, self-knowledge agent)
+- Differentiators (heartbeat, reactions, smart presence, multi-workspace, visual context, self-knowledge agent, realtime local voice companion)
 
 ### Future Ecosystem — ~60+ weeks (demand-driven)
 - 15 additional channels (IRC, Matrix, email, enterprise messengers, niche protocols)
 - Extended security (sandboxing variants, OTP, pairing, domain matcher)
 - Extended tools (SOP suite, hardware, composio, PDF, screenshots)
-- Extended differentiators (Axon, plugins, mobile apps, voice, personality)
+- Extended differentiators (Axon, plugins, mobile apps, narrative voice, personality)
 - Niche providers (Bedrock, Copilot, GLM, Telnyx, Codex)
 
 ---

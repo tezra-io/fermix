@@ -95,6 +95,69 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "compaction_config/0" do
+    setup do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_compaction = Application.get_env(:fermix_core, :compaction, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :providers, original_providers)
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :compaction, original_compaction)
+      end)
+
+      :ok
+    end
+
+    test "reports the active route and threshold trigger point" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [default_model: "claude-haiku-4-5"]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.8)
+
+      result = Checks.compaction_config()
+
+      assert result.name == "compaction"
+      assert result.status == :ok
+      assert result.detail =~ "enabled"
+      assert result.detail =~ "anthropic/claude-haiku-4-5"
+      assert result.detail =~ "context window 200000"
+      assert result.detail =~ "compact at 160000"
+    end
+  end
+
+  describe "command_owner_config/0" do
+    setup do
+      original_channels =
+        for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
+          {channel, Application.get_env(:fermix_channels, channel, [])}
+        end
+
+      on_exit(fn ->
+        Enum.each(original_channels, fn {channel, config} ->
+          Application.put_env(:fermix_channels, channel, config)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "warns when an enabled channel has no owner user id" do
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      Application.put_env(:fermix_channels, :signal, enabled: true, owner_user_id: "+15550001111")
+
+      result = Checks.command_owner_config()
+
+      assert result.name == "command owners"
+      assert result.status == :warn
+      assert result.detail =~ "telegram"
+      assert result.detail =~ "signal=owner set"
+    end
+  end
+
   describe "auth_probe/1" do
     setup do
       original_providers = Application.get_env(:fermix_core, :providers, [])

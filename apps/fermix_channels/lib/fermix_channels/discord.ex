@@ -106,8 +106,9 @@ defmodule FermixChannels.Discord do
       chat_id: channel_id,
       reply_target: channel_id,
       metadata: %{
-        author_id: Map.get(author, "id"),
+        user_id: Map.get(author, "id"),
         guild_id: Map.get(data, "guild_id"),
+        chat_type: chat_type(data),
         message_type: "MESSAGE_CREATE"
       },
       attachments: parse_attachments(Map.get(data, "attachments", []))
@@ -115,6 +116,10 @@ defmodule FermixChannels.Discord do
   end
 
   defp direct_message?(data), do: is_nil(Map.get(data, "guild_id"))
+
+  defp chat_type(data) do
+    if direct_message?(data), do: "private", else: "guild"
+  end
 
   defp app_mention?(data) do
     with {:ok, bot_user_id} <- bot_user_id() do
@@ -144,13 +149,7 @@ defmodule FermixChannels.Discord do
   end
 
   defp allowed_user_ids do
-    with {:ok, config} <- FermixCore.Config.channel(:discord) do
-      config
-      |> Keyword.get(:allowed_user_ids, [])
-      |> Enum.map(&to_string/1)
-    else
-      _ -> []
-    end
+    FermixCore.Config.channel_ingress_user_ids(:discord)
   end
 
   # Leave this as a per-message config read. Discord DM/app-mention ingress volume

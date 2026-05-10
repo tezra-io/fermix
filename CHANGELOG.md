@@ -6,7 +6,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — M7.1 (Conversation Lifecycle)
+- Per-model context-window catalog and `[fermix_core.compaction]` threshold
+  config for automatic post-turn conversation compaction.
+- Shared channel command surface for `/compact`, `/new`, `/clear`, `/help`,
+  and `/whoami`, routed through `FermixChannels.Dispatcher` before agent
+  delivery.
+- Per-channel owner authorization for mutating commands via
+  `owner_user_id` and optional `command_allowlist`; CLI remains implicit
+  owner.
+- `fermix doctor` now reports the active compaction trigger point and
+  channel command-owner configuration.
+
 ### Fixed
+- Background memory extraction no longer times out at 5s when the agent
+  provider is Codex (or any reasoning model). `[fermix_core.memory]
+  extraction_timeout_ms` default raised from `5_000` to `90_000`,
+  round-tripped through `ConfigStore` and exposed as an optional
+  `extraction_timeout_ms` wizard prompt. The Codex `:timeout` transport
+  message no longer hardcodes "60s" and now points operators at the
+  `extraction_timeout_ms` knob alongside `req_options[:receive_timeout]`
+  and `reasoning_effort`.
 - `Providers.OpenAI.Codex` no longer hangs on long Codex turns and surfaces
   `:closed` from the daemon. The SSE response is now consumed via a `Req`
   `:into` callback that feeds `SSEParser` incrementally; `receive_timeout`

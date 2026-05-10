@@ -151,6 +151,50 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @spec compaction_config() :: result()
+  def compaction_config do
+    report = ProviderProbe.compaction_report()
+
+    state =
+      if report.enabled do
+        "enabled"
+      else
+        "disabled"
+      end
+
+    ok(
+      "compaction",
+      "#{state}, threshold #{format_threshold(report.threshold)}, route #{report.provider}/#{report.model}, " <>
+        "context window #{report.context_window}, compact at #{report.compact_at_tokens} tokens; " <>
+        "catalog #{length(report.catalog)} model windows"
+    )
+  rescue
+    error in ArgumentError -> fail("compaction", Exception.message(error))
+  end
+
+  @spec command_owner_config() :: result()
+  def command_owner_config do
+    report = ProviderProbe.command_owner_report()
+
+    missing =
+      report
+      |> Enum.filter(&(&1.enabled and is_nil(&1.owner_user_id)))
+      |> Enum.map(& &1.channel)
+
+    detail = Enum.map_join(report, ", ", &format_command_owner/1)
+
+    case missing do
+      [] ->
+        ok("command owners", detail)
+
+      channels ->
+        warn(
+          "command owners",
+          "missing command owner for enabled channels: #{Enum.join(channels, ", ")}; #{detail}"
+        )
+    end
+  end
+
   @spec upgrade_available?(keyword()) :: result()
   def upgrade_available?(opts \\ []) do
     case Manifest.fetch(opts) do
@@ -283,6 +327,26 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp format_uptime(other), do: inspect(other)
+
+  defp format_threshold(value) when is_float(value) do
+    :erlang.float_to_binary(value, [:short])
+  end
+
+  defp format_command_owner(%{
+         channel: channel,
+         enabled: enabled,
+         owner_user_id: owner_user_id,
+         command_allowlist: allowlist
+       }) do
+    owner_state =
+      if is_nil(owner_user_id) do
+        "owner missing"
+      else
+        "owner set"
+      end
+
+    "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
+  end
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}
   defp warn(name, detail), do: %{name: name, status: :warn, detail: detail}

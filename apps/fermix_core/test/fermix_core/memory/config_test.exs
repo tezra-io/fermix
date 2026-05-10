@@ -26,4 +26,16 @@ defmodule FermixCore.Memory.ConfigTest do
   test "extraction_debounce_ms/1 allows zero to run extraction immediately" do
     assert Config.extraction_debounce_ms(extraction_debounce_seconds: 0) == 0
   end
+
+  test "extraction_timeout_ms/1 defaults to 90s so reasoning models have headroom" do
+    Application.put_env(:fermix_core, :memory, [])
+
+    assert Config.extraction_timeout_ms() == 90_000
+  end
+
+  test "extraction_timeout_ms/1 honors a configured override" do
+    Application.put_env(:fermix_core, :memory, extraction_timeout_ms: 30_000)
+
+    assert Config.extraction_timeout_ms() == 30_000
+  end
 end

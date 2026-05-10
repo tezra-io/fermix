@@ -109,6 +109,8 @@ defmodule FermixChannels.SignalTest do
       assert agent_message.channel == "signal"
       assert agent_message.chat_id == "+15551234567"
       assert agent_message.reply_target == "+15551234567"
+      assert agent_message.metadata.user_id == "+15551234567"
+      assert agent_message.metadata.chat_type == "private"
       assert :ok = agent_message.reply_fn.("reply from fermix")
       assert_receive {:signal_send, "+15550001111", "+15551234567", "reply from fermix"}
     end
