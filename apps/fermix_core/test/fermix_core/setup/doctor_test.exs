@@ -7,10 +7,21 @@ defmodule FermixCore.Setup.DoctorTest do
   setup do
     original_providers = Application.get_env(:fermix_core, :providers, [])
     original_agent = Application.get_env(:fermix_core, :agent, [])
+    original_compaction = Application.get_env(:fermix_core, :compaction, [])
+
+    original_channels =
+      for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
+        {channel, Application.get_env(:fermix_channels, channel, [])}
+      end
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :providers, original_providers)
       Application.put_env(:fermix_core, :agent, original_agent)
+      Application.put_env(:fermix_core, :compaction, original_compaction)
+
+      Enum.each(original_channels, fn {channel, config} ->
+        Application.put_env(:fermix_channels, channel, config)
+      end)
     end)
 
     :ok
@@ -313,6 +324,48 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:ok, %{provider: :anthropic}} =
                Doctor.probe_active(req_options: [plug: plug])
+    end
+  end
+
+  describe "compaction_report/0" do
+    test "reports threshold, active route context window, and trigger token count" do
+      Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.8)
+      put_provider(:anthropic, default_model: "claude-haiku-4-5")
+      set_active(:anthropic)
+
+      report = Doctor.compaction_report()
+
+      assert report.enabled == true
+      assert report.threshold == 0.8
+      assert report.provider == :anthropic
+      assert report.model == "claude-haiku-4-5"
+      assert report.context_window == 200_000
+      assert report.compact_at_tokens == 160_000
+
+      assert %{provider: :openai, model: "gpt-5.5", context_window: 1_050_000} in report.catalog
+    end
+  end
+
+  describe "command_owner_report/0" do
+    test "reports per-channel owner and allowlist configuration" do
+      Application.put_env(:fermix_channels, :telegram,
+        enabled: true,
+        owner_user_id: "111",
+        command_allowlist: ["222", "333"]
+      )
+
+      Application.put_env(:fermix_channels, :signal, enabled: true)
+
+      report = Doctor.command_owner_report()
+
+      assert %{
+               channel: :telegram,
+               enabled: true,
+               owner_user_id: "111",
+               command_allowlist: ["222", "333"]
+             } in report
+
+      assert %{channel: :signal, enabled: true, owner_user_id: nil, command_allowlist: []} in report
     end
   end
 

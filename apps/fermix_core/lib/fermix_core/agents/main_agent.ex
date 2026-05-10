@@ -29,16 +29,21 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
   alias FermixCore.Prompt.PromptComposer
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
 
   @typing_interval_ms 4_000
   @typing_timeout_ms 300_000
+  @auto_compaction_failure_backoff_ms 60_000
+  @max_auto_compaction_failures 512
 
   @type thread_scope :: :root | String.t() | integer()
 
@@ -167,6 +172,7 @@ defmodule FermixCore.Agents.MainAgent do
       extraction_debounce_ms: Config.extraction_debounce_ms(opts),
       extraction_model: Config.extraction_model(opts),
       conversations: %{},
+      compaction_failures: %{},
       task_refs: %{}
     }
 
@@ -237,6 +243,10 @@ defmodule FermixCore.Agents.MainAgent do
     {:noreply, state}
   end
 
+  def handle_cast({:clear_auto_compaction_failure, conversation_key}, state) do
+    {:noreply, update_in(state.compaction_failures, &Map.delete(&1, conversation_key))}
+  end
+
   @impl true
   def handle_call(:reload_skills, _from, state) do
     case reload_available_skills(state.skill_registry) do
@@ -251,6 +261,15 @@ defmodule FermixCore.Agents.MainAgent do
   @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_from_state(state), state}
+  end
+
+  def handle_call({:record_auto_compaction_failure, conversation_key, failed_at_ms}, _from, state) do
+    {:reply, :ok,
+     update_in(state.compaction_failures, fn failures ->
+       failures
+       |> Map.put(conversation_key, failed_at_ms)
+       |> prune_auto_compaction_failures()
+     end)}
   end
 
   @impl true
@@ -418,7 +437,7 @@ defmodule FermixCore.Agents.MainAgent do
     update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
   end
 
-  defp build_loop_opts(state, messages, context) do
+  defp build_loop_runtime(state, messages, context) do
     base = [
       messages: messages,
       context: context,
@@ -427,14 +446,20 @@ defmodule FermixCore.Agents.MainAgent do
 
     case resolve_loop_adapter(state) do
       {:adapter, mod, opts} ->
-        base
-        |> Keyword.put(:adapter, mod)
-        |> Keyword.put(:adapter_opts, opts)
+        loop_opts =
+          base
+          |> Keyword.put(:adapter, mod)
+          |> Keyword.put(:adapter_opts, opts)
+
+        {loop_opts, {mod, direct_adapter_route_key(state, opts), opts}}
 
       {:route, key, opts} ->
-        base
-        |> Keyword.put(:route_key, key)
-        |> Keyword.put(:adapter_opts, opts)
+        loop_opts =
+          base
+          |> Keyword.put(:route_key, key)
+          |> Keyword.put(:adapter_opts, opts)
+
+        {loop_opts, {nil, key, opts}}
     end
   end
 
@@ -484,7 +509,9 @@ defmodule FermixCore.Agents.MainAgent do
       extraction_context_messages: state.extraction_context_messages,
       extraction_min_confidence: state.extraction_min_confidence,
       extraction_debounce_ms: state.extraction_debounce_ms,
-      extraction_model: state.extraction_model
+      extraction_model: state.extraction_model,
+      main_agent_server: self(),
+      compaction_failures: state.compaction_failures
     }
   end
 
@@ -526,7 +553,7 @@ defmodule FermixCore.Agents.MainAgent do
       prompt_accounting: prompt_context.accounting
     }
 
-    loop_opts = build_loop_opts(state, messages, context)
+    {loop_opts, compaction_target} = build_loop_runtime(state, messages, context)
 
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
@@ -569,6 +596,7 @@ defmodule FermixCore.Agents.MainAgent do
 
         deliver_reply(msg, result.response)
         maybe_start_extraction(msg, history, result.response, state)
+        maybe_auto_compact(conversation_key, state, compaction_target)
 
       {:error, reason} ->
         Logger.error("Agent loop failed: #{inspect(reason)}")
@@ -678,6 +706,168 @@ defmodule FermixCore.Agents.MainAgent do
   defp positive_integer(_value, default), do: default
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp maybe_auto_compact(conversation_key, state, compaction_target) do
+    config = Application.get_env(:fermix_core, :compaction, [])
+
+    cond do
+      not CompactionConfig.enabled?(config) ->
+        :ok
+
+      auto_compaction_in_backoff?(conversation_key, state) ->
+        emit_auto_compaction_skipped(conversation_key, :failure_backoff)
+
+      true ->
+        maybe_auto_compact_now(conversation_key, state, compaction_target, config)
+    end
+  end
+
+  defp maybe_auto_compact_now(conversation_key, state, compaction_target, config) do
+    with {:ok, history} <- conversation_history(conversation_key, state) do
+      {adapter, route_key, adapter_opts} = compaction_target
+      before_tokens = Compactor.estimate_tokens(history)
+      context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
+      threshold = CompactionConfig.threshold(config)
+
+      if before_tokens / context_window >= threshold do
+        run_auto_compaction(
+          conversation_key,
+          history,
+          before_tokens,
+          adapter,
+          route_key,
+          adapter_opts,
+          context_window,
+          state
+        )
+      else
+        emit_auto_compaction_skipped(conversation_key, :under_threshold)
+      end
+    else
+      {:error, reason} -> emit_auto_compaction_skipped(conversation_key, reason)
+    end
+  end
+
+  defp conversation_history(conversation_key, state) do
+    {:ok, ConversationStore.get_history(conversation_key, server: state.conversation_store)}
+  catch
+    :exit, reason -> {:error, {:conversation_history_unavailable, reason}}
+  end
+
+  defp direct_adapter_route_key(state, adapter_opts) do
+    %{
+      provider: :mock,
+      model: Keyword.get(adapter_opts, :model, Keyword.get(state.adapter_opts, :model, "mock")),
+      auth_mode: :api_key,
+      base_url: "mock://"
+    }
+  end
+
+  defp run_auto_compaction(
+         conversation_key,
+         history,
+         before_tokens,
+         adapter,
+         route_key,
+         adapter_opts,
+         context_window,
+         state
+       ) do
+    budget = trunc(0.5 * context_window)
+
+    case Compactor.compact(history,
+           enabled: true,
+           token_budget: budget,
+           route: {route_key, adapter_opts},
+           adapter: adapter,
+           context: compaction_context(conversation_key, state)
+         ) do
+      {:ok, %{messages: compacted, compacted?: true}} ->
+        after_tokens = Compactor.estimate_tokens(compacted)
+
+        :ok =
+          ConversationStore.replace_history(conversation_key, compacted,
+            server: state.conversation_store,
+            agent_id: state.memory_agent_id,
+            owner_id: state.memory_owner_id
+          )
+
+        :telemetry.execute(
+          [:fermix, :compaction, :auto],
+          %{before_tokens: before_tokens, after_tokens: after_tokens},
+          %{
+            conversation_key: conversation_key,
+            provider: route_key.provider,
+            model: route_key.model
+          }
+        )
+
+        clear_auto_compaction_failure(state, conversation_key)
+
+      {:ok, %{compacted?: false}} ->
+        emit_auto_compaction_skipped(conversation_key, :nothing_to_compact)
+
+      {:error, reason} ->
+        Logger.error("auto-compaction failed: #{inspect(reason)}")
+        emit_auto_compaction_skipped(conversation_key, reason)
+        record_auto_compaction_failure(state, conversation_key)
+    end
+  end
+
+  defp compaction_context(conversation_key, state) do
+    %{
+      conversation_key: conversation_key,
+      memory_repo: state.memory_repo,
+      memory_agent_id: state.memory_agent_id,
+      memory_owner_id: state.memory_owner_id
+    }
+  end
+
+  defp auto_compaction_in_backoff?(conversation_key, state) do
+    case Map.get(state.compaction_failures, conversation_key) do
+      failed_at when is_integer(failed_at) ->
+        monotonic_ms() - failed_at < @auto_compaction_failure_backoff_ms
+
+      _no_failure ->
+        false
+    end
+  end
+
+  defp prune_auto_compaction_failures(failures)
+       when map_size(failures) <= @max_auto_compaction_failures do
+    failures
+  end
+
+  defp prune_auto_compaction_failures(failures) do
+    failures
+    |> Enum.sort_by(fn {_conversation_key, failed_at} -> failed_at end, :desc)
+    |> Enum.take(@max_auto_compaction_failures)
+    |> Map.new()
+  end
+
+  defp record_auto_compaction_failure(state, conversation_key) do
+    GenServer.call(
+      state.main_agent_server,
+      {:record_auto_compaction_failure, conversation_key, monotonic_ms()}
+    )
+
+    :ok
+  end
+
+  defp clear_auto_compaction_failure(state, conversation_key) do
+    GenServer.cast(state.main_agent_server, {:clear_auto_compaction_failure, conversation_key})
+    :ok
+  end
+
+  defp emit_auto_compaction_skipped(conversation_key, reason) do
+    :telemetry.execute(
+      [:fermix, :compaction, :auto_skipped],
+      %{count: 1},
+      %{conversation_key: conversation_key, reason: reason}
+    )
+
+    :ok
+  end
 
   defp deliver_reply(msg, response) do
     case msg.reply_fn.(response) do

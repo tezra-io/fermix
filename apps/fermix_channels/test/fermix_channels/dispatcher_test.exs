@@ -5,6 +5,10 @@ defmodule FermixChannels.DispatcherTest do
 
   alias FermixChannels.Dispatcher
   alias FermixChannels.Message
+  alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Scope
+  alias FermixCore.Resource.Registry
 
   defmodule CapturingAgent do
     def handle_message(message, test_pid) do
@@ -185,6 +189,107 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:captured_reply, "reply"}
   end
 
+  test "intercepts built-in commands before agent delivery" do
+    previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+    Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+
+    on_exit(fn ->
+      Application.put_env(:fermix_channels, :telegram, previous_telegram)
+    end)
+
+    store = :"dispatcher_command_store_#{System.unique_integer([:positive])}"
+    start_supervised!({ConversationStore, name: store, repo: nil})
+    key = {"telegram", "chat-1", :root}
+    ConversationStore.add_message(key, "user", "old message", server: store)
+
+    message =
+      Message.new!(%{
+        id: "message-command",
+        content: "/new",
+        sender: "alice",
+        channel: "telegram",
+        chat_id: "chat-1",
+        reply_target: "chat-1",
+        metadata: %{user_id: "owner-1"}
+      })
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self(),
+               conversation_store: store
+             )
+
+    assert_receive {:reply_sent, "chat-1",
+                    "Started a fresh session. Long-term memory is preserved.", []}
+
+    refute_receive {:agent_message, _message}, 100
+    assert ConversationStore.get_history(key, server: store) == []
+  end
+
+  test "threads memory context into manual compact commands" do
+    Req.Test.set_req_test_to_shared()
+    previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+    Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-dispatcher-compact-#{unique}.db")
+    repo = :"dispatcher_compact_repo_#{unique}"
+    store = :"dispatcher_compact_store_#{unique}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+    start_supervised!({ConversationStore, name: store, repo: nil})
+
+    on_exit(fn ->
+      Application.put_env(:fermix_channels, :telegram, previous_telegram)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &File.rm/1)
+    end)
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, summary_response_body("manual dispatcher summary"))
+    end)
+
+    chat_id = "compact-chat-#{unique}"
+    key = {"telegram", chat_id, :root}
+
+    ConversationStore.add_message(key, "user", String.duplicate("old user ", 25_000),
+      server: store
+    )
+
+    ConversationStore.add_message(key, "assistant", "old assistant", server: store)
+
+    message =
+      Message.new!(%{
+        id: "message-compact",
+        content: "/compact",
+        sender: "alice",
+        channel: "telegram",
+        chat_id: chat_id,
+        reply_target: chat_id,
+        metadata: %{user_id: "owner-1"}
+      })
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self(),
+               conversation_store: store,
+               route: route(),
+               context_window: 100_000,
+               memory_repo: repo,
+               memory_agent_id: "main",
+               memory_owner_id: "default"
+             )
+
+    assert_receive {:reply_sent, ^chat_id, "Compacted: " <> _rest, []}
+
+    scope_id = Scope.conversation_scope_id("telegram", chat_id, :root)
+    assert {:ok, [revision]} = Registry.list_revisions("main", "checkpoint", scope_id, repo: repo)
+    assert revision.content == "manual dispatcher summary"
+    assert revision.mutation_source == "compaction"
+  end
+
   test "adds channel typing runtime when the channel supports typing indicators" do
     message =
       Message.new!(%{
@@ -260,5 +365,37 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:agent_message, agent_message}
     assert agent_message.content == "hello from map"
     assert agent_message.metadata == %{"source" => "map"}
+  end
+
+  defp route do
+    route_key = %{
+      provider: :openai,
+      model: "gpt-5.4-mini",
+      auth_mode: :api_key,
+      base_url: "https://api.openai.com/v1"
+    }
+
+    adapter_opts = [
+      api_key: "sk-test",
+      model: route_key.model,
+      base_url: route_key.base_url,
+      req_options: [plug: {Req.Test, __MODULE__}]
+    ]
+
+    {route_key, adapter_opts}
+  end
+
+  defp summary_response_body(summary) do
+    %{
+      "model" => "gpt-5.4-mini",
+      "output" => [
+        %{
+          "type" => "message",
+          "id" => "msg_summary",
+          "content" => [%{"type" => "output_text", "text" => summary}]
+        }
+      ],
+      "usage" => %{"input_tokens" => 9, "output_tokens" => 3}
+    }
   end
 end

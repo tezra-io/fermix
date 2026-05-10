@@ -99,6 +99,8 @@ defmodule FermixChannels.Signal do
           reply_target: sender_id,
           metadata: %{
             sender_id: sender_id,
+            user_id: sender_id,
+            chat_type: "private",
             timestamp: timestamp,
             signal_client: send_client(opts),
             signal_client_opts: client_opts(opts)
@@ -139,13 +141,7 @@ defmodule FermixChannels.Signal do
   end
 
   defp allowed_sender_ids do
-    with {:ok, config} <- FermixCore.Config.channel(:signal) do
-      config
-      |> Keyword.get(:allowed_sender_ids, [])
-      |> Enum.map(&to_string/1)
-    else
-      _ -> []
-    end
+    FermixCore.Config.channel_ingress_user_ids(:signal)
   end
 
   defp ingress_enabled? do

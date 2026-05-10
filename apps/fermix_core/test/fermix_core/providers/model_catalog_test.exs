@@ -16,9 +16,10 @@ defmodule FermixCore.Providers.ModelCatalogTest do
         assert is_list(models) and models != []
 
         Enum.each(models, fn entry ->
-          assert {id, label} = entry
+          assert {id, label, context_window} = entry
           assert is_binary(id) and id != ""
           assert is_binary(label) and label != ""
+          assert is_integer(context_window) and context_window > 0
         end)
       end
     end
@@ -33,16 +34,66 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   describe "default_model_for/1" do
     test "returns the first model id in the per-provider list" do
       for provider <- ModelCatalog.providers() do
-        [{first_id, _label} | _] = ModelCatalog.models_for(provider)
+        [{first_id, _label, _ctx} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.default_model_for(provider) == first_id
       end
+    end
+  end
+
+  describe "context_window_for/2" do
+    test "returns cataloged context windows for known models" do
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
+      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
+      assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
+    end
+
+    test "returns a safe default and emits telemetry for unknown models" do
+      telemetry_id = "model-catalog-unknown-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        telemetry_id,
+        [:fermix, :model_catalog, :unknown_model],
+        fn event, measurements, metadata, test_pid ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      assert ModelCatalog.context_window_for(:openai, "custom-frontier") == 100_000
+
+      assert_receive {:telemetry, [:fermix, :model_catalog, :unknown_model], %{count: 1},
+                      %{provider: :openai, model: "custom-frontier"}}
+    end
+
+    test "returns the same safe default for direct-adapter providers outside the catalog" do
+      telemetry_id = "model-catalog-direct-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        telemetry_id,
+        [:fermix, :model_catalog, :unknown_model],
+        fn event, measurements, metadata, test_pid ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        self()
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      assert ModelCatalog.context_window_for(:mock, "mock-model") == 100_000
+
+      assert_receive {:telemetry, [:fermix, :model_catalog, :unknown_model], %{count: 1},
+                      %{provider: :mock, model: "mock-model"}}
     end
   end
 
   describe "known_model?/2" do
     test "matches catalog entries and rejects unknowns" do
       for provider <- ModelCatalog.providers() do
-        [{first_id, _} | _] = ModelCatalog.models_for(provider)
+        [{first_id, _, _ctx} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.known_model?(provider, first_id)
       end
 

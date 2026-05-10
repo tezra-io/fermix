@@ -8,7 +8,10 @@ defmodule FermixChannels.Dispatcher do
 
   require Logger
 
+  alias FermixChannels.Commands
   alias FermixChannels.Message
+  alias FermixCore.Memory.Config
+  alias FermixCore.Memory.ConversationStore
 
   @spec dispatch([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def dispatch(messages, opts) when is_list(messages) do
@@ -17,6 +20,8 @@ defmodule FermixChannels.Dispatcher do
     agent_server = Keyword.fetch!(opts, :agent_server)
     transcription_opts = Keyword.get(opts, :transcription, [])
     reply_fn_override = Keyword.get(opts, :reply_fn)
+    conversation_store = Keyword.get(opts, :conversation_store, ConversationStore)
+    command_context_opts = command_context_opts(opts)
 
     Enum.reduce_while(messages, :ok, fn message, :ok ->
       case dispatch_message(
@@ -25,7 +30,9 @@ defmodule FermixChannels.Dispatcher do
              agent,
              agent_server,
              transcription_opts,
-             reply_fn_override
+             reply_fn_override,
+             conversation_store,
+             command_context_opts
            ) do
         :ok ->
           {:cont, :ok}
@@ -82,7 +89,9 @@ defmodule FermixChannels.Dispatcher do
          agent,
          agent_server,
          transcription_opts,
-         reply_fn_override
+         reply_fn_override,
+         conversation_store,
+         command_context_opts
        ) do
     with {:ok, message} <-
            FermixCore.Transcription.maybe_transcribe_message(
@@ -94,13 +103,32 @@ defmodule FermixChannels.Dispatcher do
       reply_fn = build_reply_fn(channel, reply_message, reply_fn_override)
       typing_fn = build_typing_fn(channel, reply_message)
 
-      agent_message =
-        message
-        |> to_agent_message()
-        |> Map.put(:reply_fn, reply_fn)
-        |> maybe_put_typing_fn(typing_fn)
+      context =
+        command_context(
+          reply_message,
+          conversation_store,
+          agent,
+          agent_server,
+          command_context_opts
+        )
 
-      handle_agent_delivery(agent.handle_message(agent_message, agent_server))
+      case Commands.dispatch(
+             Commands.parse(reply_message, bot_name: bot_name_for(reply_message.channel)),
+             reply_fn,
+             context
+           ) do
+        :ok ->
+          :ok
+
+        {:error, :unauthorized} ->
+          :ok
+
+        {:error, _reason} = error ->
+          error
+
+        :passthrough ->
+          deliver_to_agent(reply_message, agent, agent_server, reply_fn, typing_fn)
+      end
     else
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
@@ -110,6 +138,61 @@ defmodule FermixChannels.Dispatcher do
         Logger.error("Dispatcher transcription failed: #{inspect(reason)}")
         error
     end
+  end
+
+  defp deliver_to_agent(message, agent, agent_server, reply_fn, typing_fn) do
+    agent_message =
+      message
+      |> to_agent_message()
+      |> Map.put(:reply_fn, reply_fn)
+      |> maybe_put_typing_fn(typing_fn)
+
+    handle_agent_delivery(agent.handle_message(agent_message, agent_server))
+  end
+
+  defp command_context(message, conversation_store, agent, agent_server, opts) do
+    %{
+      conversation_key: conversation_key(message),
+      conversation_store: conversation_store,
+      agent: agent,
+      agent_server: agent_server
+    }
+    |> Map.merge(opts)
+  end
+
+  defp command_context_opts(opts) do
+    %{
+      memory_repo: Keyword.get(opts, :memory_repo, Config.repo_server()),
+      memory_agent_id: Keyword.get(opts, :memory_agent_id, Config.agent_id()),
+      memory_owner_id: Keyword.get(opts, :memory_owner_id, Config.owner_id())
+    }
+    |> maybe_put_context_opt(:route, Keyword.get(opts, :route))
+    |> maybe_put_context_opt(:context_window, Keyword.get(opts, :context_window))
+  end
+
+  defp maybe_put_context_opt(context, _key, nil), do: context
+  defp maybe_put_context_opt(context, key, value), do: Map.put(context, key, value)
+
+  defp conversation_key(%Message{channel: channel, chat_id: chat_id, thread_ts: thread_ts})
+       when not is_nil(thread_ts) do
+    {channel, chat_id, thread_ts}
+  end
+
+  defp conversation_key(%Message{channel: channel, chat_id: chat_id, thread_scope: thread_scope}) do
+    {channel, chat_id, thread_scope}
+  end
+
+  defp bot_name_for(channel) when is_binary(channel) do
+    channel
+    |> channel_atom()
+    |> then(&Application.get_env(:fermix_channels, &1, []))
+    |> Keyword.get(:bot_name)
+  end
+
+  defp channel_atom(channel) do
+    String.to_existing_atom(channel)
+  rescue
+    ArgumentError -> :unknown
   end
 
   defp maybe_put_typing_fn(message, typing_fn) when is_function(typing_fn, 0) do

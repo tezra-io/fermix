@@ -93,31 +93,24 @@ config :fermix_core, :transcription,
 
 config :fermix_channels,
   telegram: [
-    enabled: true,
-    allowed_user_ids: []
+    enabled: true
   ],
   whatsapp: [
     enabled: false,
     mode: :webhook,
-    webhook_path: "/webhook/whatsapp",
-    # WhatsApp allowlists sender phone numbers only; it does not use allowed_user_ids.
-    allowed_sender_ids: []
+    webhook_path: "/webhook/whatsapp"
   ],
   discord: [
     enabled: false,
-    mode: :gateway,
-    allowed_user_ids: []
+    mode: :gateway
   ],
   slack: [
     enabled: false,
-    mode: :webhook,
-    allowed_user_ids: []
+    mode: :webhook
   ],
   signal: [
     enabled: false,
-    mode: :subprocess,
-    # Signal allowlists sender phone numbers only; it does not use allowed_user_ids.
-    allowed_sender_ids: []
+    mode: :subprocess
   ]
 
 config :fermix_core, :trace, base_dir: Path.expand("~/.fermix/traces")

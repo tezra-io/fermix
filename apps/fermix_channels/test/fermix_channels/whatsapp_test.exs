@@ -100,6 +100,8 @@ defmodule FermixChannels.WhatsAppTest do
       assert message.chat_id == "15551234567"
       assert message.reply_target == "15551234567"
       assert message.metadata.phone_number_id == "123456789"
+      assert message.metadata.user_id == "15551234567"
+      assert message.metadata.chat_type == "private"
       assert message.metadata.message_type == "text"
       assert message.attachments == []
     end
@@ -154,6 +156,31 @@ defmodule FermixChannels.WhatsAppTest do
 
       assert {:ok, [message]} = WhatsApp.parse_webhook(payload("hello from whatsapp"))
       assert message.chat_id == "15551234567"
+    end
+
+    test "defaults sender allowlist to owner_user_id when allowed_sender_ids is not configured" do
+      Application.put_env(:fermix_channels, :whatsapp,
+        enabled: true,
+        owner_user_id: "15551234567"
+      )
+
+      assert {:ok, [message]} = WhatsApp.parse_webhook(payload("hello from whatsapp"))
+      assert message.chat_id == "15551234567"
+
+      assert {:ok, []} =
+               WhatsApp.parse_webhook(
+                 payload("blocked", %{
+                   "messages" => [
+                     %{
+                       "from" => "19999999999",
+                       "id" => "wamid.blocked",
+                       "timestamp" => "1714000000",
+                       "type" => "text",
+                       "text" => %{"body" => "blocked"}
+                     }
+                   ]
+                 })
+               )
     end
   end
 

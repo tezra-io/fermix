@@ -89,6 +89,7 @@ defmodule FermixChannels.SlackTest do
       assert message.reply_target == "D12345"
       assert message.thread_ts == nil
       assert message.metadata.user_id == "U12345"
+      assert message.metadata.chat_type == "im"
       assert message.metadata.message_type == "message"
       assert message.attachments == []
     end
@@ -101,6 +102,7 @@ defmodule FermixChannels.SlackTest do
       assert message.reply_target == "C12345"
       assert message.thread_ts == "1714000000.000100"
       assert message.metadata.channel_type == "channel"
+      assert message.metadata.chat_type == "channel"
     end
 
     test "drops bot-authored events" do

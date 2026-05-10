@@ -149,6 +149,7 @@ defmodule FermixChannels.Slack do
         team_id: Map.get(payload, "team_id"),
         user_id: Map.get(event, "user"),
         channel_type: Map.get(event, "channel_type"),
+        chat_type: Map.get(event, "channel_type"),
         message_type: Map.get(event, "type")
       },
       attachments: parse_attachments(Map.get(event, "files", []))
@@ -206,13 +207,7 @@ defmodule FermixChannels.Slack do
   end
 
   defp allowed_user_ids do
-    with {:ok, config} <- FermixCore.Config.channel(:slack) do
-      config
-      |> Keyword.get(:allowed_user_ids, [])
-      |> Enum.map(&to_string/1)
-    else
-      _ -> []
-    end
+    FermixCore.Config.channel_ingress_user_ids(:slack)
   end
 
   defp ingress_enabled? do

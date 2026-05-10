@@ -36,7 +36,7 @@ defmodule FermixChannels.CLI do
           channel: @channel,
           chat_id: session_id,
           reply_target: session_id,
-          metadata: %{source: :cli}
+          metadata: %{source: :cli, user_id: "cli", chat_type: "private"}
         })
 
       :telemetry.execute(

@@ -2,6 +2,8 @@ defmodule FermixChannelsTest do
   use ExUnit.Case
   doctest FermixChannels
 
+  import ExUnit.CaptureLog
+
   test "greets the world" do
     assert FermixChannels.hello() == :world
   end
@@ -48,6 +50,40 @@ defmodule FermixChannelsTest do
                  [mode: :subprocess, enabled: false],
                  ready_report
                )
+    end
+  end
+
+  describe "command owner startup warnings" do
+    test "logs enabled ingress channels missing a command owner" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+
+      on_exit(fn ->
+        Application.put_env(:fermix_channels, :telegram, previous_telegram)
+      end)
+
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.warn_missing_command_owners(%{status: :ready, failures: []})
+        end)
+
+      assert log =~ "telegram ingress is enabled but no command owner is configured"
+    end
+
+    test "does not log when a single ingress allowlist entry can act as owner" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true, allowed_user_ids: ["111"])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_channels, :telegram, previous_telegram)
+      end)
+
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.warn_missing_command_owners(%{status: :ready, failures: []})
+        end)
+
+      refute log =~ "telegram ingress is enabled but no command owner is configured"
     end
   end
 end

@@ -4,6 +4,9 @@ defmodule FermixCore.Memory.Compactor do
 
   Checkpoint resource revisions are audit history only. M4.6 runtime behavior does not
   read checkpoints from the resource registry or support checkpoint rollback.
+
+  Over-budget compaction requires `route: {route_key, adapter_opts}`. There is no
+  hardcoded provider fallback; orphaned callers without a route fail loudly.
   """
 
   require Logger
@@ -11,7 +14,7 @@ defmodule FermixCore.Memory.Compactor do
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
-  alias FermixCore.Providers.OpenAI
+  alias FermixCore.Providers.Adapter
   alias FermixCore.Resource.Registry
 
   @type message :: map()
@@ -92,12 +95,15 @@ defmodule FermixCore.Memory.Compactor do
   end
 
   defp call_summary_provider(older, prior, budget, opts) do
-    provider = Keyword.get(opts, :provider, OpenAI)
-    model = Keyword.get(opts, :model, OpenAI.default_model())
+    {route_key, adapter_opts} = Keyword.fetch!(opts, :route)
+    adapter = Keyword.get(opts, :adapter) || Adapter.for_route(route_key)
 
-    case provider.chat(summary_prompt(older, prior, budget), model: model, temperature: 0.0) do
+    case adapter.chat(summary_prompt(older, prior, budget), [], adapter_opts) do
       {:ok, %{content: content}} when is_binary(content) ->
-        {:ok, String.trim(content)}
+        case String.trim(content) do
+          "" -> {:error, {:compaction_failed, :empty_summary}}
+          summary -> {:ok, summary}
+        end
 
       {:error, reason} ->
         {:error, {:compaction_failed, reason}}

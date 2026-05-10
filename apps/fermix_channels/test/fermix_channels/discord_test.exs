@@ -87,7 +87,9 @@ defmodule FermixChannels.DiscordTest do
       assert message.chat_id == "dm-channel-1"
       assert message.reply_target == "dm-channel-1"
       assert message.metadata.guild_id == nil
-      assert message.metadata.author_id == "111"
+      assert message.metadata.user_id == "111"
+      assert message.metadata.chat_type == "private"
+      refute Map.has_key?(message.metadata, :author_id)
       assert message.attachments == []
     end
 
@@ -97,6 +99,7 @@ defmodule FermixChannels.DiscordTest do
       assert message.content == "hello there"
       assert message.chat_id == "guild-channel-1"
       assert message.metadata.guild_id == "guild-1"
+      assert message.metadata.chat_type == "guild"
     end
 
     test "drops guild messages that do not mention the bot" do
