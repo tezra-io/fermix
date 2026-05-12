@@ -10,6 +10,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     jobs = Application.get_env(:fermix_core, :jobs, [])
     compaction = Application.get_env(:fermix_core, :compaction, [])
     memory = Application.get_env(:fermix_core, :memory, [])
+    realtime = Application.get_env(:fermix_core, :realtime, [])
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :personalization, personalization)
@@ -17,6 +18,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :jobs, jobs)
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :memory, memory)
+      Application.put_env(:fermix_core, :realtime, realtime)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -37,6 +39,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              journals: Path.join(tmp_home, "journals"),
+             realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),
              logs: Path.join(tmp_home, "logs")
            }
@@ -152,6 +155,61 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(memory, :extraction_timeout_ms) == 90_000
   end
 
+  test "save/load round-trips realtime config" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        agent: [name: "fermix"],
+        realtime: [
+          enabled: true,
+          provider: "openai",
+          model: "gpt-realtime-2",
+          voice: "marin",
+          activation: "click_to_talk",
+          turn_detection: "manual",
+          max_buffer_chunks: 20,
+          max_session_minutes: 10,
+          max_estimated_cost_cents_per_session: 25,
+          tool_policy: "broad",
+          allow_network_tools: true,
+          persist_transcripts: true
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.realtime]"
+    assert contents =~ "enabled = true"
+    assert contents =~ ~s(model = "gpt-realtime-2")
+    refute contents =~ "activation"
+    refute contents =~ "turn_detection"
+    assert contents =~ ~s(tool_policy = "broad")
+    assert contents =~ "allow_network_tools = true"
+    assert contents =~ "persist_transcripts = true"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(loaded.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :enabled) == true
+    refute Keyword.has_key?(realtime, :activation)
+    refute Keyword.has_key?(realtime, :turn_detection)
+    assert Keyword.get(realtime, :max_session_minutes) == 10
+    assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 25
+    assert Keyword.get(realtime, :tool_policy) == "broad"
+    assert Keyword.get(realtime, :allow_network_tools) == true
+    assert Keyword.get(realtime, :persist_transcripts) == true
+  end
+
   test "apply_snapshot merges memory config without wiping non-persisted keys" do
     Application.put_env(:fermix_core, :memory,
       extraction_enabled: false,
@@ -172,6 +230,30 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(memory, :extraction_timeout_ms) == 90_000
     assert Keyword.get(memory, :extraction_enabled) == false
     assert Keyword.get(memory, :agent_id) == "stable-agent"
+  end
+
+  test "apply_snapshot writes realtime config into Application env" do
+    Application.put_env(:fermix_core, :realtime, [])
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [
+        realtime: [
+          enabled: true,
+          provider: "openai",
+          max_session_minutes: 7
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    realtime = Application.get_env(:fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :enabled) == true
+    assert Keyword.get(realtime, :provider) == "openai"
+    refute Keyword.has_key?(realtime, :activation)
+    refute Keyword.has_key?(realtime, :turn_detection)
+    assert Keyword.get(realtime, :max_session_minutes) == 7
   end
 
   test "load_runtime_config rejects non-positive extraction_timeout_ms from hand-edited TOML" do

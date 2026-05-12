@@ -34,7 +34,13 @@ defmodule FermixCore.Memory.Admission do
           key: String.t(),
           value: String.t(),
           confidence: float(),
-          promote_target: String.t()
+          promote_target: String.t(),
+          source_id: String.t() | nil,
+          source_type: String.t() | nil,
+          source_name: String.t() | nil,
+          source_description: String.t() | nil,
+          session_id: String.t() | nil,
+          run_id: String.t() | nil
         }
 
   @type result :: %{
@@ -69,7 +75,13 @@ defmodule FermixCore.Memory.Admission do
       chat_mode: normalize_chat_mode(Keyword.get(opts, :chat_mode, :direct)),
       existing_memories: Keyword.get(opts, :existing_memories, %{}),
       repo: Keyword.get(opts, :repo, Config.repo_server()),
-      min_confidence: Keyword.get(opts, :min_confidence, Config.extraction_min_confidence())
+      min_confidence: Keyword.get(opts, :min_confidence, Config.extraction_min_confidence()),
+      source_id: Keyword.get(opts, :source_id),
+      source_type: Keyword.get(opts, :source_type),
+      source_name: Keyword.get(opts, :source_name),
+      source_description: Keyword.get(opts, :source_description),
+      session_id: Keyword.get(opts, :session_id),
+      run_id: Keyword.get(opts, :run_id)
     }
   end
 
@@ -112,6 +124,12 @@ defmodule FermixCore.Memory.Admission do
          value: value,
          confidence: confidence,
          promote_target: promote_target,
+         source_id: ctx.source_id,
+         source_type: ctx.source_type,
+         source_name: ctx.source_name,
+         source_description: ctx.source_description,
+         session_id: ctx.session_id,
+         run_id: ctx.run_id,
          corrective?: category == "correction"
        }}
     else

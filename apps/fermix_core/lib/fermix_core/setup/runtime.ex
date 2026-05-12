@@ -24,6 +24,14 @@ defmodule FermixCore.Setup.Runtime do
     :provider,
     :default_model,
     :reasoning_effort,
+    :realtime_enabled,
+    :realtime_api_key,
+    :realtime_voice,
+    :realtime_max_session_minutes,
+    :realtime_max_cost_cents,
+    :realtime_tool_policy,
+    :realtime_allow_network_tools,
+    :realtime_persist_transcripts,
     :telegram_bot_token,
     :whatsapp_access_token,
     :whatsapp_phone_number_id,
@@ -409,6 +417,22 @@ defmodule FermixCore.Setup.Runtime do
     selected_provider(answers) == :anthropic
   end
 
+  defp irrelevant_prompt?(%{key: :realtime_api_key}, answers) do
+    realtime_enabled_answer(answers) == false or selected_provider(answers) == :openai
+  end
+
+  defp irrelevant_prompt?(%{key: key}, answers)
+       when key in [
+              :realtime_voice,
+              :realtime_max_session_minutes,
+              :realtime_max_cost_cents,
+              :realtime_tool_policy,
+              :realtime_allow_network_tools,
+              :realtime_persist_transcripts
+            ] do
+    realtime_enabled_answer(answers) == false
+  end
+
   defp irrelevant_prompt?(_prompt, _answers), do: false
 
   defp prompt_for_answers(%{key: :default_model} = prompt_info, answers) do
@@ -430,6 +454,14 @@ defmodule FermixCore.Setup.Runtime do
       "openai" -> :openai
       "openai_codex" -> :openai_codex
       "anthropic" -> :anthropic
+      _value -> nil
+    end
+  end
+
+  defp realtime_enabled_answer(answers) do
+    case Keyword.get(answers, :realtime_enabled) do
+      value when value in [true, "true", "TRUE", "1", "yes", "y"] -> true
+      value when value in [false, "false", "FALSE", "0", "no", "n"] -> false
       _value -> nil
     end
   end

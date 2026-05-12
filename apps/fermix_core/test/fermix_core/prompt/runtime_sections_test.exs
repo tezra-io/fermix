@@ -3,6 +3,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Prompt.RuntimeSections
 
@@ -52,6 +53,26 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     assert content =~ "- coding-skill: capabilities=code, tests; tools=file_read, shell"
     refute content =~ "You write code."
+  end
+
+  test "build/2 renders the supplied capability snapshot instead of global registry built-ins" do
+    snapshot = [
+      Capability.new(%{
+        name: "safe_realtime_tool",
+        description: "Only realtime-safe tool.",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: {__MODULE__, :unused, []},
+        policy_class: :read_only,
+        metadata: %{category: :system, when_to_use: "Use only in realtime tests."}
+      })
+    ]
+
+    content = RuntimeSections.build([], capabilities: snapshot)
+
+    assert content =~ "`safe_realtime_tool`"
+    assert content =~ "Use only in realtime tests."
+    refute content =~ "`content_search`"
   end
 
   test "build/1 renders 'default' for a skill with absent allowed_tools (nil)" do

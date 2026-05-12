@@ -28,6 +28,29 @@ defmodule FermixCore.Memory.AdmissionTest do
     refute result.corrective?
   end
 
+  test "propagates source-aware metadata into admitted memories" do
+    result =
+      Admission.apply([@candidate],
+        agent_id: "main",
+        owner_id: "default",
+        conversation_key: {"realtime", "local:device-1", :root},
+        chat_mode: :direct,
+        source_id: "local:device-1",
+        source_type: "realtime",
+        source_name: "Realtime voice",
+        source_description: "Local voice transcript"
+      )
+
+    assert [
+             %{
+               source_id: "local:device-1",
+               source_type: "realtime",
+               source_name: "Realtime voice",
+               source_description: "Local voice transcript"
+             }
+           ] = result.admitted
+  end
+
   test "policy-derived promotion is not suppressed by advisory none" do
     result =
       Admission.apply([Map.put(@candidate, :promote_target, "none")],

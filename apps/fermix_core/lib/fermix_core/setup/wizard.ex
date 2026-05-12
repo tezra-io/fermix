@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Readiness
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.WizardState
@@ -24,6 +25,14 @@ defmodule FermixCore.Setup.Wizard do
           | {:reasoning_effort, reasoning_effort() | String.t()}
           | {:compaction_threshold, float() | String.t()}
           | {:extraction_timeout_ms, pos_integer() | String.t()}
+          | {:realtime_enabled, boolean() | String.t()}
+          | {:realtime_api_key, String.t()}
+          | {:realtime_voice, String.t()}
+          | {:realtime_max_session_minutes, pos_integer() | String.t()}
+          | {:realtime_max_cost_cents, pos_integer() | String.t()}
+          | {:realtime_tool_policy, String.t()}
+          | {:realtime_allow_network_tools, boolean() | String.t()}
+          | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -54,8 +63,11 @@ defmodule FermixCore.Setup.Wizard do
     slack_signing_secret: [:fermix_channels, :slack, :signing_secret]
   ]
 
+  @realtime_true_values ~w(true yes y 1)
+  @realtime_false_values ~w(false no n 0)
+
   @type seeding_result :: %{
-          name: :identity | :agents | :soul | :user | :memory,
+          name: :identity | :agents | :soul | :realtime | :user | :memory,
           path: String.t(),
           outcome: :seeded | :skipped_exists | :seeded_uncommitted
         }
@@ -98,7 +110,21 @@ defmodule FermixCore.Setup.Wizard do
   def reconfigure_prompts(%WizardState{} = state) do
     state
     |> prompt_specs()
-    |> Enum.filter(&(&1.key in [:provider, :default_model, :reasoning_effort]))
+    |> Enum.filter(
+      &(&1.key in [
+          :provider,
+          :default_model,
+          :reasoning_effort,
+          :realtime_enabled,
+          :realtime_api_key,
+          :realtime_voice,
+          :realtime_max_session_minutes,
+          :realtime_max_cost_cents,
+          :realtime_tool_policy,
+          :realtime_allow_network_tools,
+          :realtime_persist_transcripts
+        ])
+    )
     |> Enum.map(&Map.put(&1, :required?, true))
   end
 
@@ -119,6 +145,7 @@ defmodule FermixCore.Setup.Wizard do
 
     provider_prompts(context) ++
       compaction_prompts(context) ++
+      realtime_prompts(context) ++
       channel_prompts(context) ++
       personalization_prompts(context)
   end
@@ -273,6 +300,76 @@ defmodule FermixCore.Setup.Wizard do
     ]
   end
 
+  defp realtime_prompts(%{persisted: persisted, openai_api_key_unset?: openai_api_key_unset?}) do
+    config =
+      persisted
+      |> Map.get(:fermix_core, [])
+      |> Keyword.get(:realtime, [])
+      |> RealtimeConfig.normalize()
+
+    [
+      %{
+        key: :realtime_enabled,
+        label: "Enable local voice companion? (yes/no; blank = #{yes_no(config.enabled?)})",
+        default: config.enabled?,
+        required?: false
+      },
+      %{
+        key: :realtime_api_key,
+        label: realtime_api_key_label(openai_api_key_unset?),
+        required?: openai_api_key_unset?
+      },
+      %{
+        key: :realtime_voice,
+        label: "Realtime voice (blank = #{config.voice})",
+        default: config.voice,
+        required?: false
+      },
+      %{
+        key: :realtime_max_session_minutes,
+        label: "Realtime max session minutes (blank = #{config.max_session_minutes})",
+        default: config.max_session_minutes,
+        required?: false
+      },
+      %{
+        key: :realtime_max_cost_cents,
+        label:
+          "Realtime max estimated cost cents per session (blank = #{config.max_estimated_cost_cents_per_session})",
+        default: config.max_estimated_cost_cents_per_session,
+        required?: false
+      },
+      %{
+        key: :realtime_tool_policy,
+        label: "Realtime tool policy (read_only/broad; blank = #{config.tool_policy})",
+        default: config.tool_policy,
+        required?: false
+      },
+      %{
+        key: :realtime_allow_network_tools,
+        label:
+          "Allow Realtime network tools? (yes/no; blank = #{yes_no(config.allow_network_tools?)})",
+        default: config.allow_network_tools?,
+        required?: false
+      },
+      %{
+        key: :realtime_persist_transcripts,
+        label:
+          "Save voice transcripts locally? (yes/no; blank = #{yes_no(config.persist_transcripts?)})",
+        default: config.persist_transcripts?,
+        required?: false
+      }
+    ]
+  end
+
+  defp yes_no(true), do: "yes"
+  defp yes_no(false), do: "no"
+
+  defp realtime_api_key_label(true),
+    do: "OpenAI API key for Realtime (only OpenAI is supported in V1)"
+
+  defp realtime_api_key_label(false),
+    do: "OpenAI API key for Realtime (blank = use the existing OpenAI provider key)"
+
   defp personalization_prompts(%{state: state}) do
     [
       %{
@@ -299,11 +396,13 @@ defmodule FermixCore.Setup.Wizard do
       state.config_snapshot
       |> drop_unanswered_env_only_secrets(answers)
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
+      |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_provider_selection(Keyword.get(answers, :provider))
       |> put_default_model(Keyword.get(answers, :default_model))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
+      |> put_realtime_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -664,6 +763,56 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  defp put_realtime_config(snapshot, answers) do
+    values =
+      [
+        enabled:
+          normalize_realtime_bool(Keyword.get(answers, :realtime_enabled), :realtime_enabled),
+        voice: normalize_realtime_string(Keyword.get(answers, :realtime_voice), :realtime_voice),
+        max_session_minutes:
+          normalize_realtime_positive_int(
+            Keyword.get(answers, :realtime_max_session_minutes),
+            :realtime_max_session_minutes
+          ),
+        max_estimated_cost_cents_per_session:
+          normalize_realtime_positive_int(
+            Keyword.get(answers, :realtime_max_cost_cents),
+            :realtime_max_cost_cents
+          ),
+        tool_policy:
+          normalize_realtime_tool_policy(
+            Keyword.get(answers, :realtime_tool_policy),
+            :realtime_tool_policy
+          ),
+        allow_network_tools:
+          normalize_realtime_bool(
+            Keyword.get(answers, :realtime_allow_network_tools),
+            :realtime_allow_network_tools
+          ),
+        persist_transcripts:
+          normalize_realtime_bool(
+            Keyword.get(answers, :realtime_persist_transcripts),
+            :realtime_persist_transcripts
+          )
+      ]
+      |> reject_nil_values()
+
+    if values == [] do
+      snapshot
+    else
+      fermix_core = Map.get(snapshot, :fermix_core, [])
+      existing = Keyword.get(fermix_core, :realtime, [])
+
+      realtime =
+        existing
+        |> Keyword.merge(values)
+        |> RealtimeConfig.normalize()
+        |> RealtimeConfig.to_keyword()
+
+      Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :realtime, realtime))
+    end
+  end
+
   defp normalize_extraction_timeout_ms(nil), do: nil
   defp normalize_extraction_timeout_ms(""), do: nil
 
@@ -683,6 +832,84 @@ defmodule FermixCore.Setup.Wizard do
   defp normalize_extraction_timeout_ms(value) do
     raise ArgumentError,
           "invalid extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+  end
+
+  defp normalize_realtime_bool(nil, _key), do: nil
+  defp normalize_realtime_bool("", _key), do: nil
+  defp normalize_realtime_bool(value, _key) when is_boolean(value), do: value
+
+  defp normalize_realtime_bool(value, key) when is_binary(value) do
+    normalized = value |> String.trim() |> String.downcase()
+
+    cond do
+      normalized in @realtime_true_values ->
+        true
+
+      normalized in @realtime_false_values ->
+        false
+
+      true ->
+        raise ArgumentError, "invalid #{key} #{inspect(value)}; expected yes/no"
+    end
+  end
+
+  defp normalize_realtime_bool(value, key) do
+    raise ArgumentError, "invalid #{key} #{inspect(value)}; expected yes/no"
+  end
+
+  defp normalize_realtime_string(nil, _key), do: nil
+  defp normalize_realtime_string("", _key), do: nil
+
+  defp normalize_realtime_string(value, _key) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_realtime_string(value, key) do
+    raise ArgumentError, "invalid #{key} #{inspect(value)}; expected non-empty string"
+  end
+
+  defp normalize_realtime_tool_policy(nil, _key), do: nil
+  defp normalize_realtime_tool_policy("", _key), do: nil
+
+  defp normalize_realtime_tool_policy(value, key) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      "" ->
+        nil
+
+      policy when policy in ["read_only", "broad"] ->
+        policy
+
+      other ->
+        raise ArgumentError,
+              "invalid #{key} #{inspect(other)}; expected read_only or broad"
+    end
+  end
+
+  defp normalize_realtime_tool_policy(value, key) do
+    raise ArgumentError, "invalid #{key} #{inspect(value)}; expected read_only or broad"
+  end
+
+  defp normalize_realtime_positive_int(nil, _key), do: nil
+  defp normalize_realtime_positive_int("", _key), do: nil
+
+  defp normalize_realtime_positive_int(value, _key) when is_integer(value) and value > 0,
+    do: value
+
+  defp normalize_realtime_positive_int(value, key) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {integer, ""} when integer > 0 ->
+        integer
+
+      _invalid ->
+        raise ArgumentError, "invalid #{key} #{inspect(value)}; expected positive integer"
+    end
+  end
+
+  defp normalize_realtime_positive_int(value, key) do
+    raise ArgumentError, "invalid #{key} #{inspect(value)}; expected positive integer"
   end
 
   defp put_whatsapp_config(snapshot, answers) do
@@ -823,5 +1050,9 @@ defmodule FermixCore.Setup.Wizard do
     Enum.reject(values, fn {_key, value} ->
       value in [nil, ""]
     end)
+  end
+
+  defp reject_nil_values(values) do
+    Enum.reject(values, fn {_key, value} -> is_nil(value) end)
   end
 end

@@ -64,11 +64,12 @@ It also creates the workspace roots the runtime expects:
 
 - `$FERMIX_HOME/skills`
 - `$FERMIX_HOME/journals`
+- `$FERMIX_HOME/realtime`
 - `$FERMIX_HOME/traces`
 - `$FERMIX_HOME/logs`
 - `$FERMIX_HOME/auth.json` (when `openai_codex` is selected; `0600`)
 
-Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`.
+Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`. Realtime voice V1 uses the regular OpenAI API key even when the text/chat provider is `openai_codex`.
 
 Runtime precedence is:
 
@@ -110,6 +111,14 @@ chat_id = "8217352118"
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
+| `FERMIX_REALTIME_ENABLED` | No | Enable the local Realtime voice companion mode |
+| `FERMIX_REALTIME_MODEL` | No | Override the OpenAI Realtime model |
+| `FERMIX_REALTIME_VOICE` | No | Override the Realtime voice |
+| `FERMIX_REALTIME_ACTIVATION` | No | `click_to_talk` or `click_toggle` |
+| `FERMIX_REALTIME_TURN_DETECTION` | No | `manual` for click-to-talk, or provider VAD mode |
+| `FERMIX_REALTIME_MAX_SESSION_MINUTES` | No | Per-session voice duration cap |
+| `FERMIX_REALTIME_MAX_COST_CENTS` | No | Per-session estimated/reported cost cap |
+| `FERMIX_REALTIME_PERSIST_TRANSCRIPTS` | No | Persist final voice transcripts as local memory text |
 
 In dev/test these default to empty strings.
 
@@ -133,6 +142,53 @@ fermix service uninstall
 The unit calls `fermix run`, which boots the OTP supervision tree, binds the Phoenix endpoint, and blocks. Logs rotate at `~/.fermix/logs/fermix.log` (10 MB × 10 files by default).
 
 `--user` scope is per-user and requires no sudo; on Linux it enables `loginctl enable-linger` so the service survives logout. `--system` scope binds at boot and requires sudo.
+
+### Local voice companion
+
+Realtime voice is an optional local mode. When enabled, `fermix run` starts a `0600` Unix-domain socket at `~/.fermix/realtime.sock`; the native macOS companion connects to that socket and the daemon owns provider auth, prompt composition, tools, memory, and cost caps.
+
+```bash
+fermix setup --reconfigure --realtime-enabled \
+  --realtime-model gpt-realtime-2 \
+  --realtime-voice marin \
+  --realtime-activation click_to_talk
+
+fermix voice status
+```
+
+The companion source lives at `clients/macos/FermixPet` and is built locally:
+
+```bash
+cd clients/macos/FermixPet
+swift run FermixPet
+```
+
+For source-only development, skip Burrito and run the Realtime daemon from Mix:
+
+```bash
+FERMIX_HOME=/Users/sujshe/.fermix-dev \
+OPENAI_API_KEY=sk-... \
+FERMIX_REALTIME_ENABLED=true \
+FERMIX_REALTIME_MODEL=gpt-realtime-2 \
+FERMIX_REALTIME_TURN_DETECTION=manual \
+mix fermix.dev.realtime
+```
+
+Then launch the companion against the same home directory:
+
+```bash
+cd clients/macos/FermixPet
+FERMIX_HOME=/Users/sujshe/.fermix-dev swift run FermixPet
+```
+
+V1 is click-to-talk or click-toggle only. It does not stream while idle, does not persist raw audio, and transcript persistence defaults to off. If transcript persistence is enabled, final spoken user/assistant transcript text is stored locally as `voice_turn` memory rows with `source_type = "realtime"` and `source_id = "local:<device_id>"`.
+
+Troubleshooting:
+
+- `fermix voice status` shows `daemon: offline`: start Fermix with `fermix start` or `fermix run`.
+- Realtime is `setup_required`: set `OPENAI_API_KEY` or persist an OpenAI API key through setup.
+- The companion cannot use the mic: grant microphone access in macOS Privacy & Security settings.
+- A shared local app is quarantined: remove Gatekeeper quarantine with `xattr -dr com.apple.quarantine FermixPet.app`.
 
 ### Channels
 
@@ -171,6 +227,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix stop [--user\|--system]` | Stop the installed OS service |
 | `fermix restart [--user\|--system]` | Restart the installed OS service |
 | `fermix status` | Print running daemon status via the control socket (exit `3` if not running) |
+| `fermix voice status [--json]` | Show local Realtime voice companion status |
 | `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
 | `fermix logs [-f] [-n LINES]` | Show or follow the daemon log file |
 | `fermix upgrade [--check]` | Self-update from signed releases (cosign-verified, atomic swap) |
@@ -228,7 +285,8 @@ fermix/ (umbrella)
 ├── apps/fermix_core/       # Agents, providers, tools, memory, setup, CLI, auth, tracing
 ├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, CLI
 ├── apps/fermix_web/        # Phoenix: setup LiveView, health, webhook ingress
-└── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
+├── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
+└── clients/macos/FermixPet # Native local Realtime voice companion
 ```
 
 One BEAM VM, all `:permanent` under OTP. The data flow is straight-line:
@@ -275,7 +333,7 @@ Observability:
 - Structured JSONL traces under `FERMIX_HOME/traces/YYYY-MM-DD/<type>.jsonl`
 - Rotating log file at `FERMIX_HOME/logs/fermix.log`
 - Telemetry events for provider calls, tool execution, channel ingress, and agent lifecycle
-- `/health/ready` reports config paths, provider status, per-channel status, and memory backend status
+- `/health/ready` reports config paths, provider status, per-channel status, memory backend status, and Realtime voice status
 
 ## Develop
 

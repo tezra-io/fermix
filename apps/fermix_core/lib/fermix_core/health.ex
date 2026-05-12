@@ -7,6 +7,9 @@ defmodule FermixCore.Health do
   alias FermixCore.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
 
@@ -51,9 +54,10 @@ defmodule FermixCore.Health do
 
     channels = channel_statuses(boot_report.failures, process_resolver)
     memory = memory_status(process_resolver)
+    realtime = realtime_status(boot_report.failures, process_resolver)
 
     %{
-      status: overall_status(boot_report.status, channels, memory),
+      status: overall_status(boot_report.status, channels, memory, realtime),
       app: "fermix",
       version: "0.1.0",
       timestamp: timestamp,
@@ -67,7 +71,8 @@ defmodule FermixCore.Health do
       },
       providers: provider_statuses(boot_report.failures),
       channels: channels,
-      memory: memory
+      memory: memory,
+      realtime: realtime
     }
   end
 
@@ -140,18 +145,79 @@ defmodule FermixCore.Health do
     }
   end
 
+  defp realtime_status(failures, process_resolver) do
+    config = RealtimeConfig.current()
+
+    if config.enabled? do
+      realtime_enabled_status(config, failures, process_resolver)
+    else
+      %{
+        enabled: false,
+        status: :disabled,
+        provider: nil,
+        model: nil,
+        socket_path: nil,
+        socket_alive: nil,
+        active_sessions: 0,
+        active_clients: 0,
+        companion_connected?: false
+      }
+    end
+  end
+
+  defp realtime_enabled_status(config, failures, process_resolver) do
+    socket_alive = process_resolver.(LocalVoiceSocket) != nil
+    session_alive = process_resolver.(SessionSupervisor) != nil
+    counts = realtime_counts(socket_alive, session_alive)
+
+    status =
+      cond do
+        failure_status(failures, "realtime:openai") -> :setup_required
+        not socket_alive or not session_alive -> :degraded
+        true -> :ready
+      end
+
+    %{
+      enabled: true,
+      status: status,
+      provider: config.provider,
+      model: config.model,
+      socket_path: RealtimeConfig.socket_path(),
+      socket_alive: socket_alive,
+      active_sessions: counts.active_sessions,
+      active_clients: counts.active_clients,
+      companion_connected?: counts.active_clients > 0
+    }
+  end
+
+  defp realtime_counts(true, true) do
+    %{
+      active_sessions: SessionSupervisor.active_sessions(),
+      active_clients: LocalVoiceSocket.active_clients()
+    }
+  rescue
+    _error -> %{active_sessions: 0, active_clients: 0}
+  end
+
+  defp realtime_counts(_socket_alive, _session_alive) do
+    %{active_sessions: 0, active_clients: 0}
+  end
+
   defp process_status(nil), do: :degraded
   defp process_status(_pid), do: :ready
 
-  defp overall_status(:setup_required, _channels, _memory), do: :setup_required
-  defp overall_status(:degraded, _channels, _memory), do: :degraded
+  defp overall_status(:setup_required, _channels, _memory, _realtime), do: :setup_required
+  defp overall_status(:degraded, _channels, _memory, _realtime), do: :degraded
 
-  defp overall_status(_status, channels, memory) do
+  defp overall_status(_status, channels, memory, realtime) do
     cond do
       Enum.any?(channels, &(&1.status == :degraded)) ->
         :degraded
 
       Enum.any?(Map.values(memory), &(&1 == :degraded)) ->
+        :degraded
+
+      realtime.status == :degraded ->
         :degraded
 
       true ->

@@ -25,6 +25,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.StopCommand
   alias Fermix.CLI.UpgradeCommand
   alias Fermix.CLI.Version
+  alias Fermix.CLI.VoiceCommand
 
   @doc """
   Dispatch entry point.
@@ -57,6 +58,7 @@ defmodule Fermix.CLI do
   defp dispatch("restart", rest), do: RestartCommand.run(rest)
   defp dispatch("status", rest), do: StatusCommand.run(rest)
   defp dispatch("health", rest), do: HealthCommand.run(rest)
+  defp dispatch("voice", rest), do: VoiceCommand.run(rest)
   defp dispatch("agents", rest), do: AgentsCommand.run(rest)
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
@@ -75,6 +77,7 @@ defmodule Fermix.CLI do
       fermix setup [--print-state] [--reconfigure] [--import-codex] [--openai-api-key VALUE]
                    [--provider openai|openai_codex|anthropic]
                    [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
+                   [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status
@@ -89,6 +92,7 @@ defmodule Fermix.CLI do
       fermix restart           [--user|--system]   Restart the installed OS service
       fermix status [--full] [--json]             Show daemon and overview status
       fermix health [--json]                      Show daemon-evaluated health
+      fermix voice status [--json]                Show local voice companion status
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix logs   [-f] [-n LINES]                Show daemon log file

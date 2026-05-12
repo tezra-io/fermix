@@ -57,7 +57,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
   end
 
   describe "seed/2 fresh install" do
-    test "writes all five files, commits seed revisions, and upserts user memories", %{
+    test "writes all prompt files, commits seed revisions, and upserts user memories", %{
       agent_id: agent_id,
       owner_id: owner_id,
       repo: repo
@@ -86,19 +86,29 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
       assert {:ok, results} = SetupSeeder.seed(personalization, repo: repo)
 
-      assert Enum.map(results, & &1.name) == [:identity, :agents, :soul, :user, :memory]
+      assert Enum.map(results, & &1.name) == [
+               :identity,
+               :agents,
+               :soul,
+               :realtime,
+               :user,
+               :memory
+             ]
+
       assert Enum.all?(results, &(&1.outcome == :seeded))
       assert Enum.all?(results, &is_integer(&1.revision_id))
 
       identity_path = BootstrapPaths.identity_path(agent_id)
       agents_path = BootstrapPaths.agents_path(agent_id)
       soul_path = BootstrapPaths.soul_path(agent_id)
+      realtime_path = BootstrapPaths.realtime_path(agent_id)
       user_path = PromptFiles.user_path(agent_id)
       memory_path = PromptFiles.memory_path(agent_id)
 
       assert File.read!(identity_path) == Defaults.identity_md()
       assert File.read!(agents_path) == Defaults.agents_md()
       assert File.read!(soul_path) == Defaults.soul_md()
+      assert File.read!(realtime_path) == Defaults.realtime_md()
 
       user_content = File.read!(user_path)
       assert user_content =~ "name: Sujeeth"
@@ -113,7 +123,8 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       for {resource_type, expected_content} <- [
             {:identity_md, Defaults.identity_md()},
             {:agents_md, Defaults.agents_md()},
-            {:soul_md, Defaults.soul_md()}
+            {:soul_md, Defaults.soul_md()},
+            {:realtime_md, Defaults.realtime_md()}
           ] do
         assert {:ok, [revision]} =
                  Registry.list_revisions(agent_id, resource_type, "global", repo: repo)
@@ -193,6 +204,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert_received {:seed, %{name: :identity, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :agents, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :soul, outcome: :skipped_exists}}
+      assert_received {:seed, %{name: :realtime, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :user, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :memory, outcome: :skipped_exists}}
     end
