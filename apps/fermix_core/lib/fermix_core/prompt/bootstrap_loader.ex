@@ -21,7 +21,8 @@ defmodule FermixCore.Prompt.BootstrapLoader do
   @type bootstrap_prompt :: %{
           identity: bootstrap_file(),
           agents: bootstrap_file(),
-          soul: bootstrap_file() | nil
+          soul: bootstrap_file() | nil,
+          realtime: bootstrap_file() | nil
         }
 
   @spec load(String.t(), keyword()) :: {:ok, bootstrap_prompt()} | {:error, term()}
@@ -29,8 +30,9 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     with :ok <- BootstrapPaths.validate_agent_id(agent_id),
          {:ok, identity} <- load_identity(agent_id, opts),
          {:ok, agents} <- load_agents(agent_id, opts),
-         {:ok, soul} <- load_soul(agent_id, opts) do
-      {:ok, %{identity: identity, agents: agents, soul: soul}}
+         {:ok, soul} <- load_soul(agent_id, opts),
+         {:ok, realtime} <- load_realtime(agent_id, opts) do
+      {:ok, %{identity: identity, agents: agents, soul: soul, realtime: realtime}}
     end
   end
 
@@ -79,6 +81,31 @@ defmodule FermixCore.Prompt.BootstrapLoader do
 
       {:missing, _reason} ->
         {:ok, nil}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp load_realtime(agent_id, opts) do
+    if Keyword.get(opts, :realtime?, false) do
+      do_load_realtime(agent_id, opts)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp do_load_realtime(agent_id, opts) do
+    path = BootstrapPaths.realtime_path(agent_id, opts)
+
+    case BootstrapFile.read_present(path) do
+      {:ok, content} ->
+        file = BootstrapFile.metadata(:realtime, path, content, :present)
+        capture_bootstrap_revision(agent_id, :realtime_md, file, opts)
+        {:ok, file}
+
+      {:missing, _reason} ->
+        {:ok, BootstrapFile.metadata(:realtime, path, Defaults.realtime_md(), :fallback)}
 
       {:error, reason} ->
         {:error, reason}

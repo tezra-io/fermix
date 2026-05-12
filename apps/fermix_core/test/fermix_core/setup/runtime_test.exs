@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     memory = Application.get_env(:fermix_core, :memory, [])
+    realtime = Application.get_env(:fermix_core, :realtime, [])
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -21,6 +22,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :memory, memory)
+      Application.put_env(:fermix_core, :realtime, realtime)
       restart_global_memory_repo!()
 
       case fermix_home do
@@ -65,6 +67,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     # using openai_codex). Tests that want to assert codex routing must
     # override this explicitly.
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+    Application.put_env(:fermix_core, :realtime, enabled: false)
 
     Application.put_env(
       :fermix_core,
@@ -665,13 +668,27 @@ defmodule FermixCore.Setup.RuntimeTest do
       opts = [
         provider: "openai_codex",
         default_model: "gpt-5.5",
-        reasoning_effort: "high"
+        reasoning_effort: "high",
+        realtime_enabled: true,
+        realtime_voice: "marin",
+        realtime_max_session_minutes: 20,
+        realtime_max_cost_cents: 35,
+        realtime_tool_policy: "broad",
+        realtime_allow_network_tools: true,
+        realtime_persist_transcripts: true
       ]
 
       assert answers = Runtime.provided_answers(opts)
       assert Keyword.get(answers, :provider) == "openai_codex"
       assert Keyword.get(answers, :default_model) == "gpt-5.5"
       assert Keyword.get(answers, :reasoning_effort) == "high"
+      assert Keyword.get(answers, :realtime_enabled) == true
+      assert Keyword.get(answers, :realtime_voice) == "marin"
+      assert Keyword.get(answers, :realtime_max_session_minutes) == 20
+      assert Keyword.get(answers, :realtime_max_cost_cents) == 35
+      assert Keyword.get(answers, :realtime_tool_policy) == "broad"
+      assert Keyword.get(answers, :realtime_allow_network_tools) == true
+      assert Keyword.get(answers, :realtime_persist_transcripts) == true
     end
 
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do
@@ -881,6 +898,66 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(agent, :provider) == :openai_codex
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+    end
+
+    test "--reconfigure skips detailed realtime prompts when voice companion stays disabled" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      :ok =
+        ConfigStore.save_snapshot(%{
+          fermix_core: [
+            providers: [
+              openai: [
+                api_key: "sk-test",
+                default_model: "gpt-5.4",
+                reasoning_effort: :medium
+              ]
+            ],
+            personalization: [
+              user_name: "Op",
+              timezone: "UTC",
+              communication_style: "concise and direct"
+            ],
+            agent: [name: "fermix", provider: :openai],
+            realtime: [enabled: false]
+          ],
+          fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+          fermix_web: []
+        })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", default_model: "gpt-5.4", reasoning_effort: :medium]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      {:ok, prompt_log} = Agent.start_link(fn -> [] end)
+
+      prompt = fn label ->
+        Agent.update(prompt_log, &[label | &1])
+
+        cond do
+          String.starts_with?(label, "Enable local voice companion") -> "no"
+          String.starts_with?(label, "Provider") -> "openai"
+          String.starts_with?(label, "Default model") -> "gpt-5.4"
+          String.starts_with?(label, "Reasoning effort") -> "medium"
+          true -> ""
+        end
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run([reconfigure: true, skip_probe: true], puts: puts, prompt: prompt)
+
+      labels = Agent.get(prompt_log, &Enum.reverse/1)
+
+      assert Enum.any?(labels, &String.starts_with?(&1, "Enable local voice companion"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Realtime model"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Realtime voice"))
     end
   end
 end

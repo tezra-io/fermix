@@ -51,6 +51,12 @@ defmodule FermixCore.Prompt.Defaults do
     content
   end
 
+  @spec realtime_md() :: String.t()
+  def realtime_md do
+    {:ok, content} = TemplateRenderer.render(:realtime, %{})
+    content
+  end
+
   defp agent_name do
     :fermix_core
     |> Application.get_env(:agent, [])

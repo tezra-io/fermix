@@ -14,6 +14,7 @@ defmodule FermixCore.Readiness do
 
   alias FermixCore.Auth.Store
   alias FermixCore.Config
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
 
   require Logger
 
@@ -40,6 +41,7 @@ defmodule FermixCore.Readiness do
           discord_failure(),
           slack_failure(),
           signal_failure(),
+          realtime_failure(),
           personalization_failure()
         ],
         &is_nil/1
@@ -247,12 +249,43 @@ defmodule FermixCore.Readiness do
     end
   end
 
+  defp realtime_failure do
+    config = RealtimeConfig.current()
+
+    cond do
+      not config.enabled? ->
+        nil
+
+      config.provider != "openai" ->
+        %{
+          component: "realtime:openai",
+          action: "Set [fermix_core.realtime].provider to \"openai\" or disable realtime."
+        }
+
+      regular_openai_api_key?() ->
+        nil
+
+      true ->
+        %{
+          component: "realtime:openai",
+          action: "Set OPENAI_API_KEY for OpenAI Realtime or disable realtime."
+        }
+    end
+  end
+
   defp telegram_enabled?(config) do
     channel_enabled?(config, true)
   end
 
   defp openai_configured?(config) do
     present?(Keyword.get(config, :api_key))
+  end
+
+  defp regular_openai_api_key? do
+    case Config.provider(:openai) do
+      {:ok, config} when is_list(config) -> openai_configured?(config)
+      _ -> false
+    end
   end
 
   defp codex_configured? do

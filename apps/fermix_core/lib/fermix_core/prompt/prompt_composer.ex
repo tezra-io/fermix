@@ -15,7 +15,7 @@ defmodule FermixCore.Prompt.PromptComposer do
   @type message :: %{role: String.t(), content: String.t()}
 
   @type prompt_part :: %{
-          name: :identity | :soul | :agents | :user | :memory | :runtime,
+          name: :identity | :soul | :agents | :user | :memory | :realtime | :runtime,
           kind: :bootstrap | :prompt_memory | :generated,
           source_path: String.t() | nil,
           content: String.t(),
@@ -39,12 +39,13 @@ defmodule FermixCore.Prompt.PromptComposer do
   def compose_with_metadata(opts) when is_list(opts) do
     agent_id = Keyword.get(opts, :agent_id, "main")
     available_skills = Keyword.get(opts, :available_skills, [])
+    runtime_capabilities = Keyword.get(opts, :runtime_capabilities)
 
     with {:ok, bootstrap} <- BootstrapLoader.load(agent_id, opts),
          {:ok, prompt_memory} <- PromptFiles.load(agent_id) do
       parts =
         agent_id
-        |> build_parts(bootstrap, prompt_memory, available_skills)
+        |> build_parts(bootstrap, prompt_memory, available_skills, runtime_capabilities)
         |> scan_parts()
 
       {:ok,
@@ -56,14 +57,15 @@ defmodule FermixCore.Prompt.PromptComposer do
     end
   end
 
-  defp build_parts(agent_id, bootstrap, prompt_memory, available_skills) do
+  defp build_parts(agent_id, bootstrap, prompt_memory, available_skills, runtime_capabilities) do
     [
       bootstrap_part(:identity, :bootstrap, bootstrap.identity),
       bootstrap_part(:soul, :bootstrap, bootstrap.soul),
       bootstrap_part(:agents, :bootstrap, bootstrap.agents),
       memory_part(:user, PromptFiles.user_path(agent_id), prompt_memory.user),
       memory_part(:memory, PromptFiles.memory_path(agent_id), prompt_memory.memory),
-      runtime_part(available_skills)
+      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime),
+      runtime_part(available_skills, runtime_capabilities)
     ]
     |> Enum.reject(&is_nil/1)
   end
@@ -80,8 +82,17 @@ defmodule FermixCore.Prompt.PromptComposer do
     part(name, :prompt_memory, path, content)
   end
 
-  defp runtime_part(available_skills) do
+  defp runtime_part(available_skills, nil) do
     part(:runtime, :generated, nil, RuntimeSections.build(available_skills))
+  end
+
+  defp runtime_part(available_skills, runtime_capabilities) when is_list(runtime_capabilities) do
+    part(
+      :runtime,
+      :generated,
+      nil,
+      RuntimeSections.build(available_skills, capabilities: runtime_capabilities)
+    )
   end
 
   defp part(name, kind, source_path, content) do
@@ -131,13 +142,20 @@ defmodule FermixCore.Prompt.PromptComposer do
   end
 
   defp export_messages(parts) do
-    bootstrap_parts = Enum.filter(parts, &(&1.kind == :bootstrap))
-    memory_parts = Enum.filter(parts, &(&1.kind == :prompt_memory))
-    generated_parts = Enum.filter(parts, &(&1.kind == :generated))
+    parts
+    |> export_messages([])
+    |> Enum.reverse()
+  end
 
-    Enum.map(bootstrap_parts, &export_message/1) ++
-      memory_messages(memory_parts) ++
-      Enum.map(generated_parts, &export_message/1)
+  defp export_messages([], acc), do: acc
+
+  defp export_messages([%{kind: :prompt_memory} | _rest] = parts, acc) do
+    {memory_parts, rest} = Enum.split_while(parts, &(&1.kind == :prompt_memory))
+    export_messages(rest, memory_messages(memory_parts) ++ acc)
+  end
+
+  defp export_messages([part | rest], acc) do
+    export_messages(rest, [export_message(part) | acc])
   end
 
   defp export_message(part) do

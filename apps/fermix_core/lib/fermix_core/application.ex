@@ -14,6 +14,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Memory.ConversationStore
@@ -21,6 +22,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
@@ -46,6 +49,7 @@ defmodule FermixCore.Application do
   defp cli_dispatch(["run" | _] = argv) do
     enable_endpoint_server()
     enable_daemon_socket()
+    enable_realtime_socket()
 
     with {:ok, pid} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)
@@ -78,6 +82,10 @@ defmodule FermixCore.Application do
     Application.put_env(:fermix_core, :daemon_socket_enabled, true)
   end
 
+  defp enable_realtime_socket do
+    Application.put_env(:fermix_core, :realtime_socket_enabled, true)
+  end
+
   defp start_supervision_tree do
     setup_file_logger()
     Trace.TelemetryHandler.attach()
@@ -101,7 +109,8 @@ defmodule FermixCore.Application do
         MainAgent,
         JobRunnerSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
-        maybe_daemon_socket()
+        maybe_daemon_socket(),
+        maybe_realtime_supervisor()
       ]
       |> List.flatten()
 
@@ -137,6 +146,25 @@ defmodule FermixCore.Application do
     else
       []
     end
+  end
+
+  defp maybe_realtime_supervisor do
+    if realtime_socket_enabled?() and realtime_ready?() do
+      [RealtimeSupervisor]
+    else
+      []
+    end
+  end
+
+  defp realtime_socket_enabled? do
+    Application.get_env(:fermix_core, :realtime_socket_enabled, false)
+  end
+
+  defp realtime_ready? do
+    config = RealtimeConfig.current()
+
+    config.enabled? and config.provider == "openai" and
+      match?({:ok, _api_key}, CoreConfig.provider_api_key(:openai))
   end
 
   defp trace_opts do

@@ -181,6 +181,51 @@ existing_trace = Application.get_env(:fermix_core, :trace, [])
 existing_log = Application.get_env(:fermix_core, :log, [])
 existing_memory = Application.get_env(:fermix_core, :memory, [])
 existing_prompt_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
+existing_realtime = Application.get_env(:fermix_core, :realtime, [])
+
+env_bool = fn name ->
+  case System.get_env(name) do
+    nil -> :__unset__
+    "" -> :__unset__
+    value when value in ["1", "true", "TRUE", "yes", "YES", "y", "Y"] -> true
+    value when value in ["0", "false", "FALSE", "no", "NO", "n", "N"] -> false
+    value -> raise ArgumentError, "#{name}=#{inspect(value)} must be a boolean"
+  end
+end
+
+env_positive_int = fn name ->
+  case System.get_env(name) do
+    nil ->
+      :__unset__
+
+    "" ->
+      :__unset__
+
+    value ->
+      case Integer.parse(value) do
+        {integer, ""} when integer > 0 ->
+          integer
+
+        _invalid ->
+          raise ArgumentError, "#{name}=#{inspect(value)} must be a positive integer"
+      end
+  end
+end
+
+env_string = fn name ->
+  case System.get_env(name) do
+    nil -> :__unset__
+    "" -> :__unset__
+    value -> value
+  end
+end
+
+put_overlay = fn config, key, value ->
+  case value do
+    :__unset__ -> config
+    value -> Keyword.put(config, key, value)
+  end
+end
 
 memory_enabled =
   case System.get_env("FERMIX_MEMORY_ENABLED") do
@@ -217,6 +262,28 @@ config :fermix_core,
          extraction_debounce_seconds: memory_extraction_debounce_seconds
        )
 
+realtime_env =
+  existing_realtime
+  |> put_overlay.(:enabled, env_bool.("FERMIX_REALTIME_ENABLED"))
+  |> put_overlay.(:provider, env_string.("FERMIX_REALTIME_PROVIDER"))
+  |> put_overlay.(:model, env_string.("FERMIX_REALTIME_MODEL"))
+  |> put_overlay.(:voice, env_string.("FERMIX_REALTIME_VOICE"))
+  |> put_overlay.(:max_session_minutes, env_positive_int.("FERMIX_REALTIME_MAX_SESSION_MINUTES"))
+  |> put_overlay.(
+    :max_estimated_cost_cents_per_session,
+    case env_positive_int.("FERMIX_REALTIME_MAX_COST_CENTS") do
+      :__unset__ -> env_positive_int.("FERMIX_REALTIME_MAX_ESTIMATED_COST_CENTS_PER_SESSION")
+      value -> value
+    end
+  )
+  |> put_overlay.(:tool_policy, env_string.("FERMIX_REALTIME_TOOL_POLICY"))
+  |> put_overlay.(:allow_network_tools, env_bool.("FERMIX_REALTIME_ALLOW_NETWORK_TOOLS"))
+  |> put_overlay.(:persist_transcripts, env_bool.("FERMIX_REALTIME_PERSIST_TRANSCRIPTS"))
+  |> FermixCore.Realtime.Config.normalize()
+  |> FermixCore.Realtime.Config.to_keyword()
+
+config :fermix_core, :realtime, realtime_env
+
 config :fermix_core,
        :prompt_bootstrap,
        Keyword.merge(existing_prompt_bootstrap,
@@ -240,7 +307,8 @@ config :fermix_core,
 existing_telegram = Application.get_env(:fermix_channels, :telegram, [])
 
 telegram_overrides = [
-  bot_token: System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, "")
+  bot_token:
+    System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, "")
 ]
 
 telegram_overrides =
@@ -272,20 +340,32 @@ whatsapp_mode =
   end
 
 whatsapp_overrides = [
-  access_token: System.get_env("WHATSAPP_ACCESS_TOKEN") || Keyword.get(existing_whatsapp, :access_token, ""),
+  access_token:
+    System.get_env("WHATSAPP_ACCESS_TOKEN") || Keyword.get(existing_whatsapp, :access_token, ""),
   phone_number_id:
     System.get_env("WHATSAPP_PHONE_NUMBER_ID") ||
       Keyword.get(existing_whatsapp, :phone_number_id, ""),
-  verify_token: System.get_env("WHATSAPP_VERIFY_TOKEN") || Keyword.get(existing_whatsapp, :verify_token, ""),
-  app_secret: System.get_env("WHATSAPP_APP_SECRET") || Keyword.get(existing_whatsapp, :app_secret, ""),
+  verify_token:
+    System.get_env("WHATSAPP_VERIFY_TOKEN") || Keyword.get(existing_whatsapp, :verify_token, ""),
+  app_secret:
+    System.get_env("WHATSAPP_APP_SECRET") || Keyword.get(existing_whatsapp, :app_secret, ""),
   mode: whatsapp_mode
 ]
 
 whatsapp_overrides =
   case System.get_env("WHATSAPP_ALLOWED_SENDER_IDS") do
-    nil -> whatsapp_overrides
-    "" -> Keyword.put(whatsapp_overrides, :allowed_sender_ids, [])
-    ids -> Keyword.put(whatsapp_overrides, :allowed_sender_ids, ids |> String.split(",") |> Enum.map(&String.trim/1))
+    nil ->
+      whatsapp_overrides
+
+    "" ->
+      Keyword.put(whatsapp_overrides, :allowed_sender_ids, [])
+
+    ids ->
+      Keyword.put(
+        whatsapp_overrides,
+        :allowed_sender_ids,
+        ids |> String.split(",") |> Enum.map(&String.trim/1)
+      )
   end
 
 merged_whatsapp = Keyword.merge(existing_whatsapp, whatsapp_overrides)
@@ -302,15 +382,25 @@ discord_mode =
 
 discord_overrides = [
   bot_token: System.get_env("DISCORD_BOT_TOKEN") || Keyword.get(existing_discord, :bot_token, ""),
-  bot_user_id: System.get_env("DISCORD_BOT_USER_ID") || Keyword.get(existing_discord, :bot_user_id, ""),
+  bot_user_id:
+    System.get_env("DISCORD_BOT_USER_ID") || Keyword.get(existing_discord, :bot_user_id, ""),
   mode: discord_mode
 ]
 
 discord_overrides =
   case System.get_env("DISCORD_ALLOWED_USER_IDS") do
-    nil -> discord_overrides
-    "" -> Keyword.put(discord_overrides, :allowed_user_ids, [])
-    ids -> Keyword.put(discord_overrides, :allowed_user_ids, ids |> String.split(",") |> Enum.map(&String.trim/1))
+    nil ->
+      discord_overrides
+
+    "" ->
+      Keyword.put(discord_overrides, :allowed_user_ids, [])
+
+    ids ->
+      Keyword.put(
+        discord_overrides,
+        :allowed_user_ids,
+        ids |> String.split(",") |> Enum.map(&String.trim/1)
+      )
   end
 
 merged_discord = Keyword.merge(existing_discord, discord_overrides)
@@ -335,9 +425,18 @@ slack_overrides = [
 
 slack_overrides =
   case System.get_env("SLACK_ALLOWED_USER_IDS") do
-    nil -> slack_overrides
-    "" -> Keyword.put(slack_overrides, :allowed_user_ids, [])
-    ids -> Keyword.put(slack_overrides, :allowed_user_ids, ids |> String.split(",") |> Enum.map(&String.trim/1))
+    nil ->
+      slack_overrides
+
+    "" ->
+      Keyword.put(slack_overrides, :allowed_user_ids, [])
+
+    ids ->
+      Keyword.put(
+        slack_overrides,
+        :allowed_user_ids,
+        ids |> String.split(",") |> Enum.map(&String.trim/1)
+      )
   end
 
 merged_slack = Keyword.merge(existing_slack, slack_overrides)
@@ -360,9 +459,18 @@ signal_overrides = [
 
 signal_overrides =
   case System.get_env("SIGNAL_ALLOWED_SENDER_IDS") do
-    nil -> signal_overrides
-    "" -> Keyword.put(signal_overrides, :allowed_sender_ids, [])
-    ids -> Keyword.put(signal_overrides, :allowed_sender_ids, ids |> String.split(",") |> Enum.map(&String.trim/1))
+    nil ->
+      signal_overrides
+
+    "" ->
+      Keyword.put(signal_overrides, :allowed_sender_ids, [])
+
+    ids ->
+      Keyword.put(
+        signal_overrides,
+        :allowed_sender_ids,
+        ids |> String.split(",") |> Enum.map(&String.trim/1)
+      )
   end
 
 merged_signal = Keyword.merge(existing_signal, signal_overrides)

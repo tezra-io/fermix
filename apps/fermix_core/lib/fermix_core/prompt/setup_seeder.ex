@@ -3,8 +3,8 @@ defmodule FermixCore.Prompt.SetupSeeder do
   Setup-time seeder for bootstrap and prompt-memory files.
 
   Called from `Setup.Wizard` finalization. The only path that writes
-  `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `USER.md`, and `MEMORY.md`. Read-side
-  fallbacks (`Prompt.Defaults`) never write to disk.
+  `IDENTITY.md`, `AGENTS.md`, `SOUL.md`, `REALTIME.md`, `USER.md`, and
+  `MEMORY.md`. Read-side fallbacks (`Prompt.Defaults`) never write to disk.
 
   Per-file rule: if the target file already exists, skip writing — operator
   edits and prior seeds are preserved. Otherwise render the template, write
@@ -28,7 +28,7 @@ defmodule FermixCore.Prompt.SetupSeeder do
   require Logger
 
   @type seeded_file :: %{
-          name: :identity | :agents | :soul | :user | :memory,
+          name: :identity | :agents | :soul | :realtime | :user | :memory,
           path: String.t(),
           outcome: :seeded | :skipped_exists | :seeded_uncommitted,
           revision_id: integer() | nil
@@ -82,6 +82,13 @@ defmodule FermixCore.Prompt.SetupSeeder do
         name: :soul,
         resource_type: :soul_md,
         path: BootstrapPaths.soul_path(agent_id, opts),
+        assigns: %{},
+        wizard_inputs: []
+      },
+      %{
+        name: :realtime,
+        resource_type: :realtime_md,
+        path: BootstrapPaths.realtime_path(agent_id, opts),
         assigns: %{},
         wizard_inputs: []
       },

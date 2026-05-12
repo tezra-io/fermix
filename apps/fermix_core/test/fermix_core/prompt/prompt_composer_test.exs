@@ -3,6 +3,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
@@ -64,6 +65,43 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert memory_context =~ "</memory-context>"
   end
 
+  test "compose_with_metadata/1 adds REALTIME.md only for realtime sessions", %{
+    agent_id: agent_id
+  } do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    write_bootstrap(agent_id, "AGENTS.md", "agents content")
+    write_bootstrap(agent_id, "REALTIME.md", "realtime voice rules")
+    write_memory(agent_id, "MEMORY.md", "memory content")
+
+    assert {:ok, normal} =
+             PromptComposer.compose_with_metadata(agent_id: agent_id, available_skills: [])
+
+    refute Enum.any?(normal.parts, &(&1.name == :realtime))
+
+    assert {:ok, realtime} =
+             PromptComposer.compose_with_metadata(
+               agent_id: agent_id,
+               available_skills: [],
+               realtime?: true
+             )
+
+    assert Enum.map(realtime.parts, & &1.name) == [
+             :identity,
+             :agents,
+             :memory,
+             :realtime,
+             :runtime
+           ]
+
+    assert Enum.map(realtime.messages, & &1.content) == [
+             "identity content",
+             "agents content",
+             Enum.at(realtime.messages, 2).content,
+             "realtime voice rules",
+             RuntimeSections.build([])
+           ]
+  end
+
   test "compose/1 falls back to defaults for IDENTITY/AGENTS when bootstrap is missing", %{
     agent_id: agent_id
   } do
@@ -105,6 +143,34 @@ defmodule FermixCore.Prompt.PromptComposerTest do
 
     assert Enum.find(result.accounting, &(&1.name == :runtime)).source_path == nil
     assert Enum.all?(result.accounting, &(&1.approx_size > 0))
+  end
+
+  test "compose_with_metadata/1 can render runtime from a filtered capability snapshot", %{
+    agent_id: agent_id
+  } do
+    snapshot = [
+      Capability.new(%{
+        name: "realtime_visible",
+        description: "Realtime visible capability.",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: {__MODULE__, :unused, []},
+        policy_class: :read_only,
+        metadata: %{category: :system, when_to_use: "Visible to realtime."}
+      })
+    ]
+
+    assert {:ok, result} =
+             PromptComposer.compose_with_metadata(
+               agent_id: agent_id,
+               available_skills: [],
+               runtime_capabilities: snapshot
+             )
+
+    runtime = Enum.find(result.parts, &(&1.name == :runtime))
+    assert runtime.content =~ "`realtime_visible`"
+    assert runtime.content =~ "Visible to realtime."
+    refute runtime.content =~ "`content_search`"
   end
 
   test "compose/1 excludes suspicious bootstrap and memory parts before export", %{

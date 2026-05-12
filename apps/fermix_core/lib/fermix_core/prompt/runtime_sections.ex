@@ -34,14 +34,21 @@ defmodule FermixCore.Prompt.RuntimeSections do
     system: "System"
   }
 
-  @spec build([skill()]) :: String.t()
-  def build(available_skills) when is_list(available_skills) do
+  @spec build([skill()], keyword()) :: String.t()
+  def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
     [
       runtime_contract(),
-      capability_summary(),
+      capability_summary_from_opts(opts),
       skill_catalog(available_skills)
     ]
     |> Enum.join("\n\n")
+  end
+
+  defp capability_summary_from_opts(opts) do
+    case Keyword.fetch(opts, :capabilities) do
+      {:ok, capabilities} -> format_capability_summary_or_empty(capabilities)
+      :error -> capability_summary()
+    end
   end
 
   @spec capability_summary(GenServer.server()) :: String.t()
@@ -53,6 +60,12 @@ defmodule FermixCore.Prompt.RuntimeSections do
       capabilities -> format_capability_summary(capabilities)
     end
   end
+
+  defp format_capability_summary_or_empty([]),
+    do: "## Built-in Capability Catalog\n- none registered"
+
+  defp format_capability_summary_or_empty(capabilities),
+    do: format_capability_summary(capabilities)
 
   defp runtime_contract do
     """
