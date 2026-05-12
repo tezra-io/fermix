@@ -10,11 +10,13 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
 
   @workspace_dirs [
     bootstrap: "bootstrap",
     skills: "skills",
     journals: "journals",
+    realtime: "realtime",
     traces: "traces",
     logs: "logs"
   ]
@@ -37,6 +39,7 @@ defmodule FermixCore.Setup.ConfigStore do
           bootstrap: String.t(),
           skills: String.t(),
           journals: String.t(),
+          realtime: String.t(),
           traces: String.t(),
           logs: String.t()
         }
@@ -70,7 +73,8 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: Application.get_env(:fermix_core, :jobs, []),
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
-        memory: Application.get_env(:fermix_core, :memory, [])
+        memory: Application.get_env(:fermix_core, :memory, []),
+        realtime: Application.get_env(:fermix_core, :realtime, [])
       ],
       fermix_channels: [
         telegram: Application.get_env(:fermix_channels, :telegram, []),
@@ -119,6 +123,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
+    apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
     apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
@@ -209,7 +214,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:memory, [])
-          |> normalize_memory()
+          |> normalize_memory(),
+        realtime:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:realtime, [])
+          |> normalize_realtime()
       ],
       fermix_channels: [
         telegram:
@@ -261,7 +271,8 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: [],
         routing: [],
         compaction: [],
-        memory: []
+        memory: [],
+        realtime: []
       ],
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
@@ -323,6 +334,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_realtime_config(realtime_config) do
+    merged =
+      Application.get_env(:fermix_core, :realtime, [])
+      |> Keyword.merge(realtime_config)
+
+    Application.put_env(:fermix_core, :realtime, merged)
+    :ok
+  end
+
   defp apply_channel_config(channel, channel_config) do
     merged =
       Application.get_env(:fermix_channels, channel, [])
@@ -341,6 +361,7 @@ defmodule FermixCore.Setup.ConfigStore do
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
     memory = Keyword.get(fermix_core, :memory, [])
+    realtime = Keyword.get(fermix_core, :realtime, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
@@ -369,6 +390,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "memory"], memory),
+      render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -457,7 +479,8 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
-        memory: normalize_memory(get_in(document, ["fermix_core", "memory"]))
+        memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
+        realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"]))
       ],
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
@@ -567,6 +590,28 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_string(lookup(config, "default_model", :default_model))
     )
   end
+
+  defp normalize_realtime(config) do
+    config
+    |> drop_legacy_realtime_keys()
+    |> RealtimeConfig.normalize()
+    |> RealtimeConfig.to_keyword()
+  end
+
+  defp drop_legacy_realtime_keys(config) when is_list(config) do
+    Keyword.drop(config, [:activation, :turn_detection, :max_buffer_chunks])
+    |> Enum.reject(fn
+      {key, _value} when key in ["activation", "turn_detection", "max_buffer_chunks"] -> true
+      _entry -> false
+    end)
+  end
+
+  defp drop_legacy_realtime_keys(config) when is_map(config) do
+    Map.drop(config, [:activation, :turn_detection, :max_buffer_chunks])
+    |> Map.drop(["activation", "turn_detection", "max_buffer_chunks"])
+  end
+
+  defp drop_legacy_realtime_keys(config), do: config
 
   # Validates against the canonical enum owned by ResponsesShared.
   # Returns the atom on success, or nil on unknown input — consistent

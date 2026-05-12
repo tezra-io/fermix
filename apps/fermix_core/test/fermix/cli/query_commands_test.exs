@@ -7,6 +7,7 @@ defmodule Fermix.CLI.QueryCommandsTest do
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.HealthCommand
+  alias Fermix.CLI.VoiceCommand
 
   setup do
     previous_home = System.get_env("FERMIX_HOME")
@@ -39,6 +40,16 @@ defmodule Fermix.CLI.QueryCommandsTest do
     decoded = Jason.decode!(output)
     assert decoded["status"] in ["ready", "setup_required", "degraded"]
     assert is_list(decoded["channels"])
+  end
+
+  test "voice status --json returns realtime health" do
+    {exit_status, output} = run_command(fn -> VoiceCommand.run(["status", "--json"]) end)
+
+    assert exit_status == 0
+    decoded = Jason.decode!(output)
+    assert decoded["daemon"] == "online"
+    assert is_map(decoded["realtime"])
+    assert decoded["realtime"]["status"] in ["disabled", "ready", "setup_required", "degraded"]
   end
 
   test "agents --json returns main-agent and worker status" do

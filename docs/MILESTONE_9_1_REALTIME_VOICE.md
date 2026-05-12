@@ -4,7 +4,7 @@
 **Milestone:** M9 Differentiators
 **Depends on:** M4.8 Distribution & Daemon, M4.9 Unified Capabilities, M4.10 Provider Selection, M7 Built-in Capability Catalog
 **Informs:** M10 approval/governance, future Signal call support
-**Primary model target:** OpenAI `gpt-realtime-2` (verified against official OpenAI docs on 2026-05-09)
+**Primary model target:** OpenAI `gpt-realtime-2` (verified against official OpenAI docs on 2026-05-10)
 
 ## 1. Purpose
 
@@ -16,9 +16,11 @@ stream microphone audio to Fermix, and play back low-latency assistant speech.
 
 The first version is deliberately **not always listening**. The companion can be
 always visible, but the microphone stream and OpenAI Realtime session start only
-after an explicit user action. Command-word activation and true always-listening
-cloud mode are later phases because they carry cost, privacy, and false-positive
-risks.
+after an explicit user action. Once active, the session is a full-duplex voice
+call: the microphone remains live while assistant audio plays, macOS voice
+processing handles echo cancellation, and OpenAI server VAD owns turn
+boundaries. Command-word activation and true always-listening cloud mode are
+later phases because they carry cost, privacy, and false-positive risks.
 
 ## 2. References
 
@@ -33,13 +35,12 @@ risks.
 - `docs/MILESTONE_4_10_CODEX_PARITY.md` - provider/model setup and OpenAI API-key
   routing.
 - OpenAI Realtime model docs:
-  `https://developers.openai.com/api/docs/models/gpt-realtime-2` (`gpt-realtime-2`
-  is the current default Realtime voice model as of 2026-05-09; Stage 0 still
-  re-verifies before implementation)
+  `https://platform.openai.com/docs/models/gpt-realtime-2` (`gpt-realtime-2`
+  is the current default Realtime voice model as of 2026-05-10)
 - OpenAI Realtime guide:
-  `https://developers.openai.com/api/docs/guides/realtime`
+  `https://platform.openai.com/docs/guides/realtime`
 - OpenAI Realtime WebSocket guide:
-  `https://developers.openai.com/api/docs/guides/realtime-websocket`
+  `https://platform.openai.com/docs/guides/realtime-websocket`
 - OpenAI Realtime conversation/VAD/cost docs:
   `https://developers.openai.com/api/docs/guides/realtime-conversations`,
   `https://developers.openai.com/api/docs/guides/realtime-vad`,
@@ -150,7 +151,7 @@ V1 ships a native macOS companion:
 
 - small always-on-top floating character window
 - draggable position
-- click-to-talk or click-toggle activation
+- click-to-start / click-to-end voice call
 - visible states: offline, idle, listening, thinking, tool-use, speaking, muted,
   error
 - macOS microphone permission through native APIs
@@ -245,35 +246,27 @@ enabled = false
 provider = "openai"
 model = "gpt-realtime-2"
 voice = "marin"
-activation = "click_to_talk"
-turn_detection = "server_vad"
-input_audio_format = "pcm16"
-output_audio_format = "pcm16"
-max_chunk_bytes = 16384
-max_buffer_chunks = 20
-idle_timeout_ms = 30000
 max_session_minutes = 15
-max_input_audio_seconds_per_session = 600
 max_estimated_cost_cents_per_session = 100
 tool_policy = "read_only"
 allow_network_tools = false
 persist_transcripts = false
-persist_audio = false
 ```
 
 Validation rules:
 
 - `enabled` defaults to `false`.
 - `provider` must be `"openai"` in V1.
-- `model` defaults to `"gpt-realtime-2"`.
-- `activation` must be `"click_to_talk"` or `"click_toggle"` in V1.
-- `turn_detection` must be one of the OpenAI-supported modes verified at
-  implementation time.
-- `max_chunk_bytes` defaults to 16,384 bytes. With 16kHz PCM16 mono audio
-  (~32KB/sec), that caps one chunk at roughly 500ms.
-- `max_buffer_chunks` defaults to 20, roughly 10 seconds at the maximum chunk
-  size.
+- `model` must be `"gpt-realtime-2"` in this milestone.
+- V1 exposes no `activation`, `turn_detection`, or chunk-count mode knobs.
+  Realtime is one explicit full-duplex call mode with OpenAI `server_vad`.
+- Internal audio defaults are PCM16 at 24 kHz mono. `max_chunk_bytes` remains an
+  internal socket guard at 16,384 bytes.
 - cost/session limits must be positive integers.
+- `tool_policy` is `"read_only"` or `"broad"`. `"read_only"` maps to the
+  existing `trust: :third_party` preset; `"broad"` maps to `trust: :local`.
+- `allow_network_tools` is an explicit extra gate for network-capable tools
+  when broad local tooling is enabled.
 - `persist_transcripts` defaults to `false` because spoken input is more
   sensitive than text chat. Setup and the companion can explicitly enable local
   transcript persistence when memory continuity is desired.
@@ -321,12 +314,11 @@ V1 protocol uses newline-delimited JSON events with base64 PCM audio chunks:
 Client -> daemon:
 
 - `client_hello`
-- `listen_start`
+- `call_start`
 - `audio_chunk`
 - `interrupt`
-- `listen_stop`
 - `mute`
-- `session_stop`
+- `call_stop`
 
 Daemon -> client:
 
@@ -337,20 +329,26 @@ Daemon -> client:
 - `tool_event`
 - `usage`
 - `error`
+- `playback_stop`
 
 `client_hello` is for protocol-version negotiation and companion metadata only;
 it is not an auth layer. The 0600 socket file remains the local trust boundary.
+
+`call_start` opens one daemon-owned OpenAI Realtime WebSocket and starts mic
+streaming. `call_stop` closes that WebSocket and stops local capture/playback.
+There is no separate per-turn `listen_stop`; OpenAI server VAD commits user
+turns and creates responses.
 
 `mute` means "stop accepting microphone chunks while keeping the Realtime
 session and assistant audio alive." It does not silence assistant output and does
 not close the session.
 
-`interrupt` is explicit barge-in. When the companion begins capturing user speech
-while assistant audio is playing, it sends `interrupt` before new audio chunks.
-The daemon cancels current assistant playback/response using the provider event
-verified in Stage 0, clears queued output audio, then forwards the new input.
+`interrupt` is explicit click barge-in. The daemon cancels current assistant
+response playback and emits `playback_stop`; the companion stops local output
+and keeps the microphone live. Passive voice barge-in is handled by OpenAI
+server VAD plus macOS voice processing rather than by closing the mic path.
 
-Base64 audio has overhead, but the first target is local click-to-talk audio,
+Base64 audio has overhead, but the first target is a local explicit voice call,
 not an always-on cloud pipe. The format is easy to test with fixtures. If
 profiling shows meaningful overhead, switch this socket to length-prefixed
 binary frames in a follow-up.
@@ -358,10 +356,37 @@ binary frames in a follow-up.
 The socket must enforce:
 
 - `max_chunk_bytes = 16_384`
-- `max_buffer_chunks = 20`
 - one session per connected client
 - explicit close on protocol errors
 - no silent dropping of audio or output events
+
+#### 6.3.1 Wire framing contract
+
+The socket reads raw bytes and splits on `\n` in an explicit accumulating buffer.
+It does not use Erlang `{:packet, :line}`. The reason is concrete: a default
+`{:packet, :line}` listener truncates lines longer than the receive buffer
+(roughly 8 KB on common configurations), which means a normal pet audio frame
+(`audio_chunk` event ≈ 16 KB on the wire) is silently chopped, the daemon
+decodes the half-line as `invalid_json`, sends an error, and closes the socket.
+The pet then keeps capturing mic audio and observes `Socket is not connected`.
+The contract for V1:
+
+- raw `:gen_tcp` reads with `{:active, false}` and a per-connection accumulator.
+- a single `\n` byte terminates each event.
+- the daemon must hold a hard `@max_wire_line_bytes` cap as protection against
+  unbounded buffer growth. The cap is derived from `max_chunk_bytes`: a worst-case
+  wire frame is `ceil(max_chunk_bytes * 4 / 3) + 256` bytes (base64 + JSON
+  overhead). Any line exceeding the cap closes the connection with a
+  `line_too_large` error rather than allocating without bound.
+- empty lines are skipped, not treated as events.
+- multi-line bursts in a single `recv` are fully drained before the next
+  `recv` call. Partial trailing lines persist in the buffer.
+
+If a future revision re-introduces `{:packet, :line}` or any other framing
+abstraction, it must come with an explicit benchmark proving it handles a
+pet-sized audio frame plus a regression test (see
+`local_voice_socket_test.exs` "accepts a pet-sized audio chunk over the
+socket").
 
 ### 6.4 `FermixCore.Realtime.SessionServer`
 
@@ -381,9 +406,19 @@ Responsibilities:
 - emit telemetry and traces
 - enforce idle, duration, and cost limits
 
-The session starts on `listen_start`, not on companion launch. It closes on
-`session_stop`, idle timeout, cost limit, max duration, client disconnect, or
+The session starts on `call_start`, not on companion launch. It closes on
+`call_stop`, idle timeout, cost limit, max duration, client disconnect, or
 provider error.
+
+The V1 state machine is intentionally full-duplex:
+
+`idle -> listening <-> thinking/speaking/tool_use -> listening`
+
+While the call is active, microphone chunks are accepted in every non-muted
+state, including during assistant playback. `response.done` returns to
+`listening`, not `idle`; only `call_stop` ends the call. Echo/noise control is
+handled by the native companion's macOS voice-processing audio engine and by
+OpenAI `server_vad` with response creation enabled.
 
 The capability catalog is locked at session start. Realtime sends tool
 definitions during session configuration; if a skill reload or MCP disconnect
@@ -398,7 +433,7 @@ WebSocket client for OpenAI Realtime.
 V1 uses OpenAI API-key auth from `providers.openai.api_key`. It must not use the
 Codex OAuth token path because Codex OAuth scopes are checked per API surface
 and should not be assumed to authorize Realtime. The current Realtime target is
-`gpt-realtime-2`, verified in the official model docs on 2026-05-09.
+`gpt-realtime-2`, verified in the official model docs on 2026-05-10.
 
 Implementation must verify exact event names and payloads against current
 OpenAI docs immediately before coding. The design expects these event classes:
@@ -415,10 +450,118 @@ OpenAI docs immediately before coding. The design expects these event classes:
 - required connection headers, including whether any `OpenAI-Beta` or successor
   header is required for the current Realtime API revision
 
-No fallback provider is added in V1. If the Realtime connection fails, the voice
-session enters error state and closes. Automatic reconnect after transient
-network loss is V2; V1 favors a loud failed session over duplicated audio/tool
-state.
+#### 6.5.1 `session.update` contract
+
+The first frame after connect is `session.update`. It must include:
+
+- `instructions` — composed via `PromptComposer`.
+- `voice` — from `Config.voice`.
+- `output_modalities` (or successor field name on the active GA schema) — V1
+  uses `["audio"]` only. The pet does not need text output and an extra text
+  response would double-bill. If a non-pet caller of this module ever needs
+  text-only output, it must override modalities at session start, not at
+  request time.
+- `audio.input.format` and `audio.output.format` — derived from
+  `Config.input_audio_format` / `output_audio_format`. PCM16 at 24 kHz mono.
+- `audio.input.turn_detection` — fixed to `server_vad` in V1, with
+  `create_response = true`, `interrupt_response = true`, `threshold = 0.7`,
+  `prefix_padding_ms = 300`, and `silence_duration_ms = 800`. There is no
+  manual commit mode in the final V1 architecture.
+- `audio.input.transcription` — required, not optional. OpenAI only emits
+  `conversation.item.input_audio_transcription.completed` events when this
+  field is set. Without it, the user-transcript handler in `SessionServer`
+  is dead code, no `transcript_delta` (role=user) events reach the
+  companion, and `ConversationRecorder` writes assistant turns alongside
+  empty user turns. V1 defaults the model to `whisper-1`. The model is
+  configurable for ops cost or accuracy tuning.
+- `tools` and `tool_choice` — from `ToolBridge.to_openai_tools/1`,
+  `tool_choice = "auto"` in V1.
+
+The output token cap is **not** a session field on the GA `gpt-realtime`
+schema (the server rejects `session.max_response_output_tokens` as
+`unknown_parameter`). The daemon still includes `response.max_output_tokens`
+on every explicit `response.create` it emits after a tool result, sourced from
+`Config.max_response_output_tokens` (default `4096`). Server-VAD-created
+responses rely on the session's normal cost and max-duration caps.
+
+#### 6.5.2 Cost source of truth
+
+OpenAI's Realtime `response.done` event reports usage as token counts, not
+dollars. `usage` looks roughly like
+`{"input_tokens": ..., "output_tokens": ..., "input_token_details": {"audio_tokens": ..., "text_tokens": ..., "cached_tokens": ...}, "output_token_details": {"audio_tokens": ..., "text_tokens": ...}}`.
+
+The CostTracker is the only authority on per-session cost:
+
+- estimated cost is computed from input audio duration as before, plus a
+  conservative output estimate during streaming (one token per 50 ms of
+  delivered audio).
+- when `response.done` arrives, reported cost replaces the streaming output
+  estimate using the actual token counts and the per-token rates from
+  `Config.realtime_pricing` (or a literal price table on the tracker; the
+  rates change with model versions and must be sourced from a single
+  named location).
+- the daemon enforces hard caps against `max(estimated_cost, reported_cost)`.
+
+There is no `usage.cost_cents` field on the wire; any code that reads one is
+dead code. V1 must not synthesize a cents value into the payload either —
+the wire stays token-shaped.
+
+#### 6.5.3 Connect timeout
+
+`WebSockex.start` must use an explicit handshake timeout (`5_000` ms in V1).
+If OpenAI does not accept the WebSocket inside that window, the SessionServer
+returns `{:error, :openai_connect_timeout}` to the caller and notifies the
+companion with an error event. Without this cap, `call_start` blocks
+indefinitely and the pet's first click freezes the UI thread.
+
+#### 6.5.4 Reconnect policy
+
+V1 attempts a bounded reconnect on `openai_realtime_disconnect` events:
+
+- 3 attempts maximum, with delays `1_000`, `2_000`, `4_000` ms.
+- the SessionServer notifies the companion with `state: "reconnecting"`
+  before each attempt so the pet can render that distinctly from `error`.
+- on a successful reconnect, the daemon re-sends `session.update` with the
+  same instructions, tools, and configuration snapshot taken at session
+  start. It does not replay audio chunks; the user must re-utter anything
+  that was mid-flight.
+- after the third failed attempt, the session enters `error` state and
+  closes loudly. Any in-progress assistant audio is discarded.
+- companion-driven `interrupt` or `call_stop` during
+  reconnect cancels the reconnect attempts.
+
+Earlier drafts of this design said V1 had no reconnect at all. That was too
+strict: a brief network blip during a 15-minute session would otherwise force
+the user to start over, and the cost of replaying `session.update` is
+negligible compared to the failure mode. Reconnect after a failed reconnect
+loop, and reconnect across `call_stop`, are still V2.
+
+#### 6.5.5 Barge-in protocol
+
+When the user interrupts during assistant playback, two things must happen:
+
+1. cancel the in-flight response (`response.cancel`).
+2. truncate the assistant item to the audio duration the user actually
+   heard (`conversation.item.truncate` with `audio_end_ms` = played-ms).
+
+Without step 2, the model believes the entire generated response was heard.
+The next turn references content the user never received, and multi-turn
+coherence drifts. This applies to the V1 full-duplex call because the user can
+interrupt mid-playback.
+
+The companion is the only party that knows played-ms. The wire contract:
+
+- the pet tracks decoded PCM16 ms played per assistant item id, accumulated
+  across `audio_delta` events.
+- on user-driven `interrupt`, the pet sends
+  `{type: "interrupt", item_id: <last-assistant-item-id>, audio_end_ms: <played-ms>}`.
+- the daemon `Protocol.decode_client_event/2` accepts the new fields,
+  validates them as non-negative integer / non-empty string, and forwards
+  to `SessionServer`.
+- `SessionServer` sends `conversation.item.truncate` followed by
+  `response.cancel`, in that order.
+- `interrupt` with no `item_id` (e.g., user interrupts before any assistant
+  audio has played) sends `response.cancel` only.
 
 ### 6.6 `FermixCore.Realtime.ToolBridge`
 
@@ -464,6 +607,18 @@ Device identity is a stable, opaque per-install UUID stored under
 Realtime enabled, not derived from hostname, username, serial number, or other
 machine-identifying data. The same value is used to build a privacy-preserving
 OpenAI safety identifier, after hashing with Fermix owner/install context.
+Use a versioned derivation so the raw owner or device IDs are never sent:
+
+```elixir
+payload = ["fermix-realtime-safety-v1", 0, owner_id, 0, device_id]
+
+:crypto.hash(:sha256, payload)
+|> Base.url_encode64(padding: false)
+|> binary_part(0, 32)
+```
+
+`owner_id` comes from `FermixCore.Memory.Config.owner_id/0`; `device_id` is the
+opaque UUID above. The delimiter and version label are part of the contract.
 
 Conversation key:
 
@@ -539,10 +694,14 @@ clients/macos/FermixPet/
 V1 implementation shape:
 
 - SwiftUI/AppKit floating borderless window
+- mascot-first surface: the Fermix mascot is the pet, with status and controls
+  as secondary hover affordances rather than a plain status box
+- explicit close/quit affordance, plus a secondary context-menu quit path, so
+  the borderless accessory app is never trapped on screen
 - always-on-top toggle
 - draggable position stored in app preferences
-- click-to-talk and click-toggle modes
-- AVAudioEngine for capture/playback
+- one click-to-start / click-to-end voice call mode
+- AVAudioEngine for full-duplex capture/playback with macOS voice processing
 - native microphone permission prompt
 - local socket client to `~/.fermix/realtime.sock`
 - state renderer for idle/listening/thinking/tool-use/speaking/error
@@ -569,6 +728,40 @@ CLI integration can come in later stages:
 - `fermix voice start-companion`
 - `fermix voice stop-companion`
 
+### 6.10 Audio chunk cadence
+
+The companion captures at the input device's native rate and converts to
+24 kHz mono PCM16 before sending. Each `audio_chunk` event carries one chunk.
+
+V1 target: ~100 ms per chunk. With a 48 kHz input device, that's a
+4_800-frame `installTap` buffer; after converting to 24 kHz mono PCM16 it
+becomes 2_400 frames × 2 bytes = 4_800 raw bytes, ~6.4 KB on the wire after
+base64 + JSON envelope. Earlier drafts used 12_000-frame buffers (~250 ms,
+~16 KB on the wire), which adds noticeable one-way latency on top of network
+and model time and showed up as "the pet heard me late." `AudioController`
+logs the first converted chunk size on each
+session — verify it matches the target the next time the pet is launched.
+
+Bigger chunks are not free: latency scales linearly, and any single chunk
+larger than the pet's input buffer drops samples. Smaller chunks are not
+free either: a 20 ms chunk multiplies socket and base64 overhead by 5×.
+Pick the cadence the OpenAI/Azure docs explicitly recommend (~100 ms),
+and don't drift from it without measurement.
+
+### 6.11 Voice activity detection (VAD)
+
+VAD is `turn_detection` on the OpenAI Realtime session. V1 pins one mode:
+`server_vad` with provider-side response creation and interruption enabled.
+Fermix does not expose a manual VAD or semantic VAD selector in setup.
+
+The reason is architectural rather than cosmetic: the pet is a full-duplex
+voice call. If the daemon waits for manual commits, the UI falls back into
+half-duplex turn handling and the assistant cannot be interrupted naturally.
+
+Future work can tune threshold/silence values, add local wake-word activation,
+or evaluate `semantic_vad`, but those are product-mode changes and should not
+be exposed as low-level setup knobs.
+
 ## 7. Setup, Readiness, and Health
 
 ### 7.1 Setup
@@ -587,36 +780,57 @@ Add Realtime config through the existing setup chain:
 - `config/runtime.exs` env overlays
 - setup tests
 
-The wizard must not add six questions to every install. Setup asks one
-top-level question first:
+Realtime is an optional companion to the chat interface; it has no Fermix
+channel of its own and runs locally on the operator's machine. The setup wizard
+must not add a long list of questions to every install. Setup asks one top-level
+question first:
 
 ```text
 Enable local voice companion? [y/N]
 ```
 
-Only when the answer is yes does it ask for model, voice, activation mode, cost
-cap, session cap, and transcript persistence. Reconfigure flows may expose the
-advanced fields directly.
+Only when the answer is yes does the wizard prompt for the rest of the realtime
+block, in this order:
+
+1. OpenAI API key for Realtime — skipped when the main agent provider is
+   already `openai` (the agent's `[fermix_core.providers.openai].api_key` is
+   reused). When the main agent provider is `anthropic` or `openai_codex`,
+   Realtime needs its own OpenAI API key, persisted to the same canonical
+   location.
+2. Voice.
+3. Max session minutes and max estimated cost cents.
+4. Tool policy (`read_only` or `broad`) and network-tool allowance.
+5. Transcript persistence.
+
+Reconfigure flows expose the same fields directly.
 
 Suggested CLI flags:
 
 - `--realtime-enabled`
-- `--realtime-model`
+- `--realtime-api-key`
 - `--realtime-voice`
-- `--realtime-activation`
 - `--realtime-max-session-minutes`
 - `--realtime-max-cost-cents`
+- `--realtime-tool-policy`
+- `--realtime-allow-network-tools`
 - `--realtime-persist-transcripts`
 
 Suggested env overlays:
 
 - `FERMIX_REALTIME_ENABLED`
+- `FERMIX_REALTIME_PROVIDER`
 - `FERMIX_REALTIME_MODEL`
 - `FERMIX_REALTIME_VOICE`
-- `FERMIX_REALTIME_ACTIVATION`
 - `FERMIX_REALTIME_MAX_SESSION_MINUTES`
 - `FERMIX_REALTIME_MAX_COST_CENTS`
+- `FERMIX_REALTIME_TOOL_POLICY`
+- `FERMIX_REALTIME_ALLOW_NETWORK_TOOLS`
 - `FERMIX_REALTIME_PERSIST_TRANSCRIPTS`
+
+The Realtime API key reuses `OPENAI_API_KEY` rather than introducing a separate
+`FERMIX_REALTIME_API_KEY`, because Realtime stores its key in the canonical
+`[fermix_core.providers.openai].api_key` slot. Adding a duplicate env var would
+create two sources of truth for the same secret.
 
 ### 7.2 Readiness
 
@@ -664,6 +878,13 @@ Realtime sessions should reuse `PromptComposer.compose_with_metadata/1` for
 bootstrap and memory prompt parts, but the generated runtime section must match
 the Realtime session's filtered capability snapshot.
 
+Realtime also adds one bootstrap-only file, `REALTIME.md`, loaded only when
+`PromptComposer.compose_with_metadata(realtime?: true, ...)` is used. It sits
+after USER/MEMORY prompt context and before the generated runtime section, and
+narrows behavior for spoken output: short answers, no rambling, interruption
+handling, tool-call pacing, and echo/noise caution. Normal text turns must not
+load `REALTIME.md`.
+
 Current repo detail: `PromptComposer` passes `available_skills` to
 `RuntimeSections.build/1`, and `RuntimeSections.capability_summary/1` reads
 built-ins from the global registry. Calling the current API unchanged would
@@ -674,6 +895,10 @@ Implementation must add a filtered runtime-section path, for example:
 
 - `RuntimeSections.build(skills, capabilities: filtered_capabilities)`
 - or `PromptComposer.compose_with_metadata(runtime_capabilities: filtered_capabilities, available_skills: filtered_skills)`
+
+This is a small public API extension across `PromptComposer` and
+`RuntimeSections`, not just Realtime call-site wiring. Keep existing call sites
+backward compatible while adding tests for the filtered path.
 
 The generated section and the Realtime `session.tools` payload must derive from
 the same capability snapshot.
@@ -691,7 +916,7 @@ Do not fork a new memory store.
 Use `ConversationStore` for transcript turns and `ExtractionDebouncer` for
 post-turn fact extraction. Realtime metadata should distinguish:
 
-- activation mode
+- mode (`full_duplex_voice_call`)
 - device ID
 - transcript source
 - `source_type = "realtime"`
@@ -723,9 +948,9 @@ shell commands, or send network traffic.
 V1 guardrails:
 
 - no session while idle
-- no microphone stream while idle
-- visible recording/listening indicator
-- click-to-talk as the default activation
+- no microphone stream while no call is active
+- visible active-call/listening indicator
+- explicit click-to-start/click-to-end call lifecycle
 - max session duration
 - idle timeout
 - max committed input audio seconds per session
@@ -775,9 +1000,9 @@ Trace policy:
 | Provider rate limit | Send error to companion, close session or pause based on provider event |
 | Cost/session cap reached | Send limit event, stop listening, close provider session |
 | Transient WebSocket/network error | V1 closes the session loudly; reconnect is V2 |
-| User speaks over assistant audio | Companion sends `interrupt`, daemon cancels provider response/playback, then forwards new audio |
+| User speaks over assistant audio | macOS voice processing suppresses playback echo; OpenAI server VAD interrupts response; explicit pet interrupt also sends `interrupt` and daemon emits `playback_stop` |
 | Local socket protocol error | Close that client connection, trace error |
-| Audio queue overflow | Fail loud and close session; do not silently drop audio |
+| Oversized audio chunk | Fail loud and close session; do not silently drop audio |
 | Tool call unknown/denied | Return tool error output to Realtime and trace denial |
 | Transcript persistence fails | Return error state after user-visible response only if recorder failure violates configured persistence requirement; otherwise trace and continue with persistence warning |
 
@@ -807,10 +1032,11 @@ Trace policy:
 - Add `FermixCore.Realtime.Supervisor`.
 - Add `LocalVoiceSocket` with 0600 UDS.
 - Add JSON event protocol parser/encoder.
-- Add bounded queue and chunk-size validation with
-  `max_chunk_bytes = 16_384`, `max_buffer_chunks = 20`.
+- Add chunk-size validation with `max_chunk_bytes = 16_384`. Do not add a
+  per-turn chunk-count kill switch for the immediate-forwarding V1 path; it
+  breaks full-duplex speech because chunks are forwarded continuously.
 - Add explicit `interrupt` and pinned `mute` semantics.
-- Tests: socket permissions, malformed event failure, listen lifecycle,
+- Tests: socket permissions, malformed event failure, call lifecycle,
   backpressure failure, interrupt while speaking, mute keeps session alive.
 
 ### Stage 3 - OpenAI Realtime WebSocket client
@@ -825,7 +1051,10 @@ Trace policy:
 
 - Start one session per client.
 - Select and snapshot capabilities with `trust: :third_party`.
-- Compose prompt context with a runtime section derived from the same snapshot.
+- Compose prompt context with `REALTIME.md` enabled and with a runtime section
+  derived from the same snapshot.
+- Implement the versioned safety identifier derivation from §6.7 and test that
+  it never exposes raw owner or device IDs.
 - Execute function calls through `ToolBridge`.
 - Persist final transcript turns only when `persist_transcripts = true`, using
   `kind = "voice_turn"`, `source_type = "realtime"`, and
@@ -847,10 +1076,13 @@ Trace policy:
 
 - Add `clients/macos/FermixPet`.
 - Implement floating UI, states, socket connection, mic capture, playback.
+- Replace the temporary status-box UI with the mascot-first pet surface and a
+  visible close/quit affordance.
 - Use source-build/Xcode plus ad-hoc signing for V1; document Gatekeeper
   quarantine workaround for shared early-access builds.
-- Manual validation on macOS: permission prompt, click-to-talk, interrupt/stop,
-  daemon offline state.
+- Manual validation on macOS: permission prompt, start/end voice call,
+  full-duplex mic capture during playback, interrupt/stop, daemon offline state,
+  mascot hover controls, and quit behavior.
 
 ### Stage 7 - CLI and docs
 
@@ -887,8 +1119,8 @@ Trace policy:
 1. Native macOS release packaging is outside Burrito. V1 uses source-build/Xcode
    plus ad-hoc signing; Developer ID signing and notarization remain release
    packaging work.
-2. Core needs an explicit `websockex` dependency. `websockex` is currently in
-   `fermix_channels`, not `fermix_core`.
+2. Core pins `websockex ~> 0.4` to match the existing channel gateway client
+   dependency rather than adding a second WebSocket library.
 3. Exact OpenAI Realtime event names must be verified immediately before
    implementation.
 4. Base64 audio over JSON is simple and testable, but may need a binary framing
@@ -897,13 +1129,17 @@ Trace policy:
    wait for M10 approval UX.
 6. Always-listening and command-word modes are not V1. The cost risk is real if
    background audio is streamed or committed to OpenAI.
-7. Realtime reconnect is V2. V1 closes loudly on provider/WebSocket loss to
-   avoid replaying audio, duplicating tool calls, or resuming with stale state.
+7. V1 reconnect is bounded (3 attempts, 1/2/4s backoff per §6.5.4) but
+   reconnect-after-failure-loop and reconnect-across-`call_stop` are still
+   V2.
+8. Realtime per-token pricing changes with model versions. The pricing source
+   used by `CostTracker` (see §6.5.2) must point to a single named location and
+   be reviewed when bumping `Config.model`.
 
 ## 15. Recommendation
 
 Build M9.1 as a core Realtime subsystem plus a native macOS companion. Keep V1
-click-to-talk, daemon-owned, API-key-safe, transcript-persistence opt-in, and
+full-duplex, daemon-owned, API-key-safe, transcript-persistence opt-in, and
 read-only by default. This gives Fermix the local "desktop assistant" feel
 without turning the existing channel dispatcher, transcription module, or
 provider adapter into a streaming audio framework.

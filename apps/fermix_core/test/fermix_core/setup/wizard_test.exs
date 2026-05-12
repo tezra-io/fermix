@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.WizardTest do
     signal = Application.fetch_env(:fermix_channels, :signal)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
+    realtime = Application.get_env(:fermix_core, :realtime, [])
     fermix_home = System.get_env("FERMIX_HOME")
 
     Application.put_env(:fermix_core, :personalization,
@@ -33,6 +34,7 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :signal, signal)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
+      Application.put_env(:fermix_core, :realtime, realtime)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -173,6 +175,46 @@ defmodule FermixCore.Setup.WizardTest do
     refute Keyword.has_key?(telegram, :allowed_user_ids)
     assert Keyword.get(compaction, :threshold) == 0.8
     assert Keyword.get(memory, :extraction_timeout_ms) == 120_000
+  end
+
+  test "save_answers persists realtime voice setup answers" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-realtime-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        openai_api_key: "sk-test-123",
+        telegram_bot_token: "bot-token",
+        realtime_enabled: "yes",
+        realtime_voice: "marin",
+        realtime_max_session_minutes: "20",
+        realtime_max_cost_cents: "35",
+        realtime_tool_policy: "broad",
+        realtime_allow_network_tools: "true",
+        realtime_persist_transcripts: "true"
+      )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :enabled) == true
+    assert Keyword.get(realtime, :model) == "gpt-realtime-2"
+    assert Keyword.get(realtime, :voice) == "marin"
+    refute Keyword.has_key?(realtime, :activation)
+    refute Keyword.has_key?(realtime, :turn_detection)
+    assert Keyword.get(realtime, :max_session_minutes) == 20
+    assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 35
+    assert Keyword.get(realtime, :tool_policy) == "broad"
+    assert Keyword.get(realtime, :allow_network_tools) == true
+    assert Keyword.get(realtime, :persist_transcripts) == true
   end
 
   test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
@@ -365,6 +407,7 @@ defmodule FermixCore.Setup.WizardTest do
              :identity,
              :agents,
              :soul,
+             :realtime,
              :user,
              :memory
            ]
