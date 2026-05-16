@@ -64,7 +64,11 @@ defmodule FermixCore.Realtime.OpenAIClient do
             format: input_audio_format(config),
             transcription: %{model: config.transcription_model},
             turn_detection: turn_detection(config),
-            noise_reduction: %{type: "far_field"}
+            # near_field matches a close-talking laptop / desktop mic
+            # profile (FermixPet sits on the user's desk). far_field is
+            # for room mics and over-attenuates close-mic speech while
+            # letting sharp transients (clicks, key taps) through.
+            noise_reduction: %{type: "near_field"}
           },
           output: %{
             format: output_audio_format(config),
@@ -199,7 +203,11 @@ defmodule FermixCore.Realtime.OpenAIClient do
       type: "server_vad",
       create_response: true,
       interrupt_response: true,
-      threshold: 0.5,
+      # 0.6 (up from OpenAI's 0.5 default) rejects most mouse-click and
+      # keyboard transients while still tripping on normal-volume speech.
+      # If you find speech being missed, drop to 0.55; if false-positives
+      # remain, raise to 0.65.
+      threshold: 0.6,
       prefix_padding_ms: 300,
       silence_duration_ms: 800
     }

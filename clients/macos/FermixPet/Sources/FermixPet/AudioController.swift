@@ -36,7 +36,9 @@ final class AudioController {
     private let playbackCounterLock = NSLock()
     private var pendingPlaybackBuffers = 0
     private let captureMuteLock = NSLock()
-    private var captureMuted = false
+    private var captureMuted = true
+    private let chunkHandlerLock = NSLock()
+    private var onChunkHandler: ((Data) -> Void)?
 
     var isPlayingBack: Bool {
         playbackCounterLock.lock()
@@ -75,15 +77,63 @@ final class AudioController {
         }
     }
 
-    func startCapture(onChunk: @escaping (Data) -> Void) throws {
-        stopCapture()
+    /// Engage the mic hardware on socket connect so the first call doesn't
+    /// pay engine + tap startup cost. **Best-effort**: silently no-ops if
+    /// the user hasn't yet granted microphone permission (we don't want
+    /// pre-warm to trigger a permission prompt — that belongs to the user
+    /// explicitly starting a call).
+    ///
+    /// While warmed but not streaming, the macOS privacy indicator IS lit
+    /// (the OS is reading the live mic) but no bytes leave the process —
+    /// the tap closure drops every buffer because `captureMuted` is true
+    /// and `onChunkHandler` is nil.
+    func warmCapture() throws {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+        try ensureCaptureRunning()
+    }
+
+    /// Attach a chunk handler and unmute so the warmed tap starts pushing
+    /// data to the socket. The caller must have already awaited
+    /// `requestCapturePermission()` — this throws `.microphoneDenied` if
+    /// permission isn't in hand.
+    func beginStreaming(onChunk: @escaping (Data) -> Void) throws {
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            throw CaptureError.microphoneDenied
+        }
+
+        try ensureCaptureRunning()
+
+        chunkHandlerLock.lock()
+        onChunkHandler = onChunk
+        chunkHandlerLock.unlock()
+
+        setCaptureMuted(false)
+    }
+
+    /// Detach the chunk handler and re-mute. The tap and engine stay alive
+    /// so the next call doesn't pay the warm-up cost. No audio leaves the
+    /// process after this returns.
+    func stopStreaming() {
+        chunkHandlerLock.lock()
+        onChunkHandler = nil
+        chunkHandlerLock.unlock()
+
+        setCaptureMuted(true)
+    }
+
+    /// Idempotent: installs the tap, starts the engine, and leaves the
+    /// capture path muted+handlerless. Safe to call repeatedly.
+    private func ensureCaptureRunning() throws {
+        if captureTapInstalled {
+            try startEngineIfNeeded()
+            return
+        }
 
         guard AVCaptureDevice.default(for: .audio) != nil else {
             throw CaptureError.noInputDevice
         }
 
         let input = engine.inputNode
-        enableVoiceProcessing(on: input)
         var format = Self.usableInputFormat(from: input)
 
         if format.sampleRate <= 0 || format.channelCount == 0 {
@@ -112,11 +162,22 @@ final class AudioController {
         }
 
         input.installTap(onBus: 0, bufferSize: Self.captureBufferFrames, format: format) { [weak self] buffer, _ in
-            guard let self, !self.isCaptureMuted() else { return }
+            guard let self else { return }
+            // Two-stage gate: muted OR no handler ⇒ drop the buffer on
+            // the floor. Both conditions are independently sufficient.
+            // Nothing leaves the process unless an active call has both
+            // wired a handler AND unmuted the capture path.
+            guard !self.isCaptureMuted() else { return }
+
+            self.chunkHandlerLock.lock()
+            let handler = self.onChunkHandler
+            self.chunkHandlerLock.unlock()
+
+            guard let handler = handler else { return }
 
             let data = Self.pcm16Data(from: buffer, converter: converter, outputFormat: outputFormat)
             if !data.isEmpty {
-                onChunk(data)
+                handler(data)
             }
         }
         captureTapInstalled = true
@@ -161,6 +222,15 @@ final class AudioController {
     }
 
     func stopCapture() {
+        // Belt: clear the handler so any tap callback racing with teardown
+        // can't fire a write to the socket.
+        chunkHandlerLock.lock()
+        onChunkHandler = nil
+        chunkHandlerLock.unlock()
+
+        setCaptureMuted(true)
+
+        // Braces: remove the tap so no further callbacks even occur.
         if captureTapInstalled {
             engine.inputNode.removeTap(onBus: 0)
             captureTapInstalled = false
@@ -176,9 +246,21 @@ final class AudioController {
     func shutdown() {
         stopCapture()
         stopPlayback()
+
+        // Voice processing keeps the audio session and the macOS mic
+        // indicator alive even after engine.stop() — disable it explicitly
+        // before tearing down the engine.
+        if engine.inputNode.isVoiceProcessingEnabled {
+            try? engine.inputNode.setVoiceProcessingEnabled(false)
+        }
+
         if engine.isRunning {
             engine.stop()
         }
+
+        // Release the input AudioUnit so the OS sees the mic session as
+        // terminated; without this the privacy indicator persists.
+        engine.reset()
     }
 
     func diagnostics() -> String {
@@ -252,30 +334,6 @@ final class AudioController {
         if !engine.isRunning {
             engine.prepare()
             try engine.start()
-        }
-    }
-
-    private func enableVoiceProcessing(on input: AVAudioInputNode) {
-        if input.isVoiceProcessingEnabled {
-            return
-        }
-
-        if engine.isRunning {
-            engine.stop()
-            player.reset()
-
-            playbackCounterLock.lock()
-            pendingPlaybackBuffers = 0
-            playbackCounterLock.unlock()
-        }
-
-        do {
-            try input.setVoiceProcessingEnabled(true)
-        } catch {
-            NSLog(
-                "FermixPet: microphone voice processing unavailable; continuing without AEC: %@",
-                String(describing: error)
-            )
         }
     }
 

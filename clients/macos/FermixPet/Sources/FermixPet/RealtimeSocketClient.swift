@@ -26,6 +26,13 @@ final class RealtimeSocketClient {
         let socketFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard socketFD >= 0 else { throw POSIXError(.EIO) }
 
+        do {
+            try disableSigPipe(on: socketFD)
+        } catch {
+            Darwin.close(socketFD)
+            throw error
+        }
+
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
 
@@ -102,6 +109,21 @@ final class RealtimeSocketClient {
 
                 written += sent
             }
+        }
+    }
+
+    private func disableSigPipe(on socketFD: Int32) throws {
+        var value: Int32 = 1
+        let result = setsockopt(
+            socketFD,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &value,
+            socklen_t(MemoryLayout<Int32>.size)
+        )
+
+        if result != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
