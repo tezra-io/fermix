@@ -51,6 +51,12 @@ struct PetView: View {
                 state.toggleCall()
             }
 
+            if state.callActive {
+                Button(state.muted ? "Unmute" : "Mute") {
+                    state.toggleMute()
+                }
+            }
+
             Button("Interrupt") {
                 state.interrupt()
             }
@@ -79,7 +85,7 @@ struct PetView: View {
 
     private var mascotScale: CGFloat {
         switch state.mode {
-        case .listening:
+        case .listening, .muted:
             return animationPhase ? 1.035 : 0.99
         case .speaking:
             return animationPhase ? 1.02 : 0.985
@@ -116,6 +122,8 @@ struct PetView: View {
         switch state.mode {
         case .listening:
             return Color.cyan.opacity(0.42)
+        case .muted:
+            return Color.red.opacity(0.22)
         case .speaking:
             return Color.blue.opacity(0.34)
         case .toolUse:
@@ -129,7 +137,7 @@ struct PetView: View {
 
     private var glowRadius: CGFloat {
         switch state.mode {
-        case .listening, .speaking:
+        case .listening, .muted, .speaking:
             return animationPhase ? 16 : 10
         default:
             return 12
@@ -222,6 +230,16 @@ private struct ControlDock: View {
                     help: "Interrupt reply"
                 ) {
                     state.interrupt()
+                }
+            }
+
+            if state.callActive {
+                PetControlButton(
+                    systemName: state.muted ? "mic.slash.fill" : "mic.slash",
+                    tint: state.muted ? .red : .primary,
+                    help: state.muted ? "Unmute microphone" : "Mute microphone"
+                ) {
+                    state.toggleMute()
                 }
             }
         }

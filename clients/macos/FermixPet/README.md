@@ -9,7 +9,9 @@ V1 posture:
   `~/.fermix/realtime.sock`; set `FERMIX_HOME` or `FERMIX_REALTIME_SOCKET` for
   dev homes such as `~/.fermix-dev`.
 - The OpenAI API key stays in the Fermix daemon.
-- Capture is click-to-talk or click-toggle only. There is no always-listening mode.
+- Capture starts only after the user opens a local call. While the call is
+  open, the mic streams continuously and OpenAI server VAD owns turn
+  boundaries. There is no always-listening mode when no call is open.
 - Transcript persistence is controlled by Fermix setup, not by this client.
 - The visible pet is a transparent mascot surface; controls appear on hover.
 

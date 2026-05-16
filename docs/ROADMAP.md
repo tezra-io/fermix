@@ -466,10 +466,12 @@ See `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` for the full design.
 | **Visual context** | Screenshot analysis, image understanding | P1 | New | N/A | M |
 | **Self-knowledge agent** | Persistent subagent with full Fermix codebase knowledge — can modify Fermix itself when user requests platform changes | P1 | New | N/A | L |
 | **Realtime local voice companion** | Native macOS floating pet that opens a click-to-talk OpenAI Realtime session through the local daemon; command-word and always-listening modes are later opt-in phases | P1 | New | `docs/MILESTONE_9_1_REALTIME_VOICE.md` | L |
+| **Full-duplex voice cleanup** | Mac-first Realtime pass that enables graceful echo-cancellation fallback, removes local half-duplex timeout/input caps, aligns setup prompts with `gpt-realtime-2`, and rejects old voice mode knobs loudly | P1 | Follow-up | `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` | M |
 
 **Milestone 9 Total Effort:** ~8-12 weeks
 
-See `docs/MILESTONE_9_1_REALTIME_VOICE.md` for the full design.
+See `docs/MILESTONE_9_1_REALTIME_VOICE.md` and
+`docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` for the voice designs.
 
 ---
 

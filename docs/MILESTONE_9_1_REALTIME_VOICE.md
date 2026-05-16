@@ -1,6 +1,6 @@
 # Milestone 9.1: Realtime Local Voice Companion - Functional Design
 
-**Status:** Draft for review
+**Status:** V1 shipped; M9.2 tracks the full-duplex cleanup pass
 **Milestone:** M9 Differentiators
 **Depends on:** M4.8 Distribution & Daemon, M4.9 Unified Capabilities, M4.10 Provider Selection, M7 Built-in Capability Catalog
 **Informs:** M10 approval/governance, future Signal call support

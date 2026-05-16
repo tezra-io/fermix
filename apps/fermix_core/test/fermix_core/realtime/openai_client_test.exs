@@ -47,7 +47,7 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
                  prefix_padding_ms: 300,
                  silence_duration_ms: 800
                },
-               noise_reduction: %{type: "near_field"}
+               noise_reduction: %{type: "far_field"}
              },
              output: %{format: %{type: "audio/pcm", rate: 24_000}, voice: "marin"}
            }
