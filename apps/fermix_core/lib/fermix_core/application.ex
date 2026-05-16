@@ -33,11 +33,14 @@ defmodule FermixCore.Application do
     if BurritoUtil.running_standalone?() do
       cli_dispatch(BurritoArgs.argv())
     else
-      # Dev (mix test, iex -S mix phx.server) or plain release
-      # (`bin/fermix start`). All sibling apps are `:permanent`, so OTP
-      # auto-starts them after this returns; whether the Phoenix endpoint
-      # binds is governed by the existing PHX_SERVER convention in
-      # `config/runtime.exs`.
+      # Dev (mix test, mix fermix.dev, iex -S mix phx.server) or plain
+      # release (`bin/fermix start`). All sibling apps are `:permanent`,
+      # so OTP auto-starts them after this returns; whether the Phoenix
+      # endpoint binds is governed by the existing PHX_SERVER convention
+      # in `config/runtime.exs`. `mix fermix.dev` sets the gating env
+      # flags before calling `Application.ensure_all_started/1`, so the
+      # daemon socket and Realtime supervisor start without going
+      # through `cli_dispatch/1`.
       start_supervision_tree()
     end
   end
