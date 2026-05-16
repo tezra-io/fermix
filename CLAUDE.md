@@ -65,6 +65,7 @@ mix format --check-formatted
 - `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` — M4.9 design (shipped) — `Capability`/`Adapter` behaviours, `CapabilityRegistry`, MCP outbound
 - `docs/MILESTONE_4_10_CODEX_PARITY.md` — M4.10 design (shipped) — Codex tool calls, provider/model/effort persistence, wizard step, doctor auth probe
 - `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` — M4.11 design (draft) — cron jobs, persistent memory sources, isolated runs
+- `docs/MILESTONE_4_12_INBOUND_MCP.md` — M4.12 design (draft) — Fermix as an MCP server (stdio + streamable HTTP), `[mcp.inbound]` config, policy-gated capability exposure, `fermix mcp serve`
 - `docs/MILESTONE_7_ADVANCED_TOOLS.md` — M7 design — keyless built-in tool catalog (file/git/web/delegate/skill_create), capability metadata + dynamic prompt summary, self-knowledge skill
 - `docs/MILESTONE_7_1_CONVERSATION_LIFECYCLE.md` — M7.1 design (draft) — threshold-driven auto-compaction, channel command surface (`/compact`, `/new`, `/clear`, `/help`), per-channel command authorization
 - `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` — M7+ design (draft) — `Capability.Backend` behaviour, `[fermix_core.tools.<name>]` TOML, per-tool API-key wizard surface, `BuiltinSeeder.reseed/1`, `http_request` tool with `allowed_domains`

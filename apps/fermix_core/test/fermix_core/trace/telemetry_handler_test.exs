@@ -82,6 +82,47 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["success"] == true
   end
 
+  test "mcp inbound call event creates tool_exec trace", %{dir: dir, server: server} do
+    :telemetry.execute(
+      [:fermix, :mcp, :inbound, :call],
+      %{duration_ms: 42},
+      %{
+        client_name: "Claude Desktop",
+        client_version: "0.7.4",
+        session_id: "mcp-session",
+        tool_name: "memory_recall",
+        tool_kind: :builtin,
+        tool_policy_class: :read_only,
+        result: {:error, :invalid_params}
+      }
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :tool_exec)
+    entry = Enum.find(entries, &(&1["tool_name"] == "memory_recall"))
+    assert entry["agent"] == "Claude Desktop"
+    assert entry["duration_ms"] == 42
+    assert entry["session_id"] == "mcp-session"
+    assert entry["result"] == "{:error, :invalid_params}"
+  end
+
+  test "mcp inbound tools_listed event creates agent_event trace", %{dir: dir, server: server} do
+    :telemetry.execute(
+      [:fermix, :mcp, :inbound, :tools_listed],
+      %{count: 3},
+      %{client_name: "Cursor", client_version: "1.2.3", session_id: "mcp-session"}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = Enum.find(entries, &(&1["event"] == "mcp_inbound_tools_listed"))
+    assert entry["agent"] == "Cursor"
+    assert entry["count"] == 3
+    assert entry["session_id"] == "mcp-session"
+  end
+
   test "channel:message event creates channel_msg trace", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :channel, :message],
