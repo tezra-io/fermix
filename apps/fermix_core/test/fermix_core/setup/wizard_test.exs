@@ -641,6 +641,45 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(prompts, &(&1.key == :telegram_bot_token and &1.required?))
   end
 
+  test "prompts surface telegram_owner_user_id when telegram is enabled but owner is unpersisted" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-wizard-owner-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [openai: [auth_mode: :api_key, api_key: "sk-test-123"]],
+          personalization: [
+            user_name: "Test User",
+            timezone: "UTC",
+            communication_style: "neutral and direct"
+          ],
+          agent: [name: "fermix"]
+        ],
+        fermix_channels: [
+          telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]
+        ]
+      })
+
+    Application.put_env(:fermix_channels, :telegram,
+      enabled: true,
+      mode: :webhook,
+      bot_token: "bot-token"
+    )
+
+    report = Wizard.report()
+    prompts = Wizard.prompts(report.wizard)
+
+    assert Enum.any?(prompts, &(&1.key == :telegram_owner_user_id and &1.required?))
+  end
+
   test "save_answers does not persist an env-only OpenAI API key for unrelated setup answers" do
     tmp_home =
       Path.join(

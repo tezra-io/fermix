@@ -240,7 +240,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :telegram_owner_user_id,
         label: "Telegram command owner user ID",
-        required?: false
+        required?: channel_field_unpersisted?(persisted, :telegram, :owner_user_id, true)
       },
       %{
         key: :whatsapp_access_token,
@@ -265,7 +265,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :whatsapp_owner_user_id,
         label: "WhatsApp command owner user ID",
-        required?: false
+        required?: channel_field_unpersisted?(persisted, :whatsapp, :owner_user_id, false)
       },
       %{
         key: :discord_bot_token,
@@ -280,7 +280,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :discord_owner_user_id,
         label: "Discord command owner user ID",
-        required?: false
+        required?: channel_field_unpersisted?(persisted, :discord, :owner_user_id, false)
       },
       %{
         key: :slack_bot_token,
@@ -295,7 +295,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :slack_owner_user_id,
         label: "Slack command owner user ID",
-        required?: false
+        required?: channel_field_unpersisted?(persisted, :slack, :owner_user_id, false)
       },
       %{
         key: :signal_account,
@@ -305,7 +305,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :signal_owner_user_id,
         label: "Signal command owner user ID",
-        required?: false
+        required?: channel_field_unpersisted?(persisted, :signal, :owner_user_id, false)
       }
     ]
   end

@@ -33,15 +33,20 @@ defmodule FermixCore.Setup.Runtime do
     :realtime_allow_network_tools,
     :realtime_persist_transcripts,
     :telegram_bot_token,
+    :telegram_owner_user_id,
     :whatsapp_access_token,
     :whatsapp_phone_number_id,
     :whatsapp_verify_token,
     :whatsapp_app_secret,
+    :whatsapp_owner_user_id,
     :discord_bot_token,
     :discord_bot_user_id,
+    :discord_owner_user_id,
     :slack_bot_token,
     :slack_signing_secret,
-    :signal_account
+    :slack_owner_user_id,
+    :signal_account,
+    :signal_owner_user_id
   ]
 
   @type puts_fun :: (String.t() -> any())
