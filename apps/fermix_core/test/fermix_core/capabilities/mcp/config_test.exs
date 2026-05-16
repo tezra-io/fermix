@@ -90,6 +90,21 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       end
     end
 
+    test "ignores inbound MCP sections owned by FermixCore.MCP.Inbound.Config" do
+      toml = """
+      [mcp.inbound]
+      enabled = true
+
+      [mcp.inbound.http]
+      auth_token = "$env:FERMIX_TOKEN"
+
+      [mcp.inbound.tools.shell]
+      exposed = true
+      """
+
+      assert Config.from_toml(toml) == []
+    end
+
     test "raises on an invalid policy_class string" do
       toml = """
       [mcp.servers.x.tools.t]

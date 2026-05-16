@@ -1,6 +1,7 @@
 defmodule FermixCore.Setup.ConfigStoreTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.MCP.Inbound.Config, as: InboundConfig
   alias FermixCore.Setup.ConfigStore
 
   setup do
@@ -11,6 +12,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     compaction = Application.get_env(:fermix_core, :compaction, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
+    mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :personalization, personalization)
@@ -19,6 +22,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
+      Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
+      Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -496,6 +501,46 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     personalization = Application.get_env(:fermix_core, :personalization, [])
     assert Keyword.get(personalization, :user_name) == "preserved"
+    assert %InboundConfig{enabled?: false} = Application.get_env(:fermix_core, :mcp_inbound)
+  end
+
+  test "bootstrap_runtime_config hydrates inbound MCP config alongside outbound servers" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      File.rm_rf!(tmp_home)
+      System.delete_env("FERMIX_INBOUND_TOKEN_TEST")
+    end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    System.put_env("FERMIX_INBOUND_TOKEN_TEST", "secret-token")
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [mcp.servers.github]
+    command = "npx"
+    args = ["-y", "@modelcontextprotocol/server-github"]
+
+    [mcp.inbound]
+    enabled = true
+    transport = "streamable_http"
+    expose_kinds = ["builtin", "mcp"]
+
+    [mcp.inbound.http]
+    auth_token = "$env:FERMIX_INBOUND_TOKEN_TEST"
+    """)
+
+    assert :ok = ConfigStore.bootstrap_runtime_config()
+
+    assert [%{name: "github", command: "npx"}] = Application.get_env(:fermix_core, :mcp_servers)
+
+    assert %InboundConfig{
+             enabled?: true,
+             transport: :streamable_http,
+             expose_kinds: [:builtin, :mcp],
+             http: %{path: "/mcp", auth_token: "secret-token"}
+           } = Application.get_env(:fermix_core, :mcp_inbound)
   end
 
   test "bootstrap_runtime_config persists provider selection under :agent" do
