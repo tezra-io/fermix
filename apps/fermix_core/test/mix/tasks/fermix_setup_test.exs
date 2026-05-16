@@ -52,7 +52,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
           ],
           agent: [name: "fermix"]
         ],
-        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+        fermix_channels: [
+          telegram: [
+            enabled: true,
+            mode: :webhook,
+            bot_token: "bot-token",
+            owner_user_id: "test-owner"
+          ]
+        ],
         fermix_web: []
       })
 
@@ -138,7 +145,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
           ],
           agent: [name: "fermix", provider: :openai]
         ],
-        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+        fermix_channels: [
+          telegram: [
+            enabled: true,
+            mode: :webhook,
+            bot_token: "bot-token",
+            owner_user_id: "test-owner"
+          ]
+        ],
         fermix_web: []
       })
 
@@ -186,6 +200,8 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       "high",
       "--telegram-bot-token",
       "bot-token",
+      "--telegram-owner-user-id",
+      "test-owner",
       "--no-realtime-enabled",
       "--skip-probe"
     ])
