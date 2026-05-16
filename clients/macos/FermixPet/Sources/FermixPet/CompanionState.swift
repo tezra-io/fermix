@@ -8,16 +8,17 @@ final class CompanionState: ObservableObject {
         case offline
         case idle
         case listening
+        case muted
         case thinking
         case speaking
         case toolUse
-        case success
         case error
     }
 
     @Published private(set) var mode: Mode = .offline
     @Published private(set) var connected = false
     @Published private(set) var callActive = false
+    @Published private(set) var muted = false
     @Published private(set) var statusText = "offline"
 
     private let socket = RealtimeSocketClient()
@@ -50,6 +51,7 @@ final class CompanionState: ObservableObject {
         }
 
         callActive = false
+        muted = false
         audio.shutdown()
         socket.close()
         connected = false
@@ -75,10 +77,10 @@ final class CompanionState: ObservableObject {
         case .offline: return Color.gray
         case .idle: return Color.teal
         case .listening: return Color.green
+        case .muted: return Color.red
         case .thinking: return Color.indigo
         case .speaking: return Color.orange
         case .toolUse: return Color.purple
-        case .success: return Color.cyan
         case .error: return Color.red
         }
     }
@@ -88,10 +90,10 @@ final class CompanionState: ObservableObject {
         case .offline: return "wifi.slash"
         case .idle: return "circle"
         case .listening: return "mic.fill"
+        case .muted: return "mic.slash.fill"
         case .thinking: return "sparkles"
         case .speaking: return "waveform"
         case .toolUse: return "wrench.and.screwdriver"
-        case .success: return "checkmark.circle.fill"
         case .error: return "exclamationmark.triangle.fill"
         }
     }
@@ -152,6 +154,8 @@ final class CompanionState: ObservableObject {
         }
 
         callActive = true
+        muted = false
+        audio.setCaptureMuted(false)
         mode = .listening
         statusText = "checking mic"
 
@@ -186,10 +190,12 @@ final class CompanionState: ObservableObject {
     func endCall() {
         audio.stopCapture()
         audio.stopPlayback()
+        audio.setCaptureMuted(false)
         if connected {
             try? socket.send(["type": "call_stop"])
         }
         callActive = false
+        muted = false
         if connected {
             mode = .idle
             statusText = "idle"
@@ -207,9 +213,27 @@ final class CompanionState: ObservableObject {
         NSSound.beep()
     }
 
+    func toggleMute() {
+        setMuted(!muted)
+    }
+
+    private func setMuted(_ enabled: Bool) {
+        muted = enabled
+        audio.setCaptureMuted(enabled)
+
+        if connected && callActive {
+            try? socket.send(["type": "mute", "enabled": enabled])
+        }
+
+        if callActive {
+            mode = enabled ? .muted : .listening
+            statusText = enabled ? "muted" : "listening"
+        }
+    }
+
     func interrupt() {
         sendInterruptForCurrentPlayback()
-        mode = connected && callActive ? .listening : (connected ? .idle : .offline)
+        mode = connected && callActive ? activeInputMode : (connected ? .idle : .offline)
         statusText = mode.rawValue
     }
 
@@ -220,8 +244,17 @@ final class CompanionState: ObservableObject {
         case "state":
             let next = event["state"] as? String ?? "idle"
             let previous = mode
-            mode = Mode(rawValue: next) ?? .idle
-            statusText = next
+
+            if next == "muted" {
+                muted = true
+                audio.setCaptureMuted(true)
+            } else if next == "idle" {
+                muted = false
+                audio.setCaptureMuted(false)
+            }
+
+            mode = muted && next == "listening" ? .muted : (Mode(rawValue: next) ?? .idle)
+            statusText = mode.rawValue
 
             if previous == .speaking && mode != .speaking {
                 audio.resetUtteranceAnchor()
@@ -236,14 +269,19 @@ final class CompanionState: ObservableObject {
             audio.stopPlayback()
             audio.resetUtteranceAnchor()
             if callActive {
-                mode = .listening
-                statusText = "listening"
+                mode = activeInputMode
+                statusText = mode.rawValue
             }
         case "tool_event":
             switch event["status"] as? String {
             case "completed":
-                mode = .success
-                statusText = "done"
+                if callActive {
+                    mode = .toolUse
+                    statusText = "tool"
+                } else {
+                    mode = .idle
+                    statusText = "idle"
+                }
             case "error":
                 mode = .error
                 statusText = event["reason"] as? String ?? "tool error"
@@ -257,6 +295,7 @@ final class CompanionState: ObservableObject {
             audio.stopCapture()
             audio.stopPlayback()
             callActive = false
+            muted = false
         default:
             break
         }
@@ -275,10 +314,15 @@ final class CompanionState: ObservableObject {
         }
     }
 
+    private var activeInputMode: Mode {
+        muted ? .muted : .listening
+    }
+
     private func handlePeerClose() {
         audio.stopCapture()
         audio.stopPlayback()
         callActive = false
+        muted = false
         connected = false
 
         if mode != .error {

@@ -15,9 +15,7 @@ defmodule FermixCore.Realtime.ConfigTest do
     assert config.input_audio_format == "pcm16"
     assert config.output_audio_format == "pcm16"
     assert config.max_chunk_bytes == 16_384
-    assert config.idle_timeout_ms == 30_000
     assert config.max_session_minutes == 15
-    assert config.max_input_audio_seconds_per_session == 600
     assert config.max_estimated_cost_cents_per_session == 100
     assert config.tool_policy == "read_only"
     assert config.allow_network_tools? == false
@@ -81,13 +79,17 @@ defmodule FermixCore.Realtime.ConfigTest do
     end
   end
 
-  test "rejects removed activation and turn detection settings" do
-    assert_raise ArgumentError, ~r/activation.*removed/, fn ->
-      Config.normalize(activation: "click_to_talk")
-    end
-
-    assert_raise ArgumentError, ~r/turn_detection.*removed/, fn ->
-      Config.normalize(turn_detection: "manual")
+  test "rejects removed realtime mode settings" do
+    for key <- [
+          :activation,
+          :turn_detection,
+          :max_buffer_chunks,
+          :idle_timeout_ms,
+          :max_input_audio_seconds_per_session
+        ] do
+      assert_raise ArgumentError, ~r/#{key}.*removed/, fn ->
+        Config.normalize([{key, "removed"}])
+      end
     end
   end
 

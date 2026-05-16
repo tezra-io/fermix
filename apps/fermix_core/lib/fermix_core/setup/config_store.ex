@@ -97,6 +97,14 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
+  @spec realtime_configured?() :: boolean()
+  def realtime_configured? do
+    case File.read(path()) do
+      {:ok, contents} -> section_present?(contents, ["fermix_core", "realtime"])
+      {:error, _reason} -> false
+    end
+  end
+
   @spec save_snapshot(runtime_config()) :: :ok | {:error, term()}
   def save_snapshot(snapshot) do
     persisted = persistable_snapshot(snapshot)
@@ -402,6 +410,14 @@ defmodule FermixCore.Setup.ConfigStore do
     |> Kernel.<>("\n")
   end
 
+  defp section_present?(contents, path) do
+    header = "[#{Enum.join(path, ".")}]"
+
+    contents
+    |> String.split("\n")
+    |> Enum.any?(&(String.trim(&1) == header))
+  end
+
   defp render_section(_path, []), do: nil
 
   defp render_section(path, values) do
@@ -593,25 +609,9 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_realtime(config) do
     config
-    |> drop_legacy_realtime_keys()
     |> RealtimeConfig.normalize()
     |> RealtimeConfig.to_keyword()
   end
-
-  defp drop_legacy_realtime_keys(config) when is_list(config) do
-    Keyword.drop(config, [:activation, :turn_detection, :max_buffer_chunks])
-    |> Enum.reject(fn
-      {key, _value} when key in ["activation", "turn_detection", "max_buffer_chunks"] -> true
-      _entry -> false
-    end)
-  end
-
-  defp drop_legacy_realtime_keys(config) when is_map(config) do
-    Map.drop(config, [:activation, :turn_detection, :max_buffer_chunks])
-    |> Map.drop(["activation", "turn_detection", "max_buffer_chunks"])
-  end
-
-  defp drop_legacy_realtime_keys(config), do: config
 
   # Validates against the canonical enum owned by ResponsesShared.
   # Returns the atom on success, or nil on unknown input — consistent

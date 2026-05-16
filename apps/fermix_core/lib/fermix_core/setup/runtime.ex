@@ -378,22 +378,46 @@ defmodule FermixCore.Setup.Runtime do
   defp collect_answers(report, opts, prompt) do
     provided = provided_answers(opts)
 
-    Enum.reduce(prompt_plan(report, opts), provided, fn prompt_info, answers ->
-      prompt_info = prompt_for_answers(prompt_info, answers)
-
-      cond do
-        answered?(answers, prompt_info.key) -> answers
-        irrelevant_prompt?(prompt_info, answers) -> answers
-        true -> answers ++ interactive_answer(prompt_info, prompt)
-      end
-    end)
+    collect_answers(report, opts, prompt, provided, MapSet.new())
   end
 
-  defp prompt_plan(report, opts) do
-    if Keyword.get(opts, :reconfigure, false) do
-      Wizard.reconfigure_prompts(report.wizard)
+  defp collect_answers(report, opts, prompt, answers, seen_keys) do
+    {answers, seen_keys, asked?} =
+      Enum.reduce(prompt_plan(report, opts, answers), {answers, seen_keys, false}, fn
+        prompt_info, {answers, seen_keys, false} ->
+          prompt_info = prompt_for_answers(prompt_info, answers)
+
+          cond do
+            MapSet.member?(seen_keys, prompt_info.key) ->
+              {answers, seen_keys, false}
+
+            answered?(answers, prompt_info.key) ->
+              {answers, MapSet.put(seen_keys, prompt_info.key), false}
+
+            irrelevant_prompt?(prompt_info, answers) ->
+              {answers, MapSet.put(seen_keys, prompt_info.key), false}
+
+            true ->
+              {answers ++ interactive_answer(prompt_info, prompt),
+               MapSet.put(seen_keys, prompt_info.key), true}
+          end
+
+        _prompt_info, acc ->
+          acc
+      end)
+
+    if asked? do
+      collect_answers(report, opts, prompt, answers, seen_keys)
     else
-      Wizard.prompts(report.wizard)
+      answers
+    end
+  end
+
+  defp prompt_plan(report, opts, answers) do
+    if Keyword.get(opts, :reconfigure, false) do
+      Wizard.reconfigure_prompts(report.wizard, answers)
+    else
+      Wizard.prompts(report.wizard, answers)
     end
   end
 

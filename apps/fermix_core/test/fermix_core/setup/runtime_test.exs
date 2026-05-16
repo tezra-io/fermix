@@ -959,5 +959,72 @@ defmodule FermixCore.Setup.RuntimeTest do
       refute Enum.any?(labels, &String.starts_with?(&1, "Realtime model"))
       refute Enum.any?(labels, &String.starts_with?(&1, "Realtime voice"))
     end
+
+    test "--reconfigure asks basic realtime prompts after voice companion is enabled" do
+      home = tmp_home()
+      on_exit(fn -> File.rm_rf!(home) end)
+      prepare(home)
+
+      :ok =
+        ConfigStore.save_snapshot(%{
+          fermix_core: [
+            providers: [
+              openai: [
+                api_key: "sk-test",
+                default_model: "gpt-5.4",
+                reasoning_effort: :medium
+              ]
+            ],
+            personalization: [
+              user_name: "Op",
+              timezone: "UTC",
+              communication_style: "concise and direct"
+            ],
+            agent: [name: "fermix", provider: :openai],
+            realtime: [enabled: false]
+          ],
+          fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+          fermix_web: []
+        })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", default_model: "gpt-5.4", reasoning_effort: :medium]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      {:ok, prompt_log} = Agent.start_link(fn -> [] end)
+
+      prompt = fn label ->
+        Agent.update(prompt_log, &[label | &1])
+
+        cond do
+          String.starts_with?(label, "Enable local voice companion") -> "yes"
+          String.starts_with?(label, "Provider") -> "openai"
+          String.starts_with?(label, "Default model") -> "gpt-5.4"
+          String.starts_with?(label, "Reasoning effort") -> "medium"
+          true -> ""
+        end
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run([reconfigure: true, skip_probe: true], puts: puts, prompt: prompt)
+
+      labels = Agent.get(prompt_log, &Enum.reverse/1)
+
+      assert Enum.any?(labels, &String.starts_with?(&1, "Enable local voice companion"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Realtime voice"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Realtime max session minutes"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Realtime max estimated cost cents"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Realtime tool policy"))
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      realtime = snapshot.fermix_core |> Keyword.get(:realtime, [])
+      assert Keyword.get(realtime, :enabled) == true
+      assert Keyword.get(realtime, :voice) == "marin"
+    end
   end
 end

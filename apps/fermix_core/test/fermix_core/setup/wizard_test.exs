@@ -217,6 +217,83 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(realtime, :persist_transcripts) == true
   end
 
+  test "fresh setup asks for realtime opt-in before realtime details" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-prompts-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    report = Wizard.report()
+    prompts = Wizard.prompts(report.wizard)
+
+    assert Enum.any?(prompts, &(&1.key == :realtime_enabled and &1.required?))
+    refute Enum.any?(prompts, &(&1.key == :realtime_voice))
+
+    opt_in_prompts = Wizard.prompts(report.wizard, realtime_enabled: true)
+
+    assert Enum.any?(opt_in_prompts, &(&1.key == :realtime_voice))
+    assert Enum.any?(opt_in_prompts, &(&1.key == :realtime_max_session_minutes))
+    assert Enum.any?(opt_in_prompts, &(&1.key == :realtime_max_cost_cents))
+    refute Enum.any?(opt_in_prompts, &(&1.key == :realtime_tool_policy))
+    refute Enum.any?(opt_in_prompts, &(&1.key == :realtime_allow_network_tools))
+    refute Enum.any?(opt_in_prompts, &(&1.key == :realtime_persist_transcripts))
+  end
+
+  test "reconfigure realtime prompts short-circuit unless voice is enabled" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-reconfigure-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [
+            openai: [api_key: "sk-test-123", default_model: "gpt-5.5", reasoning_effort: :high]
+          ],
+          agent: [name: "fermix", provider: :openai],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"],
+          realtime: [enabled: false]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    state = Wizard.report().wizard
+
+    disabled_keys =
+      state
+      |> Wizard.reconfigure_prompts(realtime_enabled: false)
+      |> Enum.map(& &1.key)
+
+    assert :realtime_enabled in disabled_keys
+    refute :realtime_voice in disabled_keys
+    refute :realtime_max_session_minutes in disabled_keys
+    refute :realtime_max_cost_cents in disabled_keys
+
+    enabled_keys =
+      state
+      |> Wizard.reconfigure_prompts(realtime_enabled: true)
+      |> Enum.map(& &1.key)
+
+    assert :realtime_voice in enabled_keys
+    assert :realtime_max_session_minutes in enabled_keys
+    assert :realtime_max_cost_cents in enabled_keys
+    refute :realtime_tool_policy in enabled_keys
+    refute :realtime_allow_network_tools in enabled_keys
+    refute :realtime_persist_transcripts in enabled_keys
+  end
+
   test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]

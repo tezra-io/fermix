@@ -68,7 +68,8 @@ mix format --check-formatted
 - `docs/MILESTONE_7_ADVANCED_TOOLS.md` — M7 design — keyless built-in tool catalog (file/git/web/delegate/skill_create), capability metadata + dynamic prompt summary, self-knowledge skill
 - `docs/MILESTONE_7_1_CONVERSATION_LIFECYCLE.md` — M7.1 design (draft) — threshold-driven auto-compaction, channel command surface (`/compact`, `/new`, `/clear`, `/help`), per-channel command authorization
 - `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` — M7+ design (draft) — `Capability.Backend` behaviour, `[fermix_core.tools.<name>]` TOML, per-tool API-key wizard surface, `BuiltinSeeder.reseed/1`, `http_request` tool with `allowed_domains`
-- `docs/MILESTONE_9_1_REALTIME_VOICE.md` — M9.1 design (draft) — native macOS floating voice companion backed by OpenAI Realtime, daemon-owned tools/memory/traces, click-to-talk first, always-listening later
+- `docs/MILESTONE_9_1_REALTIME_VOICE.md` — M9.1 design (shipped) — native macOS floating voice companion backed by OpenAI Realtime, daemon-owned tools/memory/traces, click-to-talk first, always-listening later
+- `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` — M9.2 design (draft reviewed) — full-duplex cleanup for macOS AEC, Realtime API shape, setup prompts, and removed legacy voice mode knobs
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
