@@ -24,6 +24,7 @@ final class CompanionState: ObservableObject {
     private let socket = RealtimeSocketClient()
     private let audio = AudioController()
     private let socketPath: String
+    private var captureStarted = false
 
     init(socketPath: String = CompanionState.defaultSocketPath()) {
         self.socketPath = socketPath
@@ -52,6 +53,7 @@ final class CompanionState: ObservableObject {
 
         callActive = false
         muted = false
+        captureStarted = false
         audio.shutdown()
         socket.close()
         connected = false
@@ -114,6 +116,17 @@ final class CompanionState: ObservableObject {
             statusText = "idle"
             try socket.send(["type": "client_hello", "protocol_version": 1])
             debugLog("connected realtime socket: \(socketPath)")
+
+            // Pre-warm the mic so first call start doesn't pay the
+            // engine + tap setup cost (~couple of seconds on macOS).
+            // Best-effort: skips silently if mic permission hasn't been
+            // granted yet (we don't want connect to trigger the prompt).
+            do {
+                try audio.warmCapture()
+                debugLog("audio capture pre-warmed")
+            } catch {
+                debugLog("warmCapture failed (will retry on call start): \(String(describing: error))")
+            }
         } catch {
             connected = false
             callActive = false
@@ -125,6 +138,9 @@ final class CompanionState: ObservableObject {
 
     func disconnect() {
         endCall()
+        // Full mic teardown on disconnect — the pet is going to "off",
+        // so we release the audio session entirely (mic indicator clears).
+        audio.stopCapture()
         socket.close()
         connected = false
         mode = .offline
@@ -155,8 +171,13 @@ final class CompanionState: ObservableObject {
 
         callActive = true
         muted = false
-        audio.setCaptureMuted(false)
-        mode = .listening
+        captureStarted = false
+        // Don't unmute here — `beginStreaming(onChunk:)` (called by
+        // `startCaptureIfNeeded()` when the server confirms listening
+        // state) is what unmutes and attaches the chunk handler. Keeping
+        // the path muted until then guarantees no audio reaches the
+        // socket between callActive=true and the server's go-ahead.
+        mode = .idle
         statusText = "checking mic"
 
         Task { @MainActor in
@@ -170,13 +191,11 @@ final class CompanionState: ObservableObject {
             guard callActive else { return }
 
             try socket.send(["type": "call_start"])
-            try audio.startCapture { [weak self] chunk in
-                self?.socket.sendAudioChunk(chunk)
-            }
-            statusText = "listening"
+            statusText = "starting"
         } catch {
             mode = .error
             callActive = false
+            captureStarted = false
             if connected {
                 try? socket.send(["type": "call_stop"])
             }
@@ -188,9 +207,13 @@ final class CompanionState: ObservableObject {
     }
 
     func endCall() {
-        audio.stopCapture()
+        // Detach the chunk handler and re-mute — no audio leaves the
+        // process after this point. The tap and engine stay alive so the
+        // *next* call doesn't repay the warm-up cost. Full teardown
+        // happens in disconnect()/shutdown().
+        audio.stopStreaming()
         audio.stopPlayback()
-        audio.setCaptureMuted(false)
+        captureStarted = false
         if connected {
             try? socket.send(["type": "call_stop"])
         }
@@ -256,6 +279,10 @@ final class CompanionState: ObservableObject {
             mode = muted && next == "listening" ? .muted : (Mode(rawValue: next) ?? .idle)
             statusText = mode.rawValue
 
+            if next == "listening" {
+                startCaptureIfNeeded()
+            }
+
             if previous == .speaking && mode != .speaking {
                 audio.resetUtteranceAnchor()
             }
@@ -292,12 +319,44 @@ final class CompanionState: ObservableObject {
         case "error":
             mode = .error
             statusText = event["reason"] as? String ?? "error"
-            audio.stopCapture()
+            // Server signalled an error — detach handler so no in-flight
+            // mic buffer races back to the (possibly-broken) socket. Keep
+            // the engine warm so a recovery / reconnect doesn't pay
+            // startup latency again.
+            audio.stopStreaming()
             audio.stopPlayback()
             callActive = false
             muted = false
+            captureStarted = false
         default:
             break
+        }
+    }
+
+    private func startCaptureIfNeeded() {
+        guard callActive && !captureStarted else { return }
+
+        do {
+            // Attaches the chunk handler and unmutes the pre-warmed tap.
+            // If the mic wasn't pre-warmed at connect time (permission
+            // not yet granted), beginStreaming sets it up now — falling
+            // back to the slow path on first ever call.
+            try audio.beginStreaming { [weak self] chunk in
+                self?.socket.sendAudioChunk(chunk)
+            }
+            captureStarted = true
+            statusText = activeInputMode.rawValue
+        } catch {
+            mode = .error
+            callActive = false
+            captureStarted = false
+            if connected {
+                try? socket.send(["type": "call_stop"])
+            }
+            statusText = captureErrorMessage(error)
+            debugLog(
+                "microphone capture failed: \(statusText); error=\(String(describing: error)); diagnostics=\(audio.diagnostics())"
+            )
         }
     }
 
@@ -319,10 +378,14 @@ final class CompanionState: ObservableObject {
     }
 
     private func handlePeerClose() {
+        // Daemon socket dropped from the other end. Tear the mic all the
+        // way down — there's nothing to stream to and nothing to come
+        // back to. A subsequent connect() will re-warm.
         audio.stopCapture()
         audio.stopPlayback()
         callActive = false
         muted = false
+        captureStarted = false
         connected = false
 
         if mode != .error {

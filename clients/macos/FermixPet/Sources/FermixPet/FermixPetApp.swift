@@ -12,14 +12,27 @@ struct FermixPetApp: App {
                 .frame(width: 180, height: 168)
                 .background(Color.clear)
                 .background(WindowConfigurator())
+                .onAppear { appDelegate.companionState = state }
         }
         .windowResizability(.contentSize)
     }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    weak var companionState: CompanionState?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+    }
+
+    // willTerminate is delivered synchronously and gives us a guaranteed
+    // window to tear down voice processing before the process exits. The
+    // willTerminateNotification observer in CompanionState may not run in
+    // time on every macOS version; this is the belt to its braces.
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            companionState?.shutdown()
+        }
     }
 }
 

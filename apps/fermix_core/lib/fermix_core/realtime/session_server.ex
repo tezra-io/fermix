@@ -29,6 +29,16 @@ defmodule FermixCore.Realtime.SessionServer do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name))
   end
 
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) when is_list(opts) do
+    %{
+      id: {__MODULE__, Keyword.get(opts, :session_scope, make_ref())},
+      start: {__MODULE__, :start_link, [opts]},
+      restart: :temporary,
+      type: :worker
+    }
+  end
+
   @spec call_start(GenServer.server()) :: :ok | {:error, term()}
   def call_start(server), do: GenServer.call(server, :call_start, @call_start_timeout_ms)
 
