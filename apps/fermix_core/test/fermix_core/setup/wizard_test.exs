@@ -294,6 +294,46 @@ defmodule FermixCore.Setup.WizardTest do
     refute :realtime_persist_transcripts in enabled_keys
   end
 
+  test "reconfigure surfaces owner_user_id only for channels enabled in persisted config" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-channel-reconfigure-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [
+            openai: [api_key: "sk-test-123", default_model: "gpt-5.5", reasoning_effort: :high]
+          ],
+          agent: [name: "fermix", provider: :openai],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [
+          telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"],
+          discord: [enabled: false]
+        ]
+      })
+
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    keys =
+      Wizard.report().wizard
+      |> Wizard.reconfigure_prompts([])
+      |> Enum.map(& &1.key)
+
+    assert :telegram_owner_user_id in keys
+    refute :discord_owner_user_id in keys
+    refute :slack_owner_user_id in keys
+    refute :whatsapp_owner_user_id in keys
+    refute :signal_owner_user_id in keys
+  end
+
   test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]

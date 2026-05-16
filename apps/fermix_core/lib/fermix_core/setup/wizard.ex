@@ -83,6 +83,14 @@ defmodule FermixCore.Setup.Wizard do
     :realtime_enabled
   ]
 
+  @channel_owner_reconfigure_keys %{
+    telegram_owner_user_id: :telegram,
+    whatsapp_owner_user_id: :whatsapp,
+    discord_owner_user_id: :discord,
+    slack_owner_user_id: :slack,
+    signal_owner_user_id: :signal
+  }
+
   @type seeding_result :: %{
           name: :identity | :agents | :soul | :realtime | :user | :memory,
           path: String.t(),
@@ -143,11 +151,13 @@ defmodule FermixCore.Setup.Wizard do
   @spec reconfigure_prompts(WizardState.t(), [answer()]) :: [map()]
   def reconfigure_prompts(%WizardState{} = state, answers) when is_list(answers) do
     specs = prompt_specs(state)
+    persisted = persisted_snapshot()
 
     specs
     |> Enum.filter(fn prompt ->
       prompt.key in @reconfigure_prompt_keys or
-        realtime_reconfigure_followup?(prompt, answers)
+        realtime_reconfigure_followup?(prompt, answers) or
+        channel_owner_reconfigure?(prompt, persisted)
     end)
     |> Enum.map(&Map.put(&1, :required?, true))
   end
@@ -422,6 +432,25 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp realtime_reconfigure_followup?(_prompt, _answers), do: false
+
+  defp channel_owner_reconfigure?(%{key: key}, persisted) do
+    case Map.fetch(@channel_owner_reconfigure_keys, key) do
+      {:ok, channel} -> channel_enabled_in_persisted?(persisted, channel)
+      :error -> false
+    end
+  end
+
+  defp channel_enabled_in_persisted?(persisted, channel) do
+    config =
+      persisted
+      |> Map.get(:fermix_channels, [])
+      |> Keyword.get(channel, [])
+
+    Keyword.get(config, :enabled, default_channel_enabled?(channel)) == true
+  end
+
+  defp default_channel_enabled?(:telegram), do: true
+  defp default_channel_enabled?(_other), do: false
 
   defp realtime_resolves_enabled?(specs, answers) do
     case realtime_enabled_answer(answers) do
