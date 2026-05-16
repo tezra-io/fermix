@@ -70,6 +70,8 @@ defmodule FermixCore.Capabilities.MCP.Config do
   defp classify_section(["mcp", "servers", server, "tools", tool]),
     do: {:tool, server, tool}
 
+  defp classify_section(["mcp", "inbound" | _]), do: nil
+
   defp classify_section(["mcp" | _] = parts) do
     raise ArgumentError,
           "Unknown MCP section header: [#{Enum.join(parts, ".")}]"

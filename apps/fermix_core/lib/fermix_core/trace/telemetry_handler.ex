@@ -18,6 +18,20 @@ defmodule FermixCore.Trace.TelemetryHandler do
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent}
   ]
 
+  @mcp_inbound_events [
+    %{
+      event: [:fermix, :mcp, :inbound, :tools_listed],
+      trace_type: :agent_event,
+      agent_field: :client_name,
+      trace_event: "mcp_inbound_tools_listed"
+    },
+    %{
+      event: [:fermix, :mcp, :inbound, :call],
+      trace_type: :tool_exec,
+      agent_field: :client_name
+    }
+  ]
+
   @spec attach(keyword()) :: :ok
   def attach(opts \\ []) do
     server = Keyword.get(opts, :trace_server, Trace)
@@ -58,7 +72,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   end
 
   defp event_definitions do
-    @core_events ++ LifecycleTelemetry.trace_event_definitions()
+    @core_events ++ @mcp_inbound_events ++ LifecycleTelemetry.trace_event_definitions()
   end
 
   defp event_config(event) do
@@ -74,7 +88,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
     data =
       measurements
-      |> Map.merge(sanitize_metadata(metadata, agent_field))
+      |> Map.merge(metadata |> sanitize_metadata(agent_field) |> json_safe())
       |> maybe_put_trace_event(config)
 
     {agent, data}
@@ -89,6 +103,13 @@ defmodule FermixCore.Trace.TelemetryHandler do
   # consumers and acceptance tests rely on both the normalized `agent` and the
   # lifecycle-specific metadata key being present.
   defp sanitize_metadata(metadata, _agent_field), do: metadata
+
+  defp json_safe(map) when is_map(map),
+    do: Map.new(map, fn {key, value} -> {key, json_safe(value)} end)
+
+  defp json_safe(list) when is_list(list), do: Enum.map(list, &json_safe/1)
+  defp json_safe(tuple) when is_tuple(tuple), do: inspect(tuple)
+  defp json_safe(value), do: value
 
   defp maybe_put_trace_event(data, %{trace_event: trace_event}) when is_binary(trace_event) do
     Map.put(data, :event, trace_event)

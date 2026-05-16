@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.ConfigStore do
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -167,11 +168,14 @@ defmodule FermixCore.Setup.ConfigStore do
     case File.read(path()) do
       {:ok, contents} ->
         servers = McpConfig.from_toml(contents)
+        inbound = InboundMcpConfig.from_toml(contents)
         Application.put_env(:fermix_core, :mcp_servers, servers)
+        Application.put_env(:fermix_core, :mcp_inbound, inbound)
         :ok
 
       {:error, :enoent} ->
         Application.put_env(:fermix_core, :mcp_servers, [])
+        Application.put_env(:fermix_core, :mcp_inbound, InboundMcpConfig.default())
         :ok
 
       {:error, reason} ->
