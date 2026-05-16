@@ -18,9 +18,7 @@ defmodule FermixCore.Realtime.Config do
           transcription_model: String.t(),
           max_chunk_bytes: pos_integer(),
           max_response_output_tokens: pos_integer(),
-          idle_timeout_ms: pos_integer(),
           max_session_minutes: pos_integer(),
-          max_input_audio_seconds_per_session: pos_integer(),
           max_estimated_cost_cents_per_session: pos_integer(),
           tool_policy: String.t(),
           allow_network_tools?: boolean(),
@@ -37,9 +35,7 @@ defmodule FermixCore.Realtime.Config do
             transcription_model: "whisper-1",
             max_chunk_bytes: 16_384,
             max_response_output_tokens: 4_096,
-            idle_timeout_ms: 30_000,
             max_session_minutes: 15,
-            max_input_audio_seconds_per_session: 600,
             max_estimated_cost_cents_per_session: 100,
             tool_policy: "read_only",
             allow_network_tools?: false,
@@ -62,6 +58,9 @@ defmodule FermixCore.Realtime.Config do
   def normalize(config) when is_list(config) or is_map(config) do
     reject_removed_key!(config, :activation)
     reject_removed_key!(config, :turn_detection)
+    reject_removed_key!(config, :max_buffer_chunks)
+    reject_removed_key!(config, :idle_timeout_ms)
+    reject_removed_key!(config, :max_input_audio_seconds_per_session)
 
     realtime = %__MODULE__{
       enabled?: bool(config, :enabled, false),
@@ -73,10 +72,7 @@ defmodule FermixCore.Realtime.Config do
       transcription_model: string(config, :transcription_model, "whisper-1"),
       max_chunk_bytes: positive_int(config, :max_chunk_bytes, 16_384),
       max_response_output_tokens: positive_int(config, :max_response_output_tokens, 4_096),
-      idle_timeout_ms: positive_int(config, :idle_timeout_ms, 30_000),
       max_session_minutes: positive_int(config, :max_session_minutes, 15),
-      max_input_audio_seconds_per_session:
-        positive_int(config, :max_input_audio_seconds_per_session, 600),
       max_estimated_cost_cents_per_session:
         positive_int(config, :max_estimated_cost_cents_per_session, 100),
       tool_policy: string(config, :tool_policy, "read_only"),

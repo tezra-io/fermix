@@ -64,7 +64,7 @@ defmodule FermixCore.Realtime.OpenAIClient do
             format: input_audio_format(config),
             transcription: %{model: config.transcription_model},
             turn_detection: turn_detection(config),
-            noise_reduction: %{type: "near_field"}
+            noise_reduction: %{type: "far_field"}
           },
           output: %{
             format: output_audio_format(config),

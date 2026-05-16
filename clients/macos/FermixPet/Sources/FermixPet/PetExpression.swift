@@ -10,13 +10,15 @@ enum PetExpression: String {
         switch mode {
         case .listening:
             return .listening
+        case .muted:
+            return .listening
         case .speaking:
             return .speaking
         case .thinking, .toolUse:
             return .thinking
         case .idle where callActive:
             return .listening
-        case .offline, .idle, .success, .error:
+        case .offline, .idle, .error:
             return .idle
         }
     }

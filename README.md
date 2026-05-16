@@ -112,12 +112,14 @@ chat_id = "8217352118"
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
 | `FERMIX_REALTIME_ENABLED` | No | Enable the local Realtime voice companion mode |
+| `FERMIX_REALTIME_PROVIDER` | No | Realtime provider; only `openai` is supported |
 | `FERMIX_REALTIME_MODEL` | No | Override the OpenAI Realtime model |
 | `FERMIX_REALTIME_VOICE` | No | Override the Realtime voice |
-| `FERMIX_REALTIME_ACTIVATION` | No | `click_to_talk` or `click_toggle` |
-| `FERMIX_REALTIME_TURN_DETECTION` | No | `manual` for click-to-talk, or provider VAD mode |
 | `FERMIX_REALTIME_MAX_SESSION_MINUTES` | No | Per-session voice duration cap |
 | `FERMIX_REALTIME_MAX_COST_CENTS` | No | Per-session estimated/reported cost cap |
+| `FERMIX_REALTIME_MAX_ESTIMATED_COST_CENTS_PER_SESSION` | No | Long-form alias for `FERMIX_REALTIME_MAX_COST_CENTS` |
+| `FERMIX_REALTIME_TOOL_POLICY` | No | Voice tool scope, `read_only` or `broad` |
+| `FERMIX_REALTIME_ALLOW_NETWORK_TOOLS` | No | Allow Realtime tool calls that use network access |
 | `FERMIX_REALTIME_PERSIST_TRANSCRIPTS` | No | Persist final voice transcripts as local memory text |
 
 In dev/test these default to empty strings.
@@ -151,9 +153,25 @@ Realtime voice is an optional local mode. When enabled, `fermix run` starts a `0
 fermix setup --reconfigure --realtime-enabled \
   --realtime-model gpt-realtime-2 \
   --realtime-voice marin \
-  --realtime-activation click_to_talk
+  --realtime-max-session-minutes 15 \
+  --realtime-max-cost-cents 100
 
 fermix voice status
+```
+
+The setup snapshot writes the Realtime block to `FERMIX_HOME/config.toml`:
+
+```toml
+[fermix_core.realtime]
+enabled = true
+provider = "openai"
+model = "gpt-realtime-2"
+voice = "marin"
+max_session_minutes = 15
+max_estimated_cost_cents_per_session = 100
+tool_policy = "read_only"
+allow_network_tools = false
+persist_transcripts = false
 ```
 
 The companion source lives at `clients/macos/FermixPet` and is built locally:
@@ -170,7 +188,6 @@ FERMIX_HOME=/Users/sujshe/.fermix-dev \
 OPENAI_API_KEY=sk-... \
 FERMIX_REALTIME_ENABLED=true \
 FERMIX_REALTIME_MODEL=gpt-realtime-2 \
-FERMIX_REALTIME_TURN_DETECTION=manual \
 mix fermix.dev.realtime
 ```
 
@@ -181,7 +198,13 @@ cd clients/macos/FermixPet
 FERMIX_HOME=/Users/sujshe/.fermix-dev swift run FermixPet
 ```
 
-V1 is click-to-talk or click-toggle only. It does not stream while idle, does not persist raw audio, and transcript persistence defaults to off. If transcript persistence is enabled, final spoken user/assistant transcript text is stored locally as `voice_turn` memory rows with `source_type = "realtime"` and `source_id = "local:<device_id>"`.
+V1 opens a local call explicitly from the companion. While the call is open,
+the mic streams continuously and OpenAI server VAD owns turn boundaries; when
+no call is open, audio is not streamed. Fermix does not persist raw audio, and
+transcript persistence defaults to off. If transcript persistence is enabled,
+final spoken user/assistant transcript text is stored locally as `voice_turn`
+memory rows with `source_type = "realtime"` and
+`source_id = "local:<device_id>"`.
 
 Troubleshooting:
 

@@ -65,6 +65,23 @@ defmodule FermixCore.Setup.Wizard do
 
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
+  @realtime_followup_prompt_keys [
+    :realtime_api_key,
+    :realtime_voice,
+    :realtime_max_session_minutes,
+    :realtime_max_cost_cents
+  ]
+  @realtime_advanced_prompt_keys [
+    :realtime_tool_policy,
+    :realtime_allow_network_tools,
+    :realtime_persist_transcripts
+  ]
+  @reconfigure_prompt_keys [
+    :provider,
+    :default_model,
+    :reasoning_effort,
+    :realtime_enabled
+  ]
 
   @type seeding_result :: %{
           name: :identity | :agents | :soul | :realtime | :user | :memory,
@@ -100,31 +117,38 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   @spec prompts(WizardState.t()) :: [map()]
-  def prompts(%WizardState{} = state) do
-    state
-    |> prompt_specs()
-    |> Enum.filter(& &1.required?)
+  def prompts(%WizardState{} = state), do: prompts(state, [])
+
+  @spec prompts(WizardState.t(), [answer()]) :: [map()]
+  def prompts(%WizardState{} = state, answers) when is_list(answers) do
+    specs = prompt_specs(state)
+
+    Enum.filter(specs, fn prompt ->
+      cond do
+        prompt.key in @realtime_followup_prompt_keys ->
+          realtime_setup_followup?(prompt, specs, answers)
+
+        prompt.key in @realtime_advanced_prompt_keys ->
+          false
+
+        true ->
+          prompt.required?
+      end
+    end)
   end
 
   @spec reconfigure_prompts(WizardState.t()) :: [map()]
-  def reconfigure_prompts(%WizardState{} = state) do
-    state
-    |> prompt_specs()
-    |> Enum.filter(
-      &(&1.key in [
-          :provider,
-          :default_model,
-          :reasoning_effort,
-          :realtime_enabled,
-          :realtime_api_key,
-          :realtime_voice,
-          :realtime_max_session_minutes,
-          :realtime_max_cost_cents,
-          :realtime_tool_policy,
-          :realtime_allow_network_tools,
-          :realtime_persist_transcripts
-        ])
-    )
+  def reconfigure_prompts(%WizardState{} = state), do: reconfigure_prompts(state, [])
+
+  @spec reconfigure_prompts(WizardState.t(), [answer()]) :: [map()]
+  def reconfigure_prompts(%WizardState{} = state, answers) when is_list(answers) do
+    specs = prompt_specs(state)
+
+    specs
+    |> Enum.filter(fn prompt ->
+      prompt.key in @reconfigure_prompt_keys or
+        realtime_reconfigure_followup?(prompt, answers)
+    end)
     |> Enum.map(&Map.put(&1, :required?, true))
   end
 
@@ -156,6 +180,7 @@ defmodule FermixCore.Setup.Wizard do
     model_unset? = provider_unset? or blank?(Keyword.get(provider_block, :default_model))
     effort_unset? = provider_unset? or blank?(Keyword.get(provider_block, :reasoning_effort))
     openai_api_key_unset? = openai_api_key_unpersisted?(persisted, persisted_provider)
+    realtime_api_key_unset? = canonical_openai_api_key_unpersisted?(persisted)
     default_model = ModelCatalog.default_model_for(prompt_provider)
 
     %{
@@ -166,6 +191,8 @@ defmodule FermixCore.Setup.Wizard do
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
       openai_api_key_unset?: openai_api_key_unset?,
+      realtime_api_key_unset?: realtime_api_key_unset?,
+      realtime_unconfigured?: not ConfigStore.realtime_configured?(),
       default_model: default_model
     }
   end
@@ -300,7 +327,11 @@ defmodule FermixCore.Setup.Wizard do
     ]
   end
 
-  defp realtime_prompts(%{persisted: persisted, openai_api_key_unset?: openai_api_key_unset?}) do
+  defp realtime_prompts(%{
+         persisted: persisted,
+         realtime_api_key_unset?: realtime_api_key_unset?,
+         realtime_unconfigured?: realtime_unconfigured?
+       }) do
     config =
       persisted
       |> Map.get(:fermix_core, [])
@@ -312,12 +343,12 @@ defmodule FermixCore.Setup.Wizard do
         key: :realtime_enabled,
         label: "Enable local voice companion? (yes/no; blank = #{yes_no(config.enabled?)})",
         default: config.enabled?,
-        required?: false
+        required?: realtime_unconfigured?
       },
       %{
         key: :realtime_api_key,
-        label: realtime_api_key_label(openai_api_key_unset?),
-        required?: openai_api_key_unset?
+        label: realtime_api_key_label(realtime_api_key_unset?),
+        required?: realtime_api_key_unset?
       },
       %{
         key: :realtime_voice,
@@ -369,6 +400,62 @@ defmodule FermixCore.Setup.Wizard do
 
   defp realtime_api_key_label(false),
     do: "OpenAI API key for Realtime (blank = use the existing OpenAI provider key)"
+
+  defp realtime_setup_followup?(%{key: :realtime_api_key, required?: required?}, specs, answers) do
+    required? and realtime_resolves_enabled?(specs, answers)
+  end
+
+  defp realtime_setup_followup?(%{key: key}, _specs, answers)
+       when key in [:realtime_voice, :realtime_max_session_minutes, :realtime_max_cost_cents] do
+    realtime_enabled_answer(answers) == true
+  end
+
+  defp realtime_setup_followup?(_prompt, _specs, _answers), do: false
+
+  defp realtime_reconfigure_followup?(%{key: :realtime_api_key, required?: required?}, answers) do
+    required? and realtime_enabled_answer(answers) == true
+  end
+
+  defp realtime_reconfigure_followup?(%{key: key}, answers)
+       when key in [:realtime_voice, :realtime_max_session_minutes, :realtime_max_cost_cents] do
+    realtime_enabled_answer(answers) == true
+  end
+
+  defp realtime_reconfigure_followup?(_prompt, _answers), do: false
+
+  defp realtime_resolves_enabled?(specs, answers) do
+    case realtime_enabled_answer(answers) do
+      value when is_boolean(value) ->
+        value
+
+      nil ->
+        specs
+        |> Enum.find(&(&1.key == :realtime_enabled))
+        |> case do
+          %{default: value} when is_boolean(value) -> value
+          _prompt -> false
+        end
+    end
+  end
+
+  defp realtime_enabled_answer(answers) do
+    case Keyword.get(answers, :realtime_enabled) do
+      value when is_boolean(value) ->
+        value
+
+      value when is_binary(value) ->
+        normalized = value |> String.trim() |> String.downcase()
+
+        cond do
+          normalized in @realtime_true_values -> true
+          normalized in @realtime_false_values -> false
+          true -> nil
+        end
+
+      _value ->
+        nil
+    end
+  end
 
   defp personalization_prompts(%{state: state}) do
     [
@@ -508,6 +595,13 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp openai_api_key_unpersisted?(_persisted, _provider), do: false
+
+  defp canonical_openai_api_key_unpersisted?(persisted) do
+    persisted
+    |> provider_config(:openai)
+    |> Keyword.get(:api_key)
+    |> blank?()
+  end
 
   defp enabled_channels(snapshot) do
     channels = Map.get(snapshot, :fermix_channels, [])

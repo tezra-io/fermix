@@ -35,6 +35,8 @@ final class AudioController {
     private var utteranceAnchorSampleTime: AVAudioFramePosition?
     private let playbackCounterLock = NSLock()
     private var pendingPlaybackBuffers = 0
+    private let captureMuteLock = NSLock()
+    private var captureMuted = false
 
     var isPlayingBack: Bool {
         playbackCounterLock.lock()
@@ -81,6 +83,7 @@ final class AudioController {
         }
 
         let input = engine.inputNode
+        enableVoiceProcessing(on: input)
         var format = Self.usableInputFormat(from: input)
 
         if format.sampleRate <= 0 || format.channelCount == 0 {
@@ -108,7 +111,9 @@ final class AudioController {
             throw CaptureError.outputFormatUnavailable
         }
 
-        input.installTap(onBus: 0, bufferSize: Self.captureBufferFrames, format: format) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: Self.captureBufferFrames, format: format) { [weak self] buffer, _ in
+            guard let self, !self.isCaptureMuted() else { return }
+
             let data = Self.pcm16Data(from: buffer, converter: converter, outputFormat: outputFormat)
             if !data.isEmpty {
                 onChunk(data)
@@ -162,6 +167,12 @@ final class AudioController {
         }
     }
 
+    func setCaptureMuted(_ muted: Bool) {
+        captureMuteLock.lock()
+        captureMuted = muted
+        captureMuteLock.unlock()
+    }
+
     func shutdown() {
         stopCapture()
         stopPlayback()
@@ -176,8 +187,9 @@ final class AudioController {
         let input = engine.inputNode
         let inputFormat = Self.usableInputFormat(from: input)
         let outputFormat = engine.outputNode.outputFormat(forBus: 0)
+        let voiceProcessing = input.isVoiceProcessingEnabled ? "enabled" : "disabled"
 
-        return "auth=\(auth), inputDevice=\(device), inputSampleRate=\(inputFormat.sampleRate), inputChannels=\(inputFormat.channelCount), outputSampleRate=\(outputFormat.sampleRate), outputChannels=\(outputFormat.channelCount), engineRunning=\(engine.isRunning)"
+        return "auth=\(auth), inputDevice=\(device), inputSampleRate=\(inputFormat.sampleRate), inputChannels=\(inputFormat.channelCount), outputSampleRate=\(outputFormat.sampleRate), outputChannels=\(outputFormat.channelCount), voiceProcessing=\(voiceProcessing), engineRunning=\(engine.isRunning)"
     }
 
     func play(base64PCM16 encoded: String) {
@@ -241,6 +253,36 @@ final class AudioController {
             engine.prepare()
             try engine.start()
         }
+    }
+
+    private func enableVoiceProcessing(on input: AVAudioInputNode) {
+        if input.isVoiceProcessingEnabled {
+            return
+        }
+
+        if engine.isRunning {
+            engine.stop()
+            player.reset()
+
+            playbackCounterLock.lock()
+            pendingPlaybackBuffers = 0
+            playbackCounterLock.unlock()
+        }
+
+        do {
+            try input.setVoiceProcessingEnabled(true)
+        } catch {
+            NSLog(
+                "FermixPet: microphone voice processing unavailable; continuing without AEC: %@",
+                String(describing: error)
+            )
+        }
+    }
+
+    private func isCaptureMuted() -> Bool {
+        captureMuteLock.lock()
+        defer { captureMuteLock.unlock() }
+        return captureMuted
     }
 
     private static func usableInputFormat(from input: AVAudioInputNode) -> AVAudioFormat {

@@ -257,11 +257,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
   end
 
-  test "idle timeout closes the provider session loudly" do
+  test "call stays live across local idle periods" do
     {:ok, pid} =
       SessionServer.start_link(
         companion: self(),
-        config: Config.normalize(enabled: true, idle_timeout_ms: 10),
+        config: Config.normalize(enabled: true),
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
@@ -272,8 +272,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert :ok = SessionServer.call_start(pid)
     openai = SessionServer.openai_pid(pid)
 
-    assert_receive {:realtime, %{type: "error", reason: "idle_timeout"}}, 250
-    assert Agent.get(openai, & &1.closed?)
+    refute_receive {:realtime, %{type: "error", reason: "idle_timeout"}}, 50
+    refute Agent.get(openai, & &1.closed?)
   end
 
   test "interrupt sends response.cancel before more audio" do

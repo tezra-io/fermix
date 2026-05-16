@@ -84,7 +84,6 @@ defmodule FermixCore.Realtime.SessionServer do
        recorder_opts: Keyword.get(opts, :recorder_opts, []),
        usage: CostTracker.new(config),
        muted?: false,
-       idle_timer: nil,
        max_session_timer: nil,
        user_transcript: "",
        assistant_transcript: "",
@@ -126,7 +125,7 @@ defmodule FermixCore.Realtime.SessionServer do
   def handle_call(:call_start, _from, %{openai_pid: openai_pid} = state)
       when is_pid(openai_pid) do
     notify(state.companion, %{type: "state", state: "listening"})
-    {:reply, :ok, reset_idle_timer(state)}
+    {:reply, :ok, state}
   end
 
   def handle_call(:call_start, _from, state) do
@@ -142,10 +141,7 @@ defmodule FermixCore.Realtime.SessionServer do
     case send_openai(state, OpenAIClient.audio_append_event(audio)) do
       :ok ->
         usage = CostTracker.add_input_audio_ms(state.usage, audio_duration_ms(audio))
-
-        state =
-          %{state | usage: usage}
-          |> reset_idle_timer()
+        state = %{state | usage: usage}
 
         notify_usage(state, "estimated")
 
@@ -179,11 +175,7 @@ defmodule FermixCore.Realtime.SessionServer do
       notify(state.companion, %{type: "playback_stop"})
       notify(state.companion, %{type: "state", state: "listening"})
 
-      state =
-        %{state | current_item_id: nil}
-        |> reset_idle_timer()
-
-      {:reply, :ok, state}
+      {:reply, :ok, %{state | current_item_id: nil}}
     else
       {:error, reason} ->
         notify_provider_send_error(state, reason)
@@ -263,11 +255,7 @@ defmodule FermixCore.Realtime.SessionServer do
       {:ok, openai_pid, state} ->
         notify(state.companion, %{type: "state", state: "listening"})
 
-        state =
-          %{state | openai_pid: openai_pid, reconnect_attempts: 0, reconnect_timer: nil}
-          |> reset_idle_timer()
-
-        {:noreply, state}
+        {:noreply, %{state | openai_pid: openai_pid, reconnect_attempts: 0, reconnect_timer: nil}}
 
       {:error, _reason, state} ->
         case schedule_reconnect(state) do
@@ -279,11 +267,6 @@ defmodule FermixCore.Realtime.SessionServer do
             {:noreply, drop_session(state)}
         end
     end
-  end
-
-  def handle_info(:idle_timeout, state) do
-    notify(state.companion, %{type: "error", reason: "idle_timeout"})
-    {:noreply, drop_session(state)}
   end
 
   def handle_info(:max_session_duration, state) do
@@ -581,19 +564,12 @@ defmodule FermixCore.Realtime.SessionServer do
         state.config.max_session_minutes * @minute_ms
       )
     )
-    |> reset_idle_timer()
-  end
-
-  defp reset_idle_timer(state) do
-    if is_reference(state.idle_timer), do: Process.cancel_timer(state.idle_timer)
-    %{state | idle_timer: Process.send_after(self(), :idle_timeout, state.config.idle_timeout_ms)}
   end
 
   defp cancel_timers(state) do
-    if is_reference(state.idle_timer), do: Process.cancel_timer(state.idle_timer)
     if is_reference(state.max_session_timer), do: Process.cancel_timer(state.max_session_timer)
     if is_reference(state.reconnect_timer), do: Process.cancel_timer(state.reconnect_timer)
-    %{state | idle_timer: nil, max_session_timer: nil, reconnect_timer: nil}
+    %{state | max_session_timer: nil, reconnect_timer: nil}
   end
 
   defp notify_usage(state, status) do

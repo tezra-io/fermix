@@ -171,9 +171,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           provider: "openai",
           model: "gpt-realtime-2",
           voice: "marin",
-          activation: "click_to_talk",
-          turn_detection: "manual",
-          max_buffer_chunks: 20,
           max_session_minutes: 10,
           max_estimated_cost_cents_per_session: 25,
           tool_policy: "broad",
@@ -208,6 +205,25 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(realtime, :tool_policy) == "broad"
     assert Keyword.get(realtime, :allow_network_tools) == true
     assert Keyword.get(realtime, :persist_transcripts) == true
+  end
+
+  test "load rejects removed realtime config keys" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.realtime]
+    enabled = true
+    max_buffer_chunks = 20
+    """)
+
+    assert_raise ArgumentError, ~r/max_buffer_chunks.*removed/, fn ->
+      ConfigStore.load_runtime_config()
+    end
   end
 
   test "apply_snapshot merges memory config without wiping non-persisted keys" do

@@ -60,17 +60,12 @@ defmodule FermixCore.Realtime.CostTracker do
     put_in(tracker.reported.cost_cents, reported_cost_cents(usage))
   end
 
-  @spec enforce_limits(t()) :: :ok | {:stop, :cost_limit | :input_audio_limit}
+  @spec enforce_limits(t()) :: :ok | {:stop, :cost_limit}
   def enforce_limits(%__MODULE__{} = tracker) do
-    cond do
-      input_audio_seconds(tracker) > tracker.config.max_input_audio_seconds_per_session ->
-        {:stop, :input_audio_limit}
-
-      max_cost_cents(tracker) > tracker.config.max_estimated_cost_cents_per_session ->
-        {:stop, :cost_limit}
-
-      true ->
-        :ok
+    if max_cost_cents(tracker) > tracker.config.max_estimated_cost_cents_per_session do
+      {:stop, :cost_limit}
+    else
+      :ok
     end
   end
 
@@ -99,8 +94,6 @@ defmodule FermixCore.Realtime.CostTracker do
 
   defp non_negative_int(value) when is_integer(value) and value >= 0, do: value
   defp non_negative_int(_value), do: 0
-
-  defp input_audio_seconds(tracker), do: tracker.estimated.input_audio_ms / 1_000
 
   defp max_cost_cents(tracker) do
     max(tracker.estimated.cost_cents, tracker.reported.cost_cents)

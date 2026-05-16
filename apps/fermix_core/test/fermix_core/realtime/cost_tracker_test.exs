@@ -71,14 +71,13 @@ defmodule FermixCore.Realtime.CostTrackerTest do
     assert tracker.reported.cost_cents == 0.0
   end
 
-  test "enforces max input audio seconds" do
-    config = Config.normalize(max_input_audio_seconds_per_session: 1)
-
+  test "does not enforce a local input audio duration cap" do
     tracker =
-      config
+      [max_estimated_cost_cents_per_session: 10_000]
+      |> Config.normalize()
       |> CostTracker.new()
-      |> CostTracker.add_input_audio_ms(1_100)
+      |> CostTracker.add_input_audio_ms(60 * 60 * 1_000)
 
-    assert {:stop, :input_audio_limit} = CostTracker.enforce_limits(tracker)
+    assert :ok = CostTracker.enforce_limits(tracker)
   end
 end
