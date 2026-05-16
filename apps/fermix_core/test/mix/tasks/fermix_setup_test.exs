@@ -186,6 +186,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       "high",
       "--telegram-bot-token",
       "bot-token",
+      "--no-realtime-enabled",
       "--skip-probe"
     ])
 
