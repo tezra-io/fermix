@@ -163,7 +163,7 @@ cd clients/macos/FermixPet
 swift run FermixPet
 ```
 
-For source-only development, skip Burrito and run the Realtime daemon from Mix:
+For source-only development, skip Burrito and run the full daemon from Mix:
 
 ```bash
 FERMIX_HOME=/Users/sujshe/.fermix-dev \
@@ -171,8 +171,10 @@ OPENAI_API_KEY=sk-... \
 FERMIX_REALTIME_ENABLED=true \
 FERMIX_REALTIME_MODEL=gpt-realtime-2 \
 FERMIX_REALTIME_TURN_DETECTION=manual \
-mix fermix.dev.realtime
+mix fermix.dev
 ```
+
+`mix fermix.dev` is the dev mirror of `fermix run`: one BEAM node hosts the daemon control socket, the Realtime voice socket, the Phoenix endpoint, and the channels app. Pass `--no-realtime`, `--no-channels`, or `--no-web` to skip a layer when iterating on one subsystem in isolation.
 
 Then launch the companion against the same home directory:
 
@@ -350,17 +352,59 @@ mix test --only integration
 
 `mix quality` is the canonical "does everything pass" command. The git pre-commit hook enforces format, compile, credo, and tests.
 
-For dev iteration against the channels and Phoenix endpoint, `mix phx.server` boots the umbrella without going through the CLI dispatcher.
+### Running the daemon in dev
 
-`mix phx.server` does not enable the release daemon control socket. Use the running IEx shell for direct local agent calls, or run the release command path with `fermix run` when testing `fermix ask`, `fermix status`, `fermix health`, and other socket-backed CLI commands.
-
-Local one-shot agent checks:
+`mix fermix.dev` is the single entry point — it boots core, channels, and web in one BEAM node with the daemon control socket and Realtime voice socket enabled, so `fermix ask`, `fermix status`, the macOS companion, and the channel pollers all attach to one process. Use `iex -S mix fermix.dev` when you want an attached shell.
 
 ```bash
-fermix ask "say pong"
-fermix ask --session scenario-web-fetch "validate web_fetch localhost rejection"
-echo "summarize current health" | fermix ask --stdin --json
+# Full stack — Phoenix on :4030, daemon socket, Realtime, all enabled channels
+FERMIX_HOME=~/.fermix-dev \
+OPENAI_API_KEY=sk-... \
+FERMIX_REALTIME_ENABLED=true \
+mix fermix.dev
+
+# Skip a layer when iterating on one subsystem
+mix fermix.dev --no-channels       # no Telegram/WhatsApp/Slack/Discord/Signal
+mix fermix.dev --no-realtime       # no voice socket
+mix fermix.dev --no-web            # no Phoenix endpoint
 ```
+
+The readiness banner prints what actually started:
+
+```
+Fermix dev daemon online
+  Daemon socket:    /Users/you/.fermix-dev/daemon.sock
+  Phoenix endpoint: http://127.0.0.1:4030
+  Realtime socket:  /Users/you/.fermix-dev/realtime.sock
+  Channels:         telegram
+```
+
+If a channel or Realtime is not configured, the banner shows the reason instead of crashing — the daemon still comes up so the rest of the stack is testable.
+
+Running two BEAM nodes against the same `TELEGRAM_BOT_TOKEN` (e.g. an older split workflow with `mix phx.server` next to a separate Realtime daemon) causes the two pollers to race on `getUpdates`. Keep the dev stack on one node — `mix fermix.dev`. The Phoenix port preflight will refuse to start a second instance when port `4030` is already bound.
+
+### Smoke-testing against the running daemon
+
+With `mix fermix.dev` running, exercise the agent path locally over the daemon socket:
+
+```bash
+fermix status                                                  # ping the daemon
+fermix ask "say pong"                                          # one-shot prompt
+fermix ask --session scenario-web-fetch "validate web_fetch localhost rejection"
+echo "summarize current health" | fermix ask --stdin --json    # stdin + JSON output
+curl -s http://127.0.0.1:4030/health/ready | jq .              # Phoenix readiness
+```
+
+For the macOS Realtime companion, point it at the same `FERMIX_HOME`:
+
+```bash
+cd clients/macos/FermixPet
+FERMIX_HOME=~/.fermix-dev swift run FermixPet
+```
+
+### Unit and integration tests
+
+`mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. Run `mix quality` before pushing; the pre-commit hook enforces the same gates.
 
 ## Resource history CLI
 
