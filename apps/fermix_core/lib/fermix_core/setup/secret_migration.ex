@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.SecretMigration do
   Explicit migration from plaintext setup secrets to the OS secret store.
   """
 
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretWriter
@@ -86,7 +87,12 @@ defmodule FermixCore.Setup.SecretMigration do
       case SecretWriter.put(secret.key, secret.value) do
         :ok ->
           puts.("Migrated #{secret.env}.")
-          updated = put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())
+
+          updated =
+            snapshot
+            |> put_snapshot_value(secret.path, SecretWriter.sentinel())
+            |> maybe_add_sandbox_env_source(secret)
+
           {:cont, {:ok, updated, [secret.key | migrated]}}
 
         {:error, reason} ->
@@ -96,6 +102,39 @@ defmodule FermixCore.Setup.SecretMigration do
       puts.("Skipped #{secret.env}.")
       {:cont, {:ok, snapshot, migrated}}
     end
+  end
+
+  defp maybe_add_sandbox_env_source(snapshot, secret) do
+    if Map.get(secret, :sandbox_env, false) do
+      sandbox = SandboxConfig.normalize(Map.get(snapshot, :sandbox))
+
+      allow =
+        if secret.env in sandbox.env.allow,
+          do: sandbox.env.allow,
+          else: sandbox.env.allow ++ [secret.env]
+
+      sources = Map.put_new(sandbox.env.sources, secret.env, security_keychain_source(secret.env))
+      updated_env = %{sandbox.env | allow: allow, sources: sources}
+      Map.put(snapshot, :sandbox, %{sandbox | env: updated_env})
+    else
+      snapshot
+    end
+  end
+
+  defp security_keychain_source(env_name) do
+    %{
+      source: :command,
+      command: "/usr/bin/security",
+      args: [
+        "find-generic-password",
+        "-a",
+        System.get_env("USER") || Path.basename(System.user_home!()),
+        "-s",
+        env_name,
+        "-w"
+      ],
+      timeout_ms: 3000
+    }
   end
 
   defp backup_config do
