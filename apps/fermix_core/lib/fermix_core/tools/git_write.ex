@@ -65,13 +65,27 @@ defmodule FermixCore.Tools.GitWrite do
          :ok <- validate_command(command),
          repo = Map.get(args, "repo", File.cwd!()),
          git_args = Support.optional_string_list(args, "args"),
-         {:ok, repo_dir} <- Sandbox.working_dir(repo, :git_write, context),
+         {:ok, repo_dir} <- sandbox_repo_path(repo, context),
          {:ok, repo_root} <- git_root(repo_dir),
-         {:ok, _allowed_root} <- Sandbox.write_path(repo_root, :git_write, context),
+         {:ok, _allowed_root} <- sandbox_repo_root(repo_root, repo_dir, context),
          {:ok, output} <- GitCommand.run(repo_dir, command, git_args) do
       {:ok, Tool.success(output)}
     else
       {:error, reason} -> Support.error(format_error(reason))
+    end
+  end
+
+  defp sandbox_repo_path(repo, context) do
+    case Sandbox.working_dir(repo, :git_write, context) do
+      {:ok, repo_dir} -> {:ok, repo_dir}
+      {:error, reason} -> {:error, {:repo_path_denied, reason}}
+    end
+  end
+
+  defp sandbox_repo_root(repo_root, repo_dir, context) do
+    case Sandbox.write_path(repo_root, :git_write, context) do
+      {:ok, allowed_root} -> {:ok, allowed_root}
+      {:error, reason} -> {:error, {:repo_root_denied, reason, repo_dir}}
     end
   end
 
@@ -90,8 +104,29 @@ defmodule FermixCore.Tools.GitWrite do
   defp validate_command(command) when command in @commands, do: :ok
   defp validate_command(command), do: {:error, "unknown_command: #{command}"}
 
-  defp format_error({:outside_root, path}), do: "Sandbox denied git_write outside roots: #{path}"
-  defp format_error({:protected_path, path}), do: "Sandbox denied protected path: #{path}"
-  defp format_error({:blocked_root, path}), do: "Sandbox denied blocked root: #{path}"
+  defp format_error({:repo_path_denied, {:outside_root, path}}) do
+    "Sandbox denied git_write repo path outside roots: #{path}. " <>
+      "To allow this repository path, run: fermix grant path #{path}"
+  end
+
+  defp format_error({:repo_root_denied, {:outside_root, root}, repo_dir}) do
+    "Sandbox denied git_write repo root outside roots: #{root} " <>
+      "(resolved from input #{repo_dir}). To allow this repository, run: fermix grant path #{root}"
+  end
+
+  defp format_error({:repo_path_denied, reason}), do: format_error(reason)
+  defp format_error({:repo_root_denied, reason, _repo_dir}), do: format_error(reason)
+
+  defp format_error({:outside_root, path}) do
+    "Sandbox denied git_write outside roots: #{path}. " <>
+      "To allow this repository, run: fermix grant path #{path}"
+  end
+
+  defp format_error({:protected_path, path}),
+    do: "Sandbox denied protected path: #{path}. Run: fermix sandbox explain"
+
+  defp format_error({:blocked_root, path}),
+    do: "Sandbox denied blocked root: #{path}. Run: fermix sandbox explain"
+
   defp format_error(reason), do: reason
 end

@@ -86,7 +86,7 @@ defmodule FermixChannels.Commands.Sandbox do
         persist(proposed, reply_fn)
       end
     else
-      {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{inspect(reason)}")
+      {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{format_error(reason)}")
     end
   end
 
@@ -97,7 +97,7 @@ defmodule FermixChannels.Commands.Sandbox do
          :ok <- ConfigMutation.persist(config) do
       reply(reply_fn, "Sandbox updated.\n#{ConfigMutation.diff(current, config)}")
     else
-      {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{inspect(reason)}")
+      {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{format_error(reason)}")
     end
   end
 
@@ -111,7 +111,7 @@ defmodule FermixChannels.Commands.Sandbox do
   defp persist(config, reply_fn) do
     case ConfigMutation.persist(config) do
       :ok -> reply(reply_fn, "Sandbox updated.")
-      {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{inspect(reason)}")
+      {:error, reason} -> reply(reply_fn, "Sandbox change rejected: #{format_error(reason)}")
     end
   end
 
@@ -173,6 +173,13 @@ defmodule FermixChannels.Commands.Sandbox do
   defp args(message), do: String.split(message.content, ~r/\s+/, trim: true)
   defp stable_user_id(metadata), do: Map.get(metadata, :user_id) || Map.get(metadata, "user_id")
   defp now_ms, do: System.monotonic_time(:millisecond)
+
+  defp format_error({:unsafe_root, path}) do
+    "unsafe_root: #{path} cannot be granted. Run: /sandbox explain"
+  end
+
+  defp format_error(reason) when is_binary(reason), do: reason
+  defp format_error(reason), do: inspect(reason)
 
   defp reply(reply_fn, text) do
     reply_fn.(text)

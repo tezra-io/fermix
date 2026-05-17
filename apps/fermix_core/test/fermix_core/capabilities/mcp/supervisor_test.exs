@@ -4,6 +4,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
 
   defmodule StubCaller do
     @behaviour FermixCore.Capabilities.MCP.Caller
@@ -84,6 +85,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
   setup do
     Naming.init()
     suffix = System.unique_integer([:positive])
+    sandbox = Application.get_env(:fermix_core, :sandbox)
+    pass_token = System.get_env("FERMIX_MCP_PASS_TOKEN")
 
     cap_registry =
       start_supervised!(
@@ -92,6 +95,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       )
 
     on_exit(fn ->
+      restore_sandbox(sandbox)
+      restore_env("FERMIX_MCP_PASS_TOKEN", pass_token)
+
       case :ets.whereis(Naming) do
         :undefined -> :ok
         tid -> :ets.delete_all_objects(tid)
@@ -207,11 +213,120 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     assert_receive {:hermes_starter_invoked, server}, 500
     assert server.command == "npx"
     assert server.args == ["-y", "@modelcontextprotocol/server-github"]
-    assert server.env == %{"TOKEN" => "secret"}
+    assert server.env["TOKEN"] == "secret"
 
     assert_receive {:fake_hermes_started, opts}, 500
     assert opts[:command] == "npx"
-    assert opts[:env] == %{"TOKEN" => "secret"}
+    assert opts[:env]["TOKEN"] == "secret"
+  end
+
+  test "resolves pass_env through Sandbox.Env and preserves literal env precedence", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    System.put_env("FERMIX_MCP_PASS_TOKEN", "from-env")
+
+    Application.put_env(:fermix_core, :sandbox,
+      SandboxConfig.normalize(env: [allow: ["FERMIX_MCP_PASS_TOKEN"]])
+    )
+
+    {:ok, _} =
+      start_supervised(
+        {McpSupervisor,
+         [
+           name: :"mcp_sup_pass_env_#{suffix}",
+           mcp_registry: :"mcp_sup_pass_env_reg_#{suffix}",
+           capability_registry: cap_registry,
+           hermes_starter: RecordingHermesStarter,
+           servers: [
+             %{
+               name: "github",
+               approved?: true,
+               discoverer: HappyDiscoverer,
+               caller: StubCaller,
+               command: "npx",
+               env: %{"PATH" => "/opt/custom/bin"},
+               pass_env: ["FERMIX_MCP_PASS_TOKEN"],
+               reporter: self()
+             }
+           ]
+         ]},
+        id: :mcp_supervisor_pass_env_test
+      )
+
+    assert_receive {:fake_hermes_started, opts}, 500
+    assert opts[:env]["FERMIX_MCP_PASS_TOKEN"] == "from-env"
+    assert opts[:env]["PATH"] == "/opt/custom/bin"
+  end
+
+  test "allows undeclared pass_env in all env mode", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    System.put_env("FERMIX_MCP_PASS_TOKEN", "from-env")
+    Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(env: [mode: :all]))
+
+    {:ok, _} =
+      start_supervised(
+        {McpSupervisor,
+         [
+           name: :"mcp_sup_pass_env_all_#{suffix}",
+           mcp_registry: :"mcp_sup_pass_env_all_reg_#{suffix}",
+           capability_registry: cap_registry,
+           hermes_starter: RecordingHermesStarter,
+           servers: [
+             %{
+               name: "github",
+               approved?: true,
+               discoverer: HappyDiscoverer,
+               caller: StubCaller,
+               command: "npx",
+               pass_env: ["FERMIX_MCP_PASS_TOKEN"],
+               reporter: self()
+             }
+           ]
+         ]},
+        id: :mcp_supervisor_pass_env_all_test
+      )
+
+    assert_receive {:fake_hermes_started, opts}, 500
+    assert opts[:env]["FERMIX_MCP_PASS_TOKEN"] == "from-env"
+  end
+
+  test "rejects selected-mode pass_env names that are not allowed", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(env: [allow: []]))
+
+    assert_raise ArgumentError, ~r/FERMIX_MCP_PASS_TOKEN is not allowed/, fn ->
+      McpSupervisor.init(
+        name: :"mcp_sup_pass_env_denied_#{suffix}",
+        mcp_registry: :"mcp_sup_pass_env_denied_reg_#{suffix}",
+        capability_registry: cap_registry,
+        hermes_starter: RecordingHermesStarter,
+        servers: [%{name: "github", command: "npx", pass_env: ["FERMIX_MCP_PASS_TOKEN"]}]
+      )
+    end
+  end
+
+  test "rejects denied pass_env names in all env mode", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    Application.put_env(:fermix_core, :sandbox,
+      SandboxConfig.normalize(env: [mode: :all, deny: ["FERMIX_MCP_PASS_TOKEN"]])
+    )
+
+    assert_raise ArgumentError, ~r/FERMIX_MCP_PASS_TOKEN is denied/, fn ->
+      McpSupervisor.init(
+        name: :"mcp_sup_pass_env_all_denied_#{suffix}",
+        mcp_registry: :"mcp_sup_pass_env_all_denied_reg_#{suffix}",
+        capability_registry: cap_registry,
+        hermes_starter: RecordingHermesStarter,
+        servers: [%{name: "github", command: "npx", pass_env: ["FERMIX_MCP_PASS_TOKEN"]}]
+      )
+    end
   end
 
   test "skips Hermes starter for servers without command (test/discoverer-only path)", %{
@@ -266,4 +381,10 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       end
     end
   end
+
+  defp restore_sandbox(nil), do: Application.delete_env(:fermix_core, :sandbox)
+  defp restore_sandbox(value), do: Application.put_env(:fermix_core, :sandbox, value)
+
+  defp restore_env(name, nil), do: System.delete_env(name)
+  defp restore_env(name, value), do: System.put_env(name, value)
 end

@@ -115,8 +115,16 @@ defmodule FermixCore.Tools.FileWrite do
 
   defp validate_path(_), do: {:error, "Path must be a non-empty string"}
 
-  defp format_error({:outside_root, path}), do: "Sandbox denied file_write outside roots: #{path}"
-  defp format_error({:protected_path, path}), do: "Sandbox denied protected path: #{path}"
-  defp format_error({:blocked_root, path}), do: "Sandbox denied blocked root: #{path}"
+  defp format_error({:outside_root, path}) do
+    "Sandbox denied file_write outside roots: #{path}. " <>
+      "To allow this directory, run: fermix grant path #{Path.dirname(path)}"
+  end
+
+  defp format_error({:protected_path, path}),
+    do: "Sandbox denied protected path: #{path}. Run: fermix sandbox explain"
+
+  defp format_error({:blocked_root, path}),
+    do: "Sandbox denied blocked root: #{path}. Run: fermix sandbox explain"
+
   defp format_error(reason), do: "Failed to write file: #{inspect(reason)}"
 end

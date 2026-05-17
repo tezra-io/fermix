@@ -350,9 +350,7 @@ command = "codex"
 args = ["--quiet", "--message"]
 description = "Run Codex CLI for one prompt"
 timeout_ms = 120000
-working_dir = "inherit"          # "inherit" | "workspace"
 pass_env = ["OPENAI_API_KEY"]
-pass_files = ["~/.codex/auth.json"]
 
 [sandbox.commands.claude_code]
 enabled = true
@@ -360,7 +358,6 @@ command = "claude"
 args = ["-p"]
 description = "Run Claude Code for one prompt"
 timeout_ms = 180000
-working_dir = "inherit"
 pass_env = ["ANTHROPIC_API_KEY"]
 ```
 
@@ -369,18 +366,21 @@ Each enabled command registers one built-in capability in `CapabilityRegistry`:
 - `kind: :builtin`
 - `policy_class: :exec`
 - `requires_approval?: false`
-- schema: `%{"prompt" => string, "working_dir" => optional string}`
+- schema: `%{"prompt" => string, "args" => optional string array}`
 
 Execution:
 
 1. Resolve executable with `System.find_executable/1`.
-2. Resolve working dir through shell policy.
+2. Use the sandbox-mode default working dir and audit it through `Sandbox.enforce/3`.
 3. Build child env from `pass_env`.
-4. Verify `pass_files` exist and are specifically declared.
-5. Run the configured command with structured args plus the prompt.
-6. Return stdout/stderr and exit code.
+4. Run the configured command with structured args plus the prompt.
+5. Return stdout/stderr and exit code.
 
 No broad auto-discovery in M5. Modes and presets define what can register; per-command blocks override preset defaults.
+
+Command capabilities do not support per-call working directories in M5. They use the sandbox-mode default working dir; use `shell` when a specific cwd matters.
+
+Command capabilities also do not run `Hardline.classify/1`; they execute operator-declared specs. Do not expose `sh -c`, `bash -c`, `python -c`, or equivalent command specs as command capabilities unless you intentionally want to recreate shell without the hardline filter.
 
 Skills that need external tools can either:
 

@@ -11,6 +11,8 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
 
   require Logger
@@ -52,16 +54,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
 
-  @setup_secret_paths [
-    openai_api_key: [:fermix_core, :providers, :openai, :api_key],
-    telegram_bot_token: [:fermix_channels, :telegram, :bot_token],
-    whatsapp_access_token: [:fermix_channels, :whatsapp, :access_token],
-    whatsapp_verify_token: [:fermix_channels, :whatsapp, :verify_token],
-    whatsapp_app_secret: [:fermix_channels, :whatsapp, :app_secret],
-    discord_bot_token: [:fermix_channels, :discord, :bot_token],
-    slack_bot_token: [:fermix_channels, :slack, :bot_token],
-    slack_signing_secret: [:fermix_channels, :slack, :signing_secret]
-  ]
+  @setup_secret_paths SecretPaths.by_answer_key()
 
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
@@ -720,12 +713,17 @@ defmodule FermixCore.Setup.Wizard do
   defp put_openai_api_key(snapshot, ""), do: snapshot
 
   defp put_openai_api_key(snapshot, api_key) do
+    sentinel = secret_snapshot_value(:openai_api_key, api_key)
+    if is_nil(sentinel), do: snapshot, else: put_openai_secret(snapshot, sentinel)
+  end
+
+  defp put_openai_secret(snapshot, sentinel) do
     providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
 
     openai =
       providers
       |> Keyword.get(:openai, [])
-      |> Keyword.put(:api_key, api_key)
+      |> Keyword.put(:api_key, sentinel)
 
     Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
   end
@@ -835,6 +833,11 @@ defmodule FermixCore.Setup.Wizard do
   defp put_telegram_bot_token(snapshot, ""), do: snapshot
 
   defp put_telegram_bot_token(snapshot, bot_token) do
+    sentinel = secret_snapshot_value(:telegram_bot_token, bot_token)
+    if is_nil(sentinel), do: snapshot, else: put_telegram_secret(snapshot, sentinel)
+  end
+
+  defp put_telegram_secret(snapshot, sentinel) do
     channels = Map.get(snapshot, :fermix_channels, [])
 
     telegram =
@@ -843,7 +846,7 @@ defmodule FermixCore.Setup.Wizard do
       |> Keyword.get(:telegram, [])
       |> Keyword.put(:enabled, true)
       |> Keyword.put_new(:mode, :webhook)
-      |> Keyword.put(:bot_token, bot_token)
+      |> Keyword.put(:bot_token, sentinel)
 
     Map.put(snapshot, :fermix_channels, Keyword.put(channels, :telegram, telegram))
   end
@@ -1038,10 +1041,13 @@ defmodule FermixCore.Setup.Wizard do
   defp put_whatsapp_config(snapshot, answers) do
     values =
       [
-        access_token: Keyword.get(answers, :whatsapp_access_token),
+        access_token:
+          secret_snapshot_value(:whatsapp_access_token, Keyword.get(answers, :whatsapp_access_token)),
         phone_number_id: Keyword.get(answers, :whatsapp_phone_number_id),
-        verify_token: Keyword.get(answers, :whatsapp_verify_token),
-        app_secret: Keyword.get(answers, :whatsapp_app_secret)
+        verify_token:
+          secret_snapshot_value(:whatsapp_verify_token, Keyword.get(answers, :whatsapp_verify_token)),
+        app_secret:
+          secret_snapshot_value(:whatsapp_app_secret, Keyword.get(answers, :whatsapp_app_secret))
       ]
       |> reject_blank_values()
 
@@ -1051,7 +1057,8 @@ defmodule FermixCore.Setup.Wizard do
   defp put_discord_config(snapshot, answers) do
     values =
       [
-        bot_token: Keyword.get(answers, :discord_bot_token),
+        bot_token:
+          secret_snapshot_value(:discord_bot_token, Keyword.get(answers, :discord_bot_token)),
         bot_user_id: Keyword.get(answers, :discord_bot_user_id)
       ]
       |> reject_blank_values()
@@ -1062,8 +1069,9 @@ defmodule FermixCore.Setup.Wizard do
   defp put_slack_config(snapshot, answers) do
     values =
       [
-        bot_token: Keyword.get(answers, :slack_bot_token),
-        signing_secret: Keyword.get(answers, :slack_signing_secret)
+        bot_token: secret_snapshot_value(:slack_bot_token, Keyword.get(answers, :slack_bot_token)),
+        signing_secret:
+          secret_snapshot_value(:slack_signing_secret, Keyword.get(answers, :slack_signing_secret))
       ]
       |> reject_blank_values()
 
@@ -1120,6 +1128,32 @@ defmodule FermixCore.Setup.Wizard do
       |> Keyword.merge(values)
 
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
+  end
+
+  defp secret_snapshot_value(_key, value) when value in [nil, ""], do: nil
+
+  defp secret_snapshot_value(key, value) when is_atom(key) and is_binary(value) do
+    if SecretWriter.available?() do
+      write_secret_sentinel!(key, value)
+    else
+      log_manual_secret_fallback(key)
+      nil
+    end
+  end
+
+  defp write_secret_sentinel!(key, value) do
+    case SecretWriter.put(key, value) do
+      :ok -> SecretWriter.sentinel()
+      {:error, reason} -> raise ArgumentError, SecretWriter.format_error(key, reason)
+    end
+  end
+
+  defp log_manual_secret_fallback(key) do
+    secret = SecretPaths.fetch!(key)
+
+    Logger.warning(
+      "No OS secret writer available for #{secret.env}; set it in shell rc, systemd unit, or launchd plist"
+    )
   end
 
   defp put_personalization(snapshot, answers) do

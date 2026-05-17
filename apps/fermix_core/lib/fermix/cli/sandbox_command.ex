@@ -119,7 +119,7 @@ defmodule Fermix.CLI.SandboxCommand do
         0
 
       {:error, reason} ->
-        IO.puts(:stderr, "fermix sandbox: #{inspect(reason)}")
+        IO.puts(:stderr, "fermix sandbox: #{format_error(reason)}")
         1
     end
   end
@@ -186,7 +186,7 @@ defmodule Fermix.CLI.SandboxCommand do
         0
 
       {:error, reason} ->
-        IO.puts(:stderr, "fermix sandbox: #{inspect(reason)}")
+        IO.puts(:stderr, "fermix sandbox: #{format_error(reason)}")
         1
     end
   end
@@ -201,4 +201,19 @@ defmodule Fermix.CLI.SandboxCommand do
     |> Enum.filter(fn {_name, spec} -> spec.enabled end)
     |> Enum.map(fn {name, _spec} -> name end)
   end
+
+  defp format_error({:unsafe_root, path}) do
+    "unsafe_root: #{path} cannot be granted. Run: fermix sandbox explain"
+  end
+
+  defp format_error({:env_not_allowed, _name} = reason), do: Env.format_error(reason)
+  defp format_error({:env_denied, _name} = reason), do: Env.format_error(reason)
+  defp format_error({:missing_env, _name} = reason), do: Env.format_error(reason)
+  defp format_error({:env_command_failed, _command, _code, _output} = reason), do: Env.format_error(reason)
+  defp format_error({:env_command_timeout, _command, _timeout} = reason), do: Env.format_error(reason)
+  defp format_error(:env_command_output_too_large), do: Env.format_error(:env_command_output_too_large)
+  defp format_error(:empty_env_command_output), do: Env.format_error(:empty_env_command_output)
+  defp format_error(:env_command_output_not_single_value), do: Env.format_error(:env_command_output_not_single_value)
+  defp format_error(reason) when is_binary(reason), do: reason
+  defp format_error(reason), do: inspect(reason)
 end

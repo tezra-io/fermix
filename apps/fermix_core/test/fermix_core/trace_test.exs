@@ -3,7 +3,7 @@ defmodule FermixCore.TraceTest do
 
   alias FermixCore.Trace
 
-  @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error]
+  @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error, :sandbox_event]
 
   setup do
     tmp_dir = Path.join(System.tmp_dir!(), "fermix_trace_#{System.unique_integer([:positive])}")

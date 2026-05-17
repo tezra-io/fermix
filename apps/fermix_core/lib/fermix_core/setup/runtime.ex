@@ -17,6 +17,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.Wizard
 
   @answer_keys [
@@ -58,8 +59,12 @@ defmodule FermixCore.Setup.Runtime do
     puts = Keyword.get(io_opts, :puts, &IO.puts/1)
     prompt = Keyword.get(io_opts, :prompt, &default_prompt/1)
 
-    with {:ok, report} <- load_report() do
-      dispatch(report, opts, puts, prompt)
+    if Keyword.get(opts, :migrate_secrets, false) do
+      SecretMigration.run(opts, puts: puts, prompt: prompt)
+    else
+      with {:ok, report} <- load_report() do
+        dispatch(report, opts, puts, prompt)
+      end
     end
   end
 
