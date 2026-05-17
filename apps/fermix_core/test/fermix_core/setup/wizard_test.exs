@@ -244,6 +244,56 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(slack, :signing_secret) == "slack-signing-secret"
   end
 
+  test "save_answers populates [sandbox.env.OPENAI_API_KEY] for the openai api key" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-sandbox-env")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.delete_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        openai_api_key: "sk-sandbox-env",
+        telegram_bot_token: "telegram-secret",
+        telegram_owner_user_id: "111"
+      )
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+
+    assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
+    assert contents =~ ~s(source = "command")
+    assert contents =~ ~s(command = "/usr/bin/security")
+    refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
+  end
+
+  test "save_answers does not add sandbox.env source when no secret writer is available" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-sandbox-env-no-writer")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.delete_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.UnavailableSecretWriter)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    capture_log(fn ->
+      assert {:ok, _report} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(openai_api_key: "sk-no-writer")
+    end)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+
+    refute contents =~ ~s([sandbox.env.OPENAI_API_KEY])
+  end
+
   test "save_answers falls back without persisting secrets when no writer is available" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-secret-writer")
 
