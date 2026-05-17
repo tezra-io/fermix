@@ -118,16 +118,33 @@ defmodule FermixCore.Capabilities.MCP.Server do
       {:stop, :normal, state}
     else
       delay = state.retry_base_ms * round(:math.pow(2, attempts - 1))
-
-      Logger.warning(
-        "MCP server #{state.server_name} discovery failed (attempt #{attempts}/" <>
-          "#{state.max_discovery_attempts}); retrying in #{delay}ms: #{inspect(reason)}"
-      )
-
+      log_retry(reason, state.server_name, attempts, state.max_discovery_attempts, delay)
       Process.send_after(self(), :retry_discovery, delay)
       {:noreply, state}
     end
   end
+
+  # `Server capabilities not set` is the expected response while the MCP
+  # client is still racing through `initialize` — log at debug, not warning,
+  # so a noisy `npx`-backed startup doesn't surface as a red flag to the
+  # operator. Real errors (transport closed, unexpected response shape,
+  # tool schema errors) keep the warning level.
+  defp log_retry(reason, server_name, attempts, max_attempts, delay) do
+    message =
+      "MCP server #{server_name} discovery failed (attempt #{attempts}/#{max_attempts}); " <>
+        "retrying in #{delay}ms: #{inspect(reason)}"
+
+    if expected_startup_error?(reason),
+      do: Logger.debug(message),
+      else: Logger.warning(message)
+  end
+
+  defp expected_startup_error?(%Hermes.MCP.Error{reason: :internal_error, data: %{message: msg}})
+       when is_binary(msg) do
+    String.contains?(msg, "Server capabilities not set")
+  end
+
+  defp expected_startup_error?(_reason), do: false
 
   defp maybe_register_client(%{client: nil}), do: :ok
 
