@@ -26,17 +26,27 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.Hermes do
 
   @impl true
   def list_tools(client) do
-    case Hermes.Client.Base.list_tools(client) do
-      {:ok, %{"tools" => tools}} when is_list(tools) ->
-        {:ok, Enum.map(tools, &normalize/1)}
-
-      {:ok, response} ->
-        {:error, {:unexpected_tools_response, response}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
+    client |> Hermes.Client.Base.list_tools() |> interpret_response()
   end
+
+  @doc """
+  Decode the `Hermes.Client.Base.list_tools/2` return into the
+  `Discoverer` callback shape. Public so tests can exercise each
+  response shape without spawning a real MCP transport.
+  """
+  @spec interpret_response({:ok, term()} | {:error, term()}) ::
+          {:ok, [FermixCore.Capabilities.MCP.Discoverer.tool_descriptor()]} | {:error, term()}
+  def interpret_response({:ok, %Hermes.MCP.Response{is_error: true} = response}) do
+    {:error, {:tools_error, response}}
+  end
+
+  def interpret_response({:ok, %Hermes.MCP.Response{result: %{"tools" => tools}}})
+      when is_list(tools) do
+    {:ok, Enum.map(tools, &normalize/1)}
+  end
+
+  def interpret_response({:ok, response}), do: {:error, {:unexpected_tools_response, response}}
+  def interpret_response({:error, reason}), do: {:error, reason}
 
   defp normalize(tool) when is_map(tool) do
     %{
