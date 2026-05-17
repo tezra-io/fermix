@@ -24,6 +24,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Store
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
+  alias FermixCore.Sandbox.CommandCapabilities
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
@@ -90,6 +91,8 @@ defmodule FermixCore.Application do
   end
 
   defp start_supervision_tree do
+    remember_launch_cwd()
+    :ok = ConfigStore.ensure_workspace()
     setup_file_logger()
     Trace.TelemetryHandler.attach()
 
@@ -100,6 +103,7 @@ defmodule FermixCore.Application do
         maybe_token_manager(),
         CapabilityRegistry,
         BuiltinSeeder,
+        {CommandCapabilities, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
@@ -207,4 +211,8 @@ defmodule FermixCore.Application do
 
   defp default_trace_dir, do: ConfigStore.workspace_paths().traces
   defp default_log_file, do: Path.join(ConfigStore.workspace_paths().logs, "fermix.log")
+
+  defp remember_launch_cwd do
+    Application.put_env(:fermix_core, :sandbox_launch_cwd, File.cwd!())
+  end
 end

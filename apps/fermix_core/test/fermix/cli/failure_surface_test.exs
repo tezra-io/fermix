@@ -14,7 +14,7 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
     on_exit(fn ->
       restore_env("FERMIX_HOME", previous_home)
-      File.rm_rf!(socket_dir)
+      FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
 
     %{socket_path: Path.join(socket_dir, "daemon.sock")}
@@ -138,19 +138,22 @@ defmodule Fermix.CLI.FailureSurfaceTest do
       :ok = :gen_tcp.send(conn, [Jason.encode!(response), "\n"])
       :gen_tcp.close(conn)
       :gen_tcp.close(listen_socket)
-      File.rm(socket_path)
+      FermixTestSupport.SafeRm.rm(socket_path)
     end)
     |> tap(fn _task -> assert_receive :fake_daemon_ready end)
   end
 
   defp mkdir! do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "fermix-failure-surface-#{System.unique_integer([:positive, :monotonic])}"
-      )
+    base = "/tmp/fermix-test-sockets"
 
-    File.mkdir_p!(path)
+    path =
+      base
+      |> Path.join("fermix-fs-#{System.unique_integer([:positive, :monotonic])}")
+      |> Path.expand()
+
+    File.mkdir_p!(base)
+    File.mkdir!(path)
+    FermixTestSupport.SafeRm.mark!(path)
     path
   end
 

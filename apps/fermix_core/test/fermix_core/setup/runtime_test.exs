@@ -224,7 +224,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   describe "finalize probe wiring" do
     test "skip_probe: true bypasses the probe entirely" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, collector} = puts_collector()
@@ -242,7 +242,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "probe pass emits an auth-probe line and returns :ok" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, collector} = puts_collector()
@@ -261,7 +261,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "probe auth_scope_mismatch (401) fails the run with a clear error message" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, _collector} = puts_collector()
@@ -280,7 +280,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "probe transient 5xx is inconclusive — run returns :ok with a warning line" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, collector} = puts_collector()
@@ -300,7 +300,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "openai_codex probe uses Fermix auth store without TokenManager" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "runtime_store_at")
@@ -332,7 +332,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "selecting openai_codex starts native OAuth when Fermix has no token" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = Path.join(home, "auth.json")
@@ -375,7 +375,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "openai_codex refresh errors do not auto-launch OAuth" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = Path.join(home, "auth.json")
@@ -429,7 +429,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "rejected openai_codex token triggers native OAuth and retries the probe" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "stale_at")
@@ -475,7 +475,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "OAuth recovery reloads a running TokenManager so the retry probe sees fresh tokens" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "stale_at")
@@ -527,7 +527,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "rejected openai_codex token asks before starting OAuth recovery" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "stale_at")
@@ -562,7 +562,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   describe "--import-codex" do
     test "imports tokens, persists to fermix store, and selects openai_codex" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       prepare(home)
       codex_path = write_codex_auth(home)
@@ -598,7 +598,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "explicit --import-codex re-runs when openai_codex is already selected" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       prepare(home)
 
@@ -638,7 +638,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "surfaces an error when refresh fails" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       prepare(home)
       codex_path = write_codex_auth(home)
@@ -693,7 +693,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, _collector} = puts_collector()
@@ -723,7 +723,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "provided channel flags do not suppress missing provider/model prompts" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -785,7 +785,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "blank model and effort answers use the selected provider defaults" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -834,7 +834,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "--reconfigure prompts provider model and effort even when setup is ready" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -902,7 +902,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "--reconfigure skips detailed realtime prompts when voice companion stays disabled" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -962,7 +962,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "--reconfigure asks basic realtime prompts after voice companion is enabled" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =

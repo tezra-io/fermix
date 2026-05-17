@@ -24,7 +24,7 @@ defmodule FermixCore.Introspection.OverviewTest do
       restore_env("FERMIX_HOME", previous_home)
       restore_app_env(:fermix_core, :agent, previous_agent)
       restore_app_env(:fermix_core, :providers, previous_providers)
-      File.rm_rf!(tmp_home)
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)
 
     %{tmp_home: tmp_home}

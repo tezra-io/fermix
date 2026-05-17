@@ -37,7 +37,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
 
@@ -88,7 +88,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
       restart_global_memory_repo!()
-      File.rm_rf!(tmp_home)
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)
 
     System.put_env("FERMIX_HOME", tmp_home)
@@ -172,7 +172,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :providers,

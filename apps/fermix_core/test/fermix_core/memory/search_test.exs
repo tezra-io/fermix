@@ -33,7 +33,7 @@ defmodule FermixCore.Memory.SearchTest do
 
     on_exit(fn ->
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 

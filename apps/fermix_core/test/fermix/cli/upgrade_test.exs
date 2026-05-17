@@ -11,7 +11,7 @@ defmodule Fermix.CLI.UpgradeTest do
       )
 
     File.mkdir_p!(tmp)
-    on_exit(fn -> File.rm_rf(tmp) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(tmp) end)
     %{tmp: tmp}
   end
 
@@ -201,7 +201,7 @@ defmodule Fermix.CLI.UpgradeTest do
 
     File.write!(path, "#!/bin/sh\nexit 0\n")
     File.chmod!(path, 0o755)
-    on_exit(fn -> File.rm(path) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
     path
   end
 end

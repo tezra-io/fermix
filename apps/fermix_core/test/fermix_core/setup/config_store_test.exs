@@ -12,6 +12,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     compaction = Application.get_env(:fermix_core, :compaction, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    sandbox = Application.get_env(:fermix_core, :sandbox)
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
     mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
 
@@ -22,6 +23,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
+      restore_sandbox(sandbox)
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
       Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
 
@@ -34,6 +36,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     :ok
   end
 
+  defp restore_sandbox(nil), do: Application.delete_env(:fermix_core, :sandbox)
+  defp restore_sandbox(value), do: Application.put_env(:fermix_core, :sandbox, value)
+
   test "workspace_paths follow FERMIX_HOME and match the persisted runtime layout" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -41,6 +46,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     System.put_env("FERMIX_HOME", tmp_home)
 
     assert ConfigStore.workspace_paths() == %{
+             workspace: Path.join(tmp_home, "workspace"),
+             grants: Path.join(tmp_home, "grants"),
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              journals: Path.join(tmp_home, "journals"),
@@ -66,7 +73,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -105,7 +112,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -136,7 +143,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -164,7 +171,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -216,7 +223,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -281,7 +288,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -330,7 +337,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :personalization, [])
@@ -388,7 +395,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -436,7 +443,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -472,7 +479,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -509,7 +516,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
     on_exit(fn ->
-      File.rm_rf!(tmp_home)
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
       System.delete_env("FERMIX_INBOUND_TOKEN_TEST")
     end)
 
@@ -547,7 +554,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :agent, [])
@@ -579,7 +586,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     snapshot = %{
@@ -633,7 +640,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     # Initial: all three providers configured.
@@ -690,7 +697,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -716,7 +723,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -741,7 +748,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -783,7 +790,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 

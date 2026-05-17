@@ -55,7 +55,7 @@ defmodule Fermix.CLI.ChatCommandTest do
       restore_app_env(:cli_channel_bridge, previous_bridge)
       restore_app_env(:chat_command_test_pid, previous_pid)
       restore_app_env(:chat_command_bridge_result, previous_result)
-      File.rm_rf!(socket_dir)
+      FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
 
     :ok
@@ -186,7 +186,7 @@ defmodule Fermix.CLI.ChatCommandTest do
     assert output =~ "fermix: not running"
 
     restore_env("FERMIX_HOME", previous_home)
-    File.rm_rf!(missing_home)
+    FermixTestSupport.SafeRm.rm_rf!(missing_home)
   end
 
   defp mkdir! do

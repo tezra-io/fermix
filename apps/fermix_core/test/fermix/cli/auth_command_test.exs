@@ -16,7 +16,7 @@ defmodule Fermix.CLI.AuthCommandTest do
         v -> System.put_env("FERMIX_HOME", v)
       end
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end)
 
     {:ok, dir: dir}

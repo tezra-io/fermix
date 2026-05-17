@@ -41,10 +41,10 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
       Application.put_env(:fermix_core, :agent, previous_agent)
-      File.rm_rf!(bootstrap_dir)
-      File.rm_rf!(memory_dir)
+      FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
+      FermixTestSupport.SafeRm.rm_rf!(memory_dir)
 
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path -> File.rm(path) end)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path -> FermixTestSupport.SafeRm.rm(path) end)
     end)
 
     %{

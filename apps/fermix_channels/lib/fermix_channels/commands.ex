@@ -25,12 +25,12 @@ defmodule FermixChannels.Commands do
 
   def dispatch({:command, name, args, message}, reply_fn, context) do
     case Registry.lookup(name) do
-      {:ok, handler} -> run_command(handler, message, args, reply_fn, context)
+      {:ok, handler} -> run_command(name, handler, message, args, reply_fn, context)
       :error -> :passthrough
     end
   end
 
-  defp run_command(handler, message, args, reply_fn, context) do
+  defp run_command(name, handler, message, args, reply_fn, context) do
     :telemetry.execute(
       [:fermix, :command, :received],
       %{count: 1},
@@ -39,7 +39,10 @@ defmodule FermixChannels.Commands do
 
     case handler.authorize(message, message.metadata || %{}, context) do
       :ok ->
-        handler.execute(Map.put(message, :content, Enum.join(args, " ")), reply_fn, context)
+        message
+        |> put_command_name(name)
+        |> Map.put(:content, Enum.join(args, " "))
+        |> handler.execute(reply_fn, context)
 
       {:error, :unauthorized} ->
         :telemetry.execute(
@@ -51,6 +54,11 @@ defmodule FermixChannels.Commands do
         reply_fn.("This command requires owner permissions.")
         {:error, :unauthorized}
     end
+  end
+
+  defp put_command_name(message, name) do
+    metadata = Map.put(message.metadata || %{}, :command_name, name)
+    Map.put(message, :metadata, metadata)
   end
 
   defp parse_leading_command(content, bot_name) do

@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.FileWriteTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Sandbox.Config
   alias FermixCore.Tools.FileWrite
 
   @context %{agent_name: "test_agent", conversation_key: :test}
@@ -9,9 +10,17 @@ defmodule FermixCore.Tools.FileWriteTest do
     dir = Path.join(System.tmp_dir!(), "fermix_file_write_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
 
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
-    %{dir: dir}
+    %{
+      dir: dir,
+      context:
+        Map.put(
+          @context,
+          :sandbox_config,
+          Config.normalize(mode: :strict, workspace_root: dir)
+        )
+    }
   end
 
   describe "name/0" do
@@ -45,56 +54,56 @@ defmodule FermixCore.Tools.FileWriteTest do
   end
 
   describe "execute/2 - happy path" do
-    test "writes content to new file", %{dir: dir} do
+    test "writes content to new file", %{dir: dir, context: context} do
       path = Path.join(dir, "output.txt")
 
       assert {:ok, result} =
-               FileWrite.execute(%{"path" => path, "content" => "hello world"}, @context)
+               FileWrite.execute(%{"path" => path, "content" => "hello world"}, context)
 
       assert result.success == true
       assert result.output =~ "11 bytes"
       assert File.read!(path) == "hello world"
     end
 
-    test "overwrites existing file", %{dir: dir} do
+    test "overwrites existing file", %{dir: dir, context: context} do
       path = Path.join(dir, "existing.txt")
       File.write!(path, "old content")
 
       assert {:ok, result} =
-               FileWrite.execute(%{"path" => path, "content" => "new content"}, @context)
+               FileWrite.execute(%{"path" => path, "content" => "new content"}, context)
 
       assert result.success == true
       assert File.read!(path) == "new content"
     end
 
-    test "creates parent directories when mkdir is true", %{dir: dir} do
+    test "creates parent directories when mkdir is true", %{dir: dir, context: context} do
       path = Path.join([dir, "nested", "deep", "file.txt"])
 
       assert {:ok, result} =
                FileWrite.execute(
                  %{"path" => path, "content" => "nested", "mkdir" => true},
-                 @context
+                 context
                )
 
       assert result.success == true
       assert File.read!(path) == "nested"
     end
 
-    test "creates parent directories by default", %{dir: dir} do
+    test "creates parent directories by default", %{dir: dir, context: context} do
       path = Path.join([dir, "auto", "dirs", "file.txt"])
 
       assert {:ok, result} =
-               FileWrite.execute(%{"path" => path, "content" => "auto"}, @context)
+               FileWrite.execute(%{"path" => path, "content" => "auto"}, context)
 
       assert result.success == true
       assert File.read!(path) == "auto"
     end
 
-    test "writes empty content", %{dir: dir} do
+    test "writes empty content", %{dir: dir, context: context} do
       path = Path.join(dir, "empty.txt")
 
       assert {:ok, result} =
-               FileWrite.execute(%{"path" => path, "content" => ""}, @context)
+               FileWrite.execute(%{"path" => path, "content" => ""}, context)
 
       assert result.success == true
       assert result.output =~ "0 bytes"
@@ -103,13 +112,16 @@ defmodule FermixCore.Tools.FileWriteTest do
   end
 
   describe "execute/2 - mkdir false" do
-    test "fails when parent directory does not exist and mkdir is false", %{dir: dir} do
+    test "fails when parent directory does not exist and mkdir is false", %{
+      dir: dir,
+      context: context
+    } do
       path = Path.join([dir, "no_such_dir", "file.txt"])
 
       assert {:ok, result} =
                FileWrite.execute(
                  %{"path" => path, "content" => "test", "mkdir" => false},
-                 @context
+                 context
                )
 
       assert result.success == false
@@ -118,32 +130,58 @@ defmodule FermixCore.Tools.FileWriteTest do
   end
 
   describe "execute/2 - error cases" do
-    test "returns error for empty path" do
+    test "returns error for empty path", %{context: context} do
       assert {:ok, result} =
-               FileWrite.execute(%{"path" => "", "content" => "test"}, @context)
+               FileWrite.execute(%{"path" => "", "content" => "test"}, context)
 
       assert result.success == false
       assert result.error =~ "non-empty"
     end
 
-    test "returns error for path traversal" do
+    test "allows parent traversal when resolved target stays inside root", %{dir: dir, context: context} do
+      child = Path.join(dir, "child")
+      File.mkdir_p!(child)
+      path = Path.join([child, "..", "sibling.txt"])
+
+      assert {:ok, result} =
+               FileWrite.execute(%{"path" => path, "content" => "inside"}, context)
+
+      assert result.success == true
+      assert File.read!(Path.join(dir, "sibling.txt")) == "inside"
+    end
+
+    test "returns error for traversal that resolves outside roots", %{context: context} do
       assert {:ok, result} =
                FileWrite.execute(
                  %{"path" => "/tmp/../etc/evil.txt", "content" => "bad"},
-                 @context
+                 context
                )
 
       assert result.success == false
-      assert result.error =~ "traversal"
+      assert result.error =~ "Sandbox denied"
+    end
+
+    test "returns error for paths outside sandbox roots", %{context: context} do
+      outside = FermixTestSupport.SafeRm.make_tmp_dir!("file-write-outside")
+      path = Path.join(outside, "blocked.txt")
+
+      assert {:ok, result} =
+               FileWrite.execute(%{"path" => path, "content" => "blocked"}, context)
+
+      assert result.success == false
+      assert result.error =~ "outside roots"
+      refute File.exists?(path)
+
+      FermixTestSupport.SafeRm.rm_rf!(outside)
     end
   end
 
   describe "telemetry" do
-    test "emits [:fermix, :tool, :exec] on success", %{dir: dir} do
+    test "emits [:fermix, :tool, :exec] on success", %{dir: dir, context: context} do
       handler_id = attach_telemetry()
       path = Path.join(dir, "telem.txt")
 
-      FileWrite.execute(%{"path" => path, "content" => "telemetry"}, @context)
+      FileWrite.execute(%{"path" => path, "content" => "telemetry"}, context)
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], measurements, metadata}
       assert is_integer(measurements.duration_ms)
@@ -155,10 +193,10 @@ defmodule FermixCore.Tools.FileWriteTest do
       :telemetry.detach(handler_id)
     end
 
-    test "emits [:fermix, :tool, :exec] on failure" do
+    test "emits [:fermix, :tool, :exec] on failure", %{context: context} do
       handler_id = attach_telemetry()
 
-      FileWrite.execute(%{"path" => "", "content" => "test"}, @context)
+      FileWrite.execute(%{"path" => "", "content" => "test"}, context)
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], measurements, metadata}
       assert is_integer(measurements.duration_ms)
