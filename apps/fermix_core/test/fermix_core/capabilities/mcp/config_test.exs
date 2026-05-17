@@ -18,35 +18,43 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       assert config.command == "npx"
       assert config.args == ["-y", "@modelcontextprotocol/server-github"]
       assert config.env == %{"GITHUB_TOKEN" => "ghp_static"}
+      assert config.pass_env == []
       assert config.approved? == true
       assert config.tools_overrides == %{}
     end
 
-    test "$env: prefix resolves against the real environment at parse time" do
-      System.put_env("FERMIX_MCP_TEST_TOKEN", "from-env")
-
+    test "parses pass_env for Sandbox.Env-backed passthrough" do
       toml = """
       [mcp.servers.github]
       command = "npx"
-      env = { GITHUB_TOKEN = "$env:FERMIX_MCP_TEST_TOKEN" }
+      pass_env = ["GITHUB_TOKEN"]
       """
 
       assert [config] = Config.from_toml(toml)
-      assert config.env == %{"GITHUB_TOKEN" => "from-env"}
-    after
-      System.delete_env("FERMIX_MCP_TEST_TOKEN")
+      assert config.pass_env == ["GITHUB_TOKEN"]
     end
 
-    test "missing $env: variable resolves to empty string, not crash" do
-      System.delete_env("FERMIX_MCP_TEST_MISSING")
-
+    test "raises on removed $env shorthand" do
       toml = """
       [mcp.servers.github]
-      env = { GITHUB_TOKEN = "$env:FERMIX_MCP_TEST_MISSING" }
+      env = { GITHUB_TOKEN = "$env:GITHUB_TOKEN" }
       """
 
-      assert [config] = Config.from_toml(toml)
-      assert config.env == %{"GITHUB_TOKEN" => ""}
+      assert_raise ArgumentError, ~r/removed \$env: shorthand/, fn ->
+        Config.from_toml(toml)
+      end
+    end
+
+    test "raises when pass_env and literal env declare the same name" do
+      toml = """
+      [mcp.servers.github]
+      env = { GITHUB_TOKEN = "literal" }
+      pass_env = ["GITHUB_TOKEN"]
+      """
+
+      assert_raise ArgumentError, ~r/GITHUB_TOKEN/, fn ->
+        Config.from_toml(toml)
+      end
     end
 
     test "parses multiple servers, sorted by name" do

@@ -10,9 +10,10 @@ defmodule FermixCore.Trace do
 
   require Logger
 
-  @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error]
+  @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error, :sandbox_event]
 
-  @type trace_type :: :llm_call | :tool_exec | :agent_event | :channel_msg | :error
+  @type trace_type ::
+          :llm_call | :tool_exec | :agent_event | :channel_msg | :error | :sandbox_event
 
   # --- Client API ---
 

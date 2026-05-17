@@ -82,6 +82,14 @@ defmodule FermixChannels.Commands.SandboxTest do
     assert usage =~ "/confirm"
   end
 
+  test "rejected mutations include a follow-up command" do
+    assert :ok = dispatch(message("/grant path /", user_id: "owner-1"))
+
+    assert_receive {:sandbox_reply, reply}
+    assert reply =~ "Sandbox change rejected"
+    assert reply =~ "/sandbox explain"
+  end
+
   defp propose_grant(root, message) do
     assert :ok = dispatch(message)
     assert_receive {:sandbox_reply, confirm_text}

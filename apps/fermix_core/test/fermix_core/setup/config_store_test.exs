@@ -15,6 +15,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     sandbox = Application.get_env(:fermix_core, :sandbox)
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
     mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
+    secret_writer = Application.get_env(:fermix_core, :secret_writer)
+
+    FermixTestSupport.SecretWriterStub.reset()
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :personalization, personalization)
@@ -26,6 +30,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       restore_sandbox(sandbox)
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
       Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
+      restore_secret_writer(secret_writer)
+      FermixTestSupport.SecretWriterStub.reset()
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -38,6 +44,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   defp restore_sandbox(nil), do: Application.delete_env(:fermix_core, :sandbox)
   defp restore_sandbox(value), do: Application.put_env(:fermix_core, :sandbox, value)
+  defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
+  defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 
   test "workspace_paths follow FERMIX_HOME and match the persisted runtime layout" do
     tmp_home =
@@ -106,6 +114,70 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+  end
+
+  test "load_runtime_config resolves @keyring sentinels through SecretWriter" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok = FermixTestSupport.SecretWriterStub.put(:openai_api_key, "sk-from-keyring")
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openai]
+    api_key = "@keyring"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    openai = loaded.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
+    assert Keyword.get(openai, :api_key) == "sk-from-keyring"
+  end
+
+  test "save_snapshot preserves @keyring sentinels on disk" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [providers: [openai: [api_key: "@keyring"]], agent: [name: "fermix"]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(api_key = "@keyring")
+  end
+
+  test "save_snapshot preserves existing @keyring sentinels after runtime resolution" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok = FermixTestSupport.SecretWriterStub.put(:openai_api_key, "sk-from-keyring")
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openai]
+    api_key = "@keyring"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    openai = loaded.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
+    assert Keyword.get(openai, :api_key) == "sk-from-keyring"
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+
+    assert contents =~ ~s(api_key = "@keyring")
+    refute contents =~ "sk-from-keyring"
   end
 
   test "save/load round-trips compaction config with float threshold" do

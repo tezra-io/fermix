@@ -12,13 +12,18 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
+  alias FermixCore.Setup.SecretMigration
 
   @type status :: :ok | :warn | :fail
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
+
+  @sandbox_trace_days 7
+  @sandbox_trace_limit 20
 
   @spec readiness() :: result()
   def readiness do
@@ -211,14 +216,113 @@ defmodule Fermix.CLI.Doctor.Checks do
     error in ArgumentError -> fail("sandbox", Exception.message(error))
   end
 
+  @spec sandbox_trace_suggestions() :: result()
+  def sandbox_trace_suggestions do
+    suggestions =
+      ConfigStore.workspace_paths().traces
+      |> recent_sandbox_events()
+      |> Enum.flat_map(&grant_suggestion/1)
+      |> Enum.uniq()
+
+    case suggestions do
+      [] -> ok("sandbox traces", "no recent sandbox roadblocks")
+      targets -> warn("sandbox traces", format_grant_suggestions(targets))
+    end
+  end
+
   @spec auth_file_permissions() :: result()
   def auth_file_permissions do
-    path = Path.join(ConfigStore.fermix_home(), "auth.json")
+    path = AuthStore.path()
 
-    case File.stat(path) do
-      {:ok, %{mode: mode}} -> auth_mode_result(path, Bitwise.band(mode, 0o777))
-      {:error, :enoent} -> ok("auth perms", "no auth.json present")
+    case AuthStore.validate_permissions(path) do
+      :ok -> auth_ok_result(path)
+      {:error, {:insecure_permissions, ^path, mode}} -> fail("auth perms", AuthStore.permissions_message(path, mode))
       {:error, reason} -> fail("auth perms", "stat #{path}: #{inspect(reason)}")
+    end
+  end
+
+  @spec plaintext_secrets() :: result()
+  def plaintext_secrets do
+    with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false) do
+      case SecretMigration.plaintext_secrets(snapshot) do
+        [] ->
+          ok("setup secrets", "no plaintext setup secrets in config.toml")
+
+        secrets ->
+          names = Enum.map_join(secrets, ", ", & &1.env)
+          warn("setup secrets", "plaintext setup secrets found: #{names}; run `fermix setup --migrate-secrets`")
+      end
+    else
+      {:error, reason} -> fail("setup secrets", "could not inspect config.toml: #{inspect(reason)}")
+    end
+  end
+
+  defp recent_sandbox_events(trace_dir) do
+    trace_dir
+    |> recent_sandbox_trace_files()
+    |> Enum.flat_map(&read_jsonl_file/1)
+  end
+
+  defp recent_sandbox_trace_files(trace_dir) do
+    today = Date.utc_today()
+
+    0..(@sandbox_trace_days - 1)
+    |> Enum.map(fn days_ago ->
+      date = today |> Date.add(-days_ago) |> Date.to_iso8601()
+      Path.join([trace_dir, date, "sandbox_event.jsonl"])
+    end)
+    |> Enum.filter(&File.exists?/1)
+  end
+
+  defp read_jsonl_file(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        contents
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&decode_jsonl_line/1)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp decode_jsonl_line(line) do
+    case Jason.decode(line) do
+      {:ok, row} when is_map(row) -> [row]
+      _other -> []
+    end
+  end
+
+  defp grant_suggestion(%{
+         "decision" => "deny",
+         "reason_tag" => tag,
+         "resource" => resource,
+         "capability" => capability
+       })
+       when tag in ["outside_root", "blocked_root"] and is_binary(resource) do
+    grant_target(capability, resource)
+  end
+
+  defp grant_suggestion(_row), do: []
+
+  defp grant_target("shell", path), do: [path]
+  defp grant_target("git_write", path), do: [path]
+  defp grant_target("file_write", path), do: [Path.dirname(path)]
+  defp grant_target("file_edit", path), do: [Path.dirname(path)]
+  defp grant_target(_capability, _path), do: []
+
+  defp format_grant_suggestions(targets) do
+    shown = Enum.take(targets, @sandbox_trace_limit)
+    remaining = length(targets) - length(shown)
+
+    commands =
+      shown
+      |> Enum.map_join("; ", &"fermix grant path #{&1}")
+
+    if remaining > 0 do
+      "recent sandbox roadblocks: #{commands}; +#{remaining} more"
+    else
+      "recent sandbox roadblocks: #{commands}"
     end
   end
 
@@ -375,10 +479,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
   end
 
-  defp auth_mode_result(path, 0o600), do: ok("auth perms", "auth.json is 0600 at #{path}")
-
-  defp auth_mode_result(path, mode) do
-    fail("auth perms", "auth.json must be 0600 at #{path}; got #{Integer.to_string(mode, 8)}")
+  defp auth_ok_result(path) do
+    if File.exists?(path) do
+      ok("auth perms", "auth.json is 0600 at #{path}")
+    else
+      ok("auth perms", "no auth.json present")
+    end
   end
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}

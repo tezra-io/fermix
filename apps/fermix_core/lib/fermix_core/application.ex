@@ -10,6 +10,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
@@ -25,6 +26,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
   alias FermixCore.Sandbox.CommandCapabilities
+  alias FermixCore.Sandbox.DecisionTelemetry
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
@@ -93,8 +95,10 @@ defmodule FermixCore.Application do
   defp start_supervision_tree do
     remember_launch_cwd()
     :ok = ConfigStore.ensure_workspace()
+    :ok = AuthStore.validate_permissions!()
     setup_file_logger()
     Trace.TelemetryHandler.attach()
+    DecisionTelemetry.attach()
 
     children =
       [

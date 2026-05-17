@@ -29,6 +29,46 @@ defmodule FermixCore.Sandbox.Env do
     end
   end
 
+  @spec format_error(term()) :: String.t()
+  def format_error({:env_not_allowed, name}) when is_binary(name) do
+    "#{name} is not allowed for this command. Run `fermix sandbox env allow #{name}` " <>
+      "or configure it with `fermix sandbox env set #{name} -- <helper> [args...]`."
+  end
+
+  def format_error({:env_denied, name}) when is_binary(name) do
+    "#{name} is denied by sandbox env config. Remove it from the deny list or run " <>
+      "`fermix sandbox env allow #{name}` before passing it through."
+  end
+
+  def format_error({:missing_env, name}) when is_binary(name) do
+    "#{name} could not be resolved via configured source. Run " <>
+      "`fermix sandbox env set #{name} -- <helper> [args...]` to reconfigure."
+  end
+
+  def format_error({:env_command_failed, command, code, output}) do
+    "#{command} failed while resolving an env value (exit #{code}): #{output}. " <>
+      "Run the helper manually to verify it, or reconfigure with `fermix sandbox env set NAME -- <helper> [args...]`."
+  end
+
+  def format_error({:env_command_timeout, command, timeout}) do
+    "#{command} timed out after #{timeout}ms while resolving an env value. " <>
+      "Run the helper manually to verify it, or reconfigure with `fermix sandbox env set NAME -- <helper> [args...]`."
+  end
+
+  def format_error(:env_command_output_too_large) do
+    "Env helper output exceeded the size limit. Reconfigure it with `fermix sandbox env set NAME -- <helper> [args...]`."
+  end
+
+  def format_error(:empty_env_command_output) do
+    "Env helper returned an empty value. Reconfigure it with `fermix sandbox env set NAME -- <helper> [args...]`."
+  end
+
+  def format_error(:env_command_output_not_single_value) do
+    "Env helper returned multiple lines. Reconfigure it with `fermix sandbox env set NAME -- <helper> [args...]`."
+  end
+
+  def format_error(reason), do: inspect(reason)
+
   defp selected_env(%Config{env: %{mode: :all} = env}, names) do
     denied = MapSet.new(env.deny)
 

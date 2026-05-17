@@ -78,7 +78,7 @@ defmodule Fermix.CLI do
     fermix — Elixir-native multi-agent platform
 
     Usage:
-      fermix setup [--print-state] [--reconfigure] [--import-codex] [--openai-api-key VALUE]
+      fermix setup [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex] [--openai-api-key VALUE]
                    [--provider openai|openai_codex|anthropic]
                    [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]

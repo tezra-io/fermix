@@ -168,6 +168,54 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "sandbox_trace_suggestions/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-sandbox-traces")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "suggests parent directory for denied file writes", %{home: home} do
+      target = Path.join([home, "Workspace", "app", "lib", "file.ex"])
+      write_sandbox_event(home, capability: "file_write", resource: target)
+
+      result = Checks.sandbox_trace_suggestions()
+
+      assert result.name == "sandbox traces"
+      assert result.status == :warn
+      assert result.detail =~ "fermix grant path #{Path.dirname(target)}"
+    end
+
+    test "suggests shell cwd itself for denied shell commands", %{home: home} do
+      cwd = Path.join([home, "Workspace", "app"])
+      write_sandbox_event(home, capability: "shell", resource: cwd)
+
+      result = Checks.sandbox_trace_suggestions()
+
+      assert result.status == :warn
+      assert result.detail =~ "fermix grant path #{cwd}"
+      refute result.detail =~ "fermix grant path #{Path.dirname(cwd)};"
+    end
+
+    test "passes when no sandbox trace roadblocks exist" do
+      result = Checks.sandbox_trace_suggestions()
+
+      assert result.name == "sandbox traces"
+      assert result.status == :ok
+    end
+  end
+
   describe "auth_file_permissions/0" do
     setup do
       previous_home = System.get_env("FERMIX_HOME")
@@ -203,7 +251,53 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.name == "auth perms"
       assert result.status == :fail
-      assert result.detail =~ "0600"
+      assert result.detail =~ "0o600"
+      assert result.detail =~ "chmod 600"
+    end
+  end
+
+  describe "plaintext_secrets/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-secrets")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "warns when setup secrets are still plaintext", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "sk-plain"
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :warn
+      assert result.detail =~ "OPENAI_API_KEY"
+      assert result.detail =~ "fermix setup --migrate-secrets"
+    end
+
+    test "passes when no plaintext setup secrets are present", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :ok
     end
   end
 
@@ -333,5 +427,22 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     File.write!(path, content)
     path
+  end
+
+  defp write_sandbox_event(home, fields) do
+    dir = Path.join([home, "traces", Date.utc_today() |> Date.to_iso8601()])
+    File.mkdir_p!(dir)
+
+    row =
+      %{
+        type: "sandbox_event",
+        decision: "deny",
+        reason_tag: "outside_root",
+        resource: Keyword.fetch!(fields, :resource),
+        capability: Keyword.fetch!(fields, :capability)
+      }
+      |> Jason.encode!()
+
+    File.write!(Path.join(dir, "sandbox_event.jsonl"), row <> "\n", [:append])
   end
 end

@@ -3,9 +3,9 @@ defmodule FermixCore.Capabilities.MCP.Config do
   Parser for the `[mcp.servers.<name>]` blocks in `~/.fermix/config.toml`.
 
   Returns one config map per configured server with `command`, `args`,
-  `env`, `approved?`, and `tools_overrides` already typed. `$env:KEY`
-  references in env values are resolved against `System.get_env/1` so
-  secrets stay out of the TOML file.
+  `env`, `pass_env`, `approved?`, and `tools_overrides` already typed.
+  Secret passthrough is declared with `pass_env` and resolved later by
+  `FermixCore.Sandbox.Env`.
 
   This parser is a small purpose-built TOML reader scoped to the MCP
   block. It supports:
@@ -30,6 +30,7 @@ defmodule FermixCore.Capabilities.MCP.Config do
           command: String.t() | nil,
           args: [String.t()],
           env: %{String.t() => String.t()},
+          pass_env: [String.t()],
           approved?: boolean(),
           tools_overrides: %{String.t() => tool_override()}
         }
@@ -104,11 +105,16 @@ defmodule FermixCore.Capabilities.MCP.Config do
     server = Map.get(sections, :server, %{})
     tools = Map.get(sections, :tools, %{})
 
+    env = server |> Map.get("env", %{}) |> validate_env(name)
+    pass_env = server |> Map.get("pass_env", []) |> ensure_list_of_strings(:pass_env, name)
+    validate_env_conflicts!(name, env, pass_env)
+
     %{
       name: name,
       command: Map.get(server, "command"),
       args: server |> Map.get("args", []) |> ensure_list_of_strings(:args, name),
-      env: server |> Map.get("env", %{}) |> resolve_env() |> validate_env(name),
+      env: env,
+      pass_env: pass_env,
       approved?: server |> Map.get("approved", false) |> validate_bool(:approved, name),
       tools_overrides: parse_tools_overrides(tools, name)
     }
@@ -169,25 +175,35 @@ defmodule FermixCore.Capabilities.MCP.Config do
           "#{key} for [mcp.servers.#{name}] must be an array, got: #{inspect(other)}"
   end
 
-  defp validate_env(env, _name) when is_map(env), do: env
+  defp validate_env(env, name) when is_map(env) do
+    Enum.into(env, %{}, fn {key, value} -> {to_string(key), validate_env_value(value, name)} end)
+  end
 
   defp validate_env(other, name) do
     raise ArgumentError,
           "env for [mcp.servers.#{name}] must be an inline table, got: #{inspect(other)}"
   end
 
-  defp resolve_env(env) when is_map(env) do
-    Enum.into(env, %{}, fn {key, value} -> {to_string(key), resolve_env_value(value)} end)
+  defp validate_env_value("$env:" <> ref, name) when is_binary(ref) do
+    raise ArgumentError,
+          "MCP env value '$env:#{ref}' for [mcp.servers.#{name}] uses the removed $env: shorthand. " <>
+            "Declare #{ref} in [sandbox.env] and reference it via pass_env = [\"#{ref}\"]."
   end
 
-  defp resolve_env(other), do: other
+  defp validate_env_value(value, _name) when is_binary(value), do: value
+  defp validate_env_value(value, _name), do: to_string(value)
 
-  defp resolve_env_value("$env:" <> ref) when is_binary(ref) do
-    System.get_env(ref) || ""
+  defp validate_env_conflicts!(name, env, pass_env) do
+    duplicates = MapSet.intersection(MapSet.new(Map.keys(env)), MapSet.new(pass_env))
+
+    if MapSet.size(duplicates) > 0 do
+      duplicate_names = duplicates |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
+
+      raise ArgumentError,
+            "[mcp.servers.#{name}] declares #{duplicate_names} in both env and pass_env. " <>
+              "Pick one declaration shape per env name."
+    end
   end
-
-  defp resolve_env_value(value) when is_binary(value), do: value
-  defp resolve_env_value(value), do: to_string(value)
 
   defp parse_scalar(value) do
     trimmed = String.trim(value)

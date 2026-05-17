@@ -1,6 +1,8 @@
 defmodule FermixCore.Setup.WizardTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
@@ -15,7 +17,11 @@ defmodule FermixCore.Setup.WizardTest do
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    secret_writer = Application.get_env(:fermix_core, :secret_writer)
     fermix_home = System.get_env("FERMIX_HOME")
+
+    FermixTestSupport.SecretWriterStub.reset()
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
 
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
@@ -35,6 +41,8 @@ defmodule FermixCore.Setup.WizardTest do
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :realtime, realtime)
+      restore_secret_writer(secret_writer)
+      FermixTestSupport.SecretWriterStub.reset()
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -153,7 +161,12 @@ defmodule FermixCore.Setup.WizardTest do
       )
 
     assert report.status == :ready
-    assert File.read!(Path.join(tmp_home, "config.toml")) =~ "[fermix_core.providers.openai]"
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.providers.openai]"
+    assert contents =~ ~s(api_key = "@keyring")
+    assert contents =~ ~s(bot_token = "@keyring")
+    refute contents =~ "sk-test-123"
+    refute contents =~ "bot-token"
 
     assert Enum.all?(["skills", "journals", "traces", "logs"], fn dir ->
              File.dir?(Path.join(tmp_home, dir))
@@ -175,6 +188,86 @@ defmodule FermixCore.Setup.WizardTest do
     refute Keyword.has_key?(telegram, :allowed_user_ids)
     assert Keyword.get(compaction, :threshold) == 0.8
     assert Keyword.get(memory, :extraction_timeout_ms) == 120_000
+  end
+
+  test "save_answers writes all setup secrets through SecretWriter" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-secrets")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        openai_api_key: "sk-all-secrets",
+        telegram_bot_token: "telegram-secret",
+        telegram_owner_user_id: "111",
+        whatsapp_access_token: "whatsapp-access-secret",
+        whatsapp_phone_number_id: "phone-123",
+        whatsapp_verify_token: "whatsapp-verify-secret",
+        whatsapp_app_secret: "whatsapp-app-secret",
+        whatsapp_owner_user_id: "222",
+        discord_bot_token: "discord-secret",
+        discord_bot_user_id: "333",
+        discord_owner_user_id: "444",
+        slack_bot_token: "slack-secret",
+        slack_signing_secret: "slack-signing-secret",
+        slack_owner_user_id: "555"
+      )
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+
+    Enum.each(secret_bytes(), fn secret ->
+      refute contents =~ secret
+    end)
+
+    assert contents =~ ~s(api_key = "@keyring")
+    assert String.split(contents, ~s("@keyring")) |> length() == 9
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    openai = persisted.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
+    channels = persisted.fermix_channels
+    whatsapp = Keyword.get(channels, :whatsapp, [])
+    discord = Keyword.get(channels, :discord, [])
+    slack = Keyword.get(channels, :slack, [])
+
+    assert Keyword.get(openai, :api_key) == "sk-all-secrets"
+    assert Keyword.get(whatsapp, :access_token) == "whatsapp-access-secret"
+    assert Keyword.get(whatsapp, :verify_token) == "whatsapp-verify-secret"
+    assert Keyword.get(whatsapp, :app_secret) == "whatsapp-app-secret"
+    assert Keyword.get(discord, :bot_token) == "discord-secret"
+    assert Keyword.get(slack, :bot_token) == "slack-secret"
+    assert Keyword.get(slack, :signing_secret) == "slack-signing-secret"
+  end
+
+  test "save_answers falls back without persisting secrets when no writer is available" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-secret-writer")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.UnavailableSecretWriter)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    log =
+      capture_log(fn ->
+        assert {:ok, _report} =
+                 Wizard.report().wizard
+                 |> Wizard.save_answers(openai_api_key: "sk-no-helper")
+      end)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+
+    refute contents =~ "sk-no-helper"
+    refute contents =~ "@keyring"
+    assert log =~ "No OS secret writer available for OPENAI_API_KEY"
+    assert log =~ "shell rc, systemd unit, or launchd plist"
   end
 
   test "save_answers persists realtime voice setup answers" do
@@ -940,6 +1033,21 @@ defmodule FermixCore.Setup.WizardTest do
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+  defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
+  defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
+
+  defp secret_bytes do
+    [
+      "sk-all-secrets",
+      "telegram-secret",
+      "whatsapp-access-secret",
+      "whatsapp-verify-secret",
+      "whatsapp-app-secret",
+      "discord-secret",
+      "slack-secret",
+      "slack-signing-secret"
+    ]
+  end
 
   defp start_memory_repo! do
     unique = System.unique_integer([:positive, :monotonic])

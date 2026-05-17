@@ -6,6 +6,15 @@ defmodule FermixCore.Sandbox.Config do
   @modes ~w(strict standard open)a
   @env_modes ~w(selected all)a
   @command_profiles ~w(bare assistant extended)a
+  @old_mode_names %{
+    "workspace" => "strict",
+    "developer" => "standard",
+    "trusted_local" => "open"
+  }
+  @old_profile_names %{
+    "none" => "bare",
+    "trusted" => "extended"
+  }
 
   @type env_source :: %{
           source: :env | :command,
@@ -258,8 +267,42 @@ defmodule FermixCore.Sandbox.Config do
   defp enum_value(value, valid, key), do: raise_invalid_enum!(key, value, valid)
 
   defp raise_invalid_enum!(key, value, valid) do
+    old_value = to_string(value)
+    renamed = renamed_value(key, old_value)
+
+    if is_binary(renamed) do
+      raise ArgumentError, rename_error(key, old_value, renamed)
+    end
+
     allowed = Enum.map_join(valid, ", ", &Atom.to_string/1)
     raise ArgumentError, "invalid sandbox #{key} #{inspect(value)}; expected one of: #{allowed}"
+  end
+
+  defp renamed_value(:mode, value), do: Map.get(@old_mode_names, value)
+  defp renamed_value(:profile, value), do: Map.get(@old_profile_names, value)
+  defp renamed_value(_key, _value), do: nil
+
+  defp rename_error(:mode, value, renamed) do
+    """
+    invalid sandbox mode #{inspect(value)}. The names changed in M5:
+      workspace -> strict
+      developer -> standard
+      trusted_local -> open
+    Run: fermix sandbox mode #{renamed}
+    Or edit ~/.fermix/config.toml: mode = #{inspect(value)} -> mode = #{inspect(renamed)}
+    """
+    |> String.trim()
+  end
+
+  defp rename_error(:profile, value, renamed) do
+    """
+    invalid sandbox command profile #{inspect(value)}. The names changed in M5:
+      none -> bare
+      trusted -> extended
+    Run: fermix sandbox commands profile #{renamed}
+    Or edit ~/.fermix/config.toml: profile = #{inspect(value)} -> profile = #{inspect(renamed)}
+    """
+    |> String.trim()
   end
 
   defp path_list(values, key), do: values |> string_list(key) |> Enum.map(&expand_path/1)

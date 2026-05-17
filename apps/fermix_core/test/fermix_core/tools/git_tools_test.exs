@@ -4,6 +4,7 @@ defmodule FermixCore.Tools.GitToolsTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.GitRead
   alias FermixCore.Tools.GitWrite
 
@@ -80,8 +81,29 @@ defmodule FermixCore.Tools.GitToolsTest do
 
     assert result.success == false
     assert result.error =~ "outside roots"
+    assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(outside)}"
 
     FermixTestSupport.SafeRm.rm_rf!(outside)
+  end
+
+  test "git_write suggests repo root when cwd is allowed but repo root is denied", %{dir: dir} do
+    nested = Path.join(dir, "nested")
+    File.mkdir_p!(nested)
+
+    context =
+      Map.put(
+        @context,
+        :sandbox_config,
+        Config.normalize(mode: :strict, workspace_root: nested)
+      )
+
+    assert {:ok, result} =
+             GitWrite.execute(%{"repo" => nested, "command" => "add", "args" => ["."]}, context)
+
+    assert result.success == false
+    assert result.error =~ "outside roots"
+    assert result.error =~ "resolved from input #{PathPolicy.canonical_path(nested)}"
+    assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(dir)}"
   end
 
   test "registry policy exposes git_read to read-only filters but not git_write" do

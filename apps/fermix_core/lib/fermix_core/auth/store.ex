@@ -59,10 +59,43 @@ defmodule FermixCore.Auth.Store do
   @spec path() :: Path.t()
   def path, do: default_path()
 
+  @spec validate_permissions(Path.t()) ::
+          :ok | {:error, {:insecure_permissions, Path.t(), non_neg_integer()}} | {:error, term()}
+  def validate_permissions(path \\ default_path()) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %{mode: mode}} ->
+        check_mode(path, Bitwise.band(mode, 0o777))
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec validate_permissions!(Path.t()) :: :ok
+  def validate_permissions!(path \\ default_path()) when is_binary(path) do
+    case validate_permissions(path) do
+      :ok -> :ok
+      {:error, {:insecure_permissions, ^path, mode}} -> raise ArgumentError, permissions_message(path, mode)
+      {:error, reason} -> raise ArgumentError, "failed to stat #{path}: #{inspect(reason)}"
+    end
+  end
+
+  @spec permissions_message(Path.t(), non_neg_integer()) :: String.t()
+  def permissions_message(path, mode) when is_binary(path) and is_integer(mode) do
+    "#{path} has perms 0o#{Integer.to_string(mode, 8)} (expected 0o600). " <>
+      "Run `chmod 600 #{path}` and restart."
+  end
+
   defp default_path do
     home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
     Path.join(home, "auth.json")
   end
+
+  defp check_mode(_path, 0o600), do: :ok
+  defp check_mode(path, mode), do: {:error, {:insecure_permissions, path, mode}}
 
   defp providers_map(%{"providers" => providers}) when is_map(providers), do: {:ok, providers}
 

@@ -26,6 +26,8 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Env, as: SandboxEnv
 
   @type opt ::
           {:name, atom()}
@@ -62,6 +64,8 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   end
 
   defp child_spec_for(server, capability_registry, mcp_registry_name, hermes_starter) do
+    server = resolve_server_env!(server)
+
     %{children: hermes_children, client_name: hermes_client} =
       hermes_starter.child_specs_for(server)
 
@@ -103,6 +107,25 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp resolve_server_env!(server) do
+    pass_env = Map.get(server, :pass_env, [])
+    literal_env = Map.get(server, :env, %{})
+
+    case SandboxEnv.build_command(SandboxConfig.current(), pass_env) do
+      {:ok, sandbox_env} ->
+        effective_env =
+          sandbox_env
+          |> Map.new()
+          |> Map.merge(literal_env)
+
+        Map.put(server, :env, effective_env)
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "MCP server #{server.name} env could not be built: #{SandboxEnv.format_error(reason)}"
+    end
+  end
 
   defp default_servers do
     Application.get_env(:fermix_core, :mcp_servers, [])

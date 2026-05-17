@@ -2,6 +2,7 @@ defmodule FermixCore.Tools.ShellTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.Shell
 
   @context %{agent_name: "test_agent", conversation_key: :test}
@@ -143,6 +144,7 @@ defmodule FermixCore.Tools.ShellTest do
 
       assert result.success == false
       assert result.error =~ "outside roots"
+      assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(outside)}"
 
       FermixTestSupport.SafeRm.rm_rf!(root)
       FermixTestSupport.SafeRm.rm_rf!(outside)

@@ -146,6 +146,26 @@ defmodule FermixCore.Sandbox.ConfigTest do
     assert File.dir?(Path.join(home, "grants"))
   end
 
+  test "old mode names fail with exact migration guidance" do
+    error =
+      assert_raise ArgumentError, fn ->
+        Config.normalize(mode: "developer")
+      end
+
+    assert Exception.message(error) =~ "developer -> standard"
+    assert Exception.message(error) =~ "Run: fermix sandbox mode standard"
+  end
+
+  test "old command profile names fail with exact migration guidance" do
+    error =
+      assert_raise ArgumentError, fn ->
+        Config.normalize(commands: [profile: "trusted"])
+      end
+
+    assert Exception.message(error) =~ "trusted -> extended"
+    assert Exception.message(error) =~ "Run: fermix sandbox commands profile extended"
+  end
+
   defp restore_sandbox(nil), do: Application.delete_env(:fermix_core, :sandbox)
   defp restore_sandbox(value), do: Application.put_env(:fermix_core, :sandbox, value)
 end

@@ -142,10 +142,20 @@ defmodule FermixCore.Tools.Shell do
   defp format_error({:missing_working_dir, dir}), do: "Working directory does not exist: #{dir}"
 
   defp format_error({:outside_root, path}),
-    do: "Sandbox denied shell working_dir outside roots: #{path}"
+    do:
+      "Sandbox denied shell working_dir outside roots: #{path}. " <>
+        "To allow this directory, run: fermix grant path #{path}"
 
-  defp format_error({:protected_path, path}), do: "Sandbox denied protected path: #{path}"
-  defp format_error({:blocked_root, path}), do: "Sandbox denied blocked root: #{path}"
+  defp format_error({:protected_path, path}),
+    do:
+      "Sandbox denied protected path: #{path}. " <>
+        "Run: fermix sandbox explain"
+
+  defp format_error({:blocked_root, path}),
+    do:
+      "Sandbox denied blocked root: #{path}. " <>
+        "Run: fermix sandbox explain"
+
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: "Sandbox denied shell command: #{inspect(reason)}"
 end

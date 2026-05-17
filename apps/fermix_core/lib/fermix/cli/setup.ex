@@ -38,6 +38,7 @@ defmodule Fermix.CLI.Setup do
     signal_owner_user_id: :string,
     print_state: :boolean,
     reconfigure: :boolean,
+    migrate_secrets: :boolean,
     import_codex: :boolean,
     no_browser: :boolean,
     skip_probe: :boolean,

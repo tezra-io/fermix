@@ -161,6 +161,32 @@ defmodule FermixCore.Auth.StoreTest do
     end
   end
 
+  describe "validate_permissions/1" do
+    test "passes when auth file is missing" do
+      assert :ok = Store.validate_permissions(tmp_path())
+    end
+
+    test "passes when auth file is 0600" do
+      path = tmp_path()
+      File.write!(path, "{}")
+      File.chmod!(path, 0o600)
+
+      assert :ok = Store.validate_permissions(path)
+    end
+
+    test "rejects widened auth file permissions with chmod guidance" do
+      path = tmp_path()
+      File.write!(path, "{}")
+      File.chmod!(path, 0o644)
+
+      assert {:error, {:insecure_permissions, ^path, 0o644}} = Store.validate_permissions(path)
+
+      assert_raise ArgumentError, ~r/chmod 600/, fn ->
+        Store.validate_permissions!(path)
+      end
+    end
+  end
+
   describe "delete_provider/2" do
     test "removes a provider, preserves others, and writes with 0600 permissions" do
       path = tmp_path()

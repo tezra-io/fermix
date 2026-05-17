@@ -89,6 +89,17 @@ defmodule Fermix.CLI.SandboxCommandTest do
       end)
 
     assert output =~ "unsafe_root"
+    assert output =~ "fermix sandbox explain"
+  end
+
+  test "env get failure names the reconfiguration command" do
+    output =
+      capture_io(:stderr, fn ->
+        assert SandboxCommand.run(["env", "get", "MISSING_SECRET"]) == 1
+      end)
+
+    assert output =~ "MISSING_SECRET"
+    assert output =~ "fermix sandbox env allow MISSING_SECRET"
   end
 
   test "env allow and unset persist selected env names" do
