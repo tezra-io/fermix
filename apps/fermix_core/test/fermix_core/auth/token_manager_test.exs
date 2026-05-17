@@ -62,7 +62,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:ok, "AT"} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "does not load openai provider tokens as Codex credentials" do
@@ -83,7 +83,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:error, :no_token} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "migrates flat M3-era shape (top-level tokens) to nested provider scope" do
@@ -99,7 +99,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:ok, "legacy_at"} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "returns error when no auth file exists" do
@@ -129,7 +129,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert {:ok, "cached"} = TokenManager.get_token(name)
       assert {:ok, "cached"} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
 
@@ -152,7 +152,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:error, :no_refresh_token} = TokenManager.refresh(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "refreshes and persists to Auth.Store" do
@@ -182,7 +182,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "new_at"
       assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "new_rt"
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
 
@@ -251,7 +251,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       Process.sleep(1_500)
       assert Process.whereis(name) |> Process.alive?()
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
 
@@ -291,7 +291,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert {:ok, "fresh_at"} = TokenManager.reload(name)
       assert {:ok, "fresh_at"} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "clears invalidated state so subsequent get_token calls succeed" do
@@ -335,7 +335,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert {:ok, "recovered_at"} = TokenManager.reload(name)
       assert {:ok, "recovered_at"} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "returns error and preserves cached state when disk read fails" do
@@ -356,11 +356,11 @@ defmodule FermixCore.Auth.TokenManagerTest do
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:ok, "AT"} = TokenManager.get_token(name)
 
-      File.rm!(fermix_path)
+      FermixTestSupport.SafeRm.rm!(fermix_path)
       assert {:error, :no_auth_file} = TokenManager.reload(name)
       assert {:ok, "AT"} = TokenManager.get_token(name)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
 end

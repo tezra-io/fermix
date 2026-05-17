@@ -23,7 +23,7 @@ defmodule Mix.Tasks.Fermix.ResourceTest do
     on_exit(fn ->
       restore_memory_env(memory_env)
       Mix.shell(shell)
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &File.rm/1)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
     %{repo: repo_name}
@@ -171,7 +171,7 @@ defmodule Mix.Tasks.Fermix.ResourceTest do
     unique = System.unique_integer([:positive])
     dir = Path.join(System.tmp_dir!(), "#{name}-#{unique}")
     File.mkdir_p!(dir)
-    on_exit(fn -> File.rm_rf(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
     Path.join(dir, "RESOURCE.md")
   end
 end

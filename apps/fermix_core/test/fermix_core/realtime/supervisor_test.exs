@@ -27,7 +27,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
 
     on_exit(fn ->
       if Process.alive?(pid), do: Process.exit(pid, :shutdown)
-      File.rm(socket_path)
+      FermixTestSupport.SafeRm.rm(socket_path)
     end)
 
     assert Process.whereis(socket_name)

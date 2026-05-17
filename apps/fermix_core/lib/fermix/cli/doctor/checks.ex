@@ -12,6 +12,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
 
@@ -195,6 +197,31 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @spec sandbox_config() :: result()
+  def sandbox_config do
+    config = SandboxConfig.current()
+    roots = SandboxMode.effective_roots(config)
+
+    ok(
+      "sandbox",
+      "mode #{config.mode}, roots #{length(roots)}, env #{length(config.env.allow)}, " <>
+        "presets #{length(config.commands.presets)}"
+    )
+  rescue
+    error in ArgumentError -> fail("sandbox", Exception.message(error))
+  end
+
+  @spec auth_file_permissions() :: result()
+  def auth_file_permissions do
+    path = Path.join(ConfigStore.fermix_home(), "auth.json")
+
+    case File.stat(path) do
+      {:ok, %{mode: mode}} -> auth_mode_result(path, Bitwise.band(mode, 0o777))
+      {:error, :enoent} -> ok("auth perms", "no auth.json present")
+      {:error, reason} -> fail("auth perms", "stat #{path}: #{inspect(reason)}")
+    end
+  end
+
   @spec upgrade_available?(keyword()) :: result()
   def upgrade_available?(opts \\ []) do
     case Manifest.fetch(opts) do
@@ -346,6 +373,12 @@ defmodule Fermix.CLI.Doctor.Checks do
       end
 
     "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
+  end
+
+  defp auth_mode_result(path, 0o600), do: ok("auth perms", "auth.json is 0600 at #{path}")
+
+  defp auth_mode_result(path, mode) do
+    fail("auth perms", "auth.json must be 0600 at #{path}; got #{Integer.to_string(mode, 8)}")
   end
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}

@@ -12,7 +12,7 @@ defmodule FermixCore.Tools.FileReadTest do
     file = Path.join(dir, "test.txt")
     File.write!(file, "line1\nline2\nline3\nline4\nline5")
 
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
     %{dir: dir, test_file: file}
   end

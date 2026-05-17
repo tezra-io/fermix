@@ -236,7 +236,7 @@ defmodule FermixCore.Setup.DoctorTest do
   describe "probe_provider/2 — :openai_codex" do
     test "uses bearer token from Auth.Store without a running TokenManager" do
       dir = tmp_dir()
-      on_exit(fn -> File.rm_rf!(dir) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
       auth_path = write_codex_auth(dir, "store-bearer-xyz")
       put_provider(:openai_codex, default_model: "gpt-5.5")
@@ -261,13 +261,13 @@ defmodule FermixCore.Setup.DoctorTest do
 
     test "uses a running TokenManager instead of refreshing directly from disk" do
       dir = tmp_dir()
-      on_exit(fn -> File.rm_rf!(dir) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
       auth_path = write_codex_auth(dir, "manager-bearer-xyz")
       put_provider(:openai_codex, default_model: "gpt-5.5")
 
       start_supervised!({TokenManager, [fermix_auth_path: auth_path]}, id: :doctor_token_manager)
-      File.rm!(auth_path)
+      FermixTestSupport.SafeRm.rm!(auth_path)
 
       plug = fn conn ->
         assert ["Bearer manager-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
@@ -283,7 +283,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
     test "returns misconfigured when Auth.Store has no token" do
       dir = tmp_dir()
-      on_exit(fn -> File.rm_rf!(dir) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
       put_provider(:openai_codex, default_model: "gpt-5.5")
 
@@ -297,7 +297,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
     test "returns auth_scope_mismatch on 401 with codex-specific hint" do
       dir = tmp_dir()
-      on_exit(fn -> File.rm_rf!(dir) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
       auth_path = write_codex_auth(dir, "oauth-stale")
       put_provider(:openai_codex, default_model: "gpt-5.5")

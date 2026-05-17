@@ -99,6 +99,6 @@ defmodule Fermix.CLI.ServiceTest do
   end
 
   defp on_exit_cleanup(path) do
-    ExUnit.Callbacks.on_exit(fn -> File.rm_rf(path) end)
+    ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(path) end)
   end
 end

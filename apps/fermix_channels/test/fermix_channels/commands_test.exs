@@ -6,6 +6,8 @@ defmodule FermixChannels.CommandsTest do
   alias FermixChannels.Commands.Compact
   alias FermixChannels.Message
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.PathPolicy
 
   setup do
     telegram = Application.get_env(:fermix_channels, :telegram, [])
@@ -141,6 +143,87 @@ defmodule FermixChannels.CommandsTest do
       assert_receive {:compact_reply, help_text}
       assert help_text =~ "/new (/clear) - Start a fresh conversation session."
     end
+
+    test "owner can inspect sandbox status" do
+      {home, _root} = sandbox_fixture!()
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      test_pid = self()
+
+      assert :ok =
+               Commands.dispatch(
+                 Commands.parse(message("/sandbox status", metadata: %{user_id: "owner-1"})),
+                 reply_fn(test_pid),
+                 %{conversation_key: {"telegram", "chat-1", :root}}
+               )
+
+      assert_receive {:compact_reply, status}
+      assert status =~ "mode: strict"
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end
+
+    test "widening sandbox channel commands require same-user confirmation" do
+      {home, root} = sandbox_fixture!()
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      test_pid = self()
+
+      assert :ok =
+               Commands.dispatch(
+                 Commands.parse(message("/grant path #{root}", metadata: %{user_id: "owner-1"})),
+                 reply_fn(test_pid),
+                 %{conversation_key: {"telegram", "chat-1", :root}}
+               )
+
+      assert_receive {:compact_reply, confirm_text}
+      assert confirm_text =~ "/confirm "
+      [token] = Regex.run(~r/\/confirm ([A-Z2-7]{8})/, confirm_text, capture: :all_but_first)
+      refute PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+
+      assert :ok =
+               Commands.dispatch(
+                 Commands.parse(message("/confirm #{token}", metadata: %{user_id: "owner-1"})),
+                 reply_fn(test_pid),
+                 %{conversation_key: {"telegram", "chat-1", :root}}
+               )
+
+      assert_receive {:compact_reply, "Sandbox updated." <> _rest}
+      assert PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end
+
+    test "sandbox command preset updates use confirmation" do
+      {home, _root} = sandbox_fixture!()
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      test_pid = self()
+
+      assert :ok =
+               Commands.dispatch(
+                 Commands.parse(
+                   message("/sandbox commands enable ai_tools", metadata: %{user_id: "owner-1"})
+                 ),
+                 reply_fn(test_pid),
+                 %{conversation_key: {"telegram", "chat-1", :root}}
+               )
+
+      assert_receive {:compact_reply, confirm_text}
+      assert confirm_text =~ "/confirm "
+      assert confirm_text =~ "presets + ai_tools"
+
+      [token] = Regex.run(~r/\/confirm ([A-Z2-7]{8})/, confirm_text, capture: :all_but_first)
+
+      assert :ok =
+               Commands.dispatch(
+                 Commands.parse(message("/confirm #{token}", metadata: %{user_id: "owner-1"})),
+                 reply_fn(test_pid),
+                 %{conversation_key: {"telegram", "chat-1", :root}}
+               )
+
+      assert_receive {:compact_reply, "Sandbox updated." <> _rest}
+      assert "ai_tools" in SandboxConfig.current().commands.presets
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end
   end
 
   describe "Compact.execute/3" do
@@ -249,6 +332,40 @@ defmodule FermixChannels.CommandsTest do
       send(test_pid, {:compact_reply, text})
       :ok
     end
+  end
+
+  defp sandbox_fixture! do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("channel-sandbox")
+    root = Path.join(home, "project")
+    File.mkdir_p!(root)
+    previous_home = System.get_env("FERMIX_HOME")
+    previous_sandbox = Application.get_env(:fermix_core, :sandbox)
+
+    System.put_env("FERMIX_HOME", home)
+
+    Application.put_env(
+      :fermix_core,
+      :sandbox,
+      SandboxConfig.normalize(
+        home: home,
+        mode: :strict,
+        workspace_root: Path.join(home, "workspace")
+      )
+    )
+
+    on_exit(fn ->
+      case previous_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      case previous_sandbox do
+        nil -> Application.delete_env(:fermix_core, :sandbox)
+        value -> Application.put_env(:fermix_core, :sandbox, value)
+      end
+    end)
+
+    {home, root}
   end
 
   defp route do

@@ -34,7 +34,7 @@ defmodule FermixCore.Tools.AdminToolsTest do
         do: System.put_env("FERMIX_HOME", previous_home),
         else: System.delete_env("FERMIX_HOME")
 
-      File.rm_rf!(home)
+      FermixTestSupport.SafeRm.rm_rf!(home)
     end)
 
     %{home: home}

@@ -69,7 +69,7 @@ defmodule FermixCore.Memory.CompactorTest do
     start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
 
     on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &File.rm/1)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
     %{repo: repo_name}

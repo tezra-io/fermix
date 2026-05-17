@@ -18,6 +18,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.LogsCommand
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
+  alias Fermix.CLI.SandboxCommand
   alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup
   alias Fermix.CLI.StartCommand
@@ -52,6 +53,9 @@ defmodule Fermix.CLI do
   defp dispatch("ask", rest), do: ChatCommand.run(rest)
   defp dispatch("chat", rest), do: ChatCommand.run(rest)
   defp dispatch("run", rest), do: Run.run(rest)
+  defp dispatch("sandbox", rest), do: SandboxCommand.run(rest)
+  defp dispatch("grant", rest), do: SandboxCommand.run(["grant" | rest])
+  defp dispatch("revoke", rest), do: SandboxCommand.run(["revoke" | rest])
   defp dispatch("service", rest), do: ServiceCommand.run(rest)
   defp dispatch("start", rest), do: StartCommand.run(rest)
   defp dispatch("stop", rest), do: StopCommand.run(rest)

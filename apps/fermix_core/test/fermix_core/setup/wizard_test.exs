@@ -91,9 +91,9 @@ defmodule FermixCore.Setup.WizardTest do
   end
 
   test "report marks restart required when persisted config cannot be read" do
-    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(Path.join(tmp_home, "config.toml"))
@@ -133,9 +133,9 @@ defmodule FermixCore.Setup.WizardTest do
   end
 
   test "save_answers persists config, creates workspace directories, and updates readiness" do
-    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
     Application.put_env(:fermix_core, :providers, [])
@@ -181,7 +181,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-realtime-setup-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
     Application.put_env(:fermix_core, :providers, [])
@@ -224,7 +224,7 @@ defmodule FermixCore.Setup.WizardTest do
         "fermix-realtime-prompts-#{System.unique_integer([:positive])}"
       )
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     report = Wizard.report()
@@ -250,7 +250,7 @@ defmodule FermixCore.Setup.WizardTest do
         "fermix-realtime-reconfigure-#{System.unique_integer([:positive])}"
       )
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     :ok =
@@ -301,7 +301,7 @@ defmodule FermixCore.Setup.WizardTest do
         "fermix-channel-reconfigure-#{System.unique_integer([:positive])}"
       )
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     :ok =
@@ -361,7 +361,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-wizard-provider-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -385,7 +385,7 @@ defmodule FermixCore.Setup.WizardTest do
 
   test "prompts omit provider/model/effort once provider settings are persisted to TOML" do
     tmp_home = Path.join(System.tmp_dir!(), "fermix-wizard-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -420,7 +420,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-wizard-model-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -448,7 +448,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-wizard-auth-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
     File.mkdir_p!(tmp_home)
 
@@ -499,7 +499,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-wizard-seed-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :providers,
@@ -567,7 +567,7 @@ defmodule FermixCore.Setup.WizardTest do
 
     bootstrap_dir = Application.get_env(:fermix_core, :prompt_bootstrap)[:bootstrap_dir]
     soul_path = Path.join([bootstrap_dir, "main", "SOUL.md"])
-    File.rm!(soul_path)
+    FermixTestSupport.SafeRm.rm!(soul_path)
 
     assert {:ok, second_results} = Wizard.seed_now()
 
@@ -588,9 +588,9 @@ defmodule FermixCore.Setup.WizardTest do
   end
 
   test "save_answers persists whatsapp and discord setup answers" do
-    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
 
@@ -637,7 +637,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-wizard-prompt-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :providers,
@@ -685,7 +685,7 @@ defmodule FermixCore.Setup.WizardTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-wizard-owner-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :providers,
@@ -727,7 +727,7 @@ defmodule FermixCore.Setup.WizardTest do
         "fermix-wizard-env-secret-#{System.unique_integer([:positive])}"
       )
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     :ok =
@@ -773,9 +773,9 @@ defmodule FermixCore.Setup.WizardTest do
   end
 
   test "save_answers persists slack and signal setup answers" do
-    tmp_home = Path.join(System.tmp_dir!(), "fermix-setup-#{System.unique_integer([:positive])}")
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
 
@@ -817,7 +817,7 @@ defmodule FermixCore.Setup.WizardTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-m410-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers,
@@ -850,7 +850,7 @@ defmodule FermixCore.Setup.WizardTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-active-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
@@ -873,7 +873,7 @@ defmodule FermixCore.Setup.WizardTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-atom-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers,
@@ -974,10 +974,12 @@ defmodule FermixCore.Setup.WizardTest do
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
       restart_global_memory_repo!()
-      File.rm_rf!(bootstrap_dir)
-      File.rm_rf!(memory_dir)
+      FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
+      FermixTestSupport.SafeRm.rm_rf!(memory_dir)
 
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path -> File.rm(path) end)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        FermixTestSupport.SafeRm.rm(path)
+      end)
     end)
   end
 

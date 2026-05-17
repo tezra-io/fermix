@@ -40,7 +40,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     on_exit(fn ->
       if Process.alive?(socket), do: GenServer.stop(socket)
-      File.rm(socket_path)
+      FermixTestSupport.SafeRm.rm(socket_path)
     end)
 
     %{socket: socket, socket_path: socket_path}

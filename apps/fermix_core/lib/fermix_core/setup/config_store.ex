@@ -12,8 +12,11 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
 
   @workspace_dirs [
+    workspace: "workspace",
+    grants: "grants",
     bootstrap: "bootstrap",
     skills: "skills",
     journals: "journals",
@@ -24,6 +27,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @type runtime_config :: %{
           fermix_core: keyword(),
+          sandbox: keyword(),
           fermix_channels: keyword(),
           fermix_web: keyword()
         }
@@ -37,6 +41,8 @@ defmodule FermixCore.Setup.ConfigStore do
   def path, do: Path.join(fermix_home(), "config.toml")
 
   @spec workspace_paths() :: %{
+          workspace: String.t(),
+          grants: String.t(),
           bootstrap: String.t(),
           skills: String.t(),
           journals: String.t(),
@@ -77,6 +83,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, [])
       ],
+      sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
         telegram: Application.get_env(:fermix_channels, :telegram, []),
         whatsapp: Application.get_env(:fermix_channels, :whatsapp, []),
@@ -133,6 +140,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
+    apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
     apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
@@ -233,6 +241,10 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Keyword.get(:realtime, [])
           |> normalize_realtime()
       ],
+      sandbox:
+        snapshot
+        |> Map.get(:sandbox, SandboxConfig.default())
+        |> SandboxConfig.to_keyword(),
       fermix_channels: [
         telegram:
           snapshot
@@ -286,6 +298,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: [],
         realtime: []
       ],
+      sandbox: SandboxConfig.default(),
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
     }
@@ -355,6 +368,11 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_sandbox_config(sandbox_config) do
+    Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(sandbox_config))
+    :ok
+  end
+
   defp apply_channel_config(channel, channel_config) do
     merged =
       Application.get_env(:fermix_channels, channel, [])
@@ -374,6 +392,7 @@ defmodule FermixCore.Setup.ConfigStore do
     compaction = Keyword.get(fermix_core, :compaction, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
+    sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
@@ -403,6 +422,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
+      render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -434,6 +454,57 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Enum.join("\n")
 
     Enum.join([header, body], "\n")
+  end
+
+  defp render_sandbox([]), do: nil
+
+  defp render_sandbox(sandbox) do
+    config = SandboxConfig.normalize(sandbox)
+
+    [
+      render_section(["sandbox"],
+        mode: config.mode,
+        workspace_root: config.workspace_root,
+        allowed_roots: config.allowed_roots,
+        blocked_roots: config.blocked_roots
+      ),
+      render_section(["sandbox", "env"],
+        mode: config.env.mode,
+        allow: config.env.allow,
+        deny: config.env.deny
+      ),
+      render_env_sources(config.env.sources),
+      render_section(["sandbox", "commands"],
+        profile: config.commands.profile,
+        presets: config.commands.presets
+      ),
+      render_command_specs(config.commands.explicit)
+    ]
+    |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+  end
+
+  defp render_env_sources(sources) do
+    Enum.map(sources, fn {name, source} ->
+      values =
+        source
+        |> Map.to_list()
+        |> Enum.reject(fn {_key, value} -> value in [nil, []] end)
+
+      render_section(["sandbox", "env", name], values)
+    end)
+  end
+
+  defp render_command_specs(commands) do
+    Enum.map(commands, fn {name, spec} ->
+      values =
+        spec
+        |> Map.to_list()
+        |> Enum.reject(fn {_key, value} -> value in [nil, []] end)
+
+      render_section(["sandbox", "commands", name], values)
+    end)
   end
 
   defp encode_value(value) when is_binary(value) do
@@ -502,6 +573,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"]))
       ],
+      sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
         whatsapp: normalize_whatsapp(get_in(document, ["fermix_channels", "whatsapp"])),

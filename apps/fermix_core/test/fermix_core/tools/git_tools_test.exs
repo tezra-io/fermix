@@ -3,6 +3,7 @@ defmodule FermixCore.Tools.GitToolsTest do
 
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry
+  alias FermixCore.Sandbox.Config
   alias FermixCore.Tools.GitRead
   alias FermixCore.Tools.GitWrite
 
@@ -17,8 +18,17 @@ defmodule FermixCore.Tools.GitToolsTest do
     File.write!(Path.join(dir, "README.md"), "# Test\n")
     System.cmd("git", ["add", "README.md"], cd: dir)
     System.cmd("git", ["commit", "-m", "initial"], cd: dir)
-    on_exit(fn -> File.rm_rf!(dir) end)
-    %{dir: dir}
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    %{
+      dir: dir,
+      context:
+        Map.put(
+          @context,
+          :sandbox_config,
+          Config.normalize(mode: :strict, workspace_root: dir)
+        )
+    }
   end
 
   test "git_read runs whitelisted read-only subcommands", %{dir: dir} do
@@ -32,13 +42,16 @@ defmodule FermixCore.Tools.GitToolsTest do
     assert result.output == ""
   end
 
-  test "git_write runs whitelisted mutating subcommands and rejects push", %{dir: dir} do
+  test "git_write runs whitelisted mutating subcommands and rejects push", %{
+    dir: dir,
+    context: context
+  } do
     File.write!(Path.join(dir, "README.md"), "# Changed\n")
 
     assert {:ok, add_result} =
              GitWrite.execute(
                %{"repo" => dir, "command" => "add", "args" => ["README.md"]},
-               @context
+               context
              )
 
     assert add_result.success == true
@@ -46,16 +59,29 @@ defmodule FermixCore.Tools.GitToolsTest do
     assert {:ok, commit_result} =
              GitWrite.execute(
                %{"repo" => dir, "command" => "commit", "args" => ["-m", "change"]},
-               @context
+               context
              )
 
     assert commit_result.success == true
 
     assert {:ok, push_result} =
-             GitWrite.execute(%{"repo" => dir, "command" => "push", "args" => []}, @context)
+             GitWrite.execute(%{"repo" => dir, "command" => "push", "args" => []}, context)
 
     assert push_result.success == false
     assert push_result.error =~ "M10"
+  end
+
+  test "git_write denies repo outside sandbox roots", %{context: context} do
+    outside = FermixTestSupport.SafeRm.make_tmp_dir!("git-outside")
+    System.cmd("git", ["init"], cd: outside)
+
+    assert {:ok, result} =
+             GitWrite.execute(%{"repo" => outside, "command" => "add", "args" => ["."]}, context)
+
+    assert result.success == false
+    assert result.error =~ "outside roots"
+
+    FermixTestSupport.SafeRm.rm_rf!(outside)
   end
 
   test "registry policy exposes git_read to read-only filters but not git_write" do

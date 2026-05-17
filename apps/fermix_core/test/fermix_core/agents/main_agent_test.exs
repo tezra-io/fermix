@@ -484,10 +484,10 @@ defmodule FermixCore.Agents.MainAgentTest do
       Application.put_env(:fermix_core, :compaction, previous_compaction_config)
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
       MockProvider.cleanup()
-      File.rm_rf!(skills_dir)
-      File.rm_rf!(journal_dir)
-      File.rm_rf!(prompt_dir)
-      File.rm_rf!(bootstrap_dir)
+      FermixTestSupport.SafeRm.rm_rf!(skills_dir)
+      FermixTestSupport.SafeRm.rm_rf!(journal_dir)
+      FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
+      FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
     end)
 
     %{

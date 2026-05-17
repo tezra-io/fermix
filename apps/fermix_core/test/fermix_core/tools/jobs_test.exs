@@ -21,7 +21,7 @@ defmodule FermixCore.Tools.JobsTest do
       Application.put_env(:fermix_core, :jobs, jobs_config)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 

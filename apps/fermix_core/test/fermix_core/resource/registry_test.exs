@@ -14,7 +14,7 @@ defmodule FermixCore.Resource.RegistryTest do
 
     on_exit(fn ->
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -318,7 +318,7 @@ defmodule FermixCore.Resource.RegistryTest do
     dir = Path.join(System.tmp_dir!(), "#{name}-#{unique}")
     File.mkdir_p!(dir)
 
-    on_exit(fn -> File.rm_rf(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
     Path.join(dir, "RESOURCE.md")
   end

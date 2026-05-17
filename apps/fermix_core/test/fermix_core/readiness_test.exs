@@ -80,7 +80,7 @@ defmodule FermixCore.ReadinessTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
@@ -112,7 +112,7 @@ defmodule FermixCore.ReadinessTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
@@ -161,7 +161,7 @@ defmodule FermixCore.ReadinessTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])

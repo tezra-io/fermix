@@ -15,7 +15,7 @@ defmodule FermixChannels.Application do
     warn_missing_command_owners(readiness)
 
     children =
-      []
+      [FermixChannels.Commands.Sandbox.Confirmations]
       |> Kernel.++(
         polling_children(Application.get_env(:fermix_channels, :telegram, []), readiness)
       )

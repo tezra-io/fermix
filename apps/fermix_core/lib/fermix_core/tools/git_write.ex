@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.GitWrite do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Sandbox
   alias FermixCore.Tools.GitCommand
   alias FermixCore.Tools.Support
 
@@ -56,18 +57,28 @@ defmodule FermixCore.Tools.GitWrite do
 
   @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
-    Support.run(name(), context, fn -> do_execute(args) end)
+    Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
-  defp do_execute(args) do
+  defp do_execute(args, context) do
     with {:ok, command} <- Support.required_string(args, "command"),
          :ok <- validate_command(command),
          repo = Map.get(args, "repo", File.cwd!()),
          git_args = Support.optional_string_list(args, "args"),
-         {:ok, output} <- GitCommand.run(repo, command, git_args) do
+         {:ok, repo_dir} <- Sandbox.working_dir(repo, :git_write, context),
+         {:ok, repo_root} <- git_root(repo_dir),
+         {:ok, _allowed_root} <- Sandbox.write_path(repo_root, :git_write, context),
+         {:ok, output} <- GitCommand.run(repo_dir, command, git_args) do
       {:ok, Tool.success(output)}
     else
-      {:error, reason} -> Support.error(reason)
+      {:error, reason} -> Support.error(format_error(reason))
+    end
+  end
+
+  defp git_root(repo) do
+    case System.cmd("git", ["rev-parse", "--show-toplevel"], cd: repo, stderr_to_stdout: true) do
+      {root, 0} -> {:ok, String.trim(root)}
+      {output, code} -> {:error, "git_failed: rev-parse exited #{code}: #{output}"}
     end
   end
 
@@ -78,4 +89,9 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp validate_command(command) when command in @commands, do: :ok
   defp validate_command(command), do: {:error, "unknown_command: #{command}"}
+
+  defp format_error({:outside_root, path}), do: "Sandbox denied git_write outside roots: #{path}"
+  defp format_error({:protected_path, path}), do: "Sandbox denied protected path: #{path}"
+  defp format_error({:blocked_root, path}), do: "Sandbox denied blocked root: #{path}"
+  defp format_error(reason), do: reason
 end

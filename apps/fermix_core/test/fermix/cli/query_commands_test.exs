@@ -27,7 +27,7 @@ defmodule Fermix.CLI.QueryCommandsTest do
     on_exit(fn ->
       if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
       restore_env("FERMIX_HOME", previous_home)
-      File.rm_rf!(socket_dir)
+      FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
 
     :ok

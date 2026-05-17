@@ -92,8 +92,8 @@ defmodule FermixCore.Jobs.RunnerTest do
     start_supervised!({CapabilityRegistry, name: capability_registry})
 
     on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &File.rm/1)
-      File.rm_rf!(output_base_dir)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      FermixTestSupport.SafeRm.rm_rf!(output_base_dir)
     end)
 
     %{repo: repo, capability_registry: capability_registry, output_base_dir: output_base_dir}

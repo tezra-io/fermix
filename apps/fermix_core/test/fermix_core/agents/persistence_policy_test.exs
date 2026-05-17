@@ -7,7 +7,7 @@ defmodule FermixCore.Agents.PersistencePolicyTest do
     suffix = System.unique_integer([:positive])
     base_dir = Path.join(System.tmp_dir!(), "fermix-journals-#{suffix}")
 
-    on_exit(fn -> File.rm_rf!(base_dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(base_dir) end)
 
     %{base_dir: base_dir}
   end

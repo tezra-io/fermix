@@ -7,7 +7,8 @@ defmodule FermixChannels.Commands.Registry do
     FermixChannels.Commands.Compact,
     FermixChannels.Commands.New,
     FermixChannels.Commands.Help,
-    FermixChannels.Commands.Whoami
+    FermixChannels.Commands.Whoami,
+    FermixChannels.Commands.Sandbox
   ]
 
   @spec list() :: [module()]

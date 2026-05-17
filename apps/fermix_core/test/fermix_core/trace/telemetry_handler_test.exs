@@ -15,7 +15,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     on_exit(fn ->
       TelemetryHandler.detach(prefix)
-      File.rm_rf!(tmp_dir)
+      FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
     end)
 
     %{dir: tmp_dir, server: name}

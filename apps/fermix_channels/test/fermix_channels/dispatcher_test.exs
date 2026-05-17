@@ -242,7 +242,7 @@ defmodule FermixChannels.DispatcherTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_channels, :telegram, previous_telegram)
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &File.rm/1)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
     Req.Test.stub(__MODULE__, fn conn ->

@@ -61,7 +61,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :fail
       assert result.detail =~ "sha mismatch"
-      File.rm(tmp)
+      FermixTestSupport.SafeRm.rm(tmp)
     end
 
     test "ok on sha match" do
@@ -80,7 +80,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "matches"
-      File.rm(tmp)
+      FermixTestSupport.SafeRm.rm(tmp)
     end
   end
 
@@ -155,6 +155,55 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :warn
       assert result.detail =~ "telegram"
       assert result.detail =~ "signal=owner set"
+    end
+  end
+
+  describe "sandbox_config/0" do
+    test "reports current sandbox posture" do
+      result = Checks.sandbox_config()
+
+      assert result.name == "sandbox"
+      assert result.status == :ok
+      assert result.detail =~ "mode"
+    end
+  end
+
+  describe "auth_file_permissions/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-auth")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "passes when auth.json is absent" do
+      result = Checks.auth_file_permissions()
+
+      assert result.name == "auth perms"
+      assert result.status == :ok
+      assert result.detail =~ "no auth.json"
+    end
+
+    test "fails when auth.json is wider than 0600", %{home: home} do
+      path = Path.join(home, "auth.json")
+      File.write!(path, "{}")
+      File.chmod!(path, 0o644)
+
+      result = Checks.auth_file_permissions()
+
+      assert result.name == "auth perms"
+      assert result.status == :fail
+      assert result.detail =~ "0600"
     end
   end
 

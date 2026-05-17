@@ -371,7 +371,7 @@ defmodule FermixChannels.WhatsAppTest do
       assert File.read!(path) == "voice-bytes"
       assert String.ends_with?(path, ".ogg")
 
-      File.rm!(path)
+      FermixTestSupport.SafeRm.rm!(path)
     end
   end
 

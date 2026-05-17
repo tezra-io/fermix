@@ -10,7 +10,7 @@ defmodule FermixCore.TraceTest do
     name = :"trace_test_#{System.unique_integer([:positive])}"
     start_supervised!({Trace, base_dir: tmp_dir, name: name})
 
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_dir) end)
 
     %{dir: tmp_dir, server: name}
   end

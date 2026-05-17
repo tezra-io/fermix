@@ -5,7 +5,7 @@ defmodule FermixCore.Realtime.DeviceIdentityTest do
 
   test "ensure_device_id creates a stable opaque UUID under the realtime directory" do
     dir = Path.join(System.tmp_dir!(), "fermix-device-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
     assert {:ok, first} = DeviceIdentity.ensure_device_id(dir)
     assert {:ok, second} = DeviceIdentity.ensure_device_id(dir)

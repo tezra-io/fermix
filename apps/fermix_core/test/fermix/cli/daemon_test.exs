@@ -48,7 +48,7 @@ defmodule Fermix.CLI.DaemonTest do
       restore_app_env(:cli_channel_bridge, previous_bridge)
       restore_app_env(:daemon_test_pid, previous_pid)
       restore_app_env(:daemon_bridge_result, previous_result)
-      File.rm_rf(socket_dir)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
     %{socket_path: socket_path, daemon: daemon}
@@ -77,7 +77,7 @@ defmodule Fermix.CLI.DaemonTest do
   test "no daemon listening returns :not_running" do
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "missing.sock")
-    on_exit(fn -> File.rm_rf(socket_dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
 
     assert {:error, :not_running} =
              Client.status(socket_path: socket_path, timeout: 500)
@@ -106,7 +106,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, %{"status" => "ok"}} = Client.status(socket_path: socket_path, timeout: 1_000)
 
     GenServer.stop(daemon, :normal, 1_000)
-    File.rm_rf(socket_dir)
+    FermixTestSupport.SafeRm.rm_rf(socket_dir)
   end
 
   test "second daemon refuses to bind over a live socket", %{socket_path: socket_path} do

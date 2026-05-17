@@ -31,10 +31,10 @@ defmodule FermixCore.Memory.PromptFilesTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_config)
-      File.rm_rf!(base_dir)
+      FermixTestSupport.SafeRm.rm_rf!(base_dir)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 

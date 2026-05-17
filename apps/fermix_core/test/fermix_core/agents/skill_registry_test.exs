@@ -41,7 +41,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
          seed_defaults: false}
       )
 
-    on_exit(fn -> File.rm_rf!(skills_dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(skills_dir) end)
 
     %{registry: registry, skills_dir: skills_dir}
   end
@@ -112,7 +112,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert {:ok, ["coding-skill", "ops-skill"]} = SkillRegistry.reload(registry)
       assert SkillRegistry.list(registry) == ["coding-skill", "ops-skill"]
 
-      File.rm_rf!(Path.join(skills_dir, "ops-skill"))
+      FermixTestSupport.SafeRm.rm_rf!(Path.join(skills_dir, "ops-skill"))
 
       assert SkillRegistry.list(registry) == ["coding-skill", "ops-skill"]
       assert {:ok, ["coding-skill"]} = SkillRegistry.reload(registry)
@@ -125,10 +125,10 @@ defmodule FermixCore.Agents.SkillRegistryTest do
   describe "seeded defaults" do
     test "copies bundled skills into an empty local dir", %{skills_dir: skills_dir} do
       bundled =
-        Path.join(System.tmp_dir!(), "bundled-#{System.unique_integer([:positive])}")
+        Path.join(System.tmp_dir!(), "fermix-bundled-#{System.unique_integer([:positive])}")
 
       write_skill(bundled, "fixture-core", "Fixture core skill body.")
-      on_exit(fn -> File.rm_rf!(bundled) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(bundled) end)
 
       seeded_registry =
         start_supervised!(
@@ -147,12 +147,12 @@ defmodule FermixCore.Agents.SkillRegistryTest do
 
   describe "source classifier" do
     test "skills under priv/skills are tagged as :core" do
-      core = Path.join(System.tmp_dir!(), "core-#{System.unique_integer([:positive])}")
-      local = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}")
+      core = Path.join(System.tmp_dir!(), "fermix-core-#{System.unique_integer([:positive])}")
+      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       File.mkdir_p!(local)
       write_skill(core, "core-skill", "Core skill body.")
-      on_exit(fn -> File.rm_rf!(core) end)
-      on_exit(fn -> File.rm_rf!(local) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(core) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
 
       registry =
         start_supervised!(
@@ -170,9 +170,9 @@ defmodule FermixCore.Agents.SkillRegistryTest do
     end
 
     test "skills under the local dir are tagged as :local" do
-      local = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}")
+      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       write_skill(local, "local-skill", "Local skill body.")
-      on_exit(fn -> File.rm_rf!(local) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
 
       registry =
         start_supervised!(
@@ -189,11 +189,11 @@ defmodule FermixCore.Agents.SkillRegistryTest do
     end
 
     test "skills under the plugin dir are tagged as :third_party" do
-      local = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}")
+      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       plugin_dir = Path.join(local, "_plugins")
       File.mkdir_p!(plugin_dir)
       write_skill(plugin_dir, "plugin-skill", "Plugin skill body.")
-      on_exit(fn -> File.rm_rf!(local) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
 
       registry =
         start_supervised!(
@@ -211,11 +211,11 @@ defmodule FermixCore.Agents.SkillRegistryTest do
     end
 
     test "plugin_dir takes precedence over local_dir when nested inside it" do
-      local = Path.join(System.tmp_dir!(), "local-#{System.unique_integer([:positive])}")
+      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       plugin_dir = Path.join(local, "_plugins")
       File.mkdir_p!(plugin_dir)
       write_skill(plugin_dir, "nested-plugin", "Plugin nested inside local dir.")
-      on_exit(fn -> File.rm_rf!(local) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
 
       registry =
         start_supervised!(
@@ -295,7 +295,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert {:ok, %{name: "alpha-skill", kind: :skill}} =
                CapabilityRegistry.find(cap_registry, "alpha-skill")
 
-      File.rm_rf!(Path.join(skills_dir, "alpha-skill"))
+      FermixTestSupport.SafeRm.rm_rf!(Path.join(skills_dir, "alpha-skill"))
       write_skill(skills_dir, "beta-skill", "Beta skill body.")
 
       assert {:ok, ["beta-skill"]} = SkillRegistry.reload(registry)
