@@ -63,6 +63,27 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     assert_received {:puts, "Migrated 8 secret(s) to keyring."}
   end
 
+  test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
+    write_plaintext_config(home)
+
+    assert :ok =
+             SecretMigration.run([],
+               puts: fn _ -> :ok end,
+               prompt: fn _ -> "yes" end
+             )
+
+    contents = File.read!(ConfigStore.path())
+
+    assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
+    assert contents =~ ~s(source = "command")
+    assert contents =~ ~s(command = "/usr/bin/security")
+    assert contents =~ ~s("OPENAI_API_KEY" in [sandbox.env].allow) or
+             contents =~ ~s(allow = ["OPENAI_API_KEY"])
+
+    refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
+    refute contents =~ ~s([sandbox.env.SLACK_BOT_TOKEN])
+  end
+
   test "run reports when no plaintext setup secrets exist" do
     :ok = ConfigStore.save_snapshot(%{fermix_core: [], fermix_channels: [], fermix_web: []})
     test_pid = self()

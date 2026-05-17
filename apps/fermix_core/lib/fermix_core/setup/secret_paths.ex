@@ -4,13 +4,19 @@ defmodule FermixCore.Setup.SecretPaths do
   """
 
   @type secret :: %{
-          key: atom(),
-          env: String.t(),
-          path: [atom()]
+          :key => atom(),
+          :env => String.t(),
+          :path => [atom()],
+          optional(:sandbox_env) => boolean()
         }
 
   @secrets [
-    %{key: :openai_api_key, env: "OPENAI_API_KEY", path: [:fermix_core, :providers, :openai, :api_key]},
+    %{
+      key: :openai_api_key,
+      env: "OPENAI_API_KEY",
+      path: [:fermix_core, :providers, :openai, :api_key],
+      sandbox_env: true
+    },
     %{key: :telegram_bot_token, env: "TELEGRAM_BOT_TOKEN", path: [:fermix_channels, :telegram, :bot_token]},
     %{
       key: :whatsapp_access_token,
@@ -48,5 +54,16 @@ defmodule FermixCore.Setup.SecretPaths do
   @spec by_answer_key() :: keyword([atom()])
   def by_answer_key do
     Enum.map(@secrets, &{&1.key, &1.path})
+  end
+
+  @doc """
+  Returns secrets whose env name should be exposed to child processes via
+  `[sandbox.env.<NAME>]`. AI provider keys only; channel tokens stay
+  Fermix-internal because they are consumed by BEAM-side channel modules,
+  not spawned subprocesses.
+  """
+  @spec sandbox_env_eligible() :: [secret()]
+  def sandbox_env_eligible do
+    Enum.filter(@secrets, &Map.get(&1, :sandbox_env, false))
   end
 end

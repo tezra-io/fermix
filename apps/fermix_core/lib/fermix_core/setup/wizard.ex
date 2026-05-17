@@ -9,6 +9,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
@@ -519,12 +520,51 @@ defmodule FermixCore.Setup.Wizard do
       |> put_signal_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
+      |> ensure_sandbox_env_sources(answers)
 
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot),
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
+  end
+
+  defp ensure_sandbox_env_sources(snapshot, answers) do
+    SecretPaths.sandbox_env_eligible()
+    |> Enum.reduce(snapshot, fn secret, acc ->
+      if SecretWriter.available?() and answered?(answers, secret.key) do
+        add_sandbox_env_source(acc, secret.env)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp add_sandbox_env_source(snapshot, env_name) do
+    sandbox = SandboxConfig.normalize(Map.get(snapshot, :sandbox))
+
+    allow = add_if_missing(sandbox.env.allow, env_name)
+    sources = Map.put_new(sandbox.env.sources, env_name, security_keychain_source(env_name))
+
+    updated_env = %{sandbox.env | allow: allow, sources: sources}
+    Map.put(snapshot, :sandbox, %{sandbox | env: updated_env})
+  end
+
+  defp security_keychain_source(env_name) do
+    %{
+      source: :command,
+      command: "/usr/bin/security",
+      args: ["find-generic-password", "-a", current_user(), "-s", env_name, "-w"],
+      timeout_ms: 3000
+    }
+  end
+
+  defp current_user do
+    System.get_env("USER") || Path.basename(System.user_home!())
+  end
+
+  defp add_if_missing(list, item) when is_list(list) do
+    if item in list, do: list, else: list ++ [item]
   end
 
   defp drop_unanswered_env_only_secrets(snapshot, answers) do
