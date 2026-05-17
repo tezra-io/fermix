@@ -609,7 +609,7 @@ Concretely, exposing outbound MCP tools as inbound MCP tools means external clie
 
 1. **A loop hazard** if the external client *is itself a Fermix instance configured to consume our endpoint*. A pings B pings A on every tool call.
 2. **An observability hazard.** A `github_create_issue` call logged by Fermix shows up as an inbound MCP call (Claude Desktop client) and an outbound MCP call (Fermix → github npx subprocess). Two trace entries for one logical action, and the connecting thread (session ID) lives only in the inbound side. Debugging "who actually called this" is harder.
-3. **A capability-attribution problem.** The Claude Desktop user thinks they're talking to "fermix". They are. But the actual side effect happens in `github_create_issue`'s subprocess, with the `GITHUB_TOKEN` Fermix loaded from `~/.fermix/config.toml`'s `[mcp.servers.github] env`. The credential boundary is fuzzier than the operator may expect.
+3. **A capability-attribution problem.** The Claude Desktop user thinks they're talking to "fermix". They are. But the actual side effect happens in `github_create_issue`'s subprocess, with the `GITHUB_TOKEN` Fermix injects into the outbound `[mcp.servers.github]` process via `pass_env`. The credential boundary is fuzzier than the operator may expect.
 
 **M4.12's posture**: don't ship this as a default. Operators who want it write:
 

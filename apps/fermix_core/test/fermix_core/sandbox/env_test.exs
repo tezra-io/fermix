@@ -56,6 +56,10 @@ defmodule FermixCore.Sandbox.EnvTest do
 
     assert {:error, {:missing_env, "FERMIX_TEST_SECRET"}} =
              Env.build(Config.normalize(env: [allow: ["FERMIX_TEST_SECRET"]]))
+
+    message = Env.format_error({:missing_env, "FERMIX_TEST_SECRET"})
+    assert message =~ "FERMIX_TEST_SECRET could not be resolved"
+    assert message =~ "fermix sandbox env set FERMIX_TEST_SECRET"
   end
 
   test "command env source reads a structured helper command" do
@@ -100,6 +104,10 @@ defmodule FermixCore.Sandbox.EnvTest do
 
     assert {:error, {:env_not_allowed, "FERMIX_TEST_SECRET"}} =
              Env.build_command(config, ["FERMIX_TEST_SECRET"])
+
+    message = Env.format_error({:env_not_allowed, "FERMIX_TEST_SECRET"})
+    assert message =~ "FERMIX_TEST_SECRET is not allowed"
+    assert message =~ "fermix sandbox env allow FERMIX_TEST_SECRET"
   end
 
   defp context(root, config) do

@@ -54,7 +54,7 @@ After this milestone:
 | Force-skill instruction | P0 | New | When a sub-agent is spawned for skill X, its system prompt is `[skill body] + "\n\nYou are running as the X skill. Use your tools and complete the task: {task}"`. Forces the right behaviour even with global tool inheritance. |
 | Sub-agent capability resolution | P0 | New | Sub-agents receive a capability set resolved by Fermix from skill trust level and SKILL.md frontmatter. The main agent chooses the skill/task, not the skill's internal tools. `allowed_tools` remains an explicit override: absent = trust default, `[]` = no capabilities, list = exact allowlist. Recursion depth cap `max_skill_depth: 4` enforced by the skill executor (`Capabilities.Skill.invoke/3`) before spawning the sub-agent — failing fast at the boundary, not after the AgentServer is already up. |
 | MCP outbound integration | P0 | New | Add `hermes_mcp` dep. `MCP.Supervisor` boots configured servers as stdio children. `MCP.Capability` wraps each discovered tool. Tool name namespacing: `mcp_<server>_<tool>`. Failures isolated per server (one bad server doesn't break the others). |
-| MCP config | P0 | New | `[mcp.servers.<name>]` block in `~/.fermix/config.toml` with `command`, `args`, `env`. Wizard adds an "MCP servers" review step (informational, no required answers — operator edits TOML). |
+| MCP config | P0 | New | `[mcp.servers.<name>]` block in `~/.fermix/config.toml` with `command`, `args`, literal `env`, and `pass_env` names resolved through `[sandbox.env]`. Wizard adds an "MCP servers" review step (informational, no required answers — operator edits TOML). |
 | Anthropic adapter scaffold | P1 | New | Implement `Anthropic.Messages` adapter as a real module with `to_provider_tools/1` (input_schema rename) and `chat/3` returning `{:error, :not_implemented}` until tokens land. Tests pin the schema-translation behaviour so the future implementation has guard rails. |
 | Per-skill provider override | P1 | New | Add optional `provider` field to skill frontmatter (e.g., `provider: anthropic`). Defaults to global default. Lets `coding-skill` pin Claude even when the main agent is on GPT. Today's `model:` field stays. |
 | Telemetry uniformity | P1 | New | `[:fermix, :capability, :exec]` event for every capability execution (builtin, skill, mcp), with `kind` metadata. Replaces the per-tool/per-skill split. |
@@ -407,7 +407,7 @@ Config shape (`~/.fermix/config.toml`):
 [mcp.servers.github]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
-env = { GITHUB_TOKEN = "$env:GITHUB_TOKEN" }   # $env: prefix = read from real env at boot
+pass_env = ["GITHUB_TOKEN"]                    # resolved through [sandbox.env]
 approved = false                               # registered, not exposed to LLM until approved
 
 [mcp.servers.filesystem]

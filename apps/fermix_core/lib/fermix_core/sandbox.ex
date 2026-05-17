@@ -64,21 +64,22 @@ defmodule FermixCore.Sandbox do
     end
   end
 
-  defp do_enforce(%{operation: :shell, working_dir: dir}, config) when is_binary(dir) do
-    case PathPolicy.allowed_path?(dir, config) do
-      :ok -> :allow
-      {:error, reason} -> {:deny, reason}
-    end
-  end
+  defp do_enforce(%{operation: operation, working_dir: dir}, config)
+       when operation in [:shell, :command_capability] and is_binary(dir),
+       do: path_decision(dir, config)
 
   defp do_enforce(%{path: path}, config) when is_binary(path) do
+    path_decision(path, config)
+  end
+
+  defp do_enforce(_request, _config), do: {:deny, :invalid_request}
+
+  defp path_decision(path, config) do
     case PathPolicy.allowed_path?(path, config) do
       :ok -> :allow
       {:error, reason} -> {:deny, reason}
     end
   end
-
-  defp do_enforce(_request, _config), do: {:deny, :invalid_request}
 
   defp hardline_decision(command, context) do
     case Hardline.classify(command) do
@@ -113,7 +114,8 @@ defmodule FermixCore.Sandbox do
     %{
       policy_class: policy_class,
       operation: Map.get(request, :operation, :unknown),
-      agent: Map.get(context, :agent_name, "unknown")
+      agent: Map.get(context, :agent_name, "unknown"),
+      conversation_key: Map.get(context, :conversation_key)
     }
   end
 end

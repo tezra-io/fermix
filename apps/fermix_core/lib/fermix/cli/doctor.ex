@@ -41,7 +41,9 @@ defmodule Fermix.CLI.Doctor do
       Checks.compaction_config(),
       Checks.command_owner_config(),
       Checks.sandbox_config(),
+      Checks.sandbox_trace_suggestions(),
       Checks.auth_file_permissions(),
+      Checks.plaintext_secrets(),
       Checks.linger()
     ]
 

@@ -205,7 +205,7 @@ See `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` for the full design.
 | **Sub-agent global capability inheritance** | Default = sub-agent sees parent's full registry; `allowed_tools` is opt-out | P0 | Refactor | N/A | S |
 | **`max_skill_depth` recursion cap** | Default 4; context-propagated; fail loud past it | P0 | New | N/A | S |
 | **MCP outbound integration** | `hermes_mcp` dependency; `MCP.Supervisor` boots configured stdio servers; tools register as namespaced capabilities | P0 | New | [hermes_mcp](https://hexdocs.pm/hermes_mcp), hermes-agent `_convert_mcp_schema` | M |
-| **`[mcp.servers.<name>]` config** | TOML block with `command`, `args`, `env`; `$env:VAR` prefix for shell-env references | P0 | New | N/A | S |
+| **`[mcp.servers.<name>]` config** | TOML block with `command`, `args`, literal `env`, and `pass_env` names resolved through `[sandbox.env]` | P0 | New | N/A | S |
 | **Anthropic adapter scaffold** | Real `to_provider_tools` (input_schema rename); `chat/3` returns `{:error, :not_implemented}` until tokens land | P1 | New | N/A | S |
 | **Per-skill `provider:` override** | Optional frontmatter field; lets skills pin a specific provider | P1 | New | N/A | S |
 | **Telemetry uniformity** | `[:fermix, :capability, :exec]` across all kinds; replaces per-tool/per-skill events with overlap during migration | P1 | Refactor | N/A | S |
