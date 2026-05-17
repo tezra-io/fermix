@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.FileEdit do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Sandbox
   alias FermixCore.Tools.Support
 
   @impl true
@@ -59,23 +60,24 @@ defmodule FermixCore.Tools.FileEdit do
 
   @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
-    Support.run(name(), context, fn -> do_execute(args) end)
+    Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
-  defp do_execute(args) do
+  defp do_execute(args, context) do
     with {:ok, path} <- Support.required_string(args, "path"),
          {:ok, old_string} <- Support.required_string(args, "old_string"),
          {:ok, new_string} <- Map.fetch(args, "new_string"),
          :ok <- validate_args(path, old_string, new_string),
-         {:ok, content} <- File.read(path),
+         {:ok, resolved_path} <- Sandbox.write_path(path, :file_edit, context),
+         {:ok, content} <- File.read(resolved_path),
          {:ok, updated} <- replace_unique(content, old_string, new_string),
-         :ok <- atomic_write(path, updated) do
-      {:ok, Tool.success("Replaced unique anchor in #{path}")}
+         :ok <- atomic_write(resolved_path, updated) do
+      {:ok, Tool.success("Replaced unique anchor in #{resolved_path}")}
     else
       :error -> Support.error("Missing required parameter: new_string")
       {:error, reason} when is_binary(reason) -> Support.error(reason)
       {:error, :enoent} -> Support.error("File not found")
-      {:error, reason} -> Support.error("file_edit failed: #{inspect(reason)}")
+      {:error, reason} -> Support.error(format_error(reason))
     end
   end
 
@@ -111,4 +113,9 @@ defmodule FermixCore.Tools.FileEdit do
         {:error, reason}
     end
   end
+
+  defp format_error({:outside_root, path}), do: "Sandbox denied file_edit outside roots: #{path}"
+  defp format_error({:protected_path, path}), do: "Sandbox denied protected path: #{path}"
+  defp format_error({:blocked_root, path}), do: "Sandbox denied blocked root: #{path}"
+  defp format_error(reason), do: "file_edit failed: #{inspect(reason)}"
 end

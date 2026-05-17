@@ -131,14 +131,14 @@ defmodule FermixCore.Capabilities.SkillTest do
     suffix = System.unique_integer([:positive])
     agent_supervisor_name = :"skill_capability_agent_supervisor_#{suffix}"
     task_supervisor_name = :"skill_capability_task_supervisor_#{suffix}"
-    journal_dir = Path.join(System.tmp_dir!(), "skill-capability-journals-#{suffix}")
+    journal_dir = Path.join(System.tmp_dir!(), "fermix-skill-capability-journals-#{suffix}")
 
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor_name})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor_name})
 
     on_exit(fn ->
       MockProvider.cleanup()
-      File.rm_rf!(journal_dir)
+      FermixTestSupport.SafeRm.rm_rf!(journal_dir)
     end)
 
     %{

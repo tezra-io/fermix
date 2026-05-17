@@ -13,7 +13,7 @@ defmodule FermixCore.Tools.SearchToolsTest do
     File.write!(Path.join(dir, "lib/beta.ex"), "defmodule Beta do\n  @tag :ok\nend\n")
     File.write!(Path.join(dir, "notes.txt"), "TODO second\n")
     File.write!(Path.join(dir, "binary.bin"), <<0, 1, 2, 3, 84, 79, 68, 79>>)
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
     %{dir: dir}
   end
 

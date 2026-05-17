@@ -11,7 +11,7 @@ defmodule Fermix.CLI.Upgrade.SwapperTest do
       )
 
     File.mkdir_p!(tmp)
-    on_exit(fn -> File.rm_rf(tmp) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(tmp) end)
 
     %{tmp: tmp}
   end

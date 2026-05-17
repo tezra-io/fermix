@@ -1,9 +1,37 @@
 defmodule FermixCore.Tools.ShellTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
+  alias FermixCore.Sandbox.Config
   alias FermixCore.Tools.Shell
 
   @context %{agent_name: "test_agent", conversation_key: :test}
+
+  setup do
+    sandbox = Application.get_env(:fermix_core, :sandbox)
+    previous_home = System.get_env("FERMIX_HOME")
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("shell-home")
+    workspace = Path.join(home, "workspace")
+    File.mkdir_p!(workspace)
+
+    System.put_env("FERMIX_HOME", home)
+    Application.put_env(:fermix_core, :sandbox, Config.normalize(mode: :strict, workspace_root: workspace))
+
+    on_exit(fn ->
+      case sandbox do
+        nil -> Application.delete_env(:fermix_core, :sandbox)
+        value -> Application.put_env(:fermix_core, :sandbox, value)
+      end
+
+      case previous_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end)
+
+    :ok
+  end
 
   describe "name/0" do
     test "returns shell" do
@@ -49,11 +77,11 @@ defmodule FermixCore.Tools.ShellTest do
     end
 
     test "uses specified working directory" do
-      dir = Path.join(System.tmp_dir!(), "fermix_shell_wd_#{System.unique_integer([:positive])}")
-      File.mkdir_p!(dir)
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("shell-wd")
+      context = sandbox_context(mode: :strict, workspace_root: dir)
 
       assert {:ok, result} =
-               Shell.execute(%{"command" => "pwd -P", "working_dir" => dir}, @context)
+               Shell.execute(%{"command" => "pwd -P", "working_dir" => dir}, context)
 
       assert result.success == true
 
@@ -61,7 +89,20 @@ defmodule FermixCore.Tools.ShellTest do
       {expected, 0} = System.cmd("pwd", ["-P"], cd: dir)
       assert String.trim(result.output) == String.trim(expected)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "defaults cwd to the sandbox workspace" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("shell-default")
+      context = sandbox_context(mode: :strict, workspace_root: dir)
+
+      assert {:ok, result} = Shell.execute(%{"command" => "pwd -P"}, context)
+      assert result.success == true
+
+      {expected, 0} = System.cmd("pwd", ["-P"], cd: dir)
+      assert String.trim(result.output) == String.trim(expected)
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
 
@@ -79,13 +120,32 @@ defmodule FermixCore.Tools.ShellTest do
     end
 
     test "returns error for invalid working directory" do
-      bad_dir = "/nonexistent_fermix_dir_#{System.unique_integer([:positive])}"
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("shell-root")
+      bad_dir = Path.join(root, "missing")
+      context = sandbox_context(mode: :strict, workspace_root: root)
 
       assert {:ok, result} =
-               Shell.execute(%{"command" => "echo hi", "working_dir" => bad_dir}, @context)
+               Shell.execute(%{"command" => "echo hi", "working_dir" => bad_dir}, context)
 
       assert result.success == false
       assert result.error =~ "Working directory"
+
+      FermixTestSupport.SafeRm.rm_rf!(root)
+    end
+
+    test "returns error for working directory outside sandbox roots" do
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("shell-root")
+      outside = FermixTestSupport.SafeRm.make_tmp_dir!("shell-outside")
+      context = sandbox_context(mode: :strict, workspace_root: root)
+
+      assert {:ok, result} =
+               Shell.execute(%{"command" => "echo hi", "working_dir" => outside}, context)
+
+      assert result.success == false
+      assert result.error =~ "outside roots"
+
+      FermixTestSupport.SafeRm.rm_rf!(root)
+      FermixTestSupport.SafeRm.rm_rf!(outside)
     end
   end
 
@@ -177,5 +237,9 @@ defmodule FermixCore.Tools.ShellTest do
     )
 
     handler_id
+  end
+
+  defp sandbox_context(config) do
+    Map.put(@context, :sandbox_config, Config.normalize(config))
   end
 end

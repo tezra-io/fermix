@@ -15,7 +15,7 @@ defmodule FermixCore.Auth.StoreTest do
           "#{System.unique_integer([:positive, :monotonic])}.json"
       )
 
-    ExUnit.Callbacks.on_exit(fn -> File.rm(path) end)
+    ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
     path
   end
 

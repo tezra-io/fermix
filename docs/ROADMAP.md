@@ -294,9 +294,64 @@ See `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` for the full design.
 
 ---
 
-## Milestone 5: _Reserved_
+## Milestone 5: Workspace Sandbox & Capability Surface
 
-_Security & Governance was originally numbered M5; it has been moved to **M10** so feature exploration can run unconstrained first and security can be tightened against observed real-world usage rather than guessed-at threats. See M10 below._
+**Goal:** Ship the smallest correct *floor* under tool execution — a workspace-rooted policy boundary that keeps day-to-day bash permissive inside `~/.fermix/workspace` and operator-granted roots, hardline-blocks a tiny set of uncategorically-banned commands, and stores credentials in the OS keyring (macOS Keychain / Linux Secret Service) instead of plaintext config. Explicitly **not** M10 — no LLM content filter, no leak detector, no prompt-injection guard, no per-call approval UX. Those stay in M10. M5 is the floor M10 hardens on top of.
+
+See `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` for the full design.
+
+| Feature | Description | Priority | Type | Reference | Effort |
+|---------|-------------|----------|------|-----------|--------|
+| **Workspace root + dev/release split** | `FERMIX_HOME=~/.fermix` (release) vs `~/.fermix-dev` (dev); `workspace/` subdir is the default-allowed write surface for all built-in tools; daemon `working_dir` default changes from `File.cwd!()` to workspace root | P0 | New | hermes `environments/local.py` shape | S |
+| **Hardline blocklist** | Pure-function classifier for uncategorically-banned commands (`rm -rf /`, `mkfs`, `dd of=/dev/sd*`, fork bomb, system shutdown, sudo password-guessing). Hardcoded in code, not config — no flag lifts it | P0 | New | hermes `HARDLINE_PATTERNS` (`tools/approval.py:198`) | S |
+| **Workspace containment** | `:read_write` / `:exec` capabilities write only inside workspace + `[sandbox.allowed_roots]`. Resolved-symlink check; macOS `/private/etc` collapse handled. Best-effort shell-operand parser for `cp/mv/tee/>` with deny-on-unparsed default | P0 | New | hermes `path_security.validate_within_dir` | M |
+| **Sandbox dispatch module** | `FermixCore.Sandbox.enforce/3` — single dispatch point keyed off existing `%Capability{policy_class}` ladder; emits `[:fermix, :sandbox, :decision]` telemetry + trace entry; no Plug-style middleware chain | P0 | New | N/A | S |
+| **Allowed-roots grant CLI** | `fermix grant path <dir>`, `fermix revoke path <dir>`, append-only audit records in `~/.fermix/grants/`; control-socket `:reload_sandbox` re-reads config without daemon restart | P0 | New | hermes config.yaml shape | S |
+| **External-CLI subagent grant** | `fermix grant subagent <name>` registers a built-in capability that shells out to a local CLI (Codex, Claude Code, Cline, etc.) with declared credential passthrough; one-shot per call, `:exec` policy class | P0 | New | hermes `subprocess` patterns | M |
+| **Credential passthrough** | `[sandbox.credentials.<name>]` declares files (mount-path) or env vars (env-name) capabilities can see; daemon env scrubbed of credential-shaped vars at boot unless claimed | P0 | New | hermes `credential_files.py` | S |
+| **OS keyring backend (Rustler NIF)** | Wrap `keyring-rs` 3.x in `apps/fermix_nif`. macOS Keychain Services, Linux Secret Service (libsecret/D-Bus), Windows Credential Manager (deferred with M4.8 Windows) | P0 | New | `keyring-rs` crate | M |
+| **`age` encryption for OAuth blobs** | Multi-field OAuth credentials (Codex `auth.json` and future OAuth providers) encrypted-at-rest with `rage-rs`; symmetric master key stored in the OS keyring; `fermix keystore rotate-master` decrypts and re-encrypts with new key | P0 | New | `rage-rs` crate | S |
+| **`FermixCore.Auth.Keystore` facade** | GenServer-backed facade with `put/3` `get/2` `delete/2` `list/1` `backend_info/0`; in-memory `Stub` for tests injected via Application env; file-fallback for headless servers behind explicit opt-in | P0 | New | N/A | S |
+| **One-time plaintext-secret migration** | First M5 boot walks `auth.json` + `[providers.*].api_key` + channel secrets, writes to keystore, rewrites config with `"@keyring"` sentinels; pre-migration files preserved as `.pre-m5` until operator deletes them after `fermix doctor` green | P0 | New | N/A | S |
+| **`"@keyring"` config sentinel** | `ConfigStore` resolves `"@keyring"` and `"@keyring:<scope>.<name>"` values to live keystore lookups at read time; never writes plaintext values back to TOML | P0 | New | N/A | S |
+| **Keystore CLI** | `fermix keystore status / put / get / delete / list / rotate-master`; secret values via stdin only, never argv | P0 | New | N/A | S |
+| **Website blocklist (optional)** | `[sandbox.website_blocklist]` honored at `NetGuard.validate/2` boundary; fail-open default; `fermix grant website-allow <host>` for overrides; cannot override the NetGuard private-IP block | P1 | New | hermes `website_policy.py` | S |
+| **`SafeRm` test helper + Credo checks** | `FermixCore.TestSupport.SafeRm.rm_rf!/1` asserts path is under a tmp prefix with ≥4 segments and no `..`; two Credo checks forbid raw `File.rm_rf` in `test/` and ban `System.cmd` / `Port.open` in `test/fermix_core/sandbox/`. Pre-existing 14 test sites rewritten in Stage 0 | P0 | New | Stage 0 of M5 (gate) | S |
+| **Doctor + audit task** | `fermix doctor` adds sandbox + keystore probes; `mix sandbox.audit` Mix task prints resolved workspace, allowed roots, subagents, credentials, keystore backend, all green/red marks | P0 | New | N/A | S |
+| **Setup wizard step** | "Where do you want the agent to operate?" — defaults to `~/.fermix/workspace`, optional `~/projects/<name>` add, detect-and-grant for `codex`/`claude`/`cline` in `$PATH`; API-key prompts write through `Keystore.put/3` only | P0 | New | M4.10 wizard | S |
+
+### Why before M10 (Security & Governance)
+
+M10 as scoped (Sentinel LLM filter, content scanner, leak detector, prompt-injection guard, approval workflow, audit-log signing) is the **ceiling**, not the floor. Without M5, the operator-experience trade-off is "no protection at all" vs "prompts every shell call" — and the user has correctly flagged the latter as worse-than-useless. M5 ships the floor: workspace containment, a tiny hardline list, keychain-backed credentials, and `fermix grant` UX. M10 then layers its pattern-based and LLM-based defenses on top, without M10's progress blocking M5's day-1 value.
+
+**Test-wipe pitfall (must read).** A prior M5-shaped implementation pass had Codex generate a unit test whose cleanup hook called `File.rm_rf!` on a computed path; the path collapsed to an unsafe root and the host filesystem was wiped during `mix test`. The shell sandbox could not have caught it — direct VM call. M5's **Stage 0** is therefore the non-negotiable `FermixCore.TestSupport.SafeRm` helper + Credo checks that forbid raw `File.rm_rf` in `test/` and forbid `System.cmd` / `Port.open` in sandbox tests. Nothing else in M5 begins until Stage 0 is merged. See `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` §11 for the full negative-test discipline.
+
+**Depends on M4.8** (CLI dispatch, daemon, `~/.fermix` home, Rustler NIF infra) and **M4.9** (`%Capability{}` struct, `policy_class` ladder, `CapabilityRegistry`). **Blocks M10** — every M10 enforcement point binds to a hook M5 introduces (`Sandbox.enforce/3` decision pipeline, `[:fermix, :sandbox, :decision]` telemetry, `~/.fermix/grants/` audit records, the `"@keyring"` sentinel).
+
+**Milestone 5 Total Agent Wall-Clock:** ~9–11 hours (one to two review days). Stages 5–6 (keystore NIF introduction + migration) and Stage 0 (test-safety prerequisite) are the variance sources; the OS-keyring path needs validation on macOS Keychain + Linux Secret Service + file-fallback before any caller switches.
+
+---
+
+## Milestone 5.1: Finish M5 + Sandbox Env Unification
+
+**Goal:** Land the two halves of M5 that did not ship (wizard secret writer for plaintext API keys, `auth.json` perms-widened boot refusal, doctor trace scan, rename migration error, deny-message audit) and unify MCP env routing through `Sandbox.Env` so `[sandbox.env]` is the single declared-secret registry across shell, sandbox commands, and MCP servers.
+
+See `docs/POST_M5_PLAN.md` for the full plan.
+
+| Slice | Description | Priority | Effort | PR |
+|---|---|---|---|---|
+| **A1 Wizard secret writer (macOS-first)** | `Setup.SecretWriter` writes setup secrets to macOS Keychain via `/usr/bin/security`; `"@keyring"` sentinel in `config.toml`; explicit `fermix setup --migrate-secrets` for opt-in migration of existing plaintext keys (config load stays noninteractive) | P0 | M | 2 |
+| **A2 `auth.json` perms boot refusal** | Daemon refuses to start if `~/.fermix/auth.json` is not `0o600`; `fermix doctor` reports the same check | P0 | S | 1 |
+| **A3 Persist sandbox decisions + doctor trace scan** | Telemetry handler writes `:deny`/`:hardline` events to `Trace.record/4`; doctor scan walks recent traces and prints `fermix grant path <target>` suggestions with the right granularity per tool family | P0 | S | 3 |
+| **A4 Roadblock-message audit** | Every sandbox deny path (`shell`, `file_write`, `file_edit`, `git_write`, `sandbox/env.ex`, CLI/channel handlers) emits a message naming the exact fix command. Granularity: shell grants the cwd, file ops grant `Path.dirname`, git grants the repo root | P0 | S | 1 |
+| **A5 Rename migration error** | `Config.normalize` raises `ArgumentError` with old → new mode/profile mapping and the CLI fix command when old names appear in `config.toml` | P0 | XS | 1 |
+| **B1 MCP env unification** | Route MCP server env through `Sandbox.Env.build_command/2` via a new `pass_env` field on `[mcp.servers.*]`; `[sandbox.env].mode` extends to MCP; `$env:KEY` shorthand deleted (pre-release, no migration shim) | P1 | S | 4 |
+
+**Out of scope (roadmap, demand-driven):** Linux `secret-tool` / `pass` / `op` SecretWriter backends, Windows `Wincred` backend, auto-detection of project roots beyond the five common ones, OAuth-blob Keychain migration (`auth.json` stays as `0600` plaintext).
+
+**Depends on M5.** **Blocks M10** — the unified secret registry from B1 is the surface M10's leak detector and approval flow bind to; without it, every M10 enforcement point has to handle MCP-env separately.
+
+**Milestone 5.1 Total Agent Wall-Clock:** ~2.5 working days across four PRs (PR 1 ~½ day, PR 2 ~1 day, PR 3 ~½ day, PR 4 ~½ day). PR 1 first because it establishes the deny-message format the rest of the work follows.
 
 ---
 
@@ -633,12 +688,13 @@ See `docs/MILESTONE_9_1_REALTIME_VOICE.md` and
 1. **Milestone 2** (Multi-Agent Orchestration) — unlocks delegation
 2. **Milestone 4** (Advanced Memory) — unlocks long-term context
 3. **Milestone 3** (WhatsApp, Discord, Signal, Slack, CLI) — core channels
-4. **Milestone 6** (Dashboard + CLI) — operational visibility
-5. **Milestone 8** (Production ops) — deployment readiness
-6. **Milestone 7** (Core tools) — essential feature parity
-7. **Milestone 9** (Differentiators) — unique value
-8. **Milestone 10** (Security core: policy, approval, content scanner) — tighten _after_ feature exploration; bind to the policy hooks already left by M4.9 / M4.11
-9. **Future** (Extended ecosystem) — demand-driven expansion
+4. **Milestone 5** (Workspace Sandbox + OS-keyring credentials) — ship the floor under tool execution; M10 hardens on top later
+5. **Milestone 6** (Dashboard + CLI) — operational visibility
+6. **Milestone 8** (Production ops) — deployment readiness
+7. **Milestone 7** (Core tools) — essential feature parity
+8. **Milestone 9** (Differentiators) — unique value
+9. **Milestone 10** (Security ceiling: Sentinel, leak detector, approval UX) — tighten _after_ feature exploration; bind to the policy hooks left by M4.9 / M4.11 and the sandbox/keystore hooks from M5
+10. **Future** (Extended ecosystem) — demand-driven expansion
 
 **Total estimated time for core (M2–M10):** ~6-9 months full-time with AI assistance. Future items are demand-driven.
 

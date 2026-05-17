@@ -28,8 +28,8 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     on_exit(fn ->
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
-      File.rm_rf!(bootstrap_dir)
-      File.rm_rf!(memory_dir)
+      FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
+      FermixTestSupport.SafeRm.rm_rf!(memory_dir)
     end)
 
     %{agent_id: "main"}

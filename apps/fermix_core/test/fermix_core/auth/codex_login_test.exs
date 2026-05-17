@@ -18,7 +18,7 @@ defmodule FermixCore.Auth.CodexLoginTest do
 
   test "wraps auth-store persist failures separately from OAuth failures" do
     dir = Path.join(System.tmp_dir!(), "fermix_codex_login_#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
     File.mkdir_p!(dir)
 
     blocker = Path.join(dir, "not_a_dir")
