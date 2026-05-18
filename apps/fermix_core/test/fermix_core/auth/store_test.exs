@@ -159,6 +159,46 @@ defmodule FermixCore.Auth.StoreTest do
       tmp_pattern = Path.dirname(path) |> Path.join("#{Path.basename(path)}.tmp.*")
       assert Path.wildcard(tmp_pattern) == []
     end
+
+    test "refuses to overwrite malformed auth.json; preserves the original at a backup path" do
+      path = tmp_path()
+      File.write!(path, "{ not json ")
+
+      entry = %{
+        auth_mode: "chatgpt",
+        tokens: %{access_token: "at", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil
+      }
+
+      assert {:error, {:malformed_auth_file, ^path, backup, {:invalid_json, _err}}} =
+               Store.write(:openai, entry, path)
+
+      assert is_binary(backup)
+      assert File.exists?(backup)
+      assert File.read!(backup) == "{ not json "
+      assert File.read!(path) == "{ not json "
+      ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm(backup) end)
+    end
+
+    test "refuses to overwrite an auth.json with an unknown shape" do
+      path = tmp_path()
+      File.write!(path, Jason.encode!(%{"unknown" => "shape"}))
+
+      entry = %{
+        auth_mode: "chatgpt",
+        tokens: %{access_token: "at", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil
+      }
+
+      assert {:error, {:malformed_auth_file, ^path, backup, :unknown_shape}} =
+               Store.write(:openai, entry, path)
+
+      assert is_binary(backup)
+      assert File.exists?(backup)
+      ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm(backup) end)
+    end
   end
 
   describe "validate_permissions/1" do
