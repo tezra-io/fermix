@@ -7,11 +7,25 @@ defmodule FermixChannels.Idempotency do
   replies, and stores the same memory twice.
 
   Keys are `{channel, platform_message_id}` tuples. Entries live for
-  `@default_ttl_ms` (24h) and are pruned lazily on read. The cache is
-  process-local to the BEAM node — a daemon restart starts with a
-  fresh cache, which is acceptable: the provider's retry window is
-  typically minutes, not hours, and a fresh cache after restart simply
-  means at most one duplicate per restart per pending event.
+  `@default_ttl_ms` (24h). The cache is process-local to the BEAM node:
+  a daemon restart starts fresh, which is acceptable since provider
+  retry windows are typically minutes, not hours.
+
+  Atomicity model (audit F-06 second-pass review):
+
+  The check-and-set runs inside the GenServer's `handle_call/3`, so
+  concurrent callers are serialized by the BEAM mailbox. There is no
+  in-flight window where two callers can both observe the same state
+  and both decide they are `:fresh` — the prior `:ets.insert_new` + a
+  later `:ets.insert` for the expired-entry path had exactly that
+  window (review at audit follow-up commit 88e1eb6). The throughput
+  cost — one GenServer.call per inbound webhook message — is fine for
+  the single-user daemon's QPS budget, and the simplicity is worth
+  more than a clever ETS CAS at this scale.
+
+  ETS is still used as the storage backend so reads outside the
+  GenServer (e.g. operational dashboards) can `:ets.tab2list/1` the
+  table without blocking the writer.
   """
 
   use GenServer
@@ -33,30 +47,9 @@ defmodule FermixChannels.Idempotency do
   @spec check_and_record(atom(), term(), keyword()) :: :fresh | :duplicate
   def check_and_record(channel, message_id, opts \\ [])
       when is_atom(channel) and not is_nil(message_id) do
-    table = Keyword.get(opts, :table, @table)
+    server = Keyword.get(opts, :server, __MODULE__)
     ttl_ms = Keyword.get(opts, :ttl_ms, @default_ttl_ms)
-    now_ms = System.monotonic_time(:millisecond)
-    deadline = now_ms + ttl_ms
-    key = {channel, message_id}
-
-    # Audit F-06 follow-up: the previous lookup-then-insert pair was not
-    # atomic; two concurrent webhooks for the same id could both see
-    # missing and both insert. `:ets.insert_new/2` is the atomic
-    # check-and-set primitive — true means "key did not exist, now it
-    # does", false means "key exists". When the existing entry has
-    # expired, replace it (also atomic via `:ets.insert/2`).
-    if :ets.insert_new(table, {key, deadline}) do
-      :fresh
-    else
-      case :ets.lookup(table, key) do
-        [{^key, existing_deadline}] when existing_deadline > now_ms ->
-          :duplicate
-
-        _expired_or_missing ->
-          :ets.insert(table, {key, deadline})
-          :fresh
-      end
-    end
+    GenServer.call(server, {:check_and_record, {channel, message_id}, ttl_ms})
   end
 
   @doc """
@@ -68,9 +61,8 @@ defmodule FermixChannels.Idempotency do
   @spec forget(atom(), term(), keyword()) :: :ok
   def forget(channel, message_id, opts \\ [])
       when is_atom(channel) and not is_nil(message_id) do
-    table = Keyword.get(opts, :table, @table)
-    :ets.delete(table, {channel, message_id})
-    :ok
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:forget, {channel, message_id}})
   end
 
   @impl true
@@ -86,6 +78,29 @@ defmodule FermixChannels.Idempotency do
     end
 
     {:ok, %{table: table}}
+  end
+
+  @impl true
+  def handle_call({:check_and_record, key, ttl_ms}, _from, state) do
+    now_ms = System.monotonic_time(:millisecond)
+    deadline = now_ms + ttl_ms
+
+    result =
+      case :ets.lookup(state.table, key) do
+        [{^key, existing}] when existing > now_ms ->
+          :duplicate
+
+        _missing_or_expired ->
+          :ets.insert(state.table, {key, deadline})
+          :fresh
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:forget, key}, _from, state) do
+    :ets.delete(state.table, key)
+    {:reply, :ok, state}
   end
 
   @impl true
