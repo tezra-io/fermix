@@ -1,62 +1,82 @@
 # Milestone 11: Outbound Media on Channels — Functional Design
 
-**Status:** Draft
+**Status:** Draft (rev 2 — addresses review-1 findings)
 **Date:** 2026-05-18
 **Author:** Sujeeth / Aira
 **Depends on:** M3 (channel coverage and `FermixChannels.Channel` behaviour), M4.9 (`Capability` + `Capabilities.Builtin.Tool` surface), M5 (`Sandbox.read_path/3` floor)
-**Blocks:** any agent workflow that has to deliver an image, voice note, document, or audio file to a channel user. Today the agent's only egress is text, so it falls back to writing to disk and pasting the local path — which is what the operator observed on Telegram, and which reproduces identically on Discord, Slack, WhatsApp, and Signal.
-**Defers to other milestones:** outbound media generation (image / TTS) tools — M11 ships the egress pipe, not new producers; the LLM attaches files the agent has already written via `file_write` or fetched via `web_fetch`. Voice-companion media (M9.x) stays in its own realtime path — M11 does not route Realtime audio through channels.
-**References:** `apps/fermix_channels/lib/fermix_channels/channel.ex`, `apps/fermix_channels/lib/fermix_channels/message.ex`, `apps/fermix_channels/lib/fermix_channels/dispatcher.ex`, `apps/fermix_channels/lib/fermix_channels/telegram.ex`, `apps/fermix_channels/lib/fermix_channels/discord.ex`, `apps/fermix_channels/lib/fermix_channels/slack.ex`, `apps/fermix_channels/lib/fermix_channels/whatsapp.ex`, `apps/fermix_channels/lib/fermix_channels/signal.ex`, `apps/fermix_channels/lib/fermix_channels/idempotency.ex`, `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`, `apps/fermix_core/lib/fermix_core/capabilities/builtin/tool.ex`, `apps/fermix_core/lib/fermix_core/tools/file_write.ex`, `apps/fermix_core/lib/fermix_core/tools/file_read.ex`, `apps/fermix_core/lib/fermix_core/sandbox.ex`, [Telegram Bot API — `sendPhoto` / `sendDocument` / `sendVoice` / `sendAudio` / `sendVideo`](https://core.telegram.org/bots/api#sendphoto), [Discord REST — message attachments](https://discord.com/developers/docs/resources/channel#create-message), [Slack Web API — `files.completeUploadExternal`](https://api.slack.com/methods/files.completeUploadExternal), [WhatsApp Cloud API — Media](https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media), [`signal-cli send --attachment`](https://github.com/AsamK/signal-cli/wiki/Send-and-Receive-Messages).
+**Blocks:** any agent workflow that has to deliver an image, voice note, document, or audio file to a channel user.
+**Defers to other milestones:** outbound media generation tools — M11 ships the egress pipe, not new producers; the LLM attaches files the agent has already written via `file_write` or fetched via `web_fetch`. Voice-companion media (M9.x) stays in its own Realtime path.
+**References:** `apps/fermix_channels/lib/fermix_channels/channel.ex`, `apps/fermix_channels/lib/fermix_channels/message.ex`, `apps/fermix_channels/lib/fermix_channels/dispatcher.ex`, `apps/fermix_channels/lib/fermix_channels/telegram.ex`, `apps/fermix_channels/lib/fermix_channels/discord.ex`, `apps/fermix_channels/lib/fermix_channels/slack.ex`, `apps/fermix_channels/lib/fermix_channels/whatsapp.ex`, `apps/fermix_channels/lib/fermix_channels/signal.ex`, `apps/fermix_channels/lib/fermix_channels/cli.ex`, `apps/fermix_channels/lib/fermix_channels/command.ex`, `apps/fermix_channels/lib/fermix_channels/commands.ex`, `apps/fermix_channels/lib/fermix_channels/commands/*`, `apps/fermix_channels/lib/fermix_channels/idempotency.ex`, `apps/fermix_channels/mix.exs`, `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`, `apps/fermix_core/lib/fermix_core/agent_loop.ex`, `apps/fermix_core/lib/fermix_core/capabilities/builtin/tool.ex`, `apps/fermix_core/lib/fermix_core/tools/file_write.ex`, `apps/fermix_core/lib/fermix_core/tools/file_read.ex`, `apps/fermix_core/lib/fermix_core/sandbox.ex`, `apps/fermix_core/mix.exs`, [Telegram Bot API §"Sending files"](https://core.telegram.org/bots/api#sending-files), [Telegram `sendPhoto`](https://core.telegram.org/bots/api#sendphoto), [Telegram `sendVoice`](https://core.telegram.org/bots/api#sendvoice), [Discord File Attachments FAQ](https://support.discord.com/hc/en-us/articles/25444343291031-File-Attachments-FAQ), [Discord create-message](https://docs.discord.com/developers/reference), [Slack `files.getUploadURLExternal`](https://docs.slack.dev/reference/methods/files.getUploadURLExternal), [Slack `files.completeUploadExternal`](https://docs.slack.dev/reference/methods/files.completeUploadExternal), [WhatsApp Cloud Media](https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media), [`signal-cli send --attachment`](https://github.com/AsamK/signal-cli/wiki/Send-and-Receive-Messages).
+
+---
+
+## Revision History
+
+- **rev 2 (2026-05-18).** Addresses code-review findings on rev 1:
+  - F1 (blocking): rev 1 put `FermixChannels.*` references inside a `fermix_core` tool, which would create an umbrella cycle (`apps/fermix_channels/mix.exs:28` already lists `fermix_core` as a dep). Rev 2 introduces a types-only module `FermixCore.Channels.Outbound` in core and moves *all* channel-specific runtime (caps, idempotency, MIME mapping) into each channel adapter. Core has zero compile-time reference to `FermixChannels`.
+  - F2 (blocking): rev 1's `SendAttachment` returned `%{success: true, kind: ..., bytes: ...}`, which does not match `FermixCore.Capabilities.Builtin.Tool.tool_result()` (`tool.ex:16-20`) and would break the `AgentLoop` tool-result handler at `agent_loop.ex:265-281`. Rev 2 uses `Tool.success/1` / `Tool.error/1` returning the canonical `%{success, output, error}` shape.
+  - F3 (blocking): the tool context at `main_agent.ex:559-576` does not currently expose `reply_fn` or `channel`. Rev 2 specifies the exact diff to `process_message/2` and constrains the new context surface to the minimum SendAttachment needs.
+  - F4 (high): rev 1 simultaneously widened `Channel.reply_fn` *and* kept `build_reply/1` text-shaped, which contradicts the existing typespec. Rev 2 renames `build_reply/1` → `build_text_reply/1`, adds `build_media_reply/1`, and has the dispatcher compose them into one multiplexed reply fn.
+  - F5 (high): rev 1 missed the channel-side command surface. Production calls `reply_fn.("…")` happen in `dispatcher.ex`, `commands.ex`, `commands/help.ex`, `commands/whoami.ex` (×2), `commands/compact.ex` (×4), `commands/sandbox.ex`, `commands/new.ex`, and `main_agent.ex`. The `Command` callback at `command.ex:13-17` types `reply_fn` as string-only. Rev 2 enumerates every site and widens the Command callback type.
+  - F6 (high): rev 1 listed five channels and missed `FermixChannels.CLI` (`cli.ex:9` declares the behaviour). Rev 2 includes CLI: its `send_media/3` returns `{:error, :media_unsupported}` (CLI is a terminal stdout pipe; pretending it has a media transport is the kind of fallback rule 12 forbids).
+  - F7 (high): rev 1 specified PUT for the Slack upload-URL step. Slack's docs say POST. Rev 2 corrects this and lists `files.completeUploadExternal`'s actual parameter names (`files`, `channel_id`, `thread_ts`, `initial_comment`).
+  - F8 (medium): rev 1's cap matrix was guessed. Rev 2 uses researched values per §5.7 — Telegram photo 10 MB / voice-render 1 MB / others 50 MB, Discord 10 MiB default with server-boost notes, Slack 1 GiB platform max (we ship a 100 MiB conservative cap), WhatsApp image 5 MB / audio 16 MB / video 16 MB / doc 100 MB, Signal 100 MB. WhatsApp does not have a `voice` message type; `:voice` is mapped to WhatsApp `audio` with required MIME `audio/ogg; codecs=opus`.
 
 ---
 
 ## 1. Problem / Goal
 
-Every channel adapter today implements `send_message(chat_id, text, opts)` and nothing else (`apps/fermix_channels/lib/fermix_channels/channel.ex:35`). The dispatcher builds a single-arg reply hook of type `(String.t() -> :ok | {:error, term()})` (`channel.ex:18`) and passes it to the main agent. The main agent's typespec confirms the shape:
+Every channel adapter today implements `send_message(chat_id, text, opts)` and nothing else (`apps/fermix_channels/lib/fermix_channels/channel.ex:35`). The dispatcher builds a single-arg reply hook of type `(String.t() -> :ok | {:error, term()})` (`channel.ex:18`) and passes it to the main agent. The agent's typespec confirms the shape (`apps/fermix_core/lib/fermix_core/agents/main_agent.ex:55`), and the delivery call at `main_agent.ex:896` is `msg.reply_fn.(response)` with `response` being the LLM's final text. The result: when the agent decides to send a chart, a photo, an audio clip, or a generated PDF, the best it can do is `file_write` to disk and emit the *path* as part of the text reply. The user sees a path they can't open.
 
-```
-:reply_fn => (String.t() -> any())
-```
+The inbound side is already structured (`Message.attachments` at `message.ex:24`; Slack/Signal/WhatsApp populate it; WhatsApp implements `download_attachment/2`). Outbound has no symmetric structure. The asymmetry is the bug.
 
-`apps/fermix_core/lib/fermix_core/agents/main_agent.ex:55`, used at `main_agent.ex:896` as `msg.reply_fn.(response)` with `response` being the LLM's final text.
+**Goal of M11:** widen the channel outbound contract to carry structured media, implement the channel-side endpoints for all six existing channels, and add a single built-in tool (`send_attachment`) that lets the LLM emit a media intent through the same reply port the agent already owns — **without** introducing a `fermix_core` → `fermix_channels` dependency. After this milestone:
 
-The result: when the agent decides to send a chart, a photo, an audio clip, or even a generated PDF, the best it can do is `file_write` to disk inside the sandbox and emit the *path* as part of its text reply. The user on Telegram gets a string they can't open; the user on Slack sees a worker-machine path; the user on WhatsApp sees the same. The inbound side is already structured (`Message.attachments` at `message.ex:24`; Slack/Signal/WhatsApp populate it; WhatsApp implements `download_attachment/2`), but there is no outbound symmetry.
-
-**Goal of M11:** widen the channel outbound contract to carry structured media, implement the channel-side endpoints for the five existing channels, and add a single built-in tool (`send_attachment`) that lets the LLM emit a media intent through the same reply port the agent already owns. After this milestone:
-
-1. The `FermixChannels.Channel` behaviour declares `send_media/3` alongside `send_message/3`. The two are siblings, not alternatives — both required, both `{:ok, _} | {:error, term()}` returning.
-2. The dispatcher's reply hook is widened to a single multiplexed function `(outbound() -> :ok | {:error, term()})` where `outbound :: {:text, String.t()} | {:media, media_part()}`. Bare-string replies are dropped during the migration — every call site is updated; no string sugar (CLAUDE.md rule 12).
-3. Telegram routes `:image` → `sendPhoto`, `:voice` → `sendVoice`, `:audio` → `sendAudio`, `:video` → `sendVideo`, `:document` → `sendDocument`. Discord routes everything through multipart `POST /channels/{id}/messages`. Slack routes through `files.getUploadURLExternal` → PUT → `files.completeUploadExternal`. WhatsApp routes through `/{phone-id}/media` upload → `/{phone-id}/messages` reference. Signal routes through `signal-cli send --attachment <path>`.
-4. The LLM gets one new tool — `send_attachment(path, kind, caption?)` — that validates the path against the sandbox, enforces a per-channel byte cap, and dispatches through the agent's reply port. The tool returns `{:ok, %{success: true, kind: ..., bytes: ...}}` or `{:error, tag}` with a tag the LLM can read and react to.
-5. Failure is loud, structured, and the LLM's to handle. If a channel returns `{:error, :media_unsupported}` (e.g. a future stdio channel that has no media transport), the tool surfaces that tag verbatim. The agent does **not** silently degrade to "paste the path as text" — that decision belongs to the LLM, at the prompt layer, not to the system.
+1. A new types-only module `FermixCore.Channels.Outbound` declares `media_kind`, `media_part`, `outbound`, `send_media_opts`, `reply_fn`. `FermixChannels.Channel` and `FermixCore.Tools.SendAttachment` both reference these types. The existing dep direction (`fermix_channels` → `fermix_core`) is preserved; the inverse is never introduced.
+2. `FermixChannels.Channel` declares `send_media/3` as a required callback, plus a new `build_media_reply/1` companion to the renamed `build_text_reply/1` (was `build_reply/1`). `send_message/3` keeps its current shape and contract.
+3. The dispatcher's reply hook is widened to a single multiplexed function `(outbound() -> :ok | {:error, term()})`. The dispatcher builds it by composing both per-channel reply builders. Bare-string replies are dropped in the same change set — every call site updated; no string sugar (CLAUDE.md rule 12).
+4. Telegram routes `:image` → `sendPhoto`, `:voice` → `sendVoice`, `:audio` → `sendAudio`, `:video` → `sendVideo`, `:document` → `sendDocument`. Discord uses multipart `POST /channels/{id}/messages`. Slack uses `files.getUploadURLExternal` → **POST** to the upload URL → `files.completeUploadExternal`. WhatsApp uses `POST /{phone-id}/media` → `POST /{phone-id}/messages`, mapping `:voice` to type `audio` with `audio/ogg; codecs=opus`. Signal uses `signal-cli send --attachment <path>`. CLI returns `{:error, :media_unsupported}` — terminal output has no media transport.
+5. The LLM gets one new tool — `send_attachment(path, kind, caption?)` — that returns the canonical `Tool.tool_result()` shape (`%{success, output, error}`). Each channel adapter owns its own size cap, MIME mapping, and idempotency. SendAttachment does not import `FermixChannels`; it only sees `context.reply_fn`.
+6. Failure is loud and structured. The LLM sees a string error (per the existing `Tool.error/1` convention); operators read traces. No silent degradation to "paste the path as text."
 
 **Non-goal in this milestone:**
 
-- Media generation. M11 does not add an image-generation tool, a TTS tool, or a chart renderer. `send_attachment` consumes paths that already exist on disk (written by `file_write`, fetched by `web_fetch`, etc.).
-- Inbound→outbound forwarding ("re-send the user's photo back"). The shape supports it (the inbound attachment's `path` after `download_attachment` could be the `send_attachment` input), but no built-in capability does the forwarding automatically.
-- Realtime / voice-companion media. M9.x owns the Realtime audio path and ships its own egress. M11 keeps channels orthogonal to Realtime.
-- Streaming uploads or chunked transfer. Every channel's upload is a single multipart POST in v1. Streaming is a per-channel follow-on once a real workflow needs it.
-- Web LiveView attachment surface (M10). LiveView has its own out-of-band file delivery story; M11 does not touch it.
+- Media generation. M11 does not add image-gen, TTS, or chart tools. `send_attachment` consumes paths that already exist on disk.
+- Inbound→outbound forwarding helper. The shape allows it; no built-in capability does it automatically.
+- Realtime / voice-companion media. M9.x owns Realtime egress.
+- Streaming or chunked uploads. v1 is one multipart per send.
+- Web LiveView attachment surface (M10). LiveView has its own out-of-band path.
 
 ---
 
 ## 2. References
 
-- `apps/fermix_channels/lib/fermix_channels/channel.ex:18,35,47,54` — the current behaviour: `reply_fn` typed as `(String.t() -> _)`, `send_message/3` text-only, `download_attachment/2` already shows the inbound media pattern this milestone mirrors.
-- `apps/fermix_channels/lib/fermix_channels/message.ex:24,41` — `attachments: [map()]` field, already used by inbound.
-- `apps/fermix_channels/lib/fermix_channels/dispatcher.ex:46-75` — `build_reply_fn/3` is the only place in the codebase that constructs the agent's reply port.
-- `apps/fermix_channels/lib/fermix_channels/telegram.ex:101-130` — `post_send_message/3` shape we mirror for `post_send_media/3`.
-- `apps/fermix_channels/lib/fermix_channels/whatsapp.ex:23,94-101,256-308` — existing media path on the *inbound* side: `@max_media_bytes 25 * 1_024 * 1_024`, `download_attachment/2`, `media_url/2`, `download_media/2`. M11 reuses the same byte-cap discipline for outbound and the same two-step (resolve → transfer) shape.
-- `apps/fermix_core/lib/fermix_core/agents/main_agent.ex:55,121,127,896` — every reply-related typespec, guard, and call site; all change in lockstep.
-- `apps/fermix_core/lib/fermix_core/capabilities/builtin/tool.ex` — the behaviour `send_attachment` implements (`name/0`, `description/0`, `parameters/0`, `when_to_use/0`, `examples/0`, `failure_modes/0`, `requires_setup/0`, `category/0`, `execute/2`).
-- `apps/fermix_core/lib/fermix_core/tools/file_write.ex:6-9,69-80` — exact module shape and telemetry pattern `send_attachment` follows.
-- `apps/fermix_core/lib/fermix_core/tools/file_read.ex:89` — `Sandbox.read_path(path, :file_read, context)` is the sandbox gate; `send_attachment` calls it with action `:send_attachment`.
-- `apps/fermix_channels/lib/fermix_channels/idempotency.ex` — existing idempotency table; outbound media sends register here under `{channel, chat_id, content_hash}` to prevent duplicate sends on retry.
-- Telegram Bot API: `sendPhoto`, `sendDocument`, `sendVoice`, `sendAudio`, `sendVideo`. All multipart with `chat_id` + the file part named after the kind, plus optional `caption`, `parse_mode`, `message_thread_id`.
-- Discord REST v10: `POST /channels/{channel.id}/messages` with `multipart/form-data`, `files[n]` parts and a JSON `payload_json` field.
-- Slack Web API v2 upload flow: `files.getUploadURLExternal` → HTTP PUT to the returned URL → `files.completeUploadExternal` with the file ID and a channel reference. `files.upload` (v1) is being deprecated; we go straight to v2.
-- WhatsApp Cloud API: `POST /{version}/{phone-id}/media` → returns `id` → `POST /{version}/{phone-id}/messages` with `{ type: "image" | "audio" | "video" | "document", "image": {id: ...} }`.
-- `signal-cli`: `signal-cli -a <account> send -m "" --attachment /abs/path <recipient>`.
+- `apps/fermix_channels/lib/fermix_channels/channel.ex:18,35,47,54` — the current behaviour: `reply_fn` typed as `(String.t() -> _)`, `send_message/3` text-only, `download_attachment/2` already shows the inbound media pattern.
+- `apps/fermix_channels/lib/fermix_channels/message.ex:24,41` — `attachments: [map()]` field, used by inbound.
+- `apps/fermix_channels/lib/fermix_channels/dispatcher.ex:46-75` — `build_reply_fn/3` is the only place in the codebase that constructs the agent's reply port. Two production text-reply call sites (`:48`, `:66`).
+- `apps/fermix_channels/lib/fermix_channels/command.ex:13-17` — the `Command` behaviour: `execute(Message.t(), reply_fn :: (String.t() -> :ok | {:error, term()}), context :: map())`. Widening this is part of the migration.
+- `apps/fermix_channels/lib/fermix_channels/commands.ex:54` — `reply_fn.("This command requires owner permissions.")`.
+- `apps/fermix_channels/lib/fermix_channels/commands/help.ex:32` — `reply_fn.("Available commands:\n#{body}")`.
+- `apps/fermix_channels/lib/fermix_channels/commands/whoami.ex:21,27` — two text reply call sites.
+- `apps/fermix_channels/lib/fermix_channels/commands/compact.ex:59,64,70,75` — four text reply call sites.
+- `apps/fermix_channels/lib/fermix_channels/commands/sandbox.ex:185` — one text reply call site.
+- `apps/fermix_channels/lib/fermix_channels/commands/new.ex:28` — one text reply call site.
+- `apps/fermix_channels/lib/fermix_channels/cli.ex:9,79,108-110` — CLI channel declaration, in-process `dispatch_input_sync/2` reply closure, `build_reply/1` shape.
+- `apps/fermix_channels/lib/fermix_channels/telegram.ex:48,101-130` — `send_message/3` plus `post_send_message/3`, the shape we mirror for media.
+- `apps/fermix_channels/lib/fermix_channels/whatsapp.ex:23,94-101,256-308` — existing inbound media path; same byte-cap discipline and two-step (resolve → transfer) shape for outbound.
+- `apps/fermix_channels/lib/fermix_channels/idempotency.ex` — extant inbound dedup module; outbound media uses a sibling bucket.
+- `apps/fermix_channels/mix.exs:28` — declares `{:fermix_core, in_umbrella: true}`. The existing dep direction.
+- `apps/fermix_core/mix.exs:26` — does **not** declare `fermix_channels`. M11 preserves this.
+- `apps/fermix_core/lib/fermix_core/agents/main_agent.ex:55,121,127,559-576,896` — reply typespec, guard, context construction, delivery call.
+- `apps/fermix_core/lib/fermix_core/agent_loop.ex:265-281` — `dispatch_capability/3` consumes `{:ok, %{success, output, error}}` only; any other return shape becomes `inspect(other)` to the LLM.
+- `apps/fermix_core/lib/fermix_core/capabilities/builtin/tool.ex:16-52` — the `tool_result` type and `success/1` / `error/1` helpers.
+- `apps/fermix_core/lib/fermix_core/tools/file_write.ex:6-9,69-80` — module shape, telemetry pattern.
+- `apps/fermix_core/lib/fermix_core/tools/file_read.ex:89` — `Sandbox.read_path/3` is the gate; SendAttachment calls it with action `:send_attachment`.
+- Telegram Bot API §"Sending files" — `sendPhoto` 10 MB photo cap; `sendVoice` must be `audio/ogg` and ≤1 MB to render as a voice note (1-20 MB files sent via sendVoice render as documents); other multipart endpoints cap at 50 MB.
+- Discord File Attachments FAQ — default per-message attachment cap 10 MiB; Server Boost Tier 2 raises to 50 MiB, Tier 3 to 100 MiB; Nitro user limit 500 MiB. Whichever is higher applies, but the platform default for bots/free users is 10 MiB.
+- Slack `files.getUploadURLExternal` — call returns `{ok, file_id, upload_url}`; the binary body is uploaded via **POST** (not PUT) to `upload_url`; finalized via `files.completeUploadExternal` with `files: [{id, title}]`, `channel_id`, optional `thread_ts`, optional `initial_comment`. Slack's general per-file limit is 1 GiB; M11 ships a conservative 100 MiB cap.
+- WhatsApp Cloud Media — supported message types: `image`, `video`, `audio`, `document`, `sticker`. There is no `voice` type. Voice messages render correctly when sent as `audio` with MIME `audio/ogg; codecs=opus`. Caps: image 5 MB, audio 16 MB, video 16 MB, document 100 MB, sticker 100 KB.
+- `signal-cli` — `signal-cli -a <account> send -m <text> --attachment /abs/path <recipient>`. `SIGNAL_MAX_ATTACHMENT_SIZE = 100 MiB`.
 
 ---
 
@@ -72,44 +92,96 @@ Verified by reading the dev branch at the time this draft was written.
 @callback send_message(String.t(), String.t(), send_opts()) :: :ok | {:error, term()}
 ```
 
-`send_opts` is `[reply_to | parse_mode | message_thread_id]` (`channel.ex:13-16`). There is no media-shaped option, no MIME type, no file path, no byte payload. `reply_fn` is `(String.t() -> :ok | {:error, term()})` (`channel.ex:18`). Both are pinned to strings.
+`send_opts` is `[reply_to | parse_mode | message_thread_id]` (`channel.ex:13-16`). No media key. `reply_fn` is `(String.t() -> :ok | {:error, term()})` (`channel.ex:18`). Both string-pinned.
 
 ### 3.2 Every channel honors text-only
 
-- `telegram.ex:48,103` — only `POST /sendMessage`. `sendPhoto` etc. do not appear anywhere in the file.
-- `discord.ex:51` — `def send_message(channel_id, text, opts \\ [])`, body is JSON `{content: text}`. No multipart, no attachments parameter.
+- `telegram.ex:48,103` — only `POST /sendMessage`. No `sendPhoto`/`sendVoice`/`sendDocument`/`sendAudio`/`sendVideo`.
+- `discord.ex:51` — `def send_message(channel_id, text, opts \\ [])`, JSON `{content: text}`. No multipart.
 - `slack.ex:50` — `chat.postMessage` only.
-- `whatsapp.ex:66` — `messages` endpoint with `type: "text"`. Inbound media is parsed and downloadable (`whatsapp.ex:94-101`); outbound has no equivalent.
-- `signal.ex:55` — `signal-cli send -m <text>`. No `--attachment`.
+- `whatsapp.ex:66` — `messages` endpoint, `type: "text"`. Inbound media parsed and downloadable; outbound has no equivalent.
+- `signal.ex:55,263` — `signal-cli send -m <text>`. No `--attachment`.
+- `cli.ex:95-105` — `IO.puts(text)`. No notion of media.
 
-Every channel's `build_reply/1` returns the same `(text -> :ok | err)` shape.
+Every channel's `build_reply/1` returns `(text -> :ok | err)`.
 
-### 3.3 The agent treats the reply hook as a string port
+### 3.3 Production `reply_fn` call sites
 
-`main_agent.ex:55` types it as `(String.t() -> any())`. The guard at `main_agent.ex:127` is `is_function(reply_fn, 1)`. The delivery call at `main_agent.ex:896` is `msg.reply_fn.(response)` — `response` is the LLM's stitched-together final text.
+`grep -rnE 'reply_fn\.\(' apps/ | grep -v '_test'` — 13 production call sites:
 
-There is one reply path, it carries one string, and it fires once at end-of-loop.
+| File | Line | Site |
+|------|------|------|
+| `dispatcher.ex` | 48 | inside `build_reply_fn` override branch |
+| `dispatcher.ex` | 66 | inside `build_reply_fn` channel branch |
+| `commands.ex` | 54 | "This command requires owner permissions." |
+| `commands/help.ex` | 32 | available commands list |
+| `commands/whoami.ex` | 21 | cli user id |
+| `commands/whoami.ex` | 27 | remote channel user id |
+| `commands/compact.ex` | 59 | compaction summary |
+| `commands/compact.ex` | 64 | "Conversation changed while compacting" |
+| `commands/compact.ex` | 70 | "Nothing to compact" |
+| `commands/compact.ex` | 75 | "Compaction failed" |
+| `commands/sandbox.ex` | 185 | sandbox command output |
+| `commands/new.ex` | 28 | "Started a fresh session" |
+| `main_agent.ex` | 896 | end-of-agent-loop final response |
 
-### 3.4 No built-in tool produces media
+Plus one in-process closure at `cli.ex:79` (`dispatch_input_sync/2`'s reply override).
 
-Catalog: `apps/fermix_core/lib/fermix_core/tools/`. `file_write` writes to disk, `web_fetch` retrieves bytes (which it then writes to disk via the caller), `browser` returns text, `memory_*` are text. There is no "send this to the user" tool — the LLM has no surface to express the intent. Even if the channel could carry media, the LLM has no syntax to ask for it.
+### 3.4 The `Command` callback is string-only
 
-### 3.5 Inbound attachments are first-class, outbound has no symmetric structure
+`command.ex:13-17`:
 
-- `Message.attachments :: [map()]` (`message.ex:24,41`).
-- Slack populates it from `files` array (`slack.ex:157,184-202`).
-- Signal populates it from `attachments` array (`signal.ex:108,118-136`).
-- WhatsApp populates it and implements `download_attachment/2` with a 25 MiB cap (`whatsapp.ex:23,94-101,192-210`).
+```
+@callback execute(
+            Message.t(),
+            reply_fn :: (String.t() -> :ok | {:error, term()}),
+            context :: map()
+          ) :: :ok | {:error, term()}
+```
 
-Outbound has none of this — no `media_part` type, no `send_media` callback, no `[map()]` carrier on the reply side. The asymmetry is the entire bug.
+Six command handlers (`authorization`, `compact`, `help`, `new`, `sandbox`, `whoami`) match this signature.
 
-### 3.6 The sandbox floor is already in place for path inputs
+### 3.5 The agent treats the reply hook as a string port
 
-`Sandbox.read_path/3` is the gate `file_read` uses (`file_read.ex:89`): `{:ok, resolved_abs_path} | {:error, :sandbox_denied | ...}`. M11's `send_attachment` calls the same function with a new action atom; no new sandbox surface is required.
+`main_agent.ex:55` types it as `(String.t() -> any())`. The guard at `main_agent.ex:127` is `is_function(reply_fn, 1)`. The delivery call at `main_agent.ex:896` is `msg.reply_fn.(response)`.
 
-### 3.7 Idempotency exists for one direction
+### 3.6 Tool context exposes `source_channel` but not the reply port
 
-`apps/fermix_channels/lib/fermix_channels/idempotency.ex` handles inbound dedup keyed by webhook payload identity. Outbound has no idempotency wrapper today — retries of `send_message` on a transient HTTP error would, if they happened, double-post. They mostly don't, because most channels return idempotent enough HTTP semantics on retry, but a media upload that succeeds-but-times-out is a real risk and M11 has to address it explicitly.
+`main_agent.ex:559-576` constructs the tool context. Today's fields include `agent_name`, `conversation_key`, `session_id`, `capability_registry`, `provider`, `skill_registry`, `agent_supervisor`, `task_supervisor`, `journal_base_dir`, `memory_store`, `memory_repo`, `memory_agent_id`, `memory_owner_id`, `prompt_accounting`, `source_channel`, `source_trust`. `msg.reply_fn`, `msg.channel`, `msg.chat_id`, `msg.reply_target` are **not** in the context map — they are top-level fields on the agent message, accessible only inside `deliver_reply/2`.
+
+### 3.7 Tool result shape is `%{success, output, error}`
+
+`tool.ex:16-20`:
+
+```
+@type tool_result :: %{
+        success: boolean(),
+        output: String.t(),
+        error: String.t() | nil
+      }
+```
+
+`agent_loop.ex:265-281` pattern-matches `{:ok, %{success: true, output: output}}` and forwards `output` (a binary) to the LLM. `{:ok, %{success: false, error: error}}` becomes `"Error: #{error}"`. Any other shape becomes `inspect(other)`. Returning a map keyed by `:kind` and `:bytes` (rev 1's mistake) would surface to the LLM as a literal Elixir-inspect string.
+
+### 3.8 No built-in tool produces media
+
+`apps/fermix_core/lib/fermix_core/tools/`: `file_write`, `file_read`, `web_fetch`, `browser`, `memory_*`, etc. — all text. No tool currently emits a media intent.
+
+### 3.9 Inbound attachments are first-class, outbound has no symmetric structure
+
+`Message.attachments :: [map()]` (`message.ex:24,41`); Slack/Signal/WhatsApp populate it; WhatsApp implements `download_attachment/2`. No outbound equivalent.
+
+### 3.10 Sandbox floor is already in place for path inputs
+
+`Sandbox.read_path/3` (`file_read.ex:89`) is the gate. M11 adds a new action atom `:send_attachment`; no new sandbox surface required.
+
+### 3.11 Idempotency exists for inbound only
+
+`apps/fermix_channels/lib/fermix_channels/idempotency.ex` handles inbound dedup. M11 adds a sibling bucket for outbound media.
+
+### 3.12 Dependency direction is fermix_channels → fermix_core
+
+`apps/fermix_channels/mix.exs:28` declares `{:fermix_core, in_umbrella: true}`. `apps/fermix_core/mix.exs:26` does **not** declare `fermix_channels`. Any module under `fermix_core` that references a `FermixChannels.*` symbol creates an umbrella cycle. Rev 1 had three such references; rev 2 eliminates them.
 
 ---
 
@@ -119,122 +191,173 @@ Outbound has none of this — no `media_part` type, no `send_media` callback, no
 
 | Feature | Priority | Type | Description |
 |---------|----------|------|-------------|
-| `FermixChannels.Channel.send_media/3` callback | P0 | New | Required behaviour callback: `@callback send_media(String.t(), media_part(), send_media_opts()) :: :ok \| {:error, term()}`. Channels that genuinely cannot transport media implement it as `{:error, :media_unsupported}`. Not `@optional_callbacks` — every channel module must answer, even if the answer is "no". |
-| `FermixChannels.Channel.media_part/0` type | P0 | New | `%{required(:kind) => kind, required(:path) => String.t(), optional(:caption) => String.t(), optional(:filename) => String.t(), optional(:mime_type) => String.t()}` where `kind :: :image \| :voice \| :audio \| :video \| :document`. Declared on the behaviour module so every channel and the agent share one type. |
-| Widened `reply_fn` type | P0 | Breaking | `@type outbound :: {:text, String.t()} \| {:media, media_part()}` and `@type reply_fn :: (outbound() -> :ok \| {:error, term()})`. Bare-string replies are removed in the same change set — no sugar branch. Every existing call site is updated mechanically (§8). |
-| `Dispatcher.build_reply_fn/2,3` rewrite | P0 | Modified | The single point where the reply hook is constructed (`dispatcher.ex:46-75`). Becomes a one-arg function that pattern-matches `{:text, _}` → `channel.send_message/3` and `{:media, _}` → `channel.send_media/3`. Both branches log on `{:error, _}` exactly like today. No silent fallback between branches. |
-| Main agent reply typing | P0 | Modified | `main_agent.ex:55` typespec widens. The end-of-loop call at `main_agent.ex:896` becomes `msg.reply_fn.({:text, response})`. The guard at `main_agent.ex:127` stays `is_function(reply_fn, 1)`. |
-| Telegram media impl | P0 | New | `post_send_media/3` private, mirroring `post_send_message/3` (`telegram.ex:101-130`) but with `Req.new(method: :post, url: ..., form_multipart: [...])`. Five endpoints: `sendPhoto`, `sendDocument`, `sendVoice`, `sendAudio`, `sendVideo`. `kind`→endpoint map at module-attr level. `caption` and `message_thread_id` plumbed through. |
-| Discord media impl | P0 | New | Multipart `POST /channels/{id}/messages` with `payload_json` (content + flags) and a single `files[0]` part. `kind` is informational on Discord (no per-kind endpoint) but used to derive filename + content-type defaults. |
-| Slack media impl | P0 | New | Three-call sequence: `files.getUploadURLExternal` (returns `upload_url`, `file_id`) → `PUT` to `upload_url` → `files.completeUploadExternal` with `[{id, title}]` + `channel_id` + optional `thread_ts` + `initial_comment` (= caption). Failure at any step propagates the underlying error untouched. |
-| WhatsApp media impl | P0 | New | Two-call sequence: `POST /{version}/{phone-id}/media` multipart → returns `id` → `POST /{version}/{phone-id}/messages` with `type: <kind>` + `{<kind>: {id: <id>, caption?: <caption>}}`. Reuses the existing `whatsapp.ex` config + access-token plumbing. |
-| Signal media impl | P0 | New | `signal-cli -a <account> send -m <caption-or-empty> --attachment <abs-path> <recipient>`. Reuses the existing `Signal.send_message/4` (`signal.ex:263`) shell-invocation shape; the new branch adds the `--attachment` flag. No multipart, no temp files — Signal reads from the on-disk path directly. |
-| `FermixCore.Tools.SendAttachment` | P0 | New | New built-in tool implementing `FermixCore.Capabilities.Builtin.Tool`. `name: "send_attachment"`, `category: :channel`, three parameters: `path` (required), `kind` (required, enum), `caption` (optional). `execute/2` resolves `path` via `Sandbox.read_path(path, :send_attachment, context)`, checks the per-channel byte cap, invokes `context.reply_fn.({:media, media_part})`, and returns `{:ok, %{success: true, kind: ..., bytes: ...}}` or `{:error, tag}`. |
-| Per-channel byte caps | P0 | New | `Channel.media_byte_cap(kind)` informational helper on each adapter (Telegram photo 10 MiB / doc 50 MiB / voice 1 MiB / video 50 MiB, Discord 25 MiB any, Slack 1 GiB any (we cap at 100 MiB practical), WhatsApp 16 MiB any except video at 100 MiB, Signal 100 MiB any). `SendAttachment.execute/2` calls this via `Dispatcher.media_byte_cap/2` and rejects oversize before any upload. Mirrors `whatsapp.ex:23`. |
-| Outbound idempotency | P0 | New | `Idempotency` extension: outbound media sends compute a content hash (`:crypto.hash(:sha256, channel <> chat_id <> path <> caption)`) and register it for 60 s. Within the window, a duplicate send is a no-op returning `:ok` — same as the inbound dedup contract. Text sends are not retroactively wrapped — this milestone adds the cover for media only, where the failure cost is higher. |
-| Telemetry | P0 | New | `[:fermix, :channel, :message]` already exists (`telegram.ex:58-63`). Extended: metadata gains `:kind :: :text \| :media` and `:media_kind :: kind \| nil`. New event `[:fermix, :channel, :media_send_error]` for failed media sends, with `%{channel, chat_id, kind, reason, bytes}`. Every channel's media path emits both on success and failure paths. |
-| Tests | P0 | New | See §7. Behaviour-conformance test (every channel module passes a shared media-callback contract suite), per-channel HTTP fixture tests (Telegram `sendPhoto`, Slack three-step, WhatsApp upload→send, Discord multipart, Signal CLI), `SendAttachment` happy path + 6 failure modes, dispatcher reply-port routing, sandbox denial, byte-cap rejection, idempotency dedup. |
-| Documentation | P0 | Docs | This file. Plus a short README snippet next to `apps/fermix_channels/README.md` showing the `send_attachment` tool usage and the cap matrix. No CLAUDE.md change. |
+| `FermixCore.Channels.Outbound` types module | P0 | New | New module in `fermix_core` carrying `media_kind`, `media_part`, `outbound`, `send_media_opts`, `reply_fn` types. Pure types — no runtime, no callbacks. This is the shared vocabulary both `FermixChannels.Channel` (channels-side) and `FermixCore.Tools.SendAttachment` (core-side) reference, preserving the existing dep direction. |
+| `FermixChannels.Channel.send_media/3` callback | P0 | New | Required behaviour callback: `@callback send_media(String.t(), FermixCore.Channels.Outbound.media_part(), FermixCore.Channels.Outbound.send_media_opts()) :: :ok \| {:error, term()}`. Channels that cannot transport media implement `{:error, :media_unsupported}`. Not optional. |
+| `FermixChannels.Channel.build_text_reply/1` rename | P0 | Renamed | Existing `build_reply/1` (which returns the string-only `reply_fn`) is renamed to `build_text_reply/1`. Same shape, same contract. Renaming makes room for `build_media_reply/1` and prevents the F4 inconsistency rev 1 had. |
+| `FermixChannels.Channel.build_media_reply/1` callback | P0 | New | `@callback build_media_reply(Message.t()) :: (media_part() -> :ok \| {:error, term()})`. Each channel constructs the media-side closure analogously to `build_text_reply/1`. |
+| Widened `reply_fn` type in core | P0 | Breaking | `FermixCore.Channels.Outbound.outbound :: {:text, String.t()} \| {:media, media_part()}` and `reply_fn :: (outbound() -> :ok \| {:error, term()})`. Bare-string replies are removed in the same change set — every existing production call site (the 13 listed in §3.3 plus `cli.ex:79`) is updated. |
+| `Dispatcher.build_reply_fn/2,3` rewrite | P0 | Modified | Becomes the one place that composes the text-reply closure and the media-reply closure into a single multiplexed `outbound -> :ok\|err` function. Two production text-reply branches (`dispatcher.ex:48,66`) are rewritten to wrap inputs as `{:text, _}`. |
+| `FermixChannels.Command` callback widening | P0 | Breaking | `command.ex:13-17`'s `reply_fn` type changes from `(String.t() -> :ok \| {:error, term()})` to `FermixCore.Channels.Outbound.reply_fn()`. Every command handler (6 modules, 9 call sites — §3.3) is updated to wrap text in `{:text, _}`. |
+| Main agent reply typing | P0 | Modified | `main_agent.ex:55` typespec widens to `FermixCore.Channels.Outbound.reply_fn()`. `main_agent.ex:896` becomes `msg.reply_fn.({:text, response})`. Guard at `:127` stays `is_function(reply_fn, 1)`. |
+| Tool context plumbing | P0 | New | `main_agent.ex:559-576` gains exactly two fields: `reply_fn: msg.reply_fn` and `channel: msg.channel`. Nothing else. SendAttachment does not need `chat_id` / `reply_target` — those are baked into the dispatcher-built reply closure. Documented at §5.6 so the context surface stays minimal. |
+| Telegram media impl | P0 | New | `send_media/3` private dispatcher to five endpoints (`sendPhoto` / `sendVoice` / `sendAudio` / `sendVideo` / `sendDocument`), multipart via `Req.new(form_multipart: ...)`. Per-kind cap enforced *inside* the adapter (§5.7). |
+| Discord media impl | P0 | New | Single endpoint multipart `POST /channels/{id}/messages` with `payload_json` + `files[0]`. Default 10 MiB cap; operator-configurable via `[fermix_channels.discord] media_byte_cap_mib`. |
+| Slack media impl | P0 | New | Three-call sequence: `files.getUploadURLExternal` → **POST** body to returned `upload_url` → `files.completeUploadExternal` with `files: [{id, title}]` + `channel_id` + optional `thread_ts` + optional `initial_comment`. Conservative 100 MiB cap; Slack platform allows up to 1 GiB. |
+| WhatsApp media impl | P0 | New | Two-call: `POST /{version}/{phone-id}/media` → `id` → `POST /{version}/{phone-id}/messages` with `type: <whatsapp_type>` + `{<whatsapp_type>: {id, caption?}}`. `:voice` is mapped to type `audio` with `mime_type: "audio/ogg; codecs=opus"`. Caps per kind (§5.7). |
+| Signal media impl | P0 | New | `signal-cli -a <account> send -m <caption> --attachment <abs-path> <recipient>`. 100 MiB cap. |
+| CLI media impl | P0 | New | `def send_media(_, _, _), do: {:error, :media_unsupported}` + `def build_media_reply(_msg), do: fn _ -> {:error, :media_unsupported} end`. CLI's stdout pipe has no media transport; the explicit `:media_unsupported` error surfaces to the LLM rather than silently degrading. |
+| `FermixCore.Tools.SendAttachment` | P0 | New | New built-in tool in `fermix_core`. References `FermixCore.Channels.Outbound` for types only; **no** import of `FermixChannels`. Returns canonical `Tool.tool_result()` via `Tool.success/1` / `Tool.error/1`. Parameters: `path`, `kind`, `caption?`. `execute/2` calls `Sandbox.read_path/3` then `context.reply_fn.({:media, part})`. |
+| Per-channel byte caps (owned by adapters) | P0 | New | Each channel adapter declares its own `media_byte_cap/1` (private or module-attr) and enforces it inside `send_media/3`. Core never knows the matrix — it just sees `{:error, :byte_cap_exceeded}` and forwards. Eliminates the rev-1 cross-app cap registry. |
+| MIME mapping (owned by adapters) | P0 | New | WhatsApp's `:voice → audio` translation and the `audio/ogg; codecs=opus` MIME injection live inside the WhatsApp adapter, not in core. Other channels with simpler 1:1 mappings declare them analogously. |
+| Outbound idempotency | P0 | New | `FermixChannels.Idempotency` gains `register_outbound_media(channel, chat_id, media_part) :: :fresh \| :duplicate`. Channel adapters call this themselves inside `send_media/3` before the wire call. SHA-256 of `[channel, chat_id, path, caption]`, 60 s TTL. Duplicate returns `:ok` without re-uploading. |
+| Telemetry | P0 | New | `[:fermix, :channel, :message]` already exists. Metadata extended with `:kind :: :text \| :media` and `:media_kind :: media_kind \| nil`. New event `[:fermix, :channel, :media_send_error]` with `%{channel, chat_id, kind, reason, bytes}`. |
+| Tests | P0 | New | See §7. Behaviour-conformance test covers all six channels (including CLI's `:media_unsupported` return). Per-channel HTTP-fixture tests. SendAttachment tool tests against a recording reply_fn. Dependency-cycle test (`mix xref graph --label compile` from `fermix_core` does not include `FermixChannels.*`). Command-handler regression tests. |
+| Documentation | P0 | Docs | This file. A `apps/fermix_channels/README.md` snippet showing the cap matrix and the WhatsApp voice-to-audio mapping. No CLAUDE.md change. |
 
 ### Non-Goals
 
 | Feature | Reason | When |
 |---------|--------|------|
-| Media-generation tools (image, TTS, chart) | M11 ships the egress pipe. Producers are independent — they can ship before or after as separate, smaller PRs. Bundling would expand scope by 5x. | Separate tools per producer, owned by their respective domains (M7 advanced tools, M9.x voice). |
-| Inbound→outbound forwarding helper | The shape allows it (`download_attachment` returns a path; `send_attachment` consumes a path), but no built-in capability does it automatically. Operators / LLM workflows compose the two. | If a real workflow needs it. |
-| Streaming / chunked uploads | Every channel's v1 path is a single multipart POST. Streaming adds a second code path per channel for marginal benefit at the M11 file sizes. | Per-channel follow-on if the byte cap proves limiting. |
-| Bare-string `reply_fn` sugar / back-compat | Rule 12: no fallbacks, one code path per behavior. The migration is mechanical (one grep, ~15 call sites — §8). | Never. |
-| Web LiveView attachment surface | M10 owns LiveView. LiveView's egress is HTTP, not channel-shaped; the abstraction doesn't fit `Channel`. | M10 or its successor. |
-| Channel-side caption Markdown rendering across all kinds | Telegram `sendPhoto.caption` accepts `parse_mode`, but Discord/Slack/WhatsApp/Signal treat captions as plain text. v1 sends captions as plain text everywhere for consistency; Telegram's existing markdown→HTML pass is reserved for `:text` parts only. | Per-channel follow-on; low value vs. complexity. |
-| Media replies via `reply_to` / threading on Slack/Discord | Threading semantics already plumbed for text (`send_opts.message_thread_id`, Slack `thread_ts`). The same opts pass through `send_media_opts` unchanged, so this is in scope — but threading-edge behavior across channels (Discord forum posts, Slack canvas threads) is not exhaustively tested in v1. | Per-channel follow-on if a workflow surfaces a regression. |
-| Voice / Realtime audio routed through `send_attachment` | M9.x has its own egress and its own latency budget. Forcing it through the channel path would double-buffer and re-encode. Out of scope. | Never — orthogonal domains. |
-| Replacing `file_write`'s on-disk artifact with an in-memory blob | Sandbox-rooted on-disk artifacts are auditable; in-memory blobs aren't. The path-based shape also matches every channel's wire shape (all five do multipart from a path). | Never as primary; in-memory blob support is a future optional `media_part.bytes` key if a producer warrants it. |
-| Per-recipient consent / opt-out for media | Channel-platform terms-of-service issues (WhatsApp media policy, etc.) belong to a future governance milestone, not the egress mechanism. | M10 / governance follow-on. |
+| Media-generation tools (image, TTS, chart) | M11 ships the egress pipe. Producers are independent. | Separate per-domain follow-ons. |
+| Inbound→outbound forwarding helper | Shape supports it; no built-in does it automatically. | If a real workflow needs it. |
+| Streaming / chunked uploads | One multipart per send in v1. | Per-channel follow-on. |
+| Bare-string `reply_fn` sugar / back-compat | Rule 12: no fallbacks. Migration is mechanical (~14 sites). | Never. |
+| Web LiveView attachment surface | M10 owns LiveView; its egress is HTTP, not channel-shaped. | M10 or successor. |
+| Caption Markdown rendering for `:media` | Telegram supports `caption.parse_mode`; others treat caption as plain text. v1 sends plain text everywhere for consistency. | Per-channel follow-on. |
+| Multi-attachment per reply (Telegram `sendMediaGroup`, Discord `files[0..9]`) | `media_part` is singular in v1. Plural would be a new `{:media_group, [media_part()]}` shape plus per-channel fan-out. | Follow-on. |
+| Server-boost-aware Discord cap | Discord caps vary by guild boost tier. v1 ships a 10 MiB default with operator-configurable override. Dynamic boost-tier discovery is a separate concern. | Operator config in v1; runtime discovery later. |
+| Re-routing Realtime audio through `send_attachment` | M9.x has its own latency-tuned egress. | Never. |
+| Server-side conversion (auto-transcode MP3→OGG for WhatsApp voice rendering) | WhatsApp requires `audio/ogg; codecs=opus` for voice-message rendering. The adapter validates the MIME and rejects mismatched files; transcoding is producer-side work. | Out of scope; producer's responsibility. |
+| In-memory blob (`media_part.bytes`) instead of on-disk path | Path-based shape matches every channel's wire shape and stays audit-able. | Future optional `:bytes` key if a producer warrants it. |
 
 ---
 
 ## 5. Design
 
-### 5.1 The reply contract widens to a tagged-tuple multiplex
+### 5.1 Shared types live in fermix_core
 
-`FermixChannels.Channel` declares the new types and callbacks:
+New module:
 
 ```elixir
-@type media_kind :: :image | :voice | :audio | :video | :document
+defmodule FermixCore.Channels.Outbound do
+  @moduledoc """
+  Shared type vocabulary for channel egress.
 
-@type media_part :: %{
-        required(:kind) => media_kind(),
-        required(:path) => String.t(),
-        optional(:caption) => String.t(),
-        optional(:filename) => String.t(),
-        optional(:mime_type) => String.t()
-      }
+  Types only — no runtime, no callbacks. Lives in fermix_core so the
+  existing dep direction (fermix_channels → fermix_core) is preserved:
+  channels references these types; core's SendAttachment references
+  these types; neither side reaches across the apps boundary at runtime.
+  """
 
-@type outbound :: {:text, String.t()} | {:media, media_part()}
+  @type media_kind :: :image | :voice | :audio | :video | :document
 
-@type send_media_opts :: [
-        reply_to: String.t(),
-        message_thread_id: integer()
-      ]
+  @type media_part :: %{
+          required(:kind) => media_kind(),
+          required(:path) => String.t(),
+          optional(:caption) => String.t(),
+          optional(:filename) => String.t(),
+          optional(:mime_type) => String.t()
+        }
 
-@type reply_fn :: (outbound() -> :ok | {:error, term()})
+  @type outbound :: {:text, String.t()} | {:media, media_part()}
 
-@callback send_media(String.t(), media_part(), send_media_opts()) ::
-            :ok | {:error, term()}
+  @type send_media_opts :: [
+          reply_to: String.t(),
+          message_thread_id: integer()
+        ]
+
+  @type reply_fn :: (outbound() -> :ok | {:error, term()})
+end
 ```
 
-Bare-string replies are gone. Every existing producer of an `outbound` value wraps in `{:text, _}` explicitly (§8). The widened `reply_fn` is the only port the agent sees; the channel module remains hidden behind the dispatcher's wrapper.
+`FermixChannels.Channel` references these types in its `@callback` declarations. `FermixCore.Tools.SendAttachment` references them when constructing the `media_part` map and the `{:media, _}` tuple. No `FermixChannels.*` symbol appears anywhere under `apps/fermix_core/`.
 
-Rationale for one wrapper vs. two separate hooks (text-only + media-only):
+A `mix xref graph --label compile --source apps/fermix_core/lib` check is added to the §7 test plan to prove this at CI time.
 
-- The agent already passes around `msg.reply_fn` as a single value. A second hook would double the surface and force every internal helper that accepts `reply_fn` to accept two.
-- The tagged-tuple shape mirrors the inbound `Message.attachments` direction: inbound is "one message struct with a list of parts," outbound is "one reply port with one part per call." Both directions speak structured parts.
-- Pattern-matching on `{:text, _}` / `{:media, _}` at the dispatcher boundary is one short `case` (§5.3) — cheaper than two hooks plus call-site logic to pick the right one.
+### 5.2 Channel behaviour changes
 
-### 5.2 `Channel.send_media/3` is required, not optional
-
-`@optional_callbacks [start_typing: 1, download_attachment: 2]` stays as-is. `send_media/3` is **not** added to the optional list. Every channel module must implement it. A channel that genuinely cannot send media (e.g. a future stdio CLI channel that prints to a terminal) implements it as:
+`FermixChannels.Channel`:
 
 ```elixir
+defmodule FermixChannels.Channel do
+  alias FermixCore.Channels.Outbound
+
+  @type message :: FermixChannels.Message.t()
+  @type send_opts :: [reply_to: String.t(), parse_mode: String.t(), message_thread_id: integer()]
+
+  @callback parse_webhook(map()) :: {:ok, [message()]} | {:error, term()}
+  @callback send_message(String.t(), String.t(), send_opts()) :: :ok | {:error, term()}
+  @callback send_media(String.t(), Outbound.media_part(), Outbound.send_media_opts()) ::
+              :ok | {:error, term()}
+  @callback build_text_reply(message()) :: (String.t() -> :ok | {:error, term()})
+  @callback build_media_reply(message()) ::
+              (Outbound.media_part() -> :ok | {:error, term()})
+  @callback verify_webhook(Plug.Conn.t()) :: :ok | {:error, term()}
+  @callback download_attachment(message(), map()) :: {:ok, String.t()} | {:error, term()}
+  @callback start_typing(String.t()) :: :ok
+
+  @optional_callbacks [start_typing: 1, download_attachment: 2]
+end
+```
+
+Notes:
+
+- `build_reply/1` is renamed to `build_text_reply/1`. Every channel's current `build_reply/1` is renamed in place (six occurrences). No call sites outside `dispatcher.ex` reference it directly.
+- `send_media/3` and `build_media_reply/1` are **not** in `@optional_callbacks`. Every channel (including CLI) must implement both. The reviewer's F6 point applies: implicit unsupported-media handling is a fallback.
+- The legacy `reply_fn` type alias on `Channel` is removed; the type now lives in core and channels imports it.
+
+### 5.3 CLI explicitly returns `:media_unsupported`
+
+CLI's stdout pipe has no media transport. Pretending otherwise (e.g. printing the path with a tag like `[attachment: image] /tmp/chart.png`) would be a textbook fallback: a second visible side effect that *looks* like media delivery but isn't, and that would mask "the operator is using a channel that can't deliver media" as a normal-looking success.
+
+```elixir
+# apps/fermix_channels/lib/fermix_channels/cli.ex
 @impl true
 def send_media(_chat_id, _media_part, _opts), do: {:error, :media_unsupported}
+
+@impl true
+def build_media_reply(_message) do
+  fn _part -> {:error, :media_unsupported} end
+end
 ```
 
-This is the **only** correct shape for "we don't support this" — explicit, named, surfaceable as a tool error to the LLM. We do not catch the error inside the dispatcher and silently degrade to a text path mentioning the file. That would be a textbook rule-12 fallback: same observable end-state ("user got something"), two paths to one configuration, with no way to tell which fired.
+The LLM sees the error tag through SendAttachment's normal failure path and can adjust its reply (e.g. "I generated /tmp/chart.png — open it in your file manager"). That adjustment is the LLM's prompt-layer decision, not a system-layer fallback.
 
-### 5.3 Dispatcher reply wrapper is a one-arg multiplexer
+### 5.4 Dispatcher composes one multiplexed reply
 
-`dispatcher.ex:62` becomes:
+`dispatcher.ex:46-75` is rewritten:
 
 ```elixir
 defp build_reply_fn(channel, %Message{} = message) do
-  text_send = channel.build_reply(message)         # existing reply_fn shape
-  media_send = build_media_send(channel, message)  # new sibling
+  text_send = channel.build_text_reply(message)   # (String.t() -> :ok | err)
+  media_send = channel.build_media_reply(message) # (media_part() -> :ok | err)
 
   fn
     {:text, text} when is_binary(text) ->
-      observe_send(text_send.(text), :text, channel, message, nil)
+      observe(text_send.(text), :text, channel, message, nil)
 
     {:media, %{kind: kind} = part} ->
-      observe_send(media_send.(part), :media, channel, message, kind)
+      observe(media_send.(part), :media, channel, message, kind)
   end
 end
 
-defp build_media_send(channel, %Message{reply_target: reply_target, thread_ts: thread_ts}) do
-  opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
-  fn media_part -> channel.send_media(reply_target, media_part, opts) end
-end
+defp build_reply_fn(_channel, %Message{} = _message, reply_fn) when is_function(reply_fn, 1),
+  do: wrap_with_logging(reply_fn)
 ```
 
-`observe_send/5` is a new private helper that handles the existing logger.error branch on `{:error, _}` and emits the new `[:fermix, :channel, :media_send_error]` telemetry on the `:media` failure path. The structure of the existing `text` branch is preserved unchanged.
+`observe/5` is a new private helper: logs `{:error, _}` results and emits the new `[:fermix, :channel, :media_send_error]` telemetry on the `:media` failure branch. The text branch keeps the existing logger.error line.
 
-### 5.4 Per-channel implementations
+The `reply_fn`-override arity-3 path (used by `cli.ex:79` for `dispatch_input_sync/2`) is unchanged in spec — it accepts an already-built tuple-aware fn from the caller, who must wrap text in `{:text, _}` themselves. `cli.ex:79`'s closure is updated as part of the rev-2 migration.
 
-Each channel adapter implements `send_media/3` as a thin public function that delegates to a private `post_send_media/3` (mirroring `telegram.ex:101-130`'s `post_send_message/3`). The five implementations:
+### 5.5 Per-channel implementations
+
+Each channel adapter owns its own `send_media/3` and its own `build_media_reply/1`. Caps, MIME mapping, and idempotency live inside the adapter — not in core.
 
 **Telegram** (`apps/fermix_channels/lib/fermix_channels/telegram.ex`):
 
 ```elixir
+alias FermixCore.Channels.Outbound
+
 @media_endpoint %{
   image: "sendPhoto",
   voice: "sendVoice",
@@ -251,12 +374,26 @@ Each channel adapter implements `send_media/3` as a thin public function that de
   document: "document"
 }
 
+# Per-kind caps. Voice cap is the voice-message-rendering threshold;
+# files larger than 1 MB sent via sendVoice would still upload but
+# would render as documents in the recipient's chat, defeating the
+# `:voice` intent. We reject early.
+@media_byte_cap %{
+  image: 10 * 1024 * 1024,
+  voice: 1 * 1024 * 1024,
+  audio: 50 * 1024 * 1024,
+  video: 50 * 1024 * 1024,
+  document: 50 * 1024 * 1024
+}
+
 @impl true
 def send_media(chat_id, %{kind: kind, path: path} = part, opts \\ []) do
   with {:ok, token} <- get_bot_token(),
-       :ok <- ensure_path_readable(path),
-       {:ok, endpoint} <- Map.fetch(@media_endpoint, kind),
-       {:ok, field} <- Map.fetch(@media_field, kind) do
+       :ok <- ensure_kind_supported(kind),
+       :ok <- ensure_size_within_cap(path, kind),
+       :ok <- maybe_check_idempotency("telegram", chat_id, part),
+       endpoint <- @media_endpoint[kind],
+       field <- @media_field[kind] do
     url = "#{@bot_api_base}/bot#{token}/#{endpoint}"
     form =
       [
@@ -272,16 +409,34 @@ def send_media(chat_id, %{kind: kind, path: path} = part, opts \\ []) do
     |> handle_telegram_response(endpoint)
   end
 end
+
+@impl true
+def build_media_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+  opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
+  fn part -> send_media(reply_target, part, opts) end
+end
+
+defp ensure_size_within_cap(path, kind) do
+  cap = Map.fetch!(@media_byte_cap, kind)
+
+  case File.stat(path) do
+    {:ok, %File.Stat{size: size}} when size <= cap -> :ok
+    {:ok, %File.Stat{size: size}} -> {:error, {:byte_cap_exceeded, size, cap}}
+    {:error, reason} -> {:error, {:file_stat_failed, reason}}
+  end
+end
 ```
 
-`handle_telegram_response/2` mirrors the existing 200/error pattern at `telegram.ex:117-128`. `ensure_path_readable/1` is a strict precondition (the sandbox already guaranteed the path is allowed for the agent; this guard just confirms the OS can `File.stat/1` it before opening multipart).
+(`ensure_kind_supported/1` and `maybe_check_idempotency/3` shown elsewhere; voice format validation is per the existing Bot API contract — `audio/ogg` is the bot's responsibility to produce, not the adapter's. The adapter does not transcode.)
 
-**Discord** (`apps/fermix_channels/lib/fermix_channels/discord.ex`): one endpoint, multipart with `payload_json`:
+**Discord** (`apps/fermix_channels/lib/fermix_channels/discord.ex`): single endpoint, multipart with `payload_json`. Default cap 10 MiB; operators with Tier-2/Tier-3 boosted guilds set `[fermix_channels.discord] media_byte_cap_mib = 50` (or 100) in their config.
 
 ```elixir
 @impl true
 def send_media(channel_id, %{kind: kind, path: path} = part, opts \\ []) do
-  with {:ok, token} <- get_bot_token() do
+  with {:ok, token} <- get_bot_token(),
+       :ok <- ensure_size_within_cap(path),
+       :ok <- maybe_check_idempotency("discord", channel_id, part) do
     url = "#{@api_base}/channels/#{channel_id}/messages"
     filename = Map.get(part, :filename) || Path.basename(path)
     payload = build_message_payload(part, opts) |> Jason.encode!()
@@ -299,68 +454,130 @@ def send_media(channel_id, %{kind: kind, path: path} = part, opts \\ []) do
 end
 ```
 
-`kind` is informational on Discord — the wire request is identical for every kind. We still receive `kind` so per-kind metadata (filename default, content-type) can be set, and so the byte-cap helper at §5.7 picks the right cap.
-
-**Slack** (`apps/fermix_channels/lib/fermix_channels/slack.ex`): the new v2 three-call sequence. Each call uses `HttpClient.request/2`. The intermediate steps' errors are propagated untouched — no merge into a single opaque `:slack_upload_failed` tag.
+**Slack** (`apps/fermix_channels/lib/fermix_channels/slack.ex`): three-call sequence, **POST** to the upload URL (not PUT — F7). Cap 100 MiB conservative default.
 
 ```elixir
 @impl true
 def send_media(channel_id, %{path: path} = part, opts \\ []) do
   with {:ok, %File.Stat{size: size}} <- File.stat(path),
+       :ok <- ensure_size_within_cap(size),
+       :ok <- maybe_check_idempotency("slack", channel_id, part),
        {:ok, %{"upload_url" => upload_url, "file_id" => file_id}} <-
          get_upload_url_external(part, size),
-       :ok <- put_upload(upload_url, path),
+       :ok <- post_upload(upload_url, path),
        :ok <- complete_upload_external(channel_id, file_id, part, opts) do
     :ok
   end
 end
+
+defp get_upload_url_external(%{filename: filename}, size) do
+  # POST https://slack.com/api/files.getUploadURLExternal
+  # body: filename=...&length=<bytes>
+  # returns: %{"ok" => true, "upload_url" => ..., "file_id" => ...}
+end
+
+defp post_upload(upload_url, path) do
+  # POST <upload_url>
+  # body: binary file contents (or multipart with the file part)
+  # No Slack auth header here — the URL is presigned.
+end
+
+defp complete_upload_external(channel_id, file_id, part, opts) do
+  # POST https://slack.com/api/files.completeUploadExternal
+  # body: files=[{id: <file_id>, title: <filename>}], channel_id, thread_ts?, initial_comment?
+  caption = Map.get(part, :caption)
+  body =
+    %{
+      "files" => [%{"id" => file_id, "title" => Map.get(part, :filename) || Path.basename(part.path)}],
+      "channel_id" => channel_id
+    }
+    |> maybe_put("thread_ts", Keyword.get(opts, :thread_ts))
+    |> maybe_put("initial_comment", caption)
+  # ...
+end
 ```
 
-`get_upload_url_external/2`, `put_upload/2`, and `complete_upload_external/4` each emit `Logger.error` with the step name and return the underlying `{:error, _}` unchanged on failure.
-
-**WhatsApp** (`apps/fermix_channels/lib/fermix_channels/whatsapp.ex`): two-call upload→messages. Cap enforcement reuses `@max_media_bytes`.
+**WhatsApp** (`apps/fermix_channels/lib/fermix_channels/whatsapp.ex`): two-call upload→messages. **`:voice` is mapped to type `audio` with `audio/ogg; codecs=opus`** inside the adapter.
 
 ```elixir
+# WhatsApp has no `voice` message type. Voice messages render correctly
+# only when sent as `audio` with mime_type "audio/ogg; codecs=opus".
+@whatsapp_type %{
+  image: "image",
+  voice: "audio",
+  audio: "audio",
+  video: "video",
+  document: "document"
+}
+
+@media_byte_cap %{
+  image: 5 * 1024 * 1024,
+  voice: 16 * 1024 * 1024,
+  audio: 16 * 1024 * 1024,
+  video: 16 * 1024 * 1024,
+  document: 100 * 1024 * 1024
+}
+
 @impl true
 def send_media(to, %{kind: kind, path: path} = part, opts \\ []) do
-  with :ok <- preflight_outbound_size_cap(path),
+  with :ok <- ensure_size_within_cap(path, kind),
+       :ok <- maybe_check_idempotency("whatsapp", to, part),
        {:ok, access_token, phone_id, version} <- whatsapp_creds(),
-       {:ok, media_id} <- upload_media(path, kind, phone_id, version, access_token),
-       :ok <- send_media_message(to, media_id, kind, part, phone_id, version, access_token, opts) do
+       :ok <- validate_voice_mime(part),
+       wa_type <- @whatsapp_type[kind],
+       {:ok, media_id} <- upload_media(path, wa_type, phone_id, version, access_token, part),
+       :ok <- send_media_message(to, media_id, wa_type, part, phone_id, version, access_token, opts) do
     :ok
   end
 end
+
+defp validate_voice_mime(%{kind: :voice, mime_type: "audio/ogg; codecs=opus"}), do: :ok
+defp validate_voice_mime(%{kind: :voice, mime_type: other}),
+  do: {:error, {:invalid_voice_mime, other}}
+defp validate_voice_mime(%{kind: :voice}),
+  do: {:error, {:invalid_voice_mime, "(mime_type required for :voice; expected audio/ogg; codecs=opus)"}}
+defp validate_voice_mime(_part), do: :ok
 ```
 
-`preflight_outbound_size_cap/1` mirrors `preflight_size_cap/1` at `whatsapp.ex:106-110` — same constant, same hard reject, no fallback.
+For voice, the LLM (or upstream producer tool) must supply a `mime_type` field on the `media_part`. If absent or wrong, the WhatsApp adapter rejects loudly. The other channels ignore `mime_type` (Telegram inspects file content via libmagic anyway; Discord, Slack, Signal do not care for media-render purposes).
 
-**Signal** (`apps/fermix_channels/lib/fermix_channels/signal.ex`): the existing CLI shell-out at `signal.ex:263` already takes `account`, `recipient`, `text`, `opts`. We add an attachment branch:
+**Signal** (`apps/fermix_channels/lib/fermix_channels/signal.ex`):
 
 ```elixir
+@media_byte_cap 100 * 1024 * 1024
+
 @impl true
 def send_media(recipient, %{path: path} = part, opts \\ []) do
-  caption = Map.get(part, :caption, "")
-  account = signal_account(opts)
-  args = ["-a", account, "send", "-m", caption, "--attachment", path, recipient]
+  with :ok <- ensure_size_within_cap(path),
+       :ok <- maybe_check_idempotency("signal", recipient, part) do
+    caption = Map.get(part, :caption, "")
+    account = signal_account(opts)
+    args = ["-a", account, "send", "-m", caption, "--attachment", path, recipient]
 
-  case System.cmd(signal_cli_binary(), args, stderr_to_stdout: true) do
-    {_output, 0} -> :ok
-    {output, exit_code} ->
-      Logger.error("signal-cli send --attachment exit #{exit_code}: #{output}")
-      {:error, {:signal_send_failed, exit_code}}
+    case System.cmd(signal_cli_binary(), args, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, exit_code} ->
+        Logger.error("signal-cli send --attachment exit #{exit_code}: #{output}")
+        {:error, {:signal_send_failed, exit_code}}
+    end
   end
 end
 ```
 
-`signal_cli_binary/0` and `signal_account/1` are reused from the existing text path.
+**CLI** — see §5.3.
 
-### 5.5 `SendAttachment` is one tool, six failure modes
+### 5.6 `SendAttachment` returns the canonical Tool result shape
+
+`FermixCore.Tools.SendAttachment` is a built-in tool. Its return shape is `{:ok, tool_result()}` per `tool.ex:36`, and the `tool_result` map has only `success`, `output`, `error` keys (`tool.ex:16-20`). The LLM sees `output` (or `"Error: #{error}"`) — it does not see structured Elixir maps.
 
 ```elixir
 defmodule FermixCore.Tools.SendAttachment do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  require Logger
+
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Channels.Outbound
   alias FermixCore.Sandbox
 
   @valid_kinds ~w(image voice audio video document)a
@@ -387,16 +604,22 @@ defmodule FermixCore.Tools.SendAttachment do
           enum: ["image", "voice", "audio", "video", "document"],
           description: "What kind of media this is. Determines the channel endpoint used."
         },
-        caption: %{type: "string", description: "Optional caption shown alongside the media"}
+        caption: %{type: "string", description: "Optional caption shown alongside the media"},
+        mime_type: %{
+          type: "string",
+          description:
+            "Required for :voice on WhatsApp (must be 'audio/ogg; codecs=opus'). " <>
+              "Optional otherwise."
+        }
       }
     }
   end
 
   @impl true
-  def when_to_use do
-    "When the user expects to receive a file, image, voice note, or document directly in " <>
-      "the channel — not a path. Always prefer this over pasting a local path into the reply."
-  end
+  def when_to_use,
+    do:
+      "When the user expects to receive a file, image, voice note, or document directly in " <>
+        "the channel — not a path. Always prefer this over pasting a local path into the reply."
 
   @impl true
   def examples do
@@ -404,6 +627,14 @@ defmodule FermixCore.Tools.SendAttachment do
       %{
         args: %{"path" => "/tmp/chart.png", "kind" => "image", "caption" => "weekly revenue"},
         note: "send a chart you just wrote"
+      },
+      %{
+        args: %{
+          "path" => "/tmp/note.ogg",
+          "kind" => "voice",
+          "mime_type" => "audio/ogg; codecs=opus"
+        },
+        note: "send a voice note (WhatsApp requires the mime_type)"
       }
     ]
   end
@@ -417,6 +648,7 @@ defmodule FermixCore.Tools.SendAttachment do
       %{tag: "file_not_found", description: "path does not exist or is unreadable"},
       %{tag: "byte_cap_exceeded", description: "file is larger than the channel's outbound media cap"},
       %{tag: "media_unsupported", description: "the active channel does not support media egress"},
+      %{tag: "invalid_voice_mime", description: ":voice on WhatsApp requires audio/ogg; codecs=opus"},
       %{tag: "send_failed", description: "channel upload returned an error"}
     ]
   end
@@ -428,114 +660,216 @@ defmodule FermixCore.Tools.SendAttachment do
   def category, do: :channel
 
   @impl true
-  @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()} | {:error, atom()}
+  @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
 
     result =
-      with {:ok, path, kind, caption} <- normalize_args(args),
-           {:ok, resolved} <- Sandbox.read_path(path, :send_attachment, context),
+      with {:ok, path_raw, kind, caption, mime} <- normalize_args(args),
+           {:ok, resolved} <- Sandbox.read_path(path_raw, :send_attachment, context),
            {:ok, %File.Stat{size: size}} <- File.stat(resolved),
-           :ok <- enforce_cap(context, kind, size),
-           :ok <- dispatch(context, resolved, kind, caption) do
-        {:ok, %{success: true, kind: kind, bytes: size}}
+           {:ok, reply_fn} <- fetch_reply_fn(context),
+           part <- build_part(resolved, kind, caption, mime),
+           :ok <- dispatch(reply_fn, part) do
+        Tool.success(success_line(kind, size, Map.get(context, :channel, "unknown")))
+      else
+        {:error, :missing_parameters} ->
+          Tool.error("send_attachment requires both 'path' and 'kind'")
+
+        {:error, :invalid_kind} ->
+          Tool.error("kind must be one of: image, voice, audio, video, document")
+
+        {:error, :sandbox_denied} ->
+          Tool.error("path is outside the sandbox roots")
+
+        {:error, :enoent} ->
+          Tool.error("file_not_found: path does not exist or is unreadable")
+
+        {:error, :no_reply_fn} ->
+          Tool.error(
+            "send_attachment is only usable in a channel-bound conversation " <>
+              "(no reply_fn in tool context)"
+          )
+
+        {:error, :media_unsupported} ->
+          Tool.error("the active channel does not support media egress")
+
+        {:error, {:byte_cap_exceeded, actual, allowed}} ->
+          Tool.error(
+            "byte_cap_exceeded: file is #{actual} bytes; channel cap is #{allowed} bytes"
+          )
+
+        {:error, {:invalid_voice_mime, given}} ->
+          Tool.error(
+            "invalid_voice_mime: voice on WhatsApp requires 'audio/ogg; codecs=opus', got #{inspect(given)}"
+          )
+
+        {:error, reason} ->
+          Logger.error("send_attachment failed: #{inspect(reason)}")
+          Tool.error("send_failed: #{format_reason(reason)}")
       end
 
     emit_telemetry(result, args, context, start)
-    result
+    {:ok, result}
   end
 
-  defp normalize_args(args) do
-    # ...
-  end
+  defp fetch_reply_fn(%{reply_fn: reply_fn}) when is_function(reply_fn, 1), do: {:ok, reply_fn}
+  defp fetch_reply_fn(_context), do: {:error, :no_reply_fn}
 
-  defp dispatch(%{reply_fn: reply_fn}, path, kind, caption) when is_function(reply_fn, 1) do
-    part =
-      %{kind: kind, path: path}
-      |> maybe_put(:caption, caption)
-
+  defp dispatch(reply_fn, %{} = part) do
     case reply_fn.({:media, part}) do
       :ok -> :ok
       {:error, :media_unsupported} -> {:error, :media_unsupported}
-      {:error, reason} ->
-        Logger.error("send_attachment dispatch failed: #{inspect(reason)}")
-        {:error, :send_failed}
+      {:error, {:byte_cap_exceeded, _, _} = err} -> {:error, err}
+      {:error, {:invalid_voice_mime, _} = err} -> {:error, err}
+      {:error, reason} -> {:error, reason}
     end
   end
+
+  defp success_line(kind, size, channel),
+    do: "sent #{kind} (#{size} bytes) to #{channel}"
 end
 ```
 
-Key invariants:
+Key invariants (post-revision):
 
-1. **Reply fn comes from the context, not the registry.** The tool does not import `FermixChannels` and does not know which channel it's talking to. It only knows that the agent runtime gave it a one-arg fn that accepts `outbound()`. This keeps `FermixCore` from gaining a dependency on `FermixChannels`.
-2. **Sandbox first.** Every code path goes through `Sandbox.read_path(path, :send_attachment, context)` before the file is opened. Adding `:send_attachment` to the action vocabulary is a one-line patch in `sandbox.ex` (action atom only; the policy class is `:read_only` — sending a file requires only reading it).
-3. **Byte cap second, dispatch third.** Cap is enforced before the channel module sees the path. Channel-specific 413 / "too large" rejections from the wire are still possible (different platforms have soft caps), and they propagate as `:send_failed`.
-4. **One failure tag per code path.** No tag is reused across branches; the LLM gets unambiguous feedback.
+1. **No `FermixChannels.*` reference.** SendAttachment only knows core's `Outbound` types and the `context.reply_fn` closure. Compile-time graph: `fermix_core` does not depend on `fermix_channels`.
+2. **Sandbox first.** `Sandbox.read_path(path, :send_attachment, context)` runs before stat, before reply_fn. Adding `:send_attachment` to the sandbox action vocabulary is a one-line patch (`:read_only` policy class — sending requires reading).
+3. **Tool returns `Tool.tool_result()`.** Success becomes a one-line `output` string the LLM sees. Failure becomes a one-line `error` string the LLM sees as `"Error: …"`. The agent_loop dispatcher at `agent_loop.ex:265-281` consumes this directly.
+4. **Channel-side cap.** The adapter rejects with `{:error, {:byte_cap_exceeded, actual, allowed}}`. SendAttachment surfaces it through the `error` channel. Cap matrix is never read in core.
+5. **WhatsApp voice MIME check is channel-side.** SendAttachment accepts an optional `mime_type` arg and threads it through the `media_part`. The adapter rejects mismatches.
 
-### 5.6 The agent loop is unchanged
+### 5.7 Cap matrix (researched, May 2026)
 
-The main agent does not change shape. `msg.reply_fn` is still a one-arg function. The only edits to `main_agent.ex` are:
+Sourced from current platform documentation; each row links the upstream constraint that determines the cap.
 
-- Typespec at `:55` widens from `(String.t() -> any())` to `(FermixChannels.Channel.outbound() -> any())`.
-- The call at `:896` becomes `msg.reply_fn.({:text, response})`.
-- Cross-app type reference: `apps/fermix_core/mix.exs` already depends on `fermix_channels` (verify; if not, declare it for the typespec alias).
+| Channel | Kind | Cap | Source / rationale |
+|---------|------|-----|---------------------|
+| Telegram | `:image` | 10 MB | [`sendPhoto`](https://core.telegram.org/bots/api#sendphoto): photo ≤ 10 MB; dims ≤ 10000 combined; aspect ≤ 20:1. |
+| Telegram | `:voice` | 1 MB | [`sendVoice`](https://core.telegram.org/bots/api#sendvoice): voice messages render as voice notes only when ≤ 1 MB and `audio/ogg`. Files 1-20 MB sent via `sendVoice` render as documents — defeats the `:voice` intent. We reject early. |
+| Telegram | `:audio` | 50 MB | Bot API standard multipart limit. |
+| Telegram | `:video` | 50 MB | Bot API standard multipart limit. |
+| Telegram | `:document` | 50 MB | Bot API standard multipart limit. Local Bot API server supports 2000 MB; not used by default. |
+| Discord | any | 10 MiB | [Discord File Attachments FAQ](https://support.discord.com/hc/en-us/articles/25444343291031): default 10 MiB per attachment. Server Boost Tier 2 → 50 MiB, Tier 3 → 100 MiB; Nitro user → 500 MiB. Operator-configurable via `[fermix_channels.discord] media_byte_cap_mib`. |
+| Slack | any | 100 MiB (v1) | Platform limit is ~1 GiB but Slack also imposes per-workspace storage quotas. 100 MiB is the v1 conservative default; operator can raise. |
+| WhatsApp | `:image` | 5 MB | Cloud API: image (JPEG/PNG) ≤ 5 MB. |
+| WhatsApp | `:voice`/`:audio` | 16 MB | Cloud API: audio ≤ 16 MB. `:voice` is mapped to type `audio` with required MIME `audio/ogg; codecs=opus`. |
+| WhatsApp | `:video` | 16 MB | Cloud API: video ≤ 16 MB. |
+| WhatsApp | `:document` | 100 MB | Cloud API: document ≤ 100 MB. |
+| Signal | any | 100 MB | `signal-cli` ships `SIGNAL_MAX_ATTACHMENT_SIZE = 100 MiB`. Matches Signal Desktop/iOS/Android client caps. |
+| CLI | any | n/a | `{:error, :media_unsupported}` regardless of size. |
 
-The tool execution context already includes `reply_fn` — `SendAttachment` reads it the same way every other tool reads `context.agent_name` (`file_write.ex:72`). No new plumbing through the agent loop is needed.
+These constants live as module attributes inside each channel adapter (see §5.5 snippets). Core never sees them. A future channel adds the matrix to its own adapter; no central registry edit.
 
-### 5.7 Per-channel byte caps live on the adapter
+### 5.8 Main agent context plumbing (the F3 fix)
 
-Each channel module defines an informational helper:
+The reviewer correctly noted that rev 1 assumed `context.reply_fn` and `context.channel` already existed in the tool context. They do not (`main_agent.ex:559-576`). Rev 2 adds exactly two fields:
 
 ```elixir
-@spec media_byte_cap(FermixChannels.Channel.media_kind()) :: pos_integer()
-def media_byte_cap(:image), do: 10 * 1_024 * 1_024
-def media_byte_cap(:voice), do: 1 * 1_024 * 1_024
-def media_byte_cap(:audio), do: 50 * 1_024 * 1_024
-def media_byte_cap(:video), do: 50 * 1_024 * 1_024
-def media_byte_cap(:document), do: 50 * 1_024 * 1_024
+context = %{
+  agent_name: "main",
+  conversation_key: conversation_key,
+  session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
+  capability_registry: state.capability_registry,
+  provider: state.provider,
+  skill_registry: state.skill_registry,
+  agent_supervisor: state.agent_supervisor,
+  task_supervisor: state.task_supervisor,
+  journal_base_dir: state.journal_base_dir,
+  memory_store: state.memory_store,
+  memory_repo: state.memory_repo,
+  memory_agent_id: state.memory_agent_id,
+  memory_owner_id: state.memory_owner_id,
+  prompt_accounting: prompt_context.accounting,
+  source_channel: msg.channel,
+  source_trust: source_trust,
+  # ADDED FOR M11:
+  reply_fn: msg.reply_fn,
+  channel: msg.channel
+}
 ```
 
-(Numbers shown for Telegram; per-channel constants live next to each adapter and reflect each platform's documented limits.)
+`msg.reply_fn` is the already-multiplexed `(outbound() -> :ok | err)` function the dispatcher built. `msg.channel` is the binary like `"telegram"` already present on the agent message.
 
-The cap is enforced **before** the channel HTTP call, in `SendAttachment.enforce_cap/3`, which looks up the active channel via `context.channel` (a binary like `"telegram"` already present in the agent message) and dispatches:
+Not added (deliberately):
+
+- `chat_id`, `reply_target`: baked into the dispatcher-built reply closure; no tool needs them as separate fields.
+- `metadata`, `thread_ts`: same reason.
+- `typing_fn`: a separate `maybe_put_typing_fn/2` already exists at `dispatcher.ex:198-202`; orthogonal concern.
+
+This is the minimum surface SendAttachment needs. Other future channel-bound tools (e.g. a `mark_read` or `set_typing` tool) can add fields when they ship; M11 does not preemptively expose them.
+
+Note: `source_channel` and `channel` carry the same value in the current dispatcher. `source_channel` predates M11 and is read by trust gating; the new `channel` field is semantically "the channel I'm replying to" and is the field SendAttachment reads. They alias today but may diverge if cross-channel routing is added later — a forward-compatible naming.
+
+### 5.9 Command behaviour widening (the F5 fix)
+
+`apps/fermix_channels/lib/fermix_channels/command.ex` is updated:
 
 ```elixir
-defp enforce_cap(%{channel: "telegram"}, kind, size),
-  do: cap_check(FermixChannels.Telegram.media_byte_cap(kind), size)
-# ... etc
-defp enforce_cap(%{channel: channel}, _kind, _size),
-  do: {:error, {:unknown_channel, channel}}
+defmodule FermixChannels.Command do
+  alias FermixCore.Channels.Outbound
+  alias FermixChannels.Message
+
+  @callback name() :: String.t()
+  @callback aliases() :: [String.t()]
+  @callback description() :: String.t()
+  @callback authorize(Message.t(), channel_metadata :: map(), context :: map()) ::
+              :ok | {:error, :unauthorized}
+  @callback execute(
+              Message.t(),
+              reply_fn :: Outbound.reply_fn(),
+              context :: map()
+            ) :: :ok | {:error, term()}
+end
 ```
 
-A future channel adds two lines: a `media_byte_cap/1` clause and an `enforce_cap/3` clause. No registry indirection in v1 — five adapters; a behaviour-level `@callback media_byte_cap/1` is added so the typespec is uniform, but enforcement is the direct dispatch above to keep the call-site explicit.
+Every existing command handler is updated to wrap its text replies in `{:text, _}`. Concrete diff per file:
 
-### 5.8 Outbound idempotency
+| File | Existing call | Replacement |
+|------|---------------|-------------|
+| `commands.ex:54` | `reply_fn.("This command requires owner permissions.")` | `reply_fn.({:text, "This command requires owner permissions."})` |
+| `commands/help.ex:32` | `reply_fn.("Available commands:\n#{body}")` | `reply_fn.({:text, "Available commands:\n#{body}"})` |
+| `commands/whoami.ex:21` | `reply_fn.("Your user id on this channel: cli")` | `reply_fn.({:text, "Your user id on this channel: cli"})` |
+| `commands/whoami.ex:27` | `reply_fn.("Your user id on this channel: #{user_id || "unknown"}")` | `reply_fn.({:text, "Your user id on this channel: #{user_id || "unknown"}"})` |
+| `commands/compact.ex:59` | `reply_fn.(summary)` | `reply_fn.({:text, summary})` |
+| `commands/compact.ex:64` | `reply_fn.("Conversation changed …")` | `reply_fn.({:text, "Conversation changed …"})` |
+| `commands/compact.ex:70` | `reply_fn.("Nothing to compact …")` | `reply_fn.({:text, "Nothing to compact …"})` |
+| `commands/compact.ex:75` | `reply_fn.("Compaction failed: #{inspect(reason)}.")` | `reply_fn.({:text, "Compaction failed: #{inspect(reason)}."})` |
+| `commands/sandbox.ex:185` | `reply_fn.(text)` | `reply_fn.({:text, text})` |
+| `commands/new.ex:28` | `reply_fn.("Started a fresh session. Long-term memory is preserved.")` | `reply_fn.({:text, "Started a fresh session. Long-term memory is preserved."})` |
 
-`FermixChannels.Idempotency` gains an outbound bucket:
+Plus the two dispatcher internal call sites (`dispatcher.ex:48,66`) and `main_agent.ex:896` and `cli.ex:79`.
+
+13 production sites total. Not "~5" as rev 1 claimed.
+
+### 5.10 Outbound idempotency
+
+`FermixChannels.Idempotency` gains:
 
 ```elixir
-@spec register_outbound_media(String.t(), String.t(), media_part()) :: :fresh | :duplicate
+@spec register_outbound_media(String.t(), String.t(), Outbound.media_part()) :: :fresh | :duplicate
 def register_outbound_media(channel, chat_id, %{path: path} = part) do
   caption = Map.get(part, :caption, "")
   hash = :crypto.hash(:sha256, [channel, chat_id, path, caption]) |> Base.encode16(case: :lower)
-  # Same ETS table pattern as inbound dedup, 60-second TTL
-  # ...
+  # Same GenServer-serialized ETS pattern as commit b5d96ea (inbound dedup).
 end
 ```
 
-`SendAttachment.execute/2` calls `register_outbound_media/3` before `dispatch/4`. On `:duplicate`, the tool returns `{:ok, %{success: true, kind: kind, bytes: size, deduplicated: true}}` and does **not** invoke the channel. The LLM sees the `deduplicated: true` flag and can choose to inform the user (or not).
+Channel adapters call this themselves inside `send_media/3` (see `maybe_check_idempotency/3` in §5.5 snippets) before the wire call. On `:duplicate` the adapter returns `:ok` without re-uploading, and the `media_send_error` telemetry is **not** emitted (no error to report; dedup is the correct behavior).
 
-This is *not* a fallback: it is a single explicit path with two terminal states (`:fresh` → upload, `:duplicate` → skip), not two paths to "deliver the file." The duplicate skip is the correct behavior — re-uploading the same content within 60 s is a bug class we prevent, not a feature.
+SendAttachment does not know about idempotency — it just sees `:ok` from the reply_fn, same as for a fresh send. The LLM sees the same success line either way.
 
-### 5.9 Telemetry
+This avoids the rev-1 "tool surfaces `deduplicated: true` flag" surface, which would have required a custom tool-result shape outside `Tool.tool_result()`.
 
-Existing event `[:fermix, :channel, :message]` (today fired at `telegram.ex:58-63` and equivalents on other channels) is extended:
+### 5.11 Telemetry
+
+Existing event `[:fermix, :channel, :message]` (e.g. `telegram.ex:58-63`) extended with `kind :: :text | :media` and `media_kind :: media_kind() | nil`:
 
 ```elixir
 :telemetry.execute(
   [:fermix, :channel, :message],
-  %{count: chunks_or_1, bytes: byte_size_or_nil},
-  %{channel: :telegram, direction: :outbound, kind: :text | :media, media_kind: kind | nil}
+  %{count: count, bytes: bytes_or_nil},
+  %{channel: :telegram, direction: :outbound, kind: :media, media_kind: :image}
 )
 ```
 
@@ -549,29 +883,28 @@ New event `[:fermix, :channel, :media_send_error]`:
 )
 ```
 
-`SendAttachment` adds its own tool-level event via the existing `[:fermix, :tool, :exec]` channel — same shape as every other tool, so tool-latency dashboards pick it up without change.
-
-`Trace.record/3` is called from `SendAttachment.execute/2` with the same `:agent_event` action as other tools so the JSONL trace files (`~/.fermix/traces/YYYY-MM-DD/`) include outbound media intents.
+SendAttachment emits its tool-level event via the existing `[:fermix, :tool, :exec]` channel — same shape as every other tool. `Trace.record/3` is called from `SendAttachment.execute/2` with `:agent_event` action so JSONL trace files include outbound media intents.
 
 ---
 
 ## 6. Failure Modes
 
-Every failure surfaces to the LLM as an `{:error, atom}` it can react to. No silent degradation, no "try again as text."
+Every failure surfaces to the LLM as a string `error` per `Tool.error/1`. The agent_loop wraps it as `"Error: #{error}"` (`agent_loop.ex:271`). No silent degradation.
 
-| Failure | Where caught | Tool error tag | LLM-visible message |
-|---------|--------------|----------------|---------------------|
-| `path` or `kind` missing from args | `SendAttachment.normalize_args/1` | `:missing_parameters` | "send_attachment requires both path and kind" |
-| `kind` not in `~w(image voice audio video document)a` | `SendAttachment.normalize_args/1` | `:invalid_kind` | "kind must be one of image/voice/audio/video/document" |
-| Path outside sandbox roots | `Sandbox.read_path/3` | `:sandbox_denied` | sandbox's standard denied-path message |
-| Path does not exist / unreadable | `File.stat/1` | `:file_not_found` | "no such file or path is unreadable" |
-| File larger than channel cap | `enforce_cap/3` | `:byte_cap_exceeded` | "file (X bytes) exceeds <channel>'s <kind> cap (Y bytes)" |
-| Channel returned `{:error, :media_unsupported}` | `dispatch/4` | `:media_unsupported` | "the active channel does not support media egress" |
-| Channel HTTP / CLI error | `dispatch/4` | `:send_failed` | "channel rejected the upload" + log line with underlying reason |
-| Channel cap mismatched with platform's actual cap (413 on the wire after our pre-check passes) | `dispatch/4` | `:send_failed` | same as above; this is the operator-tuning path |
-| Duplicate within 60 s window | `Idempotency.register_outbound_media/3` | (not an error — `{:ok, %{deduplicated: true}}`) | "(idempotency dedup; not re-sent)" — LLM-visible flag |
+| Failure | Where caught | LLM-visible message |
+|---------|--------------|---------------------|
+| `path` or `kind` missing | `SendAttachment.normalize_args/1` | `"send_attachment requires both 'path' and 'kind'"` |
+| `kind` not in `~w(image voice audio video document)a` | `SendAttachment.normalize_args/1` | `"kind must be one of: image, voice, audio, video, document"` |
+| Path outside sandbox | `Sandbox.read_path/3` | `"path is outside the sandbox roots"` |
+| Path missing/unreadable | `File.stat/1` | `"file_not_found: path does not exist or is unreadable"` |
+| No reply_fn in context (e.g. an out-of-channel cron run) | `SendAttachment.fetch_reply_fn/1` | `"send_attachment is only usable in a channel-bound conversation (no reply_fn in tool context)"` |
+| Channel returned `:media_unsupported` (CLI today, future stdio channels) | `SendAttachment.dispatch/2` | `"the active channel does not support media egress"` |
+| File larger than channel cap | adapter's `ensure_size_within_cap/2` | `"byte_cap_exceeded: file is N bytes; channel cap is M bytes"` |
+| `:voice` on WhatsApp without correct MIME | WhatsApp adapter's `validate_voice_mime/1` | `"invalid_voice_mime: voice on WhatsApp requires 'audio/ogg; codecs=opus', got …"` |
+| Channel HTTP / CLI error | adapter's response handler | `"send_failed: <reason>"` + logger.error line for operators |
+| Duplicate within 60 s window | channel adapter via `Idempotency.register_outbound_media/3` | Not surfaced — adapter returns `:ok`; LLM sees normal success line. |
 
-The `:send_failed` collision is intentional — from the LLM's perspective, "the wire rejected this" is one outcome; the log line carries the discriminator for the operator. We deliberately do not expose the underlying tag (Slack's `not_in_channel`, Discord's `30007`, etc.) as an LLM-visible error code in v1 because each channel's error surface is too noisy to be useful in-prompt. Operators read traces.
+The `"Error: …"` prefix is added by `agent_loop.ex:271`, not by SendAttachment.
 
 ---
 
@@ -579,54 +912,73 @@ The `:send_failed` collision is intentional — from the LLM's perspective, "the
 
 | Test | Location | Asserts |
 |------|----------|---------|
-| Behaviour contract | `test/fermix_channels/channel_contract_test.exs` (new) | Every channel module (`Telegram`, `Discord`, `Slack`, `WhatsApp`, `Signal`) exports `send_media/3` with the expected typespec and returns `{:error, :media_unsupported}` for an unsupported-kind probe (or `:ok` for the supported kind, against a `Req.Test`-stubbed transport). |
-| Telegram `sendPhoto` | `test/fermix_channels/telegram_test.exs` | Stub Bot API; assert multipart body has `chat_id` + `photo` + `caption`; status 200 returns `:ok`; 400 returns `{:error, _}` and emits `media_send_error` telemetry. |
-| Telegram per-kind routing | same file | `:voice` → `sendVoice`, `:document` → `sendDocument`, etc. — five assertions. |
-| Discord multipart | `test/fermix_channels/discord_test.exs` | Stub REST; assert `payload_json` JSON + `files[0]` part; filename defaults to `Path.basename/1` when not given. |
-| Slack three-step | `test/fermix_channels/slack_test.exs` | Stub three calls in order; assert intermediate failure at step 2 propagates step-2's `{:error, _}` (not a merged tag); assert `initial_comment` carries `caption`. |
-| WhatsApp upload→send | `test/fermix_channels/whatsapp_test.exs` | Stub `/media` upload returning `id`; assert `/messages` body has `type: <kind>` and `<kind>.id`; oversize file rejected at `preflight_outbound_size_cap/1`. |
-| Signal CLI | `test/fermix_channels/signal_test.exs` | Inject a fake `signal_cli_binary/0` that records argv; assert `--attachment <path>` appears; exit code 0 → `:ok`, exit code 1 → `{:error, {:signal_send_failed, 1}}`. |
-| Dispatcher routing | `test/fermix_channels/dispatcher_test.exs` | `reply_fn.({:text, "hi"})` calls `channel.send_message/3`; `reply_fn.({:media, %{...}})` calls `channel.send_media/3`; unknown tuple shape raises. |
-| `SendAttachment` happy path | `test/fermix_core/tools/send_attachment_test.exs` (new) | With a sandboxed tmp file and a recording reply_fn, `execute/2` returns `{:ok, %{success: true, kind: :image, bytes: <n>}}` and the reply_fn was called with `{:media, %{kind: :image, path: <resolved>, caption: <c>}}`. |
-| `SendAttachment` failure modes | same file | Six tests, one per tag in the §6 table. |
-| Sandbox denial | same file | Path outside sandbox returns `:sandbox_denied`; reply_fn is **not** called. |
-| Byte cap | same file | File 1 byte over the cap returns `:byte_cap_exceeded`; reply_fn not called. |
-| Idempotency dedup | `test/fermix_channels/idempotency_test.exs` | Same `(channel, chat_id, path, caption)` within 60 s returns `:duplicate` and skips the channel call; after 60 s, returns `:fresh`. |
-| Telemetry on success | `test/fermix_core/tools/send_attachment_test.exs` | `[:fermix, :channel, :message]` event fires with `kind: :media, media_kind: :image, bytes: <n>`. |
-| Telemetry on failure | same file | `[:fermix, :channel, :media_send_error]` fires on a stubbed 400; tool emits its own `[:fermix, :tool, :exec]` with `success: false`. |
-| `SafeRm` discipline | new tests' `on_exit` | Every test that creates a tmp file routes cleanup through `FermixCore.TestSupport.SafeRm.rm_rf!/1` per `CLAUDE.md` §"Known Pitfalls". |
+| Dependency direction | `test/fermix_core/dependency_direction_test.exs` (new) | `mix xref graph --source apps/fermix_core/lib --label compile` returns zero edges to `FermixChannels.*`. Encodes F1. |
+| Behaviour contract (all 6 channels) | `test/fermix_channels/channel_contract_test.exs` (new) | Each module in `[Telegram, Discord, Slack, WhatsApp, Signal, CLI]` exports `send_media/3`, `build_text_reply/1`, `build_media_reply/1` with the expected arities and typespecs. CLI returns `{:error, :media_unsupported}` for any `media_part`. |
+| `Tool` result shape | `test/fermix_core/tools/send_attachment_test.exs` (new) | Every `execute/2` return matches `{:ok, %{success: _, output: _, error: _}}`. `agent_loop.ex:265-281` round-trip: success produces a string the LLM sees, failure produces `"Error: …"`. Encodes F2. |
+| Tool context fields | `test/fermix_core/agents/main_agent_test.exs` (extend) | After M11, the context passed to `AgentLoop.run/1` includes `reply_fn` (a 1-arity function) and `channel` (binary). Encodes F3. |
+| Reply contract — `build_text_reply` rename | `test/fermix_channels/channel_contract_test.exs` | No channel exports `build_reply/1` anymore; all expose `build_text_reply/1`. Encodes F4. |
+| Dispatcher routing | `test/fermix_channels/dispatcher_test.exs` (extend) | `reply_fn.({:text, "hi"})` calls `channel.send_message/3` via the text closure; `reply_fn.({:media, %{...}})` calls `channel.send_media/3` via the media closure; bare strings raise FunctionClauseError. |
+| Command behaviour widening | each `test/fermix_channels/commands/*_test.exs` | Every command-handler test wraps reply assertions in `{:text, _}`. Encodes F5. |
+| CLI `:media_unsupported` | `test/fermix_channels/cli_test.exs` (extend) | `CLI.send_media/3` and `CLI.build_media_reply/1` both return `{:error, :media_unsupported}`. End-to-end: SendAttachment invoked through a CLI-bound conversation produces `"Error: the active channel does not support media egress"`. Encodes F6. |
+| Telegram per-kind routing | `test/fermix_channels/telegram_test.exs` | `Req.Test`-stubbed Bot API; assert multipart body contains the right field (`photo` / `voice` / etc.) and goes to the right endpoint. Five assertions. |
+| Telegram voice cap | same file | A 1.5 MB file with `kind: :voice` rejected with `{:error, {:byte_cap_exceeded, …}}` before any HTTP call. Encodes F8 voice-render constraint. |
+| Discord multipart | `test/fermix_channels/discord_test.exs` | Stub REST; assert `payload_json` JSON + `files[0]` part; default 10 MiB cap rejects oversize. |
+| Slack three-step | `test/fermix_channels/slack_test.exs` | Stub three calls; assert step 2 is **POST** (not PUT) to the upload URL; step 3 (`files.completeUploadExternal`) carries `files`, `channel_id`, `thread_ts`, `initial_comment` per the [Slack docs](https://docs.slack.dev/reference/methods/files.completeUploadExternal). Encodes F7. |
+| WhatsApp voice→audio mapping | `test/fermix_channels/whatsapp_test.exs` | A `media_part` with `kind: :voice, mime_type: "audio/ogg; codecs=opus"` produces a `/messages` body with `type: "audio"` and `audio.id`. A `kind: :voice` without the correct MIME returns `{:error, {:invalid_voice_mime, _}}`. Encodes F8 WhatsApp constraint. |
+| WhatsApp upload→send | same file | Stub `/media` returning `id`; assert `/messages` body has `type: <wa_type>` and `<wa_type>.id`; oversize rejected at `ensure_size_within_cap/2`. |
+| Signal CLI | `test/fermix_channels/signal_test.exs` | Inject fake `signal_cli_binary/0` recording argv; assert `--attachment <path>` appears; exit 0 → `:ok`, exit 1 → `{:error, {:signal_send_failed, 1}}`. |
+| `SendAttachment` happy path | `test/fermix_core/tools/send_attachment_test.exs` | Sandboxed tmp file + recording reply_fn; assert tool returns `Tool.success(_)` and the reply_fn was called with `{:media, %{kind: :image, path: <resolved>, caption: <c>}}`. |
+| `SendAttachment` failure modes | same file | Eight tests, one per row in §6. |
+| Sandbox denial | same file | Path outside sandbox → `Tool.error("path is outside the sandbox roots")`; reply_fn not called. |
+| Idempotency dedup | `test/fermix_channels/idempotency_test.exs` (extend) | Same `(channel, chat_id, path, caption)` within 60 s returns `:duplicate`; channel `send_media/3` returns `:ok` without wire call; after 60 s, `:fresh`. |
+| Telemetry success | `test/fermix_core/tools/send_attachment_test.exs` | `[:fermix, :channel, :message]` event fires with `kind: :media, media_kind: :image, bytes: <n>`. |
+| Telemetry failure | same file | `[:fermix, :channel, :media_send_error]` fires on a stubbed 400; tool emits `[:fermix, :tool, :exec]` with `success: false`. |
+| `SafeRm` discipline | every new test that creates a tmp file | `on_exit` cleanup routes through `FermixCore.TestSupport.SafeRm.rm_rf!/1` per CLAUDE.md §"Known Pitfalls". |
 
-Test isolation: every channel test stubs HTTP via `Req.Test` (already used elsewhere in the repo) — no real network calls. Signal tests inject a fake binary. WhatsApp's access-token plumbing reuses the existing config stub pattern (`whatsapp.ex` test setup).
+Test isolation: every channel test stubs HTTP via `Req.Test`. Signal tests inject a fake binary. WhatsApp's access-token plumbing reuses the existing config-stub pattern. CLI tests exercise `IO.puts` redirection via `ExUnit.CaptureIO`.
 
 ---
 
 ## 8. Rollout / Migration
 
-The change is cross-cutting but mechanical. Single PR, single change-set:
+Single change-set, single PR. Order matters because the type module must compile before anything that references it:
 
-1. **`channel.ex`** — add types, declare `send_media/3` callback, widen `reply_fn` type.
-2. **Each channel module** — implement `send_media/3`, add `media_byte_cap/1`, keep `send_message/3` and `build_reply/1` unchanged in shape.
-3. **`dispatcher.ex`** — rewrite `build_reply_fn/3` to multiplex; remove the bare-string branch.
-4. **`main_agent.ex`** — widen typespec at `:55`; rewrite the call site at `:896` to wrap in `{:text, _}`.
-5. **Call-site sweep** — `grep -rnE 'reply_fn\.\("|reply_fn\.\(text\)'` across the umbrella, update each to `reply_fn.({:text, _})`. Expected hits: the main agent (1), the channel tests' fake reply_fns (~5), the realtime/CLI shims (verify). No production call site outside these.
-6. **`SendAttachment`** module, registered in `BuiltinSeeder` so it appears in `CapabilityRegistry` after `mix fermix.setup` or first daemon start.
-7. **`Sandbox`** — add `:send_attachment` to the action vocabulary (one match clause; `:read_only` policy class).
-8. **`Idempotency`** — add `register_outbound_media/3` and a separate ETS bucket.
-9. **Telemetry handlers** — extend any existing handlers that read `kind` metadata to know about `:media` (probably zero handlers, since today only `:text` is emitted).
+1. **`apps/fermix_core/lib/fermix_core/channels/outbound.ex`** (new) — declare types. Pure-Elixir compile cost ~zero.
+2. **`apps/fermix_core/lib/fermix_core/sandbox.ex`** — add `:send_attachment` to the action vocabulary (one clause, `:read_only` policy class).
+3. **`apps/fermix_channels/lib/fermix_channels/channel.ex`** — alias `Outbound`; declare new callbacks; rename `build_reply/1` → `build_text_reply/1`; remove the local `reply_fn` type alias.
+4. **Each channel adapter** (`telegram.ex`, `discord.ex`, `slack.ex`, `whatsapp.ex`, `signal.ex`, `cli.ex`):
+   - Rename `build_reply/1` → `build_text_reply/1`.
+   - Add `build_media_reply/1`.
+   - Add `send_media/3` (or `{:error, :media_unsupported}` for CLI).
+   - Add per-channel cap module-attrs and `ensure_size_within_cap/_` private.
+   - Add MIME mapping (WhatsApp only in v1).
+5. **`apps/fermix_channels/lib/fermix_channels/idempotency.ex`** — add `register_outbound_media/3` plus its ETS bucket.
+6. **`apps/fermix_channels/lib/fermix_channels/dispatcher.ex`** — rewrite `build_reply_fn/2` to compose the two channel-side closures; rewrite `build_reply_fn/3` and update logging branches.
+7. **`apps/fermix_channels/lib/fermix_channels/command.ex`** — widen `execute/3` callback's `reply_fn` type.
+8. **`apps/fermix_channels/lib/fermix_channels/commands.ex` + `commands/*.ex`** — 10 call-site updates per the §5.9 table.
+9. **`apps/fermix_channels/lib/fermix_channels/cli.ex:79`** — update `dispatch_input_sync/2`'s reply override closure to accept `{:text, _}`.
+10. **`apps/fermix_core/lib/fermix_core/agents/main_agent.ex`**:
+    - Widen `:reply_fn` typespec at `:55` to `Outbound.reply_fn()`.
+    - Add `reply_fn: msg.reply_fn` and `channel: msg.channel` to the context map at `:559-576`.
+    - Rewrite `deliver_reply/2` call at `:896` to `msg.reply_fn.({:text, response})`.
+11. **`apps/fermix_core/lib/fermix_core/tools/send_attachment.ex`** (new) — implement per §5.6.
+12. **`apps/fermix_core/lib/fermix_core/capabilities/builtin/seeder.ex`** — register `SendAttachment` so it appears in `CapabilityRegistry` after `mix fermix.setup`.
+13. **Telemetry handlers** — extend existing consumers that read `kind` metadata to know about `:media` (probably zero handlers, since today only `:text` is emitted).
 
-No data migration. No config migration. Existing `~/.fermix/config.toml` is unchanged.
+No data migration. No config migration (Discord boost-tier override is opt-in). Existing `~/.fermix/config.toml` is unchanged for operators on the default cap.
 
-No backwards-compatibility shim for the bare-string reply: rule 12 is explicit, and the call sites are countable on one hand.
+Migration check: `mix xref graph --source apps/fermix_core/lib --label compile | grep FermixChannels` should return zero matches.
 
 ---
 
 ## 9. Open Questions
 
-1. **Should `send_attachment` accept a remote URL?** Today it accepts only an on-disk path. A `url` parameter would let the LLM forward a `web_fetch` result without writing it to disk first. Pro: shorter LLM chains. Con: bypasses the sandbox path check and introduces a second code path (URL → in-memory bytes → multipart). Recommend: defer; the `web_fetch → file_write → send_attachment` chain is two extra tool calls but keeps every byte audit-able via the on-disk artifact. Revisit if the chain proves too expensive in practice.
-2. **Should the LLM be able to send multiple attachments per reply?** Telegram has `sendMediaGroup` (up to 10), Discord allows `files[0..9]`, WhatsApp does not, Slack does not in one message. Today's `media_part` shape is singular. Plural support would be a new `media_part_list :: [media_part()]` shape carried via `{:media_group, [media_part()]}`, plus channel-side fan-out for non-supporting platforms (loop + N sends). Defer to a follow-on; v1 is one-at-a-time.
-3. **Should `caption` support markdown?** Telegram does (via `parse_mode`); others treat caption as plain text. v1 sends plain text everywhere for consistency. If we add markdown support later, it's a per-channel `caption_parse_mode` opt — same shape as today's text `parse_mode`.
-4. **Should we expose the channel-specific underlying error tag to the LLM?** Trade-off in §6. Current answer: no; operators read traces. Revisit if a real workflow needs the LLM to react to (e.g.) `not_in_channel` specifically.
-5. **Naming.** `send_attachment` vs. `send_media` for the tool. `send_attachment` matches inbound's `attachments` field; `send_media` matches the channel callback. Picking `send_attachment` for the tool keeps inbound/outbound terminology symmetric *from the LLM's vantage point* (it sees attachments coming in, attachments going out) and reserves `send_media` for the wire callback. Recommend: keep as proposed.
+1. **Should `send_attachment` accept a remote URL?** Today only on-disk paths. A `url` parameter would let the LLM forward `web_fetch` results without writing to disk. Pro: shorter chains. Con: bypasses sandbox + introduces a second code path. Recommend: defer; `web_fetch → file_write → send_attachment` is two extra tool calls but keeps every byte audit-able.
+2. **Should the LLM be able to send multiple attachments per reply?** Telegram has `sendMediaGroup` (≤10); Discord allows `files[0..9]`; WhatsApp and Slack don't (one media per message). Today's `media_part` is singular. Plural would be `{:media_group, [media_part()]}` plus per-channel fan-out. Defer; v1 is one-at-a-time.
+3. **Should `caption` support markdown?** Telegram does (via `caption.parse_mode`); others don't. v1 is plain text everywhere for consistency. If we add later, it's a per-channel `caption_parse_mode` opt.
+4. **Should the WhatsApp adapter auto-transcode MP3→OGG/Opus for voice?** Doing so requires `ffmpeg` as a runtime dep. Producer-side concern. Reject in v1.
+5. **Should we expose channel-specific underlying error tags to the LLM?** Trade-off in §6. v1 collapses everything to `"send_failed: …"` with operator-visible logs. Revisit if a real workflow needs the LLM to react to e.g. Slack `not_in_channel` specifically.
+6. **Naming.** `send_attachment` vs. `send_media` for the tool. `send_attachment` matches inbound's `attachments` field; `send_media` matches the channel callback. Keeping `send_attachment` for the tool preserves inbound/outbound symmetry from the LLM's vantage point; `send_media` is reserved for the wire callback. Recommend: keep.
 
 ---
 
@@ -635,13 +987,17 @@ No backwards-compatibility shim for the bare-string reply: rule 12 is explicit, 
 Before calling M11 done:
 
 - [ ] `mix deps.get && mix compile` clean with zero warnings (rule 11).
+- [ ] `mix xref graph --source apps/fermix_core/lib --label compile | grep -i FermixChannels` returns zero lines (F1).
 - [ ] `mix test` green; new tests included.
 - [ ] `mix credo --strict` clean.
 - [ ] `mix format --check-formatted` clean.
-- [ ] All five channel adapters' `send_media/3` exercised by tests against `Req.Test` / injected-binary stubs.
-- [ ] `SendAttachment` exercised end-to-end with `Telegram` adapter against a `Req.Test` stub returning the canonical Bot API success body.
-- [ ] One manual smoke against a real Telegram bot (operator's test bot) sending a `:image` and a `:voice` part — recorded in the PR description, not automated.
-- [ ] No `File.rm_rf` direct calls in any new test file (`grep -rn 'File\.rm_rf' apps/*/test/` returns zero new hits; `SafeRm.rm_rf!/1` everywhere).
+- [ ] All six channel adapters' `send_media/3` and `build_media_reply/1` exercised by tests against `Req.Test` / injected-binary stubs.
+- [ ] `SendAttachment` exercised end-to-end with a Telegram adapter against a `Req.Test` stub returning the canonical Bot API success body.
+- [ ] `SendAttachment` failure-mode tests cover all 8 rows of §6.
+- [ ] WhatsApp `:voice → audio` mapping test passes (correct MIME → success, wrong MIME → `invalid_voice_mime` error).
+- [ ] Slack three-step test asserts **POST** at step 2 and the documented `files.completeUploadExternal` parameter names at step 3.
+- [ ] Manual smoke against a real Telegram bot: send an image + a 1 MB ogg/opus voice note. Recorded in the PR description.
+- [ ] No `File.rm_rf` direct calls in any new test file (`grep -rn 'File\.rm_rf' apps/*/test/`); `SafeRm.rm_rf!/1` everywhere per CLAUDE.md.
 - [ ] `mix fermix.setup` round-trip: `send_attachment` appears in `fermix capabilities` after seeding.
 - [ ] Trace JSONL inspection: an outbound media send produces a `:agent_event` entry with `tool: "send_attachment"` and a `:channel, :message` entry with `direction: :outbound, kind: :media`.
 
