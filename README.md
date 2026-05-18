@@ -169,8 +169,6 @@ model = "gpt-realtime-2"
 voice = "marin"
 max_session_minutes = 15
 max_estimated_cost_cents_per_session = 100
-tool_policy = "read_only"
-allow_network_tools = false
 persist_transcripts = false
 ```
 

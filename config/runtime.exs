@@ -276,7 +276,6 @@ realtime_env =
       value -> value
     end
   )
-  |> put_overlay.(:allow_network_tools, env_bool.("FERMIX_REALTIME_ALLOW_NETWORK_TOOLS"))
   |> put_overlay.(:persist_transcripts, env_bool.("FERMIX_REALTIME_PERSIST_TRANSCRIPTS"))
   |> FermixCore.Realtime.Config.normalize()
   |> FermixCore.Realtime.Config.to_keyword()

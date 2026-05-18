@@ -17,7 +17,6 @@ defmodule FermixCore.Realtime.ConfigTest do
     assert config.max_chunk_bytes == 16_384
     assert config.max_session_minutes == 15
     assert config.max_estimated_cost_cents_per_session == 100
-    assert config.allow_network_tools? == false
     assert config.persist_transcripts? == false
     assert config.persist_audio? == false
     assert config.transcription_model == "whisper-1"
@@ -31,7 +30,6 @@ defmodule FermixCore.Realtime.ConfigTest do
         voice: "cedar",
         max_session_minutes: 20,
         max_estimated_cost_cents_per_session: 35,
-        allow_network_tools: true,
         persist_transcripts: true
       )
 
@@ -42,7 +40,6 @@ defmodule FermixCore.Realtime.ConfigTest do
              voice: "cedar",
              max_session_minutes: 20,
              max_estimated_cost_cents_per_session: 35,
-             allow_network_tools: true,
              persist_transcripts: true
            ]
   end
@@ -83,7 +80,8 @@ defmodule FermixCore.Realtime.ConfigTest do
           :max_buffer_chunks,
           :idle_timeout_ms,
           :max_input_audio_seconds_per_session,
-          :tool_policy
+          :tool_policy,
+          :allow_network_tools
         ] do
       assert_raise ArgumentError, ~r/#{key}.*removed/, fn ->
         Config.normalize([{key, "removed"}])
