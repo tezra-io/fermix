@@ -78,6 +78,37 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert result.error =~ "too_large"
   end
 
+  test "web_fetch pins the connection to the validated IP (F-04 rebinding)" do
+    test_id = :"web_fetch_pin_#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    Req.Test.stub(test_id, fn conn ->
+      host_header =
+        conn
+        |> Plug.Conn.get_req_header("host")
+        |> List.first()
+
+      send(test_pid, {:web_fetch_request, conn.host, host_header})
+      Plug.Conn.resp(conn, 200, "<h1>ok</h1>")
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        # Validation sees the public IP 93.184.216.34. If Req re-resolved at
+        # connect time it could land on any IP — by pinning the URL to the
+        # validated IP literal here, no such re-resolution can happen.
+        net_resolver: fn "example.com" -> {:ok, [{93, 184, 216, 34}]} end
+      })
+
+    assert {:ok, %{success: true}} =
+             WebFetch.execute(%{"url" => "https://example.com/docs"}, context)
+
+    assert_receive {:web_fetch_request, request_host, host_header}, 1_000
+    assert request_host == "93.184.216.34"
+    assert host_header == "example.com"
+  end
+
   test "web_fetch blocks private redirects before following them" do
     test_id = :"web_fetch_redirect_#{System.unique_integer([:positive])}"
 

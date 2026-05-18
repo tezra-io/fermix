@@ -12,13 +12,10 @@ defmodule FermixCore.Net.Guard do
 
   @spec validate(String.t(), opts()) :: :ok | {:error, term()}
   def validate(url, opts \\ []) when is_binary(url) do
-    with :ok <- validate_text(url),
-         %URI{} = uri <- URI.parse(url),
-         :ok <- validate_scheme(uri.scheme),
-         {:ok, host} <- fetch_host(uri),
-         :ok <- validate_host(host),
-         :ok <- validate_dns(host, opts) do
-      :ok
+    case resolve_and_validate(url, opts) do
+      {:ok, _ip} -> :ok
+      :ok -> :ok
+      {:error, _reason} = err -> err
     end
   end
 
@@ -29,6 +26,37 @@ defmodule FermixCore.Net.Guard do
     |> URI.merge(new_url)
     |> URI.to_string()
     |> validate(opts)
+  end
+
+  @doc """
+  Resolve and validate a URL, returning the validated peer IP for
+  pin-on-connect callers.
+
+  For URLs whose host is already an IP literal, returns `:ok` (no IP
+  is "validated" beyond the public-IP check already done in `validate/2`).
+  For URLs that resolve via DNS, returns `{:ok, ip}` — the first
+  resolved IPv4 / IPv6 address that passed the public-IP check.
+  Callers should connect to this IP while preserving Host/SNI, which
+  closes the DNS-rebinding gap between validation and connect time.
+
+  Audit F-04: prior `Guard.validate/2` resolved DNS once at preflight,
+  then Req re-resolved at connect; this entry point hands the validated
+  IP to the caller so the connect is pinned to it.
+  """
+  @spec resolve_and_validate(String.t(), opts()) ::
+          :ok | {:ok, :inet.ip_address()} | {:error, term()}
+  def resolve_and_validate(url, opts \\ []) when is_binary(url) do
+    with :ok <- validate_text(url),
+         %URI{} = uri <- URI.parse(url),
+         :ok <- validate_scheme(uri.scheme),
+         {:ok, host} <- fetch_host(uri),
+         :ok <- validate_host(host),
+         {:ok, validated_ip_or_skip} <- resolve_validated_ip(host, opts) do
+      case validated_ip_or_skip do
+        :ip_literal -> :ok
+        ip -> {:ok, ip}
+      end
+    end
   end
 
   @spec redact_headers([{String.t(), String.t()}]) :: [{String.t(), String.t()}]
@@ -93,27 +121,27 @@ defmodule FermixCore.Net.Guard do
     end
   end
 
-  defp validate_dns(host, opts) do
+  defp resolve_validated_ip(host, opts) do
     case parse_ip(host) do
       {:ok, _ip} ->
-        :ok
+        {:ok, :ip_literal}
 
       {:error, :einval} ->
         resolver = Keyword.get(opts, :resolver) || (&default_resolver/1)
 
         case resolver.(host) do
           {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
-          {:ok, ips} -> validate_resolved_ips(ips)
+          {:ok, ips} -> first_validated_ip(ips)
           {:error, reason} -> {:error, {:dns_resolution_failed, reason}}
         end
     end
   end
 
-  defp validate_resolved_ips(ips) do
-    Enum.reduce_while(ips, :ok, fn ip, :ok ->
+  defp first_validated_ip(ips) do
+    Enum.reduce_while(ips, {:error, {:dns_resolution_failed, :no_public_ip}}, fn ip, _acc ->
       case validate_public_ip(ip, {:resolved_to_private_address, ip}) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+        :ok -> {:halt, {:ok, ip}}
+        {:error, _reason} = err -> {:halt, err}
       end
     end)
   end
