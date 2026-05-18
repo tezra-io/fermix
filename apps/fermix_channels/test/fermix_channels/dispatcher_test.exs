@@ -18,10 +18,19 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   defmodule ReplyChannel do
-    def build_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+    def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
       send_opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
 
       fn text -> send_message(reply_target, text, send_opts) end
+    end
+
+    def build_media_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+      send_opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
+
+      fn media_part ->
+        send(self(), {:media_sent, reply_target, media_part, send_opts})
+        :ok
+      end
     end
 
     def send_message(reply_target, text, opts) do
@@ -35,7 +44,7 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   defmodule BuildReplyChannel do
-    def build_reply(%Message{id: id, reply_target: reply_target}) do
+    def build_text_reply(%Message{id: id, reply_target: reply_target}) do
       test_pid = self()
 
       fn text ->
@@ -43,14 +52,22 @@ defmodule FermixChannels.DispatcherTest do
         :ok
       end
     end
+
+    def build_media_reply(%Message{}) do
+      fn _media_part -> {:error, :media_unsupported} end
+    end
   end
 
   defmodule TypingChannel do
-    def build_reply(%Message{reply_target: reply_target}) do
+    def build_text_reply(%Message{reply_target: reply_target}) do
       fn text ->
         send(self(), {:reply_sent, reply_target, text, []})
         :ok
       end
+    end
+
+    def build_media_reply(%Message{}) do
+      fn _media_part -> {:error, :media_unsupported} end
     end
 
     def start_typing(reply_target) do
@@ -60,8 +77,12 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   defmodule AudioChannel do
-    def build_reply(%Message{reply_target: reply_target}) do
+    def build_text_reply(%Message{reply_target: reply_target}) do
       fn text -> send_message(reply_target, text, []) end
+    end
+
+    def build_media_reply(%Message{}) do
+      fn _media_part -> {:error, :media_unsupported} end
     end
 
     def send_message(reply_target, text, opts) do
@@ -122,13 +143,18 @@ defmodule FermixChannels.DispatcherTest do
     assert agent_message.metadata == %{update_id: 100}
     assert agent_message.attachments == [%{type: :photo, id: "file-1"}]
 
-    assert :ok = agent_message.reply_fn.("reply")
+    assert :ok = agent_message.reply_fn.({:text, "reply"})
     assert_received {:reply_sent, "123", "reply", reply_opts}
     assert reply_opts[:message_thread_id] == 77
 
+    media_part = %{kind: :document, path: "/tmp/report.txt", filename: "report.txt"}
+    assert :ok = agent_message.reply_fn.({:media, media_part})
+    assert_received {:media_sent, "123", ^media_part, media_opts}
+    assert media_opts[:message_thread_id] == 77
+
     log =
       capture_log(fn ->
-        assert {:error, :telegram_down} = agent_message.reply_fn.("fail")
+        assert {:error, :telegram_down} = agent_message.reply_fn.({:text, "fail"})
       end)
 
     assert log =~ "Channel reply delivery failed"
@@ -153,8 +179,35 @@ defmodule FermixChannels.DispatcherTest do
              )
 
     assert_receive {:agent_message, agent_message}
-    assert :ok = agent_message.reply_fn.("reply")
+    assert :ok = agent_message.reply_fn.({:text, "reply"})
     assert_received {:reply_built_and_sent, "message-1", "chat-1", "reply"}
+  end
+
+  test "rejects invalid reply tuples before channel delivery" do
+    message =
+      Message.new!(%{
+        id: "message-invalid-reply",
+        content: "hello",
+        sender: "alice",
+        channel: "telegram",
+        chat_id: "chat-1",
+        reply_target: "chat-1"
+      })
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+
+    assert {:error, {:invalid_reply_part, {:invalid, "tuple"}}} =
+             agent_message.reply_fn.({:invalid, "tuple"})
+
+    refute_received {:reply_sent, _, _, _}
+    refute_received {:media_sent, _, _, _}
   end
 
   test "uses explicit reply_fn override when provided" do
@@ -175,8 +228,8 @@ defmodule FermixChannels.DispatcherTest do
                channel: ReplyChannel,
                agent: CapturingAgent,
                agent_server: test_pid,
-               reply_fn: fn text ->
-                 send(test_pid, {:captured_reply, text})
+               reply_fn: fn part ->
+                 send(test_pid, {:captured_reply, part})
                  :ok
                end
              )
@@ -185,8 +238,8 @@ defmodule FermixChannels.DispatcherTest do
     assert agent_message.content == "hello"
     assert is_function(agent_message.reply_fn, 1)
 
-    assert :ok = agent_message.reply_fn.("reply")
-    assert_receive {:captured_reply, "reply"}
+    assert :ok = agent_message.reply_fn.({:text, "reply"})
+    assert_receive {:captured_reply, {:text, "reply"}}
   end
 
   test "intercepts built-in commands before agent delivery" do

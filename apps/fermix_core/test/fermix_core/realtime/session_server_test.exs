@@ -2,6 +2,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.SessionServer
@@ -135,6 +136,40 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert_receive {:prompt_opts, opts}
     assert Keyword.get(opts, :realtime?) == true
     assert Keyword.get(opts, :runtime_capabilities) == [capability]
+  end
+
+  test "default voice capabilities exclude channel-specific tools" do
+    file_name = "voice_file_#{System.unique_integer([:positive])}"
+    channel_name = "voice_channel_#{System.unique_integer([:positive])}"
+
+    :ok = CapabilityRegistry.register(CapabilityRegistry, capability(file_name, :file))
+    :ok = CapabilityRegistry.register(CapabilityRegistry, capability(channel_name, :channel))
+
+    on_exit(fn ->
+      CapabilityRegistry.unregister(CapabilityRegistry, file_name)
+      CapabilityRegistry.unregister(CapabilityRegistry, channel_name)
+    end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    tool_names = Enum.map(event.session.tools, & &1.name)
+
+    assert file_name in tool_names
+    refute channel_name in tool_names
   end
 
   test "audio_chunk forwards provider append event and tracks usage", %{server: server} do
@@ -571,6 +606,18 @@ defmodule FermixCore.Realtime.SessionServerTest do
       kind: :builtin,
       executor: {FakeTool, :execute, []},
       policy_class: :read_only
+    })
+  end
+
+  defp capability(name, category) do
+    Capability.new(%{
+      name: name,
+      description: "Test tool.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {FakeTool, :execute, []},
+      policy_class: :read_only,
+      metadata: %{category: category}
     })
   end
 end

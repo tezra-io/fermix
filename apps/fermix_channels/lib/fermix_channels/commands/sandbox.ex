@@ -182,7 +182,7 @@ defmodule FermixChannels.Commands.Sandbox do
   defp format_error(reason), do: inspect(reason)
 
   defp reply(reply_fn, text) do
-    reply_fn.(text)
+    reply_fn.({:text, text})
     :ok
   end
 end

@@ -36,6 +36,15 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       assert cap.policy_class == :network
     end
 
+    test "wraps Tools.SendAttachment as the only channel-category builtin" do
+      cap = Builtin.from_tool_module(FermixCore.Tools.SendAttachment)
+
+      assert cap.name == "send_attachment"
+      assert cap.policy_class == :read_only
+      assert cap.hidden_from_agent? == false
+      assert cap.metadata.category == :channel
+    end
+
     test "wraps Tools.MemoryRecall with policy_class :read_only" do
       cap = Builtin.from_tool_module(FermixCore.Tools.MemoryRecall)
       assert cap.policy_class == :read_only
@@ -55,6 +64,42 @@ defmodule FermixCore.Capabilities.BuiltinTest do
 
       assert Builtin.from_tool_module(FermixCore.Tools.MemorySourcesList).policy_class ==
                :read_only
+    end
+
+    test "does not mark non-channel builtins as channel tools" do
+      tool_modules = [
+        FermixCore.Tools.Shell,
+        FermixCore.Tools.FileRead,
+        FermixCore.Tools.FileWrite,
+        FermixCore.Tools.FileEdit,
+        FermixCore.Tools.GlobSearch,
+        FermixCore.Tools.ContentSearch,
+        FermixCore.Tools.GitRead,
+        FermixCore.Tools.GitWrite,
+        FermixCore.Tools.WebFetch,
+        FermixCore.Tools.WebSearch,
+        FermixCore.Tools.Delegate,
+        FermixCore.Tools.SkillCreate,
+        FermixCore.Tools.ModelRoutingConfig,
+        FermixCore.Tools.ToolHelp,
+        FermixCore.Tools.MemoryStore,
+        FermixCore.Tools.MemoryRecall,
+        FermixCore.Tools.ScheduleJob,
+        FermixCore.Tools.ListJobs,
+        FermixCore.Tools.PauseJob,
+        FermixCore.Tools.ResumeJob,
+        FermixCore.Tools.RemoveJob,
+        FermixCore.Tools.MemorySourcesList,
+        FermixCore.Tools.Browser
+      ]
+
+      names =
+        tool_modules
+        |> Enum.map(&Builtin.from_tool_module/1)
+        |> Enum.filter(&(&1.metadata.category == :channel))
+        |> Enum.map(& &1.name)
+
+      assert names == []
     end
   end
 end

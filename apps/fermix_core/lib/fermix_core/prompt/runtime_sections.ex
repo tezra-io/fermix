@@ -20,6 +20,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     :delegation,
     :skill_admin,
     :config,
+    :channel,
     :system
   ]
   @category_labels %{
@@ -31,6 +32,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     delegation: "Delegation",
     skill_admin: "Skill Admin",
     config: "Configuration",
+    channel: "Channel",
     system: "System"
   }
 

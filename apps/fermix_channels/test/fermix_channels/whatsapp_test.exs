@@ -217,7 +217,7 @@ defmodule FermixChannels.WhatsAppTest do
       assert_receive {:agent_message, agent_message}
 
       assert agent_message.content == "hello"
-      assert :ok = agent_message.reply_fn.("reply from fermix")
+      assert :ok = agent_message.reply_fn.({:text, "reply from fermix"})
 
       assert_receive {:whatsapp_request, "/v19.0/123456789/messages", body, headers}
       assert body["messaging_product"] == "whatsapp"
@@ -340,6 +340,80 @@ defmodule FermixChannels.WhatsAppTest do
       assert_receive {:whatsapp_request, "/v19.0/123456789/messages", body}, 5_000
       assert body["to"] == "15551234567"
       assert body["text"]["body"] == "reply from main agent"
+    end
+  end
+
+  describe "send_media/3" do
+    test "maps voice attachments to WhatsApp audio messages with required MIME" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("whatsapp-send-media")
+      test_pid = self()
+
+      Req.Test.stub(:whatsapp, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        case conn.request_path do
+          "/v19.0/123456789/media" ->
+            send(test_pid, {:whatsapp_media_upload, body, conn.req_headers})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "media-id-1"}))
+
+          "/v19.0/123456789/messages" ->
+            send(test_pid, {:whatsapp_media_message, Jason.decode!(body), conn.req_headers})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, Jason.encode!(%{"messages" => [%{"id" => "reply-id"}]}))
+        end
+      end)
+
+      try do
+        path = Path.join(tmp_dir, "voice.ogg")
+        File.write!(path, "voice")
+
+        assert :ok =
+                 WhatsApp.send_media("15551234567", %{
+                   kind: :voice,
+                   path: path,
+                   filename: "voice.ogg",
+                   mime_type: "audio/ogg; codecs=opus"
+                 })
+
+        assert_receive {:whatsapp_media_upload, upload_body, upload_headers}
+        assert upload_body =~ ~s(name="messaging_product")
+        assert upload_body =~ "voice.ogg"
+        assert upload_body =~ "audio/ogg; codecs=opus"
+        assert {"authorization", "Bearer whatsapp-access-token"} in upload_headers
+
+        assert_receive {:whatsapp_media_message, message_body, message_headers}
+        assert message_body["messaging_product"] == "whatsapp"
+        assert message_body["to"] == "15551234567"
+        assert message_body["type"] == "audio"
+        assert message_body["audio"] == %{"id" => "media-id-1"}
+        assert {"authorization", "Bearer whatsapp-access-token"} in message_headers
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "rejects voice attachments without the WhatsApp opus MIME" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("whatsapp-send-media-mime")
+
+      try do
+        path = Path.join(tmp_dir, "voice.ogg")
+        File.write!(path, "voice")
+
+        assert {:error, "WhatsApp voice attachments must be audio/ogg; codecs=opus"} =
+                 WhatsApp.send_media("15551234567", %{
+                   kind: :voice,
+                   path: path,
+                   filename: "voice.ogg",
+                   mime_type: "audio/ogg"
+                 })
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
     end
   end
 

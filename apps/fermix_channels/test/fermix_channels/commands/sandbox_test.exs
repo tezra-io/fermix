@@ -118,7 +118,12 @@ defmodule FermixChannels.Commands.SandboxTest do
   defp reply_fn do
     test_pid = self()
 
-    fn text ->
+    fn
+      {:text, text} ->
+        send(test_pid, {:sandbox_reply, text})
+        :ok
+
+      text ->
       send(test_pid, {:sandbox_reply, text})
       :ok
     end

@@ -33,7 +33,8 @@ defmodule FermixCore.Capabilities.Builtin do
     "resume_job" => %{policy_class: :read_write, hidden_from_agent?: false},
     "remove_job" => %{policy_class: :read_write, hidden_from_agent?: false},
     "memory_sources_list" => %{policy_class: :read_only, hidden_from_agent?: false},
-    "browser" => %{policy_class: :network, hidden_from_agent?: false}
+    "browser" => %{policy_class: :network, hidden_from_agent?: false},
+    "send_attachment" => %{policy_class: :read_only, hidden_from_agent?: false}
   }
 
   @spec from_tool_module(module()) :: Capability.t()

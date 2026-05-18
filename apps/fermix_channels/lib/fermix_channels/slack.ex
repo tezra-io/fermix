@@ -11,11 +11,13 @@ defmodule FermixChannels.Slack do
 
   require Logger
 
+  alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixCore.Net.HttpClient
 
   @api_base "https://slack.com/api"
   @max_signature_age_seconds 300
+  @max_media_bytes 100 * 1_024 * 1_024
 
   @impl true
   @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
@@ -64,11 +66,31 @@ defmodule FermixChannels.Slack do
   end
 
   @impl true
-  @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
-  def build_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+          :ok | {:error, term()}
+  def send_media(channel_id, media_part, opts \\ [])
+      when is_binary(channel_id) and is_map(media_part) do
+    with {:ok, claim} <- Idempotency.claim_outbound_media(:slack, channel_id, media_part) do
+      send_claimed_media(claim, channel_id, media_part, opts)
+    end
+  end
+
+  @impl true
+  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
     opts = if thread_ts, do: [thread_ts: thread_ts], else: []
 
     fn text -> send_message(reply_target, text, opts) end
+  end
+
+  @impl true
+  @spec build_media_reply(FermixChannels.Channel.message()) ::
+          (FermixChannels.Channel.media_part() -> :ok | {:error, term()})
+  def build_media_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+    opts = if thread_ts, do: [thread_ts: thread_ts], else: []
+
+    fn media_part -> send_media(reply_target, media_part, opts) end
   end
 
   @impl true
@@ -207,6 +229,104 @@ defmodule FermixChannels.Slack do
       thread_ts -> Map.put(body, :thread_ts, thread_ts)
     end
   end
+
+  defp send_claimed_media(:duplicate, _channel_id, _media_part, _opts), do: :ok
+
+  defp send_claimed_media({:fresh, claim}, channel_id, media_part, opts) do
+    result =
+      with {:ok, token} <- bot_token(),
+           {:ok, upload} <- slack_upload_request(media_part, token, opts),
+           :ok <- upload_file(upload, media_part, opts) do
+        complete_upload(channel_id, upload, media_part, token, opts)
+      end
+
+    maybe_release_claim(result, claim)
+  end
+
+  defp slack_upload_request(%{path: path} = media_part, token, opts) when is_binary(path) do
+    with {:ok, stat} <- File.stat(path),
+         :ok <- enforce_media_cap(stat.size) do
+      filename = Map.get(media_part, :filename) || Path.basename(path)
+
+      body = %{filename: filename, length: stat.size}
+
+      result =
+        Req.new(url: "#{@api_base}/files.getUploadURLExternal", method: :post, json: body)
+        |> Req.Request.put_header("authorization", "Bearer #{token}")
+        |> Req.merge(req_options(opts))
+        |> HttpClient.request("Slack files.getUploadURLExternal")
+
+      case result do
+        {:ok, %{status: 200, body: %{"ok" => true, "upload_url" => url, "file_id" => file_id}}} ->
+          {:ok, %{upload_url: url, file_id: file_id, filename: filename, size: stat.size}}
+
+        {:ok, %{status: 200, body: %{"ok" => false} = body}} ->
+          Logger.error("Slack upload URL failed: #{inspect(body)}")
+          {:error, Map.get(body, "error", "slack_api_error")}
+
+        {:ok, %{status: status, body: body}} ->
+          Logger.error("Slack upload URL failed: #{status} - #{inspect(body)}")
+          {:error, "Slack API error: #{status}"}
+
+        {:error, reason} ->
+          Logger.error("Slack upload URL request failed: #{inspect(reason)}")
+          {:error, reason}
+      end
+    end
+  end
+
+  defp slack_upload_request(_media_part, _token, _opts), do: {:error, :invalid_media_part}
+
+  defp upload_file(%{upload_url: upload_url, size: size}, %{path: path} = media_part, opts) do
+    mime_type = Map.get(media_part, :mime_type) || "application/octet-stream"
+
+    result =
+      Req.new(url: upload_url, method: :post, body: File.stream!(path, 64_000, []))
+      |> Req.Request.put_header("content-type", mime_type)
+      |> Req.Request.put_header("content-length", Integer.to_string(size))
+      |> Req.merge(req_options(opts))
+      |> HttpClient.request("Slack external file upload")
+
+    case result do
+      {:ok, %{status: status}} when status in 200..299 -> :ok
+      {:ok, %{status: status, body: body}} -> {:error, "Slack upload error: #{status}: #{inspect(body)}"}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp complete_upload(channel_id, upload, media_part, token, opts) do
+    body =
+      %{
+        files: [%{id: upload.file_id, title: upload.filename}],
+        channel_id: channel_id
+      }
+      |> maybe_put_initial_comment(Map.get(media_part, :caption))
+      |> maybe_put_thread_ts(opts)
+
+    result =
+      Req.new(url: "#{@api_base}/files.completeUploadExternal", method: :post, json: body)
+      |> Req.Request.put_header("authorization", "Bearer #{token}")
+      |> Req.merge(req_options(opts))
+      |> HttpClient.request("Slack files.completeUploadExternal")
+
+    handle_send_response(result)
+  end
+
+  defp enforce_media_cap(size) when size <= @max_media_bytes, do: :ok
+
+  defp enforce_media_cap(size) do
+    {:error, "Slack attachment #{size} bytes exceeds #{@max_media_bytes}-byte cap"}
+  end
+
+  defp maybe_release_claim(:ok, _claim), do: :ok
+
+  defp maybe_release_claim({:error, _reason} = error, claim) do
+    :ok = Idempotency.release_outbound_media_claim(claim)
+    error
+  end
+
+  defp maybe_put_initial_comment(body, nil), do: body
+  defp maybe_put_initial_comment(body, comment), do: Map.put(body, :initial_comment, comment)
 
   defp allowed_user_ids do
     FermixCore.Config.channel_ingress_user_ids(:slack)

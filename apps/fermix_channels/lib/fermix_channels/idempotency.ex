@@ -32,6 +32,9 @@ defmodule FermixChannels.Idempotency do
 
   @table __MODULE__.Table
   @default_ttl_ms 24 * 60 * 60 * 1_000
+  @default_outbound_ttl_ms 60_000
+
+  @type outbound_media_claim :: {term(), reference()}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -63,6 +66,23 @@ defmodule FermixChannels.Idempotency do
       when is_atom(channel) and not is_nil(message_id) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:forget, {channel, message_id}})
+  end
+
+  @spec claim_outbound_media(atom(), String.t(), map(), keyword()) ::
+          {:ok, {:fresh, outbound_media_claim()} | :duplicate} | {:error, term()}
+  def claim_outbound_media(channel, chat_id, media_part, opts \\ [])
+      when is_atom(channel) and is_binary(chat_id) and is_map(media_part) do
+    with {:ok, key} <- outbound_media_key(channel, chat_id, media_part) do
+      server = Keyword.get(opts, :server, __MODULE__)
+      ttl_ms = Keyword.get(opts, :ttl_ms, @default_outbound_ttl_ms)
+      GenServer.call(server, {:claim_outbound_media, key, ttl_ms})
+    end
+  end
+
+  @spec release_outbound_media_claim(outbound_media_claim(), keyword()) :: :ok
+  def release_outbound_media_claim({key, claim_ref}, opts \\ []) when is_reference(claim_ref) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:release_outbound_media_claim, key, claim_ref})
   end
 
   @impl true
@@ -103,6 +123,90 @@ defmodule FermixChannels.Idempotency do
     {:reply, :ok, state}
   end
 
+  def handle_call({:claim_outbound_media, key, ttl_ms}, _from, state) do
+    now_ms = System.monotonic_time(:millisecond)
+    deadline = now_ms + ttl_ms
+
+    result =
+      case :ets.lookup(state.table, key) do
+        [{^key, existing}] ->
+          if expired?(existing, now_ms) do
+            fresh_outbound_claim(state.table, key, deadline)
+          else
+            {:ok, :duplicate}
+          end
+
+        _missing_or_expired ->
+          fresh_outbound_claim(state.table, key, deadline)
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:release_outbound_media_claim, key, claim_ref}, _from, state) do
+    case :ets.lookup(state.table, key) do
+      [{^key, {_deadline, ^claim_ref}}] -> :ets.delete(state.table, key)
+      _missing_or_reclaimed -> :ok
+    end
+
+    {:reply, :ok, state}
+  end
+
   @impl true
   def handle_info(_other, state), do: {:noreply, state}
+
+  defp fresh_outbound_claim(table, key, deadline) do
+    claim_ref = make_ref()
+    :ets.insert(table, {key, {deadline, claim_ref}})
+    {:ok, {:fresh, {key, claim_ref}}}
+  end
+
+  defp outbound_media_key(channel, chat_id, media_part) do
+    with {:ok, path} <- required_string(media_part, :path),
+         {:ok, digest} <- file_digest(path) do
+      key_parts = [
+        Atom.to_string(channel),
+        chat_id,
+        Atom.to_string(Map.get(media_part, :kind, :document)),
+        Map.get(media_part, :caption, ""),
+        Map.get(media_part, :filename, ""),
+        Map.get(media_part, :mime_type, ""),
+        digest
+      ]
+
+      {:ok, {:outbound_media, :crypto.hash(:sha256, :erlang.term_to_binary(key_parts))}}
+    end
+  end
+
+  defp expired?(deadline, now_ms) when is_integer(deadline), do: deadline <= now_ms
+  defp expired?({deadline, _claim_ref}, now_ms) when is_integer(deadline), do: deadline <= now_ms
+
+  defp required_string(map, key) do
+    case Map.get(map, key) do
+      value when is_binary(value) and value != "" -> {:ok, value}
+      _other -> {:error, {:missing_media_field, key}}
+    end
+  end
+
+  defp file_digest(path) do
+    case File.open(path, [:read, :binary]) do
+      {:ok, file} ->
+        try do
+          digest_file(file, :crypto.hash_init(:sha256))
+        after
+          File.close(file)
+        end
+
+      {:error, reason} ->
+        {:error, {:file_digest_failed, reason}}
+    end
+  end
+
+  defp digest_file(file, context) do
+    case IO.binread(file, 64_000) do
+      :eof -> {:ok, :crypto.hash_final(context)}
+      data when is_binary(data) -> digest_file(file, :crypto.hash_update(context, data))
+      {:error, reason} -> {:error, {:file_digest_failed, reason}}
+    end
+  end
 end

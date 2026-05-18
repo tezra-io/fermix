@@ -105,4 +105,100 @@ defmodule FermixChannels.IdempotencyTest do
 
     assert :fresh = Idempotency.check_and_record(:slack, "abc", server: server)
   end
+
+  test "outbound media claims include file contents and suppress later duplicates", %{
+    server: server
+  } do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("outbound-media-idempotency")
+
+    try do
+      path = Path.join(dir, "report.txt")
+      File.write!(path, "one")
+      media_part = %{kind: :document, path: path, filename: "report.txt"}
+
+      assert {:ok, {:fresh, _claim}} =
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
+                 server: server
+               )
+
+      assert {:ok, :duplicate} =
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
+                 server: server
+               )
+
+      File.write!(path, "two")
+
+      assert {:ok, {:fresh, _claim}} =
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
+                 server: server
+               )
+    after
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+  end
+
+  test "concurrent outbound media claims for the same key see exactly one fresh claim", %{
+    server: server
+  } do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("outbound-media-claim-race")
+
+    try do
+      path = Path.join(dir, "report.txt")
+      File.write!(path, "one")
+      media_part = %{kind: :document, path: path, filename: "report.txt"}
+      parent = self()
+
+      tasks =
+        for _i <- 1..50 do
+          Task.async(fn ->
+            result =
+              Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
+                server: server
+              )
+
+            send(parent, {:result, result})
+          end)
+        end
+
+      Enum.each(tasks, &Task.await/1)
+
+      results =
+        for _ <- 1..50 do
+          receive do
+            {:result, r} -> r
+          after
+            1_000 -> flunk("missing result")
+          end
+        end
+
+      assert results |> Enum.filter(&match?({:ok, {:fresh, _claim}}, &1)) |> length() == 1
+      assert Enum.count(results, &(&1 == {:ok, :duplicate})) == 49
+    after
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+  end
+
+  test "releasing an outbound media claim allows a later retry", %{server: server} do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("outbound-media-release")
+
+    try do
+      path = Path.join(dir, "report.txt")
+      File.write!(path, "one")
+      media_part = %{kind: :document, path: path, filename: "report.txt"}
+
+      assert {:ok, {:fresh, claim}} =
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
+                 server: server
+               )
+
+      assert :ok = Idempotency.release_outbound_media_claim(claim, server: server)
+
+      assert {:ok, {:fresh, _claim}} =
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
+                 server: server
+               )
+    after
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+  end
 end

@@ -307,12 +307,12 @@ defmodule FermixChannels.TelegramTest do
     end
   end
 
-  # -- build_reply/1 --
+  # -- build_text_reply/1 --
 
-  describe "build_reply/1" do
+  describe "build_text_reply/1" do
     test "requires a normalized message struct" do
       assert_raise FunctionClauseError, fn ->
-        apply(Telegram, :build_reply, [%{reply_target: "123", thread_ts: nil}])
+        apply(Telegram, :build_text_reply, [%{reply_target: "123", thread_ts: nil}])
       end
     end
 
@@ -328,7 +328,7 @@ defmodule FermixChannels.TelegramTest do
           thread_ts: 456
         })
 
-      assert is_function(Telegram.build_reply(message), 1)
+      assert is_function(Telegram.build_text_reply(message), 1)
     end
 
     test "builds threaded replies with integer message_thread_id" do
@@ -345,7 +345,7 @@ defmodule FermixChannels.TelegramTest do
           thread_ts: 456
         })
 
-      reply = Telegram.build_reply(message)
+      reply = Telegram.build_text_reply(message)
 
       assert :ok = reply.("thread reply")
       assert_received {:telegram_request, _path, body}
@@ -365,7 +365,7 @@ defmodule FermixChannels.TelegramTest do
           reply_target: "123"
         })
 
-      reply = Telegram.build_reply(message)
+      reply = Telegram.build_text_reply(message)
 
       assert :ok = reply.("answer with **bold**")
       assert_received {:telegram_request, _path, body}
@@ -395,6 +395,80 @@ defmodule FermixChannels.TelegramTest do
       assert path == "/bottest-bot-token/sendChatAction"
       assert body["chat_id"] == "123"
       assert body["action"] == "typing"
+    end
+  end
+
+  describe "send_media/3" do
+    test "routes each media kind to the Telegram method and form field" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("telegram-send-media")
+
+      cases = [
+        {:image, "sendPhoto", "photo"},
+        {:voice, "sendVoice", "voice"},
+        {:audio, "sendAudio", "audio"},
+        {:video, "sendVideo", "video"},
+        {:document, "sendDocument", "document"}
+      ]
+
+      test_pid = self()
+
+      Req.Test.stub(:telegram, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:telegram_media_request, conn.request_path, body})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true}))
+      end)
+
+      try do
+        Enum.each(cases, fn {kind, method, field} ->
+          path = Path.join(tmp_dir, "#{kind}.bin")
+          File.write!(path, "media-#{kind}")
+
+          assert :ok =
+                   Telegram.send_media(
+                     "123",
+                     %{
+                       kind: kind,
+                       path: path,
+                       caption: "caption #{kind}",
+                       filename: "#{kind}.dat",
+                       mime_type: "application/octet-stream"
+                     }
+                   )
+
+          assert_receive {:telegram_media_request, request_path, body}
+          assert request_path == "/bottest-bot-token/#{method}"
+          assert body =~ ~s(name="#{field}")
+          assert body =~ "#{kind}.dat"
+          assert body =~ "caption #{kind}"
+        end)
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "rejects media over the Telegram cap before upload" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("telegram-send-media-cap")
+
+      try do
+        path = Path.join(tmp_dir, "voice.ogg")
+        File.write!(path, :binary.copy("x", 1 * 1_024 * 1_024 + 1))
+
+        assert {:error, error} =
+                 Telegram.send_media("123", %{
+                   kind: :voice,
+                   path: path,
+                   filename: "voice.ogg",
+                   mime_type: "audio/ogg"
+                 })
+
+        assert error =~ "voice attachment"
+        assert error =~ "exceeds Telegram"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
     end
   end
 

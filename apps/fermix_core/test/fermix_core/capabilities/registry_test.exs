@@ -180,6 +180,88 @@ defmodule FermixCore.Capabilities.RegistryTest do
     end
   end
 
+  describe "list_for/2 with visibility filters" do
+    test "removes capabilities whose metadata category is excluded", %{registry: reg} do
+      :ok = Registry.register(reg, cap("read", metadata: %{category: :file}))
+      :ok = Registry.register(reg, cap("reply", metadata: %{category: :channel}))
+      :ok = Registry.register(reg, cap("search", metadata: %{category: :web}))
+
+      names =
+        reg
+        |> Registry.list_for(excluded_categories: [:channel])
+        |> Enum.map(& &1.name)
+
+      assert names == ["read", "search"]
+    end
+
+    test "nil and empty category exclusions preserve existing behavior", %{registry: reg} do
+      :ok = Registry.register(reg, cap("plain"))
+      :ok = Registry.register(reg, cap("reply", metadata: %{category: :channel}))
+
+      assert ["plain", "reply"] =
+               reg
+               |> Registry.list_for(excluded_categories: nil)
+               |> Enum.map(& &1.name)
+
+      assert ["plain", "reply"] =
+               reg
+               |> Registry.list_for(excluded_categories: [])
+               |> Enum.map(& &1.name)
+    end
+
+    test "capabilities without a category survive category filtering", %{registry: reg} do
+      :ok = Registry.register(reg, cap("plain"))
+      :ok = Registry.register(reg, cap("reply", metadata: %{category: :channel}))
+
+      names =
+        reg
+        |> Registry.list_for(excluded_categories: [:channel])
+        |> Enum.map(& &1.name)
+
+      assert names == ["plain"]
+    end
+
+    test "composes category exclusion with allowlist and policy filters", %{registry: reg} do
+      :ok = Registry.register(reg, cap("allowed", metadata: %{category: :file}))
+
+      :ok =
+        Registry.register(
+          reg,
+          cap("channel", metadata: %{category: :channel}, policy_class: :read_only)
+        )
+
+      :ok =
+        Registry.register(
+          reg,
+          cap("write", metadata: %{category: :file}, policy_class: :read_write)
+        )
+
+      names =
+        reg
+        |> Registry.list_for(
+          allowed_tools: ["allowed", "channel", "write"],
+          excluded_categories: [:channel],
+          policy: [allow: [:read_only]]
+        )
+        |> Enum.map(& &1.name)
+
+      assert names == ["allowed"]
+    end
+
+    test "composes excluded names and policy class filters", %{registry: reg} do
+      :ok = Registry.register(reg, cap("read", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("write", policy_class: :read_write))
+      :ok = Registry.register(reg, cap("exec", policy_class: :exec))
+
+      names =
+        reg
+        |> Registry.list_for(policy_classes: [:read_only, :read_write], excluded_names: ["read"])
+        |> Enum.map(& &1.name)
+
+      assert names == ["write"]
+    end
+  end
+
   describe "list/2 with :include_hidden?" do
     test "default false hides capabilities with hidden_from_agent?: true", %{registry: reg} do
       :ok = Registry.register(reg, cap("ok"))

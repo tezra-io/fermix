@@ -71,6 +71,15 @@ defmodule FermixChannels.SignalTest do
       send(Keyword.fetch!(opts, :test_pid), {:signal_send, account, recipient, text})
       :ok
     end
+
+    def send_attachment(account, recipient, caption, path, opts) do
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:signal_attachment_send, account, recipient, caption, path}
+      )
+
+      :ok
+    end
   end
 
   setup do
@@ -112,7 +121,7 @@ defmodule FermixChannels.SignalTest do
       assert agent_message.reply_target == "+15551234567"
       assert agent_message.metadata.user_id == "+15551234567"
       assert agent_message.metadata.chat_type == "private"
-      assert :ok = agent_message.reply_fn.("reply from fermix")
+      assert :ok = agent_message.reply_fn.({:text, "reply from fermix"})
       assert_receive {:signal_send, "+15550001111", "+15551234567", "reply from fermix"}
     end
 
@@ -161,6 +170,29 @@ defmodule FermixChannels.SignalTest do
       Application.put_env(:fermix_channels, :signal, enabled: true)
 
       assert {:error, :not_configured} = Signal.send_message("+15551234567", "hello")
+    end
+  end
+
+  describe "send_media/3" do
+    test "sends attachments through the configured Signal client" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("signal-send-media")
+
+      try do
+        path = Path.join(tmp_dir, "report.txt")
+        File.write!(path, "report")
+
+        assert :ok =
+                 Signal.send_media(
+                   "+15551234567",
+                   %{kind: :document, path: path, caption: "Report", filename: "report.txt"},
+                   client: FakeSignalClient,
+                   client_opts: [test_pid: self()]
+                 )
+
+        assert_receive {:signal_attachment_send, "+15550001111", "+15551234567", "Report", ^path}
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
     end
   end
 

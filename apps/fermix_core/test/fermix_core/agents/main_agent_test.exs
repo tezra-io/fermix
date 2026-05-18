@@ -331,15 +331,17 @@ defmodule FermixCore.Agents.MainAgentTest do
   defp make_message(content, opts \\ []) do
     test_pid = self()
 
+    raw_reply_fn =
+      Keyword.get(opts, :reply_fn, fn response ->
+        send(test_pid, {:reply, response})
+      end)
+
     message = %{
       content: content,
       sender: Keyword.get(opts, :sender, "user123"),
       channel: Keyword.get(opts, :channel, "telegram"),
       chat_id: Keyword.get(opts, :chat_id, "chat_#{System.unique_integer([:positive])}"),
-      reply_fn:
-        Keyword.get(opts, :reply_fn, fn response ->
-          send(test_pid, {:reply, response})
-        end)
+      reply_fn: fn response -> raw_reply_fn.(reply_payload(response)) end
     }
 
     opts
@@ -354,6 +356,9 @@ defmodule FermixCore.Agents.MainAgentTest do
     ])
     |> Enum.into(message)
   end
+
+  defp reply_payload({:text, text}), do: text
+  defp reply_payload(response), do: response
 
   defp tool_call(id, name, arguments) do
     %{

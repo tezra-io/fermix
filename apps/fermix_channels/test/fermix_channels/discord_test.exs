@@ -186,7 +186,7 @@ defmodule FermixChannels.DiscordTest do
       assert_receive {:agent_message, agent_message}
 
       assert agent_message.content == "hello"
-      assert :ok = agent_message.reply_fn.("reply from fermix")
+      assert :ok = agent_message.reply_fn.({:text, "reply from fermix"})
 
       assert_receive {:discord_request, "/api/v10/channels/dm-channel-1/messages", body, headers}
       assert body["content"] == "reply from fermix"
@@ -241,6 +241,51 @@ defmodule FermixChannels.DiscordTest do
       Application.put_env(:fermix_channels, :discord, enabled: true)
 
       assert {:error, :not_configured} = Discord.send_message("dm-channel-1", "hello")
+    end
+  end
+
+  describe "send_media/3" do
+    test "posts multipart media with payload metadata" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("discord-send-media")
+      test_pid = self()
+
+      Req.Test.stub(:discord, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:discord_media_request, conn.request_path, body, conn.req_headers})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "reply-id"}))
+      end)
+
+      try do
+        path = Path.join(tmp_dir, "report.txt")
+        File.write!(path, "report")
+
+        assert :ok =
+                 Discord.send_media(
+                   "dm-channel-1",
+                   %{
+                     kind: :document,
+                     path: path,
+                     caption: "Report",
+                     filename: "report.txt",
+                     mime_type: "text/plain"
+                   },
+                   reply_to: "message-1"
+                 )
+
+        assert_receive {:discord_media_request, request_path, body, headers}
+        assert request_path == "/api/v10/channels/dm-channel-1/messages"
+        assert {"authorization", "Bot discord-bot-token"} in headers
+        assert body =~ ~s(name="payload_json")
+        assert body =~ ~s("content":"Report")
+        assert body =~ ~s("message_id":"message-1")
+        assert body =~ ~s(name="files[0]")
+        assert body =~ "report.txt"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
     end
   end
 

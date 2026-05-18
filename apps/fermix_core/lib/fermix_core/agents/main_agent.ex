@@ -29,6 +29,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
@@ -52,7 +53,7 @@ defmodule FermixCore.Agents.MainAgent do
           :sender => String.t(),
           :channel => String.t(),
           :chat_id => String.t(),
-          :reply_fn => (String.t() -> any()),
+          :reply_fn => Outbound.reply_fn(),
           optional(:typing_fn) => (-> any()),
           optional(:typing_interval_ms) => pos_integer(),
           optional(:typing_timeout_ms) => pos_integer(),
@@ -572,7 +573,9 @@ defmodule FermixCore.Agents.MainAgent do
       memory_owner_id: state.memory_owner_id,
       prompt_accounting: prompt_context.accounting,
       source_channel: msg.channel,
-      source_trust: source_trust
+      source_trust: source_trust,
+      reply_fn: msg.reply_fn,
+      channel: msg.channel
     }
 
     {loop_opts, compaction_target} =
@@ -893,7 +896,7 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   defp deliver_reply(msg, response) do
-    case msg.reply_fn.(response) do
+    case msg.reply_fn.({:text, response}) do
       :ok ->
         :ok
 

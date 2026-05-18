@@ -29,7 +29,7 @@ defmodule FermixChannels.Commands.Help do
         "#{command_label(command)} - #{command.description()}"
       end)
 
-    reply_fn.("Available commands:\n#{body}")
+    reply_fn.({:text, "Available commands:\n#{body}"})
     :ok
   end
 
