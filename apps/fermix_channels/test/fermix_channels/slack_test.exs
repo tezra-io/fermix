@@ -68,7 +68,8 @@ defmodule FermixChannels.SlackTest do
       mode: :webhook,
       bot_token: "xoxb-test-token",
       signing_secret: "slack-signing-secret",
-      allowed_user_ids: [],
+      # F-02: empty allowlist now denies; tests need an explicit allow.
+      allowed_user_ids: ["U12345"],
       req_options: [plug: {Req.Test, :slack}]
     )
 

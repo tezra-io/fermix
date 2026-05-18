@@ -143,9 +143,11 @@ defmodule FermixChannels.Discord do
   defp bot_author?(data), do: data |> Map.get("author", %{}) |> Map.get("bot", false) == true
 
   defp authorized_sender?(data) do
+    # Audit F-02: empty allowlist denies everyone. Operators must configure
+    # owner_user_id (auto-populates the allowlist) or set
+    # fermix_channels.discord.allowed_user_ids explicitly.
     author_id = data |> Map.get("author", %{}) |> Map.get("id")
-    allowed = allowed_user_ids()
-    allowed == [] or author_id in allowed
+    author_id in allowed_user_ids()
   end
 
   defp allowed_user_ids do

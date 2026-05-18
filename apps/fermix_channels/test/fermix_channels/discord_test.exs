@@ -68,6 +68,8 @@ defmodule FermixChannels.DiscordTest do
       mode: :gateway,
       bot_token: "discord-bot-token",
       bot_user_id: "999",
+      # F-02: empty allowlist now denies; tests need an explicit allow.
+      allowed_user_ids: ["111"],
       req_options: [plug: {Req.Test, :discord}]
     )
 

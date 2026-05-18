@@ -437,12 +437,27 @@ defmodule FermixCore.Agents.MainAgent do
     update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
   end
 
-  defp build_loop_runtime(state, messages, context) do
-    base = [
-      messages: messages,
-      context: context,
-      capability_registry: state.capability_registry
-    ]
+  # Remote channels are mapped to `:third_party` — the registry default for
+  # that trust is `:read_only` only. Local channels (cli, daemon socket,
+  # realtime, scheduled jobs) stay `nil` (unfiltered main-agent surface).
+  # Audit F-02: prevent prompt-injected remote messages from reaching write,
+  # exec, network, or external-api tools.
+  @remote_channels ~w(telegram whatsapp slack discord signal)
+
+  defp source_trust_for_channel(channel) when is_binary(channel) do
+    if channel in @remote_channels, do: :third_party, else: nil
+  end
+
+  defp source_trust_for_channel(_channel), do: nil
+
+  defp build_loop_runtime(state, messages, context, opts) do
+    base =
+      [
+        messages: messages,
+        context: context,
+        capability_registry: state.capability_registry
+      ]
+      |> maybe_put_trust(Keyword.get(opts, :source_trust))
 
     case resolve_loop_adapter(state) do
       {:adapter, mod, opts} ->
@@ -462,6 +477,9 @@ defmodule FermixCore.Agents.MainAgent do
         {loop_opts, {nil, key, opts}}
     end
   end
+
+  defp maybe_put_trust(opts, nil), do: opts
+  defp maybe_put_trust(opts, trust) when is_atom(trust), do: Keyword.put(opts, :trust, trust)
 
   defp resolve_loop_adapter(state) do
     cond do
@@ -536,6 +554,8 @@ defmodule FermixCore.Agents.MainAgent do
     user_message = %{role: "user", content: msg.content}
     messages = prompt_context.messages ++ history ++ [user_message]
 
+    source_trust = source_trust_for_channel(msg.channel)
+
     context = %{
       agent_name: "main",
       conversation_key: conversation_key,
@@ -550,10 +570,13 @@ defmodule FermixCore.Agents.MainAgent do
       memory_repo: state.memory_repo,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
-      prompt_accounting: prompt_context.accounting
+      prompt_accounting: prompt_context.accounting,
+      source_channel: msg.channel,
+      source_trust: source_trust
     }
 
-    {loop_opts, compaction_target} = build_loop_runtime(state, messages, context)
+    {loop_opts, compaction_target} =
+      build_loop_runtime(state, messages, context, source_trust: source_trust)
 
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->

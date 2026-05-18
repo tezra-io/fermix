@@ -206,8 +206,10 @@ defmodule FermixChannels.WhatsApp do
   end
 
   defp authorized_sender?(sender_id) do
-    allowed = allowed_sender_ids()
-    allowed == [] or sender_id in allowed
+    # Audit F-02: empty allowlist denies everyone. Operators must configure
+    # owner_user_id (auto-populates the allowlist) or set
+    # fermix_channels.whatsapp.allowed_sender_ids explicitly.
+    sender_id in allowed_sender_ids()
   end
 
   defp allowed_sender_ids do

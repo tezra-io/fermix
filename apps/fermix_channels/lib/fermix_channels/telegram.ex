@@ -323,7 +323,10 @@ defmodule FermixChannels.Telegram do
   defp authorized_user?(user_id) do
     allowed = FermixCore.Config.channel_ingress_user_ids(:telegram)
 
-    allowed == [] or to_string(user_id) in allowed
+    # Audit F-02: empty allowlist now denies everyone (was fail-open).
+    # Operators must configure owner_user_id (auto-populates the allowlist)
+    # or set fermix_channels.telegram.allowed_user_ids explicitly.
+    to_string(user_id) in allowed
   end
 
   defp split_message(text) when is_binary(text) do

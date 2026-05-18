@@ -136,8 +136,10 @@ defmodule FermixChannels.Signal do
   defp attachment_kind(_mime_type), do: :file
 
   defp authorized_sender?(sender_id) do
-    allowed = allowed_sender_ids()
-    allowed == [] or sender_id in allowed
+    # Audit F-02: empty allowlist denies everyone. Operators must configure
+    # owner_user_id (auto-populates the allowlist) or set
+    # fermix_channels.signal.allowed_sender_ids explicitly.
+    sender_id in allowed_sender_ids()
   end
 
   defp allowed_sender_ids do
