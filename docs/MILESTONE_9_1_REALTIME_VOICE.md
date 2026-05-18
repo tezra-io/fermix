@@ -248,14 +248,13 @@ model = "gpt-realtime-2"
 voice = "marin"
 max_session_minutes = 15
 max_estimated_cost_cents_per_session = 100
-allow_network_tools = false
 persist_transcripts = false
 ```
 
-> **Note (2026-05):** `tool_policy` was removed. Voice now uses the same
-> capability surface as the main agent; sandbox mode + command profile
-> cover voice scope uniformly. Existing configs fail loud via
-> `reject_removed_key!`.
+> **Note (2026-05):** `tool_policy` and `allow_network_tools` were both
+> removed. Voice now uses the same capability surface as the main agent;
+> sandbox mode + command profile cover voice scope uniformly. Existing
+> configs fail loud via `reject_removed_key!`.
 
 Validation rules:
 
@@ -267,8 +266,6 @@ Validation rules:
 - Internal audio defaults are PCM16 at 24 kHz mono. `max_chunk_bytes` remains an
   internal socket guard at 16,384 bytes.
 - cost/session limits must be positive integers.
-- `allow_network_tools` is an explicit extra gate for network-capable tools
-  when broad local tooling is enabled.
 - `persist_transcripts` defaults to `false` because spoken input is more
   sensitive than text chat. Setup and the companion can explicitly enable local
   transcript persistence when memory continuity is desired.
@@ -584,9 +581,9 @@ CapabilityRegistry.list(
 literal `allow`/`deny` list into Realtime code; the preset is the source of
 truth.
 
-Config can allow network tools only with `allow_network_tools = true`, but
-mutating tools stay out until M10 approval UX can ask for confirmation at the
-right boundary.
+Note (2026-05): network/mutating tool exposure is no longer scoped per-voice.
+Realtime mirrors the main-agent capability surface; restrict at the capability
+layer if you need a narrower surface across all callers.
 
 Execution path:
 

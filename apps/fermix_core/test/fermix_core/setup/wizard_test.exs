@@ -340,7 +340,6 @@ defmodule FermixCore.Setup.WizardTest do
         realtime_voice: "marin",
         realtime_max_session_minutes: "20",
         realtime_max_cost_cents: "35",
-        realtime_allow_network_tools: "true",
         realtime_persist_transcripts: "true"
       )
 
@@ -354,7 +353,6 @@ defmodule FermixCore.Setup.WizardTest do
     refute Keyword.has_key?(realtime, :turn_detection)
     assert Keyword.get(realtime, :max_session_minutes) == 20
     assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 35
-    assert Keyword.get(realtime, :allow_network_tools) == true
     assert Keyword.get(realtime, :persist_transcripts) == true
   end
 
@@ -379,7 +377,6 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(opt_in_prompts, &(&1.key == :realtime_voice))
     assert Enum.any?(opt_in_prompts, &(&1.key == :realtime_max_session_minutes))
     assert Enum.any?(opt_in_prompts, &(&1.key == :realtime_max_cost_cents))
-    refute Enum.any?(opt_in_prompts, &(&1.key == :realtime_allow_network_tools))
     refute Enum.any?(opt_in_prompts, &(&1.key == :realtime_persist_transcripts))
   end
 
@@ -429,7 +426,6 @@ defmodule FermixCore.Setup.WizardTest do
     assert :realtime_voice in enabled_keys
     assert :realtime_max_session_minutes in enabled_keys
     assert :realtime_max_cost_cents in enabled_keys
-    refute :realtime_allow_network_tools in enabled_keys
     refute :realtime_persist_transcripts in enabled_keys
   end
 
