@@ -4,6 +4,7 @@ defmodule FermixWebWeb.WebhookController do
   require Logger
 
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Idempotency
   alias FermixChannels.Slack
   alias FermixChannels.WhatsApp
   alias FermixCore.Agents.MainAgent
@@ -34,16 +35,21 @@ defmodule FermixWebWeb.WebhookController do
   @spec whatsapp(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def whatsapp(conn, params) do
     with :ok <- WhatsApp.verify_webhook(conn),
-         {:ok, messages} <- WhatsApp.parse_webhook(params),
-         :ok <-
-           Dispatcher.dispatch(messages,
-             channel: WhatsApp,
-             agent: MainAgent,
-             agent_server: MainAgent
-           ) do
+         {:ok, messages} <- WhatsApp.parse_webhook(params) do
+      # Audit F-06: ack the provider quickly. Idempotency check happens
+      # synchronously (cheap ETS lookup); the actual agent dispatch (which
+      # may transcribe audio / call the LLM) runs in a supervised task.
+      fresh = filter_fresh(messages, :whatsapp)
+
+      dispatch_async(fresh,
+        channel: WhatsApp,
+        agent: MainAgent,
+        agent_server: MainAgent
+      )
+
       :telemetry.execute(
         [:fermix, :channel, :webhook],
-        %{count: length(messages)},
+        %{count: length(fresh), duplicates: length(messages) - length(fresh)},
         %{channel: :whatsapp}
       )
 
@@ -109,24 +115,62 @@ defmodule FermixWebWeb.WebhookController do
   end
 
   defp dispatch_slack_webhook(conn, params) do
-    with {:ok, messages} <- Slack.parse_webhook(params),
-         :ok <-
-           Dispatcher.dispatch(messages,
-             channel: Slack,
-             agent: MainAgent,
-             agent_server: MainAgent
-           ) do
-      :telemetry.execute(
-        [:fermix, :channel, :webhook],
-        %{count: length(messages)},
-        %{channel: :slack}
-      )
+    case Slack.parse_webhook(params) do
+      {:ok, messages} ->
+        fresh = filter_fresh(messages, :slack)
 
-      json(conn, %{ok: true})
-    else
+        dispatch_async(fresh,
+          channel: Slack,
+          agent: MainAgent,
+          agent_server: MainAgent
+        )
+
+        :telemetry.execute(
+          [:fermix, :channel, :webhook],
+          %{count: length(fresh), duplicates: length(messages) - length(fresh)},
+          %{channel: :slack}
+        )
+
+        json(conn, %{ok: true})
+
       {:error, reason} ->
         webhook_error_response(conn, "Slack webhook", reason)
     end
+  end
+
+  defp filter_fresh(messages, channel) do
+    Enum.filter(messages, fn message ->
+      case Idempotency.check_and_record(channel, message.id) do
+        :fresh ->
+          true
+
+        :duplicate ->
+          Logger.info(
+            "#{channel} webhook dropped duplicate message #{inspect(message.id)} (idempotency)"
+          )
+
+          false
+      end
+    end)
+  end
+
+  defp dispatch_async([], _opts), do: :ok
+
+  defp dispatch_async(messages, opts) do
+    Task.Supervisor.start_child(FermixCore.TaskSupervisor, fn ->
+      case Dispatcher.dispatch(messages, opts) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.error(
+            "Async webhook dispatch failed for #{inspect(Keyword.get(opts, :channel))}: " <>
+              inspect(reason)
+          )
+      end
+    end)
+
+    :ok
   end
 
   defp client_dispatch_error?({:attachment_download_failed, :missing_attachment_reference}),

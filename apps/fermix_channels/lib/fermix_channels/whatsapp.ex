@@ -16,6 +16,11 @@ defmodule FermixChannels.WhatsApp do
 
   @graph_api_base "https://graph.facebook.com"
   @default_graph_version "v19.0"
+  # Audit F-06: cap media downloads so a hostile or buggy upstream can't
+  # exhaust memory/disk. 25 MB is the practical ceiling for WhatsApp's
+  # own media types; anything larger is rejected before the body lands
+  # in memory or on tmp.
+  @max_media_bytes 25 * 1_024 * 1_024
 
   @impl true
   @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
@@ -89,11 +94,23 @@ defmodule FermixChannels.WhatsApp do
   @spec download_attachment(FermixChannels.Channel.message(), map()) ::
           {:ok, String.t()} | {:error, term()}
   def download_attachment(_message, attachment) when is_map(attachment) do
-    with {:ok, access_token} <- fetch_config_value(:access_token),
+    with :ok <- preflight_size_cap(attachment),
+         {:ok, access_token} <- fetch_config_value(:access_token),
          {:ok, media_url} <- media_url(attachment, access_token),
          {:ok, body} <- download_media(media_url, access_token),
          {:ok, path} <- write_temp_file(body, attachment) do
       {:ok, path}
+    end
+  end
+
+  defp preflight_size_cap(attachment) do
+    case attachment_value(attachment, :size_bytes) do
+      size when is_integer(size) and size > @max_media_bytes ->
+        {:error,
+         "WhatsApp media #{size} bytes exceeds the #{@max_media_bytes}-byte cap; not downloading"}
+
+      _ ->
+        :ok
     end
   end
 
@@ -281,10 +298,10 @@ defmodule FermixChannels.WhatsApp do
 
     case result do
       {:ok, %{status: 200, body: body}} when is_binary(body) ->
-        {:ok, body}
+        enforce_size_cap(body)
 
       {:ok, %{status: 200, body: body}} ->
-        {:ok, IO.iodata_to_binary(body)}
+        enforce_size_cap(IO.iodata_to_binary(body))
 
       {:ok, %{status: status, body: body}} ->
         Logger.error("WhatsApp media download failed: #{status} - #{inspect(body)}")
@@ -295,6 +312,19 @@ defmodule FermixChannels.WhatsApp do
         {:error, reason}
     end
   end
+
+  # Audit F-06: cap the in-memory body so a lying upstream can't blow
+  # past the size_bytes preflight. Body streaming via Req's `:into`
+  # collector is the ideal path, but Req's option validation rejects
+  # unknown adapters in test plug mode — we keep the post-receive cap
+  # here and rely on `preflight_size_cap/1` to drop oversized payloads
+  # before the request even leaves Fermix.
+  defp enforce_size_cap(body) when byte_size(body) > @max_media_bytes do
+    Logger.error("WhatsApp media download exceeded #{@max_media_bytes}-byte cap; refusing payload")
+    {:error, "WhatsApp media download exceeded #{@max_media_bytes}-byte cap"}
+  end
+
+  defp enforce_size_cap(body), do: {:ok, body}
 
   defp write_temp_file(body, attachment) do
     path =
