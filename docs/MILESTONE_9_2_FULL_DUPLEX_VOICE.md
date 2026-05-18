@@ -370,13 +370,16 @@ Realtime block in the clean shape below.
 
 Drop from the wizard entirely:
 
-- `realtime_tool_policy` — read_only is the default; broad is an advanced
-  override available via TOML or env. Voice tool policy is security-sensitive
-  enough that surfacing it in the main install path encourages people to
-  flip it without thinking.
-- `realtime_allow_network_tools` — same reason.
+- `realtime_allow_network_tools` — advanced override available via TOML or
+  env. Surfacing it in the main install path encourages people to flip it
+  without thinking.
 - `realtime_persist_transcripts` — privacy-sensitive, off by default,
   configurable via TOML or env.
+
+Note: `realtime_tool_policy` was removed entirely in 2026-05. Voice now
+uses the same capability surface as the main agent — sandbox mode +
+command profile cover voice scope. See the rationale in
+`Realtime.SessionServer.default_capabilities/1`.
 
 Implementation note: today `Wizard.realtime_prompts/1` returns all eight
 prompts with `required?: false` (except `realtime_api_key`), so
@@ -417,7 +420,6 @@ model = "gpt-realtime-2"
 voice = "marin"
 max_session_minutes = 15
 max_estimated_cost_cents_per_session = 100
-tool_policy = "read_only"
 allow_network_tools = false
 persist_transcripts = false
 ```
@@ -639,8 +641,9 @@ unknown tool, transcript persistence error) are unchanged.
   key is missing, `realtime_voice`, `realtime_max_session_minutes`,
   `realtime_max_cost_cents`) with `required?: true`, and when it resolves
   to `false` it returns only the enable prompt.
-- Drop `realtime_tool_policy`, `realtime_allow_network_tools`, and
-  `realtime_persist_transcripts` from both prompt lists.
+- Drop `realtime_allow_network_tools` and `realtime_persist_transcripts`
+  from both prompt lists. (`realtime_tool_policy` was removed entirely in
+  2026-05; existing configs fail loud via `reject_removed_key!`.)
 - Update wizard tests to assert:
   - fresh install with no persisted realtime block surfaces
     `realtime_enabled`,

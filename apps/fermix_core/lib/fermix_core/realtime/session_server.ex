@@ -539,15 +539,16 @@ defmodule FermixCore.Realtime.SessionServer do
   defp require_binary(value, _name) when is_binary(value) and value != "", do: {:ok, value}
   defp require_binary(_value, name), do: {:error, {:missing, name}}
 
-  defp default_capabilities(%Config{} = config) do
-    CapabilityRegistry.list(CapabilityRegistry,
-      trust: capability_trust(config),
-      include_approval_required?: false
-    )
+  defp default_capabilities(%Config{} = _config) do
+    # Realtime uses the same registry view as Main Agent — no trust filter.
+    # The prior `tool_policy = "read_only"`/`"broad"` knob was a defensive
+    # default against an always-listening voice threat model that never
+    # shipped (M9.1 is click-to-talk only); it had the side effect of
+    # hiding MCP and skill capabilities from voice. Removed in favor of
+    # parity with text. Operators wanting a restricted voice surface tune
+    # sandbox mode + command profile instead — both apply uniformly.
+    CapabilityRegistry.list(CapabilityRegistry, include_approval_required?: false)
   end
-
-  defp capability_trust(%Config{tool_policy: "broad"}), do: :local
-  defp capability_trust(_config), do: :third_party
 
   defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage}) do
     tracker = CostTracker.put_reported_tokens(state.usage, usage)
