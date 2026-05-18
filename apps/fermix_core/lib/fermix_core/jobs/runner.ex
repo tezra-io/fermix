@@ -451,7 +451,7 @@ defmodule FermixCore.Jobs.Runner do
     base = [
       context: loop_context(state, skill),
       capability_registry: state.capability_registry,
-      allowed_tools: state.job.allowed_tools,
+      allowed_tools: narrow_allowed_tools(state.job.allowed_tools),
       policy: capability_policy(state.job.capability_policy),
       trust: effective_trust(state.job),
       max_iterations: state.job.max_iterations
@@ -461,6 +461,17 @@ defmodule FermixCore.Jobs.Runner do
   rescue
     error -> {:error, Exception.message(error)}
   end
+
+  # Audit F-08 follow-up. AgentLoop's `capability_allowed?/2` treats
+  # `nil` as "no narrowing" and a list as an exact allowlist. An empty
+  # list therefore means "deny every tool", which is the wrong default
+  # for a scheduled job that simply didn't ask to narrow. Map empty to
+  # `nil` at this boundary so jobs without an explicit allowlist run
+  # against the trust-derived registry surface, exactly like the
+  # creator's live turn would.
+  defp narrow_allowed_tools([]), do: nil
+  defp narrow_allowed_tools(nil), do: nil
+  defp narrow_allowed_tools(list) when is_list(list), do: list
 
   # Audit F-08 step 2 — intersection at run time.
   #

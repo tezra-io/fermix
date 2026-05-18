@@ -31,4 +31,29 @@ defmodule FermixChannels.IdempotencyTest do
     assert :fresh =
              Idempotency.check_and_record(:telegram, "evt-ttl", ttl_ms: 1, table: table)
   end
+
+  test "concurrent callers for the same key see exactly one :fresh", %{table: table} do
+    parent = self()
+
+    tasks =
+      for _i <- 1..50 do
+        Task.async(fn ->
+          send(parent, {:result, Idempotency.check_and_record(:telegram, "race-id", table: table)})
+        end)
+      end
+
+    Enum.each(tasks, &Task.await/1)
+
+    results =
+      for _ <- 1..50 do
+        receive do
+          {:result, r} -> r
+        after
+          1_000 -> flunk("missing result")
+        end
+      end
+
+    assert Enum.count(results, &(&1 == :fresh)) == 1
+    assert Enum.count(results, &(&1 == :duplicate)) == 49
+  end
 end

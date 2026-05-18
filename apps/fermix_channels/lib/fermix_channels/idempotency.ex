@@ -39,14 +39,38 @@ defmodule FermixChannels.Idempotency do
     deadline = now_ms + ttl_ms
     key = {channel, message_id}
 
-    case :ets.lookup(table, key) do
-      [{^key, existing_deadline}] when existing_deadline > now_ms ->
-        :duplicate
+    # Audit F-06 follow-up: the previous lookup-then-insert pair was not
+    # atomic; two concurrent webhooks for the same id could both see
+    # missing and both insert. `:ets.insert_new/2` is the atomic
+    # check-and-set primitive — true means "key did not exist, now it
+    # does", false means "key exists". When the existing entry has
+    # expired, replace it (also atomic via `:ets.insert/2`).
+    if :ets.insert_new(table, {key, deadline}) do
+      :fresh
+    else
+      case :ets.lookup(table, key) do
+        [{^key, existing_deadline}] when existing_deadline > now_ms ->
+          :duplicate
 
-      _expired_or_missing ->
-        :ets.insert(table, {key, deadline})
-        :fresh
+        _expired_or_missing ->
+          :ets.insert(table, {key, deadline})
+          :fresh
+      end
     end
+  end
+
+  @doc """
+  Removes a previously-recorded entry. Used by the webhook controller to
+  roll back the idempotency record when the async dispatch task fails to
+  start — without this, a failed start_child would silently burn the
+  message id and suppress the provider's retry. (Audit F-06 follow-up.)
+  """
+  @spec forget(atom(), term(), keyword()) :: :ok
+  def forget(channel, message_id, opts \\ [])
+      when is_atom(channel) and not is_nil(message_id) do
+    table = Keyword.get(opts, :table, @table)
+    :ets.delete(table, {channel, message_id})
+    :ok
   end
 
   @impl true

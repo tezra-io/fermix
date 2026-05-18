@@ -10,7 +10,7 @@ defmodule FermixCore.MCP.Inbound.ConfigTest do
       assert config.enabled? == false
       assert config.transport == :stdio
       assert config.expose_kinds == [:builtin]
-      assert config.expose_policy_classes == [:read_only, :read_write]
+      assert config.expose_policy_classes == [:read_only]
       assert config.allowed_tools == []
       assert config.denied_tools == []
       assert config.tool_overrides == %{}

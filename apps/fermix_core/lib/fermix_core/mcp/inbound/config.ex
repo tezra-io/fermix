@@ -142,8 +142,13 @@ defmodule FermixCore.MCP.Inbound.Config do
       enabled?: bool_value(Map.get(inbound, "enabled", false), :enabled),
       transport: transport_value(Map.get(inbound, "transport", "stdio")),
       expose_kinds: kind_list(Map.get(inbound, "expose_kinds", ["builtin"])),
+      # Audit F-07 follow-up: TOML parse default must match the struct
+      # default (`[:read_only]`). The prior `["read_only", "read_write"]`
+      # default re-exposed `file_write`, `file_edit`, `git_write`, etc.
+      # the moment any operator wrote a `[mcp.inbound]` block without
+      # specifying `expose_policy_classes`.
       expose_policy_classes:
-        policy_list(Map.get(inbound, "expose_policy_classes", ["read_only", "read_write"])),
+        policy_list(Map.get(inbound, "expose_policy_classes", ["read_only"])),
       allowed_tools: string_list(Map.get(inbound, "allowed_tools", []), :allowed_tools),
       denied_tools: string_list(Map.get(inbound, "denied_tools", []), :denied_tools),
       tool_overrides: parse_tool_overrides(Map.get(sections, :tools, %{})),
