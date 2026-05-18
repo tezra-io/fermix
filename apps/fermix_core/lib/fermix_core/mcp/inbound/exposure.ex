@@ -44,7 +44,11 @@ defmodule FermixCore.MCP.Inbound.Exposure do
       not denied?(capability.name, config.denied_tools)
   end
 
-  defp allowlisted?(_name, []), do: true
+  # Audit F-07: empty `allowed_tools` is now deny-all (was allow-all).
+  # Operators must list each tool by name. The legitimate use case for
+  # "expose every passing tool" is rare and dangerous; per-tool
+  # allowlisting is the safe default.
+  defp allowlisted?(_name, []), do: false
   defp allowlisted?(name, allowed_tools), do: name in allowed_tools
 
   defp denied?(name, denied_tools), do: name in denied_tools
