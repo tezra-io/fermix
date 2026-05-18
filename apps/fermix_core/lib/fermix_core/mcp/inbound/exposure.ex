@@ -39,7 +39,7 @@ defmodule FermixCore.MCP.Inbound.Exposure do
   defp passes_default_gate?(%Capability{} = capability, %Config{} = config) do
     capability.kind in config.expose_kinds and
       capability.policy_class in config.expose_policy_classes and
-      not capability.requires_approval? and
+      not capability.hidden_from_agent? and
       allowlisted?(capability.name, config.allowed_tools) and
       not denied?(capability.name, config.denied_tools)
   end

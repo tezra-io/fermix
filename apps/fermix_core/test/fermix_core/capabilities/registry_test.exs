@@ -22,7 +22,7 @@ defmodule FermixCore.Capabilities.RegistryTest do
       kind: Keyword.get(opts, :kind, :builtin),
       executor: {FakeMod, :execute, []},
       policy_class: Keyword.get(opts, :policy_class, :read_only),
-      requires_approval?: Keyword.get(opts, :requires_approval?, false),
+      hidden_from_agent?: Keyword.get(opts, :hidden_from_agent?, false),
       metadata: Keyword.get(opts, :metadata, %{})
     })
   end
@@ -180,20 +180,20 @@ defmodule FermixCore.Capabilities.RegistryTest do
     end
   end
 
-  describe "list/2 with :include_approval_required?" do
-    test "default false hides capabilities with requires_approval?: true", %{registry: reg} do
+  describe "list/2 with :include_hidden?" do
+    test "default false hides capabilities with hidden_from_agent?: true", %{registry: reg} do
       :ok = Registry.register(reg, cap("ok"))
-      :ok = Registry.register(reg, cap("gated", requires_approval?: true))
+      :ok = Registry.register(reg, cap("gated", hidden_from_agent?: true))
 
       assert ["ok"] = reg |> Registry.list() |> Enum.map(& &1.name)
     end
 
     test "true returns approval-gated capabilities", %{registry: reg} do
-      :ok = Registry.register(reg, cap("gated", requires_approval?: true))
+      :ok = Registry.register(reg, cap("gated", hidden_from_agent?: true))
 
       assert ["gated"] =
                reg
-               |> Registry.list(include_approval_required?: true)
+               |> Registry.list(include_hidden?: true)
                |> Enum.map(& &1.name)
     end
   end

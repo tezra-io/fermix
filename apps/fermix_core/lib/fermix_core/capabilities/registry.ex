@@ -30,7 +30,7 @@ defmodule FermixCore.Capabilities.Registry do
             policy: policy_spec(),
             trust: trust(),
             kind: Capability.kind() | :all,
-            include_approval_required?: boolean()
+            include_hidden?: boolean()
           ]
 
   # Default policies per trust source. See design §4.6.3.
@@ -179,7 +179,7 @@ defmodule FermixCore.Capabilities.Registry do
     |> apply_kind(Keyword.get(opts, :kind, :all))
     |> apply_policy(policy)
     |> apply_allowlist(Keyword.get(opts, :allowed_tools))
-    |> apply_approval_filter(Keyword.get(opts, :include_approval_required?, false))
+    |> apply_hidden_filter(Keyword.get(opts, :include_hidden?, false))
   end
 
   @doc """
@@ -247,9 +247,9 @@ defmodule FermixCore.Capabilities.Registry do
     Enum.filter(capabilities, &MapSet.member?(name_set, &1.name))
   end
 
-  defp apply_approval_filter(capabilities, true), do: capabilities
+  defp apply_hidden_filter(capabilities, true), do: capabilities
 
-  defp apply_approval_filter(capabilities, false) do
-    Enum.reject(capabilities, & &1.requires_approval?)
+  defp apply_hidden_filter(capabilities, false) do
+    Enum.reject(capabilities, & &1.hidden_from_agent?)
   end
 end

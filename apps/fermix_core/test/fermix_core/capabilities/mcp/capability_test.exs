@@ -65,40 +65,25 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
 
       assert %Capability{kind: :mcp, name: "mcp_github_create_issue"} = cap
       assert cap.policy_class == :external_api
-      assert cap.requires_approval? == true
+      assert cap.hidden_from_agent? == false
       assert cap.metadata.mcp_server == "github"
       assert cap.metadata.original_name == "create_issue"
       assert cap.metadata.sanitized_name == "mcp_github_create_issue"
-      assert cap.metadata.approved? == false
       assert cap.parameters == descriptor.input_schema
       assert {McpCapability, :invoke, ["github", "create_issue", StubCaller]} = cap.executor
     end
 
-    test "approved? overrides requires_approval? unless explicitly set" do
+    test "tool_overrides flip hidden_from_agent? to true" do
       descriptor = %{name: "read_file", description: "Read a file.", input_schema: %{}}
 
       cap =
         McpCapability.from_tool_descriptor("filesystem", descriptor,
           caller: StubCaller,
-          approved?: true
-        )
-
-      assert cap.requires_approval? == false
-      assert cap.metadata.approved? == true
-    end
-
-    test "tool_overrides win over the approved? default" do
-      descriptor = %{name: "read_file", description: "Read a file.", input_schema: %{}}
-
-      cap =
-        McpCapability.from_tool_descriptor("filesystem", descriptor,
-          caller: StubCaller,
-          approved?: true,
-          tool_overrides: %{policy_class: :read_only, requires_approval?: true}
+          tool_overrides: %{policy_class: :read_only, hidden_from_agent?: true}
         )
 
       assert cap.policy_class == :read_only
-      assert cap.requires_approval? == true
+      assert cap.hidden_from_agent? == true
     end
 
     test "raises when descriptor has no :name" do

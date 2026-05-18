@@ -547,7 +547,7 @@ defmodule FermixCore.Realtime.SessionServer do
     # hiding MCP and skill capabilities from voice. Removed in favor of
     # parity with text. Operators wanting a restricted voice surface tune
     # sandbox mode + command profile instead — both apply uniformly.
-    CapabilityRegistry.list(CapabilityRegistry, include_approval_required?: false)
+    CapabilityRegistry.list(CapabilityRegistry)
   end
 
   defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage}) do

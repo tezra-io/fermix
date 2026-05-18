@@ -4,13 +4,12 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
   alias FermixCore.Capabilities.MCP.Config
 
   describe "from_toml/1" do
-    test "parses a single MCP server with command, args, env, and approved" do
+    test "parses a single MCP server with command, args, and env" do
       toml = """
       [mcp.servers.github]
       command = "npx"
       args = ["-y", "@modelcontextprotocol/server-github"]
       env = { GITHUB_TOKEN = "ghp_static" }
-      approved = true
       """
 
       assert [config] = Config.from_toml(toml)
@@ -19,7 +18,6 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       assert config.args == ["-y", "@modelcontextprotocol/server-github"]
       assert config.env == %{"GITHUB_TOKEN" => "ghp_static"}
       assert config.pass_env == []
-      assert config.approved? == true
       assert config.tools_overrides == %{}
     end
 
@@ -73,18 +71,43 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       toml = """
       [mcp.servers.filesystem]
       command = "npx"
-      approved = true
 
       [mcp.servers.filesystem.tools.read_file]
       policy_class = "read_only"
-      requires_approval = false
+      hidden_from_agent = true
       """
 
       assert [config] = Config.from_toml(toml)
 
       assert config.tools_overrides == %{
-               "read_file" => %{policy_class: :read_only, requires_approval?: false}
+               "read_file" => %{policy_class: :read_only, hidden_from_agent?: true}
              }
+    end
+
+    test "raises when a server block carries the removed `approved` key" do
+      toml = """
+      [mcp.servers.filesystem]
+      command = "npx"
+      approved = true
+      """
+
+      assert_raise ArgumentError, ~r/approved was removed/, fn ->
+        Config.from_toml(toml)
+      end
+    end
+
+    test "raises when a per-tool block uses the renamed `requires_approval` key" do
+      toml = """
+      [mcp.servers.filesystem]
+      command = "npx"
+
+      [mcp.servers.filesystem.tools.read_file]
+      requires_approval = true
+      """
+
+      assert_raise ArgumentError, ~r/requires_approval was renamed/, fn ->
+        Config.from_toml(toml)
+      end
     end
 
     test "raises on an unknown [mcp.*] section header" do

@@ -3,7 +3,7 @@
 **Status:** Draft
 **Date:** 2026-05-16
 **Author:** Sujeeth / Aira
-**Depends on:** M4.9 (`Capability` struct, `CapabilityRegistry`, `Capabilities.MCP.*` outbound, `policy_class`/`requires_approval?` metadata), M4.8 (`fermix` CLI dispatch, daemon control socket), M3 (Phoenix endpoint, `FermixWebWeb.Router`)
+**Depends on:** M4.9 (`Capability` struct, `CapabilityRegistry`, `Capabilities.MCP.*` outbound, `policy_class`/`hidden_from_agent?` metadata), M4.8 (`fermix` CLI dispatch, daemon control socket), M3 (Phoenix endpoint, `FermixWebWeb.Router`)
 **Blocks:** anything that needs Claude Desktop / Cursor / external-agent access to Fermix capabilities; future M10 security milestone (provides the per-capability authorization surface this milestone exposes).
 **Defers to other milestones:** wizard integration (handled by a follow-up to `Setup.Wizard`), full auth model and per-user ACLs (M10 — Security & Governance), inbound resources/prompts (M4.12 ships tools-only).
 **References:** `apps/fermix_core/lib/fermix_core/capabilities/mcp/supervisor.ex`, `apps/fermix_core/lib/fermix_core/capabilities/mcp/config.ex`, `apps/fermix_core/lib/fermix_core/capabilities/registry.ex`, `apps/fermix_core/lib/fermix_core/setup/config_store.ex`, `apps/fermix_web/lib/fermix_web_web/router.ex`, `apps/fermix_web/lib/fermix_web_web/endpoint.ex`, `apps/fermix_core/lib/fermix_core/application.ex`, `deps/hermes_mcp/lib/hermes/server.ex`, `deps/hermes_mcp/lib/hermes/server/supervisor.ex`, `deps/hermes_mcp/lib/hermes/server/transport/streamable_http.ex`, `deps/hermes_mcp/lib/hermes/server/transport/stdio.ex`, [`/Users/sujshe/projects/hermes-agent/mcp_serve.py`](file:///Users/sujshe/projects/hermes-agent/mcp_serve.py) (closest analogue — Python `hermes mcp serve` exposing a curated MCP tool surface over stdio), [Peekaboo MCP server](https://github.com/steipete/peekaboo), [MCP Streamable HTTP spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
@@ -20,7 +20,7 @@ Concretely:
 - A team running Cursor points the editor at Fermix's HTTP MCP endpoint and the in-editor agent can ask Fermix to recall prior conversations or invoke an explicitly-opted-in skill.
 - A separate Fermix instance, or any third-party agent that speaks MCP, can call into Fermix without inventing a Fermix-specific protocol.
 
-M4.9 (§Non-Goals) explicitly deferred this: *"Inbound MCP — fermix as an MCP server | Outbound … is the immediate value. Inbound … is a smaller follow-on once outbound is stable and the capability shape is settled."* That follow-on is now in scope: outbound has been shipping for two minor versions, the `Capability` shape is settled, `policy_class` / `requires_approval?` metadata exist, and the operator pain ("I have skills and memory in Fermix but my coding agent can't see them") is concrete.
+M4.9 (§Non-Goals) explicitly deferred this: *"Inbound MCP — fermix as an MCP server | Outbound … is the immediate value. Inbound … is a smaller follow-on once outbound is stable and the capability shape is settled."* That follow-on is now in scope: outbound has been shipping for two minor versions, the `Capability` shape is settled, `policy_class` / `hidden_from_agent?` metadata exist, and the operator pain ("I have skills and memory in Fermix but my coding agent can't see them") is concrete.
 
 **Goal of M4.12:** ship a single Hermes-backed MCP **server** that exposes a filtered, policy-gated view of `CapabilityRegistry` as MCP tools over either stdio (peekaboo-style, for Claude Desktop / Cursor / local clients) or streamable HTTP (network clients), reuses the existing `Capability` policy metadata for access control, persists its config alongside the existing `[mcp.servers.*]` outbound config in `~/.fermix/config.toml`, and emits a `[:fermix, :mcp, :inbound, :call]` telemetry event for every served call.
 
@@ -34,7 +34,7 @@ After this milestone:
    ```
    …and `fermix mcp serve` becomes a Claude-Desktop-compatible MCP server entry point exposing the conservative built-in default set (read-only + read-write file/git/memory ops). Adding individual skills is one TOML block each: `[mcp.inbound.tools.<skill>] exposed = true`.
 2. The same operator can flip `transport = "streamable_http"` and the daemon's Phoenix endpoint mounts `/mcp` with bearer-token auth, allowing remote agents to connect.
-3. The exposed tool set is a deterministic function of `(CapabilityRegistry contents, kind filter, policy_class filter, allow/deny lists, requires_approval?)`. No capability is exposed by default that the operator did not explicitly invite — fail closed.
+3. The exposed tool set is a deterministic function of `(CapabilityRegistry contents, kind filter, policy_class filter, allow/deny lists, hidden_from_agent?)`. No capability is exposed by default that the operator did not explicitly invite — fail closed.
 4. The outbound→inbound loop is prevented by construction: `kind: :mcp` capabilities are not re-exposed unless the operator explicitly opts in, and there is a documented warning when they do.
 5. Every served call writes a telemetry event and a trace entry tagged with the calling MCP client name / version (sent during the MCP `initialize` handshake), the tool name, latency, and result tag — providing the audit trail M10 will later gate on.
 
@@ -61,8 +61,8 @@ After this milestone:
 | `FermixCore.MCP.Inbound.Supervisor` | P0 | New | Top-level supervisor that, when `[mcp.inbound] enabled = true`, starts `Hermes.Server.Supervisor` with the configured transport. Added to `FermixCore.Application` between `BuiltinSeeder` / `SkillRegistry` and `McpSupervisor` so the inbound server only starts after the registry is seeded. |
 | Stdio transport via `fermix mcp serve` | P0 | New | New CLI dispatch path in `FermixCore.Application` that starts a minimal supervision tree and runs the inbound Hermes server with `transport: :stdio`. Designed for Claude Desktop launching Fermix as a subprocess. Does not bind any network port, does not start channels or the daemon socket. |
 | Streamable HTTP transport via Phoenix mount | P0 | New | `FermixWebWeb.Router` **always** mounts `/mcp` forwarded to `Hermes.Server.Transport.StreamableHTTP.Plug` (Phoenix router scopes are compile-time; the runtime TOML cannot decide whether the route exists). The route is fronted by `FermixWebWeb.Plugs.McpInboundAuth`, which checks at request time: (a) `enabled = true` and `transport = "streamable_http"`, else `503 mcp inbound disabled`; (b) valid bearer token, else `401`. The Hermes plug never runs when the gate denies. The supervisor only starts the Hermes server child when the same runtime config is satisfied. |
-| Capability exposure filter | P0 | New | `Exposure.expose_for_inbound(capabilities, config) :: [Capability.t()]` applies, in order: (1) `enabled` gate, (2) per-tool override `exposed = true` force-expose (skips remaining filters), (3) per-tool override `exposed = false` force-hide (drops immediately), (4) `expose_kinds` filter (default `[:builtin]` — see §4.2), (5) `expose_policy_classes` filter (default `[:read_only, :read_write]`), (6) `requires_approval?` filter (capabilities requiring approval are dropped — only the per-tool override can let them through), (7) `allowed_tools` exact allowlist if non-empty, (8) `denied_tools` exact denylist. Failing any gate excludes the capability. No partial exposure (a capability either appears in both `tools/list` and `tools/call` or in neither). |
-| Per-tool override blocks | P0 | New | `[mcp.inbound.tools.<name>]` with `exposed = true \| false` and `description_override = "..."`. `exposed = true` is the **only** per-tool opt-in — it overrides every kind/policy/approval gate and is the single mechanism for force-exposing a capability that fails the default filters (including skills, `requires_approval?` capabilities, and capabilities the operator wants regardless of kind). `exposed = false` is the only force-hide. No separate `approved` field; one opt-in keyword keeps the gate logic readable. `description_override` lets the operator publish a different description to MCP clients than the LLM-facing one. |
+| Capability exposure filter | P0 | New | `Exposure.expose_for_inbound(capabilities, config) :: [Capability.t()]` applies, in order: (1) `enabled` gate, (2) per-tool override `exposed = true` force-expose (skips remaining filters), (3) per-tool override `exposed = false` force-hide (drops immediately), (4) `expose_kinds` filter (default `[:builtin]` — see §4.2), (5) `expose_policy_classes` filter (default `[:read_only, :read_write]`), (6) `hidden_from_agent?` filter (capabilities requiring approval are dropped — only the per-tool override can let them through), (7) `allowed_tools` exact allowlist if non-empty, (8) `denied_tools` exact denylist. Failing any gate excludes the capability. No partial exposure (a capability either appears in both `tools/list` and `tools/call` or in neither). |
+| Per-tool override blocks | P0 | New | `[mcp.inbound.tools.<name>]` with `exposed = true \| false` and `description_override = "..."`. `exposed = true` is the **only** per-tool opt-in — it overrides every kind/policy/approval gate and is the single mechanism for force-exposing a capability that fails the default filters (including skills, `hidden_from_agent?` capabilities, and capabilities the operator wants regardless of kind). `exposed = false` is the only force-hide. No separate `approved` field; one opt-in keyword keeps the gate logic readable. `description_override` lets the operator publish a different description to MCP clients than the LLM-facing one. |
 | Bearer-token auth (HTTP) | P0 | New | `auth_token` config key (resolved via `$env:` reference). Plug compares `Authorization: Bearer <token>` against the config value in constant time (`Plug.Crypto.secure_compare/2`). Missing / mismatched token returns `401 Unauthorized` with a single body line; no token enumeration via timing or body content. |
 | Outbound→inbound loop prevention | P0 | New | `:mcp` is excluded from `expose_kinds` default. Operators who include it see a `Logger.warning` at startup naming each `mcp_*` capability that would be re-exposed, plus the recommendation to use the upstream MCP server directly instead. No silent loop, no automatic deduplication. |
 | Capability listing + execution dispatch | P0 | New | A new `FermixCore.MCP.Inbound.CapabilityPort` behaviour with two callbacks: `list_capabilities() :: {:ok, [Capability.t()]}` and `execute_capability(name, args, context) :: {:ok, payload} \| {:error, term()}`. Two implementations: `Local` (queries `CapabilityRegistry` and calls `Capability.execute/3` in-process) and `DaemonProxy` (sends both list and execute requests over the existing daemon control socket). `Inbound.Server` only ever talks to the port — never directly to `CapabilityRegistry` or `Capability.execute/3` — so daemon-up stdio mode resolves *both* the exposed tool list and the call result against the daemon's registry. Anything less would let the stdio subprocess advertise tools the daemon can't execute, or hide tools the daemon could. |
@@ -103,7 +103,7 @@ The existing outbound implementation under `FermixCore.Capabilities.MCP.*` is th
 - **Top-level `[mcp.*]` TOML namespace** (`[mcp.inbound]`, `[mcp.inbound.tools.<name>]`), not nested under `[fermix_core.*]`. Matches the outbound `[mcp.servers.<name>]` convention.
 - **`Config` module pattern** — a small purpose-built TOML reader scoped to the inbound block (`FermixCore.MCP.Inbound.Config`), echoing `FermixCore.Capabilities.MCP.Config`. Same `$env:` resolution semantics.
 - **`Supervisor + Server + per-thing-isolated-subtree`** — `Inbound.Supervisor` boots Hermes and isolates a crash to the inbound subtree the same way outbound's per-server supervisors isolate one bad MCP child.
-- **Reuse of `policy_class` and `requires_approval?`** — the same metadata outbound consumes from the registry, inbound writes through the exposure filter. No new policy primitives.
+- **Reuse of `policy_class` and `hidden_from_agent?`** — the same metadata outbound consumes from the registry, inbound writes through the exposure filter. No new policy primitives.
 - **No deprecation churn / no parallel registries** — `CapabilityRegistry` is already the single source of truth; inbound only reads it.
 
 What inbound deliberately does *not* mirror from outbound:
@@ -139,7 +139,7 @@ What we deliberately diverge on:
 
 - **State coordination.** Hermes-agent reads `sessions.json` and `state.db` directly from disk, mtime-checks for changes (`mcp_serve.py:352-376`), and re-reads on change. No daemon coordination. Fermix's tools (`memory_recall`, `list_jobs`, every skill) operate on in-process state (`ConversationStore` ETS, `Memory.Repo` GenServer-mediated SQLite, `Jobs.Registry` ETS). Direct-disk reads cannot see that state. That's why §4.3 introduces the daemon-proxy `CapabilityPort` — to share the daemon's in-process state (both the capability list and tool execution). The hermes-agent "just read the files" trick doesn't translate to Fermix's architecture.
 
-- **Approval-request surface.** Hermes-agent's `permissions_list_open` / `permissions_respond` (`mcp_serve.py:823-857`) lets the MCP client observe and respond to internal exec-approval requests. This is M10 territory in Fermix (the user-facing approval UX). Surfacing it as MCP tools is the kind of M10 extension `requires_approval?` was designed to enable, but the policy surface itself doesn't exist yet, so the tools have nothing to wrap. Out of scope.
+- **Approval-request surface.** Hermes-agent's `permissions_list_open` / `permissions_respond` (`mcp_serve.py:823-857`) lets the MCP client observe and respond to internal exec-approval requests. This is M10 territory in Fermix (the user-facing approval UX). Surfacing it as MCP tools is the kind of M10 extension `hidden_from_agent?` was designed to enable, but the policy surface itself doesn't exist yet, so the tools have nothing to wrap. Out of scope.
 
 ### Peekaboo — stdio-native, one-process-per-launch (design pattern only)
 
@@ -278,13 +278,13 @@ defmodule FermixCore.MCP.Inbound.Exposure do
     3. Per-tool exposed = false?                           -> DROP
     4. Kind NOT in expose_kinds?                           -> DROP
     5. policy_class NOT in expose_policy_classes?          -> DROP
-    6. requires_approval? = true?                          -> DROP
+    6. hidden_from_agent? = true?                          -> DROP
     7. allowed_tools non-empty AND name NOT in it?         -> DROP
     8. denied_tools contains name?                         -> DROP
     9. else                                                -> EXPOSE
 
   The `exposed = true` per-tool override is the single opt-in keyword.
-  It overrides every gate including requires_approval? and policy_class.
+  It overrides every gate including hidden_from_agent? and policy_class.
   No separate `approved` field — one mechanism, one mental model.
   """
 
@@ -329,7 +329,7 @@ defmodule FermixCore.MCP.Inbound.Exposure do
   defp passes_default_gate?(%Capability{} = cap, config) do
     cap.kind in config.expose_kinds and
       cap.policy_class in config.expose_policy_classes and
-      not cap.requires_approval? and
+      not cap.hidden_from_agent? and
       allowlisted?(cap.name, config.allowed_tools) and
       not denied?(cap.name, config.denied_tools)
   end
@@ -339,7 +339,7 @@ end
 Per-tool `exposed = true` is applied **first** and short-circuits every other gate. This is the only way to expose:
 - A capability whose `kind` is not in `expose_kinds` (e.g., a skill, which is `kind: :skill`).
 - A capability whose `policy_class` is not in `expose_policy_classes` (e.g., `shell` is `:exec`).
-- A capability where `requires_approval?: true`.
+- A capability where `hidden_from_agent?: true`.
 
 The "single opt-in keyword" shape (one `exposed = true`, no separate `approved`) keeps the gate logic in §4.2 short and the operator mental model in §4.7 short. An operator who wants to expose `shell` doesn't have to think about `approved`, `policy_class`, and `exposed` as three separate dimensions — they write one line.
 
@@ -357,13 +357,13 @@ exposed = true                 # opt this skill into the inbound surface
 exposed = false                # force-hide despite passing default gate
 ```
 
-`description_override` lets the operator publish a cleaner MCP-facing description than the LLM-facing one. Inbound never publishes the `policy_class`, `kind`, or `requires_approval?` fields — those are internal classifiers. The MCP `tool.description` and `tool.inputSchema` are derived from the `Capability`'s `description` (overridable) and `parameters` (not overridable — schema rewriting is M10 territory).
+`description_override` lets the operator publish a cleaner MCP-facing description than the LLM-facing one. Inbound never publishes the `policy_class`, `kind`, or `hidden_from_agent?` fields — those are internal classifiers. The MCP `tool.description` and `tool.inputSchema` are derived from the `Capability`'s `description` (overridable) and `parameters` (not overridable — schema rewriting is M10 territory).
 
 #### Defaults rationale
 
 - `expose_kinds: [:builtin]` — only built-ins by default. **Skills are not default-exposed** because `Capabilities.Skill.from_definition/1` produces `policy_class: :exec` (`apps/fermix_core/lib/fermix_core/capabilities/skill.ex:31`), so they would fail the policy-class gate anyway — and even if they didn't, treating every installed skill as default-public for inbound MCP would mean a plugin skill becomes externally callable as soon as the operator drops a folder under `~/.fermix/skills/_plugins/`. Skills are opted in per-name (one `[mcp.inbound.tools.<skill>] exposed = true` block each). `:mcp` is also excluded by default because re-exposing outbound MCP tools as inbound MCP tools is the loop case (§4.5).
 - `expose_policy_classes: [:read_only, :read_write]` — the conservative posture. `:exec` (shell, skills), `:network` (browser, web_fetch), and `:external_api` (anything with a credential) require explicit per-tool opt-in via `exposed = true`.
-- `requires_approval?: true` capabilities are hidden by default and only surface through `exposed = true`. The per-tool override is the single approval mechanism.
+- `hidden_from_agent?: true` capabilities are hidden by default and only surface through `exposed = true`. The per-tool override is the single approval mechanism.
 
 These defaults mean a brand-new `[mcp.inbound] enabled = true` config exposes exactly:
 
@@ -908,7 +908,7 @@ request_timeout_ms = 30000
 
 # ---- Per-tool overrides ----
 # `exposed = true` is the single opt-in keyword. It bypasses every gate
-# (kind, policy_class, requires_approval?) for one named capability.
+# (kind, policy_class, hidden_from_agent?) for one named capability.
 
 # Opt in a skill (skills are :exec policy_class, so they need the override).
 [mcp.inbound.tools.research-skill]
@@ -941,7 +941,7 @@ auth_token = "$env:FERMIX_MCP_INBOUND_TOKEN"          # required when HTTP trans
 | `allowed_tools` / `denied_tools` | never | `[]` / `[]` | Mutually compatible; `allowed_tools` is an allowlist, `denied_tools` a denylist. Both `[]` means "use kind+policy filters". |
 | `server_name` / `server_version` | never | `"fermix"` / release version | Cosmetic, surfaces in MCP client UI. |
 | `request_timeout_ms` | never | `30000` (Hermes default) | Wire timeout for `handle_request/2`. Capability execution continues after timeout; only the client reply is dropped. Raise when exposing long-running tools. |
-| `[mcp.inbound.tools.<name>] exposed` | never | absent (default gate applies) | `true` force-includes (bypasses every gate including `requires_approval?`); `false` force-excludes. The **only** per-tool opt-in keyword. |
+| `[mcp.inbound.tools.<name>] exposed` | never | absent (default gate applies) | `true` force-includes (bypasses every gate including `hidden_from_agent?`); `false` force-excludes. The **only** per-tool opt-in keyword. |
 | `[mcp.inbound.tools.<name>] description_override` | never | uses `Capability.description` | Cosmetic. Does not change the underlying capability. |
 | `[mcp.inbound.http] path` | `transport = "streamable_http"` | `"/mcp"` | Mount point on the existing Phoenix endpoint. |
 | `[mcp.inbound.http] auth_token` | `transport = "streamable_http"` | _required_ | Boot fails if HTTP transport is enabled and this key is unset. |
@@ -1038,7 +1038,7 @@ Same staged-and-reversible approach as M4.9. Compile + tests + credo green betwe
 - Add `FermixCore.MCP.Inbound.Config` (TOML parser + validation + `$env:` resolution).
 - Add `FermixCore.MCP.Inbound.Exposure` with the full filter from §4.2.
 - Wire `Setup.ConfigStore.apply_mcp_config/0` to also load `[mcp.inbound]` into `Application.put_env(:fermix_core, :mcp_inbound, ...)`.
-- Tests: every Exposure gate in isolation (enabled/disabled, each kind filter, each policy_class filter, requires_approval?, allowed/denied lists, per-tool override force-expose / force-hide / description_override, kind+policy+requires_approval composition, malformed TOML raises loud).
+- Tests: every Exposure gate in isolation (enabled/disabled, each kind filter, each policy_class filter, hidden_from_agent?, allowed/denied lists, per-tool override force-expose / force-hide / description_override, kind+policy+hidden_from_agent? composition, malformed TOML raises loud).
 
 **Ship gate:** All exposure rules pinned by tests. No transport, no Hermes, no runtime change. Verifiable by reading `Application.get_env(:fermix_core, :mcp_inbound, [])` after a boot with an example TOML.
 
@@ -1070,7 +1070,7 @@ Same staged-and-reversible approach as M4.9. Compile + tests + credo green betwe
 - Add `Fermix.CLI.Daemon.Client.probe/0` (200ms timeout, returns `:running | :not_running`).
 - Implement `CapabilityPort.DaemonProxy` with both halves: `list_capabilities/0` sends a `:mcp_inbound_list` request over the existing control socket; `execute_capability/3` sends `:mcp_inbound_execute`. Both halves handle `:daemon_unavailable` uniformly (one in-flight request to a now-dead socket → `{:error, :daemon_unavailable}`).
 - Add the two daemon socket handlers (mirrors the existing `:status`, `:capabilities`, etc. pattern in `Fermix.CLI.Daemon`):
-  - `:mcp_inbound_list` — runs `Exposure.expose_for_inbound(CapabilityRegistry.list(), InboundConfig.current())` and returns the capability list (JSON-serializable subset: name, description, parameters, kind, policy_class, requires_approval?, metadata). No raw `%Capability{}` over the socket — keep the wire decoupled from the struct shape.
+  - `:mcp_inbound_list` — runs `Exposure.expose_for_inbound(CapabilityRegistry.list(), InboundConfig.current())` and returns the capability list (JSON-serializable subset: name, description, parameters, kind, policy_class, hidden_from_agent?, metadata). No raw `%Capability{}` over the socket — keep the wire decoupled from the struct shape.
   - `:mcp_inbound_execute` — looks up the capability by name, re-applies `Exposure.expose_for_inbound/2`, calls `Capability.execute/3`. Returns the result tuple.
 - Tests: `fermix mcp serve` end-to-end with daemon-up (both `tools/list` and `tools/call` proxy through the daemon) and daemon-down (Local mode reads from this process's own registry). MCP client (a `Hermes.Client.Base` with `Hermes.Transport.STDIO` pointed at our binary) round-trips a session. `CapabilityPort.DaemonProxy` handles `:daemon_unavailable` for both calls cleanly when the daemon disappears mid-session. The list returned in daemon-proxy mode exactly matches what an HTTP-transport client would see from the same daemon (no drift between transports).
 
@@ -1159,10 +1159,10 @@ Recorded fixtures (table-driven tests in `apps/fermix_core/test/fermix_core/mcp/
 - [ ] Inbound disabled returns `[]` regardless of registry contents.
 - [ ] Each `kind` filter (every combination of `[:builtin, :skill, :mcp]`). Skill-by-default is excluded; pin this explicitly.
 - [ ] Each `policy_class` filter (every combination of `[:read_only, :read_write, :exec, :network, :external_api]`).
-- [ ] `requires_approval?: true` hidden by default and stays hidden under any kind/policy-class change. Only `exposed = true` lets it through.
+- [ ] `hidden_from_agent?: true` hidden by default and stays hidden under any kind/policy-class change. Only `exposed = true` lets it through.
 - [ ] `allowed_tools = []` is no-op; non-empty is exact allowlist (other tools dropped even if they pass kind+policy).
 - [ ] `denied_tools` removes a tool that would otherwise pass.
-- [ ] Per-tool override `exposed: true` force-exposes despite failing kind+policy+`requires_approval?` — the single opt-in mechanism.
+- [ ] Per-tool override `exposed: true` force-exposes despite failing kind+policy+`hidden_from_agent?` — the single opt-in mechanism.
 - [ ] Per-tool override `exposed: false` force-hides despite passing kind+policy.
 - [ ] Order pinned: `exposed: true` short-circuits **before** any other gate; `exposed: false` short-circuits immediately.
 - [ ] `description_override` rewrites the MCP descriptor description; the underlying `Capability.description` is unchanged.
@@ -1198,6 +1198,6 @@ Concrete next-step milestones this design unlocks but does not deliver:
 - **Inbound prompts (`prompts/list`, `prompts/get`).** Expose skill bodies as Claude-Desktop slash commands. Each skill becomes `fermix:skill:<name>`. The MCP client renders the skill prompt with parameter inputs. **~3-4 days, depends on resources.**
 - **`tools/list_changed` notifications.** When `CapabilityRegistry` changes (skill hot-reload, new outbound MCP server's tools registering), broadcast to connected inbound sessions so they refresh their tool list. **~1-2 days.**
 - **Hot-reload of inbound config.** `fermix mcp inbound reload` daemon socket method that re-reads `[mcp.inbound]` from disk and refreshes the Hermes server's exposure filter without restart. **~2 days, depends on the existing reseed pattern from M7+.**
-- **Approval-surface exposure (M10 territory).** Once M10 ships the approval queue (the user-facing surface for `requires_approval?: true` capabilities), expose `permissions_list_open` / `permissions_respond` as MCP tools so an external agent can drive Fermix's approval gate. The shape hermes-agent landed on (`mcp_serve.py:823-857`) is a reasonable port target. **Blocked on M10 — the approval store doesn't exist yet.**
+- **Approval-surface exposure (M10 territory).** Once M10 ships the approval queue (the user-facing surface for `hidden_from_agent?: true` capabilities), expose `permissions_list_open` / `permissions_respond` as MCP tools so an external agent can drive Fermix's approval gate. The shape hermes-agent landed on (`mcp_serve.py:823-857`) is a reasonable port target. **Blocked on M10 — the approval store doesn't exist yet.**
 - **Per-user inbound auth + ACLs (M10).** Multi-token: each token maps to a policy filter. Token rotation, audit per token, per-token rate limits, per-token capability subset. **M10 territory; this milestone surfaces the static gates that M10 composes on top of.**
 - **mTLS / OAuth for HTTP transport.** Bearer is the v1 posture. mTLS and OAuth are M10.

@@ -136,11 +136,11 @@ M4.9 capabilities already carry:
 
 - `policy_class`: `:read_only`, `:read_write`, `:exec`, `:network`, or
   `:external_api`
-- `requires_approval?`
+- `hidden_from_agent?`
 
 Realtime tool exposure should reuse `FermixCore.Capabilities.Registry.list/2`
 with `trust: :third_party`, `kind: :builtin | :skill | :mcp` as needed, and
-`include_approval_required?: false`. The third-party trust preset is already the
+`include_hidden?: false`. The third-party trust preset is already the
 read-only baseline; the design must not duplicate that policy literal.
 
 ## 4. Product Contract
@@ -576,7 +576,7 @@ Default V1 selection:
 CapabilityRegistry.list(
   registry,
   trust: :third_party,
-  include_approval_required?: false
+  include_hidden?: false
 )
 ```
 
@@ -933,7 +933,7 @@ post-turn fact extraction. Realtime metadata should distinguish:
 
 Realtime tools use the same `Capability` structs as normal turns. The model sees
 only the selected tool schema. Internal fields such as `policy_class`,
-`requires_approval?`, and executor remain daemon-side.
+`hidden_from_agent?`, and executor remain daemon-side.
 
 V1 default tool set should be conservative:
 

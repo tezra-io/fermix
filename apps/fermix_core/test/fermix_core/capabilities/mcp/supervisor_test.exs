@@ -107,7 +107,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     %{cap_registry: cap_registry, suffix: suffix}
   end
 
-  test "boots a healthy server and exposes its approved tools as capabilities", %{
+  test "boots a healthy server and exposes its discovered tools as capabilities", %{
     cap_registry: cap_registry,
     suffix: suffix
   } do
@@ -121,7 +121,6 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            servers: [
              %{
                name: "github",
-               approved?: true,
                discoverer: HappyDiscoverer,
                caller: StubCaller
              }
@@ -157,13 +156,11 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         servers: [
           %{
             name: "github",
-            approved?: true,
             discoverer: HappyDiscoverer,
             caller: StubCaller
           },
           %{
             name: "broken",
-            approved?: true,
             discoverer: SadDiscoverer,
             caller: StubCaller
           }
@@ -197,7 +194,6 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            servers: [
              %{
                name: "github",
-               approved?: true,
                discoverer: HappyDiscoverer,
                caller: StubCaller,
                command: "npx",
@@ -241,7 +237,6 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            servers: [
              %{
                name: "github",
-               approved?: true,
                discoverer: HappyDiscoverer,
                caller: StubCaller,
                command: "npx",
@@ -277,7 +272,6 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            servers: [
              %{
                name: "github",
-               approved?: true,
                discoverer: HappyDiscoverer,
                caller: StubCaller,
                command: "npx",
@@ -344,7 +338,6 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            servers: [
              %{
                name: "github",
-               approved?: true,
                discoverer: HappyDiscoverer,
                caller: StubCaller,
                reporter: self()

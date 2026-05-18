@@ -10,7 +10,7 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       assert cap.kind == :builtin
       assert cap.name == "shell"
       assert cap.policy_class == :exec
-      assert cap.requires_approval? == false
+      assert cap.hidden_from_agent? == false
       assert cap.executor == {FermixCore.Tools.Shell, :execute, []}
       assert cap.metadata.tool_module == FermixCore.Tools.Shell
       assert cap.metadata.when_to_use =~ "shell command"

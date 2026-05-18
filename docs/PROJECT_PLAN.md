@@ -674,7 +674,7 @@ defmodule FermixCore.Security.Policy do
   def enforce(operation, tool_name, context) do
     cond do
       always_allowed?(tool_name) -> :ok
-      requires_approval?(operation, tool_name) -> {:needs_approval, reason}
+      hidden_from_agent?(operation, tool_name) -> {:needs_approval, reason}
       blocked?(tool_name) -> {:error, "Tool #{tool_name} is blocked"}
       true -> :ok
     end
