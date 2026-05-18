@@ -129,9 +129,11 @@ defmodule FermixChannels.Slack do
   end
 
   defp authorized_sender?(event) do
+    # Audit F-02: empty allowlist denies everyone. Operators must configure
+    # owner_user_id (auto-populates the allowlist) or set
+    # fermix_channels.slack.allowed_user_ids explicitly.
     user_id = Map.get(event, "user")
-    allowed = allowed_user_ids()
-    allowed == [] or user_id in allowed
+    user_id in allowed_user_ids()
   end
 
   defp build_message(event, payload) do

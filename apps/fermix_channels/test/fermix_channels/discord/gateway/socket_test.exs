@@ -16,7 +16,9 @@ defmodule FermixChannels.Discord.Gateway.SocketTest do
       enabled: true,
       mode: :gateway,
       bot_token: "discord-bot-token",
-      bot_user_id: "999"
+      bot_user_id: "999",
+      # F-02: empty allowlist now denies.
+      allowed_user_ids: ["111"]
     )
 
     on_exit(fn -> Application.delete_env(:fermix_channels, :discord) end)

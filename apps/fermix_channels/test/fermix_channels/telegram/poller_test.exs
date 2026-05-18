@@ -12,7 +12,8 @@ defmodule FermixChannels.Telegram.PollerTest do
 
     Application.put_env(:fermix_channels, :telegram,
       bot_token: "test-bot-token",
-      allowed_user_ids: []
+      # F-02: empty allowlist now denies; poller tests need an explicit allow.
+      allowed_user_ids: ["111"]
     )
 
     on_exit(fn ->
