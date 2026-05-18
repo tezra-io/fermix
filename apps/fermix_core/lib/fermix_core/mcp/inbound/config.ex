@@ -38,10 +38,18 @@ defmodule FermixCore.MCP.Inbound.Config do
     "external_api" => :external_api
   }
 
+  # Audit F-07: defaults are now read-only-only and deny-all-by-tool-name.
+  # Inbound MCP exposes Fermix's tools to external MCP clients (Claude
+  # Desktop, Cursor, …). Older defaults exposed every `:read_only` and
+  # `:read_write` builtin out of the box; `file_write`, `file_edit`,
+  # `git_write`, `memory_store`, `schedule_job`, etc. classify as
+  # `:read_write` and would have been wide open the moment the (currently
+  # unwired) supervisor landed. Tighten now so the latent surface can't
+  # bite when wired later.
   defstruct enabled?: false,
             transport: :stdio,
             expose_kinds: [:builtin],
-            expose_policy_classes: [:read_only, :read_write],
+            expose_policy_classes: [:read_only],
             allowed_tools: [],
             denied_tools: [],
             tool_overrides: %{},

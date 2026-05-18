@@ -30,7 +30,7 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
       assert Exposure.expose_for_inbound([cap("file_read")], config) == []
     end
 
-    test "default gate exposes builtin read and write capabilities only" do
+    test "default gate exposes nothing without an explicit allowed_tools entry (F-07)" do
       capabilities = [
         cap("file_read", kind: :builtin, policy_class: :read_only),
         cap("file_write", kind: :builtin, policy_class: :read_write),
@@ -41,10 +41,22 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
 
       config = %Config{enabled?: true}
 
-      assert capabilities |> Exposure.expose_for_inbound(config) |> names() == [
-               "file_read",
-               "file_write"
-             ]
+      assert Exposure.expose_for_inbound(capabilities, config) == []
+    end
+
+    test "default gate exposes only :read_only builtins explicitly listed (F-07)" do
+      capabilities = [
+        cap("file_read", kind: :builtin, policy_class: :read_only),
+        cap("file_write", kind: :builtin, policy_class: :read_write),
+        cap("shell", kind: :builtin, policy_class: :exec)
+      ]
+
+      config = %Config{enabled?: true, allowed_tools: ["file_read", "file_write", "shell"]}
+
+      # Even with file_write and shell allowlisted, the default
+      # policy_classes is [:read_only] — operator must opt in to
+      # :read_write explicitly.
+      assert capabilities |> Exposure.expose_for_inbound(config) |> names() == ["file_read"]
     end
 
     test "hidden_from_agent? capabilities are hidden unless explicitly exposed" do
@@ -53,12 +65,13 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
         cap("hidden", hidden_from_agent?: true)
       ]
 
-      config = %Config{enabled?: true}
+      config = %Config{enabled?: true, allowed_tools: ["safe", "hidden"]}
 
       assert capabilities |> Exposure.expose_for_inbound(config) |> names() == ["safe"]
 
       config = %Config{
         enabled?: true,
+        allowed_tools: ["safe"],
         tool_overrides: %{"hidden" => %{exposed: true}}
       }
 
@@ -74,6 +87,7 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
 
       config = %Config{
         enabled?: true,
+        expose_policy_classes: [:read_only, :read_write],
         allowed_tools: ["a", "b"],
         denied_tools: ["b"]
       }
