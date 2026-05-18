@@ -5,6 +5,13 @@ struct FermixPetApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var state = CompanionState()
 
+    init() {
+        // Preload mascot PNGs before SwiftUI builds the first view body.
+        // App.init runs on the main actor before any view is evaluated,
+        // so the cache is hot by the time MascotImage queries it.
+        PetAssetCache.shared.preload()
+    }
+
     var body: some Scene {
         WindowGroup {
             PetView()

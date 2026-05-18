@@ -21,6 +21,10 @@ final class CompanionState: ObservableObject {
     @Published private(set) var muted = false
     @Published private(set) var statusText = "offline"
 
+    /// Normalized RMS (0...1) of the model's voice output, updated as
+    /// PCM chunks are scheduled for playback. Drives the speaking pulse.
+    @Published private(set) var audioLevel: Float = 0
+
     private let socket = RealtimeSocketClient()
     private let audio = AudioController()
     private let socketPath: String
@@ -33,6 +37,13 @@ final class CompanionState: ObservableObject {
         }
         socket.onClose = { [weak self] in
             Task { @MainActor in self?.handlePeerClose() }
+        }
+        audio.onOutputLevel = { [weak self] level in
+            // AudioController dispatches to main; assume isolation to
+            // write the @Published value without a Task hop.
+            MainActor.assumeIsolated {
+                self?.audioLevel = level
+            }
         }
 
         NotificationCenter.default.addObserver(

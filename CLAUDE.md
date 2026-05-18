@@ -73,6 +73,7 @@ mix format --check-formatted
 - `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` — M7+ design (draft) — `Capability.Backend` behaviour, `[fermix_core.tools.<name>]` TOML, per-tool API-key wizard surface, `BuiltinSeeder.reseed/1`, `http_request` tool with `allowed_domains`
 - `docs/MILESTONE_9_1_REALTIME_VOICE.md` — M9.1 design (shipped) — native macOS floating voice companion backed by OpenAI Realtime, daemon-owned tools/memory/traces, click-to-talk first, always-listening later
 - `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` — M9.2 design (draft reviewed) — full-duplex cleanup for macOS AEC, Realtime API shape, setup prompts, and removed legacy voice mode knobs
+- `docs/MILESTONE_9_3_PET_ANIMATION.md` — M9.3 design (draft) — pure-SwiftUI animation pass for FermixPet: `TimelineView` sine motion, PNG cache, expression cross-fade, audio-RMS speaking pulse, blink, one-shot event reactions
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.

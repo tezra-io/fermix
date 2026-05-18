@@ -1,6 +1,6 @@
 import Foundation
 
-enum PetExpression: String {
+enum PetExpression: String, CaseIterable {
     case idle
     case listening
     case thinking
