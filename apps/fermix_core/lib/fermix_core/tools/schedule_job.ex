@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.ScheduleJob do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.DeliveryDefaults
   alias FermixCore.Jobs.Registry
   alias FermixCore.Tools.JobRegistrySupport, as: Support
@@ -46,8 +47,12 @@ defmodule FermixCore.Tools.ScheduleJob do
           description:
             "Optional ISO8601 UTC datetime for temporary jobs. When reached, Fermix stops running the job and marks it expired."
         },
-        allowed_tools: %{type: "array", items: %{type: "string"}},
-        capability_policy: %{type: "array", items: %{type: "string"}},
+        allowed_tools: %{
+          type: "array",
+          items: %{type: "string"},
+          description:
+            "Optional narrowing list of tool names the future run may call. Names must be a subset of the tools available to the caller now; unknown names are rejected. Capability policy is derived from the caller — the model cannot widen the future run's policy class."
+        },
         timeout_seconds: %{
           type: "integer",
           minimum: 1,
@@ -116,22 +121,25 @@ defmodule FermixCore.Tools.ScheduleJob do
          {:ok, inactivity_timeout_seconds} <-
            Support.optional_positive_integer(args, "inactivity_timeout_seconds"),
          {:ok, expires_at} <- Support.optional_datetime(args, "expires_at"),
-         {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context) do
+         {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context),
+         {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context) do
       attrs = %{
         name: name,
         schedule: schedule,
         task_prompt: task,
         description: Support.optional_string(args, "description"),
         timezone: Support.optional_string(args, "timezone", "UTC"),
-        allowed_tools: Support.optional_list(args, "allowed_tools"),
-        capability_policy: Support.optional_list(args, "capability_policy"),
+        allowed_tools: allowed_tools,
+        capability_policy: [],
         timeout_seconds: timeout_seconds,
         inactivity_timeout_seconds: inactivity_timeout_seconds,
         expires_at: expires_at,
         delivery_mode: delivery_mode,
         delivery_target: delivery_target,
         created_by_agent_id: Map.get(context, :memory_agent_id, "main"),
-        created_by_session_id: origin_session_id(context)
+        created_by_session_id: origin_session_id(context),
+        created_by_channel: Map.get(context, :source_channel),
+        created_by_trust: encode_trust(Map.get(context, :source_trust))
       }
 
       case Registry.create_job(attrs, repo: Support.repo(context)) do
@@ -143,6 +151,44 @@ defmodule FermixCore.Tools.ScheduleJob do
       {:error, reason} -> Support.error(reason)
     end
   end
+
+  # Audit F-08: tool names in `allowed_tools` must be a subset of the
+  # capabilities the caller can currently see. A remote-channel main-agent
+  # turn cannot smuggle `shell` or `web_fetch` into a future scheduled run.
+  defp caller_scoped_allowed_tools(args, context) do
+    requested = Support.optional_list(args, "allowed_tools")
+
+    if requested == [] do
+      {:ok, []}
+    else
+      visible = caller_visible_tool_names(context)
+
+      case Enum.reject(requested, &(&1 in visible)) do
+        [] -> {:ok, requested}
+        unknown -> {:error, "tools not available to the caller: #{Enum.join(unknown, ", ")}"}
+      end
+    end
+  end
+
+  defp caller_visible_tool_names(context) do
+    registry =
+      Map.get(context, :capability_registry) ||
+        FermixCore.Capabilities.Registry
+
+    opts =
+      []
+      |> maybe_put(:trust, Map.get(context, :source_trust))
+
+    registry
+    |> CapabilityRegistry.list(opts)
+    |> Enum.map(& &1.name)
+  end
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp encode_trust(nil), do: "core"
+  defp encode_trust(trust) when is_atom(trust), do: Atom.to_string(trust)
 
   defp origin_session_id(%{conversation_key: {channel, chat_id, thread_scope}}) do
     Enum.map_join([channel, chat_id, thread_scope], ":", &target_part/1)
