@@ -4,18 +4,14 @@ import SwiftUI
 struct PetView: View {
     @EnvironmentObject private var state: CompanionState
     @State private var hovered = false
-    @State private var animationPhase = false
 
     var body: some View {
         VStack(spacing: 2) {
             ZStack {
-                MascotImage(expression: state.petExpression, breathing: animationPhase)
+                AnimatedMascot()
                     .frame(width: 116, height: 108)
-                    .scaleEffect(mascotScale)
-                    .offset(y: mascotOffset)
-                    .rotationEffect(mascotRotation)
                     .compositingGroup()
-                    .shadow(color: glowColor, radius: glowRadius, y: 6)
+                    .shadow(color: glowColor, radius: 12, y: 6)
                     .animation(.easeInOut(duration: 0.7), value: state.mode)
                     .contentShape(Rectangle())
                     .onTapGesture {
@@ -38,10 +34,6 @@ struct PetView: View {
                 hovered = inside
             }
         }
-        .onAppear {
-            animationPhase = true
-        }
-        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: animationPhase)
         .contextMenu {
             Button(state.connected ? "Disconnect" : "Connect") {
                 state.toggleConnection()
@@ -83,41 +75,6 @@ struct PetView: View {
         hovered || state.callActive || state.mode == .speaking
     }
 
-    private var mascotScale: CGFloat {
-        switch state.mode {
-        case .listening, .muted:
-            return animationPhase ? 1.035 : 0.99
-        case .speaking:
-            return animationPhase ? 1.02 : 0.985
-        case .thinking, .error:
-            return 1.0
-        default:
-            return animationPhase ? 1.008 : 0.995
-        }
-    }
-
-    private var mascotOffset: CGFloat {
-        switch state.mode {
-        case .offline:
-            return 3
-        case .speaking:
-            return animationPhase ? -3 : 1
-        default:
-            return animationPhase ? -2 : 1
-        }
-    }
-
-    private var mascotRotation: Angle {
-        switch state.mode {
-        case .thinking:
-            return .degrees(animationPhase ? 1.4 : -1.4)
-        case .error:
-            return .degrees(animationPhase ? -1.6 : 1.6)
-        default:
-            return .degrees(0)
-        }
-    }
-
     private var glowColor: Color {
         switch state.mode {
         case .listening:
@@ -130,24 +87,70 @@ struct PetView: View {
             return Color.indigo.opacity(0.34)
         case .error:
             return Color.blue.opacity(0.22)
-        default:
+        case .offline, .idle, .thinking:
             return Color.black.opacity(0.18)
         }
     }
+}
 
-    private var glowRadius: CGFloat {
-        switch state.mode {
-        case .listening, .muted, .speaking:
-            return animationPhase ? 16 : 10
-        default:
-            return 12
+/// Time-driven mascot: a single `TimelineView` drives sine motion on all
+/// three axes (breath, bob, sway) plus an audio-RMS speaking pulse, and
+/// wraps a `MascotCrossfade` so expression changes fade rather than swap.
+private struct AnimatedMascot: View {
+    @EnvironmentObject var state: CompanionState
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+            let t = context.date.timeIntervalSinceReferenceDate
+            MascotCrossfade(expression: state.petExpression)
+                .scaleEffect(scale(at: t))
+                .offset(y: offset(at: t))
+                .rotationEffect(.degrees(rotation(at: t)))
         }
+    }
+
+    private func scale(at t: TimeInterval) -> CGFloat {
+        let mode = state.mode
+        let breath = MascotMotion.breathAmp(mode)
+            * sin(2 * .pi * t / MascotMotion.breathPeriod(mode))
+        let speakingPulse = mode == .speaking
+            ? Double(0.06 * state.audioLevel)
+            : 0
+        return CGFloat(1 + breath + speakingPulse)
+    }
+
+    private func offset(at t: TimeInterval) -> CGFloat {
+        let mode = state.mode
+        let amp = MascotMotion.bobAmp(mode)
+        let period = MascotMotion.bobPeriod(mode)
+        return CGFloat(-amp * sin(2 * .pi * t / period))
+    }
+
+    private func rotation(at t: TimeInterval) -> Double {
+        MascotMotion.swayAmp(state.mode) * sin(2 * .pi * t / 4.2)
+    }
+}
+
+/// Cross-fades the four mascot expressions with a brief scale pop instead
+/// of hard-swapping the PNG stack on mode change.
+private struct MascotCrossfade: View {
+    let expression: PetExpression
+
+    var body: some View {
+        ZStack {
+            ForEach(PetExpression.allCases, id: \.self) { expr in
+                if expr == expression {
+                    MascotImage(expression: expr)
+                        .transition(.opacity.combined(with: .scale(scale: 0.97)))
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.28), value: expression)
     }
 }
 
 private struct MascotImage: View {
     let expression: PetExpression
-    let breathing: Bool
 
     var body: some View {
         if hasLayers {
@@ -168,19 +171,18 @@ private struct MascotImage: View {
                 layer(.body)
                 layer(.face)
             }
-            .scaleEffect(breathing ? 1.003 : 0.999)
 
             layer(.decor)
-                .opacity(breathing ? 0.9 : 0.5)
+                .opacity(0.75)
 
             ball
-                .offset(y: breathing ? -16 : -15)
+                .offset(y: -15)
         }
     }
 
     @ViewBuilder
     private func layer(_ which: PetLayer) -> some View {
-        if let img = nsImage(named: expression.layerAssetName(which)) {
+        if let img = PetAssetCache.shared.image(expression.layerAssetName(which)) {
             Image(nsImage: img)
                 .resizable()
                 .interpolation(.high)
@@ -190,7 +192,7 @@ private struct MascotImage: View {
 
     @ViewBuilder
     private var ball: some View {
-        if let img = nsImage(named: "pet_ball") {
+        if let img = PetAssetCache.shared.image("pet_ball") {
             Image(nsImage: img)
                 .resizable()
                 .interpolation(.high)
@@ -199,14 +201,7 @@ private struct MascotImage: View {
     }
 
     private var hasLayers: Bool {
-        nsImage(named: expression.layerAssetName(.body)) != nil
-    }
-
-    private func nsImage(named name: String) -> NSImage? {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "png") else {
-            return nil
-        }
-        return NSImage(contentsOf: url)
+        PetAssetCache.shared.image(expression.layerAssetName(.body)) != nil
     }
 }
 

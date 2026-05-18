@@ -40,6 +40,10 @@ final class AudioController {
     private let chunkHandlerLock = NSLock()
     private var onChunkHandler: ((Data) -> Void)?
 
+    /// Invoked on the main thread with the RMS amplitude (0...1) of each
+    /// played PCM chunk. Drives the mascot's speaking-pulse visual.
+    var onOutputLevel: ((Float) -> Void)?
+
     var isPlayingBack: Bool {
         playbackCounterLock.lock()
         defer { playbackCounterLock.unlock() }
@@ -129,10 +133,23 @@ final class AudioController {
             return
         }
 
-        guard AVCaptureDevice.default(for: .audio) != nil else {
-            throw CaptureError.noInputDevice
-        }
-
+        // Device-availability check via AVAudioEngine's Core Audio-backed
+        // input format, NOT AVCaptureDevice.default(for: .audio).
+        //
+        // On macOS, AVCaptureDevice (AVFoundation capture framework) and
+        // AVAudioEngine.inputNode (Core Audio HAL) are different subsystems
+        // and DISAGREE about which devices exist. AVCaptureDevice.default
+        // can return nil — e.g. when no AVFoundation-classified capture
+        // device is the system default — while AVAudioEngine.inputNode
+        // still has a valid 44100/2ch (or similar) input from a USB or
+        // Bluetooth interface visible to Core Audio. The engine is what
+        // actually captures, so its format is the authoritative signal.
+        //
+        // We engage the engine first (which lazily binds to the current
+        // Core Audio input) and only fall through to noInputDevice if the
+        // engine itself reports no usable format. The auth gate is upstream
+        // in beginStreaming/warmCapture; this guard only fires when there
+        // is literally no mic Core Audio can see.
         let input = engine.inputNode
         var format = Self.usableInputFormat(from: input)
 
@@ -142,10 +159,7 @@ final class AudioController {
         }
 
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw CaptureError.invalidInputFormat(
-                sampleRate: format.sampleRate,
-                channels: format.channelCount
-            )
+            throw CaptureError.noInputDevice
         }
 
         guard let outputFormat = AVAudioFormat(
@@ -265,13 +279,19 @@ final class AudioController {
 
     func diagnostics() -> String {
         let auth = Self.authorizationDescription(AVCaptureDevice.authorizationStatus(for: .audio))
-        let device = AVCaptureDevice.default(for: .audio)?.localizedName ?? "none"
+        // AVFoundation's view (may say none on macOS even when Core Audio
+        // sees a device — see ensureCaptureRunning for the API mismatch).
+        let avfDevice = AVCaptureDevice.default(for: .audio)?.localizedName ?? "none"
+        // Core Audio HAL's view via AVAudioEngine — this is what actually
+        // backs capture. A valid sample rate + channel count means the
+        // engine has a usable input regardless of what AVFoundation reports.
         let input = engine.inputNode
         let inputFormat = Self.usableInputFormat(from: input)
         let outputFormat = engine.outputNode.outputFormat(forBus: 0)
         let voiceProcessing = input.isVoiceProcessingEnabled ? "enabled" : "disabled"
+        let engineHasInput = inputFormat.sampleRate > 0 && inputFormat.channelCount > 0
 
-        return "auth=\(auth), inputDevice=\(device), inputSampleRate=\(inputFormat.sampleRate), inputChannels=\(inputFormat.channelCount), outputSampleRate=\(outputFormat.sampleRate), outputChannels=\(outputFormat.channelCount), voiceProcessing=\(voiceProcessing), engineRunning=\(engine.isRunning)"
+        return "auth=\(auth), avfDevice=\(avfDevice), engineHasInput=\(engineHasInput), inputSampleRate=\(inputFormat.sampleRate), inputChannels=\(inputFormat.channelCount), outputSampleRate=\(outputFormat.sampleRate), outputChannels=\(outputFormat.channelCount), voiceProcessing=\(voiceProcessing), engineRunning=\(engine.isRunning)"
     }
 
     func play(base64PCM16 encoded: String) {
@@ -288,6 +308,7 @@ final class AudioController {
         buffer.frameLength = frameCount
 
         Self.fillFloatBuffer(buffer, fromPCM16: data)
+        emitOutputLevel(from: data)
 
         if !engine.isRunning {
             do {
@@ -314,6 +335,33 @@ final class AudioController {
         if !wasPlaying {
             player.play()
             utteranceAnchorSampleTime = currentPlayerSampleTime() ?? 0
+        }
+    }
+
+    /// Compute RMS over the raw PCM16 chunk and dispatch to the main
+    /// thread so SwiftUI views observing `CompanionState.audioLevel` see
+    /// the update. Cheap: ~512 multiply-adds per chunk for a 24kHz Realtime
+    /// frame.
+    private func emitOutputLevel(from data: Data) {
+        guard let callback = onOutputLevel else { return }
+        let count = data.count / MemoryLayout<Int16>.size
+        guard count > 0 else { return }
+
+        let rms = data.withUnsafeBytes { raw -> Float in
+            guard let ptr = raw.baseAddress?.assumingMemoryBound(to: Int16.self) else {
+                return 0
+            }
+            var sumSquares: Float = 0
+            let scale: Float = 1.0 / Float(Int16.max)
+            for index in 0..<count {
+                let sample = Float(ptr[index]) * scale
+                sumSquares += sample * sample
+            }
+            return (sumSquares / Float(count)).squareRoot()
+        }
+
+        DispatchQueue.main.async {
+            callback(rms)
         }
     }
 
