@@ -17,7 +17,7 @@ defmodule FermixWebWeb.Router do
   scope "/", FermixWebWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    live "/", HomeLive
     live "/setup", SetupLive
   end
 

@@ -28,6 +28,17 @@ defmodule FermixWebWeb.PageControllerTest do
              failed_recent: 0,
              status: :ready,
              error: nil
+           },
+           realtime: %{
+             enabled: true,
+             status: :ready,
+             provider: :openai,
+             model: "gpt-realtime-2",
+             socket_path: "/Users/sujshe/.fermix-dev/realtime.sock",
+             socket_alive: true,
+             active_sessions: 0,
+             active_clients: 1,
+             companion_connected?: true
            }
          },
          agents: %{
@@ -137,6 +148,10 @@ defmodule FermixWebWeb.PageControllerTest do
     assert body =~ "Scheduled jobs"
     assert body =~ "Daily Digest"
     assert body =~ "gpt-5.4-mini"
+    assert body =~ "Realtime voice"
+    assert body =~ "gpt-realtime-2"
+    assert body =~ "Active sessions"
+    assert body =~ "realtime.sock"
     assert body =~ "Open setup"
     assert body =~ ~s(href="/health/ready?pretty=1")
     assert body =~ ~s(href="/health/live?pretty=1")
