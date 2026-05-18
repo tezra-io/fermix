@@ -7,6 +7,7 @@ defmodule FermixCore.Tools.Browser do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.CommandRunner
 
   @default_timeout_ms 30_000
   @valid_actions ~w(snapshot navigate click fill screenshot)
@@ -186,20 +187,21 @@ defmodule FermixCore.Tools.Browser do
   defp run_action(binary, action, args, timeout) do
     cmd_args = build_args(action, args)
 
-    task =
-      Task.async(fn ->
-        System.cmd(binary, cmd_args, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, timeout) || Task.shutdown(task) do
-      {:ok, {output, 0}} ->
+    case CommandRunner.run(binary, cmd_args, timeout_ms: timeout) do
+      {:ok, %{exit: 0, stdout: output}} ->
         {:ok, Tool.success(output)}
 
-      {:ok, {output, exit_code}} ->
-        {:ok, Tool.error("agent-browser failed (exit code #{exit_code}):\n#{output}")}
+      {:ok, %{exit: code, stdout: output}} ->
+        {:ok, Tool.error("agent-browser failed (exit code #{code}):\n#{output}")}
 
-      nil ->
-        {:ok, Tool.error("agent-browser timed out after #{timeout}ms")}
+      {:error, {:timeout, ms}} ->
+        {:ok, Tool.error("agent-browser timed out after #{ms}ms")}
+
+      {:error, {:executable_not_found, path}} ->
+        {:ok, Tool.error("agent-browser not found at #{path}")}
+
+      {:error, reason} ->
+        {:ok, Tool.error("agent-browser failed: #{inspect(reason)}")}
     end
   end
 
