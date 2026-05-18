@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.GitRead do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Sandbox
   alias FermixCore.Tools.GitCommand
   alias FermixCore.Tools.Support
 
@@ -54,15 +55,16 @@ defmodule FermixCore.Tools.GitRead do
 
   @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
-    Support.run(name(), context, fn -> do_execute(args) end)
+    Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
-  defp do_execute(args) do
+  defp do_execute(args, context) do
     with {:ok, command} <- Support.required_string(args, "command"),
          :ok <- validate_command(command),
          repo = Map.get(args, "repo", File.cwd!()),
+         {:ok, resolved_repo} <- Sandbox.read_path(repo, :git_read, context),
          git_args = Support.optional_string_list(args, "args"),
-         {:ok, output} <- GitCommand.run(repo, command, git_args) do
+         {:ok, output} <- GitCommand.run(resolved_repo, command, git_args) do
       {:ok, Tool.success(output)}
     else
       {:error, reason} -> Support.error(reason)

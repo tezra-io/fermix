@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.GlobSearch do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Sandbox
   alias FermixCore.Tools.Support
 
   @default_max_results 200
@@ -52,25 +53,34 @@ defmodule FermixCore.Tools.GlobSearch do
 
   @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
-    Support.run(name(), context, fn -> do_execute(args) end)
+    Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
-  defp do_execute(args) do
+  defp do_execute(args, context) do
     with {:ok, pattern} <- Support.required_string(args, "pattern"),
          root = Map.get(args, "path", File.cwd!()),
-         :ok <- Support.validate_path(root) do
+         :ok <- Support.validate_path(root),
+         {:ok, resolved_root} <- Sandbox.read_path(root, :glob_search, context) do
       max_results = Support.optional_integer(args, "max_results", @default_max_results, 1, 1_000)
 
-      root
+      resolved_root
       |> Path.join(pattern)
       |> Path.wildcard(match_dot: true)
       |> Enum.filter(&File.regular?/1)
       |> Enum.map(&Path.expand/1)
+      |> Enum.filter(&sandbox_allows?(&1, context))
       |> Enum.sort()
       |> Enum.take(max_results)
       |> Support.success_json()
     else
       {:error, reason} -> Support.error(reason)
+    end
+  end
+
+  defp sandbox_allows?(path, context) do
+    case Sandbox.read_path(path, :glob_search, context) do
+      {:ok, _resolved} -> true
+      {:error, _reason} -> false
     end
   end
 end
