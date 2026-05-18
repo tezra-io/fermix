@@ -42,4 +42,90 @@ defmodule FermixCore.Tools.GitReadTest do
     assert result.success == false
     assert result.error =~ "unknown_command"
   end
+
+  test "rejects `--no-index` (would read absolute paths outside the repo)", %{
+    context: context,
+    dir: dir
+  } do
+    assert {:ok, result} =
+             GitRead.execute(
+               %{
+                 "command" => "diff",
+                 "repo" => dir,
+                 "args" => ["--no-index", "/etc/passwd", "/etc/group"]
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "--no-index"
+  end
+
+  test "rejects `--git-dir=` (would redirect git's view of the repo)", %{
+    context: context,
+    dir: dir
+  } do
+    assert {:ok, result} =
+             GitRead.execute(
+               %{
+                 "command" => "status",
+                 "repo" => dir,
+                 "args" => ["--git-dir=/some/other/.git"]
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "--git-dir="
+  end
+
+  test "rejects an absolute-path positional arg", %{context: context, dir: dir} do
+    assert {:ok, result} =
+             GitRead.execute(
+               %{"command" => "log", "repo" => dir, "args" => ["/etc/passwd"]},
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "absolute path"
+  end
+
+  test "rejects `..`-bearing positional args", %{context: context, dir: dir} do
+    assert {:ok, result} =
+             GitRead.execute(
+               %{"command" => "log", "repo" => dir, "args" => ["../../etc/passwd"]},
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "outside the repo"
+  end
+
+  test "accepts legitimate flag-style args like --short, --oneline, refs/heads/main", %{
+    context: context,
+    dir: dir
+  } do
+    System.cmd("git", ["init", "--initial-branch=main"], cd: dir)
+    System.cmd("git", ["config", "user.email", "test@example.com"], cd: dir)
+    System.cmd("git", ["config", "user.name", "Test"], cd: dir)
+    File.write!(Path.join(dir, "f.txt"), "hi")
+    System.cmd("git", ["add", "f.txt"], cd: dir)
+    System.cmd("git", ["commit", "-m", "init"], cd: dir)
+
+    assert {:ok, ok_short} =
+             GitRead.execute(
+               %{"command" => "status", "repo" => dir, "args" => ["--short"]},
+               context
+             )
+
+    assert ok_short.success == true
+
+    assert {:ok, ok_log} =
+             GitRead.execute(
+               %{"command" => "log", "repo" => dir, "args" => ["--oneline", "refs/heads/main"]},
+               context
+             )
+
+    assert ok_log.success == true
+  end
 end
