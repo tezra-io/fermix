@@ -73,6 +73,7 @@ defmodule FermixCore.Memory.Admission do
       owner_id: Keyword.fetch!(opts, :owner_id),
       conversation_key: normalize_conversation_key(Keyword.fetch!(opts, :conversation_key)),
       chat_mode: normalize_chat_mode(Keyword.get(opts, :chat_mode, :direct)),
+      source_trust: Keyword.get(opts, :source_trust),
       existing_memories: Keyword.get(opts, :existing_memories, %{}),
       repo: Keyword.get(opts, :repo, Config.repo_server()),
       min_confidence: Keyword.get(opts, :min_confidence, Config.extraction_min_confidence()),
@@ -101,6 +102,7 @@ defmodule FermixCore.Memory.Admission do
   defp normalize_candidate(candidate, ctx) do
     with {:ok, category} <- fetch_candidate_string(candidate, :category),
          true <- MapSet.member?(@valid_categories, category),
+         true <- trust_allows_category?(category, ctx.source_trust),
          {:ok, key} <- fetch_candidate_string(candidate, :key),
          {:ok, value} <- fetch_candidate_string(candidate, :value),
          confidence when confidence >= ctx.min_confidence <- fetch_confidence(candidate),
@@ -204,6 +206,19 @@ defmodule FermixCore.Memory.Admission do
        do: existing_category
 
   defp resolve_category(category, _existing), do: category
+
+  # Audit F-09: remote-low-trust channels (`:third_party`) cannot promote
+  # instruction/correction candidates into durable memory. Those two
+  # categories are the ones that get persisted into prompt files
+  # (`memory_md` / `user_md`) and therefore shape *future* agent behavior;
+  # accepting them from arbitrary inbound prompts is the path the audit
+  # called out. Other trust levels (`:local`, `:core`, `nil`) keep the
+  # full category surface.
+  defp trust_allows_category?(category, :third_party)
+       when category in ["instruction", "correction"],
+       do: false
+
+  defp trust_allows_category?(_category, _trust), do: true
 
   defp prompt_target(category, "owner") do
     cond do

@@ -936,6 +936,10 @@ defmodule FermixCore.Agents.MainAgent do
         owner_id: state.memory_owner_id,
         conversation_key: conversation_key(msg),
         chat_mode: chat_mode(msg),
+        # F-09: forward source trust so the admission gate can refuse to
+        # promote instruction/correction categories from remote-low-trust
+        # channels into the durable prompt context.
+        source_trust: source_trust_for_channel(msg.channel),
         memory_store: state.memory_store,
         scheduler: state.memory_scheduler,
         repo: state.memory_repo,
