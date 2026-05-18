@@ -90,7 +90,11 @@ defmodule FermixCore.MCP.Inbound.SupervisorTest do
       capability("file_read", :builtin)
     ])
 
-    config = %Config{enabled?: true, expose_kinds: [:builtin, :mcp]}
+    config = %Config{
+      enabled?: true,
+      expose_kinds: [:builtin, :mcp],
+      allowed_tools: ["mcp_github_create_issue", "file_read"]
+    }
 
     log =
       capture_log(fn ->

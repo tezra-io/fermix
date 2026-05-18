@@ -56,6 +56,7 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
 
     Application.put_env(:fermix_core, :mcp_inbound, %Config{
       enabled?: true,
+      allowed_tools: ["echo"],
       tool_overrides: %{"echo" => %{description_override: "MCP echo"}}
     })
 
@@ -101,6 +102,7 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
       enabled?: true,
       server_name: "fermix-dev",
       server_version: "9.9.9",
+      allowed_tools: ["echo"],
       tool_overrides: %{"echo" => %{description_override: "Wire echo"}}
     })
 
