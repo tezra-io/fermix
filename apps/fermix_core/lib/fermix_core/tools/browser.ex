@@ -10,7 +10,7 @@ defmodule FermixCore.Tools.Browser do
 
   @default_timeout_ms 30_000
   @valid_actions ~w(snapshot navigate click fill screenshot)
-  @hardcoded_path "/Users/sujshe/.npm-global/bin/agent-browser"
+  @env_var "AGENT_BROWSER_PATH"
 
   @impl true
   @spec name() :: String.t()
@@ -153,14 +153,33 @@ defmodule FermixCore.Tools.Browser do
   end
 
   defp find_binary do
-    case System.find_executable("agent-browser") do
+    case override_binary() || System.find_executable("agent-browser") do
       nil ->
-        if File.exists?(@hardcoded_path),
-          do: {:ok, @hardcoded_path},
-          else: {:error, "agent-browser not found. Install with: npm install -g agent-browser"}
+        {:error,
+         "agent-browser not found on PATH. Install with `npm install -g agent-browser` " <>
+           "or set #{@env_var} to an absolute path."}
 
       path ->
         {:ok, path}
+    end
+  end
+
+  defp override_binary do
+    case System.get_env(@env_var) do
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      path ->
+        if File.exists?(path),
+          do: path,
+          else:
+            raise(
+              ArgumentError,
+              "#{@env_var}=#{inspect(path)} does not exist; set it to an absolute path to agent-browser or unset it to use PATH."
+            )
     end
   end
 
