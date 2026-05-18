@@ -399,7 +399,7 @@ See `docs/MILESTONE_7_ADVANCED_TOOLS.md` for the full design.
 | **`file_edit`** | Unique-anchor string replacement, atomic write | P0 | Port | `src/tools/file_edit.rs` | S |
 | **`glob_search`** | File pattern matching with bounded results | P1 | Port | `src/tools/glob_search.rs` | S |
 | **`content_search`** | Pure-Elixir grep across the workspace | P1 | Port | `src/tools/content_search.rs` | S |
-| **`git_read` / `git_write`** | Two tools, one per `policy_class` band — split because the registry filters at capability level, not per action. `git_push` deferred to M10 (needs `requires_approval?: true`, but the registry strips approval-required capabilities by default and AgentLoop has no opt-in path in M7). | P1 | Port (split) | `src/tools/git_operations.rs` | S |
+| **`git_read` / `git_write`** | Two tools, one per `policy_class` band — split because the registry filters at capability level, not per action. `git_push` deferred to M10 (needs `hidden_from_agent?: true`, but the registry strips approval-required capabilities by default and AgentLoop has no opt-in path in M7). | P1 | Port (split) | `src/tools/git_operations.rs` | S |
 | **`web_fetch`** | HTTP GET + HTML→markdown via Floki, keyless. All outbound URLs (initial + redirects) gated by `NetGuard`. | P0 | Port | `src/tools/web_fetch.rs` | S |
 | **`web_search`** | DuckDuckGo HTML SERP scrape backend, keyless. One backend in M7 — pluggable backends + paid alternatives are the future "Pluggable Capability Backends" milestone. Failure contract is loud (`:rate_limited`, `:parser_changed`), not silent. | P0 | New | `src/tools/web_search_tool.rs` (shape only) | S |
 | **`NetGuard` module** | Shared outbound-network safety contract. Hardcoded "public HTTP(S) only" rules: scheme allowlist, IP-literal block (RFC 1918 + loopback + link-local + IPv6), DNS resolution + recheck of every resolved address, redirect re-validation per hop, sensitive-header redaction. Used by `web_fetch` and `web_search`. | P0 | New | M7 §4.3a | S |
@@ -475,7 +475,7 @@ See `docs/MILESTONE_7_1_CONVERSATION_LIFECYCLE.md` for the full design.
 
 **Goal:** Per-capability backend choice (e.g., `web_search` → Parallel REST | Tavily | DDG-default), API-key wizard surface, `[fermix_core.tools.<name>]` TOML schema with `ConfigStore` round-trip, `BuiltinSeeder.reseed/1` for live re-registration after the wizard writes a key, daemon control-socket `:reseed_builtins` request, doctor probes per backend, **and `http_request` tool** (deferred from M7 because it requires per-tool `[http_request].allowed_domains` config that this milestone provides — see RustyClaw `src/tools/http_request.rs:47`). This milestone also owns bounded DNS preflight behavior for `NetGuard`-backed tools: explicit DNS lookup timeouts and, if measurements show repeated resolver cost, a small per-daemon cache for successful public resolutions.
 
-Separately tracked: **`git_push`** is deferred to **M10** (Security & Governance), not here. It's not a per-tool config problem — it's an approval-flow problem. M10 owns the `requires_approval?: true` exposure path (`include_approval_required?: true` opt threading through AgentLoop, `/approve` UX, etc.) which `git_push` and any future approval-gated capability need.
+Separately tracked: **`git_push`** is deferred to **M10** (Security & Governance), not here. It's not a per-tool config problem — it's an approval-flow problem. M10 owns the `hidden_from_agent?: true` exposure path (`include_hidden?: true` opt threading through AgentLoop, `/approve` UX, etc.) which `git_push` and any future approval-gated capability need.
 
 Not part of M7 — folding even a stripped-down version into M7 means designing the same plumbing twice when this milestone properly lands.
 
@@ -532,7 +532,7 @@ See `docs/MILESTONE_9_1_REALTIME_VOICE.md` and
 
 ## Milestone 10: Security & Governance
 
-**Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering — added _last_ on purpose, after the feature surface has settled and we have observed real usage patterns. Earlier milestones (M4.9 capabilities, M4.11 scheduled agents) leave hooks (`requires_approval?`, `policy_class`, static-config gating) for M10 to bind to.
+**Goal:** Production-grade security with tool ACLs, approval workflows, and content filtering — added _last_ on purpose, after the feature surface has settled and we have observed real usage patterns. Earlier milestones (M4.9 capabilities, M4.11 scheduled agents) leave hooks (`hidden_from_agent?`, `policy_class`, static-config gating) for M10 to bind to.
 
 | Feature | Description | Priority | Type | Reference | Effort |
 |---------|-------------|----------|------|-----------|--------|

@@ -31,7 +31,7 @@ defmodule FermixCore.Capabilities.Capability do
           parameters: map(),
           kind: kind(),
           executor: executor(),
-          requires_approval?: boolean(),
+          hidden_from_agent?: boolean(),
           policy_class: policy_class(),
           metadata: map()
         }
@@ -43,7 +43,7 @@ defmodule FermixCore.Capabilities.Capability do
     :parameters,
     :kind,
     :executor,
-    requires_approval?: false,
+    hidden_from_agent?: false,
     policy_class: :read_only,
     metadata: %{}
   ]
@@ -71,7 +71,7 @@ defmodule FermixCore.Capabilities.Capability do
       parameters: parameters,
       kind: kind,
       executor: executor,
-      requires_approval?: Map.get(attrs, :requires_approval?, false),
+      hidden_from_agent?: Map.get(attrs, :hidden_from_agent?, false),
       policy_class: policy_class,
       metadata: Map.get(attrs, :metadata, %{})
     }

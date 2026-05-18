@@ -119,7 +119,7 @@ defmodule FermixCore.Sandbox.CommandCapabilities do
       kind: :builtin,
       executor: {CommandTool, :execute, [spec]},
       policy_class: :exec,
-      requires_approval?: false,
+      hidden_from_agent?: false,
       metadata: %{
         sandbox_command?: true,
         category: :system,

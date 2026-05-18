@@ -41,12 +41,12 @@ defmodule FermixCore.MCP.Inbound.CapabilityPortTest do
     assert CapabilityPort.impl() == Local
   end
 
-  test "local port lists approval-required capabilities for inbound filtering", %{
+  test "local port lists hidden capabilities for inbound filtering", %{
     registry: registry
   } do
-    :ok = Registry.register(registry, capability("needs_approval", requires_approval?: true))
+    :ok = Registry.register(registry, capability("hidden_tool", hidden_from_agent?: true))
 
-    assert {:ok, [%Capability{name: "needs_approval"}]} = Local.list_capabilities()
+    assert {:ok, [%Capability{name: "hidden_tool"}]} = Local.list_capabilities()
   end
 
   test "local port executes by capability name with explicit context", %{registry: registry} do
@@ -69,7 +69,7 @@ defmodule FermixCore.MCP.Inbound.CapabilityPortTest do
       },
       kind: Keyword.get(opts, :kind, :builtin),
       executor: {ProbeExecutor, :execute, []},
-      requires_approval?: Keyword.get(opts, :requires_approval?, false),
+      hidden_from_agent?: Keyword.get(opts, :hidden_from_agent?, false),
       policy_class: Keyword.get(opts, :policy_class, :read_only)
     })
   end

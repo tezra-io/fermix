@@ -6,9 +6,10 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   `:caller` module so tests can swap in a stub instead of going through
   a live `Hermes.Client`.
 
-  Default policy class is `:external_api` and `requires_approval?: true`.
-  Stage 5 only ships the metadata; the registry is the place where
-  approval gates the LLM exposure (see `Capabilities.Registry.list/2`).
+  Default policy class is `:external_api`. MCP tools are visible to the
+  agent by default (`hidden_from_agent?: false`); operators can hide
+  individual tools by setting `[mcp.servers.X.tools.Y] hidden_from_agent
+  = true` in the TOML, which is wired through `tool_overrides`.
   """
 
   alias FermixCore.Capabilities.Builtin.Tool
@@ -36,10 +37,9 @@ defmodule FermixCore.Capabilities.MCP.Capability do
     sanitized = Naming.register(server, original, sanitized_candidate)
 
     caller = Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Hermes)
-    approved? = Keyword.get(opts, :approved?, false)
     overrides = Keyword.get(opts, :tool_overrides, %{})
     policy_class = Map.get(overrides, :policy_class, :external_api)
-    requires_approval? = Map.get(overrides, :requires_approval?, not approved?)
+    hidden_from_agent? = Map.get(overrides, :hidden_from_agent?, false)
 
     Capability.new(%{
       name: sanitized,
@@ -48,12 +48,11 @@ defmodule FermixCore.Capabilities.MCP.Capability do
       kind: :mcp,
       executor: {__MODULE__, :invoke, [server, original, caller]},
       policy_class: policy_class,
-      requires_approval?: requires_approval?,
+      hidden_from_agent?: hidden_from_agent?,
       metadata: %{
         mcp_server: server,
         original_name: original,
-        sanitized_name: sanitized,
-        approved?: approved?
+        sanitized_name: sanitized
       }
     })
   end

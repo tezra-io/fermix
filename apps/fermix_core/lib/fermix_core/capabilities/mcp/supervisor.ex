@@ -95,7 +95,6 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
 
     [
       server_name: server.name,
-      approved?: Map.get(server, :approved?, false),
       tools_overrides: Map.get(server, :tools_overrides, %{}),
       capability_registry: capability_registry,
       mcp_registry: mcp_registry_name

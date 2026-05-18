@@ -11,7 +11,7 @@ defmodule FermixCore.MCP.Inbound.CapabilityPort.Local do
   @impl true
   def list_capabilities do
     registry = registry()
-    {:ok, Registry.list(registry, include_approval_required?: true)}
+    {:ok, Registry.list(registry, include_hidden?: true)}
   rescue
     error -> {:error, {:capability_registry_unavailable, Exception.message(error)}}
   catch

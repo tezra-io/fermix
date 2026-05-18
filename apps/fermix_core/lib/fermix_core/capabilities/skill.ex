@@ -29,7 +29,7 @@ defmodule FermixCore.Capabilities.Skill do
       kind: :skill,
       executor: {__MODULE__, :invoke, [definition]},
       policy_class: :exec,
-      requires_approval?: false,
+      hidden_from_agent?: false,
       metadata: %{
         skill: definition.name,
         trust: definition.trust,
