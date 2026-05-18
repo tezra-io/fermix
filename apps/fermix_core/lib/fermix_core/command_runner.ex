@@ -72,10 +72,29 @@ defmodule FermixCore.CommandRunner do
       |> maybe_put_env(Keyword.get(opts, :env, []))
 
     port = Port.open({:spawn_executable, executable}, port_opts)
-    os_pid = Port.info(port, :os_pid) |> elem(1)
     deadline = System.monotonic_time(:millisecond) + limits.timeout_ms
 
-    collect(port, os_pid, deadline, limits, [], 0)
+    case Port.info(port, :os_pid) do
+      {:os_pid, os_pid} ->
+        collect(port, os_pid, deadline, limits, [], 0)
+
+      nil ->
+        # The port closed before we could read its OS pid — rare but
+        # observed under heavy umbrella-test parallelism. Drain any
+        # final exit_status message; treat as a normal completion.
+        drain_orphan(port, limits.timeout_ms)
+    end
+  end
+
+  defp drain_orphan(port, timeout_ms) do
+    receive do
+      {^port, {:exit_status, exit_code}} ->
+        {:ok, %{exit: exit_code, stdout: "", truncated?: false}}
+    after
+      timeout_ms ->
+        _ = safe_port_close(port)
+        {:error, {:timeout, timeout_ms}}
+    end
   end
 
   defp collect(port, os_pid, deadline, limits, acc, total) do

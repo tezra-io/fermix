@@ -15,7 +15,10 @@ defmodule FermixChannels.Application do
     log_missing_ingress_authorization(readiness)
 
     children =
-      [FermixChannels.Commands.Sandbox.Confirmations]
+      [
+        FermixChannels.Commands.Sandbox.Confirmations,
+        FermixChannels.Idempotency
+      ]
       |> Kernel.++(
         polling_children(Application.get_env(:fermix_channels, :telegram, []), readiness)
       )
