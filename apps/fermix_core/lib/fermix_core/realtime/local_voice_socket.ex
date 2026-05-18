@@ -55,7 +55,12 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          session_module: Keyword.get(opts, :session_module, SessionServer),
          session_opts: Keyword.get(opts, :session_opts, []),
          max_clients: positive_int_opt(opts, :max_clients, @default_max_clients),
-         active_clients: 0
+         active_clients: 0,
+         # Audit F-12 follow-up: track each handler's monitor ref so a
+         # crash inside `do_client_loop/1` decrements the counter the
+         # same way a clean exit does. Without this, a `:ok = send_event`
+         # match failure would leak the increment until restart.
+         client_refs: %{}
        }}
     else
       {:error, reason} -> {:stop, reason}
@@ -86,6 +91,17 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         Logger.warning("Realtime voice socket accept error: #{inspect(reason)}")
         Process.send_after(self(), :accept, 1_000)
         {:noreply, state}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    case Map.pop(state.client_refs, ref) do
+      {nil, _refs} ->
+        {:noreply, state}
+
+      {true, refs} ->
+        {:noreply,
+         %{state | client_refs: refs, active_clients: max(0, state.active_clients - 1)}}
     end
   end
 
@@ -143,8 +159,14 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     }
 
     case Task.Supervisor.start_child(state.task_supervisor, fn -> client_loop(handler_state) end) do
-      {:ok, _pid} ->
-        %{state | active_clients: state.active_clients + 1}
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+
+        %{
+          state
+          | active_clients: state.active_clients + 1,
+            client_refs: Map.put(state.client_refs, ref, true)
+        }
 
       {:error, reason} ->
         Logger.warning("Realtime voice socket client handler failed to start: #{inspect(reason)}")
@@ -336,9 +358,13 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   defp cleanup_client(state) do
+    # Audit F-12 follow-up: the decrement is now driven by the parent's
+    # `Process.monitor`-issued `:DOWN` message in
+    # `handle_info({:DOWN, ...}, state)`, which fires regardless of how
+    # the handler task exited. We no longer cast `{:client_delta, -1}`
+    # here — that path missed crashes and could double-decrement once a
+    # crash path was added.
     close_session(state)
-
-    GenServer.cast(state.parent, {:client_delta, -1})
     :gen_tcp.close(state.conn)
   end
 

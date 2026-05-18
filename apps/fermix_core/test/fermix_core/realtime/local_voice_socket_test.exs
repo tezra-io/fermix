@@ -262,6 +262,59 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert {:error, _reason} = LocalVoiceSocket.active_clients(name)
   end
 
+  test "a client handler crash decrements active_clients via the monitor (F-12 follow-up)" do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-crash-#{System.unique_integer([:positive])}.sock"
+      )
+
+    {:ok, task_sup} =
+      Task.Supervisor.start_link(name: :"rt_crash_tasks_#{System.unique_integer([:positive])}")
+
+    crashing_starter = fn _opts ->
+      # Simulate a handler that raises after the parent has already
+      # incremented active_clients. Returning {:error, _} from the
+      # starter is not enough — the bug requires the *task* to crash,
+      # not just the session_starter, so we raise inside an Agent.
+      {:ok, pid} = Agent.start_link(fn -> :ready end)
+      ref = make_ref()
+      send(pid, {:raise_after, ref, 10})
+      {:ok, pid}
+    end
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        task_supervisor: task_sup,
+        session_starter: crashing_starter,
+        session_module: FakeSession,
+        max_clients: 4,
+        name: :"rt_crash_socket_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      if Process.alive?(socket), do: GenServer.stop(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    {:ok, conn} = connect(socket_path)
+
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
+
+    # Force the handler task to crash by closing the conn from our side
+    # AND telling the handler to send raw bytes that make
+    # `process_one_line/2`'s `:ok = send_event(...)` assertion fail. The
+    # simplest path: send a giant unterminated line so the wire-line cap
+    # trips, then close before the response lands — but the cleanest
+    # crash is `Process.exit/2` on the task. We can't reach it directly,
+    # so we send malformed data and immediately close so write fails.
+    :ok = :gen_tcp.send(conn, "{\n")
+    :gen_tcp.close(conn)
+
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
+  end
+
   defp connect(socket_path) do
     :gen_tcp.connect(
       {:local, String.to_charlist(socket_path)},
