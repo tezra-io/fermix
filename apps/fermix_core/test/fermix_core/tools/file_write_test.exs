@@ -139,7 +139,10 @@ defmodule FermixCore.Tools.FileWriteTest do
       assert result.error =~ "non-empty"
     end
 
-    test "allows parent traversal when resolved target stays inside root", %{dir: dir, context: context} do
+    test "allows parent traversal when resolved target stays inside root", %{
+      dir: dir,
+      context: context
+    } do
       child = Path.join(dir, "child")
       File.mkdir_p!(child)
       path = Path.join([child, "..", "sibling.txt"])
