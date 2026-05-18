@@ -28,8 +28,11 @@ defmodule FermixCore.Capabilities.Registry do
           [
             allowed_tools: [String.t()] | nil,
             policy: policy_spec(),
+            policy_classes: [Capability.policy_class()] | nil,
             trust: trust(),
             kind: Capability.kind() | :all,
+            excluded_categories: [atom()] | nil,
+            excluded_names: [String.t()] | nil,
             include_hidden?: boolean()
           ]
 
@@ -94,6 +97,22 @@ defmodule FermixCore.Capabilities.Registry do
     |> Enum.map(fn {_name, capability} -> capability end)
     |> Enum.sort_by(& &1.name)
     |> apply_filters(opts)
+  end
+
+  @doc """
+  Return the agent-visible capability catalog with coarse visibility filters.
+
+  This is a semantic wrapper over `list/2` for agent runtimes that declare
+  exclusions by capability category instead of maintaining per-tool allowlists.
+  """
+  @spec list_for(filter()) :: [Capability.t()]
+  def list_for(opts \\ []) when is_list(opts) do
+    list(__MODULE__, opts)
+  end
+
+  @spec list_for(GenServer.server(), filter()) :: [Capability.t()]
+  def list_for(server, opts) when is_list(opts) do
+    list(server, opts)
   end
 
   @doc """
@@ -173,13 +192,22 @@ defmodule FermixCore.Capabilities.Registry do
   defp table_name(name) when is_atom(name), do: :"#{name}.Table"
 
   defp apply_filters(capabilities, opts) do
-    policy = resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
+    policy = effective_policy(opts)
 
     capabilities
     |> apply_kind(Keyword.get(opts, :kind, :all))
     |> apply_policy(policy)
     |> apply_allowlist(Keyword.get(opts, :allowed_tools))
+    |> apply_name_exclusion(Keyword.get(opts, :excluded_names))
+    |> apply_category_exclusion(Keyword.get(opts, :excluded_categories, []))
     |> apply_hidden_filter(Keyword.get(opts, :include_hidden?, false))
+  end
+
+  defp effective_policy(opts) do
+    case Keyword.get(opts, :policy_classes) do
+      nil -> resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
+      classes when is_list(classes) -> classes
+    end
   end
 
   @doc """
@@ -245,6 +273,25 @@ defmodule FermixCore.Capabilities.Registry do
   defp apply_allowlist(capabilities, names) when is_list(names) do
     name_set = MapSet.new(names)
     Enum.filter(capabilities, &MapSet.member?(name_set, &1.name))
+  end
+
+  defp apply_name_exclusion(capabilities, nil), do: capabilities
+  defp apply_name_exclusion(capabilities, []), do: capabilities
+
+  defp apply_name_exclusion(capabilities, names) when is_list(names) do
+    name_set = MapSet.new(names)
+    Enum.reject(capabilities, &MapSet.member?(name_set, &1.name))
+  end
+
+  defp apply_category_exclusion(capabilities, nil), do: capabilities
+  defp apply_category_exclusion(capabilities, []), do: capabilities
+
+  defp apply_category_exclusion(capabilities, categories) when is_list(categories) do
+    category_set = MapSet.new(categories)
+
+    Enum.reject(capabilities, fn %Capability{metadata: metadata} ->
+      Map.get(metadata, :category) in category_set
+    end)
   end
 
   defp apply_hidden_filter(capabilities, true), do: capabilities

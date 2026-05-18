@@ -41,7 +41,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ResumeJob,
     FermixCore.Tools.RemoveJob,
     FermixCore.Tools.MemorySourcesList,
-    FermixCore.Tools.Browser
+    FermixCore.Tools.Browser,
+    FermixCore.Tools.SendAttachment
   ]
 
   def child_spec(opts) do

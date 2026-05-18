@@ -9,9 +9,13 @@ defmodule FermixChannels.Signal do
 
   @behaviour FermixChannels.Channel
 
+  require Logger
+
+  alias FermixChannels.Idempotency
   alias FermixChannels.Message
 
   @default_cli_path "signal-cli"
+  @max_media_bytes 100 * 1_024 * 1_024
 
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
@@ -60,14 +64,37 @@ defmodule FermixChannels.Signal do
   end
 
   @impl true
-  @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
-  def build_reply(%Message{reply_target: reply_target, metadata: metadata}) do
+  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+          :ok | {:error, term()}
+  def send_media(recipient, media_part, opts \\ [])
+      when is_binary(recipient) and is_map(media_part) do
+    with {:ok, claim} <- Idempotency.claim_outbound_media(:signal, recipient, media_part) do
+      send_claimed_media(claim, recipient, media_part, opts)
+    end
+  end
+
+  @impl true
+  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  def build_text_reply(%Message{reply_target: reply_target, metadata: metadata}) do
     reply_opts =
       []
       |> put_if_present(:client, Map.get(metadata, :signal_client))
       |> put_if_present(:client_opts, Map.get(metadata, :signal_client_opts))
 
     fn text -> send_message(reply_target, text, reply_opts) end
+  end
+
+  @impl true
+  @spec build_media_reply(FermixChannels.Channel.message()) ::
+          (FermixChannels.Channel.media_part() -> :ok | {:error, term()})
+  def build_media_reply(%Message{reply_target: reply_target, metadata: metadata}) do
+    reply_opts =
+      []
+      |> put_if_present(:client, Map.get(metadata, :signal_client))
+      |> put_if_present(:client_opts, Map.get(metadata, :signal_client_opts))
+
+    fn media_part -> send_media(reply_target, media_part, reply_opts) end
   end
 
   @impl true
@@ -130,6 +157,49 @@ defmodule FermixChannels.Signal do
   end
 
   defp parse_attachments(_attachments), do: []
+
+  defp send_claimed_media(:duplicate, _recipient, _media_part, _opts), do: :ok
+
+  defp send_claimed_media({:fresh, claim}, recipient, media_part, opts) do
+    result =
+      with {:ok, account} <- account(),
+           :ok <- validate_media(media_part) do
+        send_client(opts).send_attachment(
+          account,
+          recipient,
+          media_caption(media_part),
+          media_part.path,
+          client_opts(opts)
+        )
+      end
+
+    maybe_release_claim(result, claim)
+  end
+
+  defp validate_media(%{path: path}) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %{size: size}} when size <= @max_media_bytes ->
+        :ok
+
+      {:ok, %{size: size}} ->
+        {:error, "Signal attachment #{size} bytes exceeds #{@max_media_bytes}-byte cap"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp validate_media(_media_part), do: {:error, :invalid_media_part}
+
+  defp media_caption(%{caption: caption}) when is_binary(caption), do: caption
+  defp media_caption(_media_part), do: ""
+
+  defp maybe_release_claim(:ok, _claim), do: :ok
+
+  defp maybe_release_claim({:error, _reason} = error, claim) do
+    :ok = Idempotency.release_outbound_media_claim(claim)
+    error
+  end
 
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image
@@ -254,9 +324,6 @@ defmodule FermixChannels.Signal.CLI do
 
       {:error, {:executable_not_found, path}} ->
         {:error, "signal-cli executable not found at #{path}"}
-
-      {:error, reason} ->
-        {:error, "signal-cli receive failed: #{inspect(reason)}"}
     end
   end
 
@@ -278,9 +345,26 @@ defmodule FermixChannels.Signal.CLI do
 
       {:error, {:executable_not_found, path}} ->
         {:error, "signal-cli executable not found at #{path}"}
+    end
+  end
 
-      {:error, reason} ->
-        {:error, "signal-cli send failed: #{inspect(reason)}"}
+  def send_attachment(account, recipient, caption, path, opts) do
+    cli_path = resolve_cli(opts)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @send_timeout_ms)
+    args = ["-a", account, "send", "-m", caption, "--attachment", path, recipient]
+
+    case CommandRunner.run(cli_path, args, timeout_ms: timeout_ms) do
+      {:ok, %{exit: 0}} ->
+        :ok
+
+      {:ok, %{exit: status, stdout: output}} ->
+        {:error, "signal-cli attachment send failed: #{status}: #{String.trim(output)}"}
+
+      {:error, {:timeout, ms}} ->
+        {:error, "signal-cli attachment send timed out after #{ms}ms"}
+
+      {:error, {:executable_not_found, path}} ->
+        {:error, "signal-cli executable not found at #{path}"}
     end
   end
 

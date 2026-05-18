@@ -540,14 +540,15 @@ defmodule FermixCore.Realtime.SessionServer do
   defp require_binary(_value, name), do: {:error, {:missing, name}}
 
   defp default_capabilities(%Config{} = _config) do
-    # Realtime uses the same registry view as Main Agent — no trust filter.
+    # Realtime keeps parity with Main Agent except for channel-only reply tools,
+    # which need an active channel reply function that voice sessions do not have.
     # The prior `tool_policy = "read_only"`/`"broad"` knob was a defensive
     # default against an always-listening voice threat model that never
     # shipped (M9.1 is click-to-talk only); it had the side effect of
     # hiding MCP and skill capabilities from voice. Removed in favor of
     # parity with text. Operators wanting a restricted voice surface tune
     # sandbox mode + command profile instead — both apply uniformly.
-    CapabilityRegistry.list(CapabilityRegistry)
+    CapabilityRegistry.list_for(CapabilityRegistry, excluded_categories: [:channel])
   end
 
   defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage}) do

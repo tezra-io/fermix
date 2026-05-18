@@ -7,15 +7,19 @@ defmodule FermixChannels.Channel do
   send outbound messages, and optionally verify webhook authenticity.
   """
 
+  alias FermixCore.Channels.Outbound
+
   @type message :: FermixChannels.Message.t()
 
   @type send_opts :: [
           reply_to: String.t(),
           parse_mode: String.t(),
-          message_thread_id: integer()
+          message_thread_id: String.t() | integer(),
+          thread_ts: String.t()
         ]
 
-  @type reply_fn :: (String.t() -> :ok | {:error, term()})
+  @type media_part :: Outbound.media_part()
+  @type reply_fn :: Outbound.reply_fn()
 
   @doc """
   Parse a webhook payload into messages.
@@ -34,8 +38,14 @@ defmodule FermixChannels.Channel do
   """
   @callback send_message(String.t(), String.t(), send_opts()) :: :ok | {:error, term()}
 
-  @doc "Build a reply function for a normalized inbound message"
-  @callback build_reply(message()) :: reply_fn()
+  @doc "Send an attachment to a chat."
+  @callback send_media(String.t(), media_part(), send_opts()) :: :ok | {:error, term()}
+
+  @doc "Build a text reply function for a normalized inbound message."
+  @callback build_text_reply(message()) :: (String.t() -> :ok | {:error, term()})
+
+  @doc "Build an attachment reply function for a normalized inbound message."
+  @callback build_media_reply(message()) :: (media_part() -> :ok | {:error, term()})
 
   @doc """
   Download an attachment to a local temp path for shared runtime processing.

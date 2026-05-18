@@ -151,7 +151,7 @@ defmodule FermixChannels.SlackTest do
       assert_receive {:agent_message, agent_message}
 
       assert agent_message.content == "hello"
-      assert :ok = agent_message.reply_fn.("reply from fermix")
+      assert :ok = agent_message.reply_fn.({:text, "reply from fermix"})
 
       assert_receive {:slack_request, "/api/chat.postMessage", body, headers}
       assert body["channel"] == "D12345"
@@ -200,6 +200,79 @@ defmodule FermixChannels.SlackTest do
       assert body["channel"] == "C12345"
       assert body["text"] == "reply from main agent"
       assert body["thread_ts"] == "1714000000.000100"
+    end
+  end
+
+  describe "send_media/3" do
+    test "uses Slack external upload URL POST flow and complete parameters" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("slack-send-media")
+      test_pid = self()
+
+      Req.Test.stub(:slack, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        case conn.request_path do
+          "/api/files.getUploadURLExternal" ->
+            send(test_pid, {:slack_upload_url, Jason.decode!(body), conn.req_headers})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(
+              200,
+              Jason.encode!(%{
+                "ok" => true,
+                "upload_url" => "https://files.slack.test/upload/F123",
+                "file_id" => "F123"
+              })
+            )
+
+          "/upload/F123" ->
+            send(test_pid, {:slack_upload_post, body, conn.req_headers})
+            Plug.Conn.send_resp(conn, 200, "")
+
+          "/api/files.completeUploadExternal" ->
+            send(test_pid, {:slack_complete, Jason.decode!(body), conn.req_headers})
+
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true}))
+        end
+      end)
+
+      try do
+        path = Path.join(tmp_dir, "report.txt")
+        File.write!(path, "report")
+
+        assert :ok =
+                 Slack.send_media(
+                   "C12345",
+                   %{
+                     kind: :document,
+                     path: path,
+                     caption: "Report",
+                     filename: "report.txt",
+                     mime_type: "text/plain"
+                   },
+                   thread_ts: "1714000000.000100"
+                 )
+
+        assert_receive {:slack_upload_url, upload_url_body, upload_url_headers}
+        assert upload_url_body == %{"filename" => "report.txt", "length" => 6}
+        assert {"authorization", "Bearer xoxb-test-token"} in upload_url_headers
+
+        assert_receive {:slack_upload_post, "report", upload_headers}
+        assert {"content-type", "text/plain"} in upload_headers
+        assert {"content-length", "6"} in upload_headers
+
+        assert_receive {:slack_complete, complete_body, complete_headers}
+        assert complete_body["channel_id"] == "C12345"
+        assert complete_body["files"] == [%{"id" => "F123", "title" => "report.txt"}]
+        assert complete_body["initial_comment"] == "Report"
+        assert complete_body["thread_ts"] == "1714000000.000100"
+        assert {"authorization", "Bearer xoxb-test-token"} in complete_headers
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
     end
   end
 

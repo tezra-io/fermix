@@ -14,6 +14,7 @@ defmodule FermixCore.Capabilities.MetadataSchemaTest do
     :config,
     :memory,
     :scheduling,
+    :channel,
     :system
   ]
 
