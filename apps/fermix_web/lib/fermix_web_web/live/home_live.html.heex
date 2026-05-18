@@ -10,6 +10,18 @@
     counts: %{},
     jobs: []
   }) %>
+<% realtime = Map.get(overview, :realtime, %{enabled: false, status: :unknown}) %>
+<% realtime_enabled? = Map.get(realtime, :enabled) == true %>
+<% realtime_status = Map.get(realtime, :status, :unknown) %>
+<% realtime_companion? = Map.get(realtime, :companion_connected?) == true %>
+<% realtime_badge_class =
+  case realtime_status do
+    :ready -> "badge badge-success"
+    :degraded -> "badge badge-warning"
+    :setup_required -> "badge badge-warning"
+    :disabled -> "badge badge-outline"
+    _ -> "badge badge-ghost"
+  end %>
 <% main_agent = get_in(agents, [:main]) || %{} %>
 <% workers = Map.get(agents, :skill_workers, []) %>
 <% agent_counts = Map.get(agents, :counts, %{}) %>
@@ -81,6 +93,13 @@
           <div class="flex items-center justify-between gap-4">
             <dt class="text-base-content/60">Scheduled jobs</dt>
             <dd class="font-medium">{Map.get(job_counts, :total, 0)}</dd>
+          </div>
+          <div class="flex items-center justify-between gap-4">
+            <dt class="text-base-content/60">Realtime voice</dt>
+            <dd class={realtime_badge_class <> " gap-2"}>
+              <span class="h-2 w-2 rounded-full bg-current"></span>
+              {status_label(realtime_status)}
+            </dd>
           </div>
         </dl>
       </aside>
@@ -175,6 +194,62 @@
             <% end %>
           </div>
         </div>
+      </section>
+
+      <section class="border border-base-300 bg-base-100 p-5 shadow-sm">
+        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <h2 class="text-lg font-semibold">Realtime voice</h2>
+            <p class="mt-1 text-sm text-base-content/60">
+              <%= if realtime_enabled? do %>
+                {Map.get(realtime, :provider) || "openai"} · {Map.get(realtime, :model) ||
+                  "unknown"}
+              <% else %>
+                Disabled — enable in setup to use FermixPet
+              <% end %>
+            </p>
+          </div>
+          <span class={realtime_badge_class}>{status_label(realtime_status)}</span>
+        </div>
+
+        <%= if realtime_enabled? do %>
+          <dl class="mt-5 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+            <div>
+              <dt class="text-base-content/60">Companion</dt>
+              <dd class="mt-1 font-medium">
+                <%= if realtime_companion? do %>
+                  <span class="badge badge-success badge-sm">connected</span>
+                <% else %>
+                  <span class="badge badge-ghost badge-sm">idle</span>
+                <% end %>
+              </dd>
+            </div>
+            <div>
+              <dt class="text-base-content/60">Active sessions</dt>
+              <dd class="mt-1 text-xl font-semibold">{Map.get(realtime, :active_sessions, 0)}</dd>
+            </div>
+            <div>
+              <dt class="text-base-content/60">Active clients</dt>
+              <dd class="mt-1 text-xl font-semibold">{Map.get(realtime, :active_clients, 0)}</dd>
+            </div>
+            <div>
+              <dt class="text-base-content/60">Socket</dt>
+              <dd class="mt-1 font-medium">
+                <%= if Map.get(realtime, :socket_alive) == true do %>
+                  <span class="badge badge-success badge-sm">alive</span>
+                <% else %>
+                  <span class="badge badge-error badge-sm">down</span>
+                <% end %>
+              </dd>
+            </div>
+          </dl>
+
+          <%= if path = Map.get(realtime, :socket_path) do %>
+            <p class="mt-4 truncate text-xs text-base-content/50">
+              <span class="text-base-content/40">socket</span> <code class="ml-1">{path}</code>
+            </p>
+          <% end %>
+        <% end %>
       </section>
 
       <section class="border border-base-300 bg-base-100 p-5 shadow-sm">
