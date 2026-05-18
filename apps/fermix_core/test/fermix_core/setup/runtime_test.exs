@@ -673,7 +673,6 @@ defmodule FermixCore.Setup.RuntimeTest do
         realtime_voice: "marin",
         realtime_max_session_minutes: 20,
         realtime_max_cost_cents: 35,
-        realtime_allow_network_tools: true,
         realtime_persist_transcripts: true
       ]
 
@@ -685,7 +684,6 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :realtime_voice) == "marin"
       assert Keyword.get(answers, :realtime_max_session_minutes) == 20
       assert Keyword.get(answers, :realtime_max_cost_cents) == 35
-      assert Keyword.get(answers, :realtime_allow_network_tools) == true
       assert Keyword.get(answers, :realtime_persist_transcripts) == true
     end
 

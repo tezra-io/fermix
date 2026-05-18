@@ -33,7 +33,6 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_voice, String.t()}
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
-          | {:realtime_allow_network_tools, boolean() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
@@ -65,7 +64,6 @@ defmodule FermixCore.Setup.Wizard do
     :realtime_max_cost_cents
   ]
   @realtime_advanced_prompt_keys [
-    :realtime_allow_network_tools,
     :realtime_persist_transcripts
   ]
   @reconfigure_prompt_keys [
@@ -369,13 +367,6 @@ defmodule FermixCore.Setup.Wizard do
         label:
           "Realtime max estimated cost cents per session (blank = #{config.max_estimated_cost_cents_per_session})",
         default: config.max_estimated_cost_cents_per_session,
-        required?: false
-      },
-      %{
-        key: :realtime_allow_network_tools,
-        label:
-          "Allow Realtime network tools? (yes/no; blank = #{yes_no(config.allow_network_tools?)})",
-        default: config.allow_network_tools?,
         required?: false
       },
       %{
@@ -936,11 +927,6 @@ defmodule FermixCore.Setup.Wizard do
           normalize_realtime_positive_int(
             Keyword.get(answers, :realtime_max_cost_cents),
             :realtime_max_cost_cents
-          ),
-        allow_network_tools:
-          normalize_realtime_bool(
-            Keyword.get(answers, :realtime_allow_network_tools),
-            :realtime_allow_network_tools
           ),
         persist_transcripts:
           normalize_realtime_bool(

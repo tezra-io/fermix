@@ -19,7 +19,6 @@ defmodule FermixCore.Realtime.Config do
           max_response_output_tokens: pos_integer(),
           max_session_minutes: pos_integer(),
           max_estimated_cost_cents_per_session: pos_integer(),
-          allow_network_tools?: boolean(),
           persist_transcripts?: boolean(),
           persist_audio?: boolean()
         }
@@ -35,7 +34,6 @@ defmodule FermixCore.Realtime.Config do
             max_response_output_tokens: 4_096,
             max_session_minutes: 15,
             max_estimated_cost_cents_per_session: 100,
-            allow_network_tools?: false,
             persist_transcripts?: false,
             persist_audio?: false
 
@@ -58,7 +56,17 @@ defmodule FermixCore.Realtime.Config do
     reject_removed_key!(config, :max_buffer_chunks)
     reject_removed_key!(config, :idle_timeout_ms)
     reject_removed_key!(config, :max_input_audio_seconds_per_session)
-    reject_removed_key!(config, :tool_policy, "realtime now uses the same capability surface as the main agent; remove the line from [fermix_core.realtime]. Sandbox mode + command profile cover voice scope.")
+    reject_removed_key!(
+      config,
+      :tool_policy,
+      "realtime now uses the same capability surface as the main agent; remove the line from [fermix_core.realtime]. Sandbox mode + command profile cover voice scope."
+    )
+
+    reject_removed_key!(
+      config,
+      :allow_network_tools,
+      "realtime now uses the same capability surface as the main agent; remove the line from [fermix_core.realtime]. Restrict network tools at the capability layer if you need them off."
+    )
 
     realtime = %__MODULE__{
       enabled?: bool(config, :enabled, false),
@@ -73,7 +81,6 @@ defmodule FermixCore.Realtime.Config do
       max_session_minutes: positive_int(config, :max_session_minutes, 15),
       max_estimated_cost_cents_per_session:
         positive_int(config, :max_estimated_cost_cents_per_session, 100),
-      allow_network_tools?: bool(config, :allow_network_tools, false),
       persist_transcripts?: bool(config, :persist_transcripts, false),
       persist_audio?: bool(config, :persist_audio, false)
     }
@@ -90,7 +97,6 @@ defmodule FermixCore.Realtime.Config do
       voice: config.voice,
       max_session_minutes: config.max_session_minutes,
       max_estimated_cost_cents_per_session: config.max_estimated_cost_cents_per_session,
-      allow_network_tools: config.allow_network_tools?,
       persist_transcripts: config.persist_transcripts?
     ]
   end

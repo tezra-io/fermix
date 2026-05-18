@@ -257,7 +257,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           voice: "marin",
           max_session_minutes: 10,
           max_estimated_cost_cents_per_session: 25,
-          allow_network_tools: true,
           persist_transcripts: true
         ]
       ],
@@ -274,7 +273,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute contents =~ "activation"
     refute contents =~ "turn_detection"
     refute contents =~ "tool_policy"
-    assert contents =~ "allow_network_tools = true"
+    refute contents =~ "allow_network_tools"
     assert contents =~ "persist_transcripts = true"
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
@@ -285,7 +284,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute Keyword.has_key?(realtime, :turn_detection)
     assert Keyword.get(realtime, :max_session_minutes) == 10
     assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 25
-    assert Keyword.get(realtime, :allow_network_tools) == true
     assert Keyword.get(realtime, :persist_transcripts) == true
   end
 
