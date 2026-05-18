@@ -47,7 +47,6 @@ defmodule FermixCore.Capabilities.MCP.Server do
       client: Keyword.get(opts, :client),
       discoverer: Keyword.get(opts, :discoverer, FermixCore.Capabilities.MCP.Discoverer.Hermes),
       caller: Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Hermes),
-      approved?: Keyword.get(opts, :approved?, false),
       tools_overrides: Keyword.get(opts, :tools_overrides, %{}),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       mcp_registry: Keyword.get(opts, :mcp_registry, McpRegistry),
@@ -170,7 +169,6 @@ defmodule FermixCore.Capabilities.MCP.Server do
     capability =
       McpCapability.from_tool_descriptor(state.server_name, descriptor,
         caller: state.caller,
-        approved?: state.approved?,
         tool_overrides: overrides
       )
 

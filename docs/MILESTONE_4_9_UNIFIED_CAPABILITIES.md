@@ -44,7 +44,7 @@ After this milestone:
 
 | Feature | Priority | Type | Description |
 |---------|----------|------|-------------|
-| `Capability` struct | P0 | New | Plain data: `%Capability{name, description, parameters, kind, executor, requires_approval?, policy_class, metadata}`. `executor` is `{module, function, extra_args}` — the runtime calls `apply(module, function, [args, context | extra_args])`. Replaces the current `Tools.Tool` behaviour as the lowest-level callable shape. A struct (not a behaviour) because skill and MCP capabilities are constructed from runtime data (SKILL.md frontmatter, MCP `tools/list` responses), not declared at compile time — there's no static module to back them. Built-in tools also become structs at registration time; their `executor` points at the existing tool module's `execute/2`. |
+| `Capability` struct | P0 | New | Plain data: `%Capability{name, description, parameters, kind, executor, hidden_from_agent?, policy_class, metadata}`. `executor` is `{module, function, extra_args}` — the runtime calls `apply(module, function, [args, context | extra_args])`. Replaces the current `Tools.Tool` behaviour as the lowest-level callable shape. A struct (not a behaviour) because skill and MCP capabilities are constructed from runtime data (SKILL.md frontmatter, MCP `tools/list` responses), not declared at compile time — there's no static module to back them. Built-in tools also become structs at registration time; their `executor` points at the existing tool module's `execute/2`. |
 | `CapabilityRegistry` GenServer | P0 | New | Single source of truth for everything the LLM can call. Subsumes `Tools.Registry`. Holds `%Capability{}` structs in an ETS-backed table keyed by `name`. Built-in capabilities registered at app boot; skill capabilities pulled from `SkillRegistry` on register/refresh; MCP capabilities pulled from each MCP client on server-up/down. Returns the capability list the agent loop hands to the provider. |
 | `Adapter` behaviour | P0 | New | Per-provider conversion + continuation. `to_provider_tools(capabilities)`, `chat(messages, capabilities, opts)`, `continue(provider_state, tool_results, opts)`, `parse_tool_calls(response)`, `parse_response(response)`. The only place that knows OpenAI-vs-Anthropic-vs-Responses wire shapes. The adapter never executes capabilities. |
 | OpenAI Responses adapter | P0 | New | Routes `gpt-*` and `o*` models on `api.openai.com` to `/v1/responses` with `{type: "function", name, description, parameters, strict: false}` tool shape. Implements Responses continuation formatting with `function_call` / `function_call_output` / `reasoning` items keyed by the API-returned `call_id` (deterministic SHA256 hash used only as a fallback when the API doesn't return one). Replaces the current Chat Completions path for OpenAI-direct GPT models. |
@@ -58,7 +58,7 @@ After this milestone:
 | Anthropic adapter scaffold | P1 | New | Implement `Anthropic.Messages` adapter as a real module with `to_provider_tools/1` (input_schema rename) and `chat/3` returning `{:error, :not_implemented}` until tokens land. Tests pin the schema-translation behaviour so the future implementation has guard rails. |
 | Per-skill provider override | P1 | New | Add optional `provider` field to skill frontmatter (e.g., `provider: anthropic`). Defaults to global default. Lets `coding-skill` pin Claude even when the main agent is on GPT. Today's `model:` field stays. |
 | Telemetry uniformity | P1 | New | `[:fermix, :capability, :exec]` event for every capability execution (builtin, skill, mcp), with `kind` metadata. Replaces the per-tool/per-skill split. |
-| Capability policy metadata | P0 | New | Every `Capability` carries `requires_approval?: boolean()` and `policy_class :: :read_only \| :read_write \| :exec \| :network \| :external_api`. Built-ins set sane defaults (`shell` → `:exec`, `file_write` → `:read_write`, `file_read` → `:read_only`, `browser` → `:network`). MCP capabilities default to `:external_api` + `requires_approval?: true` until per-server overrides land. Skill capabilities are `:exec` because they spawn an agent, but the spawned agent's internal capability set is resolved separately. Surfaced now so M10's gate has somewhere to bind. |
+| Capability policy metadata | P0 | New | Every `Capability` carries `hidden_from_agent?: boolean()` and `policy_class :: :read_only \| :read_write \| :exec \| :network \| :external_api`. Built-ins set sane defaults (`shell` → `:exec`, `file_write` → `:read_write`, `file_read` → `:read_only`, `browser` → `:network`). MCP capabilities default to `:external_api` + `hidden_from_agent?: true` until per-server overrides land. Skill capabilities are `:exec` because they spawn an agent, but the spawned agent's internal capability set is resolved separately. Surfaced now so M10's gate has somewhere to bind. |
 | Sub-agent trust policy | P0 | New | `Capabilities.Registry.list/2` accepts `:policy` and `:allowed_tools` filters. For sub-agents, Fermix resolves a default policy from skill trust: core/local skills may inherit broad capabilities; third-party/plugin skills default to a safe read-only set until explicitly trusted or allowlisted. Without this, the moment MCP servers register, every sub-agent transitively gets destructive external tools. Default policy is documented and enforced in tests. |
 | Placeholder skill cleanup | P0 | Refactor | The existing placeholder skills are removed or replaced with real skills. M4.9 does not preserve their current frontmatter as a compatibility contract. Tests should cover generic installed skills and at least one fixture skill, not the placeholder names as product behaviour. |
 
@@ -71,7 +71,7 @@ After this milestone:
 | Streaming sub-agent output | Today's path is sync (parent blocks while sub-agent runs). Streaming changes the AgentLoop contract and the tool result shape. Defer until there's a real UX consumer. | M6 (LiveView dashboard) |
 | Skill plugin install CLI | This milestone establishes the registry shape. CLI affordances (`fermix skill add <git-url>`, `fermix skill remove <name>`) are next-step polish. Operators can drop a SKILL.md folder under `~/.fermix/skills/` today. | Follow-on (skill plugins milestone) |
 | MCP tool call streaming | Hermes_mcp supports streaming responses; we'll start sync-only. | Follow-on |
-| Per-user tool ACLs / approval prompts | M10 governance milestone owns the user-facing approval UI and per-user authorization. M4.9 surfaces the **metadata** (`requires_approval?`, `policy_class`) and enforces static config gates so MCP doesn't ship without a guardrail; the interactive gating UX is M10. | M10 |
+| Per-user tool ACLs / approval prompts | M10 governance milestone owns the user-facing approval UI and per-user authorization. M4.9 surfaces the **metadata** (`hidden_from_agent?`, `policy_class`) and enforces static config gates so MCP doesn't ship without a guardrail; the interactive gating UX is M10. | M10 |
 | Smart capability pruning | When the registry passes ~30 entries, GPT/Claude tool selection degrades. We'll address with explicit per-agent allowlists for now (already supported via `allowed_tools`). Auto-pruning is a separate optimization. | After M4.9 in production |
 | Replacing `SkillRegistry` entirely | `SkillRegistry` keeps its job as the SKILL.md parser, hot-reloader, and definition cache. What changes is that its consumers move from "ask SkillRegistry directly" to "ask CapabilityRegistry, which queries SkillRegistry under the hood". | — |
 | Agent-loop redesign | `AgentLoop`, `AgentServer`, `AgentSupervisor`, `MainAgent` keep their current shapes. Only the parameter that crosses into providers changes (from `tools: [map()]` to `capabilities: [Capability.t()]`). | — |
@@ -139,7 +139,7 @@ defmodule FermixCore.Capabilities.Capability do
           parameters: map(),                 # JSON Schema, LLM-facing
           kind: kind(),                      # internal — telemetry / diagnostics, NOT sent to LLM
           executor: executor(),              # runtime: apply(mod, fun, [args, context | extra_args])
-          requires_approval?: boolean(),     # M10 hook — gate before execution
+          hidden_from_agent?: boolean(),     # M10 hook — gate before execution
           policy_class: policy_class(),      # M10 hook — coarse-grained classification
           metadata: map()                    # adapter hints, source pointers (mcp server name, skill path)
         }
@@ -151,7 +151,7 @@ defmodule FermixCore.Capabilities.Capability do
     :parameters,
     :kind,
     :executor,
-    requires_approval?: false,
+    hidden_from_agent?: false,
     policy_class: :read_only,
     metadata: %{}
   ]
@@ -183,7 +183,7 @@ The `:network` vs `:external_api` distinction matters because the sub-agent defa
 | `:skill` | `Skill.from_definition(%AgentDefinition{})` | SKILL.md (runtime) | `{Capabilities.Skill, :invoke, [definition]}` |
 | `:mcp` | `MCP.from_tool_descriptor(server, descriptor)` | `tools/list` (runtime) | `{Capabilities.MCP, :call_tool, [server_name, original_tool_name]}` |
 
-The LLM sees `name`, `description`, `parameters`. `kind`, `executor`, `requires_approval?`, `policy_class`, `metadata` are internal — used by the registry, telemetry, and the M10 policy gate, never serialised to the model.
+The LLM sees `name`, `description`, `parameters`. `kind`, `executor`, `hidden_from_agent?`, `policy_class`, `metadata` are internal — used by the registry, telemetry, and the M10 policy gate, never serialised to the model.
 
 ### 4.2 Registry shape
 
@@ -408,21 +408,26 @@ Config shape (`~/.fermix/config.toml`):
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 pass_env = ["GITHUB_TOKEN"]                    # resolved through [sandbox.env]
-approved = false                               # registered, not exposed to LLM until approved
 
 [mcp.servers.filesystem]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/sujshe/projects"]
-approved = true
 
-[mcp.servers.filesystem.tools.read_file]
-policy_class = "read_only"
-requires_approval = false
+[mcp.servers.filesystem.tools.dangerous_tool]
+hidden_from_agent = true
 ```
 
 The `$env:` prefix lets users reference shell env vars without baking secrets into the TOML.
 
-MCP capability exposure is static-config gated in M4.9. A capability with `requires_approval?: true` is registered for diagnostics and `fermix mcp list`, but it is not exposed to the LLM until config marks the server/tool approved or overrides the tool to `requires_approval = false`. Interactive approval prompts are M10; M4.9 uses explicit TOML configuration only.
+> **Note (2026-05):** The original M4.9 design defaulted MCP capabilities to
+> `hidden_from_agent?: true` (then named `requires_approval?`) and gated
+> exposure on a per-server `approved = true` knob, on the assumption that
+> M10 would later add an interactive approval flow. M10 hasn't shipped and
+> the flag was only ever a list-filter — no per-call gate, no prompt. The
+> default was inverted: MCP tools are now visible by default and can be
+> hidden per tool via `[mcp.servers.X.tools.Y] hidden_from_agent = true`.
+> The server-level `approved` key and the per-tool `requires_approval` key
+> both fail loud on load with a message pointing at the new knob.
 
 ### 4.6 Sub-agent capability scope and recursion safety
 
@@ -820,7 +825,7 @@ Phased so each stage is independently shippable and reversible. Compile + tests 
 
 ### Stage 1 — Capability struct and registry (no behaviour change)
 
-- Add `FermixCore.Capabilities.Capability` struct (see §4.1) — `name`, `description`, `parameters`, `kind`, `executor`, `requires_approval?`, `policy_class`, `metadata`.
+- Add `FermixCore.Capabilities.Capability` struct (see §4.1) — `name`, `description`, `parameters`, `kind`, `executor`, `hidden_from_agent?`, `policy_class`, `metadata`.
 - Add `FermixCore.Capabilities.Registry` GenServer (ETS-backed table keyed by name).
 - Add `FermixCore.Capabilities.Builtin.from_tool_module/1` that wraps existing `Tools.Tool` modules into `%Capability{kind: :builtin, executor: {Module, :execute, []}}`. **Old `Tools.Registry` keeps running unchanged.**
 - Both registries co-exist. `CapabilityRegistry` populated from `Tools.Registry` on boot via the wrapper.
@@ -869,7 +874,7 @@ Phased so each stage is independently shippable and reversible. Compile + tests 
 - Add `hermes_mcp` dependency.
 - Add `FermixCore.Capabilities.MCP.Supervisor`, `MCP.ServerSupervisor`, `MCP.Capability`, `MCP.Naming` (sanitizer + reverse map, §4.5).
 - `[mcp.servers.<name>]` parsing in `Setup.ConfigStore`.
-- Boot supervises configured servers; tools register into CapabilityRegistry as `%Capability{kind: :mcp, policy_class: :external_api, requires_approval?: true}` by default. Registry listing hides approval-required MCP capabilities from LLM exposure until `[mcp.servers.<name>] approved = true` or a per-tool override explicitly clears `requires_approval`. Per-tool overrides live under `[mcp.servers.<name>.tools.<tool>]` blocks.
+- Boot supervises configured servers; tools register into CapabilityRegistry as `%Capability{kind: :mcp, policy_class: :external_api, hidden_from_agent?: false}` by default (see the 2026-05 note in §4.5). Per-tool overrides live under `[mcp.servers.<name>.tools.<tool>]` blocks; `hidden_from_agent = true` is the only knob that hides a discovered tool from the LLM.
 - `$env:` prefix handling for env var references.
 - Tests: stub MCP server (no external `npx`), tool registration, server crash isolation, `$env:` resolution. Naming: collision (two tools sanitizing to the same name → `_<8char>` suffix + telemetry), truncation (>64 char → truncate + hash suffix), unicode/special-char sanitization, empty-after-sanitize raises, reverse lookup round-trip. Default sub-agent cannot reach MCP tools without explicit trust/policy/allowlist configuration.
 
@@ -939,7 +944,7 @@ Same script run after every stage. Failure = stage rejected.
 
 5. **Hermes_mcp version pin.** Project is at `0.3.5` as of writing. Pin a version in mix.exs and document upgrade path.
 
-6. **Default policy class for unknown MCP tools.** Currently every MCP tool defaults to `:external_api` + `requires_approval?: true`. That is correct for `github_create_issue`; it's pessimistic for `filesystem_read_file`. Hermes-mcp doesn't expose tool side-effect annotations. Per-tool overrides live in `[mcp.servers.<name>.tools.<tool>]` config blocks; the question is whether we ship a curated default classification map for the popular MCP servers (filesystem, github, sentry, slack) or stay strict-and-explicit. Defaulting to strict-and-explicit for v1.
+6. **Default policy class for unknown MCP tools.** Currently every MCP tool defaults to `:external_api` + `hidden_from_agent?: true`. That is correct for `github_create_issue`; it's pessimistic for `filesystem_read_file`. Hermes-mcp doesn't expose tool side-effect annotations. Per-tool overrides live in `[mcp.servers.<name>.tools.<tool>]` config blocks; the question is whether we ship a curated default classification map for the popular MCP servers (filesystem, github, sentry, slack) or stay strict-and-explicit. Defaulting to strict-and-explicit for v1.
 
 ---
 
@@ -990,5 +995,5 @@ Concrete next-step milestones this design unlocks but does not deliver:
 - **Skill plugin install CLI.** `fermix skill add <git-url>`, `fermix skill remove <name>`, `fermix skill list`. Now feasible because skills are first-class capabilities. ~1 week.
 - **Inbound MCP — fermix as MCP server.** Expose every fermix capability over MCP so external agents can use fermix's skills + memory + tools. Requires deciding auth model (token? mTLS?). ~2 weeks.
 - **Real Anthropic implementation.** Token storage, OAuth flow, Anthropic Messages `chat/3` body, prompt caching. Adapter scaffold makes the change a 1-file fill-in. ~1.5 weeks.
-- **Capability ACL / approval policy.** M10 work. M4.9 surfaces `requires_approval?` so the gating logic has a hook to bind to.
+- **Capability ACL / approval policy.** M10 work. M4.9 surfaces `hidden_from_agent?` so the gating logic has a hook to bind to.
 - **Capability rate limiting.** Token-bucket per capability per minute, configurable. M10.

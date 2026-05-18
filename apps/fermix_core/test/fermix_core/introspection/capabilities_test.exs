@@ -28,7 +28,7 @@ defmodule FermixCore.Introspection.CapabilitiesTest do
                name: "coding",
                kind: :skill,
                policy_class: :exec,
-               requires_approval?: false
+               hidden_from_agent?: false
              },
              %{name: "file_read", kind: :builtin},
              %{name: "github.search", kind: :mcp}

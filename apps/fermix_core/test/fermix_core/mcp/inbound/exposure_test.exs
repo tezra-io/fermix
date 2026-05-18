@@ -17,7 +17,7 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
       kind: Keyword.get(opts, :kind, :builtin),
       executor: {FakeExecutor, :execute, []},
       policy_class: Keyword.get(opts, :policy_class, :read_only),
-      requires_approval?: Keyword.get(opts, :requires_approval?, false)
+      hidden_from_agent?: Keyword.get(opts, :hidden_from_agent?, false)
     })
   end
 
@@ -47,10 +47,10 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
              ]
     end
 
-    test "requires_approval capabilities are hidden unless explicitly exposed" do
+    test "hidden_from_agent? capabilities are hidden unless explicitly exposed" do
       capabilities = [
-        cap("safe", requires_approval?: false),
-        cap("gated", requires_approval?: true)
+        cap("safe", hidden_from_agent?: false),
+        cap("hidden", hidden_from_agent?: true)
       ]
 
       config = %Config{enabled?: true}
@@ -59,10 +59,10 @@ defmodule FermixCore.MCP.Inbound.ExposureTest do
 
       config = %Config{
         enabled?: true,
-        tool_overrides: %{"gated" => %{exposed: true}}
+        tool_overrides: %{"hidden" => %{exposed: true}}
       }
 
-      assert capabilities |> Exposure.expose_for_inbound(config) |> names() == ["safe", "gated"]
+      assert capabilities |> Exposure.expose_for_inbound(config) |> names() == ["safe", "hidden"]
     end
 
     test "allowed and denied tools compose with the broad gate" do

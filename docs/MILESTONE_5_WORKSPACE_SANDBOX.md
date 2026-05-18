@@ -365,7 +365,7 @@ Each enabled command registers one built-in capability in `CapabilityRegistry`:
 
 - `kind: :builtin`
 - `policy_class: :exec`
-- `requires_approval?: false`
+- `hidden_from_agent?: false`
 - schema: `%{"prompt" => string, "args" => optional string array}`
 
 Execution:

@@ -12,17 +12,20 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
     * section headers with two or three dot-separated parts
       (`[mcp.servers.github]`, `[mcp.servers.github.tools.read_file]`)
-    * scalar key/value pairs (`command = "npx"`, `approved = true`)
+    * scalar key/value pairs (`command = "npx"`)
     * inline arrays (`args = ["-y", "..."]`)
     * inline tables (`env = { KEY = "..." }`)
 
   Unknown section blocks under `[mcp.*]` raise loud — silent drops would
   hide misconfiguration.
+
+  MCP tools are visible to the agent by default. To hide a specific tool
+  from the LLM, set `[mcp.servers.X.tools.Y] hidden_from_agent = true`.
   """
 
   @type tool_override :: %{
           optional(:policy_class) => atom(),
-          optional(:requires_approval?) => boolean()
+          optional(:hidden_from_agent?) => boolean()
         }
 
   @type server_config :: %{
@@ -31,7 +34,6 @@ defmodule FermixCore.Capabilities.MCP.Config do
           args: [String.t()],
           env: %{String.t() => String.t()},
           pass_env: [String.t()],
-          approved?: boolean(),
           tools_overrides: %{String.t() => tool_override()}
         }
 
@@ -105,6 +107,11 @@ defmodule FermixCore.Capabilities.MCP.Config do
     server = Map.get(sections, :server, %{})
     tools = Map.get(sections, :tools, %{})
 
+    reject_removed_server_key!(name, server, "approved",
+      "MCP tools are visible to the agent by default. To hide a specific tool, set " <>
+        "`[mcp.servers.#{name}.tools.<tool>] hidden_from_agent = true`."
+    )
+
     env = server |> Map.get("env", %{}) |> validate_env(name)
     pass_env = server |> Map.get("pass_env", []) |> ensure_list_of_strings(:pass_env, name)
     validate_env_conflicts!(name, env, pass_env)
@@ -115,9 +122,15 @@ defmodule FermixCore.Capabilities.MCP.Config do
       args: server |> Map.get("args", []) |> ensure_list_of_strings(:args, name),
       env: env,
       pass_env: pass_env,
-      approved?: server |> Map.get("approved", false) |> validate_bool(:approved, name),
       tools_overrides: parse_tools_overrides(tools, name)
     }
+  end
+
+  defp reject_removed_server_key!(server_name, server, key, hint) do
+    if Map.has_key?(server, key) do
+      raise ArgumentError,
+            "[mcp.servers.#{server_name}] #{key} was removed; #{hint}"
+    end
   end
 
   defp parse_tools_overrides(tools, server_name) do
@@ -128,12 +141,18 @@ defmodule FermixCore.Capabilities.MCP.Config do
           {"policy_class", value}, acc ->
             Map.put(acc, :policy_class, validate_policy(value, tool_name, server_name))
 
-          {"requires_approval", value}, acc ->
+          {"hidden_from_agent", value}, acc ->
             Map.put(
               acc,
-              :requires_approval?,
-              validate_bool(value, :requires_approval, "#{server_name}/#{tool_name}")
+              :hidden_from_agent?,
+              validate_bool(value, :hidden_from_agent, "#{server_name}/#{tool_name}")
             )
+
+          {"requires_approval", _value}, _acc ->
+            raise ArgumentError,
+                  "[mcp.servers.#{server_name}.tools.#{tool_name}] requires_approval was " <>
+                    "renamed; use `hidden_from_agent = true` (semantics are identical — " <>
+                    "the flag hides the tool from the agent; there is no approval prompt)."
 
           _other, acc ->
             acc
