@@ -40,7 +40,7 @@ defmodule FermixCore.Auth.Store do
 
   @spec write(provider(), entry(), Path.t()) :: :ok | {:error, term()}
   def write(provider, %{} = entry, path \\ default_path()) when is_atom(provider) do
-    with {:ok, current} <- read_or_empty(path),
+    with {:ok, current} <- read_for_write(path),
          updated <- put_provider(current, provider, entry),
          :ok <- atomic_write(path, encode(updated)) do
       :ok
@@ -77,9 +77,14 @@ defmodule FermixCore.Auth.Store do
   @spec validate_permissions!(Path.t()) :: :ok
   def validate_permissions!(path \\ default_path()) when is_binary(path) do
     case validate_permissions(path) do
-      :ok -> :ok
-      {:error, {:insecure_permissions, ^path, mode}} -> raise ArgumentError, permissions_message(path, mode)
-      {:error, reason} -> raise ArgumentError, "failed to stat #{path}: #{inspect(reason)}"
+      :ok ->
+        :ok
+
+      {:error, {:insecure_permissions, ^path, mode}} ->
+        raise ArgumentError, permissions_message(path, mode)
+
+      {:error, reason} ->
+        raise ArgumentError, "failed to stat #{path}: #{inspect(reason)}"
     end
   end
 
@@ -141,21 +146,54 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
-  defp read_or_empty(path) do
+  defp read_for_write(path) do
     case File.read(path) do
       {:ok, raw} ->
-        case Jason.decode(raw) do
-          {:ok, %{"providers" => _} = data} -> {:ok, data}
-          {:ok, %{"tokens" => _} = flat} -> {:ok, legacy_codex_doc(flat)}
-          {:ok, _} -> {:ok, empty_doc()}
-          {:error, _} -> {:ok, empty_doc()}
-        end
+        decode_for_write(path, raw)
 
       {:error, :enoent} ->
         {:ok, empty_doc()}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp decode_for_write(path, raw) do
+    case Jason.decode(raw) do
+      {:ok, %{"providers" => providers} = data} when is_map(providers) ->
+        {:ok, data}
+
+      {:ok, %{"tokens" => _} = flat} ->
+        {:ok, legacy_codex_doc(flat)}
+
+      {:ok, _other} ->
+        preserve_and_refuse(path, raw, :unknown_shape)
+
+      {:error, %Jason.DecodeError{} = err} ->
+        preserve_and_refuse(path, raw, {:invalid_json, err})
+    end
+  end
+
+  defp preserve_and_refuse(path, raw, reason) do
+    backup = "#{path}.broken.#{System.system_time(:second)}"
+
+    case File.write(backup, raw, [:binary]) do
+      :ok ->
+        _ = File.chmod(backup, 0o600)
+
+        Logger.error(
+          "Auth.Store: refusing to overwrite #{path} (#{inspect(reason)}); preserved at #{backup}"
+        )
+
+        {:error, {:malformed_auth_file, path, backup, reason}}
+
+      {:error, write_err} ->
+        Logger.error(
+          "Auth.Store: refusing to overwrite #{path} (#{inspect(reason)}); backup also failed: #{inspect(write_err)}"
+        )
+
+        {:error, {:malformed_auth_file, path, nil, reason}}
     end
   end
 
