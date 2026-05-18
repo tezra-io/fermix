@@ -57,7 +57,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   } do
     {:ok, conn} = connect(socket_path)
 
-    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == 1 end)
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello"}\n))
 
     assert {:ok, line} = recv_line(conn)
@@ -184,6 +184,82 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     :gen_tcp.close(conn)
     wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
+  end
+
+  test "rejects a connection once max_clients is reached" do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-cap-#{System.unique_integer([:positive])}.sock"
+      )
+
+    {:ok, task_sup} =
+      Task.Supervisor.start_link(name: :"rt_cap_tasks_#{System.unique_integer([:positive])}")
+
+    test_pid = self()
+
+    session_starter = fn opts ->
+      {:ok, pid} = Agent.start_link(fn -> %{opts: opts} end)
+      send(test_pid, {:session_started, pid, opts})
+      {:ok, pid}
+    end
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        task_supervisor: task_sup,
+        session_starter: session_starter,
+        session_module: FakeSession,
+        max_clients: 1,
+        name: :"rt_cap_socket_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      if Process.alive?(socket), do: GenServer.stop(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    {:ok, conn1} = connect(socket_path)
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
+
+    {:ok, conn2} = connect(socket_path)
+
+    assert {:ok, line} = recv_line(conn2, 2_000)
+
+    assert %{"type" => "error", "reason" => "max_clients_reached"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn2, 0, 1_000)
+    assert LocalVoiceSocket.active_clients(socket) == {:ok, 1}
+
+    :gen_tcp.close(conn1)
+  end
+
+  test "rejects non-positive max_clients" do
+    Process.flag(:trap_exit, true)
+
+    bad_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-bad-#{System.unique_integer([:positive])}.sock"
+      )
+
+    name = :"rt_bad_socket_#{System.unique_integer([:positive])}"
+
+    assert {:error, {%ArgumentError{message: msg}, _stack}} =
+             LocalVoiceSocket.start_link(
+               socket_path: bad_path,
+               task_supervisor: FermixCore.TaskSupervisor,
+               max_clients: 0,
+               name: name
+             )
+
+    assert msg =~ "max_clients"
+  end
+
+  test "active_clients surfaces an error tuple when the server is gone" do
+    name = :"rt_gone_#{System.unique_integer([:positive])}"
+    assert {:error, _reason} = LocalVoiceSocket.active_clients(name)
   end
 
   defp connect(socket_path) do

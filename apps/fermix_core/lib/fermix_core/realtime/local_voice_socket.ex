@@ -19,17 +19,20 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   @accept_idle_ms 50
   @recv_idle_ms 50
   @max_wire_line_bytes 65_536
+  @default_max_clients 4
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @spec active_clients(GenServer.server()) :: non_neg_integer()
+  @spec active_clients(GenServer.server()) :: {:ok, non_neg_integer()} | {:error, term()}
   def active_clients(server \\ __MODULE__) do
-    GenServer.call(server, :active_clients)
+    {:ok, GenServer.call(server, :active_clients)}
   rescue
-    _error -> 0
+    error -> {:error, error}
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   @impl true
@@ -51,6 +54,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
          session_starter: Keyword.get(opts, :session_starter, &default_session_starter/1),
          session_module: Keyword.get(opts, :session_module, SessionServer),
          session_opts: Keyword.get(opts, :session_opts, []),
+         max_clients: positive_int_opt(opts, :max_clients, @default_max_clients),
          active_clients: 0
        }}
     else
@@ -114,6 +118,17 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     end
   end
 
+  defp spawn_client_handler(conn, %{active_clients: active, max_clients: max} = state)
+       when active >= max do
+    Logger.warning(
+      "Realtime voice socket rejecting client: cap=#{max} reached (active=#{active})"
+    )
+
+    _ = send_event(conn, %{type: "error", reason: "max_clients_reached"})
+    _ = :gen_tcp.close(conn)
+    state
+  end
+
   defp spawn_client_handler(conn, state) do
     handler_state = %{
       parent: self(),
@@ -135,6 +150,17 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         Logger.warning("Realtime voice socket client handler failed to start: #{inspect(reason)}")
         _ = :gen_tcp.close(conn)
         state
+    end
+  end
+
+  defp positive_int_opt(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      other ->
+        raise ArgumentError,
+              "#{inspect(key)} must be a positive integer, got: #{inspect(other)}"
     end
   end
 

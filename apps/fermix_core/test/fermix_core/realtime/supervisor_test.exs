@@ -32,7 +32,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
 
     assert Process.whereis(socket_name)
     assert Process.whereis(session_name)
-    assert LocalVoiceSocket.active_clients(socket_name) == 0
+    assert LocalVoiceSocket.active_clients(socket_name) == {:ok, 0}
     assert SessionSupervisor.active_sessions(session_name) == 0
   end
 

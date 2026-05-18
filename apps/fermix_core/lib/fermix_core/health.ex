@@ -13,6 +13,8 @@ defmodule FermixCore.Health do
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
 
+  require Logger
+
   @channels [
     %{
       key: :telegram,
@@ -193,14 +195,26 @@ defmodule FermixCore.Health do
   defp realtime_counts(true, true) do
     %{
       active_sessions: SessionSupervisor.active_sessions(),
-      active_clients: LocalVoiceSocket.active_clients()
+      active_clients: realtime_client_count()
     }
-  rescue
-    _error -> %{active_sessions: 0, active_clients: 0}
   end
 
   defp realtime_counts(_socket_alive, _session_alive) do
     %{active_sessions: 0, active_clients: 0}
+  end
+
+  defp realtime_client_count do
+    case LocalVoiceSocket.active_clients() do
+      {:ok, count} ->
+        count
+
+      {:error, reason} ->
+        Logger.warning(
+          "Realtime active_clients probe failed: #{inspect(reason)}; reporting 0 for health"
+        )
+
+        0
+    end
   end
 
   defp process_status(nil), do: :degraded
