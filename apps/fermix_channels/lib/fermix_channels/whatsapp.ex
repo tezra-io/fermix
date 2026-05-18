@@ -11,6 +11,7 @@ defmodule FermixChannels.WhatsApp do
 
   require Logger
 
+  alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixCore.Net.HttpClient
 
@@ -21,6 +22,23 @@ defmodule FermixChannels.WhatsApp do
   # own media types; anything larger is rejected before the body lands
   # in memory or on tmp.
   @max_media_bytes 25 * 1_024 * 1_024
+  @outbound_caps %{
+    image: 5 * 1_024 * 1_024,
+    audio: 16 * 1_024 * 1_024,
+    video: 16 * 1_024 * 1_024,
+    voice: 16 * 1_024 * 1_024,
+    document: 100 * 1_024 * 1_024
+  }
+  @mime_by_extension %{
+    ".gif" => "image/gif",
+    ".jpeg" => "image/jpeg",
+    ".jpg" => "image/jpeg",
+    ".mp3" => "audio/mpeg",
+    ".mp4" => "video/mp4",
+    ".ogg" => "audio/ogg",
+    ".pdf" => "application/pdf",
+    ".png" => "image/png"
+  }
 
   @impl true
   @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
@@ -85,9 +103,26 @@ defmodule FermixChannels.WhatsApp do
   end
 
   @impl true
-  @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
-  def build_reply(%Message{reply_target: reply_target}) do
+  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+          :ok | {:error, term()}
+  def send_media(to, media_part, opts \\ []) when is_binary(to) and is_map(media_part) do
+    with {:ok, claim} <- Idempotency.claim_outbound_media(:whatsapp, to, media_part) do
+      send_claimed_media(claim, to, media_part, opts)
+    end
+  end
+
+  @impl true
+  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  def build_text_reply(%Message{reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, []) end
+  end
+
+  @impl true
+  @spec build_media_reply(FermixChannels.Channel.message()) ::
+          (FermixChannels.Channel.media_part() -> :ok | {:error, term()})
+  def build_media_reply(%Message{reply_target: reply_target}) do
+    fn media_part -> send_media(reply_target, media_part, []) end
   end
 
   @impl true
@@ -251,6 +286,138 @@ defmodule FermixChannels.WhatsApp do
          req_options: req_options(opts)
        }}
     end
+  end
+
+  defp validate_outbound_media(%{kind: kind, path: path} = media_part) when is_binary(path) do
+    with cap when is_integer(cap) <- Map.get(@outbound_caps, kind),
+         {:ok, stat} <- File.stat(path),
+         :ok <- enforce_outbound_cap(stat.size, cap, kind),
+         :ok <- validate_voice_mime(kind, Map.get(media_part, :mime_type)) do
+      {:ok, stat}
+    else
+      nil -> {:error, {:unsupported_media_kind, kind}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_outbound_media(_media_part), do: {:error, :invalid_media_part}
+
+  defp send_claimed_media(:duplicate, _to, _media_part, _opts), do: :ok
+
+  defp send_claimed_media({:fresh, claim}, to, media_part, opts) do
+    result =
+      with {:ok, config} <- send_config(opts),
+           {:ok, stat} <- validate_outbound_media(media_part),
+           {:ok, media_id} <- upload_outbound_media(media_part, stat, config) do
+        send_media_message(to, media_part, media_id, config)
+      end
+
+    maybe_release_claim(result, claim)
+  end
+
+  defp upload_outbound_media(%{path: path} = media_part, stat, config) do
+    url = "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/media"
+    filename = Map.get(media_part, :filename) || Path.basename(path)
+    mime_type = Map.get(media_part, :mime_type) || mime_from_path(path)
+
+    fields = [
+      messaging_product: "whatsapp",
+      file:
+        {File.stream!(path, 64_000, []),
+         filename: filename, content_type: mime_type, size: stat.size}
+    ]
+
+    result =
+      Req.new(url: url, method: :post, form_multipart: fields, auth: {:bearer, config.access_token})
+      |> Req.merge(config.req_options)
+      |> HttpClient.request("WhatsApp media upload")
+
+    case result do
+      {:ok, %{status: status, body: %{"id" => id}}} when status in [200, 201] ->
+        {:ok, id}
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("WhatsApp media upload failed: #{status} - #{inspect(body)}")
+        {:error, "WhatsApp media upload error: #{status}"}
+
+      {:error, reason} ->
+        Logger.error("WhatsApp media upload request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp send_media_message(to, media_part, media_id, config) do
+    wa_type = whatsapp_media_type(media_part.kind)
+
+    body =
+      %{
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: wa_type
+      }
+      |> Map.put(wa_type, media_payload(wa_type, media_part, media_id))
+
+    result =
+      Req.new(
+        url: "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages",
+        method: :post,
+        json: body,
+        auth: {:bearer, config.access_token}
+      )
+      |> Req.merge(config.req_options)
+      |> HttpClient.request("WhatsApp send media")
+
+    handle_send_response(result)
+  end
+
+  defp media_payload(wa_type, media_part, media_id) do
+    payload = %{id: media_id}
+
+    if wa_type in ["image", "video", "document"] do
+      payload
+      |> maybe_put_caption(Map.get(media_part, :caption))
+      |> maybe_put_filename(wa_type, Map.get(media_part, :filename))
+    else
+      payload
+    end
+  end
+
+  defp whatsapp_media_type(:voice), do: "audio"
+  defp whatsapp_media_type(kind), do: Atom.to_string(kind)
+
+  defp enforce_outbound_cap(size, cap, _kind) when size <= cap, do: :ok
+
+  defp enforce_outbound_cap(size, cap, kind) do
+    {:error, "#{kind} attachment #{size} bytes exceeds WhatsApp #{cap}-byte cap"}
+  end
+
+  defp validate_voice_mime(:voice, "audio/ogg; codecs=opus"), do: :ok
+
+  defp validate_voice_mime(:voice, _mime) do
+    {:error, "WhatsApp voice attachments must be audio/ogg; codecs=opus"}
+  end
+
+  defp validate_voice_mime(_kind, _mime), do: :ok
+
+  defp maybe_put_caption(payload, nil), do: payload
+  defp maybe_put_caption(payload, caption), do: Map.put(payload, :caption, caption)
+
+  defp maybe_put_filename(payload, "document", filename) when is_binary(filename) and filename != "" do
+    Map.put(payload, :filename, filename)
+  end
+
+  defp maybe_put_filename(payload, _wa_type, _filename), do: payload
+
+  defp maybe_release_claim(:ok, _claim), do: :ok
+
+  defp maybe_release_claim({:error, _reason} = error, claim) do
+    :ok = Idempotency.release_outbound_media_claim(claim)
+    error
+  end
+
+  defp mime_from_path(path) do
+    Map.get(@mime_by_extension, Path.extname(path), "application/octet-stream")
   end
 
   defp media_url(attachment, access_token) do

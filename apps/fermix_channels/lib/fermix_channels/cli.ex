@@ -76,9 +76,16 @@ defmodule FermixChannels.CLI do
              channel: __MODULE__,
              agent: Keyword.get(opts, :agent, MainAgent),
              agent_server: Keyword.get(opts, :agent_server, MainAgent),
-             reply_fn: fn text ->
-               send(parent, {ref, {:reply, text}})
-               :ok
+             reply_fn: fn
+               {:text, text} ->
+                 send(parent, {ref, {:reply, text}})
+                 :ok
+
+               {:media, _media_part} ->
+                 {:error, :media_unsupported}
+
+               other ->
+                 {:error, {:invalid_reply_part, other}}
              end
            ) do
       await_reply(ref, message.chat_id, timeout_ms)
@@ -105,8 +112,19 @@ defmodule FermixChannels.CLI do
   end
 
   @impl true
-  def build_reply(%Message{reply_target: reply_target}) do
+  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: {:error, :media_unsupported}
+  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+          {:error, :media_unsupported}
+  def send_media(_chat_id, _media_part, _opts \\ []), do: {:error, :media_unsupported}
+
+  @impl true
+  def build_text_reply(%Message{reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, []) end
+  end
+
+  @impl true
+  def build_media_reply(%Message{reply_target: reply_target}) do
+    fn media_part -> send_media(reply_target, media_part, []) end
   end
 
   @impl true

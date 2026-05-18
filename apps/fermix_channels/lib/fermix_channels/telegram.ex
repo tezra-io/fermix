@@ -11,6 +11,7 @@ defmodule FermixChannels.Telegram do
 
   require Logger
 
+  alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixCore.Net.HttpClient
 
@@ -20,6 +21,23 @@ defmodule FermixChannels.Telegram do
   @fenced_code_pattern ~r/```([A-Za-z0-9_+-]*)\n([\s\S]*?)```/u
   @inline_markdown_pattern ~r/(\[[^\]\n]+?\]\([^\)\n]+?\)|`[^`\n]+?`|\*\*[^*\n]+?\*\*|~~[^~\n]+?~~|\*[^*\n]+?\*|_[^_\n]+?_)/u
   @link_markdown_pattern ~r/^\[([^\]\n]+)\]\(([^\)\n]+)\)$/u
+  @media_methods %{
+    image: {"sendPhoto", :photo, 10 * 1_024 * 1_024},
+    document: {"sendDocument", :document, 50 * 1_024 * 1_024},
+    audio: {"sendAudio", :audio, 50 * 1_024 * 1_024},
+    video: {"sendVideo", :video, 50 * 1_024 * 1_024},
+    voice: {"sendVoice", :voice, 1 * 1_024 * 1_024}
+  }
+  @mime_by_extension %{
+    ".gif" => "image/gif",
+    ".jpeg" => "image/jpeg",
+    ".jpg" => "image/jpeg",
+    ".mp3" => "audio/mpeg",
+    ".mp4" => "video/mp4",
+    ".ogg" => "audio/ogg",
+    ".pdf" => "application/pdf",
+    ".png" => "image/png"
+  }
 
   # -- Behaviour Callbacks --
 
@@ -69,11 +87,30 @@ defmodule FermixChannels.Telegram do
   end
 
   @impl true
-  @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
-  def build_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+          :ok | {:error, term()}
+  def send_media(chat_id, media_part, opts \\ []) when is_binary(chat_id) and is_map(media_part) do
+    with {:ok, claim} <- Idempotency.claim_outbound_media(:telegram, chat_id, media_part) do
+      send_claimed_media(claim, chat_id, media_part, opts)
+    end
+  end
+
+  @impl true
+  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
     opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
 
     fn text -> send_message(reply_target, text, opts) end
+  end
+
+  @impl true
+  @spec build_media_reply(FermixChannels.Channel.message()) ::
+          (FermixChannels.Channel.media_part() -> :ok | {:error, term()})
+  def build_media_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
+    opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
+
+    fn media_part -> send_media(reply_target, media_part, opts) end
   end
 
   @impl true
@@ -127,6 +164,87 @@ defmodule FermixChannels.Telegram do
           {:error, reason}
       end
     end
+  end
+
+  defp send_claimed_media(:duplicate, _chat_id, _media_part, _opts), do: :ok
+
+  defp send_claimed_media({:fresh, claim}, chat_id, media_part, opts) do
+    result =
+      with {:ok, token} <- get_bot_token(),
+           {:ok, request} <- media_request(token, chat_id, media_part, opts) do
+        post_media(request)
+      end
+
+    maybe_release_claim(result, claim)
+  end
+
+  defp media_request(token, chat_id, %{kind: kind, path: path} = media_part, opts)
+       when is_binary(path) do
+    with {:ok, {method, field, cap}} <- Map.fetch(@media_methods, kind),
+         {:ok, stat} <- File.stat(path),
+         :ok <- enforce_media_cap(stat.size, cap, kind) do
+      url = "#{@bot_api_base}/bot#{token}/#{method}"
+      filename = Map.get(media_part, :filename) || Path.basename(path)
+      mime_type = Map.get(media_part, :mime_type) || mime_from_path(path)
+
+      fields =
+        [
+          {:chat_id, chat_id},
+          {field,
+           {File.stream!(path, 64_000, []),
+            filename: filename, content_type: mime_type, size: stat.size}}
+        ]
+        |> maybe_put_form(:caption, Map.get(media_part, :caption))
+        |> maybe_put_form(:message_thread_id, Keyword.get(opts, :message_thread_id))
+
+      {:ok, Req.new(url: url, method: :post, form_multipart: fields) |> Req.merge(req_options(opts))}
+    else
+      :error -> {:error, {:unsupported_media_kind, kind}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp media_request(_token, _chat_id, _media_part, _opts), do: {:error, :invalid_media_part}
+
+  defp post_media(request) do
+    case HttpClient.request(request, "Telegram sendMedia") do
+      {:ok, %{status: 200}} ->
+        :telemetry.execute(
+          [:fermix, :channel, :message],
+          %{count: 1},
+          %{channel: :telegram, direction: :outbound}
+        )
+
+        :ok
+
+      {:ok, %{status: status, body: response}} ->
+        Logger.error("Telegram sendMedia failed: #{status} - #{inspect(response)}")
+        {:error, "Telegram API error: #{status}"}
+
+      {:error, reason} ->
+        Logger.error("Telegram sendMedia request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp enforce_media_cap(size, cap, _kind) when size <= cap, do: :ok
+
+  defp enforce_media_cap(size, cap, kind) do
+    {:error, "#{kind} attachment #{size} bytes exceeds Telegram #{cap}-byte cap"}
+  end
+
+  defp maybe_release_claim(:ok, _claim), do: :ok
+
+  defp maybe_release_claim({:error, _reason} = error, claim) do
+    :ok = Idempotency.release_outbound_media_claim(claim)
+    error
+  end
+
+  defp maybe_put_form(fields, _key, nil), do: fields
+  defp maybe_put_form(fields, key, value), do: Keyword.put(fields, key, value)
+
+  defp mime_from_path(path) do
+    Map.get(@mime_by_extension, Path.extname(path), "application/octet-stream")
   end
 
   defp prepare_outbound_text(text, opts) do

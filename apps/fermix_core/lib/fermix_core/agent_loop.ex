@@ -27,6 +27,7 @@ defmodule FermixCore.AgentLoop do
           allowed_tools: [String.t()] | nil,
           policy: CapabilityRegistry.policy_spec(),
           trust: CapabilityRegistry.trust(),
+          excluded_categories: [atom()] | nil,
           route_key: Adapter.route_key(),
           adapter_opts: keyword(),
           model: String.t(),
@@ -64,6 +65,7 @@ defmodule FermixCore.AgentLoop do
     allowed_tools = Keyword.get(opts, :allowed_tools)
     policy = Keyword.get(opts, :policy)
     trust = Keyword.get(opts, :trust)
+    excluded_categories = Keyword.get(opts, :excluded_categories)
     {adapter, route_key} = resolve_adapter(opts)
 
     capabilities =
@@ -72,7 +74,8 @@ defmodule FermixCore.AgentLoop do
       |> default_capabilities(capability_registry,
         allowed_tools: allowed_tools,
         policy: policy,
-        trust: trust
+        trust: trust,
+        excluded_categories: excluded_categories
       )
 
     %{
@@ -118,7 +121,7 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp default_capabilities(nil, registry, opts) do
-    CapabilityRegistry.list(registry, opts)
+    CapabilityRegistry.list_for(registry, opts)
   end
 
   defp default_capabilities(capabilities, _registry, _opts)

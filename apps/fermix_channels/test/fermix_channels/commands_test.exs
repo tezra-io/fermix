@@ -328,7 +328,12 @@ defmodule FermixChannels.CommandsTest do
   end
 
   defp reply_fn(test_pid) do
-    fn text ->
+    fn
+      {:text, text} ->
+        send(test_pid, {:compact_reply, text})
+        :ok
+
+      text ->
       send(test_pid, {:compact_reply, text})
       :ok
     end

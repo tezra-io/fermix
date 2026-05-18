@@ -5,6 +5,7 @@ defmodule FermixChannels.Commands do
 
   alias FermixChannels.Commands.Registry
   alias FermixChannels.Message
+  alias FermixCore.Channels.Outbound
 
   @type result ::
           {:command, String.t(), [String.t()], Message.t()} | {:passthrough, Message.t()}
@@ -19,7 +20,7 @@ defmodule FermixChannels.Commands do
     end
   end
 
-  @spec dispatch(result(), (String.t() -> :ok | {:error, term()}), map()) ::
+  @spec dispatch(result(), Outbound.reply_fn(), map()) ::
           :ok | :passthrough | {:error, term()}
   def dispatch({:passthrough, _message}, _reply_fn, _context), do: :passthrough
 
@@ -51,7 +52,7 @@ defmodule FermixChannels.Commands do
           %{command: handler.name(), channel: message.channel}
         )
 
-        reply_fn.("This command requires owner permissions.")
+        reply_fn.({:text, "This command requires owner permissions."})
         {:error, :unauthorized}
     end
   end

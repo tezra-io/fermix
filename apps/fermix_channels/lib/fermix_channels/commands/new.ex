@@ -25,7 +25,7 @@ defmodule FermixChannels.Commands.New do
     conversation_store = Map.fetch!(context, :conversation_store)
 
     :ok = ConversationStore.clear(conversation_key, server: conversation_store)
-    reply_fn.("Started a fresh session. Long-term memory is preserved.")
+    reply_fn.({:text, "Started a fresh session. Long-term memory is preserved."})
     :ok
   end
 end

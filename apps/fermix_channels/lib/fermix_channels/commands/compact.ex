@@ -57,22 +57,23 @@ defmodule FermixChannels.Commands.Compact do
             emit_forced_compaction(conversation_key, before_tokens, after_tokens)
 
             reply_fn.(
-              "Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} tokens."
+              {:text,
+               "Compacted: #{format_tokens(before_tokens)} -> #{format_tokens(after_tokens)} tokens."}
             )
 
           {:error, :stale_history} ->
-            reply_fn.("Conversation changed while compacting; run /compact again.")
+            reply_fn.({:text, "Conversation changed while compacting; run /compact again."})
         end
 
         :ok
 
       {:ok, %{compacted?: false}} ->
-        reply_fn.("Nothing to compact (#{format_tokens(before_tokens)} tokens).")
+        reply_fn.({:text, "Nothing to compact (#{format_tokens(before_tokens)} tokens)."})
         :ok
 
       {:error, reason} ->
         Logger.error("forced compaction failed: #{inspect(reason)}")
-        reply_fn.("Compaction failed: #{inspect(reason)}.")
+        reply_fn.({:text, "Compaction failed: #{inspect(reason)}."})
         {:error, reason}
     end
   end

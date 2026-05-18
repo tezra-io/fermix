@@ -18,13 +18,13 @@ defmodule FermixChannels.Commands.Whoami do
   @impl true
   def execute(%{channel: "cli"}, reply_fn, _context) do
     # CLI is an implicit-owner channel; no external stable id discovery is needed.
-    reply_fn.("Your user id on this channel: cli")
+    reply_fn.({:text, "Your user id on this channel: cli"})
     :ok
   end
 
   def execute(message, reply_fn, _context) do
     user_id = stable_user_id(message.metadata || %{})
-    reply_fn.("Your user id on this channel: #{user_id || "unknown"}")
+    reply_fn.({:text, "Your user id on this channel: #{user_id || "unknown"}"})
     :ok
   end
 

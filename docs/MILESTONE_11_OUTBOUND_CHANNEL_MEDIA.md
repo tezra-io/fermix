@@ -222,7 +222,7 @@ M11 is the first milestone where this matters in practice: `send_attachment` is 
 | `FermixCore.Tools.SendAttachment` | P0 | New | New built-in tool in `fermix_core`. References `FermixCore.Channels.Outbound` for types only; **no** import of `FermixChannels`. Returns canonical `Tool.tool_result()` via `Tool.success/1` / `Tool.error/1`. Parameters: `path`, `kind`, `caption?`. `execute/2` calls `Sandbox.read_path/3` then `context.reply_fn.({:media, part})`. |
 | Per-channel byte caps (owned by adapters) | P0 | New | Each channel adapter declares its own `media_byte_cap/1` (private or module-attr) and enforces it inside `send_media/3`. Core never knows the matrix — it just sees `{:error, :byte_cap_exceeded}` and forwards. Eliminates the rev-1 cross-app cap registry. |
 | MIME mapping (owned by adapters) | P0 | New | WhatsApp's `:voice → audio` translation and the `audio/ogg; codecs=opus` MIME injection live inside the WhatsApp adapter, not in core. Other channels with simpler 1:1 mappings declare them analogously. |
-| Outbound idempotency | P0 | New | `FermixChannels.Idempotency` gains `register_outbound_media(channel, chat_id, media_part) :: :fresh \| :duplicate`. Channel adapters call this themselves inside `send_media/3` before the wire call. SHA-256 of `[channel, chat_id, path, caption]`, 60 s TTL. Duplicate returns `:ok` without re-uploading. |
+| Outbound idempotency | P0 | New | `FermixChannels.Idempotency` gains `claim_outbound_media/4` and `release_outbound_media_claim/2`. Channel adapters atomically claim before the wire call; duplicate returns `:ok` without re-uploading. The key includes channel, chat id, media metadata, and SHA-256 of file contents; 60 s TTL. Failed sends release the claim so a later retry can send. |
 | Telemetry | P0 | New | `[:fermix, :channel, :message]` already exists. Metadata extended with `:kind :: :text \| :media` and `:media_kind :: media_kind \| nil`. New event `[:fermix, :channel, :media_send_error]` with `%{channel, chat_id, kind, reason, bytes}`. |
 | `CapabilityRegistry.list_for/1` category filter | P0 | New | Single filtering primitive in core: `list_for(opts)` accepts `excluded_categories: [atom()] \| nil`, `excluded_names: [String.t()] \| nil`, `policy_classes: [atom()] \| nil`. Default `nil` for every key preserves today's behavior. Capabilities whose `metadata.category` is unset are never filtered by category (preserves behavior for any tool that hasn't been annotated yet). One mechanism; threads to every agent runtime (AgentLoop today, voice/Realtime tomorrow). |
 | Agent-level `excluded_categories` declaration | P0 | New | Each agent runtime declares its exclusions once at init. Main agent: `excluded_categories: nil` (accepts all — no behavioral change vs. today). Voice agent (M9.x Realtime session bootstrap): `excluded_categories: [:channel]`. `send_attachment` declares `category :: :channel` so the exclusion catches it automatically; no per-name list to maintain. |
@@ -862,15 +862,17 @@ Plus the two dispatcher internal call sites (`dispatcher.ex:48,66`) and `main_ag
 `FermixChannels.Idempotency` gains:
 
 ```elixir
-@spec register_outbound_media(String.t(), String.t(), Outbound.media_part()) :: :fresh | :duplicate
-def register_outbound_media(channel, chat_id, %{path: path} = part) do
-  caption = Map.get(part, :caption, "")
-  hash = :crypto.hash(:sha256, [channel, chat_id, path, caption]) |> Base.encode16(case: :lower)
-  # Same GenServer-serialized ETS pattern as commit b5d96ea (inbound dedup).
-end
+@spec claim_outbound_media(atom(), String.t(), Outbound.media_part()) ::
+        {:ok, {:fresh, claim}} | {:ok, :duplicate} | {:error, term()}
+
+@spec release_outbound_media_claim(claim) :: :ok
 ```
 
-Channel adapters call this themselves inside `send_media/3` (see `maybe_check_idempotency/3` in §5.5 snippets) before the wire call. On `:duplicate` the adapter returns `:ok` without re-uploading, and the `media_send_error` telemetry is **not** emitted (no error to report; dedup is the correct behavior).
+Channel adapters call `claim_outbound_media/3` themselves inside `send_media/3` before the wire call. The claim is a single GenServer call, using the same serialized ETS pattern as inbound dedup, so two concurrent sends for the same key cannot both observe `:fresh`.
+
+The key includes `channel`, `chat_id`, `kind`, `caption`, `filename`, `mime_type`, and a SHA-256 digest of the file contents. This intentionally costs one bounded file read per attempted send, but avoids suppressing a changed file that reused the same path and filename.
+
+On `:duplicate`, the adapter returns `:ok` without re-uploading, and the `media_send_error` telemetry is **not** emitted (no error to report; dedup is the correct behavior). On `{:fresh, claim}`, the adapter performs the upload/send. If that send returns an error, the adapter calls `release_outbound_media_claim/1` so a later retry can claim the key again; on success, the claim remains until its TTL expires.
 
 SendAttachment does not know about idempotency — it just sees `:ok` from the reply_fn, same as for a fresh send. The LLM sees the same success line either way.
 
@@ -984,7 +986,7 @@ Every failure surfaces to the LLM as a string `error` per `Tool.error/1`. The ag
 | File larger than channel cap | adapter's `ensure_size_within_cap/2` | `"byte_cap_exceeded: file is N bytes; channel cap is M bytes"` |
 | `:voice` on WhatsApp without correct MIME | WhatsApp adapter's `validate_voice_mime/1` | `"invalid_voice_mime: voice on WhatsApp requires 'audio/ogg; codecs=opus', got …"` |
 | Channel HTTP / CLI error | adapter's response handler | `"send_failed: <reason>"` + logger.error line for operators |
-| Duplicate within 60 s window | channel adapter via `Idempotency.register_outbound_media/3` | Not surfaced — adapter returns `:ok`; LLM sees normal success line. |
+| Duplicate within 60 s window | channel adapter via `Idempotency.claim_outbound_media/4` | Not surfaced — adapter returns `:ok`; LLM sees normal success line. |
 
 The `"Error: …"` prefix is added by `agent_loop.ex:271`, not by SendAttachment.
 
@@ -1012,7 +1014,7 @@ The `"Error: …"` prefix is added by `agent_loop.ex:271`, not by SendAttachment
 | `SendAttachment` happy path | `test/fermix_core/tools/send_attachment_test.exs` | Sandboxed tmp file + recording reply_fn; assert tool returns `Tool.success(_)` and the reply_fn was called with `{:media, %{kind: :image, path: <resolved>, caption: <c>}}`. |
 | `SendAttachment` failure modes | same file | Eight tests, one per row in §6. |
 | Sandbox denial | same file | Path outside sandbox → `Tool.error("path is outside the sandbox roots")`; reply_fn not called. |
-| Idempotency dedup | `test/fermix_channels/idempotency_test.exs` (extend) | Same `(channel, chat_id, path, caption)` within 60 s returns `:duplicate`; channel `send_media/3` returns `:ok` without wire call; after 60 s, `:fresh`. |
+| Idempotency dedup | `test/fermix_channels/idempotency_test.exs` (extend) | Same `(channel, chat_id, kind, caption, filename, mime_type, file-content SHA-256)` within 60 s returns `:duplicate`; concurrent claims produce exactly one `:fresh`; released failed-send claims can be retried. |
 | Telemetry success | `test/fermix_core/tools/send_attachment_test.exs` | `[:fermix, :channel, :message]` event fires with `kind: :media, media_kind: :image, bytes: <n>`. |
 | Telemetry failure | same file | `[:fermix, :channel, :media_send_error]` fires on a stubbed 400; tool emits `[:fermix, :tool, :exec]` with `success: false`. |
 | Category filter — happy path | `test/fermix_core/capabilities/registry_test.exs` (extend) | `Registry.list_for(excluded_categories: [:channel])` returns the full list minus capabilities whose `metadata.category == :channel`. `list_for([])` and `list_for(excluded_categories: nil)` both equal `list/0`. Tools without a declared category survive every form. |
@@ -1038,7 +1040,7 @@ Single change-set, single PR. Order matters because the type module must compile
    - Add `send_media/3` (or `{:error, :media_unsupported}` for CLI).
    - Add per-channel cap module-attrs and `ensure_size_within_cap/_` private.
    - Add MIME mapping (WhatsApp only in v1).
-5. **`apps/fermix_channels/lib/fermix_channels/idempotency.ex`** — add `register_outbound_media/3` plus its ETS bucket.
+5. **`apps/fermix_channels/lib/fermix_channels/idempotency.ex`** — add atomic outbound media claim/release calls plus their ETS bucket.
 6. **`apps/fermix_channels/lib/fermix_channels/dispatcher.ex`** — rewrite `build_reply_fn/2` to compose the two channel-side closures; rewrite `build_reply_fn/3` and update logging branches.
 7. **`apps/fermix_channels/lib/fermix_channels/command.ex`** — widen `execute/3` callback's `reply_fn` type.
 8. **`apps/fermix_channels/lib/fermix_channels/commands.ex` + `commands/*.ex`** — 10 call-site updates per the §5.9 table.

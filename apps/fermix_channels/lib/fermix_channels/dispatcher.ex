@@ -10,6 +10,7 @@ defmodule FermixChannels.Dispatcher do
 
   alias FermixChannels.Commands
   alias FermixChannels.Message
+  alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
 
@@ -44,35 +45,55 @@ defmodule FermixChannels.Dispatcher do
   end
 
   defp build_reply_fn(_channel, _message, reply_fn) when is_function(reply_fn, 1) do
-    fn text ->
-      case reply_fn.(text) do
-        :ok ->
-          :ok
-
-        {:error, reason} = error ->
-          Logger.error("Channel reply delivery failed: #{inspect(reason)}")
-          error
-      end
-    end
+    fn part -> observe_reply(reply_fn.(part), :override, nil) end
   end
 
   defp build_reply_fn(channel, %Message{} = message, _reply_fn),
     do: build_reply_fn(channel, message)
 
   defp build_reply_fn(channel, %Message{} = message) do
-    reply_fn = channel.build_reply(message)
+    text_reply = text_reply_fn(channel, message)
+    media_reply = media_reply_fn(channel, message)
 
-    fn text ->
-      case reply_fn.(text) do
-        :ok ->
-          :ok
+    fn
+      {:text, text} when is_binary(text) ->
+        observe_reply(text_reply.(text), :text, nil)
 
-        {:error, reason} = error ->
-          Logger.error("Channel reply delivery failed: #{inspect(reason)}")
-          error
-      end
+      {:media, %{kind: kind} = media_part} ->
+        observe_reply(media_reply.(media_part), :media, kind)
+
+      other ->
+        {:error, {:invalid_reply_part, other}}
     end
   end
+
+  defp text_reply_fn(channel, message) do
+    channel.build_text_reply(message)
+  end
+
+  defp media_reply_fn(channel, message) do
+    channel.build_media_reply(message)
+  end
+
+  @spec observe_reply(term(), :override | :text | :media, Outbound.media_kind() | nil) ::
+          :ok | {:error, term()}
+  defp observe_reply(:ok, _reply_type, _media_kind), do: :ok
+
+  defp observe_reply({:error, reason} = error, reply_type, media_kind) do
+    Logger.error("Channel reply delivery failed: #{inspect(reason)}")
+
+    if reply_type == :media do
+      :telemetry.execute(
+        [:fermix, :channel, :media_send_error],
+        %{count: 1},
+        %{kind: media_kind, reason: reason}
+      )
+    end
+
+    error
+  end
+
+  defp observe_reply(_other, _reply_type, _media_kind), do: :ok
 
   defp build_typing_fn(channel, %Message{reply_target: reply_target}) do
     if function_exported?(channel, :start_typing, 1) do
@@ -80,8 +101,7 @@ defmodule FermixChannels.Dispatcher do
     end
   end
 
-  defp to_agent_message(%{__struct__: _} = message), do: Map.from_struct(message)
-  defp to_agent_message(message) when is_map(message), do: message_attrs(message)
+  defp to_agent_message(%Message{} = message), do: Map.from_struct(message)
 
   defp dispatch_message(
          channel,
@@ -242,16 +262,6 @@ defmodule FermixChannels.Dispatcher do
         end
       end
     )
-  end
-
-  defp message_attrs(message) do
-    {:ok, attrs} = required_message_attrs(message)
-
-    Map.merge(attrs, %{
-      thread_ts: message_value(message, :thread_ts),
-      metadata: normalize_metadata(message_value(message, :metadata)),
-      attachments: normalize_attachments(message_value(message, :attachments))
-    })
   end
 
   defp message_value(message, key) do

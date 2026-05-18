@@ -201,7 +201,7 @@ defmodule FermixWebWeb.IntegrationTest do
         sender: "test_user",
         channel: "telegram",
         chat_id: "42",
-        reply_fn: fn response -> send(test_pid, {:reply, response}) end
+        reply_fn: fn response -> send(test_pid, {:reply, reply_payload(response)}) end
       }
 
       MainAgent.handle_message(msg, agent)
@@ -245,7 +245,7 @@ defmodule FermixWebWeb.IntegrationTest do
         sender: "test_user",
         channel: "telegram",
         chat_id: "99",
-        reply_fn: fn response -> send(test_pid, {:reply, response}) end
+        reply_fn: fn response -> send(test_pid, {:reply, reply_payload(response)}) end
       }
 
       MainAgent.handle_message(msg, agent)
@@ -276,4 +276,7 @@ defmodule FermixWebWeb.IntegrationTest do
       assert conn.status == 404
     end
   end
+
+  defp reply_payload({:text, text}), do: text
+  defp reply_payload(response), do: response
 end

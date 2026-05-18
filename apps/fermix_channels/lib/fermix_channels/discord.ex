@@ -12,10 +12,12 @@ defmodule FermixChannels.Discord do
 
   require Logger
 
+  alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixCore.Net.HttpClient
 
   @api_base "https://discord.com/api/v10"
+  @max_media_bytes 10 * 1_024 * 1_024
 
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
@@ -67,9 +69,27 @@ defmodule FermixChannels.Discord do
   end
 
   @impl true
-  @spec build_reply(FermixChannels.Channel.message()) :: FermixChannels.Channel.reply_fn()
-  def build_reply(%Message{id: message_id, reply_target: reply_target}) do
+  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+          :ok | {:error, term()}
+  def send_media(channel_id, media_part, opts \\ [])
+      when is_binary(channel_id) and is_map(media_part) do
+    with {:ok, claim} <- Idempotency.claim_outbound_media(:discord, channel_id, media_part) do
+      send_claimed_media(claim, channel_id, media_part, opts)
+    end
+  end
+
+  @impl true
+  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  def build_text_reply(%Message{id: message_id, reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, reply_to: message_id) end
+  end
+
+  @impl true
+  @spec build_media_reply(FermixChannels.Channel.message()) ::
+          (FermixChannels.Channel.media_part() -> :ok | {:error, term()})
+  def build_media_reply(%Message{id: message_id, reply_target: reply_target}) do
+    fn media_part -> send_media(reply_target, media_part, reply_to: message_id) end
   end
 
   @impl true
@@ -200,6 +220,67 @@ defmodule FermixChannels.Discord do
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image
   defp attachment_kind(_mime_type), do: :file
+
+  defp send_claimed_media(:duplicate, _channel_id, _media_part, _opts), do: :ok
+
+  defp send_claimed_media({:fresh, claim}, channel_id, media_part, opts) do
+    result =
+      with {:ok, token} <- bot_token(),
+           {:ok, request} <- media_request(channel_id, token, media_part, opts) do
+        post_media(request)
+      end
+
+    maybe_release_claim(result, claim)
+  end
+
+  defp media_request(channel_id, token, %{path: path} = media_part, opts) when is_binary(path) do
+    with {:ok, stat} <- File.stat(path),
+         :ok <- enforce_media_cap(stat.size) do
+      url = "#{@api_base}/channels/#{channel_id}/messages"
+      filename = Map.get(media_part, :filename) || Path.basename(path)
+      mime_type = Map.get(media_part, :mime_type) || "application/octet-stream"
+
+      payload =
+        %{allowed_mentions: %{parse: []}}
+        |> maybe_put_content(Map.get(media_part, :caption))
+        |> maybe_put_message_reference(channel_id, opts)
+
+      fields = [
+        payload_json: Jason.encode!(payload),
+        "files[0]":
+          {File.stream!(path, 64_000, []), filename: filename, content_type: mime_type, size: stat.size}
+      ]
+
+      {:ok,
+       Req.new(url: url, method: :post, form_multipart: fields)
+       |> Req.Request.put_header("authorization", "Bot #{token}")
+       |> Req.merge(req_options(opts))}
+    end
+  end
+
+  defp media_request(_channel_id, _token, _media_part, _opts), do: {:error, :invalid_media_part}
+
+  defp post_media(request) do
+    request
+    |> HttpClient.request("Discord sendMedia")
+    |> handle_send_response()
+  end
+
+  defp enforce_media_cap(size) when size <= @max_media_bytes, do: :ok
+
+  defp enforce_media_cap(size) do
+    {:error, "Discord attachment #{size} bytes exceeds #{@max_media_bytes}-byte cap"}
+  end
+
+  defp maybe_put_content(body, nil), do: body
+  defp maybe_put_content(body, content), do: Map.put(body, :content, content)
+
+  defp maybe_release_claim(:ok, _claim), do: :ok
+
+  defp maybe_release_claim({:error, _reason} = error, claim) do
+    :ok = Idempotency.release_outbound_media_claim(claim)
+    error
+  end
 
   defp maybe_put_message_reference(body, channel_id, opts) do
     case Keyword.get(opts, :reply_to) do
