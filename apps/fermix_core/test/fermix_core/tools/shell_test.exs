@@ -15,7 +15,12 @@ defmodule FermixCore.Tools.ShellTest do
     File.mkdir_p!(workspace)
 
     System.put_env("FERMIX_HOME", home)
-    Application.put_env(:fermix_core, :sandbox, Config.normalize(mode: :strict, workspace_root: workspace))
+
+    Application.put_env(
+      :fermix_core,
+      :sandbox,
+      Config.normalize(mode: :strict, workspace_root: workspace)
+    )
 
     on_exit(fn ->
       case sandbox do

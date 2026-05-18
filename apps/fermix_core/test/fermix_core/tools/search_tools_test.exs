@@ -4,8 +4,6 @@ defmodule FermixCore.Tools.SearchToolsTest do
   alias FermixCore.Tools.ContentSearch
   alias FermixCore.Tools.GlobSearch
 
-  @context %{agent_name: "test_agent", conversation_key: :test}
-
   setup do
     dir = Path.join(System.tmp_dir!(), "fermix-search-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.join(dir, "lib"))
@@ -14,14 +12,22 @@ defmodule FermixCore.Tools.SearchToolsTest do
     File.write!(Path.join(dir, "notes.txt"), "TODO second\n")
     File.write!(Path.join(dir, "binary.bin"), <<0, 1, 2, 3, 84, 79, 68, 79>>)
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-    %{dir: dir}
+
+    context = %{
+      agent_name: "test_agent",
+      conversation_key: :test,
+      cwd: dir,
+      sandbox_config: %{mode: :strict, workspace_root: dir, allowed_roots: []}
+    }
+
+    %{dir: dir, context: context}
   end
 
-  test "glob_search returns bounded absolute path matches", %{dir: dir} do
+  test "glob_search returns bounded absolute path matches", %{dir: dir, context: context} do
     assert {:ok, result} =
              GlobSearch.execute(
                %{"path" => dir, "pattern" => "**/*.ex", "max_results" => 1},
-               @context
+               context
              )
 
     assert result.success == true
@@ -30,11 +36,11 @@ defmodule FermixCore.Tools.SearchToolsTest do
     assert String.ends_with?(path, ".ex")
   end
 
-  test "content_search finds text matches and skips binary files", %{dir: dir} do
+  test "content_search finds text matches and skips binary files", %{dir: dir, context: context} do
     assert {:ok, result} =
              ContentSearch.execute(
                %{"path" => dir, "pattern" => "TODO", "max_results" => 10},
-               @context
+               context
              )
 
     assert result.success == true
@@ -43,11 +49,14 @@ defmodule FermixCore.Tools.SearchToolsTest do
     refute Enum.any?(payload["matches"], &String.ends_with?(&1["path"], "binary.bin"))
   end
 
-  test "content_search supports regex and reports invalid regex loudly", %{dir: dir} do
+  test "content_search supports regex and reports invalid regex loudly", %{
+    dir: dir,
+    context: context
+  } do
     assert {:ok, ok} =
              ContentSearch.execute(
                %{"path" => dir, "pattern" => "defmodule\\s+Alpha", "regex" => true},
-               @context
+               context
              )
 
     assert ok.success == true
@@ -56,7 +65,7 @@ defmodule FermixCore.Tools.SearchToolsTest do
     assert {:ok, bad} =
              ContentSearch.execute(
                %{"path" => dir, "pattern" => "[", "regex" => true},
-               @context
+               context
              )
 
     assert bad.success == false

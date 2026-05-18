@@ -35,15 +35,24 @@ defmodule FermixCore.Sandbox.PathPolicy do
   def resolve_working_dir(_dir, _config, _context), do: {:error, :invalid_working_dir}
 
   @spec resolve_write_path(String.t(), Config.t(), map()) :: {:ok, String.t()} | {:error, term()}
-  def resolve_write_path(path, config, context) when is_binary(path) do
+  def resolve_write_path(path, config, context) when is_binary(path),
+    do: resolve_constrained_path(path, config, context)
+
+  def resolve_write_path(_path, _config, _context), do: {:error, :invalid_path}
+
+  @spec resolve_read_path(String.t(), Config.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def resolve_read_path(path, config, context) when is_binary(path),
+    do: resolve_constrained_path(path, config, context)
+
+  def resolve_read_path(_path, _config, _context), do: {:error, :invalid_path}
+
+  defp resolve_constrained_path(path, config, context) do
     with {:ok, base} <- resolve_working_dir(Map.get(context, :cwd), config, context),
          {:ok, resolved} <- resolve(path, base),
          :ok <- allowed_path?(resolved, config) do
       {:ok, resolved}
     end
   end
-
-  def resolve_write_path(_path, _config, _context), do: {:error, :invalid_path}
 
   @spec allowed_path?(String.t(), Config.t()) :: :ok | {:error, term()}
   def allowed_path?(path, config) when is_binary(path) do

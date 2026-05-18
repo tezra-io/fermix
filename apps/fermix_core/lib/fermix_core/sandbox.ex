@@ -47,7 +47,21 @@ defmodule FermixCore.Sandbox do
       {:ok, resolved}
     else
       {:deny, reason} -> {:error, reason}
-      {:error, reason} -> emit_denied(reason, operation, context)
+      {:error, reason} -> emit_denied(:read_write, reason, operation, context)
+    end
+  end
+
+  @spec read_path(String.t(), atom(), map()) :: {:ok, String.t()} | {:error, term()}
+  def read_path(path, operation, context)
+      when is_binary(path) and is_atom(operation) and is_map(context) do
+    config = config_from(context)
+
+    with {:ok, resolved} <- PathPolicy.resolve_read_path(path, config, context),
+         :allow <- enforce(:read_only, %{operation: operation, path: resolved}, context) do
+      {:ok, resolved}
+    else
+      {:deny, reason} -> {:error, reason}
+      {:error, reason} -> emit_denied(:read_only, reason, operation, context)
     end
   end
 
@@ -60,7 +74,7 @@ defmodule FermixCore.Sandbox do
       {:ok, resolved}
     else
       {:deny, reason} -> {:error, reason}
-      {:error, reason} -> emit_denied(reason, operation, context)
+      {:error, reason} -> emit_denied(:read_write, reason, operation, context)
     end
   end
 
@@ -102,8 +116,8 @@ defmodule FermixCore.Sandbox do
     end
   end
 
-  defp emit_denied(reason, operation, context) do
-    Decision.emit({:deny, reason}, metadata(:read_write, %{operation: operation}, context))
+  defp emit_denied(policy_class, reason, operation, context) do
+    Decision.emit({:deny, reason}, metadata(policy_class, %{operation: operation}, context))
     {:error, reason}
   end
 

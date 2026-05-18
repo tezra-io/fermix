@@ -32,15 +32,31 @@ defmodule FermixCore.Tools.GitToolsTest do
     }
   end
 
-  test "git_read runs whitelisted read-only subcommands", %{dir: dir} do
+  test "git_read runs whitelisted read-only subcommands", %{dir: dir, context: context} do
     assert {:ok, result} =
              GitRead.execute(
                %{"repo" => dir, "command" => "status", "args" => ["--short"]},
-               @context
+               context
              )
 
     assert result.success == true
     assert result.output == ""
+  end
+
+  test "git_read denies a repo outside sandbox roots", %{context: context} do
+    outside = FermixTestSupport.SafeRm.make_tmp_dir!("git-read-outside")
+    System.cmd("git", ["init"], cd: outside)
+
+    assert {:ok, result} =
+             GitRead.execute(
+               %{"repo" => outside, "command" => "status", "args" => []},
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "outside_root" or result.error =~ "protected_path"
+
+    FermixTestSupport.SafeRm.rm_rf!(outside)
   end
 
   test "git_write runs whitelisted mutating subcommands and rejects push", %{
