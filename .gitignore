@@ -47,3 +47,6 @@ erl_crash.dump
 !/docs/*.md
 !/docs/*.png
 !/docs/superpowers/
+
+# Claude Code local worktrees
+/.claude/worktrees/
