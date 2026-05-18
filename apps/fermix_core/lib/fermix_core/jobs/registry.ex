@@ -176,6 +176,8 @@ defmodule FermixCore.Jobs.Registry do
          silent_marker: optional_string(attrs, :silent_marker, "[SILENT]"),
          created_by_agent_id: optional_string(attrs, :created_by_agent_id, @default_agent_id),
          created_by_session_id: optional_string(attrs, :created_by_session_id, nil),
+         created_by_channel: optional_string(attrs, :created_by_channel, nil),
+         created_by_trust: optional_string(attrs, :created_by_trust, "core"),
          expires_at: expires_at
        }}
     end
@@ -214,6 +216,8 @@ defmodule FermixCore.Jobs.Registry do
       state: "scheduled",
       created_by_agent_id: normalized.created_by_agent_id,
       created_by_session_id: normalized.created_by_session_id,
+      created_by_channel: normalized.created_by_channel,
+      created_by_trust: normalized.created_by_trust,
       expires_at: normalized.expires_at
     }
   end
