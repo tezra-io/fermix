@@ -12,6 +12,8 @@ defmodule Fermix.CLI.Upgrade.Cosign do
   version or repo cannot pass.
   """
 
+  alias FermixCore.CommandRunner
+
   @issuer "https://token.actions.githubusercontent.com"
   @identity_prefix "https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v"
   @default_timeout_ms 60_000
@@ -73,12 +75,11 @@ defmodule Fermix.CLI.Upgrade.Cosign do
   end
 
   defp run_with_timeout(cosign, args, timeout_ms) do
-    task = Task.async(fn -> System.cmd(cosign, args, stderr_to_stdout: true) end)
-
-    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {_out, 0}} -> :ok
-      {:ok, {out, code}} -> {:error, {:cosign_failed, code, String.trim(out)}}
-      nil -> {:error, {:cosign_timeout, timeout_ms}}
+    case CommandRunner.run(cosign, args, timeout_ms: timeout_ms) do
+      {:ok, %{exit: 0}} -> :ok
+      {:ok, %{exit: code, stdout: out}} -> {:error, {:cosign_failed, code, String.trim(out)}}
+      {:error, {:timeout, ms}} -> {:error, {:cosign_timeout, ms}}
+      {:error, reason} -> {:error, {:cosign_failed, -1, inspect(reason)}}
     end
   end
 end

@@ -4,6 +4,7 @@ defmodule FermixCore.Sandbox.CommandTool do
   """
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
@@ -51,24 +52,15 @@ defmodule FermixCore.Sandbox.CommandTool do
   defp run_command(spec, prompt, extra_args, cwd, env) do
     argv = spec.args ++ extra_args ++ [prompt]
 
-    task =
-      Task.async(fn ->
-        system_cmd(env_args(env, spec.command, argv), cwd, spec.timeout_ms)
-      end)
-
-    case Task.yield(task, spec.timeout_ms) || Task.shutdown(task) do
-      {:ok, {:ok, output, 0}} -> {:ok, output}
-      {:ok, {:ok, output, code}} -> {:error, {:command_failed, code, output}}
-      {:ok, {:error, reason}} -> {:error, reason}
-      nil -> {:error, {:command_timeout, spec.timeout_ms}}
+    case CommandRunner.run(env_binary(), env_args(env, spec.command, argv),
+           cwd: cwd,
+           timeout_ms: spec.timeout_ms
+         ) do
+      {:ok, %{exit: 0, stdout: output}} -> {:ok, output}
+      {:ok, %{exit: code, stdout: output}} -> {:error, {:command_failed, code, output}}
+      {:error, {:timeout, ms}} -> {:error, {:command_timeout, ms}}
+      {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp system_cmd(argv, cwd, _timeout_ms) do
-    {output, code} = System.cmd(env_binary(), argv, cd: cwd, stderr_to_stdout: true)
-    {:ok, output, code}
-  rescue
-    error in ErlangError -> {:error, Exception.message(error)}
   end
 
   defp env_args(env, command, argv) do

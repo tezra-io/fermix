@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.Shell do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
 
   @default_timeout_ms 30_000
@@ -112,20 +113,24 @@ defmodule FermixCore.Tools.Shell do
   defp validate_command(_), do: {:error, "Command must be a non-empty string"}
 
   defp run_command(command, working_dir, timeout, env) do
-    task =
-      Task.async(fn ->
-        System.cmd(env_binary(), env_args(env, command), cd: working_dir, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, timeout) || Task.shutdown(task) do
-      {:ok, {output, 0}} ->
+    case CommandRunner.run(env_binary(), env_args(env, command),
+           cwd: working_dir,
+           timeout_ms: timeout
+         ) do
+      {:ok, %{exit: 0, stdout: output}} ->
         {:ok, Tool.success(output)}
 
-      {:ok, {output, exit_code}} ->
-        {:ok, Tool.error("Command failed (exit code #{exit_code}):\n#{output}")}
+      {:ok, %{exit: code, stdout: output}} ->
+        {:ok, Tool.error("Command failed (exit code #{code}):\n#{output}")}
 
-      nil ->
-        {:ok, Tool.error("Command timed out after #{timeout}ms")}
+      {:error, {:timeout, ms}} ->
+        {:ok, Tool.error("Command timed out after #{ms}ms")}
+
+      {:error, {:executable_not_found, path}} ->
+        {:ok, Tool.error("Shell executable missing: #{path}")}
+
+      {:error, reason} ->
+        {:ok, Tool.error("Shell command failed: #{inspect(reason)}")}
     end
   end
 

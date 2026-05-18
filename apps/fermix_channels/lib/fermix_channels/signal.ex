@@ -228,32 +228,67 @@ end
 defmodule FermixChannels.Signal.CLI do
   @moduledoc false
 
-  def receive_messages(opts) do
-    cli_path = Keyword.get(opts, :cli_path, "signal-cli")
-    account = Keyword.fetch!(opts, :account)
+  alias FermixCore.CommandRunner
 
-    case System.cmd(cli_path, ["-a", account, "receive", "--output", "json"],
-           stderr_to_stdout: true
+  @receive_timeout_ms 60_000
+  @send_timeout_ms 30_000
+
+  def receive_messages(opts) do
+    cli_path = resolve_cli(opts)
+    account = Keyword.fetch!(opts, :account)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @receive_timeout_ms)
+
+    case CommandRunner.run(cli_path, ["-a", account, "receive", "--output", "json"],
+           timeout_ms: timeout_ms
          ) do
-      {output, 0} ->
+      {:ok, %{exit: 0, stdout: output}} ->
         decode_receive_output(output)
 
-      {output, status} ->
+      {:ok, %{exit: status, stdout: output}} ->
         {:error, "signal-cli receive failed: #{status}: #{String.trim(output)}"}
+
+      {:error, {:timeout, ms}} ->
+        {:error, "signal-cli receive timed out after #{ms}ms"}
+
+      {:error, {:executable_not_found, path}} ->
+        {:error, "signal-cli executable not found at #{path}"}
+
+      {:error, reason} ->
+        {:error, "signal-cli receive failed: #{inspect(reason)}"}
     end
   end
 
   def send_message(account, recipient, text, opts) do
-    cli_path = Keyword.get(opts, :cli_path, "signal-cli")
+    cli_path = resolve_cli(opts)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @send_timeout_ms)
 
-    case System.cmd(cli_path, ["-a", account, "send", "-m", text, recipient],
-           stderr_to_stdout: true
+    case CommandRunner.run(cli_path, ["-a", account, "send", "-m", text, recipient],
+           timeout_ms: timeout_ms
          ) do
-      {_output, 0} ->
+      {:ok, %{exit: 0}} ->
         :ok
 
-      {output, status} ->
+      {:ok, %{exit: status, stdout: output}} ->
         {:error, "signal-cli send failed: #{status}: #{String.trim(output)}"}
+
+      {:error, {:timeout, ms}} ->
+        {:error, "signal-cli send timed out after #{ms}ms"}
+
+      {:error, {:executable_not_found, path}} ->
+        {:error, "signal-cli executable not found at #{path}"}
+
+      {:error, reason} ->
+        {:error, "signal-cli send failed: #{inspect(reason)}"}
+    end
+  end
+
+  defp resolve_cli(opts) do
+    case Keyword.get(opts, :cli_path) do
+      path when is_binary(path) and path != "" ->
+        path
+
+      _ ->
+        System.find_executable("signal-cli") || "signal-cli"
     end
   end
 
