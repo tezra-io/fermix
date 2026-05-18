@@ -1,11 +1,11 @@
 # Milestone 11: Outbound Media on Channels — Functional Design
 
-**Status:** Draft (rev 2 — addresses review-1 findings)
+**Status:** Draft (rev 3 — adds category-based tool visibility so non-channel agents do not see `send_attachment`)
 **Date:** 2026-05-18
 **Author:** Sujeeth / Aira
 **Depends on:** M3 (channel coverage and `FermixChannels.Channel` behaviour), M4.9 (`Capability` + `Capabilities.Builtin.Tool` surface), M5 (`Sandbox.read_path/3` floor)
 **Blocks:** any agent workflow that has to deliver an image, voice note, document, or audio file to a channel user.
-**Defers to other milestones:** outbound media generation tools — M11 ships the egress pipe, not new producers; the LLM attaches files the agent has already written via `file_write` or fetched via `web_fetch`. Voice-companion media (M9.x) stays in its own Realtime path.
+**Defers to other milestones:** outbound media generation tools — M11 ships the egress pipe, not new producers; the LLM attaches files that already exist on disk. URLs remain ordinary text replies so the channel platform can render or preview them itself. Voice-companion media (M9.x) stays in its own Realtime path.
 **References:** `apps/fermix_channels/lib/fermix_channels/channel.ex`, `apps/fermix_channels/lib/fermix_channels/message.ex`, `apps/fermix_channels/lib/fermix_channels/dispatcher.ex`, `apps/fermix_channels/lib/fermix_channels/telegram.ex`, `apps/fermix_channels/lib/fermix_channels/discord.ex`, `apps/fermix_channels/lib/fermix_channels/slack.ex`, `apps/fermix_channels/lib/fermix_channels/whatsapp.ex`, `apps/fermix_channels/lib/fermix_channels/signal.ex`, `apps/fermix_channels/lib/fermix_channels/cli.ex`, `apps/fermix_channels/lib/fermix_channels/command.ex`, `apps/fermix_channels/lib/fermix_channels/commands.ex`, `apps/fermix_channels/lib/fermix_channels/commands/*`, `apps/fermix_channels/lib/fermix_channels/idempotency.ex`, `apps/fermix_channels/mix.exs`, `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`, `apps/fermix_core/lib/fermix_core/agent_loop.ex`, `apps/fermix_core/lib/fermix_core/capabilities/builtin/tool.ex`, `apps/fermix_core/lib/fermix_core/tools/file_write.ex`, `apps/fermix_core/lib/fermix_core/tools/file_read.ex`, `apps/fermix_core/lib/fermix_core/sandbox.ex`, `apps/fermix_core/mix.exs`, [Telegram Bot API §"Sending files"](https://core.telegram.org/bots/api#sending-files), [Telegram `sendPhoto`](https://core.telegram.org/bots/api#sendphoto), [Telegram `sendVoice`](https://core.telegram.org/bots/api#sendvoice), [Discord File Attachments FAQ](https://support.discord.com/hc/en-us/articles/25444343291031-File-Attachments-FAQ), [Discord create-message](https://docs.discord.com/developers/reference), [Slack `files.getUploadURLExternal`](https://docs.slack.dev/reference/methods/files.getUploadURLExternal), [Slack `files.completeUploadExternal`](https://docs.slack.dev/reference/methods/files.completeUploadExternal), [WhatsApp Cloud Media](https://developers.facebook.com/docs/whatsapp/cloud-api/reference/media), [`signal-cli send --attachment`](https://github.com/AsamK/signal-cli/wiki/Send-and-Receive-Messages).
 
 ---
@@ -21,6 +21,10 @@
   - F6 (high): rev 1 listed five channels and missed `FermixChannels.CLI` (`cli.ex:9` declares the behaviour). Rev 2 includes CLI: its `send_media/3` returns `{:error, :media_unsupported}` (CLI is a terminal stdout pipe; pretending it has a media transport is the kind of fallback rule 12 forbids).
   - F7 (high): rev 1 specified PUT for the Slack upload-URL step. Slack's docs say POST. Rev 2 corrects this and lists `files.completeUploadExternal`'s actual parameter names (`files`, `channel_id`, `thread_ts`, `initial_comment`).
   - F8 (medium): rev 1's cap matrix was guessed. Rev 2 uses researched values per §5.7 — Telegram photo 10 MB / voice-render 1 MB / others 50 MB, Discord 10 MiB default with server-boost notes, Slack 1 GiB platform max (we ship a 100 MiB conservative cap), WhatsApp image 5 MB / audio 16 MB / video 16 MB / doc 100 MB, Signal 100 MB. WhatsApp does not have a `voice` message type; `:voice` is mapped to WhatsApp `audio` with required MIME `audio/ogg; codecs=opus`.
+
+- **rev 3 (2026-05-18).** Two additions:
+  - Author copy-edit pass on §1, §5.6 description, and §9.1 to make the URL stance explicit: `send_attachment` is local-files-only; URLs ride as text so the channel platform renders/previews them natively. No `web_fetch` chain implied. Remote-URL acceptance moves from §9 "deferred" to §1 non-goal.
+  - New mechanism — **category-based tool visibility** (§3.13, §5.12). Tool `category/0` metadata already exists (`tool.ex:35`) but is not read for filtering today. M11 introduces `CapabilityRegistry.list_for/1` with an `excluded_categories` option, and has each agent runtime declare its exclusions once (main agent: none; voice agent: `[:channel]`). This prevents `send_attachment` from polluting the voice-agent prompt context, and gives every future cross-cutting tool (e.g. a future `image_gen` with category `:media_producer`) a one-line opt-out per agent instead of per-name allowlist bookkeeping that scales as `O(tools × agents)`.
 
 ---
 
@@ -42,6 +46,7 @@ The inbound side is already structured (`Message.attachments` at `message.ex:24`
 **Non-goal in this milestone:**
 
 - Media generation. M11 does not add image-gen, TTS, or chart tools. `send_attachment` consumes paths that already exist on disk.
+- Remote URL fetching/re-uploading. If the agent has a link, it sends the link as text. `send_attachment` is only for an actual local attachment that would otherwise be exposed as a file path.
 - Inbound→outbound forwarding helper. The shape allows it; no built-in capability does it automatically.
 - Realtime / voice-companion media. M9.x owns Realtime egress.
 - Streaming or chunked uploads. v1 is one multipart per send.
@@ -183,6 +188,14 @@ Six command handlers (`authorization`, `compact`, `help`, `new`, `sandbox`, `who
 
 `apps/fermix_channels/mix.exs:28` declares `{:fermix_core, in_umbrella: true}`. `apps/fermix_core/mix.exs:26` does **not** declare `fermix_channels`. Any module under `fermix_core` that references a `FermixChannels.*` symbol creates an umbrella cycle. Rev 1 had three such references; rev 2 eliminates them.
 
+### 3.13 Tool `category` metadata exists but is not read for filtering
+
+`FermixCore.Capabilities.Builtin.Tool` declares `@callback category() :: atom()` (`tool.ex:35`) and lists it in `@optional_callbacks` (`tool.ex:38-42`). Every built-in tool today declares a category — `file_write` is `:file`, `file_read` is `:file`, `web_fetch` is `:web`, `memory_recall` is `:memory`, etc. The capability registry stores the category in `metadata`.
+
+No runtime currently reads `category` to filter tool visibility. The only filtering primitive is a per-name allowlist at `agent_loop.ex:248-263` (`capability_allowed?(name, allowed)` checks `name in allowed`). That primitive is fine at three tools but accrues debt linearly: a per-name allowlist on agent A requires a bookkeeping decision every time a new tool ships in core, and the same for agents B, C, D. The cost is `O(tools × agents)`.
+
+M11 is the first milestone where this matters in practice: `send_attachment` is meaningful only in channel-bound conversations, so the voice agent (M9.x Realtime) should not see it in its prompt context. Solving the problem with `hidden_from_agent?: true` or a per-name allowlist re-introduces the `O(tools × agents)` shape. Solving it with category-based visibility costs `O(1)` per new tool (set its category, already happening) and `O(1)` per new agent (declare excluded categories once at runtime init).
+
 ---
 
 ## 4. Scope and Non-Goals
@@ -211,6 +224,8 @@ Six command handlers (`authorization`, `compact`, `help`, `new`, `sandbox`, `who
 | MIME mapping (owned by adapters) | P0 | New | WhatsApp's `:voice → audio` translation and the `audio/ogg; codecs=opus` MIME injection live inside the WhatsApp adapter, not in core. Other channels with simpler 1:1 mappings declare them analogously. |
 | Outbound idempotency | P0 | New | `FermixChannels.Idempotency` gains `register_outbound_media(channel, chat_id, media_part) :: :fresh \| :duplicate`. Channel adapters call this themselves inside `send_media/3` before the wire call. SHA-256 of `[channel, chat_id, path, caption]`, 60 s TTL. Duplicate returns `:ok` without re-uploading. |
 | Telemetry | P0 | New | `[:fermix, :channel, :message]` already exists. Metadata extended with `:kind :: :text \| :media` and `:media_kind :: media_kind \| nil`. New event `[:fermix, :channel, :media_send_error]` with `%{channel, chat_id, kind, reason, bytes}`. |
+| `CapabilityRegistry.list_for/1` category filter | P0 | New | Single filtering primitive in core: `list_for(opts)` accepts `excluded_categories: [atom()] \| nil`, `excluded_names: [String.t()] \| nil`, `policy_classes: [atom()] \| nil`. Default `nil` for every key preserves today's behavior. Capabilities whose `metadata.category` is unset are never filtered by category (preserves behavior for any tool that hasn't been annotated yet). One mechanism; threads to every agent runtime (AgentLoop today, voice/Realtime tomorrow). |
+| Agent-level `excluded_categories` declaration | P0 | New | Each agent runtime declares its exclusions once at init. Main agent: `excluded_categories: nil` (accepts all — no behavioral change vs. today). Voice agent (M9.x Realtime session bootstrap): `excluded_categories: [:channel]`. `send_attachment` declares `category :: :channel` so the exclusion catches it automatically; no per-name list to maintain. |
 | Tests | P0 | New | See §7. Behaviour-conformance test covers all six channels (including CLI's `:media_unsupported` return). Per-channel HTTP-fixture tests. SendAttachment tool tests against a recording reply_fn. Dependency-cycle test (`mix xref graph --label compile` from `fermix_core` does not include `FermixChannels.*`). Command-handler regression tests. |
 | Documentation | P0 | Docs | This file. A `apps/fermix_channels/README.md` snippet showing the cap matrix and the WhatsApp voice-to-audio mapping. No CLAUDE.md change. |
 
@@ -589,7 +604,7 @@ defmodule FermixCore.Tools.SendAttachment do
   def description do
     "Send a file from the workspace to the current channel as an attachment. " <>
       "The user sees the actual image/audio/document, not the path. " <>
-      "Use after producing a file with file_write or web_fetch."
+      "Use only for a file that already exists on disk; send URLs as text."
   end
 
   @impl true
@@ -885,6 +900,73 @@ New event `[:fermix, :channel, :media_send_error]`:
 
 SendAttachment emits its tool-level event via the existing `[:fermix, :tool, :exec]` channel — same shape as every other tool. `Trace.record/3` is called from `SendAttachment.execute/2` with `:agent_event` action so JSONL trace files include outbound media intents.
 
+### 5.12 Category-based tool visibility (avoiding per-tool-per-agent bookkeeping)
+
+`send_attachment` is the first tool with a cross-cutting visibility concern: the main agent should see it; the voice agent (M9.x) should not, because voice has no channel reply port and seeing the tool would just pollute the Realtime session prompt with a description the LLM cannot meaningfully act on.
+
+The wrong fix is `hidden_from_agent?: true` on the tool, or a per-name allowlist on the voice agent. Both re-introduce `O(tools × agents)` bookkeeping: every future tool with cross-cutting visibility (e.g. a future `image_gen` of category `:media_producer`, a future `mark_read` of category `:channel`) means re-asking the visibility question for every existing agent.
+
+The right fix is one-time mechanism plus per-agent declaration:
+
+**Three additions:**
+
+1. **Tool already declares its category.** `category/0` is in the `FermixCore.Capabilities.Builtin.Tool` behaviour (`tool.ex:35`); every built-in declares one. `send_attachment` declares `:channel`. Nothing new on the tool side — §5.6 already specifies this.
+
+2. **`CapabilityRegistry` exposes a filtered query.**
+
+   ```elixir
+   defmodule FermixCore.Capabilities.Registry do
+     @type list_opts :: [
+             excluded_categories: [atom()] | nil,
+             excluded_names: [String.t()] | nil,
+             policy_classes: [atom()] | nil
+           ]
+
+     @spec list_for(list_opts()) :: [Capability.t()]
+     def list_for(opts \\ []) do
+       list()
+       |> Enum.reject(&excluded_by_category?(&1, Keyword.get(opts, :excluded_categories)))
+       |> Enum.reject(&excluded_by_name?(&1, Keyword.get(opts, :excluded_names)))
+       |> Enum.reject(&excluded_by_policy?(&1, Keyword.get(opts, :policy_classes)))
+     end
+
+     defp excluded_by_category?(_capability, nil), do: false
+     defp excluded_by_category?(_capability, []), do: false
+
+     defp excluded_by_category?(%Capability{metadata: %{category: c}}, excluded)
+          when is_atom(c) and is_list(excluded),
+          do: c in excluded
+
+     defp excluded_by_category?(_capability, _excluded), do: false
+   end
+   ```
+
+   The third clause (tool has a category, exclusion list is a list) is the only filtering path. The fourth clause (no category set on the tool) is a no-op: tools without a declared category are never filtered out by category exclusion. Existing tools that lack `category/0` (none today, but possible) survive unchanged.
+
+3. **Each agent runtime declares its excluded categories once.**
+
+   - **Main agent** (`main_agent.ex`, where it queries the registry to build `loop_opts`): switches from `Registry.list/0` to `Registry.list_for(excluded_categories: nil)`. Explicit-nil is documentation, not behavior; the result is identical to today.
+   - **Voice agent** (M9.x Realtime session bootstrap, where it loads the tool catalog before opening the session): `Registry.list_for(excluded_categories: [:channel])`. `send_attachment` is invisible to the voice LLM; its description never lands in the Realtime session prompt. M9.x's session module is the one place that knows it.
+
+**The scaling property:**
+
+| Scenario | Per-event cost |
+|----------|----------------|
+| Add a new built-in tool with category `:file` | Set the tool's `category/0`. Voice and main both already accept `:file`. No agent changes. |
+| Add a future `image_gen` tool with category `:media_producer` | Set the tool's `category/0`. Decide once whether voice should see it; flip its one-line `excluded_categories` list if not. Main is automatic. |
+| Add a third agent (e.g. a future scheduler agent) | One-line `excluded_categories` declaration at its runtime init. |
+| Rename a category | One sweep through agent runtimes. Tool modules and registry are unaffected. |
+
+Per-name allowlists do not have this shape — every new tool means re-asking the visibility question for every existing agent, and the answers diffuse across modules.
+
+**What this does not try to solve:**
+
+- **Cross-cutting context preconditions** (e.g. "this tool needs `context.memory_store`"). Category is coarse visibility, not a replacement for per-tool sandbox / context checks at execute time. `SendAttachment` still validates `context.reply_fn` at execute time (§5.6); category filtering is belt-and-suspenders, not the only line of defense. The execute-time check is what catches an explicit `Capability.execute/3` call from outside any agent runtime (e.g. tests, a future cron-runner) where the category filter never had a chance to run.
+- **Per-user / per-conversation visibility.** Policy-class territory (M4.9 `policy_class`) and stays separate. `list_for/1` carries a `policy_classes` filter for symmetry but M11 only exercises the `excluded_categories` path.
+- **Hot-reload of exclusions.** Each agent reads its categories at runtime init; changes take effect on agent restart. Same lifecycle as today's `allowed_tools`.
+
+**Implementation cost in M11:** ~20 lines in `CapabilityRegistry` (`list_for/1` + the three private predicates), one call-site change in `MainAgent.run_message_loop/2` (switch from `list/0` to `list_for/1`), one call-site change in the voice agent's tool-loader to set `excluded_categories: [:channel]`. The voice-agent file is identified at implementation time against the M9.x layout; the contract above is the touchpoint.
+
 ---
 
 ## 6. Failure Modes
@@ -933,6 +1015,10 @@ The `"Error: …"` prefix is added by `agent_loop.ex:271`, not by SendAttachment
 | Idempotency dedup | `test/fermix_channels/idempotency_test.exs` (extend) | Same `(channel, chat_id, path, caption)` within 60 s returns `:duplicate`; channel `send_media/3` returns `:ok` without wire call; after 60 s, `:fresh`. |
 | Telemetry success | `test/fermix_core/tools/send_attachment_test.exs` | `[:fermix, :channel, :message]` event fires with `kind: :media, media_kind: :image, bytes: <n>`. |
 | Telemetry failure | same file | `[:fermix, :channel, :media_send_error]` fires on a stubbed 400; tool emits `[:fermix, :tool, :exec]` with `success: false`. |
+| Category filter — happy path | `test/fermix_core/capabilities/registry_test.exs` (extend) | `Registry.list_for(excluded_categories: [:channel])` returns the full list minus capabilities whose `metadata.category == :channel`. `list_for([])` and `list_for(excluded_categories: nil)` both equal `list/0`. Tools without a declared category survive every form. |
+| Category filter — composition | same file | `list_for(excluded_categories: [:channel], excluded_names: ["file_read"])` excludes both `send_attachment` (by category) and `file_read` (by name). The three predicates compose; rejecting via any one is sufficient. |
+| Main agent sees `send_attachment` | `test/fermix_core/agents/main_agent_test.exs` (extend) | After M11, main agent's tool list as presented to the LLM contains `send_attachment`. The context map carries `excluded_categories: nil`. |
+| Voice agent excludes `:channel` | voice-agent-side test (M9.x location, identified at impl time) | The voice runtime's loaded tool list does not contain `send_attachment` even when it is seeded in the registry. Tool description is absent from the Realtime session prompt. |
 | `SafeRm` discipline | every new test that creates a tmp file | `on_exit` cleanup routes through `FermixCore.TestSupport.SafeRm.rm_rf!/1` per CLAUDE.md §"Known Pitfalls". |
 
 Test isolation: every channel test stubs HTTP via `Req.Test`. Signal tests inject a fake binary. WhatsApp's access-token plumbing reuses the existing config-stub pattern. CLI tests exercise `IO.puts` redirection via `ExUnit.CaptureIO`.
@@ -963,7 +1049,10 @@ Single change-set, single PR. Order matters because the type module must compile
     - Rewrite `deliver_reply/2` call at `:896` to `msg.reply_fn.({:text, response})`.
 11. **`apps/fermix_core/lib/fermix_core/tools/send_attachment.ex`** (new) — implement per §5.6.
 12. **`apps/fermix_core/lib/fermix_core/capabilities/builtin/seeder.ex`** — register `SendAttachment` so it appears in `CapabilityRegistry` after `mix fermix.setup`.
-13. **Telemetry handlers** — extend existing consumers that read `kind` metadata to know about `:media` (probably zero handlers, since today only `:text` is emitted).
+13. **`apps/fermix_core/lib/fermix_core/capabilities/registry.ex`** — add `list_for/1` with the three exclusion options (`excluded_categories`, `excluded_names`, `policy_classes`). Preserve `list/0` for any callers that want the unfiltered set. Per §5.12.
+14. **`apps/fermix_core/lib/fermix_core/agents/main_agent.ex`** (visibility wiring) — switch the capability query in `run_message_loop/2` from `Registry.list/0` to `Registry.list_for(excluded_categories: nil)`. Explicit-nil documents intent; behavior is unchanged.
+15. **Voice agent runtime** (M9.x — exact module identified at implementation time against the current M9.x layout) — at session bootstrap, set `excluded_categories: [:channel]` on the registry query. This is the single touchpoint that makes `send_attachment` invisible to voice; no per-tool flag, no per-agent name allowlist.
+16. **Telemetry handlers** — extend existing consumers that read `kind` metadata to know about `:media` (probably zero handlers, since today only `:text` is emitted).
 
 No data migration. No config migration (Discord boost-tier override is opt-in). Existing `~/.fermix/config.toml` is unchanged for operators on the default cap.
 
@@ -973,7 +1062,7 @@ Migration check: `mix xref graph --source apps/fermix_core/lib --label compile |
 
 ## 9. Open Questions
 
-1. **Should `send_attachment` accept a remote URL?** Today only on-disk paths. A `url` parameter would let the LLM forward `web_fetch` results without writing to disk. Pro: shorter chains. Con: bypasses sandbox + introduces a second code path. Recommend: defer; `web_fetch → file_write → send_attachment` is two extra tool calls but keeps every byte audit-able.
+1. **Should `send_attachment` accept a remote URL?** No for v1. Links should stay in normal text replies; Telegram and other platforms can resolve previews/download affordances according to their own rules. `send_attachment` is only for local files the agent intentionally attaches instead of pasting a path. Revisit only if a real workflow needs server-side fetch-and-reupload semantics.
 2. **Should the LLM be able to send multiple attachments per reply?** Telegram has `sendMediaGroup` (≤10); Discord allows `files[0..9]`; WhatsApp and Slack don't (one media per message). Today's `media_part` is singular. Plural would be `{:media_group, [media_part()]}` plus per-channel fan-out. Defer; v1 is one-at-a-time.
 3. **Should `caption` support markdown?** Telegram does (via `caption.parse_mode`); others don't. v1 is plain text everywhere for consistency. If we add later, it's a per-channel `caption_parse_mode` opt.
 4. **Should the WhatsApp adapter auto-transcode MP3→OGG/Opus for voice?** Doing so requires `ffmpeg` as a runtime dep. Producer-side concern. Reject in v1.
@@ -1000,6 +1089,7 @@ Before calling M11 done:
 - [ ] No `File.rm_rf` direct calls in any new test file (`grep -rn 'File\.rm_rf' apps/*/test/`); `SafeRm.rm_rf!/1` everywhere per CLAUDE.md.
 - [ ] `mix fermix.setup` round-trip: `send_attachment` appears in `fermix capabilities` after seeding.
 - [ ] Trace JSONL inspection: an outbound media send produces a `:agent_event` entry with `tool: "send_attachment"` and a `:channel, :message` entry with `direction: :outbound, kind: :media`.
+- [ ] `Registry.list_for(excluded_categories: [:channel])` excludes `send_attachment`; main-agent prompt context contains it; voice-agent prompt context (M9.x Realtime session) does not.
 
 ---
 
