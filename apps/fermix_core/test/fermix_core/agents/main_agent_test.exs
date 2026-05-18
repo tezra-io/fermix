@@ -1324,7 +1324,11 @@ defmodule FermixCore.Agents.MainAgentTest do
         mock_response("Done. The coding skill inspected the README and found the issue.")
       ])
 
-      MainAgent.handle_message(make_message("Use the coding skill."), agent)
+      # Skill capabilities are policy_class :exec, so a remote-channel
+      # (:third_party trust) wouldn't see them. The test exercises the
+      # skill-routing mechanic, not channel trust — use the local "cli"
+      # channel to keep the full capability surface visible.
+      MainAgent.handle_message(make_message("Use the coding skill.", channel: "cli"), agent)
 
       assert_receive {:reply, "Done. The coding skill inspected the README and found the issue."},
                      5_000

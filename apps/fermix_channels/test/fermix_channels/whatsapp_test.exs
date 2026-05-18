@@ -81,6 +81,8 @@ defmodule FermixChannels.WhatsAppTest do
       phone_number_id: "123456789",
       verify_token: "verify-token",
       app_secret: "app-secret",
+      # F-02: empty allowlist now denies; tests need an explicit allow.
+      allowed_sender_ids: ["15551234567"],
       req_options: [plug: {Req.Test, :whatsapp}]
     )
 
@@ -148,14 +150,16 @@ defmodule FermixChannels.WhatsAppTest do
       assert {:ok, []} = WhatsApp.parse_webhook(payload("blocked"))
     end
 
-    test "does not fall back to allowed_user_ids when sender allowlist is unset" do
+    test "does not fall back to allowed_user_ids when sender allowlist is unset (F-02 deny)" do
+      # WhatsApp's ingress key is :allowed_sender_ids, not :allowed_user_ids.
+      # When allowed_sender_ids is unset *and* no owner_user_id is configured,
+      # F-02 means the result must be deny-all rather than fail-open.
       Application.put_env(:fermix_channels, :whatsapp,
         enabled: true,
         allowed_user_ids: ["19999999999"]
       )
 
-      assert {:ok, [message]} = WhatsApp.parse_webhook(payload("hello from whatsapp"))
-      assert message.chat_id == "15551234567"
+      assert {:ok, []} = WhatsApp.parse_webhook(payload("hello from whatsapp"))
     end
 
     test "defaults sender allowlist to owner_user_id when allowed_sender_ids is not configured" do

@@ -78,7 +78,8 @@ defmodule FermixChannels.SignalTest do
       enabled: true,
       mode: :subprocess,
       account: "+15550001111",
-      allowed_sender_ids: []
+      # F-02: empty allowlist now denies; tests need an explicit allow.
+      allowed_sender_ids: ["+15551234567"]
     )
 
     on_exit(fn -> Application.delete_env(:fermix_channels, :signal) end)

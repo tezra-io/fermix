@@ -50,6 +50,8 @@ defmodule FermixChannels.TelegramTest do
   setup do
     Application.put_env(:fermix_channels, :telegram,
       bot_token: "test-bot-token",
+      # F-02: empty allowlist now denies; tests need an explicit allow.
+      allowed_user_ids: ["111"],
       req_options: [plug: {Req.Test, :telegram}]
     )
 
@@ -134,23 +136,21 @@ defmodule FermixChannels.TelegramTest do
       assert {:ok, []} = Telegram.parse_update(payload)
     end
 
-    test "allows all messages when allowed_user_ids is empty list" do
+    test "denies all messages when allowed_user_ids is an empty list (F-02)" do
       Application.put_env(:fermix_channels, :telegram,
         bot_token: "test-bot-token",
         allowed_user_ids: []
       )
 
       payload = message_payload()
-      assert {:ok, [msg]} = Telegram.parse_update(payload)
-      assert msg.sender == "alice"
+      assert {:ok, []} = Telegram.parse_update(payload)
     end
 
-    test "allows all messages when allowed_user_ids is not configured" do
+    test "denies all messages when neither allowed_user_ids nor owner_user_id are set (F-02)" do
       Application.put_env(:fermix_channels, :telegram, bot_token: "test-bot-token")
 
       payload = message_payload()
-      assert {:ok, [msg]} = Telegram.parse_update(payload)
-      assert msg.sender == "alice"
+      assert {:ok, []} = Telegram.parse_update(payload)
     end
 
     test "defaults ingress allowlist to owner_user_id when allowed_user_ids is not configured" do
