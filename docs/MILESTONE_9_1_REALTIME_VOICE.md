@@ -248,10 +248,14 @@ model = "gpt-realtime-2"
 voice = "marin"
 max_session_minutes = 15
 max_estimated_cost_cents_per_session = 100
-tool_policy = "read_only"
 allow_network_tools = false
 persist_transcripts = false
 ```
+
+> **Note (2026-05):** `tool_policy` was removed. Voice now uses the same
+> capability surface as the main agent; sandbox mode + command profile
+> cover voice scope uniformly. Existing configs fail loud via
+> `reject_removed_key!`.
 
 Validation rules:
 
@@ -263,8 +267,6 @@ Validation rules:
 - Internal audio defaults are PCM16 at 24 kHz mono. `max_chunk_bytes` remains an
   internal socket guard at 16,384 bytes.
 - cost/session limits must be positive integers.
-- `tool_policy` is `"read_only"` or `"broad"`. `"read_only"` maps to the
-  existing `trust: :third_party` preset; `"broad"` maps to `trust: :local`.
 - `allow_network_tools` is an explicit extra gate for network-capable tools
   when broad local tooling is enabled.
 - `persist_transcripts` defaults to `false` because spoken input is more

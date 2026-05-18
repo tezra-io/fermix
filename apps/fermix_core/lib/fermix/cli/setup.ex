@@ -18,7 +18,6 @@ defmodule Fermix.CLI.Setup do
     realtime_voice: :string,
     realtime_max_session_minutes: :integer,
     realtime_max_cost_cents: :integer,
-    realtime_tool_policy: :string,
     realtime_allow_network_tools: :boolean,
     realtime_persist_transcripts: :boolean,
     telegram_bot_token: :string,

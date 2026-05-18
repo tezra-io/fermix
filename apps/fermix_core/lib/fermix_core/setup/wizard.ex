@@ -33,7 +33,6 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_voice, String.t()}
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
-          | {:realtime_tool_policy, String.t()}
           | {:realtime_allow_network_tools, boolean() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
           | {:telegram_bot_token, String.t()}
@@ -66,7 +65,6 @@ defmodule FermixCore.Setup.Wizard do
     :realtime_max_cost_cents
   ]
   @realtime_advanced_prompt_keys [
-    :realtime_tool_policy,
     :realtime_allow_network_tools,
     :realtime_persist_transcripts
   ]
@@ -371,12 +369,6 @@ defmodule FermixCore.Setup.Wizard do
         label:
           "Realtime max estimated cost cents per session (blank = #{config.max_estimated_cost_cents_per_session})",
         default: config.max_estimated_cost_cents_per_session,
-        required?: false
-      },
-      %{
-        key: :realtime_tool_policy,
-        label: "Realtime tool policy (read_only/broad; blank = #{config.tool_policy})",
-        default: config.tool_policy,
         required?: false
       },
       %{
@@ -945,11 +937,6 @@ defmodule FermixCore.Setup.Wizard do
             Keyword.get(answers, :realtime_max_cost_cents),
             :realtime_max_cost_cents
           ),
-        tool_policy:
-          normalize_realtime_tool_policy(
-            Keyword.get(answers, :realtime_tool_policy),
-            :realtime_tool_policy
-          ),
         allow_network_tools:
           normalize_realtime_bool(
             Keyword.get(answers, :realtime_allow_network_tools),
@@ -1035,27 +1022,6 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_realtime_string(value, key) do
     raise ArgumentError, "invalid #{key} #{inspect(value)}; expected non-empty string"
-  end
-
-  defp normalize_realtime_tool_policy(nil, _key), do: nil
-  defp normalize_realtime_tool_policy("", _key), do: nil
-
-  defp normalize_realtime_tool_policy(value, key) when is_binary(value) do
-    case value |> String.trim() |> String.downcase() do
-      "" ->
-        nil
-
-      policy when policy in ["read_only", "broad"] ->
-        policy
-
-      other ->
-        raise ArgumentError,
-              "invalid #{key} #{inspect(other)}; expected read_only or broad"
-    end
-  end
-
-  defp normalize_realtime_tool_policy(value, key) do
-    raise ArgumentError, "invalid #{key} #{inspect(value)}; expected read_only or broad"
   end
 
   defp normalize_realtime_positive_int(nil, _key), do: nil

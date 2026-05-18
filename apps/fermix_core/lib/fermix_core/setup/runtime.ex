@@ -30,7 +30,6 @@ defmodule FermixCore.Setup.Runtime do
     :realtime_voice,
     :realtime_max_session_minutes,
     :realtime_max_cost_cents,
-    :realtime_tool_policy,
     :realtime_allow_network_tools,
     :realtime_persist_transcripts,
     :telegram_bot_token,
@@ -460,7 +459,6 @@ defmodule FermixCore.Setup.Runtime do
               :realtime_voice,
               :realtime_max_session_minutes,
               :realtime_max_cost_cents,
-              :realtime_tool_policy,
               :realtime_allow_network_tools,
               :realtime_persist_transcripts
             ] do
