@@ -44,8 +44,11 @@ defmodule FermixCore.Tools.JobsTest do
                  "schedule" => "every 15 minutes",
                  "task" => "Summarize what changed.",
                  "timezone" => "America/New_York",
-                 "allowed_tools" => ["memory_recall"],
-                 "capability_policy" => ["read_only"]
+                 # F-08: capability_policy was removed from the public schema —
+                 # the runner derives it from the creator's trust. allowed_tools
+                 # must be a subset of what the caller can currently see, so the
+                 # test passes an empty list (full caller visibility implied).
+                 "allowed_tools" => []
                },
                context
              )

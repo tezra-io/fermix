@@ -453,7 +453,7 @@ defmodule FermixCore.Jobs.Runner do
       capability_registry: state.capability_registry,
       allowed_tools: state.job.allowed_tools,
       policy: capability_policy(state.job.capability_policy),
-      trust: @scheduled_job_trust,
+      trust: effective_trust(state.job),
       max_iterations: state.job.max_iterations
     ]
 
@@ -461,6 +461,21 @@ defmodule FermixCore.Jobs.Runner do
   rescue
     error -> {:error, Exception.message(error)}
   end
+
+  # Audit F-08 step 2 — intersection at run time.
+  #
+  # The persisted `created_by_trust` is the ceiling the creator could
+  # reach at creation. The runner uses it as the *floor* for the run's
+  # trust value, so the registry's per-trust policy default kicks in
+  # (e.g., `:third_party` → :read_only). The capability_policy field
+  # is now empty for jobs created after this commit — the model can't
+  # widen the future run's policy class.
+  #
+  # Pre-migration rows ("core" trust) keep the original full-surface
+  # behavior so existing watcher/digest jobs don't silently stop working.
+  defp effective_trust(%{created_by_trust: "third_party"}), do: :third_party
+  defp effective_trust(%{created_by_trust: "local"}), do: :local
+  defp effective_trust(_job), do: @scheduled_job_trust
 
   defp add_adapter_opts(base, %{adapter: adapter, adapter_opts: adapter_opts})
        when is_atom(adapter) and not is_nil(adapter) do

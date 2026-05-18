@@ -14,6 +14,7 @@ defmodule FermixCore.Memory.Repo do
   @resource_migration_version 3
   @jobs_migration_version 4
   @job_expiry_migration_version 5
+  @job_creator_trust_migration_version 6
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -236,6 +237,17 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE scheduled_jobs ADD COLUMN expires_at TEXT;
   CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_expires_at
     ON scheduled_jobs(enabled, state, expires_at);
+  """
+
+  # Audit F-08: capture the channel + trust the job was created from so the
+  # runner can intersect any stored capability_policy with the creator's
+  # ceiling at run time. Existing rows get NULL channel and "core" trust —
+  # legacy jobs run with full main-agent surface (their original semantics)
+  # until they are recreated; new jobs created from remote channels are
+  # scoped at creation.
+  @job_creator_trust_schema_sql """
+  ALTER TABLE scheduled_jobs ADD COLUMN created_by_channel TEXT;
+  ALTER TABLE scheduled_jobs ADD COLUMN created_by_trust TEXT NOT NULL DEFAULT 'core';
   """
 
   @type message_attrs :: %{
@@ -983,7 +995,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_fts_migration(conn, versions),
          :ok <- apply_resource_migration(conn, versions),
          :ok <- apply_jobs_migration(conn, versions),
-         :ok <- apply_job_expiry_migration(conn, versions) do
+         :ok <- apply_job_expiry_migration(conn, versions),
+         :ok <- apply_job_creator_trust_migration(conn, versions) do
       :ok
     end
   end
@@ -1076,6 +1089,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@job_expiry_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@job_expiry_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_job_creator_trust_migration(conn, versions) do
+    if Enum.member?(versions, @job_creator_trust_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@job_creator_trust_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_creator_trust_migration_version});
         COMMIT;
         """
       )
@@ -1800,10 +1829,12 @@ defmodule FermixCore.Memory.Repo do
                created_by_agent_id,
                created_by_session_id,
                expires_at,
+               created_by_channel,
+               created_by_trust,
                created_at,
                updated_at
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id)
              DO UPDATE SET
                name = excluded.name,
@@ -1837,6 +1868,8 @@ defmodule FermixCore.Memory.Repo do
                created_by_agent_id = excluded.created_by_agent_id,
                created_by_session_id = excluded.created_by_session_id,
                expires_at = excluded.expires_at,
+               created_by_channel = excluded.created_by_channel,
+               created_by_trust = excluded.created_by_trust,
                updated_at = excluded.updated_at
              """,
              scheduled_job_upsert_params(job)
@@ -2202,6 +2235,8 @@ defmodule FermixCore.Memory.Repo do
       last_error: optional_string!(attrs, :last_error),
       created_by_agent_id: string_with_default!(attrs, :created_by_agent_id, "main"),
       created_by_session_id: optional_string!(attrs, :created_by_session_id),
+      created_by_channel: optional_string!(attrs, :created_by_channel),
+      created_by_trust: string_with_default!(attrs, :created_by_trust, "core"),
       expires_at: optional_timestamp_string(Map.get(attrs, :expires_at)),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
       updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))
@@ -2425,6 +2460,8 @@ defmodule FermixCore.Memory.Repo do
       job.created_by_agent_id,
       job.created_by_session_id,
       job.expires_at,
+      job.created_by_channel,
+      job.created_by_trust,
       job.created_at,
       job.updated_at
     ]
@@ -2935,7 +2972,9 @@ defmodule FermixCore.Memory.Repo do
          created_by_session_id,
          created_at,
          updated_at,
-         expires_at
+         expires_at,
+         created_by_channel,
+         created_by_trust
        ]) do
     %{
       id: id,
@@ -2969,6 +3008,8 @@ defmodule FermixCore.Memory.Repo do
       last_error: last_error,
       created_by_agent_id: created_by_agent_id,
       created_by_session_id: created_by_session_id,
+      created_by_channel: created_by_channel,
+      created_by_trust: created_by_trust,
       expires_at: parse_optional_timestamp(expires_at),
       created_at: parse_timestamp!(created_at),
       updated_at: parse_timestamp!(updated_at)
