@@ -16,7 +16,7 @@ defmodule FermixCore.Agents.AgentDefinition do
   alias FermixCore.Capabilities.Capability
 
   @type role :: :main | :sub
-  @type source :: :core | :local | :third_party
+  @type source :: :operator | :guest
 
   @type t :: %__MODULE__{
           name: String.t(),
@@ -116,7 +116,7 @@ defmodule FermixCore.Agents.AgentDefinition do
   """
   @spec with_trust(t(), source()) :: t()
   def with_trust(%__MODULE__{} = definition, trust)
-      when trust in [:core, :local, :third_party] do
+      when trust in [:operator, :guest] do
     %{definition | trust: trust}
   end
 
@@ -237,7 +237,7 @@ defmodule FermixCore.Agents.AgentDefinition do
   defp parse_policy_class(value), do: {:error, {:invalid_policy_class, value}}
 
   defp parse_trust(nil), do: {:ok, nil}
-  defp parse_trust(value) when value in [:core, :local, :third_party], do: {:ok, value}
+  defp parse_trust(value) when value in [:operator, :guest], do: {:ok, value}
   defp parse_trust(other), do: {:error, {:invalid_trust, other}}
 
   defp parse_provider(nil), do: {:ok, nil}

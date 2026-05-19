@@ -22,7 +22,7 @@ defmodule FermixCore.Capabilities.Registry do
           | [Capability.policy_class()]
           | [allow: [Capability.policy_class()], deny: [Capability.policy_class()]]
 
-  @type trust :: nil | :core | :local | :third_party
+  @type trust :: nil | :operator | :guest
 
   @type filter ::
           [
@@ -36,15 +36,28 @@ defmodule FermixCore.Capabilities.Registry do
             include_hidden?: boolean()
           ]
 
-  # Default policies per trust source. See design §4.6.3.
-  # `:core` and `nil` (unscoped, e.g. main agent) are unfiltered.
-  @third_party_default_policy [
+  # Default policies per trust level. Single-owner model:
+  #
+  #   :operator — the human owner (and the system-internal callers that
+  #               inherit from the operator's session: voice, CLI,
+  #               scheduled jobs, bundled/user-installed skills). Full
+  #               capability surface.
+  #
+  #   :guest    — non-operator humans (currently dormant until
+  #               multi-user/group-chat lands) and plugin-loaded skills
+  #               whose code the operator did not vet. Read-only only.
+  #
+  #   nil       — trust not set on this call path. Treated as `:guest`
+  #               (least privilege). This is the forgiving safe default:
+  #               a forgotten trust degrades the surface rather than
+  #               silently granting full access.
+  @operator_default_policy [
+    allow: [:read_only, :read_write, :exec, :network, :external_api],
+    deny: []
+  ]
+  @guest_default_policy [
     allow: [:read_only],
     deny: [:read_write, :exec, :network, :external_api]
-  ]
-  @local_default_policy [
-    allow: [:read_only, :read_write, :exec, :network],
-    deny: [:external_api]
   ]
 
   # --- Client API ---
@@ -203,27 +216,40 @@ defmodule FermixCore.Capabilities.Registry do
     |> apply_hidden_filter(Keyword.get(opts, :include_hidden?, false))
   end
 
+  # Trust/policy filtering is only applied when the caller explicitly
+  # asks for it. A `list/2` call with no `:trust`, `:policy`, or
+  # `:policy_classes` opt is treated as the storage primitive — return
+  # everything registered. The "missing = least privilege" safety
+  # default applies to call sites that DO ask for trust filtering but
+  # pass `trust: nil` (see `resolve_policy/2`); it does not retroactively
+  # filter callers that never asked for a trust gate at all.
   defp effective_policy(opts) do
-    case Keyword.get(opts, :policy_classes) do
-      nil -> resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
-      classes when is_list(classes) -> classes
+    cond do
+      Keyword.has_key?(opts, :policy_classes) ->
+        Keyword.get(opts, :policy_classes)
+
+      Keyword.has_key?(opts, :trust) or Keyword.has_key?(opts, :policy) ->
+        resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
+
+      true ->
+        nil
     end
   end
 
   @doc """
   Resolve the effective policy filter from `(trust, policy)`.
 
-  An explicit `policy` always wins. When the skill leaves `policy` unset,
-  fall back to the default for the trust level: `:third_party` is read-only,
-  `:local` is broad-but-not-external. `:core` and `nil` (main agent) are
-  unfiltered.
+  An explicit `policy` (non-empty list) always wins. When `policy` is
+  unset or empty, fall back to the default for the trust level:
+  `:operator` is unfiltered (full surface), `:guest` is read-only.
+  `nil` is treated as `:guest` so any call path that forgot to set
+  trust fails safe rather than silently granting the full surface.
   """
   @spec resolve_policy(trust(), policy_spec()) :: policy_spec()
   def resolve_policy(_trust, policy) when is_list(policy) and policy != [], do: policy
-  def resolve_policy(:third_party, _policy), do: @third_party_default_policy
-  def resolve_policy(:local, _policy), do: @local_default_policy
-  def resolve_policy(:core, _policy), do: nil
-  def resolve_policy(nil, _policy), do: nil
+  def resolve_policy(:operator, _policy), do: @operator_default_policy
+  def resolve_policy(:guest, _policy), do: @guest_default_policy
+  def resolve_policy(nil, _policy), do: @guest_default_policy
 
   defp apply_kind(capabilities, :all), do: capabilities
 

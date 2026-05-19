@@ -2,6 +2,8 @@ defmodule FermixChannels.Commands.SandboxTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Commands
+  alias FermixChannels.Ingress.Authorizer
+  alias FermixChannels.Ingress.Source
   alias FermixChannels.Message
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
@@ -51,6 +53,7 @@ defmodule FermixChannels.Commands.SandboxTest do
   test "confirmation rejects mismatched user and thread", %{root: root} do
     Application.put_env(:fermix_channels, :telegram,
       owner_user_id: "owner-1",
+      allowed_user_ids: ["owner-1", "owner-2"],
       command_allowlist: ["owner-2"]
     )
 
@@ -99,7 +102,21 @@ defmodule FermixChannels.Commands.SandboxTest do
   end
 
   defp dispatch(message) do
-    Commands.dispatch(Commands.parse(message), reply_fn(), %{conversation_key: {"telegram", "chat-1", :root}})
+    Commands.dispatch(
+      Commands.parse(message),
+      reply_fn(),
+      %{
+        conversation_key: {"telegram", "chat-1", :root},
+        authorization: build_authorization(message)
+      }
+    )
+  end
+
+  defp build_authorization(message) do
+    case message |> Map.from_struct() |> Source.from_message() |> Authorizer.resolve() do
+      {:ok, auth} -> auth
+      {:error, _reason} -> nil
+    end
   end
 
   defp message(content, opts) do

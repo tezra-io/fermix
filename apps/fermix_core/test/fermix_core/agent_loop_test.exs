@@ -471,7 +471,7 @@ defmodule FermixCore.AgentLoopTest do
         turn("Handled policy block")
       ])
 
-      assert {:ok, result} = run_loop(capability_registry: registry, trust: :third_party)
+      assert {:ok, result} = run_loop(capability_registry: registry, trust: :guest)
       assert result.response == "Handled policy block"
       refute_received :spy_tool_executed
 

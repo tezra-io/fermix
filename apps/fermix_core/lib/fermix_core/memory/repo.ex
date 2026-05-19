@@ -15,6 +15,7 @@ defmodule FermixCore.Memory.Repo do
   @jobs_migration_version 4
   @job_expiry_migration_version 5
   @job_creator_trust_migration_version 6
+  @trust_rename_migration_version 7
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -248,6 +249,18 @@ defmodule FermixCore.Memory.Repo do
   @job_creator_trust_schema_sql """
   ALTER TABLE scheduled_jobs ADD COLUMN created_by_channel TEXT;
   ALTER TABLE scheduled_jobs ADD COLUMN created_by_trust TEXT NOT NULL DEFAULT 'core';
+  """
+
+  # Trust vocabulary collapse: `:owner_remote`, `:local`, and `:core`
+  # all merge into `:operator` (the human owner's surface);
+  # `:third_party` is renamed to `:guest`. Existing scheduled job rows
+  # are rewritten in place so the runner's `effective_trust/1` only
+  # needs to recognise the new strings.
+  @trust_rename_schema_sql """
+  UPDATE scheduled_jobs SET created_by_trust = 'operator'
+    WHERE created_by_trust IN ('owner_remote', 'local', 'core');
+  UPDATE scheduled_jobs SET created_by_trust = 'guest'
+    WHERE created_by_trust = 'third_party';
   """
 
   @type message_attrs :: %{
@@ -996,7 +1009,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_resource_migration(conn, versions),
          :ok <- apply_jobs_migration(conn, versions),
          :ok <- apply_job_expiry_migration(conn, versions),
-         :ok <- apply_job_creator_trust_migration(conn, versions) do
+         :ok <- apply_job_creator_trust_migration(conn, versions),
+         :ok <- apply_trust_rename_migration(conn, versions) do
       :ok
     end
   end
@@ -1105,6 +1119,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@job_creator_trust_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@job_creator_trust_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_trust_rename_migration(conn, versions) do
+    if Enum.member?(versions, @trust_rename_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@trust_rename_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@trust_rename_migration_version});
         COMMIT;
         """
       )

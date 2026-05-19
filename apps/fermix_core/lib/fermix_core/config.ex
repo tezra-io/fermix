@@ -57,6 +57,23 @@ defmodule FermixCore.Config do
     end
   end
 
+  @doc """
+  Strict owner lookup — returns `nil` unless `owner_user_id` is explicitly
+  configured. Unlike `channel_command_owner_user_id/1`, this does not
+  promote a single allowed-user-list entry to owner. Used by the ingress
+  gateway so that adding a friend to `allowed_user_ids` does not silently
+  grant them `:operator` trust; they get `:guest` (read-only) until the
+  operator explicitly elevates them.
+  """
+  @spec channel_explicit_owner_user_id(atom()) :: String.t() | nil
+  def channel_explicit_owner_user_id(name) when is_atom(name) do
+    with {:ok, config} <- channel(name) do
+      normalize_id(Keyword.get(config, :owner_user_id))
+    else
+      _ -> nil
+    end
+  end
+
   @spec channel_command_allowlist(atom()) :: [String.t()]
   def channel_command_allowlist(name) when is_atom(name) do
     with {:ok, config} <- channel(name) do

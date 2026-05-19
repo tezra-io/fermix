@@ -123,7 +123,7 @@ defmodule FermixCore.Capabilities.SkillTest do
         "timeout_seconds" => 30
       })
 
-    AgentDefinition.with_trust(definition, :local)
+    AgentDefinition.with_trust(definition, :operator)
   end
 
   setup do
@@ -155,7 +155,7 @@ defmodule FermixCore.Capabilities.SkillTest do
 
       assert %Capability{kind: :skill, policy_class: :exec, name: "alpha"} = cap
       assert cap.metadata.skill == "alpha"
-      assert cap.metadata.trust == :local
+      assert cap.metadata.trust == :operator
       assert {Skill, :invoke, [^definition]} = cap.executor
     end
 

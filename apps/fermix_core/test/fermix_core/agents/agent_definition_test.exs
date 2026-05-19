@@ -153,8 +153,8 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
 
     test "with_trust/2 stamps a definition with its source classification" do
       {:ok, definition} = AgentDefinition.new(%{"name" => "p", "system_prompt" => "."})
-      tagged = AgentDefinition.with_trust(definition, :third_party)
-      assert tagged.trust == :third_party
+      tagged = AgentDefinition.with_trust(definition, :guest)
+      assert tagged.trust == :guest
     end
   end
 

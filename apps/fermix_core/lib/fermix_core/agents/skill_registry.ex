@@ -5,13 +5,15 @@ defmodule FermixCore.Agents.SkillRegistry do
   The registry holds an in-memory snapshot of installed skills. Three roots
   feed into one snapshot, each tagged with a trust source on load:
 
-    * `core_dir` (default: `priv/skills` inside the Fermix release) → `:core`
-    * `local_dir` (default: `~/.fermix/skills`) → `:local`
-    * `plugin_dir` (default: `~/.fermix/skills/_plugins`) → `:third_party`
+    * `core_dir` (default: `priv/skills` inside the Fermix release) → `:operator`
+    * `local_dir` (default: `~/.fermix/skills`) → `:operator`
+    * `plugin_dir` (default: `~/.fermix/skills/_plugins`) → `:guest`
 
-  Anything outside the three known roots fails closed to `:third_party`. The
-  `source` is recorded on the loaded `AgentDefinition.trust` field so the
-  sub-agent policy gate has a stable enforcement input.
+  Bundled and user-installed skills are operator-trusted (the operator
+  vetted them by installing). Plugin-loaded skills and anything outside
+  the three known roots fail closed to `:guest` (read-only). The
+  `source` is recorded on the loaded `AgentDefinition.trust` field so
+  the sub-agent policy gate has a stable enforcement input.
 
   When a `capability_registry` is configured, each loaded skill is also
   registered as a `%Capability{kind: :skill}` so the LLM can invoke skills
@@ -173,10 +175,10 @@ defmodule FermixCore.Agents.SkillRegistry do
     skill_dir = Path.dirname(skill_path)
 
     cond do
-      under?(skill_dir, dirs.core_dir) -> :core
-      under?(skill_dir, dirs.plugin_dir) -> :third_party
-      under?(skill_dir, dirs.local_dir) -> :local
-      true -> :third_party
+      under?(skill_dir, dirs.core_dir) -> :operator
+      under?(skill_dir, dirs.plugin_dir) -> :guest
+      under?(skill_dir, dirs.local_dir) -> :operator
+      true -> :guest
     end
   end
 

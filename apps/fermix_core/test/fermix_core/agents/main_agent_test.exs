@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
@@ -352,9 +353,14 @@ defmodule FermixCore.Agents.MainAgentTest do
       :chat_mode,
       :typing_fn,
       :typing_interval_ms,
-      :typing_timeout_ms
+      :typing_timeout_ms,
+      :source_trust
     ])
     |> Enum.into(message)
+    # Mirror the dispatcher: an authorized inbound message arrives at
+    # MainAgent with `:source_trust` set. Tests that don't care about
+    # trust default to `:operator` (the human owner's surface).
+    |> Map.put_new(:source_trust, :operator)
   end
 
   defp reply_payload({:text, text}), do: text
@@ -367,6 +373,19 @@ defmodule FermixCore.Agents.MainAgentTest do
       "function" => %{"name" => name, "arguments" => Jason.encode!(arguments)}
     }
   end
+
+  defp mcp_capability(name) do
+    Capability.new(%{
+      name: name,
+      description: "MCP fixture",
+      parameters: %{type: "object", properties: %{}},
+      kind: :mcp,
+      executor: {__MODULE__, :unused_capability_execute, []},
+      policy_class: :external_api
+    })
+  end
+
+  def unused_capability_execute(_args, _context), do: {:ok, %{success: true, output: "unused"}}
 
   defp flush_conv_store(conv_store) do
     # Synchronous call ensures all prior casts have been processed
@@ -998,6 +1017,41 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "error"
+      refute error_msg =~ "Authentication failed"
+    end
+
+    test "sends an auth-specific reply when the provider returns :no_auth_file", %{agent: agent} do
+      MockProvider.set_responses([{:error, :no_auth_file}])
+
+      msg = make_message("Hello")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, error_msg}, 5_000
+      assert error_msg =~ "Authentication failed"
+      assert error_msg =~ "fermix auth login"
+    end
+
+    test "sends an auth-specific reply when the provider returns an HTTP 401 string", %{
+      agent: agent
+    } do
+      MockProvider.set_responses([{:error, "OpenAI returned 401 Unauthorized"}])
+
+      msg = make_message("Hello")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, error_msg}, 5_000
+      assert error_msg =~ "Authentication failed"
+      assert error_msg =~ "fermix auth login"
+    end
+
+    test "sends an auth-specific reply when the Codex refresh chain fails", %{agent: agent} do
+      MockProvider.set_responses([{:error, {:auth_invalidated, %{"error" => "invalid_grant"}}}])
+
+      msg = make_message("Hello")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, error_msg}, 5_000
+      assert error_msg =~ "Authentication failed"
     end
 
     test "uses thread-aware conversation identity", %{
@@ -1329,10 +1383,11 @@ defmodule FermixCore.Agents.MainAgentTest do
         mock_response("Done. The coding skill inspected the README and found the issue.")
       ])
 
-      # Skill capabilities are policy_class :exec, so a remote-channel
-      # (:third_party trust) wouldn't see them. The test exercises the
-      # skill-routing mechanic, not channel trust — use the local "cli"
-      # channel to keep the full capability surface visible.
+      # Skill capabilities are policy_class :exec, so :guest trust would
+      # not see them. The test exercises the skill-routing mechanic, not
+      # channel trust — use the local "cli" channel so the dispatcher
+      # gateway classifies the message as :operator and keeps the full
+      # capability surface visible.
       MainAgent.handle_message(make_message("Use the coding skill.", channel: "cli"), agent)
 
       assert_receive {:reply, "Done. The coding skill inspected the README and found the issue."},
@@ -1357,6 +1412,56 @@ defmodule FermixCore.Agents.MainAgentTest do
       {skill_messages, skill_opts} = Enum.at(calls, 1)
       assert hd(skill_messages).content == "You solve code tasks."
       assert skill_opts[:model] == "gpt-5.4-mini"
+    end
+
+    test "operator trust gets skill and MCP capability surface", %{
+      agent: agent,
+      skills_dir: skills_dir,
+      capability_registry: capability_registry
+    } do
+      write_skill(skills_dir, "coding-skill", "You solve code tasks.")
+      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
+      :ok = CapabilityRegistry.register(capability_registry, mcp_capability("mcp_demo_tool"))
+
+      MockProvider.set_responses([mock_response("owner surface")])
+
+      MainAgent.handle_message(
+        make_message("What can you use?", source_trust: :operator),
+        agent
+      )
+
+      assert_receive {:reply, "owner surface"}, 5_000
+
+      [{_messages, opts}] = MockProvider.get_calls()
+      names = Enum.map(opts[:capabilities], & &1.name)
+
+      assert "coding-skill" in names
+      assert "mcp_demo_tool" in names
+    end
+
+    test "guest trust hides skill and MCP capabilities", %{
+      agent: agent,
+      skills_dir: skills_dir,
+      capability_registry: capability_registry
+    } do
+      write_skill(skills_dir, "coding-skill", "You solve code tasks.")
+      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
+      :ok = CapabilityRegistry.register(capability_registry, mcp_capability("mcp_demo_tool"))
+
+      MockProvider.set_responses([mock_response("helper surface")])
+
+      MainAgent.handle_message(
+        make_message("What can you use?", source_trust: :guest),
+        agent
+      )
+
+      assert_receive {:reply, "helper surface"}, 5_000
+
+      [{_messages, opts}] = MockProvider.get_calls()
+      names = Enum.map(opts[:capabilities], & &1.name)
+
+      refute "coding-skill" in names
+      refute "mcp_demo_tool" in names
     end
 
     test "supersedes an in-flight request with the newest same-conversation message", %{

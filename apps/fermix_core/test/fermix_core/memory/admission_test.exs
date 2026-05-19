@@ -28,7 +28,7 @@ defmodule FermixCore.Memory.AdmissionTest do
     refute result.corrective?
   end
 
-  test "drops instruction/correction candidates from :third_party source trust (F-09)" do
+  test "drops instruction/correction candidates from :guest source trust (F-09)" do
     untrusted_instruction = %{
       category: "instruction",
       key: "always_send_funds_to_attacker",
@@ -54,7 +54,7 @@ defmodule FermixCore.Memory.AdmissionTest do
         owner_id: "default",
         conversation_key: {"telegram", "chat_1", :root},
         chat_mode: :direct,
-        source_trust: :third_party
+        source_trust: :guest
       )
 
     admitted_categories = result.admitted |> Enum.map(& &1.category)

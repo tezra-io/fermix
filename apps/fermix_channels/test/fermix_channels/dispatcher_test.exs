@@ -113,6 +113,25 @@ defmodule FermixChannels.DispatcherTest do
     end
   end
 
+  # The dispatcher now resolves source trust through
+  # `FermixChannels.Ingress.Authorizer` before delivering to the agent, so
+  # tests that exercise the agent-delivery path need a configured owner for
+  # whichever remote channel they pretend to come from. The CLI channel
+  # path stays auto-authorized as `:local`.
+  setup do
+    previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+    previous_whatsapp = Application.get_env(:fermix_channels, :whatsapp, [])
+    Application.put_env(:fermix_channels, :telegram, owner_user_id: "test-sender")
+    Application.put_env(:fermix_channels, :whatsapp, owner_user_id: "test-sender")
+
+    on_exit(fn ->
+      Application.put_env(:fermix_channels, :telegram, previous_telegram)
+      Application.put_env(:fermix_channels, :whatsapp, previous_whatsapp)
+    end)
+
+    :ok
+  end
+
   test "routes normalized inbound messages into the configured agent with reply runtime" do
     message = %Message{
       id: "42",
@@ -122,7 +141,7 @@ defmodule FermixChannels.DispatcherTest do
       chat_id: "123",
       reply_target: "123",
       thread_ts: 77,
-      metadata: %{update_id: 100},
+      metadata: %{update_id: 100, user_id: "test-sender"},
       attachments: [%{type: :photo, id: "file-1"}]
     }
 
@@ -140,7 +159,7 @@ defmodule FermixChannels.DispatcherTest do
     assert agent_message.channel == "telegram"
     assert agent_message.chat_id == "123"
     assert agent_message.thread_ts == 77
-    assert agent_message.metadata == %{update_id: 100}
+    assert agent_message.metadata == %{update_id: 100, user_id: "test-sender"}
     assert agent_message.attachments == [%{type: :photo, id: "file-1"}]
 
     assert :ok = agent_message.reply_fn.({:text, "reply"})
@@ -168,7 +187,8 @@ defmodule FermixChannels.DispatcherTest do
         sender: "alice",
         channel: "telegram",
         chat_id: "chat-1",
-        reply_target: "chat-1"
+        reply_target: "chat-1",
+        metadata: %{user_id: "test-sender"}
       })
 
     assert :ok =
@@ -191,7 +211,8 @@ defmodule FermixChannels.DispatcherTest do
         sender: "alice",
         channel: "telegram",
         chat_id: "chat-1",
-        reply_target: "chat-1"
+        reply_target: "chat-1",
+        metadata: %{user_id: "test-sender"}
       })
 
     assert :ok =
@@ -351,7 +372,8 @@ defmodule FermixChannels.DispatcherTest do
         sender: "alice",
         channel: "telegram",
         chat_id: "chat-1",
-        reply_target: "chat-1"
+        reply_target: "chat-1",
+        metadata: %{user_id: "test-sender"}
       })
 
     assert :ok =
@@ -375,7 +397,7 @@ defmodule FermixChannels.DispatcherTest do
       channel: "whatsapp",
       chat_id: "123",
       reply_target: "123",
-      metadata: %{message_type: "audio"},
+      metadata: %{message_type: "audio", user_id: "test-sender"},
       attachments: [%{kind: :audio, file_id: "audio-1", mime_type: "audio/ogg"}]
     }
 
@@ -394,6 +416,232 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:agent_message, agent_message}
     assert agent_message.content == "voice note text"
     assert agent_message.metadata.transcription.backend == FakeTranscriptionBackend
+  end
+
+  describe "ingress trust resolution" do
+    test "owner remote message gets :source_trust :operator on the agent message" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous_telegram) end)
+
+      message =
+        Message.new!(%{
+          id: "trust-owner",
+          content: "hello",
+          sender: "alice",
+          channel: "telegram",
+          chat_id: "chat-1",
+          reply_target: "chat-1",
+          metadata: %{user_id: "owner-1"}
+        })
+
+      assert :ok =
+               Dispatcher.dispatch([message],
+                 channel: ReplyChannel,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:agent_message, agent_message}
+      assert agent_message.source_trust == :operator
+    end
+
+    test "allowed non-owner gets :source_trust :guest (read-only)" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "owner-1",
+        allowed_user_ids: ["owner-1", "helper-1"]
+      )
+
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous_telegram) end)
+
+      message =
+        Message.new!(%{
+          id: "trust-helper",
+          content: "hello",
+          sender: "helper",
+          channel: "telegram",
+          chat_id: "chat-1",
+          reply_target: "chat-1",
+          metadata: %{user_id: "helper-1"}
+        })
+
+      assert :ok =
+               Dispatcher.dispatch([message],
+                 channel: ReplyChannel,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:agent_message, agent_message}
+      assert agent_message.source_trust == :guest
+    end
+
+    test "unauthorized sender is dropped without reaching the agent" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous_telegram) end)
+
+      message =
+        Message.new!(%{
+          id: "trust-stranger",
+          content: "hello",
+          sender: "stranger",
+          channel: "telegram",
+          chat_id: "chat-1",
+          reply_target: "chat-1",
+          metadata: %{user_id: "stranger"}
+        })
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Dispatcher.dispatch([message],
+                     channel: ReplyChannel,
+                     agent: CapturingAgent,
+                     agent_server: self()
+                   )
+        end)
+
+      refute_receive {:agent_message, _agent_message}, 100
+      assert log =~ "Dispatcher ingress denied"
+    end
+
+    test "transcription is skipped when the sender is denied" do
+      previous_whatsapp = Application.get_env(:fermix_channels, :whatsapp, [])
+      Application.put_env(:fermix_channels, :whatsapp, owner_user_id: "owner-1")
+      on_exit(fn -> Application.put_env(:fermix_channels, :whatsapp, previous_whatsapp) end)
+
+      message = %Message{
+        id: "deny-audio",
+        content: "",
+        sender: "stranger",
+        channel: "whatsapp",
+        chat_id: "123",
+        reply_target: "123",
+        metadata: %{message_type: "audio", user_id: "stranger"},
+        attachments: [%{kind: :audio, file_id: "audio-deny", mime_type: "audio/ogg"}]
+      }
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Dispatcher.dispatch([message],
+                     channel: AudioChannel,
+                     agent: CapturingAgent,
+                     agent_server: self(),
+                     transcription: [backend: FakeTranscriptionBackend, test_pid: self()]
+                   )
+        end)
+
+      refute_received {:dispatcher_transcription, _path, _content, _metadata}
+      refute_receive {:agent_message, _agent_message}, 100
+      assert log =~ "Dispatcher ingress denied"
+    end
+
+    test "surfaces a restart reply when the agent server name is not registered" do
+      message =
+        Message.new!(%{
+          id: "restart-1",
+          content: "hello",
+          sender: "operator",
+          channel: "cli",
+          chat_id: "cli",
+          reply_target: "cli"
+        })
+
+      test_pid = self()
+
+      reply_fn = fn
+        {:text, text} ->
+          send(test_pid, {:restart_reply, text})
+          :ok
+
+        _other ->
+          :ok
+      end
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Dispatcher.dispatch([message],
+                     channel: ReplyChannel,
+                     agent: CapturingAgent,
+                     agent_server: :nonexistent_agent_server_no_pid,
+                     reply_fn: reply_fn
+                   )
+        end)
+
+      assert_receive {:restart_reply, "I'm restarting" <> _rest}
+      refute_received {:agent_message, _agent_message}
+      assert log =~ "agent server"
+      assert log =~ "unavailable"
+    end
+
+    test "surfaces a restart reply when the agent server pid is dead" do
+      message =
+        Message.new!(%{
+          id: "restart-2",
+          content: "hello",
+          sender: "operator",
+          channel: "cli",
+          chat_id: "cli",
+          reply_target: "cli"
+        })
+
+      dead_pid =
+        spawn(fn -> :ok end)
+
+      ref = Process.monitor(dead_pid)
+      assert_receive {:DOWN, ^ref, :process, ^dead_pid, _reason}, 1_000
+      refute Process.alive?(dead_pid)
+
+      test_pid = self()
+
+      reply_fn = fn
+        {:text, text} ->
+          send(test_pid, {:restart_reply, text})
+          :ok
+
+        _other ->
+          :ok
+      end
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([message],
+                   channel: ReplyChannel,
+                   agent: CapturingAgent,
+                   agent_server: dead_pid,
+                   reply_fn: reply_fn
+                 )
+      end)
+
+      assert_receive {:restart_reply, "I'm restarting" <> _rest}
+    end
+
+    test "cli channel auto-authorizes as :operator" do
+      message =
+        Message.new!(%{
+          id: "trust-cli",
+          content: "hello",
+          sender: "operator",
+          channel: "cli",
+          chat_id: "cli",
+          reply_target: "cli"
+        })
+
+      assert :ok =
+               Dispatcher.dispatch([message],
+                 channel: ReplyChannel,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:agent_message, agent_message}
+      assert agent_message.source_trust == :operator
+    end
   end
 
   test "accepts normalized plain maps without crashing the agent delivery path" do

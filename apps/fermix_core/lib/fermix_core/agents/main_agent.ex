@@ -438,19 +438,6 @@ defmodule FermixCore.Agents.MainAgent do
     update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
   end
 
-  # Remote channels are mapped to `:third_party` — the registry default for
-  # that trust is `:read_only` only. Local channels (cli, daemon socket,
-  # realtime, scheduled jobs) stay `nil` (unfiltered main-agent surface).
-  # Audit F-02: prevent prompt-injected remote messages from reaching write,
-  # exec, network, or external-api tools.
-  @remote_channels ~w(telegram whatsapp slack discord signal)
-
-  defp source_trust_for_channel(channel) when is_binary(channel) do
-    if channel in @remote_channels, do: :third_party, else: nil
-  end
-
-  defp source_trust_for_channel(_channel), do: nil
-
   defp build_loop_runtime(state, messages, context, opts) do
     base =
       [
@@ -555,7 +542,7 @@ defmodule FermixCore.Agents.MainAgent do
     user_message = %{role: "user", content: msg.content}
     messages = prompt_context.messages ++ history ++ [user_message]
 
-    source_trust = source_trust_for_channel(msg.channel)
+    source_trust = Map.get(msg, :source_trust)
 
     context = %{
       agent_name: "main",
@@ -633,9 +620,39 @@ defmodule FermixCore.Agents.MainAgent do
           %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
         )
 
-        deliver_reply(msg, "Sorry, I encountered an error processing your message.")
+        deliver_reply(msg, agent_loop_error_message(reason))
     end
   end
+
+  # Map an `AgentLoop.run/1` error reason to a user-facing reply. Auth
+  # failures get a specific message pointing at `fermix auth login`
+  # because that's the actionable fix; everything else gets the
+  # generic line. See `auth_error?/1` for the recognised patterns.
+  defp agent_loop_error_message(reason) do
+    if auth_error?(reason) do
+      "Authentication failed — run `fermix auth login` from the host and try again."
+    else
+      "Sorry, I encountered an error processing your message."
+    end
+  end
+
+  defp auth_error?(:no_auth_file), do: true
+  defp auth_error?(:auth_invalidated), do: true
+  defp auth_error?(:refresh_failed), do: true
+  defp auth_error?(:invalid_grant), do: true
+  defp auth_error?({:auth_invalidated, _body}), do: true
+  defp auth_error?({:refresh_failed, _reason}), do: true
+  defp auth_error?({:provider_error, status, _body}) when status in [401, 403], do: true
+  defp auth_error?(%{status: status}) when status in [401, 403], do: true
+
+  defp auth_error?(reason) when is_binary(reason) do
+    String.match?(
+      reason,
+      ~r/\b(401|403|Unauthorized|refresh_token_reused|invalid_grant|invalid_token|no_auth_file|auth_invalidated)\b/i
+    )
+  end
+
+  defp auth_error?(_other), do: false
 
   defp with_typing_indicator(%{typing_fn: typing_fn} = msg, fun)
        when is_function(typing_fn, 0) and is_function(fun, 0) do
@@ -941,8 +958,9 @@ defmodule FermixCore.Agents.MainAgent do
         chat_mode: chat_mode(msg),
         # F-09: forward source trust so the admission gate can refuse to
         # promote instruction/correction categories from remote-low-trust
-        # channels into the durable prompt context.
-        source_trust: source_trust_for_channel(msg.channel),
+        # channels into the durable prompt context. Trust is set by the
+        # ingress gateway (`FermixChannels.Ingress.Authorizer`).
+        source_trust: Map.get(msg, :source_trust),
         memory_store: state.memory_store,
         scheduler: state.memory_scheduler,
         repo: state.memory_repo,

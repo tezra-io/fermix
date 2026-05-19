@@ -4,10 +4,26 @@ defmodule FermixChannels.CommandsTest do
   alias FermixChannels.Commands
   alias FermixChannels.Commands.Authorization
   alias FermixChannels.Commands.Compact
+  alias FermixChannels.Ingress.Authorization, as: IngressAuthorization
+  alias FermixChannels.Ingress.Authorizer
+  alias FermixChannels.Ingress.Source
   alias FermixChannels.Message
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
+
+  defp operator_ctx, do: %{authorization: %IngressAuthorization{role: :operator, trust: :operator}}
+  defp guest_ctx, do: %{authorization: %IngressAuthorization{role: :guest, trust: :guest}}
+
+  defp context_for(%Message{} = msg, base) do
+    authorization =
+      case msg |> Map.from_struct() |> Source.from_message() |> Authorizer.resolve() do
+        {:ok, auth} -> auth
+        {:error, _reason} -> nil
+      end
+
+    Map.put(base, :authorization, authorization)
+  end
 
   setup do
     telegram = Application.get_env(:fermix_channels, :telegram, [])
@@ -36,91 +52,86 @@ defmodule FermixChannels.CommandsTest do
   end
 
   describe "Authorization.owner_only/3" do
-    test "allows cli without channel owner config" do
-      assert :ok = Authorization.owner_only(message("/new", channel: "cli"), %{}, %{})
+    test "operator role from the ingress gateway always passes" do
+      assert :ok = Authorization.owner_only(message("/new"), %{}, operator_ctx())
     end
 
-    test "fails closed without owner or stable user id" do
-      Application.put_env(:fermix_channels, :telegram, [])
+    test "guest role passes when sender is in command_allowlist" do
+      Application.put_env(:fermix_channels, :telegram, command_allowlist: ["456"])
+
+      assert :ok = Authorization.owner_only(message("/new"), %{user_id: "456"}, guest_ctx())
+      assert :ok = Authorization.owner_only(message("/new"), %{user_id: 456}, guest_ctx())
+      assert :ok = Authorization.owner_only(message("/new"), %{"user_id" => "456"}, guest_ctx())
+    end
+
+    test "guest role denies when sender is not in command_allowlist" do
+      Application.put_env(:fermix_channels, :telegram, command_allowlist: ["456"])
 
       assert {:error, :unauthorized} =
-               Authorization.owner_only(message("/new"), %{user_id: "123"}, %{})
+               Authorization.owner_only(message("/new"), %{user_id: "789"}, guest_ctx())
+    end
 
-      Application.put_env(:fermix_channels, :telegram, owner_user_id: "123")
+    test "guest role denies when metadata has no user_id" do
+      Application.put_env(:fermix_channels, :telegram, command_allowlist: ["456"])
 
+      assert {:error, :unauthorized} =
+               Authorization.owner_only(message("/new"), %{}, guest_ctx())
+    end
+
+    test "missing authorization in context denies (fail closed)" do
       assert {:error, :unauthorized} = Authorization.owner_only(message("/new"), %{}, %{})
     end
 
-    test "allows configured owner and command allowlist ids" do
-      Application.put_env(:fermix_channels, :telegram,
-        owner_user_id: "123",
-        command_allowlist: ["456"]
-      )
-
-      assert :ok = Authorization.owner_only(message("/new"), %{user_id: 123}, %{})
-      assert :ok = Authorization.owner_only(message("/new"), %{"user_id" => 456}, %{})
-
-      assert {:error, :unauthorized} =
-               Authorization.owner_only(message("/new"), %{user_id: "789"}, %{})
-    end
-
-    test "uses single ingress allowlist entry as the command owner fallback" do
-      Application.put_env(:fermix_channels, :telegram, allowed_user_ids: ["123"])
-
-      assert :ok = Authorization.owner_only(message("/new"), %{user_id: 123}, %{})
-
-      assert {:error, :unauthorized} =
-               Authorization.owner_only(message("/new"), %{user_id: "456"}, %{})
-    end
-
-    test "does not allow all ingress users to run owner-only commands" do
-      Application.put_env(:fermix_channels, :telegram, allowed_user_ids: ["123", "456"])
-
-      assert {:error, :unauthorized} =
-               Authorization.owner_only(message("/new"), %{user_id: "123"}, %{})
-    end
-
-    test "fails closed for unrecognized channels even if :unknown is configured" do
-      unknown = Application.get_env(:fermix_channels, :unknown, [])
-      Application.put_env(:fermix_channels, :unknown, owner_user_id: "owner-1")
-
-      on_exit(fn ->
-        Application.put_env(:fermix_channels, :unknown, unknown)
-      end)
-
+    test "fails closed for unrecognized channels even with guest authorization" do
       assert {:error, :unauthorized} =
                Authorization.owner_only(
                  message("/new", channel: "not-a-real-channel"),
-                 %{user_id: "owner-1"},
-                 %{}
+                 %{user_id: "anyone"},
+                 guest_ctx()
                )
     end
   end
 
   describe "dispatch/3" do
     test "returns unauthorized after replying to owner-only command failures" do
-      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "owner-1",
+        allowed_user_ids: ["owner-1", "intruder"]
+      )
+
       test_pid = self()
+      msg = message("/new", metadata: %{user_id: "intruder"})
 
       assert {:error, :unauthorized} =
                Commands.dispatch(
-                 Commands.parse(message("/new", metadata: %{user_id: "intruder"})),
+                 Commands.parse(msg),
                  reply_fn(test_pid),
-                 %{conversation_store: self(), conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(msg, %{
+                   conversation_store: self(),
+                   conversation_key: {"telegram", "chat-1", :root}
+                 })
                )
 
       assert_receive {:compact_reply, "This command requires owner permissions."}
     end
 
     test "filters help output to commands authorized for the caller" do
-      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "owner-1",
+        allowed_user_ids: ["owner-1", "intruder"]
+      )
+
       test_pid = self()
+      msg = message("/help", metadata: %{user_id: "intruder"})
 
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(message("/help", metadata: %{user_id: "intruder"})),
+                 Commands.parse(msg),
                  reply_fn(test_pid),
-                 %{conversation_store: self(), conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(msg, %{
+                   conversation_store: self(),
+                   conversation_key: {"telegram", "chat-1", :root}
+                 })
                )
 
       assert_receive {:compact_reply, help_text}
@@ -132,12 +143,16 @@ defmodule FermixChannels.CommandsTest do
     test "shows command aliases in help output for authorized callers" do
       Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
       test_pid = self()
+      msg = message("/help", metadata: %{user_id: "owner-1"})
 
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(message("/help", metadata: %{user_id: "owner-1"})),
+                 Commands.parse(msg),
                  reply_fn(test_pid),
-                 %{conversation_store: self(), conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(msg, %{
+                   conversation_store: self(),
+                   conversation_key: {"telegram", "chat-1", :root}
+                 })
                )
 
       assert_receive {:compact_reply, help_text}
@@ -148,12 +163,13 @@ defmodule FermixChannels.CommandsTest do
       {home, _root} = sandbox_fixture!()
       Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
       test_pid = self()
+      msg = message("/sandbox status", metadata: %{user_id: "owner-1"})
 
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(message("/sandbox status", metadata: %{user_id: "owner-1"})),
+                 Commands.parse(msg),
                  reply_fn(test_pid),
-                 %{conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(msg, %{conversation_key: {"telegram", "chat-1", :root}})
                )
 
       assert_receive {:compact_reply, status}
@@ -166,12 +182,13 @@ defmodule FermixChannels.CommandsTest do
       {home, root} = sandbox_fixture!()
       Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
       test_pid = self()
+      grant_msg = message("/grant path #{root}", metadata: %{user_id: "owner-1"})
 
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(message("/grant path #{root}", metadata: %{user_id: "owner-1"})),
+                 Commands.parse(grant_msg),
                  reply_fn(test_pid),
-                 %{conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(grant_msg, %{conversation_key: {"telegram", "chat-1", :root}})
                )
 
       assert_receive {:compact_reply, confirm_text}
@@ -179,11 +196,13 @@ defmodule FermixChannels.CommandsTest do
       [token] = Regex.run(~r/\/confirm ([A-Z2-7]{8})/, confirm_text, capture: :all_but_first)
       refute PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
 
+      confirm_msg = message("/confirm #{token}", metadata: %{user_id: "owner-1"})
+
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(message("/confirm #{token}", metadata: %{user_id: "owner-1"})),
+                 Commands.parse(confirm_msg),
                  reply_fn(test_pid),
-                 %{conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(confirm_msg, %{conversation_key: {"telegram", "chat-1", :root}})
                )
 
       assert_receive {:compact_reply, "Sandbox updated." <> _rest}
@@ -196,14 +215,13 @@ defmodule FermixChannels.CommandsTest do
       {home, _root} = sandbox_fixture!()
       Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
       test_pid = self()
+      preset_msg = message("/sandbox commands enable ai_tools", metadata: %{user_id: "owner-1"})
 
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(
-                   message("/sandbox commands enable ai_tools", metadata: %{user_id: "owner-1"})
-                 ),
+                 Commands.parse(preset_msg),
                  reply_fn(test_pid),
-                 %{conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(preset_msg, %{conversation_key: {"telegram", "chat-1", :root}})
                )
 
       assert_receive {:compact_reply, confirm_text}
@@ -211,12 +229,13 @@ defmodule FermixChannels.CommandsTest do
       assert confirm_text =~ "presets + ai_tools"
 
       [token] = Regex.run(~r/\/confirm ([A-Z2-7]{8})/, confirm_text, capture: :all_but_first)
+      confirm_msg = message("/confirm #{token}", metadata: %{user_id: "owner-1"})
 
       assert :ok =
                Commands.dispatch(
-                 Commands.parse(message("/confirm #{token}", metadata: %{user_id: "owner-1"})),
+                 Commands.parse(confirm_msg),
                  reply_fn(test_pid),
-                 %{conversation_key: {"telegram", "chat-1", :root}}
+                 context_for(confirm_msg, %{conversation_key: {"telegram", "chat-1", :root}})
                )
 
       assert_receive {:compact_reply, "Sandbox updated." <> _rest}

@@ -1,10 +1,44 @@
 # Milestone 4.9: Unified Capabilities — Skills, Tools, MCP, and Provider Adapters
 
-**Status:** Draft
+**Status:** Shipped. **Amended 2026-05-18** — trust vocabulary collapsed; see callout below.
 **Date:** 2026-04-28
 **Author:** Sujeeth / Aira
 **Depends on:** M2 (`AgentSupervisor`, `AgentServer`, `SkillRegistry`), M4.8 (`fermix` CLI surface, daemon)
-**References:** `docs/ROADMAP.md` (§Additional Providers, §Skill Management Tools), `apps/fermix_core/lib/fermix_core/tools/registry.ex`, `apps/fermix_core/lib/fermix_core/tools/invoke_skill.ex`, `apps/fermix_core/lib/fermix_core/agents/skill_registry.ex`, [hermes-agent](file:///Users/sujshe/projects/hermes-agent/run_agent.py), [hermes_mcp](https://hexdocs.pm/hermes_mcp), [Anthropic — Equipping agents with skills](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills), [OpenAI Responses API](https://platform.openai.com/docs/guides/responses)
+**References:** `docs/ROADMAP.md` (§Additional Providers, §Skill Management Tools), `docs/MESSAGE_GATEWAY_ARCHITECTURE.md` (the ingress gateway that feeds trust into the policy gate this milestone defined), `apps/fermix_core/lib/fermix_core/tools/registry.ex`, `apps/fermix_core/lib/fermix_core/tools/invoke_skill.ex`, `apps/fermix_core/lib/fermix_core/agents/skill_registry.ex`, [hermes-agent](file:///Users/sujshe/projects/hermes-agent/run_agent.py), [hermes_mcp](https://hexdocs.pm/hermes_mcp), [Anthropic — Equipping agents with skills](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills), [OpenAI Responses API](https://platform.openai.com/docs/guides/responses)
+
+---
+
+## Post-implementation amendment — 2026-05-18 trust vocabulary collapse
+
+The trust atoms defined by this milestone (`:core`, `:local`, `:third_party`,
+plus the audit-added `:owner_remote`) were collapsed during the message
+gateway work to a single-owner two-tier model: `:operator` and `:guest`.
+The `policy_class` taxonomy this milestone introduced
+(`:read_only`/`:read_write`/`:exec`/`:network`/`:external_api`) is **unchanged**
+— only the trust enum that maps onto it was renamed.
+
+| Old (this doc, as written) | New (in code today) |
+| --- | --- |
+| `:core` (bundled skill / internal agent) | `:operator` |
+| `:local` (user-installed skill / CLI / daemon) | `:operator` |
+| `:owner_remote` (audit F-02 addition — owner on remote channel) | `:operator` |
+| `:third_party` (plugin skill / allowed-non-owner human) | `:guest` |
+| `@third_party_default_policy` | `@guest_default_policy` |
+| `@local_default_policy` | **dropped** — folded into `:operator`'s full surface |
+
+The §4.6 design — capability listing filtered by trust + policy + allowlist,
+with strict frontmatter parsing and a recursion depth cap — is otherwise
+intact. `AgentDefinition.source :: :operator | :guest`. `SkillRegistry`
+classifies `core_dir` and `local_dir` skills as `:operator`,
+`plugin_dir` (and any unknown path) as `:guest`. See
+`docs/MESSAGE_GATEWAY_ARCHITECTURE.md` §1.1 and §10.2 for the rationale
+and the SQLite migration that rewrites old `scheduled_jobs.created_by_trust`
+strings in place.
+
+The sections below use the **original 2026-04-28 vocabulary** for
+historical fidelity — they are the design as it shipped before the
+collapse. Treat them as the design rationale and read the cross-reference
+table above for the current names.
 
 ---
 

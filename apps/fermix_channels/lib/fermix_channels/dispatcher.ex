@@ -9,6 +9,8 @@ defmodule FermixChannels.Dispatcher do
   require Logger
 
   alias FermixChannels.Commands
+  alias FermixChannels.Ingress.Authorizer
+  alias FermixChannels.Ingress.Source
   alias FermixChannels.Message
   alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.Config
@@ -113,19 +115,21 @@ defmodule FermixChannels.Dispatcher do
          conversation_store,
          command_context_opts
        ) do
-    with {:ok, message} <-
+    with {:ok, reply_message} <- normalize_message(message),
+         {:ok, authorization} <- authorize(reply_message),
+         {:ok, reply_message} <-
            FermixCore.Transcription.maybe_transcribe_message(
              channel,
-             message,
+             reply_message,
              transcription_opts
-           ),
-         {:ok, reply_message} <- normalize_message(message) do
+           ) do
       reply_fn = build_reply_fn(channel, reply_message, reply_fn_override)
       typing_fn = build_typing_fn(channel, reply_message)
 
       context =
         command_context(
           reply_message,
+          authorization,
           conversation_store,
           agent,
           agent_server,
@@ -147,12 +151,19 @@ defmodule FermixChannels.Dispatcher do
           error
 
         :passthrough ->
-          deliver_to_agent(reply_message, agent, agent_server, reply_fn, typing_fn)
+          deliver_to_agent(reply_message, authorization, agent, agent_server, reply_fn, typing_fn)
       end
     else
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
         error
+
+      {:error, reason} when reason in [:unauthorized, :unknown_channel] ->
+        Logger.warning(
+          "Dispatcher ingress denied #{channel} message (#{reason}); sender not authorized"
+        )
+
+        :ok
 
       {:error, reason} = error ->
         Logger.error("Dispatcher transcription failed: #{inspect(reason)}")
@@ -160,22 +171,69 @@ defmodule FermixChannels.Dispatcher do
     end
   end
 
-  defp deliver_to_agent(message, agent, agent_server, reply_fn, typing_fn) do
-    agent_message =
-      message
-      |> to_agent_message()
-      |> Map.put(:reply_fn, reply_fn)
-      |> maybe_put_typing_fn(typing_fn)
-
-    handle_agent_delivery(agent.handle_message(agent_message, agent_server))
+  defp authorize(%Message{} = message) do
+    message
+    |> Map.from_struct()
+    |> Source.from_message()
+    |> Authorizer.resolve()
   end
 
-  defp command_context(message, conversation_store, agent, agent_server, opts) do
+  defp deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn) do
+    if agent_alive?(agent_server) do
+      agent_message =
+        message
+        |> to_agent_message()
+        |> Map.put(:reply_fn, reply_fn)
+        |> Map.put(:source_trust, authorization.trust)
+        |> maybe_put_typing_fn(typing_fn)
+
+      handle_agent_delivery(agent.handle_message(agent_message, agent_server))
+    else
+      # `MainAgent.handle_message/2` is a `GenServer.cast`, which silently
+      # no-ops if the named server is not registered (or the registered
+      # pid is dead). Without this check, messages arriving during a
+      # supervisor restart would be dropped without any user-visible
+      # signal. Surface a restart-in-progress reply instead.
+      Logger.error(
+        "Dispatcher: agent server #{inspect(agent_server)} unavailable; surfacing restart reply"
+      )
+
+      :telemetry.execute(
+        [:fermix, :dispatcher, :agent_unavailable],
+        %{count: 1},
+        %{channel: message.channel}
+      )
+
+      _ = reply_fn.({:text, "I'm restarting — please send your message again in a moment."})
+      :ok
+    end
+  end
+
+  defp agent_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+
+  defp agent_alive?(name) when is_atom(name) do
+    case GenServer.whereis(name) do
+      nil -> false
+      pid when is_pid(pid) -> Process.alive?(pid)
+    end
+  end
+
+  defp agent_alive?({:via, _registry, _key} = via) do
+    case GenServer.whereis(via) do
+      nil -> false
+      pid when is_pid(pid) -> Process.alive?(pid)
+    end
+  end
+
+  defp agent_alive?(_other), do: false
+
+  defp command_context(message, authorization, conversation_store, agent, agent_server, opts) do
     %{
       conversation_key: conversation_key(message),
       conversation_store: conversation_store,
       agent: agent,
-      agent_server: agent_server
+      agent_server: agent_server,
+      authorization: authorization
     }
     |> Map.merge(opts)
   end
