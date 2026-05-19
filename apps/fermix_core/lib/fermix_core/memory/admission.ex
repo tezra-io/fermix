@@ -207,14 +207,16 @@ defmodule FermixCore.Memory.Admission do
 
   defp resolve_category(category, _existing), do: category
 
-  # Audit F-09: remote-low-trust channels (`:third_party`) cannot promote
+  # Audit F-09: explicit `:guest` callers cannot promote
   # instruction/correction candidates into durable memory. Those two
-  # categories are the ones that get persisted into prompt files
-  # (`memory_md` / `user_md`) and therefore shape *future* agent behavior;
-  # accepting them from arbitrary inbound prompts is the path the audit
-  # called out. Other trust levels (`:local`, `:core`, `nil`) keep the
-  # full category surface.
-  defp trust_allows_category?(category, :third_party)
+  # categories shape *future* agent behavior via the persisted prompt
+  # files (`memory_md` / `user_md`); accepting them from non-operator
+  # remote prompts is the path the audit called out. `:operator` and
+  # `nil` (admission paths that don't carry trust info, e.g. internal
+  # extractor runs) keep the full category surface — Admission's job
+  # is to restrict an *explicit* low-trust source, not to second-guess
+  # internal callers that never produced an unauthorised source.
+  defp trust_allows_category?(category, :guest)
        when category in ["instruction", "correction"],
        do: false
 

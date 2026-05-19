@@ -38,7 +38,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7]} = Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -51,10 +51,10 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7]} = Repo.migration_versions(server: repo)
   end
 
   test "resource migration creates required tables and indexes", %{db_path: db_path, repo: repo} do

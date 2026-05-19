@@ -548,7 +548,13 @@ defmodule FermixCore.Realtime.SessionServer do
     # hiding MCP and skill capabilities from voice. Removed in favor of
     # parity with text. Operators wanting a restricted voice surface tune
     # sandbox mode + command profile instead — both apply uniformly.
-    CapabilityRegistry.list_for(CapabilityRegistry, excluded_categories: [:channel])
+    # Voice is the operator at the keyboard — same trust level as the
+    # human owner messaging from CLI or a remote channel. Declared
+    # explicitly at the call site rather than inferred from absence.
+    CapabilityRegistry.list_for(CapabilityRegistry,
+      trust: :operator,
+      excluded_categories: [:channel]
+    )
   end
 
   defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage}) do

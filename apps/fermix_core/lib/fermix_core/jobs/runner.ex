@@ -21,7 +21,7 @@ defmodule FermixCore.Jobs.Runner do
   @default_timeout_ms 30 * 60 * 1_000
   @default_delivery_timeout_ms 60_000
   @default_capability_policy [:read_only, :network]
-  @scheduled_job_trust :local
+  @scheduled_job_trust :operator
 
   @type state :: %{
           repo: GenServer.server(),
@@ -448,12 +448,14 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp loop_opts(state, skill) do
+    trust = effective_trust(state.job)
+
     base = [
       context: loop_context(state, skill),
       capability_registry: state.capability_registry,
       allowed_tools: narrow_allowed_tools(state.job.allowed_tools),
-      policy: capability_policy(state.job.capability_policy),
-      trust: effective_trust(state.job),
+      policy: scheduled_policy(state.job.capability_policy, trust),
+      trust: trust,
       max_iterations: state.job.max_iterations
     ]
 
@@ -461,6 +463,14 @@ defmodule FermixCore.Jobs.Runner do
   rescue
     error -> {:error, Exception.message(error)}
   end
+
+  # `:operator` jobs run with the trust-derived registry default (full
+  # operator surface). The static scheduled-job policy default
+  # (`[:read_only, :network]`) would otherwise win at
+  # `Registry.resolve_policy/2` and silently re-narrow an operator-created
+  # job — defeating the `created_by_trust` ceiling captured at creation.
+  defp scheduled_policy(_explicit, :operator), do: nil
+  defp scheduled_policy(explicit, _trust), do: capability_policy(explicit)
 
   # Audit F-08 follow-up. AgentLoop's `capability_allowed?/2` treats
   # `nil` as "no narrowing" and a list as an exact allowlist. An empty
@@ -478,14 +488,15 @@ defmodule FermixCore.Jobs.Runner do
   # The persisted `created_by_trust` is the ceiling the creator could
   # reach at creation. The runner uses it as the *floor* for the run's
   # trust value, so the registry's per-trust policy default kicks in
-  # (e.g., `:third_party` → :read_only). The capability_policy field
-  # is now empty for jobs created after this commit — the model can't
-  # widen the future run's policy class.
+  # (e.g., `:guest` → :read_only). The capability_policy field is now
+  # empty for jobs created after this commit — the model can't widen
+  # the future run's policy class.
   #
-  # Pre-migration rows ("core" trust) keep the original full-surface
-  # behavior so existing watcher/digest jobs don't silently stop working.
-  defp effective_trust(%{created_by_trust: "third_party"}), do: :third_party
-  defp effective_trust(%{created_by_trust: "local"}), do: :local
+  # Persisted strings are migrated to the new vocabulary by the
+  # `created_by_trust_rename` Memory.Repo migration; unknown values
+  # fall through to the safe default (`@scheduled_job_trust`).
+  defp effective_trust(%{created_by_trust: "operator"}), do: :operator
+  defp effective_trust(%{created_by_trust: "guest"}), do: :guest
   defp effective_trust(_job), do: @scheduled_job_trust
 
   defp add_adapter_opts(base, %{adapter: adapter, adapter_opts: adapter_opts})
