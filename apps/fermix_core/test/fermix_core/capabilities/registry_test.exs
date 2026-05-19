@@ -133,25 +133,20 @@ defmodule FermixCore.Capabilities.RegistryTest do
       :ok
     end
 
-    test "trust: :third_party defaults to read-only and denies the rest", %{registry: reg} do
-      names = reg |> Registry.list(trust: :third_party) |> Enum.map(& &1.name)
+    test "trust: :guest defaults to read-only and denies the rest", %{registry: reg} do
+      names = reg |> Registry.list(trust: :guest) |> Enum.map(& &1.name)
       assert names == ["ro"]
     end
 
-    test "trust: :local allows read/write/exec/network but denies external_api", %{registry: reg} do
-      names = reg |> Registry.list(trust: :local) |> Enum.map(& &1.name)
-      assert names == ["ex", "net", "ro", "rw"]
-    end
-
-    test "trust: :core allows everything", %{registry: reg} do
-      names = reg |> Registry.list(trust: :core) |> Enum.map(& &1.name)
+    test "trust: :operator allows the full surface incl. external_api", %{registry: reg} do
+      names = reg |> Registry.list(trust: :operator) |> Enum.map(& &1.name)
       assert names == ["api", "ex", "net", "ro", "rw"]
     end
 
     test "explicit policy overrides trust default", %{registry: reg} do
       names =
         reg
-        |> Registry.list(trust: :third_party, policy: [:read_only, :exec])
+        |> Registry.list(trust: :guest, policy: [:read_only, :exec])
         |> Enum.map(& &1.name)
 
       assert names == ["ex", "ro"]
@@ -162,9 +157,14 @@ defmodule FermixCore.Capabilities.RegistryTest do
       assert names == ["ex"]
     end
 
-    test "no trust + no policy = main-agent style: no filtering", %{registry: reg} do
+    test "no trust + no policy returns everything (storage primitive)", %{registry: reg} do
       names = reg |> Registry.list() |> Enum.map(& &1.name)
       assert names == ["api", "ex", "net", "ro", "rw"]
+    end
+
+    test "explicit trust: nil defaults to least privilege (read-only)", %{registry: reg} do
+      names = reg |> Registry.list(trust: nil) |> Enum.map(& &1.name)
+      assert names == ["ro"]
     end
   end
 

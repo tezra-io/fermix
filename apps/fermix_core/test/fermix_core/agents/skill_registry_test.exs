@@ -146,7 +146,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
   end
 
   describe "source classifier" do
-    test "skills under priv/skills are tagged as :core" do
+    test "skills under priv/skills are tagged as :operator" do
       core = Path.join(System.tmp_dir!(), "fermix-core-#{System.unique_integer([:positive])}")
       local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       File.mkdir_p!(local)
@@ -166,10 +166,10 @@ defmodule FermixCore.Agents.SkillRegistryTest do
 
       [definition] = SkillRegistry.list_detailed(registry)
       assert definition.name == "core-skill"
-      assert definition.trust == :core
+      assert definition.trust == :operator
     end
 
-    test "skills under the local dir are tagged as :local" do
+    test "skills under the local dir are tagged as :operator" do
       local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       write_skill(local, "local-skill", "Local skill body.")
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
@@ -185,10 +185,10 @@ defmodule FermixCore.Agents.SkillRegistryTest do
         )
 
       [definition] = SkillRegistry.list_detailed(registry)
-      assert definition.trust == :local
+      assert definition.trust == :operator
     end
 
-    test "skills under the plugin dir are tagged as :third_party" do
+    test "skills under the plugin dir are tagged as :guest (untrusted)" do
       local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
       plugin_dir = Path.join(local, "_plugins")
       File.mkdir_p!(plugin_dir)
@@ -207,7 +207,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
         )
 
       [definition] = SkillRegistry.list_detailed(registry)
-      assert definition.trust == :third_party
+      assert definition.trust == :guest
     end
 
     test "plugin_dir takes precedence over local_dir when nested inside it" do
@@ -230,8 +230,8 @@ defmodule FermixCore.Agents.SkillRegistryTest do
 
       [definition] = SkillRegistry.list_detailed(registry)
       # plugin_dir is checked before local_dir in classify_source/2 so a
-      # plugin nested inside local_dir is still tagged :third_party.
-      assert definition.trust == :third_party
+      # plugin nested inside local_dir is still tagged :guest.
+      assert definition.trust == :guest
     end
   end
 

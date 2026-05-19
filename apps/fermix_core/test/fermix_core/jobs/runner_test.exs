@@ -321,7 +321,7 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert timed_out_run.error =~ "wall-clock timeout after 20ms"
   end
 
-  test "scheduled runs apply local trust defaults to capability selection", %{
+  test "guest-trust scheduled runs are narrowed to read-only capabilities", %{
     repo: repo,
     capability_registry: capability_registry,
     output_base_dir: output_base_dir
@@ -341,7 +341,8 @@ defmodule FermixCore.Jobs.RunnerTest do
              create_claimed_job(repo,
                name: "Trust Check",
                schedule: "every 15 minutes",
-               task_prompt: "Use only allowed local-safe tools.",
+               task_prompt: "Use only allowed read-only tools.",
+               created_by_trust: "guest",
                allowed_tools: ["stage3_read", "stage3_exec", "stage3_external"]
              )
 
@@ -355,6 +356,42 @@ defmodule FermixCore.Jobs.RunnerTest do
     )
 
     assert_receive {:adapter_chat, _messages, ["stage3_read"]}, 1_000
+  end
+
+  test "operator-created scheduled runs preserve the operator capability surface", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("owner_read"))
+
+    :ok =
+      CapabilityRegistry.register(
+        capability_registry,
+        test_capability("owner_external", :external_api)
+      )
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Owner Job",
+               schedule: "every 15 minutes",
+               task_prompt: "Use the full owner surface.",
+               created_by_trust: "operator",
+               allowed_tools: ["owner_read", "owner_external"]
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, tool_names}, 1_000
+    assert "owner_read" in tool_names
+    assert "owner_external" in tool_names
   end
 
   test "delivers successful channel output after persisting the run", %{

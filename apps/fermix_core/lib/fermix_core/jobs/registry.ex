@@ -177,7 +177,7 @@ defmodule FermixCore.Jobs.Registry do
          created_by_agent_id: optional_string(attrs, :created_by_agent_id, @default_agent_id),
          created_by_session_id: optional_string(attrs, :created_by_session_id, nil),
          created_by_channel: optional_string(attrs, :created_by_channel, nil),
-         created_by_trust: optional_string(attrs, :created_by_trust, "core"),
+         created_by_trust: optional_string(attrs, :created_by_trust, "operator"),
          expires_at: expires_at
        }}
     end
