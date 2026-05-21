@@ -14,32 +14,30 @@ defmodule FermixCore.Tools.Delegate do
   def name, do: "delegate"
 
   @impl true
-  def description, do: "Send one prompt to another configured model and return its text reply."
+  def description,
+    do:
+      "Send one prompt to a sub-agent and return its text reply. " <>
+        "The model is resolved from routing.delegate_model or the active provider's default."
 
   @impl true
   def parameters do
     %{
       type: "object",
-      required: ["model", "prompt"],
+      required: ["prompt"],
       properties: %{
-        model: %{type: "string", description: "Target model id."},
-        provider: %{
-          type: "string",
-          description: "Optional provider key: openai, openai_codex, anthropic."
-        },
         prompt: %{type: "string", description: "Single-turn delegation prompt."}
       }
     }
   end
 
   @impl true
-  def when_to_use, do: "Ask another configured model for one bounded answer without tool calls."
+  def when_to_use, do: "Ask a sub-agent for one bounded answer without tool calls."
 
   @impl true
   def examples do
     [
       %{
-        args: %{"model" => "gpt-5.4-mini", "prompt" => "Review this idea."},
+        args: %{"prompt" => "Summarize this article in three bullets."},
         note: "delegate one turn"
       }
     ]
@@ -48,7 +46,7 @@ defmodule FermixCore.Tools.Delegate do
   @impl true
   def failure_modes do
     [
-      %{tag: "missing_parameters", description: "model or prompt is absent"},
+      %{tag: "missing_parameters", description: "prompt is absent"},
       %{tag: "route_failed", description: "provider/model routing could not be resolved"},
       %{tag: "provider_failed", description: "target model call failed"}
     ]
@@ -66,9 +64,8 @@ defmodule FermixCore.Tools.Delegate do
   end
 
   defp do_execute(args, context) do
-    with {:ok, model} <- Support.required_string(args, "model"),
-         {:ok, prompt} <- Support.required_string(args, "prompt"),
-         {:ok, adapter, opts} <- resolve_delegate_route(args, context, model),
+    with {:ok, prompt} <- Support.required_string(args, "prompt"),
+         {:ok, adapter, opts} <- resolve_delegate_route(context),
          {:ok, turn} <- adapter.chat([%{role: "user", content: prompt}], [], opts) do
       {:ok, Tool.success(turn.content)}
     else
@@ -77,17 +74,32 @@ defmodule FermixCore.Tools.Delegate do
     end
   end
 
-  defp resolve_delegate_route(_args, context, model) do
+  defp resolve_delegate_route(context) do
+    resolver_opts = configured_model_opts()
+
     case Map.fetch(context, :delegate_adapter) do
-      {:ok, adapter} -> {:ok, adapter, [model: model]}
-      :error -> resolve_configured_route(model)
+      {:ok, adapter} -> {:ok, adapter, resolver_opts}
+      :error -> resolve_configured_route(resolver_opts)
     end
   end
 
-  defp resolve_configured_route(model) do
-    {route_key, opts} = RouteResolver.resolve!(model: model)
+  defp resolve_configured_route(resolver_opts) do
+    {route_key, opts} = RouteResolver.resolve!(resolver_opts)
     {:ok, Adapter.for_route(route_key), opts}
   rescue
     error in ArgumentError -> {:error, "route_failed: #{Exception.message(error)}"}
+  end
+
+  defp configured_model_opts do
+    case configured_delegate_model() do
+      nil -> []
+      model -> [model: model]
+    end
+  end
+
+  defp configured_delegate_model do
+    :fermix_core
+    |> Application.get_env(:routing, [])
+    |> Keyword.get(:delegate_model)
   end
 end
