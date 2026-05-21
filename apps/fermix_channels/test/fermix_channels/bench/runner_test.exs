@@ -58,16 +58,18 @@ defmodule FermixChannels.Bench.RunnerTest do
     assert {:ok, report} =
              Runner.run(
                scenarios: ["shared_multi_conv_throughput"],
-               samples: 5,
+               samples: 101,
                warmup: 0,
                output: nil
              )
 
     scenario = report.scenarios["shared_multi_conv_throughput"]
-    assert scenario.messages_dispatched == 5
-    assert scenario.messages_processed == 5
+    assert scenario.messages_dispatched == 101
+    assert scenario.messages_processed == 101
+    assert scenario.messages_superseded == 0
     assert scenario.wall_time_us > 0
     assert scenario.throughput_messages_per_second > 0
+    assert scenario.stages["agent_message"].count == 101
   end
 
   test "reports long-history setup work separately from measured samples" do
