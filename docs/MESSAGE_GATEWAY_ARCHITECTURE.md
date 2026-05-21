@@ -1,11 +1,76 @@
 # Message Gateway Architecture
 
 **Status:** Shipped (stages 1–4 + post-rename collapse; stage 5 deferred).
+Outbound gateway plan added 2026-05-19; first enforcement slice implemented
+2026-05-19.
 **Date:** 2026-05-18 (initial draft); updated 2026-05-18 after implementation +
-trust vocabulary collapse.
+trust vocabulary collapse; updated 2026-05-19 with outbound gateway bounds.
 **Author:** Sujeeth / Aira
 **Context:** Follow-up to the Telegram owner trust debugging around remote skill/MCP visibility. Implementation collapsed the original five-level trust enum into two atoms (`:operator`, `:guest`) for the single-owner usage model.
-**References:** `ARCHITECTURE.md`, `docs/MILESTONE_9_1_REALTIME_VOICE.md`, `apps/fermix_channels/lib/fermix_channels/ingress/`, `apps/fermix_channels/lib/fermix_channels/dispatcher.ex`, `apps/fermix_channels/lib/fermix_channels/commands/authorization.ex`, `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`, `apps/fermix_core/lib/fermix_core/capabilities/registry.ex`
+**References:** `ARCHITECTURE.md`, `docs/MILESTONE_9_1_REALTIME_VOICE.md`, `docs/MILESTONE_11_OUTBOUND_CHANNEL_MEDIA.md`, `apps/fermix_channels/lib/fermix_channels/ingress/`, `apps/fermix_channels/lib/fermix_channels/dispatcher.ex`, `apps/fermix_channels/lib/fermix_channels/commands/authorization.ex`, `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`, `apps/fermix_core/lib/fermix_core/capabilities/registry.ex`
+
+---
+
+## 0. Implementation Snapshot And Cleanup Index
+
+This section records repo state as of 2026-05-19 so cleanup work can be
+done without rereading the whole history.
+
+Already implemented:
+
+- Ingress gateway modules live in `FermixChannels.Ingress.*`.
+- `FermixChannels.Dispatcher` resolves authorization before transcription,
+  drops unauthorized messages, writes `:source_trust` onto agent messages,
+  and writes `authorization` into command context.
+- `MainAgent` consumes the dispatcher-provided `:source_trust`; the old
+  per-message owner lookup in `MainAgent` is gone.
+- Slash-command authorization consumes `context.authorization`.
+- Trust vocabulary is collapsed to `:operator`, `:guest`, and explicit
+  `nil`.
+- `MainAgent` already has single-flight behavior per conversation: one
+  active task plus one pending replacement. Newer messages replace pending
+  work and cancel active work.
+- Transport runtimes already exist in `fermix_channels`:
+  `Telegram.Poller`, `Discord.Gateway`, and `Signal.Listener`.
+  `FermixChannels.Application` starts them only when channel config,
+  readiness, and ingress authorization allow it.
+- Outbound media is implemented by
+  [M11](MILESTONE_11_OUTBOUND_CHANNEL_MEDIA.md): `send_attachment`,
+  `send_media/3`, `build_media_reply/1`, outbound media idempotency, and
+  adapter-owned media byte caps. Core does not know the cap matrix.
+- Outbound adapter oversize-media errors are normalized to
+  `{:byte_cap_exceeded, actual, allowed}` at the adapter boundary.
+- Telegram text splitting now uses rendered Telegram-HTML visible length
+  rather than raw Markdown source length and prefers nearby whitespace
+  boundaries before the cap. Discord, Slack, and WhatsApp reject text that
+  exceeds their platform hard bounds before making the API call.
+- Outbound send paths parse platform retry hints into
+  `{:rate_limited, retry_after_ms}`. A retrying reply executor is still
+  pending; today's behavior surfaces the structured error.
+- `AgentLoop` rejects multiple executable `:channel` category tool calls in
+  one provider iteration before running any of them.
+- Scheduled-job delivery already has a delivery deadline
+  (`delivery_timeout_ms`, default 60 seconds).
+
+Not implemented yet:
+
+- A gateway-owned outbound reply router. Today the dispatcher still builds
+  `reply_fn` closures that call channel adapter callbacks directly; the
+  agent and `send_attachment` tool call those closures.
+- Provider output caps are not wired through the provider adapters for
+  channel turns (`max_output_tokens`, `max_completion_tokens`, or
+  provider equivalent).
+- Text splitting and length accounting are not routed through a gateway reply
+  context yet. The adapter-level bounds exist, but the dispatcher still calls
+  adapter-built reply closures directly.
+- Gateway-owned retry sleeps are not implemented yet. Adapters parse retry
+  hints, but no reply executor consumes them to sleep and retry under a
+  deadline.
+- Stage 5 remains deferred: adapter allow/guest checks still duplicate
+  ingress lookups instead of delegating to one shared authorizer helper.
+- Naming cleanup remains open if the target config vocabulary is `guests`.
+  Current code and parts of this doc still use the pre-cleanup keys
+  `allowed_user_ids` / `allowed_sender_ids` for remote non-owner senders.
 
 ---
 
@@ -189,6 +254,9 @@ What is *not* on the gateway today:
   thread_scope), not on the authorizer.
 - Reply/typing function construction — still on the dispatcher,
   channel-specific.
+- Direct `MainAgent.handle_message/2` callers must set `:source_trust`.
+  The dispatcher is the production writer today; future direct callers must
+  preserve that invariant or fail closed before reaching `MainAgent`.
 
 Slash-command authorization **does** consume the gateway result as of stage
 4: `Commands.Authorization.owner_only/3` reads `context.authorization.role`
@@ -263,7 +331,7 @@ Strangers are denied at the gateway.
 | --- | --- | --- |
 | `owner_user_id` | The single human operator on this channel. | `:operator` |
 | `allowed_user_ids` / `allowed_sender_ids` (entries that are *not* the owner) | Users allowed to chat with the bot. | `:guest` (read-only). Adding someone to this list lets them talk to the bot but does **not** silently grant them skills, MCP tools, exec, network, or external API capabilities. |
-| `command_allowlist` | Non-owner users allowed to run owner-only channel slash commands. | Applies only after the gateway has resolved the sender as `:guest`; it does not grant operator tool trust. |
+| `command_allowlist` | Non-owner users allowed to run owner-only channel slash commands. | Consulted only when the gateway resolved the sender as `:guest`; it does not grant operator tool trust. |
 
 Owner detection uses `Config.channel_explicit_owner_user_id/1` — strict,
 no single-allow-list promotion. Adding a sole user to
@@ -414,7 +482,7 @@ and voice call `Registry.list_for(trust: ...)` directly.
 | 2 | `Dispatcher.dispatch_message/8` calls `Authorizer.resolve/1`, drops unauthorised messages **before** transcription, writes `:source_trust` onto agent message. | **Shipped.** |
 | 3 | `MainAgent.source_trust_for_message/1` → `Map.get(msg, :source_trust)`; delete owner-lookup helpers from `MainAgent`. | **Shipped.** |
 | 4 | Route slash-command authorization through the resolved `Authorization`. | **Shipped.** Dispatcher writes `authorization` into the command context; `Commands.Authorization.owner_only/3` consumes `context.authorization` — `:operator` passes unconditionally, `:guest` passes only if the sender is in `command_allowlist`, missing authorization fails closed. The pre-Stage-4 single-allowlist-promotion fallback is gone. |
-| 5 | Collapse adapter allowlist duplication: each adapter's `authorized_user?` delegates to a shared `Ingress.Authorizer.allowed?/2`. | **Deferred.** Adapters still hold their own per-channel `authorized_user?`/`authorized_sender?` functions. |
+| 5 | Collapse adapter allowlist duplication: each adapter's `authorized_user?` delegates to a shared `Ingress.Authorizer.allowed?/2`. | **Deferred.** Adapters still hold their own per-channel `authorized_user?`/`authorized_sender?` functions, so hot remote channels can read ingress config once in the adapter and once again in the dispatcher authorizer. |
 | 6 | Shared `Capabilities.SourcePolicy` helper. | **Dropped** — see §9.4. |
 
 ### 10.1 Post-implementation cleanups
@@ -588,3 +656,193 @@ Remaining work, tracked:
 - **Stage 5** — adapters delegate `authorized_user?` to a shared
   `Ingress.Authorizer.allowed?/2` to remove the five copies of the same
   4-line allowlist check.
+
+---
+
+## 14. Next Plan: Transport And Outbound Gateway
+
+The next gateway step is not another trust refactor. The missing boundary is
+reply delivery: inbound trust is centralized, but outbound replies still leave
+core through direct `reply_fn` closures built by the dispatcher. That works,
+but it means serialization, rate-limit handling, stale-turn rejection, and
+reply telemetry are not owned by one runtime boundary.
+
+### 14.1 Boundary
+
+Keep the gateway inside `fermix_channels`.
+
+```text
+enabled transport
+  -> channel adapter
+  -> Dispatcher + Ingress.Authorizer
+  -> MainAgent
+  -> gateway ReplyContext
+  -> channel adapter send_message/send_media
+```
+
+Core still must not import `FermixChannels`. `MainAgent` receives a
+`reply_fn`, but that function should call a `fermix_channels` reply context
+instead of directly calling Telegram/Slack/Discord/WhatsApp/Signal adapter
+functions.
+
+Voice stays out of this gateway. Realtime voice has its own local socket and
+OpenAI Realtime session lifecycle; it shares the capability registry trust
+model, not message transport.
+
+### 14.2 No Generic Queue Size
+
+Do not add a generic `max_queue_length`, `max_parts`, or "100 messages"
+setting. Those values are not platform standards and would be made up.
+
+The outbound gateway should instead use these existing or protocol-owned
+bounds:
+
+| Bound | Source |
+| --- | --- |
+| Conversation concurrency | Existing `MainAgent` single-flight: one active task plus one pending replacement per conversation. |
+| Turn execution | Existing `AgentLoop` iteration cap, default 25. |
+| Live agent deadline | Existing `AgentDefinition.timeout_seconds`, default 300 seconds. |
+| Scheduled delivery deadline | Existing jobs `delivery_timeout_ms`, default 60 seconds. |
+| Text part size | Adapter-declared platform text limit (§14.3). |
+| Media byte size | Adapter-owned M11 media caps (§14.4). |
+| Retry delay | Platform/API retry hint (`retry_after`, `Retry-After`, or equivalent), not guessed sleeps. |
+
+The reply executor should be FIFO for a single accepted reply batch. Stale
+turn checks happen before accepting a batch; once a text batch starts, it
+drains all chunks under the delivery deadline so Telegram/Discord users do
+not receive half a sentence. New reply batches from canceled/replaced turns
+are rejected before delivery. Channel tool side effects such as media sends
+are not rollbackable once accepted.
+
+Dispatcher/system replies that are intentionally outside an agent turn
+must have an explicit system-delivery path. The existing restart message
+(`"I'm restarting — please send your message again in a moment."`) is one
+such path: it has no agent turn id and must still deliver.
+
+### 14.3 Text Bounds
+
+Each adapter declares its text limit and length-accounting function. The
+gateway can ask the adapter to split text; it should not embed platform
+rules in core.
+
+| Channel | Text bound |
+| --- | --- |
+| Telegram | 4096 characters after entity parsing for `sendMessage`. Current adapter splitting counts Fermix-rendered Telegram HTML visible length, not raw Markdown source length, and prefers nearby whitespace split points before the visible cap. |
+| Discord | 2000 characters in message `content`; current adapter rejects larger text before API send. |
+| Slack | Hard truncation begins above 40000 characters; current adapter rejects larger text before API send. If Fermix later chooses a 4000-character UX chunk, name it as a Fermix UX policy, not a platform hard cap. |
+| WhatsApp | 4096 characters in `messages.text.body`; current adapter rejects larger text before API send. |
+| Signal | Use the adapter/client-supported text behavior; no gateway-owned generic value. |
+| CLI | No split required for transport correctness. |
+
+Provider output should also be bounded before delivery:
+
+- OpenAI Responses: wire `max_output_tokens`.
+- OpenAI Chat Completions: wire `max_completion_tokens`.
+- Anthropic Messages, when enabled: wire required `max_tokens`.
+- OpenAI Codex/private Responses route: wire the equivalent field only if the
+  route supports it; otherwise document that the route relies on post-response
+  channel truncation.
+
+### 14.4 Media Bounds
+
+Media size is already solved by
+[M11](MILESTONE_11_OUTBOUND_CHANNEL_MEDIA.md). The gateway must not copy
+this matrix into core and must not add a second central cap registry.
+
+| Channel | Kind | Cap |
+| --- | --- | --- |
+| Telegram | `:image` | 10 MB |
+| Telegram | `:voice` | 1 MB |
+| Telegram | `:audio`, `:video`, `:document` | 50 MB |
+| Discord | any | 10 MiB default; configurable to 50 or 100 MiB for boosted guilds. |
+| Slack | any | 100 MiB v1 cap. |
+| WhatsApp | `:image` | 5 MB |
+| WhatsApp | `:voice`, `:audio`, `:video` | 16 MB. `:voice` maps to WhatsApp `audio` and requires `audio/ogg; codecs=opus`. |
+| WhatsApp | `:document` | 100 MB |
+| Signal | any | 100 MB |
+| CLI | any | unsupported |
+
+The gateway receives success or adapter errors. For oversize media, adapters
+return `{:error, {:byte_cap_exceeded, actual, allowed}}`. The gateway logs and
+surfaces the normalized failure. Core sees only the tool result.
+
+WhatsApp has a separate inbound download cap from audit F-06:
+`@max_media_bytes` is 25 MiB for inbound media downloads. That is not an
+outbound send cap and should remain documented separately from this outbound
+matrix.
+
+### 14.5 Media Count Bound
+
+Do not bound media count with a queue depth. Bound it from the turn runtime:
+
+- For channel-bound agent turns, disable provider parallel tool calls where
+  the provider supports that setting.
+- The enforcement point is `AgentLoop`: if a provider still returns
+  multiple channel-side-effect tool calls (`send_attachment` or future
+  channel category tools) in one iteration, reject that iteration before
+  executing any of them and return a tool/loop error.
+- With one channel side-effect per iteration, the maximum number of
+  `send_attachment` deliveries in one turn is the agent loop's
+  `max_iterations`.
+
+This keeps the media count bound tied to an existing Fermix runtime contract
+instead of a new queue knob.
+
+### 14.6 Rate Limits And Retries
+
+Retry only when the platform tells us when to retry:
+
+- Telegram: use Bot API `parameters.retry_after` on flood/rate errors.
+- Discord: use `Retry-After` / `retry_after` and documented rate-limit
+  headers.
+- Slack: use `Retry-After` on HTTP 429.
+- WhatsApp/Meta: use a documented retry hint only if present. Without one,
+  fail visibly and let the operator retry.
+
+If the retry delay exceeds the remaining live-turn or scheduled-delivery
+deadline, fail instead of sleeping past the caller's deadline.
+
+Adapters now parse `parameters.retry_after`, `Retry-After`, and body-level
+`retry_after` hints into `{:error, {:rate_limited, retry_after_ms}}` on
+outbound send failures. The remaining work is executor behavior: consume that
+hint, sleep only if it fits the live-turn or scheduled-delivery deadline, and
+retry once through the same adapter send function.
+
+### 14.7 Implementation Steps
+
+1. Add a `FermixChannels.Replies.Context` value owned by the dispatcher:
+   channel module, reply target, platform thread option, conversation key,
+   optional turn id, source, authorization, and delivery deadline.
+2. Change dispatcher-built `reply_fn` to call the reply context, not direct
+   adapter closures.
+3. Add a per-conversation reply executor keyed by the dispatcher's existing
+   `conversation_key` (`{channel, chat_id, thread_ts || thread_scope}`). Do
+   not introduce a second outbound thread vocabulary.
+4. **Done for the current adapters:** Move text chunking behind adapter-owned
+   functions so platform limits stay
+   near `send_message/3`. Telegram splitting must count the post-render text
+   that Telegram validates after Fermix's Markdown-to-HTML preparation, not
+   only the raw source string.
+5. **Done:** Keep media byte checks inside adapters exactly as M11 designed,
+   then normalize oversize media errors to
+   `{:byte_cap_exceeded, actual, allowed}` at the adapter boundary.
+6. **Adapter parsing done; executor retry pending:** Add retry-hint parsing in
+   adapters before routing delivery through the executor.
+7. Wire provider output caps into adapter options for channel turns.
+8. **Done:** Add `AgentLoop` protection against multiple channel side-effect
+   tool calls in one iteration.
+9. Add an explicit system-delivery path for dispatcher replies that have no
+   agent turn id.
+10. Add tests before behavior changes:
+   - stale turn reply is rejected;
+   - two reply parts from one active turn are delivered FIFO;
+   - accepted multi-chunk text batch drains to completion under deadline;
+   - dispatcher restart reply delivers without a turn id;
+   - **done:** Telegram text splits at the adapter limit;
+   - **done:** Telegram split counting uses post-render outbound text length;
+   - **done:** Discord text fails before API call at 2000 characters;
+   - **done:** Slack and WhatsApp text fail before API call at their hard
+     bounds;
+   - **done:** adapter oversize media errors are normalized;
+   - **done for parsing:** retry hints are surfaced from adapters;
+   - retry waits use platform retry hints and respect delivery deadlines.

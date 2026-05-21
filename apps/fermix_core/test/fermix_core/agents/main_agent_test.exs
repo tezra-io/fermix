@@ -1642,6 +1642,60 @@ defmodule FermixCore.Agents.MainAgentTest do
   # -- Telemetry --
 
   describe "telemetry" do
+    test "emits prompt, history, and reply telemetry on success", %{agent: agent} do
+      test_pid = self()
+      handler_id = "test-agent-runtime-#{System.unique_integer()}"
+
+      events = [
+        [:fermix, :agent, :prompt_context],
+        [:fermix, :agent, :history],
+        [:fermix, :agent, :reply]
+      ]
+
+      :telemetry.attach_many(
+        handler_id,
+        events,
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      MockProvider.set_responses([mock_response("OK", total_tokens: 42)])
+
+      msg = make_message("Test")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:reply, "OK"}, 5_000
+
+      assert_receive {:telemetry, [:fermix, :agent, :prompt_context], prompt_measurements,
+                      prompt_metadata},
+                     5_000
+
+      assert prompt_measurements.duration_us >= 0
+      assert prompt_measurements.message_count >= 1
+      assert prompt_measurements.message_bytes > 0
+      assert prompt_metadata.agent == "main"
+
+      assert_receive {:telemetry, [:fermix, :agent, :history], history_measurements,
+                      history_metadata},
+                     5_000
+
+      assert history_measurements.duration_us >= 0
+      assert history_measurements.message_count == 0
+      assert history_metadata.channel == "telegram"
+
+      assert_receive {:telemetry, [:fermix, :agent, :reply], reply_measurements, reply_metadata},
+                     5_000
+
+      assert reply_measurements.duration_us >= 0
+      assert reply_measurements.response_bytes == 2
+      assert reply_metadata.status == :ok
+      assert reply_metadata.channel == "telegram"
+    end
+
     test "emits [:fermix, :agent, :message] on success", %{agent: agent} do
       test_pid = self()
       handler_id = "test-agent-message-#{System.unique_integer()}"

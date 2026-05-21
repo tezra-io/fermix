@@ -242,6 +242,22 @@ defmodule FermixChannels.DiscordTest do
 
       assert {:error, :not_configured} = Discord.send_message("dm-channel-1", "hello")
     end
+
+    test "rejects text over the Discord content cap before send" do
+      assert {:error, {:text_cap_exceeded, 2_001, 2_000}} =
+               Discord.send_message("dm-channel-1", String.duplicate("a", 2_001))
+    end
+
+    test "returns structured rate limit errors when Discord provides retry_after" do
+      Req.Test.stub(:discord, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(429, Jason.encode!(%{"retry_after" => 1.5}))
+      end)
+
+      assert {:error, {:rate_limited, 1_500}} =
+               Discord.send_message("dm-channel-1", "hello")
+    end
   end
 
   describe "send_media/3" do
@@ -287,6 +303,27 @@ defmodule FermixChannels.DiscordTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
     end
+
+    test "rejects media over the Discord cap before upload" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("discord-send-media-cap")
+
+      try do
+        path = Path.join(tmp_dir, "oversize.bin")
+        write_sparse_file!(path, 10 * 1_024 * 1_024 + 1)
+
+        assert {:error, {:byte_cap_exceeded, actual, allowed}} =
+                 Discord.send_media("dm-channel-1", %{
+                   kind: :document,
+                   path: path,
+                   filename: "oversize.bin"
+                 })
+
+        assert actual == 10 * 1_024 * 1_024 + 1
+        assert allowed == 10 * 1_024 * 1_024
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
   end
 
   defp dm_event(content) do
@@ -316,5 +353,16 @@ defmodule FermixChannels.DiscordTest do
         "attachments" => []
       }
     }
+  end
+
+  defp write_sparse_file!(path, size) when is_binary(path) and is_integer(size) and size > 0 do
+    {:ok, file} = File.open(path, [:write, :binary])
+
+    try do
+      {:ok, _position} = :file.position(file, size - 1)
+      :ok = IO.binwrite(file, <<0>>)
+    after
+      File.close(file)
+    end
   end
 end

@@ -13,6 +13,7 @@ defmodule FermixChannels.Telegram do
 
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
+  alias FermixChannels.RetryHint
   alias FermixCore.Net.HttpClient
 
   @bot_api_base "https://api.telegram.org"
@@ -64,11 +65,11 @@ defmodule FermixChannels.Telegram do
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(chat_id, text, opts \\ []) do
-    chunks = split_message(text)
+    chunks = outbound_text_chunks(text, opts)
 
     results =
-      Enum.map(chunks, fn chunk ->
-        post_send_message(chat_id, chunk, opts)
+      Enum.map(chunks, fn {chunk, chunk_opts} ->
+        post_send_message(chat_id, chunk, chunk_opts)
       end)
 
     case Enum.find(results, &match?({:error, _}, &1)) do
@@ -138,7 +139,6 @@ defmodule FermixChannels.Telegram do
   defp post_send_message(chat_id, text, opts) do
     with {:ok, token} <- get_bot_token() do
       url = "#{@bot_api_base}/bot#{token}/sendMessage"
-      {text, opts} = prepare_outbound_text(text, opts)
 
       body =
         %{chat_id: chat_id, text: text}
@@ -155,9 +155,9 @@ defmodule FermixChannels.Telegram do
         {:ok, %{status: 200}} ->
           :ok
 
-        {:ok, %{status: status, body: response}} ->
+        {:ok, %{status: status, body: response} = api_response} ->
           Logger.error("Telegram sendMessage failed: #{status} - #{inspect(response)}")
-          {:error, "Telegram API error: #{status}"}
+          telegram_api_error(api_response)
 
         {:error, reason} ->
           Logger.error("Telegram request failed: #{inspect(reason)}")
@@ -217,9 +217,9 @@ defmodule FermixChannels.Telegram do
 
         :ok
 
-      {:ok, %{status: status, body: response}} ->
+      {:ok, %{status: status, body: response} = api_response} ->
         Logger.error("Telegram sendMedia failed: #{status} - #{inspect(response)}")
-        {:error, "Telegram API error: #{status}"}
+        telegram_api_error(api_response)
 
       {:error, reason} ->
         Logger.error("Telegram sendMedia request failed: #{inspect(reason)}")
@@ -229,8 +229,15 @@ defmodule FermixChannels.Telegram do
 
   defp enforce_media_cap(size, cap, _kind) when size <= cap, do: :ok
 
-  defp enforce_media_cap(size, cap, kind) do
-    {:error, "#{kind} attachment #{size} bytes exceeds Telegram #{cap}-byte cap"}
+  defp enforce_media_cap(size, cap, _kind) do
+    {:error, {:byte_cap_exceeded, size, cap}}
+  end
+
+  defp telegram_api_error(%{status: status} = response) do
+    case RetryHint.retry_after_ms(response) do
+      {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
+      :error -> {:error, "Telegram API error: #{status}"}
+    end
   end
 
   defp maybe_release_claim(:ok, _claim), do: :ok
@@ -447,23 +454,98 @@ defmodule FermixChannels.Telegram do
     to_string(user_id) in allowed
   end
 
-  defp split_message(text) when is_binary(text) do
-    if String.length(text) <= @max_message_length do
-      [text]
+  defp outbound_text_chunks(text, opts) when is_binary(text) do
+    if telegram_html?(opts) do
+      html_opts = Keyword.put(opts, :parse_mode, "HTML")
+      split_markdown_for_telegram(text, [])
+      |> Enum.map(fn chunk -> {basic_markdown_to_html(chunk), html_opts} end)
     else
-      do_split(text, [])
+      {text, opts} = prepare_outbound_text(text, opts)
+      Enum.map(split_text_by_length(text), fn chunk -> {chunk, opts} end)
     end
   end
 
-  defp do_split("", acc), do: Enum.reverse(acc)
+  defp telegram_html?(opts) do
+    not Keyword.has_key?(opts, :parse_mode) and Keyword.get(opts, :format, :telegram_html) != :plain
+  end
 
-  defp do_split(remaining, acc) do
-    if String.length(remaining) <= @max_message_length do
-      Enum.reverse([remaining | acc])
+  defp split_markdown_for_telegram("", acc), do: Enum.reverse(acc)
+
+  defp split_markdown_for_telegram(text, acc) do
+    if telegram_rendered_length(text) <= @max_message_length do
+      Enum.reverse([text | acc])
     else
-      {chunk, rest} = String.split_at(remaining, @max_message_length)
-      do_split(rest, [chunk | acc])
+      {chunk, rest} = take_rendered_prefix(text)
+      split_markdown_for_telegram(rest, [chunk | acc])
     end
+  end
+
+  defp take_rendered_prefix(text) do
+    graphemes = String.graphemes(text)
+    count = rendered_prefix_count(graphemes, 1, length(graphemes), 1)
+    String.split_at(text, semantic_split_count(graphemes, count))
+  end
+
+  defp rendered_prefix_count(graphemes, low, high, best) when low <= high do
+    mid = div(low + high, 2)
+    candidate = graphemes |> Enum.take(mid) |> Enum.join()
+
+    if telegram_rendered_length(candidate) <= @max_message_length do
+      rendered_prefix_count(graphemes, mid + 1, high, mid)
+    else
+      rendered_prefix_count(graphemes, low, mid - 1, best)
+    end
+  end
+
+  defp rendered_prefix_count(_graphemes, _low, _high, best), do: best
+
+  defp semantic_split_count(graphemes, count) do
+    graphemes
+    |> Enum.take(count)
+    |> Enum.with_index(1)
+    |> Enum.reverse()
+    |> Enum.find_value(count, &semantic_split_at(&1, count))
+  end
+
+  defp semantic_split_at({grapheme, index}, count) do
+    min_index = max(count - 512, 1)
+
+    if index >= min_index and String.match?(grapheme, ~r/\s/u) do
+      index
+    end
+  end
+
+  defp telegram_rendered_length(text) do
+    text
+    |> basic_markdown_to_html()
+    |> strip_html_tags()
+    |> html_unescape()
+    |> String.length()
+  end
+
+  defp split_text_by_length(text) do
+    if String.length(text) <= @max_message_length do
+      [text]
+    else
+      do_split_text_by_length(text, [])
+    end
+  end
+
+  defp do_split_text_by_length("", acc), do: Enum.reverse(acc)
+
+  defp do_split_text_by_length(text, acc) do
+    {chunk, rest} = String.split_at(text, @max_message_length)
+    do_split_text_by_length(rest, [chunk | acc])
+  end
+
+  defp strip_html_tags(text), do: Regex.replace(~r/<[^>]*>/u, text, "")
+
+  defp html_unescape(text) do
+    text
+    |> String.replace("&quot;", "\"")
+    |> String.replace("&lt;", "<")
+    |> String.replace("&gt;", ">")
+    |> String.replace("&amp;", "&")
   end
 
   @doc false

@@ -86,6 +86,19 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     end)
   end
 
+  @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
+  def request_metrics(input, instructions, tools, capabilities)
+      when is_list(input) and is_list(tools) and is_list(capabilities) do
+    %{
+      input_items: length(input),
+      input_bytes: encoded_size(input),
+      instructions_bytes: string_size(instructions),
+      tools_count: length(tools),
+      tools_bytes: encoded_size(tools),
+      capabilities_count: length(capabilities)
+    }
+  end
+
   @spec build_input([map()]) :: {String.t() | nil, [map()]}
   def build_input(messages) do
     {system_parts, rest} = Enum.split_while(messages, fn msg -> msg.role == "system" end)
@@ -107,6 +120,15 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
       %{type: "function_call_output", call_id: call_id, output: to_string(output)}
     end)
   end
+
+  defp encoded_size(value) do
+    value
+    |> Jason.encode_to_iodata!()
+    |> IO.iodata_length()
+  end
+
+  defp string_size(value) when is_binary(value), do: byte_size(value)
+  defp string_size(_value), do: 0
 
   @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()]) ::
           {:ok, map()}

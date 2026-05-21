@@ -278,6 +278,35 @@ defmodule FermixChannels.TelegramTest do
       assert String.length(body1["text"]) <= 4096
       assert String.length(body2["text"]) <= 4096
       assert body1["text"] <> body2["text"] == long_text
+      refute_received {:telegram_request, _path, _body}
+    end
+
+    test "splits using Telegram post-render entity length" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text = String.duplicate("**a**", 4097)
+      :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body1}
+      assert_received {:telegram_request, _path, body2}
+      assert body1["parse_mode"] == "HTML"
+      assert body2["parse_mode"] == "HTML"
+      assert body1["text"] == String.duplicate("<b>a</b>", 4096)
+      assert body2["text"] == "<b>a</b>"
+      refute_received {:telegram_request, _path, _body}
+    end
+
+    test "prefers semantic split boundaries for rendered Telegram HTML" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text = String.duplicate("a", 4_090) <> " [Fermix](https://example.com) tail"
+      :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body1}
+      assert_received {:telegram_request, _path, body2}
+      assert body1["text"] == String.duplicate("a", 4_090) <> " "
+      assert body2["text"] == ~s(<a href="https://example.com">Fermix</a> tail)
+      refute_received {:telegram_request, _path, _body}
     end
 
     test "does not split messages under 4096 chars" do
@@ -295,6 +324,15 @@ defmodule FermixChannels.TelegramTest do
 
       assert {:error, msg} = send_msg("123", "hello")
       assert msg =~ "400"
+    end
+
+    test "returns structured rate limit errors when Telegram provides retry_after" do
+      stub_telegram(self(), 429, %{
+        "ok" => false,
+        "parameters" => %{"retry_after" => 3}
+      })
+
+      assert {:error, {:rate_limited, 3_000}} = send_msg("123", "hello")
     end
 
     test "returns error on connection failure" do
@@ -456,7 +494,7 @@ defmodule FermixChannels.TelegramTest do
         path = Path.join(tmp_dir, "voice.ogg")
         File.write!(path, :binary.copy("x", 1 * 1_024 * 1_024 + 1))
 
-        assert {:error, error} =
+        assert {:error, {:byte_cap_exceeded, actual, allowed}} =
                  Telegram.send_media("123", %{
                    kind: :voice,
                    path: path,
@@ -464,8 +502,8 @@ defmodule FermixChannels.TelegramTest do
                    mime_type: "audio/ogg"
                  })
 
-        assert error =~ "voice attachment"
-        assert error =~ "exceeds Telegram"
+        assert actual == 1 * 1_024 * 1_024 + 1
+        assert allowed == 1 * 1_024 * 1_024
       after
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end

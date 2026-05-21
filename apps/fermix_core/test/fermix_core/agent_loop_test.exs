@@ -105,6 +105,25 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  defmodule ChannelSpyTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "channel_spy"
+    @impl true
+    def description, do: "Reports if a channel side effect ran"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+    @impl true
+    def category, do: :channel
+
+    @impl true
+    def execute(_args, _ctx) do
+      send(self(), :channel_spy_executed)
+      {:ok, Tool.success("channel side effect ran")}
+    end
+  end
+
   # -- Helpers --
 
   defp turn(content, opts \\ []) do
@@ -205,6 +224,36 @@ defmodule FermixCore.AgentLoopTest do
   # -- Simple response (no tool calls) --
 
   describe "run/1 with no tool calls" do
+    test "emits capability selection telemetry", %{registry: registry} do
+      test_pid = self()
+      handler_id = "test-capability-select-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :capabilities, :select],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      register_caps(registry, [EchoTool])
+      set_mock_responses([turn("done")])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry, trust: :operator)
+
+      assert_receive {:telemetry, [:fermix, :capabilities, :select], measurements, metadata}
+      assert measurements.count == 1
+      assert is_integer(measurements.duration_us)
+      assert measurements.duration_us >= 0
+      assert metadata.agent == "test"
+      assert metadata.trust == :operator
+      assert metadata.kind_counts == %{builtin: 1}
+      assert metadata.policy_counts == %{read_only: 1}
+    end
+
     test "returns final response from adapter", %{registry: registry} do
       set_mock_responses([turn("Hello there!")])
 
@@ -312,6 +361,49 @@ defmodule FermixCore.AgentLoopTest do
       [{_state, results, _opts}] = mock_continues()
       assert Enum.map(results, & &1.call_id) == ["call_1", "call_2"]
       assert Enum.map(results, & &1.output) == ["Echo: a", "Echo: b"]
+    end
+
+    test "rejects multiple channel side-effect tool calls before execution", %{
+      registry: registry
+    } do
+      register_caps(registry, [ChannelSpyTool])
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [
+            tool_call("call_1", "channel_spy", %{}),
+            tool_call("call_2", "channel_spy", %{})
+          ]
+        )
+      ])
+
+      assert {:error, reason} = run_loop(capability_registry: registry)
+      assert reason =~ "Multiple channel side-effect tool calls"
+      refute_received :channel_spy_executed
+      assert mock_continues() == []
+    end
+
+    test "allows one channel side-effect tool call with other read-only calls", %{
+      registry: registry
+    } do
+      register_caps(registry, [ChannelSpyTool, EchoTool])
+
+      set_mock_responses([
+        turn("",
+          tool_calls: [
+            tool_call("call_1", "channel_spy", %{}),
+            tool_call("call_2", "echo", %{"text" => "ok"})
+          ]
+        ),
+        turn("All done")
+      ])
+
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.response == "All done"
+      assert_received :channel_spy_executed
+
+      [{_state, results, _opts}] = mock_continues()
+      assert Enum.map(results, & &1.call_id) == ["call_1", "call_2"]
     end
   end
 
