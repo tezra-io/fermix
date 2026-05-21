@@ -50,3 +50,7 @@ erl_crash.dump
 
 # Claude Code local worktrees
 /.claude/worktrees/
+
+# Transient benchmark outputs (track only bench/baseline.json once it lands)
+/bench/current.json
+/bench/soak.json

@@ -20,6 +20,7 @@ defmodule FermixChannels.Bench.Runner do
   @default_output "bench/current.json"
   @sample_reply_timeout_ms 2_000
   @batch_reply_timeout_ms 30_000
+  @multi_conversation_count 100
 
   @events [
     {[:fermix, :channel, :parse], "channel_parse"},
@@ -182,13 +183,14 @@ defmodule FermixChannels.Bench.Runner do
   end
 
   defp run_parallel_samples!(env, spec, first_index, samples) do
-    refs =
-      first_index
-      |> sample_range(samples)
-      |> Enum.map(fn index -> dispatch_sample!(env, spec, index, :sample) end)
-
-    await_replies!(MapSet.new(refs), @batch_reply_timeout_ms)
-    samples
+    first_index
+    |> sample_range(samples)
+    |> Enum.chunk_every(@multi_conversation_count)
+    |> Enum.reduce(0, fn indexes, count ->
+      Enum.each(indexes, &dispatch_sample!(env, spec, &1, :sample))
+      wait_until_idle_or_deadline(env.agent, @batch_reply_timeout_ms)
+      count + drain_replies(0)
+    end)
   end
 
   defp run_contention_samples!(env, spec, first_index, samples) do
@@ -277,7 +279,7 @@ defmodule FermixChannels.Bench.Runner do
   defp content_for(_spec, index), do: "bench message #{index}"
 
   defp chat_id(%{contention?: true}, _index, _label), do: "shared-contention"
-  defp chat_id(%{multi?: true}, index, _label), do: "multi-#{rem(index, 100)}"
+  defp chat_id(%{multi?: true}, index, _label), do: "multi-#{rem(index, @multi_conversation_count)}"
   defp chat_id(_spec, index, label), do: "#{label}-#{index}"
 
   defp await_reply!(ref) do
@@ -288,26 +290,24 @@ defmodule FermixChannels.Bench.Runner do
     end
   end
 
-  defp await_replies!(refs, timeout_ms) do
+  defp wait_until_idle_or_deadline(agent, timeout_ms) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    await_replies_until!(refs, deadline)
+    wait_until_idle_or_deadline_loop(agent, deadline)
   end
 
-  defp await_replies_until!(refs, deadline) do
-    if MapSet.size(refs) == 0 do
-      :ok
-    else
-      await_nonempty_replies_until!(refs, deadline)
-    end
-  end
+  defp wait_until_idle_or_deadline_loop(agent, deadline) do
+    status = MainAgent.status(agent)
 
-  defp await_nonempty_replies_until!(refs, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    cond do
+      status.active_requests == 0 and status.pending_requests == 0 ->
+        :ok
 
-    receive do
-      {:bench_reply, ref, _part} -> await_replies_until!(MapSet.delete(refs, ref), deadline)
-    after
-      remaining -> raise "benchmark replies timed out: #{MapSet.size(refs)} missing"
+      System.monotonic_time(:millisecond) >= deadline ->
+        :deadline
+
+      true ->
+        Process.sleep(5)
+        wait_until_idle_or_deadline_loop(agent, deadline)
     end
   end
 
