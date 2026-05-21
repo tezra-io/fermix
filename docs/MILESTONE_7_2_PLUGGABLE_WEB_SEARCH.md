@@ -4,7 +4,7 @@
 **Date:** 2026-05-21
 **Author:** Sujeeth
 **Depends on:** M7 (`web_search` shipped with keyless DDG backend; capability metadata + dynamic prompt summary), M4.9 (`CapabilityRegistry`)
-**References:** `apps/fermix_core/lib/fermix_core/tools/web_search.ex`, `apps/fermix_core/lib/fermix_core/tools/net_guard.ex`, `docs/ROADMAP.md` ("Milestone 7+: Pluggable Capability Backends")
+**References:** `apps/fermix_core/lib/fermix_core/tools/web_search.ex`, `apps/fermix_core/lib/fermix_core/net/guard.ex`, `apps/fermix_core/lib/fermix_core/setup/config_store.ex`, `docs/ROADMAP.md` ("Milestone 7+: Pluggable Capability Backends")
 
 ---
 
@@ -88,6 +88,8 @@ timeout_ms = 3000
 ```
 
 **Resolution rule:** `Application.get_env(:fermix_core, [:tools, :web_search, :backend])` resolves at call time (so config reloads via `ConfigStore.apply_snapshot/1` take effect without daemon restart). If the key is missing or unknown, fall back to `:duckduckgo_html` and emit a one-time warning at boot — same pattern as other unconfigured providers.
+
+**ConfigStore extension required.** `ConfigStore` today parses and dumps `[fermix_core.agent]`, `[fermix_core.personalization]`, `[fermix_core.memory]`, `[fermix_core.realtime]`, `[fermix_core.providers.*]`, `[fermix_core.routing]`, `[fermix_core.jobs]`, `[sandbox.*]`, and `[fermix_channels.*]`. It does **not** parse a `[fermix_core.tools.*]` section — anything the wizard writes there is silently dropped on the next `load_runtime_config/0` round-trip. M7.2 must extend `ConfigStore` to recognise a `tools` block with a minimal supported shape (`backend` string per tool name) and round-trip it through `current_snapshot/0`, `persistable_snapshot/0`, and `apply_snapshot/1`. See migration Step 0.
 
 **Why credentials aren't in `config.toml`:** existing pattern in M4.10 — `OPENAI_API_KEY` already routes through `[sandbox.env]` with a `security` command. Reusing it keeps secrets out of plaintext config and out of git accidents.
 
@@ -179,14 +181,15 @@ If they skip, no config change — DDG stays the default.
 
 | Step | Change | Validation |
 |---|---|---|
+| 0 | Extend `ConfigStore` to round-trip `[fermix_core.tools.<name>]`. Add the `tools` keyword to `current_snapshot/0`, parse/dump it in the TOML codec alongside `routing` and `jobs`, and load it into `Application.get_env(:fermix_core, :tools, [])`. Schema for v1: one key per tool, value is a keyword list (e.g., `[web_search: [backend: "brave"]]`). | Snapshot round-trip test: write `[fermix_core.tools.web_search] backend = "brave"`, call `load_runtime_config/0` then `current_snapshot/0`, assert equality. |
 | 1 | Extract current `parse_html` / `result_rows` / `challenge?` into `WebSearch.Backends.DuckDuckGoHtml` implementing the `Backend` behaviour. No behavior change. | Existing web_tools_test.exs passes unchanged. |
 | 2 | Add `WebSearch.Backend` behaviour module. | Compile-time only. |
 | 3 | Add `WebSearch.Backends.Brave` (HTTP GET, JSON parse). Read key via `System.get_env("BRAVE_API_KEY")`. | New test: stub Brave with `Req.Test`, assert structured results. |
 | 4 | Refactor `WebSearch.execute/2` to dispatch via `configured_backend/0`. Default `:duckduckgo_html` when unset. | Existing telemetry tests assert `backend` key present; result_count unchanged. |
-| 5 | Wizard step + `mix fermix.setup` write path. | Wizard test asserts roundtrip of `[fermix_core.tools.web_search] backend = "brave"`. |
+| 5 | Wizard step + `mix fermix.setup` write path. | Wizard test asserts roundtrip of `[fermix_core.tools.web_search] backend = "brave"` through ConfigStore (depends on Step 0). |
 | 6 | Doctor probe. | New doctor check test for both backends. |
 
-Each step is independently shippable. Step 1 alone is a pure refactor with zero behavior change — the safe foundation.
+Each step is independently shippable. Step 0 is a pure plumbing change in `ConfigStore` with no behavior on the tool surface — the prerequisite that makes Steps 4-5 actually round-trip through `config.toml`.
 
 ---
 
