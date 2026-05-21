@@ -14,7 +14,9 @@ defmodule FermixChannels.Telegram do
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixChannels.RetryHint
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Telemetry
 
   @bot_api_base "https://api.telegram.org"
   @max_message_length 4096
@@ -48,6 +50,13 @@ defmodule FermixChannels.Telegram do
 
   @spec parse_update(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
   def parse_update(update) do
+    {result, duration_us} = Telemetry.timed_us(fn -> do_parse_update(update) end)
+    ChannelTelemetry.emit_parse(:telegram, result, duration_us)
+    maybe_emit_inbound_message(:telegram, result, duration_us)
+    result
+  end
+
+  defp do_parse_update(update) do
     cond do
       Map.has_key?(update, "message") ->
         parse_message(update["message"])
@@ -65,21 +74,21 @@ defmodule FermixChannels.Telegram do
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(chat_id, text, opts \\ []) do
-    chunks = outbound_text_chunks(text, opts)
+    {chunks, render_duration_us} =
+      Telemetry.timed_us(fn -> outbound_text_chunks(text, opts) end)
 
-    results =
-      Enum.map(chunks, fn {chunk, chunk_opts} ->
-        post_send_message(chat_id, chunk, chunk_opts)
+    ChannelTelemetry.emit_render(:telegram, :ok, render_duration_us)
+
+    {results, send_duration_us} =
+      Telemetry.timed_us(fn ->
+        Enum.map(chunks, fn {chunk, chunk_opts} ->
+          post_send_message(chat_id, chunk, chunk_opts)
+        end)
       end)
 
     case Enum.find(results, &match?({:error, _}, &1)) do
       nil ->
-        :telemetry.execute(
-          [:fermix, :channel, :message],
-          %{count: length(chunks)},
-          %{channel: :telegram, direction: :outbound}
-        )
-
+        ChannelTelemetry.emit_message(:telegram, :outbound, length(chunks), send_duration_us)
         :ok
 
       error ->
@@ -207,14 +216,12 @@ defmodule FermixChannels.Telegram do
   defp media_request(_token, _chat_id, _media_part, _opts), do: {:error, :invalid_media_part}
 
   defp post_media(request) do
-    case HttpClient.request(request, "Telegram sendMedia") do
-      {:ok, %{status: 200}} ->
-        :telemetry.execute(
-          [:fermix, :channel, :message],
-          %{count: 1},
-          %{channel: :telegram, direction: :outbound}
-        )
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> HttpClient.request(request, "Telegram sendMedia") end)
 
+    case result do
+      {:ok, %{status: 200}} ->
+        ChannelTelemetry.emit_message(:telegram, :outbound, 1, duration_us)
         :ok
 
       {:ok, %{status: status, body: response} = api_response} ->
@@ -446,13 +453,25 @@ defmodule FermixChannels.Telegram do
   end
 
   defp authorized_user?(user_id) do
-    allowed = FermixCore.Config.channel_ingress_user_ids(:telegram)
+    {allowed?, duration_us} =
+      Telemetry.timed_us(fn ->
+        allowed = FermixCore.Config.channel_ingress_user_ids(:telegram)
 
-    # Audit F-02: empty allowlist now denies everyone (was fail-open).
-    # Operators must configure owner_user_id (auto-populates the allowlist)
-    # or set fermix_channels.telegram.allowed_user_ids explicitly.
-    to_string(user_id) in allowed
+        # Audit F-02: empty allowlist now denies everyone (was fail-open).
+        # Operators must configure owner_user_id (auto-populates the allowlist)
+        # or set fermix_channels.telegram.allowed_user_ids explicitly.
+        to_string(user_id) in allowed
+      end)
+
+    ChannelTelemetry.emit_authorize(:telegram, allowed?, duration_us)
+    allowed?
   end
+
+  defp maybe_emit_inbound_message(channel, {:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(channel, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_channel, _result, _duration_us), do: :ok
 
   defp outbound_text_chunks(text, opts) when is_binary(text) do
     if telegram_html?(opts) do

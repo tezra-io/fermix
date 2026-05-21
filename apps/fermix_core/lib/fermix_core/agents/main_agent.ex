@@ -40,6 +40,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Telemetry
 
   @typing_interval_ms 4_000
   @typing_timeout_ms 300_000
@@ -126,6 +127,7 @@ defmodule FermixCore.Agents.MainAgent do
       )
       when is_binary(content) and is_binary(sender) and is_binary(channel) and
              is_binary(chat_id) and is_function(reply_fn, 1) do
+    msg = Map.put(msg, :__fermix_enqueued_at_us, System.monotonic_time(:microsecond))
     GenServer.cast(server, {:handle_message, msg})
   end
 
@@ -231,6 +233,8 @@ defmodule FermixCore.Agents.MainAgent do
 
   @impl true
   def handle_cast({:handle_message, msg}, state) do
+    emit_mailbox_telemetry(msg)
+    msg = Map.delete(msg, :__fermix_enqueued_at_us)
     conversation_key = conversation_key(msg)
     state = enqueue_latest_message(conversation_key, msg, state)
 
@@ -539,7 +543,7 @@ defmodule FermixCore.Agents.MainAgent do
     prompt_context = load_prompt_context!(state.memory_agent_id, state.available_skills)
 
     {history, history_duration_us} =
-      timed_us(fn ->
+      Telemetry.timed_us(fn ->
         ConversationStore.get_history(conversation_key, server: state.conversation_store)
       end)
 
@@ -571,8 +575,10 @@ defmodule FermixCore.Agents.MainAgent do
       channel: msg.channel
     }
 
-    {loop_opts, compaction_target} =
-      build_loop_runtime(state, messages, context, source_trust: source_trust)
+    {{loop_opts, compaction_target}, loop_runtime_duration_us} =
+      Telemetry.timed_us(fn -> build_loop_runtime(state, messages, context, source_trust: source_trust) end)
+
+    emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
 
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
@@ -824,13 +830,18 @@ defmodule FermixCore.Agents.MainAgent do
        ) do
     budget = trunc(0.5 * context_window)
 
-    case Compactor.compact(history,
-           enabled: true,
-           token_budget: budget,
-           route: {route_key, adapter_opts},
-           adapter: adapter,
-           context: compaction_context(conversation_key, state)
-         ) do
+    {compaction_result, duration_us} =
+      Telemetry.timed_us(fn ->
+        Compactor.compact(history,
+          enabled: true,
+          token_budget: budget,
+          route: {route_key, adapter_opts},
+          adapter: adapter,
+          context: compaction_context(conversation_key, state)
+        )
+      end)
+
+    case compaction_result do
       {:ok, %{messages: compacted, compacted?: true}} ->
         after_tokens = Compactor.estimate_tokens(compacted)
 
@@ -843,7 +854,7 @@ defmodule FermixCore.Agents.MainAgent do
 
         :telemetry.execute(
           [:fermix, :compaction, :auto],
-          %{before_tokens: before_tokens, after_tokens: after_tokens},
+          %{before_tokens: before_tokens, after_tokens: after_tokens, duration_us: duration_us},
           %{
             conversation_key: conversation_key,
             provider: route_key.provider,
@@ -919,7 +930,7 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   defp deliver_reply(msg, response) do
-    {result, duration_us} = timed_us(fn -> msg.reply_fn.({:text, response}) end)
+    {result, duration_us} = Telemetry.timed_us(fn -> msg.reply_fn.({:text, response}) end)
     emit_reply_telemetry(msg, response, result, duration_us)
 
     case result do
@@ -945,7 +956,7 @@ defmodule FermixCore.Agents.MainAgent do
   defp load_prompt_context!(agent_id, available_skills)
        when is_binary(agent_id) and is_list(available_skills) do
     {result, duration_us} =
-      timed_us(fn ->
+      Telemetry.timed_us(fn ->
         PromptComposer.compose_with_metadata(
           agent_id: agent_id,
           available_skills: available_skills
@@ -959,12 +970,6 @@ defmodule FermixCore.Agents.MainAgent do
 
       {:error, reason} -> raise "prompt composition failed: #{inspect(reason)}"
     end
-  end
-
-  defp timed_us(fun) when is_function(fun, 0) do
-    start = System.monotonic_time(:microsecond)
-    result = fun.()
-    {result, System.monotonic_time(:microsecond) - start}
   end
 
   defp emit_prompt_context_telemetry(agent_id, prompt_context, duration_us) do
@@ -996,6 +1001,39 @@ defmodule FermixCore.Agents.MainAgent do
       }
     )
   end
+
+  defp emit_loop_runtime_telemetry(msg, conversation_key, source_trust, duration_us) do
+    :telemetry.execute(
+      [:fermix, :agent, :loop_runtime],
+      %{duration_us: duration_us},
+      %{
+        agent: "main",
+        channel: msg.channel,
+        chat_id: msg.chat_id,
+        conversation_key: inspect(conversation_key),
+        trust: source_trust
+      }
+    )
+  end
+
+  defp emit_mailbox_telemetry(msg) do
+    enqueued_at = Map.get(msg, :__fermix_enqueued_at_us)
+    duration_us = mailbox_duration_us(enqueued_at)
+
+    :telemetry.execute(
+      [:fermix, :agent, :mailbox],
+      %{duration_us: duration_us},
+      %{channel: Map.get(msg, :channel), status: :ok}
+    )
+  end
+
+  defp mailbox_duration_us(enqueued_at) when is_integer(enqueued_at) do
+    System.monotonic_time(:microsecond)
+    |> Kernel.-(enqueued_at)
+    |> max(0)
+  end
+
+  defp mailbox_duration_us(_missing_timestamp), do: 0
 
   defp emit_reply_telemetry(msg, response, result, duration_us) do
     :telemetry.execute(
@@ -1052,8 +1090,29 @@ defmodule FermixCore.Agents.MainAgent do
       ]
       |> add_extraction_route(state)
 
-    ExtractionDebouncer.request(opts, server: state.extraction_debouncer)
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> ExtractionDebouncer.request(opts, server: state.extraction_debouncer) end)
+
+    emit_extraction_dispatch_telemetry(msg, result, duration_us)
+    result
   end
+
+  defp emit_extraction_dispatch_telemetry(msg, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :memory, :extraction_dispatch],
+      %{duration_us: duration_us},
+      %{
+        agent: "main",
+        channel: msg.channel,
+        chat_id: msg.chat_id,
+        status: dispatch_status(result)
+      }
+    )
+  end
+
+  defp dispatch_status(:ok), do: :ok
+  defp dispatch_status({:error, _reason}), do: :error
+  defp dispatch_status(_other), do: :ok
 
   defp add_extraction_route(opts, %{adapter: adapter, adapter_opts: adapter_opts})
        when not is_nil(adapter) do

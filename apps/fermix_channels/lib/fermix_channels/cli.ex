@@ -10,7 +10,9 @@ defmodule FermixChannels.CLI do
 
   alias FermixChannels.Dispatcher
   alias FermixChannels.Message
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Telemetry
 
   @channel "cli"
   @default_timeout_ms 120_000
@@ -20,6 +22,13 @@ defmodule FermixChannels.CLI do
 
   @spec parse_input(String.t(), keyword()) :: {:ok, [Message.t()]} | {:error, :empty_input}
   def parse_input(input, opts \\ []) when is_binary(input) do
+    {result, duration_us} = Telemetry.timed_us(fn -> do_parse_input(input, opts) end)
+    ChannelTelemetry.emit_parse(:cli, result, duration_us)
+    maybe_emit_inbound_message(result, duration_us)
+    result
+  end
+
+  defp do_parse_input(input, opts) do
     content = String.trim(input)
 
     if content == "" do
@@ -38,12 +47,6 @@ defmodule FermixChannels.CLI do
           reply_target: session_id,
           metadata: %{source: :cli, user_id: "cli", chat_type: "private"}
         })
-
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: 1},
-        %{channel: :cli, direction: :inbound}
-      )
 
       {:ok, [message]}
     end
@@ -100,13 +103,8 @@ defmodule FermixChannels.CLI do
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(_chat_id, text, _opts \\ []) when is_binary(text) do
-    IO.puts(text)
-
-    :telemetry.execute(
-      [:fermix, :channel, :message],
-      %{count: 1},
-      %{channel: :cli, direction: :outbound}
-    )
+    {_result, duration_us} = Telemetry.timed_us(fn -> IO.puts(text) end)
+    ChannelTelemetry.emit_message(:cli, :outbound, 1, duration_us)
 
     :ok
   end
@@ -150,4 +148,10 @@ defmodule FermixChannels.CLI do
   defp default_sender do
     System.get_env("USER") || "operator"
   end
+
+  defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:cli, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 end

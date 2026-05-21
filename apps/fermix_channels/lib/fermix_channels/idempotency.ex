@@ -30,6 +30,8 @@ defmodule FermixChannels.Idempotency do
 
   use GenServer
 
+  alias FermixCore.Telemetry
+
   @table __MODULE__.Table
   @default_ttl_ms 24 * 60 * 60 * 1_000
   @default_outbound_ttl_ms 60_000
@@ -52,7 +54,12 @@ defmodule FermixChannels.Idempotency do
       when is_atom(channel) and not is_nil(message_id) do
     server = Keyword.get(opts, :server, __MODULE__)
     ttl_ms = Keyword.get(opts, :ttl_ms, @default_ttl_ms)
-    GenServer.call(server, {:check_and_record, {channel, message_id}, ttl_ms})
+
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> GenServer.call(server, {:check_and_record, {channel, message_id}, ttl_ms}) end)
+
+    emit_idempotency_check(channel, result, duration_us)
+    result
   end
 
   @doc """
@@ -72,11 +79,17 @@ defmodule FermixChannels.Idempotency do
           {:ok, {:fresh, outbound_media_claim()} | :duplicate} | {:error, term()}
   def claim_outbound_media(channel, chat_id, media_part, opts \\ [])
       when is_atom(channel) and is_binary(chat_id) and is_map(media_part) do
-    with {:ok, key} <- outbound_media_key(channel, chat_id, media_part) do
-      server = Keyword.get(opts, :server, __MODULE__)
-      ttl_ms = Keyword.get(opts, :ttl_ms, @default_outbound_ttl_ms)
-      GenServer.call(server, {:claim_outbound_media, key, ttl_ms})
-    end
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        with {:ok, key} <- outbound_media_key(channel, chat_id, media_part) do
+          server = Keyword.get(opts, :server, __MODULE__)
+          ttl_ms = Keyword.get(opts, :ttl_ms, @default_outbound_ttl_ms)
+          GenServer.call(server, {:claim_outbound_media, key, ttl_ms})
+        end
+      end)
+
+    emit_outbound_media_claim(channel, result, duration_us)
+    result
   end
 
   @spec release_outbound_media_claim(outbound_media_claim(), keyword()) :: :ok
@@ -209,4 +222,24 @@ defmodule FermixChannels.Idempotency do
       {:error, reason} -> {:error, {:file_digest_failed, reason}}
     end
   end
+
+  defp emit_idempotency_check(channel, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :idempotency, :check],
+      %{duration_us: duration_us},
+      %{channel: channel, result: result}
+    )
+  end
+
+  defp emit_outbound_media_claim(channel, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :idempotency, :outbound_media_claim],
+      %{duration_us: duration_us},
+      %{channel: channel, result: outbound_media_claim_result(result)}
+    )
+  end
+
+  defp outbound_media_claim_result({:ok, {:fresh, _claim}}), do: :fresh
+  defp outbound_media_claim_result({:ok, :duplicate}), do: :duplicate
+  defp outbound_media_claim_result({:error, _reason}), do: :error
 end

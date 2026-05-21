@@ -47,6 +47,20 @@ defmodule FermixCore.TranscriptionTest do
   end
 
   test "downloads audio, transcribes it, preserves attachments, and annotates metadata" do
+    test_pid = self()
+    handler_id = "test-transcription-message-#{System.unique_integer()}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :transcription, :message],
+      fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     message = %{
       id: "wamid.audio",
       content: "",
@@ -92,6 +106,14 @@ defmodule FermixCore.TranscriptionTest do
     assert metadata[:chat_id] == "15551234567"
     assert metadata[:attachment][:file_id] == "audio-media-id"
     refute File.exists?(path)
+
+    assert_receive {:telemetry, [:fermix, :transcription, :message], measurements,
+                    telemetry_metadata}
+
+    assert measurements.duration_us >= 0
+    assert telemetry_metadata.channel == "whatsapp"
+    assert telemetry_metadata.status == :ok
+    assert telemetry_metadata.transcribed? == true
   end
 
   test "leaves non-audio messages unchanged" do

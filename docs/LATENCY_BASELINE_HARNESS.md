@@ -1,11 +1,13 @@
 # Latency Baseline & Load Harness
 
-**Status:** Draft
+**Status:** Shared, adapter, E2E, advisory CI, and soak harness code implemented; pinned-machine baseline and blocking CI thresholds pending
 **Date:** 2026-05-20
 **Author:** Sujeeth / Aira
 **Context:** Performance work without a baseline is folklore. This plan establishes a reproducible, low-noise latency baseline for every hot-path stage in Fermix so future perf decisions (RuntimeContext cache, streaming, provider session reuse) anchor on real numbers, not estimates. Pairs with `docs/MAIN_AGENT_RUNTIME_CONTEXT_CACHE.md` — the data this harness produces should drive the runtime-context cache's cost/benefit decision.
 
 **References:** `docs/MESSAGE_GATEWAY_ARCHITECTURE.md`, `docs/MAIN_AGENT_RUNTIME_CONTEXT_CACHE.md`, `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`, `apps/fermix_core/lib/fermix_core/agent_loop.ex`, `apps/fermix_channels/lib/fermix_channels/dispatcher.ex`, `apps/fermix_core/lib/fermix_core/trace.ex`
+
+**Implementation note (2026-05-20):** the implementation now includes bounded, content-free `duration_us` telemetry for shared dispatcher/command/MainAgent/provider/idempotency/transcription stages, adapter parse/auth/render/send stages, and `MainAgent` mailbox pickup. It also includes `mix fermix.bench`, `mix fermix.bench.diff`, `mix fermix.bench.soak`, core benchmark recorder/stats/reporter/mock-provider modules, shared-tier scenarios, direct adapter scenarios, dispatcher-to-adapter E2E smoke scenarios, a webhook idempotency timing scenario, and an advisory GitHub Actions workflow. The first checked-in `bench/baseline.json` still must be captured by a maintainer on pinned hardware; blocking CI thresholds remain deferred until variance is known. The current GitHub-hosted advisory workflow is directional, not gate-ready.
 
 ---
 
@@ -42,11 +44,13 @@ Most work is channel-agnostic. Going per-channel for everything triples the harn
 
 | Tier | What it measures | Channels |
 | --- | --- | --- |
-| **Shared hot path** | Ingress → MainAgent → AgentLoop → provider — channel-independent | One synthetic `bench` channel |
+| **Shared hot path** | Ingress → MainAgent → AgentLoop → provider — channel-independent | Existing local `cli` channel with synthetic messages |
 | **Adapter-specific** | `parse_*`, `send_message`, `send_media`, text splitting, HMAC verification | Per real channel (Telegram, Discord, Slack, WhatsApp, Signal, CLI) |
 | **End-to-end smoke** | Transport → reply, integration regression detection | One scenario per enabled channel, smaller sample |
 
 90% of perf work happens in the Shared tier with one scenario. Channel-specific benchmarks fire only when adapter code changes. E2E is a thin layer to catch "an adapter change accidentally slowed the shared pipeline."
+
+The default `mix fermix.bench` run captures the shared Fermix-internal hot path. Adapter and E2E scenarios are available through `--scenarios=...` and use mocked channel HTTP/subprocess boundaries, so they measure Fermix adapter code without external network variance.
 
 ---
 
@@ -70,77 +74,81 @@ Three categories. The harness recorder should attach to existing events where po
 - `[:fermix, :tool, :exec]`
 - `[:fermix, :memory, :message]` (`add_message`, at `conversation_store.ex:130`)
 - `[:fermix, :memory, :extraction]` (async extractor work, `extractor.ex:418`)
-- `[:fermix, :transcription, :*]` (verify shape during Stage 1)
+- `[:fermix, :transcription, :message]`
+- `[:fermix, :idempotency, :check]`
+- `[:fermix, :idempotency, :outbound_media_claim]`
+- `[:fermix, :channel, :parse]`
+- `[:fermix, :channel, :authorize]`
+- `[:fermix, :channel, :render]`
+- `[:fermix, :channel, :message]`
+- `[:fermix, :dispatcher, :normalize]`
+- `[:fermix, :ingress, :authorize]`
+- `[:fermix, :command, :dispatch]`
+- `[:fermix, :dispatcher, :agent_delivery]`
+- `[:fermix, :agent, :mailbox]`
+- `[:fermix, :agent, :loop_runtime]`
+- `[:fermix, :memory, :extraction_dispatch]`
+- `[:fermix, :provider, :tool_schema]`
+- `[:fermix, :channel, :reply]`
+- `[:fermix, :compaction, :auto]`
+- `[:fermix, :compaction, :forced]`
 
-**Emits event but no duration (add `duration_us` to existing metadata):**
+`[:fermix, :channel, :authorize]` is the transport-layer adapter allowlist check (`:allowed | :denied`). `[:fermix, :ingress, :authorize]` is gateway trust resolution (`:ok | :unauthorized | :unknown_channel`, plus trust metadata). Keep both stages in reports; they answer different questions.
 
-- `[:fermix, :compaction, :auto]` — has `before_tokens`/`after_tokens`, no duration
-- `[:fermix, :compaction, :forced]` — same
-- `[:fermix, :compaction, :auto_skipped]` — same
-- `[:fermix, :channel, :message]` (inbound + outbound, count only)
+**Emits event but no duration (add `duration_us` where a timed operation exists):**
+
+- `[:fermix, :compaction, :auto_skipped]` — count only; skipped decision timing is still pending
 
 **No event yet (new `:telemetry.execute/3` needed):**
 
-- Channel adapter `parse_*` (per-platform inbound parse)
-- Adapter `authorized_user?` / `authorized_sender?`
-- `FermixChannels.Idempotency.check_and_record/3` — **webhook controller only**, not shared path (see §3.1.1)
-- `FermixChannels.Dispatcher.normalize_message/1`
-- `FermixChannels.Ingress.Authorizer.resolve/1`
-- `FermixChannels.Commands.dispatch/3`
-- `MainAgent` mailbox enqueue → pickup
-- `MainAgent.build_loop_runtime/4` (post-prompt overhead)
-- `ResponsesShared.to_provider_tools/1`
-- `maybe_start_extraction` dispatch (the cast itself, not the async extractor work)
-- `maybe_auto_compact` dispatch (same)
-- `build_text_reply` / `build_media_reply` closure invocation
-- Adapter outbound HTTP send (rendering + POST per channel)
-- `Idempotency.claim_outbound_media/4`
+- `maybe_auto_compact` decision overhead
 
 ### 3.1 Inbound (shared path through Dispatcher)
 
 | # | Stage | Existing telemetry | Action |
 | --- | --- | --- | --- |
-| 1 | Transport receive → adapter `parse_*` | `[:fermix, :channel, :message]` count only | Add `duration_us` per adapter. |
-| 2 | Adapter `authorized_user?` / `authorized_sender?` | none | New. |
-| 3 | `Dispatcher.normalize_message/1` | none | New; group with #4. |
-| 4 | `Ingress.Authorizer.resolve/1` | none | New; expect <50 µs. |
-| 5 | Transcription (audio only) | `[:fermix, :transcription, :*]` (verify shape) | Verify in Stage 1. |
-| 6 | `Commands.dispatch/3` (when command) | none | New. Branch separately — most messages skip. |
-| 7 | `agent_alive?` + `MainAgent.handle_message/2` cast | none | New. Cast is microseconds; mailbox enqueue + pickup is what matters. |
+| 1 | Transport receive → adapter `parse_*` | `[:fermix, :channel, :parse]` + `[:fermix, :channel, :message]` | Use as-is. |
+| 2 | Adapter `authorized_user?` / `authorized_sender?` | `[:fermix, :channel, :authorize]` | Use as-is. |
+| 3 | `Dispatcher.normalize_message/1` | `[:fermix, :dispatcher, :normalize]` | Use as-is. |
+| 4 | `Ingress.Authorizer.resolve/1` | `[:fermix, :ingress, :authorize]` | Use as-is; expect <50 µs. |
+| 5 | Transcription (audio only) | `[:fermix, :transcription, :message]` | Use as-is. |
+| 6 | `Commands.dispatch/3` (when command) | `[:fermix, :command, :dispatch]` | Use as-is. Branch separately — most messages skip. |
+| 7 | `agent_alive?` + `MainAgent.handle_message/2` cast | `[:fermix, :dispatcher, :agent_delivery]` | Use as-is. Mailbox enqueue + pickup is `[:fermix, :agent, :mailbox]`. |
 
 ### 3.1.1 Webhook-only ingress (not shared path)
 
-`Idempotency.check_and_record/3` lives in the **HTTP webhook controller** (`apps/fermix_web/lib/fermix_web_web/controllers/webhook_controller.ex:146`), not in the dispatcher. Polling channels (Telegram, Signal) and the Discord gateway socket bypass it entirely. The shared synthetic `bench` channel scenarios won't exercise it.
+`Idempotency.check_and_record/3` lives in the **HTTP webhook controller** (`apps/fermix_web/lib/fermix_web_web/controllers/webhook_controller.ex:146`), not in the dispatcher. Polling channels (Telegram, Signal) and the Discord gateway socket bypass it entirely. The shared local `cli` scenarios won't exercise it.
 
-Measured separately as the `webhook_ingress_idempotency` scenario in §5.3, which exercises the webhook controller path end-to-end (Slack / WhatsApp / future webhook channels). Add a new `duration_us`-emitting telemetry event at `check_and_record` so the recorder attaches without code-path inference.
+Measured separately as the `webhook_ingress_idempotency` scenario in §5.3. The current `fermix_channels` runner measures the shared idempotency GenServer directly because `fermix_channels` must not depend on `fermix_web`; a future `fermix_web`-owned runner can add controller overhead if that boundary becomes suspect.
 
 ### 3.2 MainAgent (per turn)
 
 | # | Stage | Existing telemetry | Action |
 | --- | --- | --- | --- |
 | 8 | `PromptComposer.compose_with_metadata/1` | `[:fermix, :agent, :prompt_context]` | Use as-is. |
+| 8a | `MainAgent` mailbox enqueue → pickup | `[:fermix, :agent, :mailbox]` | Use as-is. |
 | 9 | `ConversationStore.get_history` | `[:fermix, :agent, :history]` | Use as-is. |
-| 10 | Build context + `build_loop_runtime/4` | none | New. Report as `main_agent_overhead`. |
+| 10 | Build context + `build_loop_runtime/4` | `[:fermix, :agent, :loop_runtime]` | Use as-is. Report as `main_agent_overhead`. |
 | 11 | `AgentLoop.run/1` total | `[:fermix, :agent, :message]`, `[:fermix, :agent, :iteration]` | Use as-is. |
-| 12 | `Compactor.compact` (auto + forced) | `[:fermix, :compaction, :auto]` / `:forced` | **Gap**: events exist but carry no duration. Extend metadata with `duration_us`. |
+| 12 | `Compactor.compact` (auto + forced) | `[:fermix, :compaction, :auto]` / `:forced` | Use as-is for actual compaction work. `:auto_skipped` remains count-only. |
 | 13 | `CapabilityRegistry.list_for/2` | `[:fermix, :capabilities, :select]` | Use as-is. |
-| 14 | `to_provider_tools/1` | none | New. |
+| 14 | `to_provider_tools/1` | `[:fermix, :provider, :tool_schema]` | Use as-is. |
 | 15 | Provider HTTP call | `[:fermix, :provider, :call]` | Use as-is. |
 | 16 | Per-tool `execute/2` | `[:fermix, :tool, :exec]` | Use as-is. |
 | 17 | `ConversationStore.add_message` ×2 | `[:fermix, :memory, :message]` with `duration_us` | Use as-is. |
 | 18 | `deliver_reply` → outbound (§3.3) | `[:fermix, :agent, :reply]` | Use as-is at the boundary; outbound work follows. |
-| 19 | `maybe_start_extraction` (dispatch) | none | New event for the dispatch (the cast). Async extractor work is its own metric (`[:fermix, :memory, :extraction]`, `duration_ms`) and stays a background measurement, not hot-path. |
-| 20 | `maybe_auto_compact` (dispatch) | none | New event for the dispatch. The compaction work itself is #12. |
+| 19 | `maybe_start_extraction` (dispatch) | `[:fermix, :memory, :extraction_dispatch]` | Use as-is. Async extractor work is its own metric (`[:fermix, :memory, :extraction]`, `duration_ms`) and stays a background measurement, not hot-path. |
+| 20 | `maybe_auto_compact` decision | none | Pending only if decision overhead proves measurable. The compaction work itself is #12. |
 
 ### 3.3 Outbound
 
 | # | Stage | Existing telemetry | Gap |
 | --- | --- | --- | --- |
-| 22 | `build_text_reply` / `build_media_reply` closure invocation | none | New. |
-| 23 | Adapter `send_message` text rendering (Telegram: markdown→HTML + split) | none | Per-channel. New. |
-| 24 | Adapter HTTP send | `[:fermix, :channel, :message]` (count, `direction: :outbound`) | Needs `duration_us`. |
-| 25 | Adapter `send_media` outbound cap + upload | same | New. Separate cap-check from upload. |
-| 26 | Idempotency outbound media claim | none | GenServer.call per media. New. |
+| 22 | `build_text_reply` / `build_media_reply` closure invocation | `[:fermix, :channel, :reply]` | Use as-is. |
+| 23 | Adapter `send_message` text rendering (Telegram: markdown→HTML + split) | `[:fermix, :channel, :render]` | Use as-is. |
+| 24 | Adapter HTTP send | `[:fermix, :channel, :message]` (`direction: :outbound`) | Use as-is. |
+| 25 | Adapter `send_media` outbound cap + upload | `[:fermix, :channel, :message]` + `[:fermix, :idempotency, :outbound_media_claim]` | Use as-is. |
+| 26 | Idempotency outbound media claim | `[:fermix, :idempotency, :outbound_media_claim]` | Use as-is. |
 
 ### 3.4 Cross-cutting
 
@@ -154,19 +162,20 @@ Measure:
 - **Supervisor restart counters** — must be 0 across the run.
 - **`Trace` process mailbox depth** sampled mid-scenario if the trace writer is enabled. (Default is disabled in bench mode; see §9.)
 
+Current shared-tier memory snapshots are taken before the scenario starts and after the recorder has detached and deleted its ETS table, so recorder buffer growth is not counted as Fermix ETS growth.
+
 ### 3.5 Gaps to fix before the harness ships (Stage 1 of §7)
 
-Per §3.0, the gaps are:
+Per §3.0, the only remaining optional gap is:
 
-1. Add `duration_us` to four `[:fermix, :compaction, :*]` events.
-2. Add new `duration_us` events at the dozen stages with no telemetry today (listed in §3.0).
+1. Decide whether `maybe_auto_compact` skipped-decision timing is useful; the actual compaction duration is already covered. This is intentionally not in the default recorder yet because skipped compaction is a tiny branch-only decision and has not shown up as a bottleneck.
 
 Constraints on Stage 1 (non-interference principle):
 
 - Telemetry payloads must be **bounded and content-free**. No message bodies, no full capability lists, no full prompt parts.
 - Telemetry handlers must not add synchronous disk or network work on the user path. The bench recorder buffers in ETS and flushes at scenario end; the trace writer is disabled in bench mode.
-- Each new event has a single `duration_us` measurement and a small metadata map (channel, agent, conversation key hash).
-- Existing tests must pass unchanged.
+- Each new event has a single `duration_us` measurement and a small metadata map (channel, agent, status, and existing conversation identifiers where neighboring telemetry already uses them).
+- Existing behavior must stay unchanged; add focused telemetry regression tests for new events.
 
 ---
 
@@ -176,24 +185,22 @@ Per scenario, per stage:
 
 ```elixir
 %{
-  stage: "prompt_context",
-  unit: :microsecond,
   count: 1000,
-  p50: 2_134,
-  p95: 8_421,
-  p99: 19_882,
-  max: 142_113,
-  mean: 3_201,
-  stdev: 4_872
+  p50_us: 2_134,
+  p95_us: 8_421,
+  p99_us: 19_882,
+  max_us: 142_113,
+  mean_us: 3_201.0,
+  stdev_us: 4_872.0
 }
 ```
 
 Rules:
 
-- **Histogram-backed** for runs >10k samples; sort-based list for ≤10k (simpler, fine for default 1000).
+- **Current implementation:** sort-based list for all sample sizes. Histogram-backed aggregation is only needed if future runs move beyond the current ≤10k target.
 - **One bucket per scenario per stage.** Don't aggregate across scenarios (Telegram numbers must not mix with WhatsApp).
 - **Mean + stdev are sanity checks**; p95 is the gate.
-- **Tail tracker**: keep the worst 10 samples per stage with full context (timestamp, conversation key, tool count, message length). Debug aid for p99 spikes.
+- **Planned tail tracker:** keep the worst 10 samples per stage with bounded context (timestamp, conversation key, tool count, message length). Debug aid for p99 spikes.
 
 ---
 
@@ -201,7 +208,7 @@ Rules:
 
 Each is a separate JSON entry; each runs N samples with warmup.
 
-### 5.1 Shared (channel-agnostic, drives synthetic `bench` channel)
+### 5.1 Shared (channel-agnostic, drives the local `cli` channel path with synthetic messages)
 
 | Scenario | What's varied | Sample size |
 | --- | --- | --- |
@@ -229,17 +236,17 @@ Adapter scenarios use `Req.Test` stubs to return mock responses deterministicall
 
 200 samples each, end-to-end through the dispatcher with stubbed HTTP. Catches integration regressions where a shared-tier change accidentally slows a specific channel.
 
-Includes a dedicated **`webhook_ingress_idempotency`** scenario that drives the webhook controller path (Slack signed payload) so `Idempotency.check_and_record/3` is exercised. The shared-tier scenarios do not reach this code (see §3.1.1).
+Includes a dedicated **`webhook_ingress_idempotency`** scenario so `Idempotency.check_and_record/3` is exercised. The shared-tier scenarios do not reach this code (see §3.1.1). The Phoenix controller wrapper is intentionally not called from `fermix_channels` to avoid reversing the app dependency direction.
 
 ### 5.4 Soak (separate command, optional)
 
-`shared_soak_10min` — 10-minute sustained run at fixed QPS across 50 conversation keys. Reports BEAM memory growth slope, ETS size deltas, supervisor restarts. Not a CI gate; run pre-release.
+`shared_soak_10min` — 10-minute sustained run across the shared multi-conversation scenario. Reports batch count, processed messages, throughput, and BEAM memory growth slope. Not a CI gate; run pre-release.
 
 ---
 
 ## 6. Output
 
-`bench/baseline.json` checked into the repo. Compare with `mix fermix.bench.diff old.json new.json`.
+`bench/baseline.json` should be checked into the repo after a deliberate pinned-machine baseline run. Local ad-hoc runs should write `bench/current.json`. Compare with `mix fermix.bench.diff old.json new.json`.
 
 ```json
 {
@@ -252,18 +259,28 @@ Includes a dedicated **`webhook_ingress_idempotency`** scenario that drives the 
     "samples": 1000,
     "warmup": 20,
     "provider_mode": "mock",
-    "trace_writes_enabled": false
+    "trace_writes_enabled": false,
+    "output": "bench/current.json"
   },
   "scenarios": {
     "shared_text_minimal": {
+      "messages_dispatched": 1000,
       "messages_processed": 1000,
+      "messages_superseded": 0,
+      "wall_time_us": 4200000,
+      "throughput_messages_per_second": 238.1,
+      "setup": {
+        "environments_started": 1,
+        "history_conversations_seeded": 0,
+        "history_messages_seeded": 0
+      },
       "stages": {
-        "ingress_authorize":   { "p50_us": 18,   "p95_us": 42,   "p99_us": 110,   "max_us": 240 },
-        "prompt_context":      { "p50_us": 2134, "p95_us": 8421, "p99_us": 19882, "max_us": 142113 },
-        "history_fetch":       { "p50_us": 380,  "p95_us": 1100, "p99_us": 2400,  "max_us": 5800 },
-        "capabilities_select": { "p50_us": 320,  "p95_us": 580,  "p99_us": 980,   "max_us": 2400 },
-        "agent_loop_total":    { "p50_us": 8500, "p95_us": 14200,"p99_us": 22000, "max_us": 48000 },
-        "deliver_reply":       { "p50_us": 1200, "p95_us": 2100, "p99_us": 3400,  "max_us": 6800 }
+        "ingress_authorize":   { "count": 1000, "p50_us": 18,   "p95_us": 42,   "p99_us": 110,   "max_us": 240 },
+        "prompt_context":      { "count": 1000, "p50_us": 2134, "p95_us": 8421, "p99_us": 19882, "max_us": 142113 },
+        "history_fetch":       { "count": 1000, "p50_us": 380,  "p95_us": 1100, "p99_us": 2400,  "max_us": 5800 },
+        "capabilities_select": { "count": 1000, "p50_us": 320,  "p95_us": 580,  "p99_us": 980,   "max_us": 2400 },
+        "agent_message":       { "count": 1000, "p50_us": 8500, "p95_us": 14200,"p99_us": 22000, "max_us": 48000 },
+        "agent_reply":         { "count": 1000, "p50_us": 1200, "p95_us": 2100, "p99_us": 3400,  "max_us": 6800 }
       },
       "memory": {
         "beam_total_before_bytes": 142336000,
@@ -302,50 +319,62 @@ Regression thresholds (configurable per stage):
 
 ### Stage 1 — Telemetry gap fill (1 day)
 
-Two edits per the §3.0 map:
+Initial shared-path pass is complete for dispatcher normalization, ingress authorization, command dispatch, agent delivery, reply closure invocation, transcription, idempotency, MainAgent loop runtime, extraction dispatch, provider tool schema conversion, and actual compaction work.
 
-1. **Extend** the four `[:fermix, :compaction, :*]` events to include `duration_us` in measurements. Existing `before_tokens`/`after_tokens` keys stay.
-2. **Add** new `:telemetry.execute/3` calls at the ~13 currently-uninstrumented stages listed in §3.0.
+Remaining edits per the §3.0 map:
+
+1. **Implemented:** adapter-specific parse/auth/send/render/media paths emit `duration_us`.
+2. **Implemented:** `MainAgent` mailbox enqueue → pickup emits `duration_us`.
+3. **Deferred by design:** `maybe_auto_compact` skipped-decision timing. Actual compaction durations already emit `duration_us`; skipped decisions remain count-only unless baseline data shows a need.
 
 Constraints (per §3.5):
 
 - Telemetry payloads bounded, content-free, no synchronous I/O.
-- Existing tests pass unchanged.
+- Existing behavior remains unchanged; focused telemetry regression tests cover new shared-path events.
 - The bench recorder attaches to the existing event names; no rename or duplicate emission.
 
 Verify:
 
-- Every numbered stage in §3.1 and §3.2 has a duration source (existing event, extended event, or new event).
+- Every implemented shared stage in §3.1 and §3.2 has a duration source (existing event, extended event, or new event).
+- Remaining gap matches the §3.5 list.
 - A quick `grep -r ":telemetry.execute" apps/` smoke shows no inadvertent duplication.
 
 ### Stage 2 — Bench infrastructure (1 day)
 
+Implemented:
+
 - `apps/fermix_core/lib/fermix_core/bench/` module tree under `lib/`, not `test/` — Mix tasks cannot depend on test-tree modules.
-- `Bench.Recorder` — telemetry handler that buffers `{stage, duration_us}` tuples in ETS during a scenario, flushes at scenario end.
-- `Bench.Stats` — percentile computation (sort-based for n ≤10k; histogram for larger).
-- `Bench.MockProvider` — a new minimal `FermixCore.Providers.Adapter` implementation under `lib/fermix_core/bench/mock_provider.ex`. The test-tree `MockAdapter` in `agent_loop_test.exs` lives in `test/` and is not reachable from a Mix task; copy the minimal behavior (deterministic `chat/3`, `continue/3`, scripted responses via process dictionary or ETS).
-- `Bench.Reporter` — JSON writer + delta diff.
-- `mix fermix.bench` task with `--scenarios=…`, `--samples=N`, `--warmup=N`, `--output=path`, `--compare=path`.
+- `FermixCore.Bench.Recorder` — telemetry handler that buffers `{stage, duration_us}` tuples in an ETS `:duplicate_bag` with read/write concurrency during a scenario and flushes at scenario end.
+- `FermixCore.Bench.Stats` — sort-based percentile computation for the default sample sizes.
+- `FermixCore.Bench.MockProvider` — minimal `FermixCore.Providers.Adapter` implementation with deterministic `:text`, `:tool_once`, and `:repeat_tool` scripts configured through adapter opts.
+- `FermixCore.Bench.Reporter` — JSON writer + p95 delta diff.
+- `FermixChannels.Bench.Runner` — shared-path runner lives in `fermix_channels` because it deliberately exercises `FermixChannels.Dispatcher`; core benchmark primitives remain in `fermix_core`.
+- `FermixChannels.Bench.AdapterRunner` — adapter and dispatcher-to-adapter E2E scenarios with mocked channel boundaries.
+- `mix fermix.bench` with `--scenarios=…`, `--samples=N`, `--warmup=N`, `--output=path`, `--compare=path`, and `--list`.
+- `mix fermix.bench.diff OLD.json NEW.json`.
+- `mix fermix.bench.soak` with `--duration-ms=N`, `--samples=N`, and `--output=path`.
 
 Verify:
 
 - Recorder attaches and detaches cleanly per scenario.
-- Stats produce stable percentiles on repeated runs against a no-op scenario.
+- Stats produce stable percentiles against deterministic samples.
 - Mix task accepts the listed flags.
 
 ### Stage 3 — Shared-tier scenarios (1 day)
 
-Implement scenarios in §5.1. Drive `FermixChannels.Dispatcher.dispatch/2` with synthetic `bench` channel + stubbed `reply_fn`. Validate that per-stage durations sum correctly to `agent_loop_total` within 1ms tolerance.
+Implemented scenarios in §5.1. The runner drives `FermixChannels.Dispatcher.dispatch/2` with synthetic messages on the existing local `cli` channel and a stubbed `reply_fn`.
 
 Verify:
 
 - Each scenario completes within sane wallclock.
-- Per-stage sums match aggregates.
-- First baseline `bench/baseline.json` checked in.
+- Per-stage counts are emitted for the expected shared events.
+- Contention scenarios report dispatched, processed, and superseded message counts explicitly.
+- Multi-conversation scenarios report `wall_time_us` and `throughput_messages_per_second`.
+- First baseline `bench/baseline.json` is captured and checked in from the pinned baseline machine, not from an ad-hoc developer laptop run.
 
 ### Stage 4 — Adapter scenarios (1-2 days)
 
-Implement §5.2 per channel. Each adapter benchmark exercises `parse_*`, `send_message`, `send_media` directly with `Req.Test` stubs. No daemon boot needed.
+Implemented §5.2 per channel. Each adapter benchmark exercises `parse_*`, `send_message`, and `send_media` directly with `Req.Test` stubs or the in-process Signal bench client. No daemon boot is needed. The default `mix fermix.bench` run still stays on the shared tier; adapter scenarios run when named explicitly with `--scenarios=...`.
 
 Verify:
 
@@ -354,7 +383,9 @@ Verify:
 
 ### Stage 5 — E2E smoke (half day)
 
-Implement §5.3. Same harness but full pipeline per channel.
+Implemented dispatcher-to-adapter E2E smoke scenarios for the configured channel adapters (`*_e2e_text`). These parse a representative inbound payload, dispatch through `Dispatcher` and `MainAgent`, and deliver the reply through the adapter's outbound send path with mocked HTTP/subprocess boundaries.
+
+`webhook_ingress_idempotency` measures the idempotency GenServer used by the webhook controller path. A full Phoenix controller benchmark belongs in `fermix_web` rather than `fermix_channels`; keep that as a web-owned extension if controller overhead itself becomes a suspected bottleneck.
 
 Verify:
 
@@ -365,9 +396,9 @@ Verify:
 
 CI gates are tempting but premature without variance data. Phase the rollout:
 
-**Phase 6a — advisory-only.** GitHub Actions job runs `mix fermix.bench --compare=bench/baseline.json` on every PR touching `apps/fermix_core/` or `apps/fermix_channels/`. Posts a comment with the delta table. **Does not fail the check on regression.** Runs on a pinned runner (consistent hardware/OS) to keep variance attributable to code, not infrastructure.
+**Phase 6a — advisory-only.** Implemented as `.github/workflows/bench.yml`. GitHub Actions runs `mix fermix.bench` on every PR touching `apps/fermix_core/` or `apps/fermix_channels/`; if `bench/baseline.json` exists, the workflow embeds `mix fermix.bench.diff bench/baseline.json bench/current.json` output in the PR comment. The check is advisory (`continue-on-error`) and uploads `bench/current.json` as an artifact. The current `ubuntu-24.04` GitHub-hosted runner is useful for directional PR feedback only; move to a pinned self-hosted runner before treating numbers as authoritative.
 
-**Phase 6b — nightly baseline refresh.** A nightly cron job runs `mix fermix.bench` against `origin/dev` HEAD on the same pinned runner. Collects ~7 days of nightly data to establish noise floor per stage.
+**Phase 6b — nightly baseline refresh.** The workflow has a scheduled run. Use the same pinned runner for ~7 days of nightly data before deriving thresholds.
 
 **Phase 6c — promote to blocking.** Once nightly variance is known per stage, derive per-stage regression thresholds (e.g., "p95 stage X has σ ≈ 8%, fail at >3σ ≈ 25%"). Promote the PR check to blocking with those thresholds. Operator refreshes the baseline via `git commit bench/baseline.json` after a deliberate change.
 
@@ -381,9 +412,9 @@ Verify:
 
 ### Stage 7 — Soak (optional, 1 day)
 
-Implement `shared_soak_10min`. Manual `mix fermix.bench.soak` pre-release. Reports BEAM/ETS growth slopes.
+Implemented `shared_soak_10min` as `mix fermix.bench.soak`. Manual pre-release command; reports batch count, processed messages, throughput, and BEAM memory growth slope.
 
-**Total: 5-7 days for Stages 1-6.**
+Historical estimate: 5-7 days for Stages 1-6. The remaining work is operational baseline capture and blocking-gate rollout.
 
 ---
 
@@ -411,7 +442,7 @@ Implement `shared_soak_10min`. Manual `mix fermix.bench.soak` pre-release. Repor
 
 ## 10. What the First Baseline Will Tell You
 
-Once Stages 1-3 land and you run `mix fermix.bench` once (Shared + Adapter tiers):
+Once Stages 1-3 land and you run `mix fermix.bench` once (Shared tier):
 
 - Whether `compose_with_metadata` is actually 2 ms or 20 ms → recalibrates `docs/MAIN_AGENT_RUNTIME_CONTEXT_CACHE.md`'s cost/benefit math.
 - Whether `CapabilityRegistry.list_for/2` is noise or measurable at 30 caps → tells you if the cache's capability-selection win matters.
@@ -419,7 +450,7 @@ Once Stages 1-3 land and you run `mix fermix.bench` once (Shared + Adapter tiers
 - Whether outbound text rendering (Telegram markdown→HTML+split) dominates the outbound path → tells you if streaming would help more.
 - Whether `Compactor.compact` durations justify the per-message auto-compact check on the hot path.
 
-Once Stage 5 (E2E smoke) lands and `webhook_ingress_idempotency` runs:
+With Stages 4-5 (Adapter + E2E smoke) implemented and `webhook_ingress_idempotency` available:
 
 - Whether `Idempotency.check_and_record/3` is a chokepoint at sustained webhook QPS → tells you if the F-06 GenServer-serialization choice has a measurable cost on Slack/WhatsApp paths. Polling-channel scenarios won't surface this (see §3.1.1).
 
@@ -429,4 +460,4 @@ That data should drive every perf decision for the next year, including whether 
 
 ## 11. Bottom Line
 
-5-7 days of work, broken into stages that each ship independently. After Stage 3 you have data. After Stage 6 you have a regression gate. Defer Stage 7 until measured wins from Stages 1-6 justify it.
+The harness code now covers Stages 1-7 except the intentionally manual pinned-machine baseline and the deferred promotion from advisory to blocking CI. Use the first week of advisory runs to establish variance before changing thresholds or enabling blocking behavior.

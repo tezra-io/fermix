@@ -15,6 +15,7 @@ defmodule FermixChannels.Dispatcher do
   alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Telemetry
 
   @spec dispatch([Message.t() | map()], keyword()) :: :ok | {:error, term()}
   def dispatch(messages, opts) when is_list(messages) do
@@ -46,8 +47,10 @@ defmodule FermixChannels.Dispatcher do
     end)
   end
 
-  defp build_reply_fn(_channel, _message, reply_fn) when is_function(reply_fn, 1) do
-    fn part -> observe_reply(reply_fn.(part), :override, nil) end
+  defp build_reply_fn(_channel, %Message{} = message, reply_fn) when is_function(reply_fn, 1) do
+    fn part ->
+      observe_reply(fn -> reply_fn.(part) end, :override, nil, message)
+    end
   end
 
   defp build_reply_fn(channel, %Message{} = message, _reply_fn),
@@ -59,10 +62,10 @@ defmodule FermixChannels.Dispatcher do
 
     fn
       {:text, text} when is_binary(text) ->
-        observe_reply(text_reply.(text), :text, nil)
+        observe_reply(fn -> text_reply.(text) end, :text, nil, message)
 
       {:media, %{kind: kind} = media_part} ->
-        observe_reply(media_reply.(media_part), :media, kind)
+        observe_reply(fn -> media_reply.(media_part) end, :media, kind, message)
 
       other ->
         {:error, {:invalid_reply_part, other}}
@@ -77,11 +80,23 @@ defmodule FermixChannels.Dispatcher do
     channel.build_media_reply(message)
   end
 
-  @spec observe_reply(term(), :override | :text | :media, Outbound.media_kind() | nil) ::
+  @spec observe_reply(
+          (() -> term()),
+          :override | :text | :media,
+          Outbound.media_kind() | nil,
+          Message.t()
+        ) ::
           :ok | {:error, term()}
-  defp observe_reply(:ok, _reply_type, _media_kind), do: :ok
+  defp observe_reply(fun, reply_type, media_kind, message) when is_function(fun, 0) do
+    {result, duration_us} = Telemetry.timed_us(fun)
 
-  defp observe_reply({:error, reason} = error, reply_type, media_kind) do
+    emit_channel_reply_telemetry(message, result, reply_type, media_kind, duration_us)
+    observe_reply_result(result, reply_type, media_kind)
+  end
+
+  defp observe_reply_result(:ok, _reply_type, _media_kind), do: :ok
+
+  defp observe_reply_result({:error, reason} = error, reply_type, media_kind) do
     Logger.error("Channel reply delivery failed: #{inspect(reason)}")
 
     if reply_type == :media do
@@ -95,7 +110,7 @@ defmodule FermixChannels.Dispatcher do
     error
   end
 
-  defp observe_reply(_other, _reply_type, _media_kind), do: :ok
+  defp observe_reply_result(_other, _reply_type, _media_kind), do: :ok
 
   defp build_typing_fn(channel, %Message{reply_target: reply_target}) do
     if function_exported?(channel, :start_typing, 1) do
@@ -115,7 +130,10 @@ defmodule FermixChannels.Dispatcher do
          conversation_store,
          command_context_opts
        ) do
-    with {:ok, reply_message} <- normalize_message(message),
+    {normalize_result, normalize_duration_us} = Telemetry.timed_us(fn -> normalize_message(message) end)
+    emit_normalize_telemetry(message, normalize_result, normalize_duration_us)
+
+    with {:ok, reply_message} <- normalize_result,
          {:ok, authorization} <- authorize(reply_message),
          {:ok, reply_message} <-
            FermixCore.Transcription.maybe_transcribe_message(
@@ -172,13 +190,29 @@ defmodule FermixChannels.Dispatcher do
   end
 
   defp authorize(%Message{} = message) do
-    message
-    |> Map.from_struct()
-    |> Source.from_message()
-    |> Authorizer.resolve()
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        message
+        |> Map.from_struct()
+        |> Source.from_message()
+        |> Authorizer.resolve()
+      end)
+
+    emit_authorize_telemetry(message, result, duration_us)
+    result
   end
 
   defp deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        do_deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn)
+      end)
+
+    emit_agent_delivery_telemetry(message, result, duration_us)
+    result
+  end
+
+  defp do_deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn) do
     if agent_alive?(agent_server) do
       agent_message =
         message
@@ -331,4 +365,67 @@ defmodule FermixChannels.Dispatcher do
 
   defp normalize_attachments(value) when is_list(value), do: value
   defp normalize_attachments(_value), do: []
+
+  defp emit_normalize_telemetry(message, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :dispatcher, :normalize],
+      %{duration_us: duration_us},
+      %{
+        channel: message_channel(message),
+        status: result_status(result)
+      }
+    )
+  end
+
+  defp emit_authorize_telemetry(message, result, duration_us) do
+    metadata =
+      %{channel: message.channel, status: result_status(result)}
+      |> maybe_put_metadata(:trust, authorization_trust(result))
+
+    :telemetry.execute(
+      [:fermix, :ingress, :authorize],
+      %{duration_us: duration_us},
+      metadata
+    )
+  end
+
+  defp emit_agent_delivery_telemetry(message, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :dispatcher, :agent_delivery],
+      %{duration_us: duration_us},
+      %{channel: message.channel, status: result_status(result)}
+    )
+  end
+
+  defp emit_channel_reply_telemetry(message, result, reply_type, media_kind, duration_us) do
+    metadata =
+      %{
+        channel: message.channel,
+        reply_type: reply_type,
+        status: result_status(result)
+      }
+      |> maybe_put_metadata(:media_kind, media_kind)
+
+    :telemetry.execute(
+      [:fermix, :channel, :reply],
+      %{duration_us: duration_us},
+      metadata
+    )
+  end
+
+  defp message_channel(%Message{channel: channel}), do: channel
+  defp message_channel(message) when is_map(message), do: message_value(message, :channel)
+
+  defp authorization_trust({:ok, authorization}), do: authorization.trust
+  defp authorization_trust(_result), do: nil
+
+  defp result_status(:ok), do: :ok
+  defp result_status({:ok, _value}), do: :ok
+  defp result_status({:error, :unauthorized}), do: :unauthorized
+  defp result_status({:error, :unknown_channel}), do: :unknown_channel
+  defp result_status({:error, _reason}), do: :error
+  defp result_status(_other), do: :ok
+
+  defp maybe_put_metadata(metadata, _key, nil), do: metadata
+  defp maybe_put_metadata(metadata, key, value), do: Map.put(metadata, key, value)
 end

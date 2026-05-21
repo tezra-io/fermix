@@ -10,6 +10,7 @@ defmodule FermixChannels.Commands.Compact do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Telemetry
 
   @impl true
   def name, do: "compact"
@@ -43,7 +44,9 @@ defmodule FermixChannels.Commands.Compact do
         context: compaction_context(conversation_key, context)
       ]
 
-    case Compactor.compact(history, opts) do
+    {compaction_result, duration_us} = Telemetry.timed_us(fn -> Compactor.compact(history, opts) end)
+
+    case compaction_result do
       {:ok, %{messages: compacted, compacted?: true}} ->
         after_tokens = Compactor.estimate_tokens(compacted)
 
@@ -54,7 +57,7 @@ defmodule FermixChannels.Commands.Compact do
                expected_version: history_version
              ) do
           :ok ->
-            emit_forced_compaction(conversation_key, before_tokens, after_tokens)
+            emit_forced_compaction(conversation_key, before_tokens, after_tokens, duration_us)
 
             reply_fn.(
               {:text,
@@ -78,10 +81,10 @@ defmodule FermixChannels.Commands.Compact do
     end
   end
 
-  defp emit_forced_compaction(conversation_key, before_tokens, after_tokens) do
+  defp emit_forced_compaction(conversation_key, before_tokens, after_tokens, duration_us) do
     :telemetry.execute(
       [:fermix, :compaction, :forced],
-      %{before_tokens: before_tokens, after_tokens: after_tokens},
+      %{before_tokens: before_tokens, after_tokens: after_tokens, duration_us: duration_us},
       %{conversation_key: conversation_key}
     )
   end

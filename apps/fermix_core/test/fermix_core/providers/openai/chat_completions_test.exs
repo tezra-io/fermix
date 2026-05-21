@@ -105,6 +105,20 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
   describe "chat/3 — request shape and response handling" do
     test "posts the standard chat completions body and parses the response" do
+      test_pid = self()
+      handler_id = "test-chat-completions-tool-schema-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :tool_schema],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
       response_format = %{
         type: "json_schema",
         json_schema: %{
@@ -145,6 +159,14 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert turn.provider_state.messages == messages
       assert turn.provider_state.assistant.role == "assistant"
       assert turn.provider_state.capabilities == [capability()]
+
+      assert_receive {:telemetry, [:fermix, :provider, :tool_schema], measurements,
+                      %{adapter: :chat_completions} = metadata}
+      assert measurements.duration_us >= 0
+      assert measurements.tools_count == 1
+      refute Map.has_key?(measurements, :tools_bytes)
+      assert measurements.capabilities_count == 1
+      assert metadata.adapter == :chat_completions
     end
 
     test "raises when api_key is missing" do
