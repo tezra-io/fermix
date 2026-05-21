@@ -13,9 +13,11 @@ defmodule FermixChannels.Slack do
 
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
+  alias FermixChannels.RetryHint
   alias FermixCore.Net.HttpClient
 
   @api_base "https://slack.com/api"
+  @max_message_length 40_000
   @max_signature_age_seconds 300
   @max_media_bytes 100 * 1_024 * 1_024
 
@@ -50,7 +52,8 @@ defmodule FermixChannels.Slack do
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(channel_id, text, opts \\ []) when is_binary(channel_id) and is_binary(text) do
-    with {:ok, token} <- bot_token() do
+    with :ok <- enforce_text_cap(text),
+         {:ok, token} <- bot_token() do
       body =
         %{channel: channel_id, text: text}
         |> maybe_put_thread_ts(opts)
@@ -315,7 +318,17 @@ defmodule FermixChannels.Slack do
   defp enforce_media_cap(size) when size <= @max_media_bytes, do: :ok
 
   defp enforce_media_cap(size) do
-    {:error, "Slack attachment #{size} bytes exceeds #{@max_media_bytes}-byte cap"}
+    {:error, {:byte_cap_exceeded, size, @max_media_bytes}}
+  end
+
+  defp enforce_text_cap(text) do
+    length = String.length(text)
+
+    if length <= @max_message_length do
+      :ok
+    else
+      {:error, {:text_cap_exceeded, length, @max_message_length}}
+    end
   end
 
   defp maybe_release_claim(:ok, _claim), do: :ok
@@ -379,14 +392,21 @@ defmodule FermixChannels.Slack do
     {:error, Map.get(body, "error", "slack_api_error")}
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body}}) do
+  defp handle_send_response({:ok, %{status: status, body: body} = response}) do
     Logger.error("Slack send failed: #{status} - #{inspect(body)}")
-    {:error, "Slack API error: #{status}"}
+    slack_api_error(response)
   end
 
   defp handle_send_response({:error, reason}) do
     Logger.error("Slack request failed: #{inspect(reason)}")
     {:error, reason}
+  end
+
+  defp slack_api_error(%{status: status} = response) do
+    case RetryHint.retry_after_ms(response) do
+      {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
+      :error -> {:error, "Slack API error: #{status}"}
+    end
   end
 
   defp raw_body(conn) do

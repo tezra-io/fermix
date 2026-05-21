@@ -67,7 +67,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       tools: tools,
       capabilities: capabilities,
       agent: Keyword.get(opts, :agent),
-      reasoning_effort: reasoning_effort
+      reasoning_effort: reasoning_effort,
+      request_metrics: ResponsesShared.request_metrics(input, instructions, tools, capabilities)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -103,7 +104,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       tools: tools,
       capabilities: caps,
       agent: Keyword.get(opts, :agent),
-      reasoning_effort: reasoning_effort
+      reasoning_effort: reasoning_effort,
+      request_metrics: ResponsesShared.request_metrics(next_input, nil, tools, caps)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -231,6 +233,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
       |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end

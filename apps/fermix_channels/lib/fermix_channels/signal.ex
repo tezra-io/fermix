@@ -182,7 +182,7 @@ defmodule FermixChannels.Signal do
         :ok
 
       {:ok, %{size: size}} ->
-        {:error, "Signal attachment #{size} bytes exceeds #{@max_media_bytes}-byte cap"}
+        {:error, {:byte_cap_exceeded, size, @max_media_bytes}}
 
       {:error, reason} ->
         {:error, reason}

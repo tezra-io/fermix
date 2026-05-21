@@ -415,6 +415,28 @@ defmodule FermixChannels.WhatsAppTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
     end
+
+    test "rejects media over the WhatsApp outbound cap before upload" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("whatsapp-send-media-cap")
+
+      try do
+        path = Path.join(tmp_dir, "oversize.jpg")
+        write_sparse_file!(path, 5 * 1_024 * 1_024 + 1)
+
+        assert {:error, {:byte_cap_exceeded, actual, allowed}} =
+                 WhatsApp.send_media("15551234567", %{
+                   kind: :image,
+                   path: path,
+                   filename: "oversize.jpg",
+                   mime_type: "image/jpeg"
+                 })
+
+        assert actual == 5 * 1_024 * 1_024 + 1
+        assert allowed == 5 * 1_024 * 1_024
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
   end
 
   describe "download_attachment/2" do
@@ -472,6 +494,23 @@ defmodule FermixChannels.WhatsAppTest do
 
       assert {:error, :not_configured} = WhatsApp.send_message("15551234567", "hello")
     end
+
+    test "rejects text over the WhatsApp Cloud API body cap before send" do
+      assert {:error, {:text_cap_exceeded, 4_097, 4_096}} =
+               WhatsApp.send_message("15551234567", String.duplicate("a", 4_097))
+    end
+
+    test "returns structured rate limit errors when Meta provides Retry-After" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "4")
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(429, Jason.encode!(%{"error" => %{"message" => "rate limited"}}))
+      end)
+
+      assert {:error, {:rate_limited, 4_000}} =
+               WhatsApp.send_message("15551234567", "hello")
+    end
   end
 
   describe "verify_challenge/1" do
@@ -522,5 +561,16 @@ defmodule FermixChannels.WhatsAppTest do
         %{"id" => "waba-id", "changes" => [%{"field" => "messages", "value" => value}]}
       ]
     }
+  end
+
+  defp write_sparse_file!(path, size) when is_binary(path) and is_integer(size) and size > 0 do
+    {:ok, file} = File.open(path, [:write, :binary])
+
+    try do
+      {:ok, _position} = :file.position(file, size - 1)
+      :ok = IO.binwrite(file, <<0>>)
+    after
+      File.close(file)
+    end
   end
 end

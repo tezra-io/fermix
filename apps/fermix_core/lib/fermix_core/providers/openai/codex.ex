@@ -75,7 +75,9 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       capabilities: capabilities,
       instructions: resolved_instructions,
       agent: Keyword.get(opts, :agent),
-      reasoning_effort: reasoning_effort
+      reasoning_effort: reasoning_effort,
+      request_metrics:
+        ResponsesShared.request_metrics(input, resolved_instructions, tools, capabilities)
     }
 
     post(url, body, auth, req_options, turn_state)
@@ -123,7 +125,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       capabilities: caps,
       instructions: instructions,
       agent: Keyword.get(opts, :agent),
-      reasoning_effort: reasoning_effort
+      reasoning_effort: reasoning_effort,
+      request_metrics: ResponsesShared.request_metrics(next_input, instructions, tools, caps)
     }
 
     post(url, body, auth, req_options, turn_state)
@@ -528,6 +531,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
       |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end

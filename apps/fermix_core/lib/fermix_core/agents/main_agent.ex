@@ -538,7 +538,13 @@ defmodule FermixCore.Agents.MainAgent do
     conversation_key = conversation_key(msg)
     prompt_context = load_prompt_context!(state.memory_agent_id, state.available_skills)
 
-    history = ConversationStore.get_history(conversation_key, server: state.conversation_store)
+    {history, history_duration_us} =
+      timed_us(fn ->
+        ConversationStore.get_history(conversation_key, server: state.conversation_store)
+      end)
+
+    emit_history_telemetry(msg, conversation_key, history, history_duration_us)
+
     user_message = %{role: "user", content: msg.content}
     messages = prompt_context.messages ++ history ++ [user_message]
 
@@ -913,7 +919,10 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   defp deliver_reply(msg, response) do
-    case msg.reply_fn.({:text, response}) do
+    {result, duration_us} = timed_us(fn -> msg.reply_fn.({:text, response}) end)
+    emit_reply_telemetry(msg, response, result, duration_us)
+
+    case result do
       :ok ->
         :ok
 
@@ -935,14 +944,85 @@ defmodule FermixCore.Agents.MainAgent do
 
   defp load_prompt_context!(agent_id, available_skills)
        when is_binary(agent_id) and is_list(available_skills) do
-    case PromptComposer.compose_with_metadata(
-           agent_id: agent_id,
-           available_skills: available_skills
-         ) do
-      {:ok, prompt_context} -> prompt_context
+    {result, duration_us} =
+      timed_us(fn ->
+        PromptComposer.compose_with_metadata(
+          agent_id: agent_id,
+          available_skills: available_skills
+        )
+      end)
+
+    case result do
+      {:ok, prompt_context} ->
+        emit_prompt_context_telemetry(agent_id, prompt_context, duration_us)
+        prompt_context
+
       {:error, reason} -> raise "prompt composition failed: #{inspect(reason)}"
     end
   end
+
+  defp timed_us(fun) when is_function(fun, 0) do
+    start = System.monotonic_time(:microsecond)
+    result = fun.()
+    {result, System.monotonic_time(:microsecond) - start}
+  end
+
+  defp emit_prompt_context_telemetry(agent_id, prompt_context, duration_us) do
+    :telemetry.execute(
+      [:fermix, :agent, :prompt_context],
+      %{
+        duration_us: duration_us,
+        message_count: length(prompt_context.messages),
+        message_bytes: messages_bytes(prompt_context.messages),
+        part_count: length(prompt_context.parts)
+      },
+      %{agent: agent_id}
+    )
+  end
+
+  defp emit_history_telemetry(msg, conversation_key, history, duration_us) do
+    :telemetry.execute(
+      [:fermix, :agent, :history],
+      %{
+        duration_us: duration_us,
+        message_count: length(history),
+        message_bytes: messages_bytes(history)
+      },
+      %{
+        agent: "main",
+        channel: msg.channel,
+        chat_id: msg.chat_id,
+        conversation_key: inspect(conversation_key)
+      }
+    )
+  end
+
+  defp emit_reply_telemetry(msg, response, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :agent, :reply],
+      %{duration_us: duration_us, response_bytes: byte_size(response || "")},
+      %{
+        agent: "main",
+        channel: msg.channel,
+        chat_id: msg.chat_id,
+        status: reply_status(result)
+      }
+      |> maybe_put_reply_reason(result)
+    )
+  end
+
+  defp messages_bytes(messages) do
+    Enum.reduce(messages, 0, fn message, total ->
+      total + byte_size(to_string(Map.get(message, :content) || Map.get(message, "content") || ""))
+    end)
+  end
+
+  defp reply_status(:ok), do: :ok
+  defp reply_status({:error, _reason}), do: :error
+  defp reply_status(_other), do: :ok
+
+  defp maybe_put_reply_reason(metadata, {:error, reason}), do: Map.put(metadata, :reason, reason)
+  defp maybe_put_reply_reason(metadata, _result), do: metadata
 
   defp maybe_start_extraction(_msg, _history, _assistant_response, %{extraction_enabled: false}),
     do: :ok

@@ -83,6 +83,50 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "chat/3 — request shape" do
+    test "emits provider telemetry with request shape" do
+      test_pid = self()
+      handler_id = "test-codex-request-shape-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      assert {:ok, _turn} =
+               Codex.chat(
+                 [
+                   %{role: "system", content: "be terse"},
+                   %{role: "user", content: "Hi"}
+                 ],
+                 [capability()],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
+      assert measurements.duration_ms >= 0
+      assert metadata.input_items == 1
+      assert metadata.input_bytes > 0
+      assert metadata.instructions_bytes == byte_size("be terse")
+      assert metadata.tools_count == 1
+      assert metadata.tools_bytes > 0
+      assert metadata.capabilities_count == 1
+    end
+
     test "posts SSE-streaming body to Codex URL with bearer token + tools" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)

@@ -274,6 +274,27 @@ defmodule FermixChannels.SlackTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
     end
+
+    test "rejects media over the Slack cap before upload" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("slack-send-media-cap")
+
+      try do
+        path = Path.join(tmp_dir, "oversize.bin")
+        write_sparse_file!(path, 100 * 1_024 * 1_024 + 1)
+
+        assert {:error, {:byte_cap_exceeded, actual, allowed}} =
+                 Slack.send_media("C12345", %{
+                   kind: :document,
+                   path: path,
+                   filename: "oversize.bin"
+                 })
+
+        assert actual == 100 * 1_024 * 1_024 + 1
+        assert allowed == 100 * 1_024 * 1_024
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
   end
 
   describe "verify_webhook/1" do
@@ -295,6 +316,22 @@ defmodule FermixChannels.SlackTest do
       Application.put_env(:fermix_channels, :slack, enabled: true)
 
       assert {:error, :not_configured} = Slack.send_message("D12345", "hello")
+    end
+
+    test "rejects text over Slack's hard truncation bound before send" do
+      assert {:error, {:text_cap_exceeded, 40_001, 40_000}} =
+               Slack.send_message("D12345", String.duplicate("a", 40_001))
+    end
+
+    test "returns structured rate limit errors when Slack provides Retry-After" do
+      Req.Test.stub(:slack, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("retry-after", "2")
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(429, Jason.encode!(%{"ok" => false, "error" => "ratelimited"}))
+      end)
+
+      assert {:error, {:rate_limited, 2_000}} = Slack.send_message("D12345", "hello")
     end
   end
 
@@ -337,5 +374,16 @@ defmodule FermixChannels.SlackTest do
       :crypto.mac(:hmac, :sha256, "slack-signing-secret", "v0:#{timestamp}:#{body}")
 
     "v0=" <> Base.encode16(digest, case: :lower)
+  end
+
+  defp write_sparse_file!(path, size) when is_binary(path) and is_integer(size) and size > 0 do
+    {:ok, file} = File.open(path, [:write, :binary])
+
+    try do
+      {:ok, _position} = :file.position(file, size - 1)
+      :ok = IO.binwrite(file, <<0>>)
+    after
+      File.close(file)
+    end
   end
 end

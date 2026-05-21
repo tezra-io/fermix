@@ -129,6 +129,48 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
   end
 
   describe "chat/3 — request shape and response handling" do
+    test "emits provider telemetry with request shape" do
+      test_pid = self()
+      handler_id = "test-responses-request-shape-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               Responses.chat(
+                 [
+                   %{role: "system", content: "You are helpful"},
+                   %{role: "user", content: "Hi"}
+                 ],
+                 [capability()],
+                 api_key: "sk-test",
+                 model: "gpt-5.4-mini",
+                 base_url: "https://api.openai.com/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
+      assert measurements.duration_ms >= 0
+      assert metadata.input_items == 1
+      assert metadata.input_bytes > 0
+      assert metadata.instructions_bytes == byte_size("You are helpful")
+      assert metadata.tools_count == 1
+      assert metadata.tools_bytes > 0
+      assert metadata.capabilities_count == 1
+    end
+
     test "posts item-list input with separate instructions and parses the response" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)

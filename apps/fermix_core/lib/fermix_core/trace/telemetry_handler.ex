@@ -15,7 +15,31 @@ defmodule FermixCore.Trace.TelemetryHandler do
   @core_events [
     %{event: [:fermix, :provider, :call], trace_type: :llm_call, agent_field: :agent},
     %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent},
-    %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent}
+    %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
+    %{
+      event: [:fermix, :agent, :prompt_context],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "prompt_context"
+    },
+    %{
+      event: [:fermix, :agent, :history],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "history_load"
+    },
+    %{
+      event: [:fermix, :agent, :reply],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "reply_delivery"
+    },
+    %{
+      event: [:fermix, :capabilities, :select],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "capability_select"
+    }
   ]
 
   @mcp_inbound_events [

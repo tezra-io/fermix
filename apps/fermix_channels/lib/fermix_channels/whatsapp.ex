@@ -13,10 +13,14 @@ defmodule FermixChannels.WhatsApp do
 
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
+  alias FermixChannels.RetryHint
   alias FermixCore.Net.HttpClient
 
   @graph_api_base "https://graph.facebook.com"
   @default_graph_version "v19.0"
+  # Free-form Cloud API text messages. Templates and interactive message
+  # fields have separate platform limits and should stay adapter-local.
+  @max_text_length 4_096
   # Audit F-06: cap media downloads so a hostile or buggy upstream can't
   # exhaust memory/disk. 25 MB is the practical ceiling for WhatsApp's
   # own media types; anything larger is rejected before the body lands
@@ -82,7 +86,8 @@ defmodule FermixChannels.WhatsApp do
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(to, text, opts \\ []) when is_binary(to) and is_binary(text) do
-    with {:ok, config} <- send_config(opts) do
+    with :ok <- enforce_text_cap(text),
+         {:ok, config} <- send_config(opts) do
       url = "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages"
 
       body = %{
@@ -388,8 +393,18 @@ defmodule FermixChannels.WhatsApp do
 
   defp enforce_outbound_cap(size, cap, _kind) when size <= cap, do: :ok
 
-  defp enforce_outbound_cap(size, cap, kind) do
-    {:error, "#{kind} attachment #{size} bytes exceeds WhatsApp #{cap}-byte cap"}
+  defp enforce_outbound_cap(size, cap, _kind) do
+    {:error, {:byte_cap_exceeded, size, cap}}
+  end
+
+  defp enforce_text_cap(text) do
+    length = String.length(text)
+
+    if length <= @max_text_length do
+      :ok
+    else
+      {:error, {:text_cap_exceeded, length, @max_text_length}}
+    end
   end
 
   defp validate_voice_mime(:voice, "audio/ogg; codecs=opus"), do: :ok
@@ -571,14 +586,21 @@ defmodule FermixChannels.WhatsApp do
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body}}) do
+  defp handle_send_response({:ok, %{status: status, body: body} = response}) do
     Logger.error("WhatsApp send failed: #{status} - #{inspect(body)}")
-    {:error, "WhatsApp API error: #{status}"}
+    whatsapp_api_error(response)
   end
 
   defp handle_send_response({:error, reason}) do
     Logger.error("WhatsApp request failed: #{inspect(reason)}")
     {:error, reason}
+  end
+
+  defp whatsapp_api_error(%{status: status} = response) do
+    case RetryHint.retry_after_ms(response) do
+      {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
+      :error -> {:error, "WhatsApp API error: #{status}"}
+    end
   end
 
   defp raw_body(conn) do

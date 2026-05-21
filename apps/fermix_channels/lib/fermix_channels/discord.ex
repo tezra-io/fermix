@@ -14,9 +14,11 @@ defmodule FermixChannels.Discord do
 
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
+  alias FermixChannels.RetryHint
   alias FermixCore.Net.HttpClient
 
   @api_base "https://discord.com/api/v10"
+  @max_message_length 2_000
   @max_media_bytes 10 * 1_024 * 1_024
 
   @impl true
@@ -51,7 +53,8 @@ defmodule FermixChannels.Discord do
   @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(channel_id, text, opts \\ []) when is_binary(channel_id) and is_binary(text) do
-    with {:ok, token} <- bot_token() do
+    with :ok <- enforce_text_cap(text),
+         {:ok, token} <- bot_token() do
       url = "#{@api_base}/channels/#{channel_id}/messages"
 
       body =
@@ -269,7 +272,17 @@ defmodule FermixChannels.Discord do
   defp enforce_media_cap(size) when size <= @max_media_bytes, do: :ok
 
   defp enforce_media_cap(size) do
-    {:error, "Discord attachment #{size} bytes exceeds #{@max_media_bytes}-byte cap"}
+    {:error, {:byte_cap_exceeded, size, @max_media_bytes}}
+  end
+
+  defp enforce_text_cap(text) do
+    length = String.length(text)
+
+    if length <= @max_message_length do
+      :ok
+    else
+      {:error, {:text_cap_exceeded, length, @max_message_length}}
+    end
   end
 
   defp maybe_put_content(body, nil), do: body
@@ -372,14 +385,21 @@ defmodule FermixChannels.Discord do
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body}}) do
+  defp handle_send_response({:ok, %{status: status, body: body} = response}) do
     Logger.error("Discord send failed: #{status} - #{inspect(body)}")
-    {:error, "Discord API error: #{status}"}
+    discord_api_error(response)
   end
 
   defp handle_send_response({:error, reason}) do
     Logger.error("Discord request failed: #{inspect(reason)}")
     {:error, reason}
+  end
+
+  defp discord_api_error(%{status: status} = response) do
+    case RetryHint.retry_after_ms(response) do
+      {:ok, retry_after_ms} -> {:error, {:rate_limited, retry_after_ms}}
+      :error -> {:error, "Discord API error: #{status}"}
+    end
   end
 
   defp present?(value) when is_binary(value), do: value != ""

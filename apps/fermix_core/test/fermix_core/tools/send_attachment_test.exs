@@ -152,5 +152,51 @@ defmodule FermixCore.Tools.SendAttachmentTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
     end
+
+    test "humanizes structured channel delivery errors" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("send-attachment-delivery-errors")
+
+      try do
+        path = Path.join(tmp_dir, "report.txt")
+        File.write!(path, "hello")
+
+        context = %{
+          cwd: tmp_dir,
+          sandbox_config: %{mode: :strict, workspace_root: tmp_dir, allowed_roots: [tmp_dir]},
+          reply_fn: fn {:media, _part} ->
+            {:error, {:byte_cap_exceeded, 11_534_337, 10_485_760}}
+          end
+        }
+
+        assert {:ok, %{success: false, error: error}} =
+                 SendAttachment.execute(%{"path" => path, "kind" => "document"}, context)
+
+        assert error == "Failed to send attachment: attachment is 11.0 MiB; limit is 10.0 MiB"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
+
+    test "humanizes rate-limit delivery errors" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("send-attachment-rate-limit")
+
+      try do
+        path = Path.join(tmp_dir, "report.txt")
+        File.write!(path, "hello")
+
+        context = %{
+          cwd: tmp_dir,
+          sandbox_config: %{mode: :strict, workspace_root: tmp_dir, allowed_roots: [tmp_dir]},
+          reply_fn: fn {:media, _part} -> {:error, {:rate_limited, 3_000}} end
+        }
+
+        assert {:ok, %{success: false, error: error}} =
+                 SendAttachment.execute(%{"path" => path, "kind" => "document"}, context)
+
+        assert error == "Failed to send attachment: channel is rate limited; retry after 3s"
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
   end
 end
