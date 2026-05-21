@@ -3,6 +3,8 @@ defmodule FermixCore.Tools.Support do
 
   alias FermixCore.Capabilities.Builtin.Tool
 
+  @reserved_metadata_keys [:tool, :agent, :success, :error]
+
   @type fun_return ::
           {:ok, Tool.tool_result()}
           | {:ok, Tool.tool_result(), map()}
@@ -18,12 +20,14 @@ defmodule FermixCore.Tools.Support do
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
+    # Drop reserved keys from `extra` so a tool cannot inject :tool, :agent,
+    # :success, or :error into telemetry metadata.
     :telemetry.execute(
       [:fermix, :tool, :exec],
       %{duration_ms: duration},
-      tool_name
-      |> telemetry_metadata(agent, result, success, context)
-      |> Map.merge(extra)
+      extra
+      |> Map.drop(@reserved_metadata_keys)
+      |> Map.merge(telemetry_metadata(tool_name, agent, result, success, context))
     )
 
     result
