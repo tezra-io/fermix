@@ -1,15 +1,10 @@
 name: latency-bench
 
+# Disabled from auto-running until the harness is hardened against
+# multi-conv supersede tails and a pinned-hardware baseline lands.
+# Run manually via the Actions tab ("workflow_dispatch") when needed.
 on:
-  pull_request:
-    paths:
-      - "apps/fermix_core/**"
-      - "apps/fermix_channels/**"
-      - "docs/LATENCY_BASELINE_HARNESS.md"
-      - "bench/baseline.json"
   workflow_dispatch:
-  schedule:
-    - cron: "17 8 * * *"
 
 permissions:
   contents: read

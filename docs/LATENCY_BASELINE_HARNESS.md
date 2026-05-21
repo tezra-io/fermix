@@ -1,6 +1,6 @@
 # Latency Baseline & Load Harness
 
-**Status:** Shared, adapter, E2E, advisory CI, and soak harness code implemented; pinned-machine baseline and blocking CI thresholds pending
+**Status:** Shared, adapter, E2E, and soak harness code implemented; advisory CI workflow present but auto-triggers disabled (manual `workflow_dispatch` only) until the harness is hardened (multi-conv supersede-tail handling) and a pinned-hardware baseline lands
 **Date:** 2026-05-20
 **Author:** Sujeeth / Aira
 **Context:** Performance work without a baseline is folklore. This plan establishes a reproducible, low-noise latency baseline for every hot-path stage in Fermix so future perf decisions (RuntimeContext cache, streaming, provider session reuse) anchor on real numbers, not estimates. Pairs with `docs/MAIN_AGENT_RUNTIME_CONTEXT_CACHE.md` — the data this harness produces should drive the runtime-context cache's cost/benefit decision.
@@ -218,7 +218,7 @@ Each is a separate JSON entry; each runs N samples with warmup.
 | `shared_text_max_iter` | 1 turn forced to hit `max_iterations = 25` (tool loop pattern) | 200 |
 | `shared_cold_start` | First N messages immediately after `MainAgent` restart, no warmup | 50 |
 | `shared_single_flight_contention` | 100 messages to **same** conversation key, arrival rate > processing rate; measures supersede latency + active/pending ratios | 500 |
-| `shared_multi_conv_throughput` | 100 distinct conversation keys, 10 messages each, fan-out | 1000 messages total |
+| `shared_multi_conv_throughput` | 100 distinct conversation keys, dispatched in waves with at most one in-flight message per key; each wave waits for replies and agent idle before the next wave, so throughput is measured without single-flight supersession | 1000 messages total |
 
 ### 5.2 Adapter-specific (drive the adapter function directly, no daemon)
 
