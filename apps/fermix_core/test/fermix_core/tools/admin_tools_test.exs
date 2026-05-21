@@ -40,16 +40,25 @@ defmodule FermixCore.Tools.AdminToolsTest do
     %{home: home}
   end
 
-  test "delegate performs a single model call without nested capabilities" do
+  test "delegate uses routing.delegate_model from config; main agent does not pass model" do
+    Application.put_env(:fermix_core, :routing, delegate_model: "gpt-routed")
+    on_exit(fn -> Application.delete_env(:fermix_core, :routing) end)
+
     context = Map.merge(@context, %{delegate_adapter: DelegateAdapter})
 
-    assert {:ok, result} =
-             Delegate.execute(%{"model" => "gpt-test", "prompt" => "Summarize this."}, context)
+    assert {:ok, result} = Delegate.execute(%{"prompt" => "Summarize this."}, context)
 
     assert result.success == true
     assert result.output == "delegated answer"
     assert_received {:delegate_seen, [%{role: "user", content: "Summarize this."}], [], opts}
-    assert Keyword.fetch!(opts, :model) == "gpt-test"
+    assert Keyword.fetch!(opts, :model) == "gpt-routed"
+  end
+
+  test "delegate parameters schema exposes only prompt" do
+    schema = Delegate.parameters()
+
+    assert schema.required == ["prompt"]
+    assert Map.keys(schema.properties) == [:prompt]
   end
 
   test "skill_create scaffolds SKILL.md and eval cases under FERMIX_HOME", %{home: home} do
