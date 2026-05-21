@@ -1,0 +1,106 @@
+name: latency-bench
+
+on:
+  pull_request:
+    paths:
+      - "apps/fermix_core/**"
+      - "apps/fermix_channels/**"
+      - "docs/LATENCY_BASELINE_HARNESS.md"
+      - "bench/baseline.json"
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * *"
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  benchmark:
+    name: Advisory latency benchmark
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      MIX_ENV: test
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      - name: Run advisory benchmark
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mix fermix.bench --samples=200 --warmup=10 --output=bench/current.json
+
+      - name: Build benchmark comment
+        if: always()
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          mkdir -p bench
+
+          {
+            echo '<!-- fermix-latency-bench -->'
+            echo 'Fermix advisory latency benchmark finished.'
+            echo ''
+            echo 'The JSON report is available as the `fermix-bench-current` workflow artifact.'
+
+            if [ -f bench/baseline.json ] && [ -f bench/current.json ]; then
+              echo ''
+              echo 'Benchmark diff:'
+              echo '```text'
+              set +e
+              mix fermix.bench.diff bench/baseline.json bench/current.json
+              diff_status=$?
+              set -e
+              echo '```'
+
+              if [ "$diff_status" -ne 0 ]; then
+                echo ''
+                echo "Advisory diff exited with status ${diff_status}; this workflow is not blocking yet."
+              fi
+            else
+              echo ''
+              echo 'No baseline diff was produced because `bench/baseline.json` or `bench/current.json` was missing.'
+            fi
+          } > bench/comment.md
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fermix-bench-current
+          path: bench/current.json
+          if-no-files-found: ignore
+
+      - name: Comment benchmark location
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const body = fs.existsSync('bench/comment.md')
+              ? fs.readFileSync('bench/comment.md', 'utf8')
+              : [
+                  '<!-- fermix-latency-bench -->',
+                  'Fermix advisory latency benchmark did not produce a comment body.',
+                  '',
+                  'Check the workflow logs and the `fermix-bench-current` artifact.'
+                ].join('\n')
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body
+            })

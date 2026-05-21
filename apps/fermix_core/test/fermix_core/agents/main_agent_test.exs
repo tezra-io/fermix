@@ -1649,6 +1649,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       events = [
         [:fermix, :agent, :prompt_context],
         [:fermix, :agent, :history],
+        [:fermix, :agent, :loop_runtime],
         [:fermix, :agent, :reply]
       ]
 
@@ -1687,6 +1688,15 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert history_measurements.message_count == 0
       assert history_metadata.channel == "telegram"
 
+      assert_receive {:telemetry, [:fermix, :agent, :loop_runtime], loop_measurements,
+                      loop_metadata},
+                     5_000
+
+      assert loop_measurements.duration_us >= 0
+      assert loop_metadata.agent == "main"
+      assert loop_metadata.channel == "telegram"
+      assert loop_metadata.trust == :operator
+
       assert_receive {:telemetry, [:fermix, :agent, :reply], reply_measurements, reply_metadata},
                      5_000
 
@@ -1694,6 +1704,33 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert reply_measurements.response_bytes == 2
       assert reply_metadata.status == :ok
       assert reply_metadata.channel == "telegram"
+    end
+
+    test "emits mailbox pickup telemetry on message cast", %{agent: agent} do
+      test_pid = self()
+      handler_id = "test-agent-mailbox-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :agent, :mailbox],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      MockProvider.set_responses([mock_response("OK")])
+
+      msg = make_message("Test")
+      MainAgent.handle_message(msg, agent)
+
+      assert_receive {:telemetry, [:fermix, :agent, :mailbox], measurements, metadata}, 5_000
+      assert measurements.duration_us >= 0
+      assert metadata.channel == "telegram"
+      assert metadata.status == :ok
+      assert_receive {:reply, "OK"}, 5_000
     end
 
     test "emits [:fermix, :agent, :message] on success", %{agent: agent} do

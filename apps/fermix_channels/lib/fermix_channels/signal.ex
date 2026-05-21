@@ -13,6 +13,8 @@ defmodule FermixChannels.Signal do
 
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Telemetry
 
   @default_cli_path "signal-cli"
   @max_media_bytes 100 * 1_024 * 1_024
@@ -24,6 +26,15 @@ defmodule FermixChannels.Signal do
   @spec parse_receive_entry(map(), keyword()) ::
           {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
   def parse_receive_entry(entry, opts \\ []) when is_map(entry) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> do_parse_receive_entry(entry, opts) end)
+
+    ChannelTelemetry.emit_parse(:signal, result, duration_us)
+    maybe_emit_inbound_message(result, duration_us)
+    result
+  end
+
+  defp do_parse_receive_entry(entry, opts) do
     messages =
       if ingress_enabled?() do
         entry
@@ -32,14 +43,6 @@ defmodule FermixChannels.Signal do
       else
         []
       end
-
-    if messages != [] do
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: length(messages)},
-        %{channel: :signal, direction: :inbound}
-      )
-    end
 
     {:ok, messages}
   end
@@ -58,8 +61,8 @@ defmodule FermixChannels.Signal do
           :ok | {:error, term()}
   def send_message(recipient, text, opts \\ []) when is_binary(recipient) and is_binary(text) do
     with {:ok, account} <- account(),
-         :ok <- send_client(opts).send_message(account, recipient, text, client_opts(opts)) do
-      emit_outbound_telemetry()
+         {:ok, :ok, duration_us} <- timed_signal_send(account, recipient, text, opts) do
+      emit_outbound_telemetry(duration_us)
     end
   end
 
@@ -163,14 +166,9 @@ defmodule FermixChannels.Signal do
   defp send_claimed_media({:fresh, claim}, recipient, media_part, opts) do
     result =
       with {:ok, account} <- account(),
-           :ok <- validate_media(media_part) do
-        send_client(opts).send_attachment(
-          account,
-          recipient,
-          media_caption(media_part),
-          media_part.path,
-          client_opts(opts)
-        )
+           :ok <- validate_media(media_part),
+           {:ok, :ok, duration_us} <- timed_signal_attachment_send(account, recipient, media_part, opts) do
+        emit_outbound_telemetry(duration_us)
       end
 
     maybe_release_claim(result, claim)
@@ -191,6 +189,36 @@ defmodule FermixChannels.Signal do
 
   defp validate_media(_media_part), do: {:error, :invalid_media_part}
 
+  defp timed_signal_send(account, recipient, text, opts) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        send_client(opts).send_message(account, recipient, text, client_opts(opts))
+      end)
+
+    case result do
+      :ok -> {:ok, :ok, duration_us}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp timed_signal_attachment_send(account, recipient, media_part, opts) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        send_client(opts).send_attachment(
+          account,
+          recipient,
+          media_caption(media_part),
+          media_part.path,
+          client_opts(opts)
+        )
+      end)
+
+    case result do
+      :ok -> {:ok, :ok, duration_us}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp media_caption(%{caption: caption}) when is_binary(caption), do: caption
   defp media_caption(_media_part), do: ""
 
@@ -206,10 +234,16 @@ defmodule FermixChannels.Signal do
   defp attachment_kind(_mime_type), do: :file
 
   defp authorized_sender?(sender_id) do
-    # Audit F-02: empty allowlist denies everyone. Operators must configure
-    # owner_user_id (auto-populates the allowlist) or set
-    # fermix_channels.signal.allowed_sender_ids explicitly.
-    sender_id in allowed_sender_ids()
+    {allowed?, duration_us} =
+      Telemetry.timed_us(fn ->
+        # Audit F-02: empty allowlist denies everyone. Operators must configure
+        # owner_user_id (auto-populates the allowlist) or set
+        # fermix_channels.signal.allowed_sender_ids explicitly.
+        sender_id in allowed_sender_ids()
+      end)
+
+    ChannelTelemetry.emit_authorize(:signal, allowed?, duration_us)
+    allowed?
   end
 
   defp allowed_sender_ids do
@@ -283,15 +317,16 @@ defmodule FermixChannels.Signal do
     end
   end
 
-  defp emit_outbound_telemetry do
-    :telemetry.execute(
-      [:fermix, :channel, :message],
-      %{count: 1},
-      %{channel: :signal, direction: :outbound}
-    )
-
+  defp emit_outbound_telemetry(duration_us) do
+    ChannelTelemetry.emit_message(:signal, :outbound, 1, duration_us)
     :ok
   end
+
+  defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:signal, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
   defp put_if_present(keyword, _key, nil), do: keyword
   defp put_if_present(keyword, key, value), do: Keyword.put(keyword, key, value)

@@ -11,9 +11,28 @@ defmodule FermixChannels.IdempotencyTest do
   end
 
   test "returns :fresh once and :duplicate thereafter for the same key", %{server: server} do
+    test_pid = self()
+    handler_id = "test-idempotency-check-#{System.unique_integer()}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :idempotency, :check],
+      fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     assert :fresh = Idempotency.check_and_record(:telegram, "evt-1", server: server)
     assert :duplicate = Idempotency.check_and_record(:telegram, "evt-1", server: server)
     assert :duplicate = Idempotency.check_and_record(:telegram, "evt-1", server: server)
+
+    assert_receive {:telemetry, [:fermix, :idempotency, :check], measurements, metadata}
+    assert measurements.duration_us >= 0
+    assert metadata.channel == :telegram
+    assert metadata.result == :fresh
   end
 
   test "keys are scoped by channel", %{server: server} do
@@ -109,6 +128,20 @@ defmodule FermixChannels.IdempotencyTest do
   test "outbound media claims include file contents and suppress later duplicates", %{
     server: server
   } do
+    test_pid = self()
+    handler_id = "test-idempotency-outbound-media-#{System.unique_integer()}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :idempotency, :outbound_media_claim],
+      fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     dir = FermixTestSupport.SafeRm.make_tmp_dir!("outbound-media-idempotency")
 
     try do
@@ -125,6 +158,13 @@ defmodule FermixChannels.IdempotencyTest do
                Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
                  server: server
                )
+
+      assert_receive {:telemetry, [:fermix, :idempotency, :outbound_media_claim],
+                      measurements, metadata}
+
+      assert measurements.duration_us >= 0
+      assert metadata.channel == :telegram
+      assert metadata.result == :fresh
 
       File.write!(path, "two")
 

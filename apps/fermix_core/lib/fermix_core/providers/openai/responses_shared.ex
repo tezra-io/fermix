@@ -18,6 +18,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Telemetry
 
   @type tool_result :: %{required(:call_id) => String.t(), required(:output) => term()}
 
@@ -72,18 +73,22 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   end
 
   @spec to_provider_tools([Capability.t()]) :: [map()]
-  def to_provider_tools([]), do: []
-
   def to_provider_tools(capabilities) when is_list(capabilities) do
-    Enum.map(capabilities, fn %Capability{} = cap ->
-      %{
-        type: "function",
-        name: cap.name,
-        description: cap.description,
-        parameters: cap.parameters,
-        strict: false
-      }
-    end)
+    {tools, duration_us} =
+      Telemetry.timed_us(fn ->
+        Enum.map(capabilities, fn %Capability{} = cap ->
+          %{
+            type: "function",
+            name: cap.name,
+            description: cap.description,
+            parameters: cap.parameters,
+            strict: false
+          }
+        end)
+      end)
+
+    emit_tool_schema_telemetry(tools, capabilities, duration_us)
+    tools
   end
 
   @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
@@ -129,6 +134,18 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   defp string_size(value) when is_binary(value), do: byte_size(value)
   defp string_size(_value), do: 0
+
+  defp emit_tool_schema_telemetry(tools, capabilities, duration_us) do
+    :telemetry.execute(
+      [:fermix, :provider, :tool_schema],
+      %{
+        duration_us: duration_us,
+        tools_count: length(tools),
+        capabilities_count: length(capabilities)
+      },
+      %{adapter: :responses_shared}
+    )
+  end
 
   @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()]) ::
           {:ok, map()}

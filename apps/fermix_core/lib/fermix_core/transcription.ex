@@ -11,6 +11,8 @@ defmodule FermixCore.Transcription do
 
   require Logger
 
+  alias FermixCore.Telemetry
+
   @type attachment :: map()
   @type message :: map()
   @type backend :: module()
@@ -42,6 +44,14 @@ defmodule FermixCore.Transcription do
   end
 
   defp transcribe_message(channel, message, attachment, opts) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> do_transcribe_message(channel, message, attachment, opts) end)
+
+    emit_transcription_telemetry(message, result, duration_us)
+    result
+  end
+
+  defp do_transcribe_message(channel, message, attachment, opts) do
     with {:ok, path} <- channel.download_attachment(message, attachment) do
       try do
         metadata = transcription_metadata(message, attachment)
@@ -165,4 +175,19 @@ defmodule FermixCore.Transcription do
       true -> key
     end
   end
+
+  defp emit_transcription_telemetry(message, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :transcription, :message],
+      %{duration_us: duration_us},
+      %{
+        channel: message_value(message, :channel),
+        status: transcription_status(result),
+        transcribed?: match?({:ok, _message}, result)
+      }
+    )
+  end
+
+  defp transcription_status({:ok, _message}), do: :ok
+  defp transcription_status({:error, _reason}), do: :error
 end

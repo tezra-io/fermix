@@ -100,6 +100,19 @@ defmodule FermixChannels.CommandsTest do
       )
 
       test_pid = self()
+      handler_id = "test-command-dispatch-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :command, :dispatch],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
       msg = message("/new", metadata: %{user_id: "intruder"})
 
       assert {:error, :unauthorized} =
@@ -113,6 +126,11 @@ defmodule FermixChannels.CommandsTest do
                )
 
       assert_receive {:compact_reply, "This command requires owner permissions."}
+      assert_receive {:telemetry, [:fermix, :command, :dispatch], measurements, metadata}
+      assert measurements.duration_us >= 0
+      assert metadata.command == "new"
+      assert metadata.channel == "telegram"
+      assert metadata.status == :unauthorized
     end
 
     test "filters help output to commands authorized for the caller" do
@@ -255,6 +273,18 @@ defmodule FermixChannels.CommandsTest do
     test "derives forced compaction budget from the resolved route context window" do
       Req.Test.set_req_test_to_shared()
       test_pid = self()
+      handler_id = "test-forced-compaction-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :compaction, :forced],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
 
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -282,6 +312,11 @@ defmodule FermixChannels.CommandsTest do
 
       assert_receive {:summary_body, body}, 5_000
       assert body =~ "Summary token budget: 50000"
+
+      assert_receive {:telemetry, [:fermix, :compaction, :forced], measurements, metadata}
+      assert measurements.duration_us >= 0
+      assert measurements.before_tokens > measurements.after_tokens
+      assert metadata.conversation_key == key
     end
 
     test "does not overwrite messages appended while summary is in flight" do

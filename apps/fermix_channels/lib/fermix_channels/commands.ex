@@ -6,6 +6,7 @@ defmodule FermixChannels.Commands do
   alias FermixChannels.Commands.Registry
   alias FermixChannels.Message
   alias FermixCore.Channels.Outbound
+  alias FermixCore.Telemetry
 
   @type result ::
           {:command, String.t(), [String.t()], Message.t()} | {:passthrough, Message.t()}
@@ -22,9 +23,17 @@ defmodule FermixChannels.Commands do
 
   @spec dispatch(result(), Outbound.reply_fn(), map()) ::
           :ok | :passthrough | {:error, term()}
-  def dispatch({:passthrough, _message}, _reply_fn, _context), do: :passthrough
+  def dispatch(command_result, reply_fn, context) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> do_dispatch(command_result, reply_fn, context) end)
 
-  def dispatch({:command, name, args, message}, reply_fn, context) do
+    emit_dispatch_telemetry(command_result, result, duration_us)
+    result
+  end
+
+  defp do_dispatch({:passthrough, _message}, _reply_fn, _context), do: :passthrough
+
+  defp do_dispatch({:command, name, args, message}, reply_fn, context) do
     case Registry.lookup(name) do
       {:ok, handler} -> run_command(name, handler, message, args, reply_fn, context)
       :error -> :passthrough
@@ -61,6 +70,29 @@ defmodule FermixChannels.Commands do
     metadata = Map.put(message.metadata || %{}, :command_name, name)
     Map.put(message, :metadata, metadata)
   end
+
+  defp emit_dispatch_telemetry(command_result, result, duration_us) do
+    :telemetry.execute(
+      [:fermix, :command, :dispatch],
+      %{duration_us: duration_us},
+      %{
+        command: parsed_command(command_result),
+        channel: parsed_channel(command_result),
+        status: dispatch_status(result)
+      }
+    )
+  end
+
+  defp parsed_command({:command, name, _args, _message}), do: name
+  defp parsed_command({:passthrough, _message}), do: nil
+
+  defp parsed_channel({:command, _name, _args, %Message{channel: channel}}), do: channel
+  defp parsed_channel({:passthrough, %Message{channel: channel}}), do: channel
+
+  defp dispatch_status(:ok), do: :ok
+  defp dispatch_status(:passthrough), do: :passthrough
+  defp dispatch_status({:error, :unauthorized}), do: :unauthorized
+  defp dispatch_status({:error, _reason}), do: :error
 
   defp parse_leading_command(content, bot_name) do
     content = content |> to_string() |> String.trim_leading()

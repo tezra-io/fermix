@@ -18,6 +18,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Telemetry
 
   @max_iterations 25
 
@@ -70,7 +71,7 @@ defmodule FermixCore.AgentLoop do
     context = Keyword.get(opts, :context, %{})
 
     {capabilities, capability_duration_us} =
-      timed_us(fn ->
+      Telemetry.timed_us(fn ->
         opts
         |> Keyword.get(:capabilities)
         |> default_capabilities(capability_registry,
@@ -105,12 +106,6 @@ defmodule FermixCore.AgentLoop do
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback)
     }
-  end
-
-  defp timed_us(fun) when is_function(fun, 0) do
-    start = System.monotonic_time(:microsecond)
-    result = fun.()
-    {result, System.monotonic_time(:microsecond) - start}
   end
 
   defp index_by_name(capabilities) do

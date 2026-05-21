@@ -133,9 +133,9 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       test_pid = self()
       handler_id = "test-responses-request-shape-#{System.unique_integer()}"
 
-      :telemetry.attach(
+      :telemetry.attach_many(
         handler_id,
-        [:fermix, :provider, :call],
+        [[:fermix, :provider, :call], [:fermix, :provider, :tool_schema]],
         fn event, measurements, metadata, _config ->
           send(test_pid, {:telemetry, event, measurements, metadata})
         end,
@@ -161,7 +161,8 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
                  req_options: [plug: {Req.Test, __MODULE__}]
                )
 
-      assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
+                      %{adapter: :responses} = metadata}
       assert measurements.duration_ms >= 0
       assert metadata.input_items == 1
       assert metadata.input_bytes > 0
@@ -169,6 +170,14 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       assert metadata.tools_count == 1
       assert metadata.tools_bytes > 0
       assert metadata.capabilities_count == 1
+
+      assert_receive {:telemetry, [:fermix, :provider, :tool_schema], tool_measurements,
+                      %{adapter: :responses_shared} = tool_metadata}
+
+      assert tool_measurements.duration_us >= 0
+      assert tool_measurements.tools_count == 1
+      refute Map.has_key?(tool_measurements, :tools_bytes)
+      assert tool_metadata.adapter == :responses_shared
     end
 
     test "posts item-list input with separate instructions and parses the response" do
