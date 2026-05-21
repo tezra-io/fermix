@@ -132,10 +132,11 @@ defmodule FermixCore.Tools.WebSearch do
          results <- result_rows(doc) do
       cond do
         results != [] ->
-          results |> Enum.take(@max_results) |> Support.success_json()
+          trimmed = Enum.take(results, @max_results)
+          Support.success_json(trimmed, %{result_count: length(trimmed)})
 
         empty_results?(doc) ->
-          Support.success_json([])
+          Support.success_json([], %{result_count: 0})
 
         true ->
           Support.error(

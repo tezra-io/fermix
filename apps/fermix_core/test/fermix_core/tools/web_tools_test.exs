@@ -188,17 +188,45 @@ defmodule FermixCore.Tools.WebToolsTest do
                     %{tool: "web_fetch", request_headers: fetch_headers}}
 
     assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements,
-                    %{tool: "web_search", request_headers: search_headers}}
+                    %{
+                      tool: "web_search",
+                      request_headers: search_headers,
+                      result_count: search_result_count
+                    }}
 
     assert %{name: "authorization", value: "***REDACTED***"} in fetch_headers
     assert %{name: "x-api-key", value: "***REDACTED***"} in fetch_headers
     assert %{name: "authorization", value: "***REDACTED***"} in search_headers
     assert %{name: "x-api-key", value: "***REDACTED***"} in search_headers
+    assert is_integer(search_result_count) and search_result_count > 0
     refute inspect(fetch_headers) =~ "secret"
     refute inspect(search_headers) =~ "secret"
 
     :telemetry.detach(fetch_handler)
     :telemetry.detach(search_handler)
+  end
+
+  test "web_search emits result_count: 0 when DuckDuckGo returns no results" do
+    test_id = :"web_search_empty_#{System.unique_integer([:positive])}"
+    handler = attach_tool_telemetry("web_search")
+
+    Req.Test.stub(test_id, fn conn ->
+      Plug.Conn.resp(conn, 200, "<div class=\"no-results\">No results</div>")
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    assert {:ok, %{success: true, output: "[]"}} =
+             WebSearch.execute(%{"query" => "unlikely"}, context)
+
+    assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements,
+                    %{tool: "web_search", result_count: 0}}
+
+    :telemetry.detach(handler)
   end
 
   defp assert_search_error(body, expected_tag) do
