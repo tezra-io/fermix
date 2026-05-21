@@ -1,5 +1,8 @@
 defmodule FermixCore.Tools.AdminToolsTest do
-  use ExUnit.Case, async: true
+  # async: false — setup mutates System env (FERMIX_HOME) and one test mutates
+  # Application env (:fermix_core, :routing). Running async would race other
+  # tests reading those globals.
+  use ExUnit.Case, async: false
 
   alias FermixCore.Tools.Delegate
   alias FermixCore.Tools.ModelRoutingConfig
@@ -41,8 +44,15 @@ defmodule FermixCore.Tools.AdminToolsTest do
   end
 
   test "delegate uses routing.delegate_model from config; main agent does not pass model" do
+    previous_routing = Application.get_env(:fermix_core, :routing)
     Application.put_env(:fermix_core, :routing, delegate_model: "gpt-routed")
-    on_exit(fn -> Application.delete_env(:fermix_core, :routing) end)
+
+    on_exit(fn ->
+      case previous_routing do
+        nil -> Application.delete_env(:fermix_core, :routing)
+        value -> Application.put_env(:fermix_core, :routing, value)
+      end
+    end)
 
     context = Map.merge(@context, %{delegate_adapter: DelegateAdapter})
 
