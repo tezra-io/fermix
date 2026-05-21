@@ -427,6 +427,21 @@ FERMIX_HOME=~/.fermix-dev swift run FermixPet
 
 `mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. Run `mix quality` before pushing; the pre-commit hook enforces the same gates.
 
+### Latency benchmarks
+
+The deterministic benchmark harness uses a mock provider and `Req.Test` channel stubs, so it does not call real LLMs or external channel networks. The default run covers the shared dispatcher → `MainAgent` → `AgentLoop` path; adapter, E2E, idempotency, and soak scenarios are available explicitly by name.
+
+```bash
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --list
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --output=bench/current.json
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --scenarios=shared_text_minimal --samples=1000 --warmup=20 --output=bench/current.json
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --scenarios=telegram_send_short_text,telegram_e2e_text --samples=200 --warmup=10 --output=bench/adapter.json
+FERMIX_HOME=~/.fermix-dev mix fermix.bench.soak --output=bench/soak.json
+mix fermix.bench.diff bench/baseline.json bench/current.json
+```
+
+Relative benchmark paths are resolved from the umbrella root, so the commands above write to the repo-level `bench/` directory even when invoked from a child directory. Use `--compare=bench/baseline.json` with `mix fermix.bench` when you want the run to print the p95 delta table after writing `bench/current.json`.
+
 ## Resource history CLI
 
 Versioned prompt and memory resources can be inspected from Mix:

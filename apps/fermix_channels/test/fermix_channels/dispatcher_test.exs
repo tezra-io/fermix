@@ -133,6 +133,25 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   test "routes normalized inbound messages into the configured agent with reply runtime" do
+    test_pid = self()
+    handler_id = "test-dispatcher-stage-#{System.unique_integer()}"
+
+    :telemetry.attach_many(
+      handler_id,
+      [
+        [:fermix, :dispatcher, :normalize],
+        [:fermix, :ingress, :authorize],
+        [:fermix, :dispatcher, :agent_delivery],
+        [:fermix, :channel, :reply]
+      ],
+      fn event, measurements, metadata, _config ->
+        send(test_pid, {:telemetry, event, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     message = %Message{
       id: "42",
       content: "hello",
@@ -165,6 +184,34 @@ defmodule FermixChannels.DispatcherTest do
     assert :ok = agent_message.reply_fn.({:text, "reply"})
     assert_received {:reply_sent, "123", "reply", reply_opts}
     assert reply_opts[:message_thread_id] == 77
+
+    assert_receive {:telemetry, [:fermix, :dispatcher, :normalize], normalize_measurements,
+                    normalize_metadata}
+
+    assert normalize_measurements.duration_us >= 0
+    assert normalize_metadata.channel == "telegram"
+    assert normalize_metadata.status == :ok
+
+    assert_receive {:telemetry, [:fermix, :ingress, :authorize], authorize_measurements,
+                    authorize_metadata}
+
+    assert authorize_measurements.duration_us >= 0
+    assert authorize_metadata.channel == "telegram"
+    assert authorize_metadata.status == :ok
+    assert authorize_metadata.trust == :operator
+
+    assert_receive {:telemetry, [:fermix, :dispatcher, :agent_delivery], delivery_measurements,
+                    delivery_metadata}
+
+    assert delivery_measurements.duration_us >= 0
+    assert delivery_metadata.channel == "telegram"
+    assert delivery_metadata.status == :ok
+
+    assert_receive {:telemetry, [:fermix, :channel, :reply], reply_measurements, reply_metadata}
+    assert reply_measurements.duration_us >= 0
+    assert reply_metadata.channel == "telegram"
+    assert reply_metadata.reply_type == :text
+    assert reply_metadata.status == :ok
 
     media_part = %{kind: :document, path: "/tmp/report.txt", filename: "report.txt"}
     assert :ok = agent_message.reply_fn.({:media, media_part})

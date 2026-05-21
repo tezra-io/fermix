@@ -14,7 +14,9 @@ defmodule FermixChannels.Slack do
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixChannels.RetryHint
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Telemetry
 
   @api_base "https://slack.com/api"
   @max_message_length 40_000
@@ -23,29 +25,22 @@ defmodule FermixChannels.Slack do
 
   @impl true
   @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
-  def parse_webhook(%{"type" => "event_callback", "event" => event} = payload)
-      when is_map(event) and is_map(payload) do
-    messages =
-      if ingress_enabled?() do
-        parse_event(event, payload)
-      else
-        []
-      end
+  def parse_webhook(payload) do
+    {result, duration_us} = Telemetry.timed_us(fn -> do_parse_webhook(payload) end)
+    ChannelTelemetry.emit_parse(:slack, result, duration_us)
+    maybe_emit_inbound_message(result, duration_us)
+    result
+  end
 
-    if messages != [] do
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: length(messages)},
-        %{channel: :slack, direction: :inbound}
-      )
-    end
-
+  defp do_parse_webhook(%{"type" => "event_callback", "event" => event} = payload)
+       when is_map(event) and is_map(payload) do
+    messages = if ingress_enabled?(), do: parse_event(event, payload), else: []
     {:ok, messages}
   end
 
-  def parse_webhook(%{"type" => "url_verification"}), do: {:ok, []}
-  def parse_webhook(%{"type" => "event_callback"}), do: {:error, :invalid_webhook_payload}
-  def parse_webhook(_payload), do: {:ok, []}
+  defp do_parse_webhook(%{"type" => "url_verification"}), do: {:ok, []}
+  defp do_parse_webhook(%{"type" => "event_callback"}), do: {:error, :invalid_webhook_payload}
+  defp do_parse_webhook(_payload), do: {:ok, []}
 
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
@@ -58,13 +53,15 @@ defmodule FermixChannels.Slack do
         %{channel: channel_id, text: text}
         |> maybe_put_thread_ts(opts)
 
-      result =
-        Req.new(url: "#{@api_base}/chat.postMessage", method: :post, json: body)
-        |> Req.Request.put_header("authorization", "Bearer #{token}")
-        |> Req.merge(req_options(opts))
-        |> HttpClient.request("Slack chat.postMessage")
+      {result, duration_us} =
+        Telemetry.timed_us(fn ->
+          Req.new(url: "#{@api_base}/chat.postMessage", method: :post, json: body)
+          |> Req.Request.put_header("authorization", "Bearer #{token}")
+          |> Req.merge(req_options(opts))
+          |> HttpClient.request("Slack chat.postMessage")
+        end)
 
-      handle_send_response(result)
+      handle_send_response(result, duration_us)
     end
   end
 
@@ -154,11 +151,17 @@ defmodule FermixChannels.Slack do
   end
 
   defp authorized_sender?(event) do
-    # Audit F-02: empty allowlist denies everyone. Operators must configure
-    # owner_user_id (auto-populates the allowlist) or set
-    # fermix_channels.slack.allowed_user_ids explicitly.
-    user_id = Map.get(event, "user")
-    user_id in allowed_user_ids()
+    {allowed?, duration_us} =
+      Telemetry.timed_us(fn ->
+        # Audit F-02: empty allowlist denies everyone. Operators must configure
+        # owner_user_id (auto-populates the allowlist) or set
+        # fermix_channels.slack.allowed_user_ids explicitly.
+        user_id = Map.get(event, "user")
+        user_id in allowed_user_ids()
+      end)
+
+    ChannelTelemetry.emit_authorize(:slack, allowed?, duration_us)
+    allowed?
   end
 
   defp build_message(event, payload) do
@@ -306,13 +309,15 @@ defmodule FermixChannels.Slack do
       |> maybe_put_initial_comment(Map.get(media_part, :caption))
       |> maybe_put_thread_ts(opts)
 
-    result =
-      Req.new(url: "#{@api_base}/files.completeUploadExternal", method: :post, json: body)
-      |> Req.Request.put_header("authorization", "Bearer #{token}")
-      |> Req.merge(req_options(opts))
-      |> HttpClient.request("Slack files.completeUploadExternal")
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        Req.new(url: "#{@api_base}/files.completeUploadExternal", method: :post, json: body)
+        |> Req.Request.put_header("authorization", "Bearer #{token}")
+        |> Req.merge(req_options(opts))
+        |> HttpClient.request("Slack files.completeUploadExternal")
+      end)
 
-    handle_send_response(result)
+    handle_send_response(result, duration_us)
   end
 
   defp enforce_media_cap(size) when size <= @max_media_bytes, do: :ok
@@ -377,30 +382,31 @@ defmodule FermixChannels.Slack do
     end
   end
 
-  defp handle_send_response({:ok, %{status: 200, body: %{"ok" => true}}}) do
-    :telemetry.execute(
-      [:fermix, :channel, :message],
-      %{count: 1},
-      %{channel: :slack, direction: :outbound}
-    )
-
+  defp handle_send_response({:ok, %{status: 200, body: %{"ok" => true}}}, duration_us) do
+    ChannelTelemetry.emit_message(:slack, :outbound, 1, duration_us)
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: 200, body: %{"ok" => false} = body}}) do
+  defp handle_send_response({:ok, %{status: 200, body: %{"ok" => false} = body}}, _duration_us) do
     Logger.error("Slack send failed: #{inspect(body)}")
     {:error, Map.get(body, "error", "slack_api_error")}
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body} = response}) do
+  defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
     Logger.error("Slack send failed: #{status} - #{inspect(body)}")
     slack_api_error(response)
   end
 
-  defp handle_send_response({:error, reason}) do
+  defp handle_send_response({:error, reason}, _duration_us) do
     Logger.error("Slack request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:slack, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
   defp slack_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do

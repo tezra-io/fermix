@@ -15,7 +15,9 @@ defmodule FermixChannels.Discord do
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixChannels.RetryHint
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Telemetry
 
   @api_base "https://discord.com/api/v10"
   @max_message_length 2_000
@@ -25,28 +27,20 @@ defmodule FermixChannels.Discord do
   def parse_webhook(_params), do: {:error, :unsupported_transport}
 
   @spec parse_gateway_event(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
-  def parse_gateway_event(%{"t" => "MESSAGE_CREATE", "d" => data}) when is_map(data) do
-    messages =
-      if process_message?(data) do
-        [build_message(data)]
-      else
-        []
-      end
+  def parse_gateway_event(event) do
+    {result, duration_us} = Telemetry.timed_us(fn -> do_parse_gateway_event(event) end)
+    ChannelTelemetry.emit_parse(:discord, result, duration_us)
+    maybe_emit_inbound_message(result, duration_us)
+    result
+  end
 
-    if messages != [] do
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: length(messages)},
-        %{channel: :discord, direction: :inbound}
-      )
-    end
-
+  defp do_parse_gateway_event(%{"t" => "MESSAGE_CREATE", "d" => data}) when is_map(data) do
+    messages = if process_message?(data), do: [build_message(data)], else: []
     {:ok, messages}
   end
 
-  def parse_gateway_event(%{"t" => "MESSAGE_CREATE"}), do: {:error, :invalid_gateway_payload}
-
-  def parse_gateway_event(_event), do: {:ok, []}
+  defp do_parse_gateway_event(%{"t" => "MESSAGE_CREATE"}), do: {:error, :invalid_gateway_payload}
+  defp do_parse_gateway_event(_event), do: {:ok, []}
 
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
@@ -61,13 +55,15 @@ defmodule FermixChannels.Discord do
         %{content: text, allowed_mentions: %{parse: []}}
         |> maybe_put_message_reference(channel_id, opts)
 
-      result =
-        Req.new(url: url, method: :post, json: body)
-        |> Req.Request.put_header("authorization", "Bot #{token}")
-        |> Req.merge(req_options(opts))
-        |> HttpClient.request("Discord sendMessage")
+      {result, duration_us} =
+        Telemetry.timed_us(fn ->
+          Req.new(url: url, method: :post, json: body)
+          |> Req.Request.put_header("authorization", "Bot #{token}")
+          |> Req.merge(req_options(opts))
+          |> HttpClient.request("Discord sendMessage")
+        end)
 
-      handle_send_response(result)
+      handle_send_response(result, duration_us)
     end
   end
 
@@ -166,11 +162,17 @@ defmodule FermixChannels.Discord do
   defp bot_author?(data), do: data |> Map.get("author", %{}) |> Map.get("bot", false) == true
 
   defp authorized_sender?(data) do
-    # Audit F-02: empty allowlist denies everyone. Operators must configure
-    # owner_user_id (auto-populates the allowlist) or set
-    # fermix_channels.discord.allowed_user_ids explicitly.
-    author_id = data |> Map.get("author", %{}) |> Map.get("id")
-    author_id in allowed_user_ids()
+    {allowed?, duration_us} =
+      Telemetry.timed_us(fn ->
+        # Audit F-02: empty allowlist now denies everyone. Operators must configure
+        # owner_user_id (auto-populates the allowlist) or set
+        # fermix_channels.discord.allowed_user_ids explicitly.
+        author_id = data |> Map.get("author", %{}) |> Map.get("id")
+        author_id in allowed_user_ids()
+      end)
+
+    ChannelTelemetry.emit_authorize(:discord, allowed?, duration_us)
+    allowed?
   end
 
   defp allowed_user_ids do
@@ -264,9 +266,10 @@ defmodule FermixChannels.Discord do
   defp media_request(_channel_id, _token, _media_part, _opts), do: {:error, :invalid_media_part}
 
   defp post_media(request) do
-    request
-    |> HttpClient.request("Discord sendMedia")
-    |> handle_send_response()
+    {result, duration_us} =
+      Telemetry.timed_us(fn -> HttpClient.request(request, "Discord sendMedia") end)
+
+    handle_send_response(result, duration_us)
   end
 
   defp enforce_media_cap(size) when size <= @max_media_bytes, do: :ok
@@ -375,25 +378,26 @@ defmodule FermixChannels.Discord do
     end
   end
 
-  defp handle_send_response({:ok, %{status: status}}) when status in [200, 201] do
-    :telemetry.execute(
-      [:fermix, :channel, :message],
-      %{count: 1},
-      %{channel: :discord, direction: :outbound}
-    )
-
+  defp handle_send_response({:ok, %{status: status}}, duration_us) when status in [200, 201] do
+    ChannelTelemetry.emit_message(:discord, :outbound, 1, duration_us)
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body} = response}) do
+  defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
     Logger.error("Discord send failed: #{status} - #{inspect(body)}")
     discord_api_error(response)
   end
 
-  defp handle_send_response({:error, reason}) do
+  defp handle_send_response({:error, reason}, _duration_us) do
     Logger.error("Discord request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:discord, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
   defp discord_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do

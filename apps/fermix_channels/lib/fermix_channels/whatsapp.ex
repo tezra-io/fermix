@@ -14,7 +14,9 @@ defmodule FermixChannels.WhatsApp do
   alias FermixChannels.Idempotency
   alias FermixChannels.Message
   alias FermixChannels.RetryHint
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Telemetry
 
   @graph_api_base "https://graph.facebook.com"
   @default_graph_version "v19.0"
@@ -47,6 +49,13 @@ defmodule FermixChannels.WhatsApp do
   @impl true
   @spec parse_webhook(map()) :: {:ok, [FermixChannels.Channel.message()]} | {:error, term()}
   def parse_webhook(params) do
+    {result, duration_us} = Telemetry.timed_us(fn -> do_parse_webhook(params) end)
+    ChannelTelemetry.emit_parse(:whatsapp, result, duration_us)
+    maybe_emit_inbound_message(result, duration_us)
+    result
+  end
+
+  defp do_parse_webhook(params) do
     messages =
       if ingress_enabled?() do
         params
@@ -55,14 +64,6 @@ defmodule FermixChannels.WhatsApp do
       else
         []
       end
-
-    if messages != [] do
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: length(messages)},
-        %{channel: :whatsapp, direction: :inbound}
-      )
-    end
 
     {:ok, messages}
   end
@@ -98,12 +99,14 @@ defmodule FermixChannels.WhatsApp do
         text: %{preview_url: false, body: text}
       }
 
-      result =
-        Req.new(url: url, method: :post, json: body, auth: {:bearer, config.access_token})
-        |> Req.merge(config.req_options)
-        |> HttpClient.request("WhatsApp send")
+      {result, duration_us} =
+        Telemetry.timed_us(fn ->
+          Req.new(url: url, method: :post, json: body, auth: {:bearer, config.access_token})
+          |> Req.merge(config.req_options)
+          |> HttpClient.request("WhatsApp send")
+        end)
 
-      handle_send_response(result)
+      handle_send_response(result, duration_us)
     end
   end
 
@@ -263,10 +266,16 @@ defmodule FermixChannels.WhatsApp do
   end
 
   defp authorized_sender?(sender_id) do
-    # Audit F-02: empty allowlist denies everyone. Operators must configure
-    # owner_user_id (auto-populates the allowlist) or set
-    # fermix_channels.whatsapp.allowed_sender_ids explicitly.
-    sender_id in allowed_sender_ids()
+    {allowed?, duration_us} =
+      Telemetry.timed_us(fn ->
+        # Audit F-02: empty allowlist denies everyone. Operators must configure
+        # owner_user_id (auto-populates the allowlist) or set
+        # fermix_channels.whatsapp.allowed_sender_ids explicitly.
+        sender_id in allowed_sender_ids()
+      end)
+
+    ChannelTelemetry.emit_authorize(:whatsapp, allowed?, duration_us)
+    allowed?
   end
 
   defp allowed_sender_ids do
@@ -363,17 +372,19 @@ defmodule FermixChannels.WhatsApp do
       }
       |> Map.put(wa_type, media_payload(wa_type, media_part, media_id))
 
-    result =
-      Req.new(
-        url: "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages",
-        method: :post,
-        json: body,
-        auth: {:bearer, config.access_token}
-      )
-      |> Req.merge(config.req_options)
-      |> HttpClient.request("WhatsApp send media")
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        Req.new(
+          url: "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages",
+          method: :post,
+          json: body,
+          auth: {:bearer, config.access_token}
+        )
+        |> Req.merge(config.req_options)
+        |> HttpClient.request("WhatsApp send media")
+      end)
 
-    handle_send_response(result)
+    handle_send_response(result, duration_us)
   end
 
   defp media_payload(wa_type, media_part, media_id) do
@@ -576,25 +587,26 @@ defmodule FermixChannels.WhatsApp do
     end
   end
 
-  defp handle_send_response({:ok, %{status: status}}) when status in [200, 201] do
-    :telemetry.execute(
-      [:fermix, :channel, :message],
-      %{count: 1},
-      %{channel: :whatsapp, direction: :outbound}
-    )
-
+  defp handle_send_response({:ok, %{status: status}}, duration_us) when status in [200, 201] do
+    ChannelTelemetry.emit_message(:whatsapp, :outbound, 1, duration_us)
     :ok
   end
 
-  defp handle_send_response({:ok, %{status: status, body: body} = response}) do
+  defp handle_send_response({:ok, %{status: status, body: body} = response}, _duration_us) do
     Logger.error("WhatsApp send failed: #{status} - #{inspect(body)}")
     whatsapp_api_error(response)
   end
 
-  defp handle_send_response({:error, reason}) do
+  defp handle_send_response({:error, reason}, _duration_us) do
     Logger.error("WhatsApp request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:whatsapp, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 
   defp whatsapp_api_error(%{status: status} = response) do
     case RetryHint.retry_after_ms(response) do
