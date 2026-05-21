@@ -194,6 +194,29 @@ defmodule FermixChannels.SignalTest do
         FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
       end
     end
+
+    test "rejects media over the Signal cap before send" do
+      tmp_dir = FermixTestSupport.SafeRm.make_tmp_dir!("signal-send-media-cap")
+
+      try do
+        path = Path.join(tmp_dir, "oversize.bin")
+        write_sparse_file!(path, 100 * 1_024 * 1_024 + 1)
+
+        assert {:error, {:byte_cap_exceeded, actual, allowed}} =
+                 Signal.send_media(
+                   "+15551234567",
+                   %{kind: :document, path: path, filename: "oversize.bin"},
+                   client: FakeSignalClient,
+                   client_opts: [test_pid: self()]
+                 )
+
+        assert actual == 100 * 1_024 * 1_024 + 1
+        assert allowed == 100 * 1_024 * 1_024
+        refute_received {:signal_attachment_send, _, _, _, _}
+      after
+        FermixTestSupport.SafeRm.rm_rf!(tmp_dir)
+      end
+    end
   end
 
   defp receive_event(text) do
@@ -208,5 +231,16 @@ defmodule FermixChannels.SignalTest do
         }
       }
     }
+  end
+
+  defp write_sparse_file!(path, size) when is_binary(path) and is_integer(size) and size > 0 do
+    {:ok, file} = File.open(path, [:write, :binary])
+
+    try do
+      {:ok, _position} = :file.position(file, size - 1)
+      :ok = IO.binwrite(file, <<0>>)
+    after
+      File.close(file)
+    end
   end
 end
