@@ -20,6 +20,8 @@ defmodule FermixCore.Auth.OAuthFlow do
   captures the auth code, and exchanges it for tokens.
   """
 
+  alias FermixCore.Auth.Browser
+
   require Logger
 
   @client_id "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -306,25 +308,7 @@ defmodule FermixCore.Auth.OAuthFlow do
     ]
   end
 
-  defp open_browser(url) do
-    {executable, args} =
-      case :os.type() do
-        {:unix, :darwin} -> {"open", [url]}
-        {:unix, _} -> {"xdg-open", [url]}
-        {:win32, _} -> {"cmd", ["/c", "start", "", url]}
-      end
-
-    case System.find_executable(executable) do
-      nil ->
-        {:error, :no_opener}
-
-      path ->
-        case System.cmd(path, args, stderr_to_stdout: true) do
-          {_output, 0} -> :ok
-          {output, code} -> {:error, {:opener_failed, code, output}}
-        end
-    end
-  end
+  defp open_browser(url), do: Browser.open(url)
 
   defp random_base64url(byte_len) do
     :crypto.strong_rand_bytes(byte_len) |> Base.url_encode64(padding: false)
