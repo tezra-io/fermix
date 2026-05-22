@@ -4,6 +4,7 @@ defmodule FermixCore.Setup.WizardTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Memory.Repo, as: MemoryRepo
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
@@ -1069,6 +1070,101 @@ defmodule FermixCore.Setup.WizardTest do
 
       assert_raise ArgumentError, ~r/reasoning_effort applies to :openai/, fn ->
         Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "high")
+      end
+    end
+  end
+
+  describe "set_sandbox_overrides/3" do
+    setup do
+      sandbox = Application.get_env(:fermix_core, :sandbox)
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-sandbox-overrides")
+
+      System.put_env("FERMIX_HOME", tmp_home)
+      Application.put_env(:fermix_core, :sandbox, SandboxConfig.default())
+      # Force readiness to :setup_required so commit_snapshot/1 skips
+      # prompt-file seeding — these tests do not exercise the memory repo.
+      Application.put_env(:fermix_core, :providers, [])
+      Application.delete_env(:fermix_channels, :telegram)
+
+      on_exit(fn ->
+        case sandbox do
+          nil -> Application.delete_env(:fermix_core, :sandbox)
+          value -> Application.put_env(:fermix_core, :sandbox, value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{tmp_home: tmp_home}
+    end
+
+    test "persists mode, command profile, and env allowlist", %{tmp_home: tmp_home} do
+      {:ok, report} =
+        Wizard.set_sandbox_overrides(:open, :extended, ["FOO_API_KEY", "BAR_API_KEY"])
+
+      assert is_map(report)
+
+      persisted = Application.get_env(:fermix_core, :sandbox)
+      assert persisted.mode == :open
+      assert persisted.commands.profile == :extended
+      assert "FOO_API_KEY" in persisted.env.allow
+      assert "BAR_API_KEY" in persisted.env.allow
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(mode = "open")
+      assert contents =~ ~s(profile = "extended")
+      assert contents =~ "FOO_API_KEY"
+      assert contents =~ "BAR_API_KEY"
+    end
+
+    test "nil arguments leave each existing field untouched" do
+      Application.put_env(:fermix_core, :sandbox,
+        mode: :standard,
+        commands: %{profile: :assistant, presets: [], explicit: %{}},
+        env: %{mode: :selected, allow: ["EXISTING_VAR"], deny: [], sources: %{}}
+      )
+
+      {:ok, _report} = Wizard.set_sandbox_overrides(nil, nil, nil)
+
+      persisted = Application.get_env(:fermix_core, :sandbox)
+      assert persisted.mode == :standard
+      assert persisted.commands.profile == :assistant
+      assert "EXISTING_VAR" in persisted.env.allow
+    end
+
+    test "mutates only the field whose argument is non-nil" do
+      Application.put_env(:fermix_core, :sandbox,
+        mode: :standard,
+        commands: %{profile: :assistant, presets: [], explicit: %{}},
+        env: %{mode: :selected, allow: ["EXISTING_VAR"], deny: [], sources: %{}}
+      )
+
+      {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
+
+      persisted = Application.get_env(:fermix_core, :sandbox)
+      assert persisted.mode == :strict
+      assert persisted.commands.profile == :assistant
+      assert "EXISTING_VAR" in persisted.env.allow
+    end
+
+    test "deduplicates the allow list" do
+      {:ok, _report} =
+        Wizard.set_sandbox_overrides(nil, nil, ["DUPE", "DUPE", "UNIQUE"])
+
+      persisted = Application.get_env(:fermix_core, :sandbox)
+      assert Enum.count(persisted.env.allow, &(&1 == "DUPE")) == 1
+      assert "UNIQUE" in persisted.env.allow
+    end
+
+    test "rejects invalid mode" do
+      assert_raise FunctionClauseError, fn ->
+        Wizard.set_sandbox_overrides(:invalid, nil, nil)
+      end
+    end
+
+    test "rejects invalid command profile" do
+      assert_raise FunctionClauseError, fn ->
+        Wizard.set_sandbox_overrides(nil, :invalid, nil)
       end
     end
   end

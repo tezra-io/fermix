@@ -505,11 +505,64 @@ defmodule FermixCore.Setup.Wizard do
       |> put_personalization(answers)
       |> ensure_sandbox_env_sources(answers)
 
+    commit_snapshot(snapshot)
+  end
+
+  @type sandbox_mode :: :strict | :standard | :open
+  @type sandbox_profile :: :bare | :assistant | :extended
+
+  @doc """
+  Mutates sandbox mode, command profile, and env allowlist without going
+  through the prompt-driven `save_answers/2` path. Each argument is
+  optional — pass `nil` to leave the existing value untouched.
+
+  Used by the LiveView Sandbox tab so a per-tab save persists only the
+  sandbox keys. Routes through the same save → apply → seed → report
+  cycle as `save_answers/2`.
+  """
+  @spec set_sandbox_overrides(
+          sandbox_mode() | nil,
+          sandbox_profile() | nil,
+          [String.t()] | nil
+        ) :: {:ok, report()} | {:error, term()}
+  def set_sandbox_overrides(mode, profile, allow)
+      when mode in [nil, :strict, :standard, :open] and
+             profile in [nil, :bare, :assistant, :extended] and
+             (is_nil(allow) or is_list(allow)) do
+    snapshot = ConfigStore.current_snapshot()
+
+    sandbox =
+      snapshot
+      |> Map.get(:sandbox)
+      |> SandboxConfig.normalize()
+      |> maybe_put_sandbox_mode(mode)
+      |> maybe_put_sandbox_profile(profile)
+      |> maybe_put_sandbox_allow(allow)
+
+    commit_snapshot(Map.put(snapshot, :sandbox, sandbox))
+  end
+
+  defp commit_snapshot(snapshot) do
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot),
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
+  end
+
+  defp maybe_put_sandbox_mode(sandbox, nil), do: sandbox
+  defp maybe_put_sandbox_mode(sandbox, mode), do: %{sandbox | mode: mode}
+
+  defp maybe_put_sandbox_profile(sandbox, nil), do: sandbox
+
+  defp maybe_put_sandbox_profile(sandbox, profile) do
+    %{sandbox | commands: Map.put(sandbox.commands, :profile, profile)}
+  end
+
+  defp maybe_put_sandbox_allow(sandbox, nil), do: sandbox
+
+  defp maybe_put_sandbox_allow(sandbox, allow) do
+    %{sandbox | env: Map.put(sandbox.env, :allow, Enum.uniq(allow))}
   end
 
   defp ensure_sandbox_env_sources(snapshot, answers) do
@@ -1034,10 +1087,16 @@ defmodule FermixCore.Setup.Wizard do
     values =
       [
         access_token:
-          secret_snapshot_value(:whatsapp_access_token, Keyword.get(answers, :whatsapp_access_token)),
+          secret_snapshot_value(
+            :whatsapp_access_token,
+            Keyword.get(answers, :whatsapp_access_token)
+          ),
         phone_number_id: Keyword.get(answers, :whatsapp_phone_number_id),
         verify_token:
-          secret_snapshot_value(:whatsapp_verify_token, Keyword.get(answers, :whatsapp_verify_token)),
+          secret_snapshot_value(
+            :whatsapp_verify_token,
+            Keyword.get(answers, :whatsapp_verify_token)
+          ),
         app_secret:
           secret_snapshot_value(:whatsapp_app_secret, Keyword.get(answers, :whatsapp_app_secret))
       ]
@@ -1061,9 +1120,13 @@ defmodule FermixCore.Setup.Wizard do
   defp put_slack_config(snapshot, answers) do
     values =
       [
-        bot_token: secret_snapshot_value(:slack_bot_token, Keyword.get(answers, :slack_bot_token)),
+        bot_token:
+          secret_snapshot_value(:slack_bot_token, Keyword.get(answers, :slack_bot_token)),
         signing_secret:
-          secret_snapshot_value(:slack_signing_secret, Keyword.get(answers, :slack_signing_secret))
+          secret_snapshot_value(
+            :slack_signing_secret,
+            Keyword.get(answers, :slack_signing_secret)
+          )
       ]
       |> reject_blank_values()
 
