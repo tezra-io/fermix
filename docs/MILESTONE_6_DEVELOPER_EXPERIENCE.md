@@ -197,8 +197,7 @@ fermix memory sources [--json]
 fermix memory search QUERY [--scope current|owner|all] [--source memories|history|all] [--json]
 fermix capabilities [--kind builtin|skill|mcp|all] [--json]
 fermix traces [--type TYPE] [--since DURATION] [--json]
-fermix reload skills
-fermix reload prompt
+fermix restart
 ```
 
 Keep existing `fermix status`, `fermix logs`, and `fermix doctor`; improve their output by sharing formatters and error hints with the new commands.
@@ -335,7 +334,7 @@ M6 runs before M10, so it must be conservative:
 - Do not allow arbitrary config TOML edits from the dashboard.
 - Do not expose raw environment variables.
 - Keep dangerous actions out of M6. No shell execution, file writes, prompt editing, memory deletion, or tool approval management from the dashboard.
-- Mutating M6 actions are limited to reload skills, reload prompt files, pause/resume/remove jobs, run job now, and seed missing prompt files.
+- Mutating M6 actions are limited to pause/resume/remove jobs, run job now, seed missing prompt files, and restart the daemon.
 - Every mutating action emits telemetry/trace and shows a confirmation when it can delete or run work.
 - If the endpoint is configured to bind remotely before M10 auth exists, disable mutating dashboard actions unless an explicit opt-in config flag is set.
 
@@ -419,14 +418,14 @@ Ship gate: a scheduled job can be inspected and paused/resumed from both CLI and
 
 Ship gate: an operator can answer "what happened, what did it call, what memory exists, and where did it come from" without opening SQLite or raw JSONL files, and Logs/Traces views surface new lines as they are written without a refresh.
 
-### Stage 5 - Local Browser Chat and Reload Controls
+### Stage 5 - Local Browser Chat and Restart Visibility
 
 - Add Chat LiveView routed through `MainAgent.handle_message/2`.
 - Add browser-only `reply_fn` that appends assistant responses to the LiveView conversation.
-- Add `fermix reload skills` and dashboard skill reload action.
-- Add prompt reload action if it can be implemented as a visible, single code path; otherwise keep prompt reload out and require restart.
+- Do not add skill or prompt reload actions. Runtime prompt/capability state refreshes at the `fermix restart` boundary.
+- Surface restart-required guidance in the dashboard when skill or prompt source changes are detected.
 
-Ship gate: local chat uses the same MainAgent path as real channels and reload controls are visible in trace/log output.
+Ship gate: local chat uses the same MainAgent path as real channels and restart guidance is visible in trace/log output.
 
 ### Stage 6 - Migration Helpers
 

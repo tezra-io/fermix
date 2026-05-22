@@ -161,8 +161,14 @@ defmodule FermixCore.Capabilities.Registry do
   end
 
   def handle_call({:unregister, name}, _from, state) do
-    :ets.delete(state.table, name)
-    {:reply, :ok, state}
+    case :ets.lookup(state.table, name) do
+      [] ->
+        {:reply, :ok, state}
+
+      [{^name, _existing}] ->
+        :ets.delete(state.table, name)
+        {:reply, :ok, state}
+    end
   end
 
   def handle_call({:unregister_kind, kind, opts}, _from, state) do
@@ -170,11 +176,7 @@ defmodule FermixCore.Capabilities.Registry do
 
     state.table
     |> :ets.tab2list()
-    |> Enum.each(fn {name, %Capability{} = cap} ->
-      if cap.kind == kind and metadata_matches?(cap.metadata, metadata_match) do
-        :ets.delete(state.table, name)
-      end
-    end)
+    |> Enum.each(fn entry -> maybe_unregister(entry, state, kind, metadata_match) end)
 
     {:reply, :ok, state}
   end
@@ -186,6 +188,14 @@ defmodule FermixCore.Capabilities.Registry do
   end
 
   def handle_call(:table_name, _from, state), do: {:reply, state.table, state}
+
+  defp maybe_unregister({_name, %Capability{} = cap}, state, kind, metadata_match) do
+    if cap.kind == kind and metadata_matches?(cap.metadata, metadata_match) do
+      :ets.delete(state.table, cap.name)
+    end
+  end
+
+  defp maybe_unregister(_entry, _state, _kind, _metadata_match), do: :ok
 
   # --- Helpers ---
 

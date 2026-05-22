@@ -428,6 +428,68 @@ defmodule FermixCore.Agents.MainAgentTest do
     )
   end
 
+  defp start_agent_with_skill(ctx, skill_name, body) do
+    suffix = System.unique_integer([:positive])
+    skill_registry_name = :"test_skill_registry_with_skill_#{suffix}"
+    capability_registry_name = :"test_capability_registry_with_skill_#{suffix}"
+    conv_name = :"test_conv_with_skill_#{suffix}"
+    agent_name = :"test_main_agent_with_skill_#{suffix}"
+    skills_dir = Path.join(System.tmp_dir!(), "fermix-skills-with-skill-#{suffix}")
+    journal_dir = Path.join(System.tmp_dir!(), "fermix-journals-with-skill-#{suffix}")
+
+    File.mkdir_p!(skills_dir)
+    write_skill(skills_dir, skill_name, body)
+
+    {:ok, _} =
+      start_supervised({CapabilityRegistry, [name: capability_registry_name]},
+        id: :"test_capability_registry_with_skill_#{suffix}"
+      )
+
+    {:ok, _} =
+      start_supervised(
+        {SkillRegistry,
+         [
+           name: skill_registry_name,
+           skills_dir: skills_dir,
+           seed_defaults: false,
+           capability_registry: capability_registry_name
+         ]},
+        id: :"test_skill_registry_with_skill_#{suffix}"
+      )
+
+    {:ok, _} =
+      start_supervised({ConversationStore, [name: conv_name]},
+        id: :"test_conv_with_skill_#{suffix}"
+      )
+
+    {:ok, _} =
+      start_supervised(
+        {MainAgent,
+         [
+           name: agent_name,
+           provider: MockProvider,
+           capability_registry: capability_registry_name,
+           agent_supervisor: ctx.agent_supervisor,
+           skill_registry: skill_registry_name,
+           conversation_store: conv_name,
+           task_supervisor: ctx.task_supervisor,
+           journal_base_dir: journal_dir
+         ]},
+        id: :"test_main_agent_with_skill_#{suffix}"
+      )
+
+    on_exit(fn ->
+      FermixTestSupport.SafeRm.rm_rf!(skills_dir)
+      FermixTestSupport.SafeRm.rm_rf!(journal_dir)
+    end)
+
+    %{
+      agent: agent_name,
+      capability_registry: capability_registry_name,
+      journal_dir: journal_dir
+    }
+  end
+
   setup do
     :ok = MockProvider.init()
 
@@ -1327,14 +1389,13 @@ defmodule FermixCore.Agents.MainAgentTest do
              )
     end
 
-    test "keeps the skill list static until reload_skills/1 is called", %{
+    test "keeps the skill list pinned for the MainAgent epoch", %{
       agent: agent,
       skills_dir: skills_dir
     } do
       MockProvider.set_responses([
         mock_response("first"),
-        mock_response("second"),
-        mock_response("third")
+        mock_response("second")
       ])
 
       MainAgent.handle_message(make_message("hello"), agent)
@@ -1351,27 +1412,11 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       [{messages_without_reload, _opts}] = MockProvider.get_calls()
       refute runtime_message(messages_without_reload).content =~ "coding-skill"
-
-      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
-      MockProvider.reset_calls()
-
-      MainAgent.handle_message(make_message("after reload"), agent)
-      assert_receive {:reply, "third"}, 5_000
-
-      [{messages_after_reload, _opts}] = MockProvider.get_calls()
-      runtime = runtime_message(messages_after_reload)
-      assert runtime.content =~ "coding-skill"
-      assert runtime.content =~ "capabilities=code"
-      assert runtime.content =~ "tools=file_read"
     end
 
-    test "delegates to a skill capability when the LLM picks one by name", %{
-      agent: agent,
-      skills_dir: skills_dir,
-      journal_dir: journal_dir
-    } do
-      write_skill(skills_dir, "coding-skill", "You solve code tasks.")
-      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
+    test "delegates to a skill capability when the LLM picks one by name", ctx do
+      %{agent: agent, journal_dir: journal_dir} =
+        start_agent_with_skill(ctx, "coding-skill", "You solve code tasks.")
 
       MockProvider.set_responses([
         mock_response("",
@@ -1414,13 +1459,10 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert skill_opts[:model] == "gpt-5.4-mini"
     end
 
-    test "operator trust gets skill and MCP capability surface", %{
-      agent: agent,
-      skills_dir: skills_dir,
-      capability_registry: capability_registry
-    } do
-      write_skill(skills_dir, "coding-skill", "You solve code tasks.")
-      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
+    test "operator trust gets skill and MCP capability surface", ctx do
+      %{agent: agent, capability_registry: capability_registry} =
+        start_agent_with_skill(ctx, "coding-skill", "You solve code tasks.")
+
       :ok = CapabilityRegistry.register(capability_registry, mcp_capability("mcp_demo_tool"))
 
       MockProvider.set_responses([mock_response("owner surface")])
@@ -1432,20 +1474,20 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, "owner surface"}, 5_000
 
-      [{_messages, opts}] = MockProvider.get_calls()
+      [{messages, opts}] = MockProvider.get_calls()
       names = Enum.map(opts[:capabilities], & &1.name)
+      runtime = runtime_message(messages)
 
       assert "coding-skill" in names
       assert "mcp_demo_tool" in names
+      assert runtime.content =~ "coding-skill"
+      assert runtime.content =~ "mcp_demo_tool"
     end
 
-    test "guest trust hides skill and MCP capabilities", %{
-      agent: agent,
-      skills_dir: skills_dir,
-      capability_registry: capability_registry
-    } do
-      write_skill(skills_dir, "coding-skill", "You solve code tasks.")
-      assert {:ok, ["coding-skill", "self_knowledge"]} = MainAgent.reload_skills(agent)
+    test "guest trust hides skill and MCP capabilities", ctx do
+      %{agent: agent, capability_registry: capability_registry} =
+        start_agent_with_skill(ctx, "coding-skill", "You solve code tasks.")
+
       :ok = CapabilityRegistry.register(capability_registry, mcp_capability("mcp_demo_tool"))
 
       MockProvider.set_responses([mock_response("helper surface")])
@@ -1457,11 +1499,14 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, "helper surface"}, 5_000
 
-      [{_messages, opts}] = MockProvider.get_calls()
+      [{messages, opts}] = MockProvider.get_calls()
       names = Enum.map(opts[:capabilities], & &1.name)
+      runtime = runtime_message(messages)
 
       refute "coding-skill" in names
       refute "mcp_demo_tool" in names
+      refute runtime.content =~ "coding-skill"
+      refute runtime.content =~ "mcp_demo_tool"
     end
 
     test "supersedes an in-flight request with the newest same-conversation message", %{
@@ -1785,6 +1830,182 @@ defmodule FermixCore.Agents.MainAgentTest do
       :telemetry.detach(handler_id)
     end
   end
+
+  # -- Runtime context cache --
+
+  describe "runtime context cache" do
+    setup %{agent: agent} do
+      test_pid = self()
+      handler_id = "test-runctx-#{System.unique_integer()}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:fermix, :runtime_context, :build],
+          [:fermix, :runtime_context, :cache]
+        ],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:runctx_telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      %{agent: agent}
+    end
+
+    test "first message builds and caches; second hits the cache",
+         %{agent: agent} = ctx do
+      MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
+
+      MainAgent.handle_message(make_message("hello", chat_id: "runctx_1"), agent)
+      assert_receive {:reply, "OK"}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build],
+                      %{duration_us: _, base_message_bytes: _}, build_metadata},
+                     5_000
+
+      assert build_metadata.status == :ok
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :miss}},
+                     5_000
+
+      MainAgent.handle_message(make_message("again", chat_id: "runctx_1"), ctx.agent)
+      assert_receive {:reply, "OK"}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :hit, trust: :operator}},
+                     5_000
+
+      # No additional build between the two messages on a clean cache.
+      refute_received {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}
+    end
+
+    test "capability registry changes do not mutate the active runtime context",
+         %{agent: agent, capability_registry: registry} do
+      MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
+
+      MainAgent.handle_message(make_message("first", chat_id: "runctx_2"), agent)
+      assert_receive {:reply, "OK"}, 5_000
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :miss}},
+                     5_000
+
+      capability =
+        Capability.new(%{
+          name: "noop_after_first",
+          description: "Noop",
+          parameters: %{type: "object"},
+          kind: :builtin,
+          executor: {__MODULE__, :unused, []},
+          policy_class: :read_only
+        })
+
+      :ok = CapabilityRegistry.register(registry, capability)
+      MockProvider.reset_calls()
+
+      MainAgent.handle_message(make_message("second", chat_id: "runctx_2"), agent)
+      assert_receive {:reply, "OK"}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _, %{result: :hit}},
+                     5_000
+
+      refute_received {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}
+
+      [{_messages, opts}] = MockProvider.get_calls()
+      names = Enum.map(opts[:capabilities], & &1.name)
+      refute "noop_after_first" in names
+    end
+
+    test "guest profile is also pinned for the MainAgent epoch",
+         %{agent: agent, capability_registry: registry} do
+      MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
+
+      MainAgent.handle_message(make_message("first", chat_id: "runctx_guest"), agent)
+      assert_receive {:reply, "OK"}, 5_000
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :miss}},
+                     5_000
+
+      capability =
+        Capability.new(%{
+          name: "late_guest_tool",
+          description: "Late guest-visible tool",
+          parameters: %{type: "object"},
+          kind: :builtin,
+          executor: {__MODULE__, :unused, []},
+          policy_class: :read_only
+        })
+
+      :ok = CapabilityRegistry.register(registry, capability)
+      MockProvider.reset_calls()
+
+      guest_msg =
+        "guest turn"
+        |> make_message(chat_id: "runctx_guest")
+        |> Map.put(:source_trust, :guest)
+
+      MainAgent.handle_message(guest_msg, agent)
+      assert_receive {:reply, "OK"}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :hit, trust: :guest}},
+                     5_000
+
+      [{_messages, opts}] = MockProvider.get_calls()
+      names = Enum.map(opts[:capabilities], & &1.name)
+      refute "late_guest_tool" in names
+    end
+
+    test "does not expose reload_skills/1 as a MainAgent public API" do
+      refute function_exported?(MainAgent, :reload_skills, 1)
+    end
+
+    test "runtime context build failure replies without crashing the server", %{
+      skill_registry: skill_registry,
+      capability_registry: capability_registry,
+      conv_store: conv_store,
+      task_supervisor: task_supervisor,
+      agent_supervisor: agent_supervisor
+    } do
+      agent_name = :"runtime_context_failure_#{System.unique_integer([:positive])}"
+
+      {:ok, pid} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             capability_registry: capability_registry,
+             agent_supervisor: agent_supervisor,
+             skill_registry: skill_registry,
+             conversation_store: conv_store,
+             task_supervisor: task_supervisor,
+             agent_id: "../escape"
+           ]},
+          id: agent_name
+        )
+
+      log =
+        capture_log(fn ->
+          MainAgent.handle_message(make_message("broken", chat_id: "runctx_bad"), agent_name)
+          assert_receive {:reply, reply}, 5_000
+          assert reply =~ "error processing your message"
+        end)
+
+      assert Process.alive?(pid)
+      assert log =~ "runtime context build failed"
+      assert MockProvider.get_calls() == []
+    end
+  end
+
+  def unused(_args, _ctx, _extra \\ nil), do: {:ok, :ok}
 
   # -- Validation --
 

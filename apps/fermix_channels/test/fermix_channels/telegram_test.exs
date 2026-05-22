@@ -220,6 +220,79 @@ defmodule FermixChannels.TelegramTest do
                """
     end
 
+    test "renders markdown headings as Telegram HTML by default" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text = """
+      ## **Run Summary**
+      **Status:** failed
+      ### Details
+      - checked `mix test`
+      """
+
+      assert :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body}
+      assert body["parse_mode"] == "HTML"
+
+      assert body["text"] ==
+               """
+               <b>Run Summary</b>
+               <b>Status:</b> failed
+               <b>Details</b>
+               • checked <code>mix test</code>
+               """
+
+      refute body["text"] =~ "##"
+      refute body["text"] =~ "###"
+      refute body["text"] =~ "**"
+    end
+
+    test "renders deeper markdown headings without nested bold tags" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text = """
+      #### Run **Summary** <tag>
+      ###### Final Check
+      """
+
+      assert :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body}
+      assert body["parse_mode"] == "HTML"
+
+      assert body["text"] ==
+               """
+               <b>Run Summary &lt;tag&gt;</b>
+               <b>Final Check</b>
+               """
+
+      refute body["text"] =~ "<b><b>"
+      refute body["text"] =~ "</b></b>"
+      refute body["text"] =~ "####"
+      refute body["text"] =~ "**"
+    end
+
+    test "preserves unpaired ** markers in heading text" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      text = """
+      ## Use ** as wildcard
+      ### **mismatched bold
+      """
+
+      assert :ok = send_msg("123", text)
+
+      assert_received {:telegram_request, _path, body}
+      assert body["parse_mode"] == "HTML"
+
+      assert body["text"] ==
+               """
+               <b>Use ** as wildcard</b>
+               <b>**mismatched bold</b>
+               """
+    end
+
     test "can send plain text without Telegram parse mode" do
       stub_telegram(self(), 200, %{"ok" => true})
 
