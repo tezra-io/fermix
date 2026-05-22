@@ -38,10 +38,12 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   @spec build([skill()], keyword()) :: String.t()
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
+    visible_skills = visible_skills(available_skills, opts)
+
     [
       runtime_contract(),
       capability_summary_from_opts(opts),
-      skill_catalog(available_skills)
+      skill_catalog(visible_skills)
     ]
     |> Enum.join("\n\n")
   end
@@ -50,6 +52,28 @@ defmodule FermixCore.Prompt.RuntimeSections do
     case Keyword.fetch(opts, :capabilities) do
       {:ok, capabilities} -> format_capability_summary_or_empty(capabilities)
       :error -> capability_summary()
+    end
+  end
+
+  # When the caller supplies a filtered capability snapshot, keep only the
+  # skills whose names survived that filter. Without this the prompt would
+  # advertise skills that the LLM cannot actually invoke under the
+  # caller's policy (e.g. guest trust denies :exec, so skill capabilities
+  # are removed from the tool surface but their names would still appear
+  # in the skill catalog).
+  defp visible_skills(available_skills, opts) do
+    case Keyword.fetch(opts, :capabilities) do
+      {:ok, capabilities} ->
+        visible_names =
+          for capability <- capabilities,
+              capability.kind == :skill,
+              into: MapSet.new(),
+              do: capability.name
+
+        Enum.filter(available_skills, &MapSet.member?(visible_names, &1.name))
+
+      :error ->
+        available_skills
     end
   end
 
@@ -78,7 +102,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
     - Pick a skill capability by name when a specialized skill is a better fit than handling the work directly.
-    - Runtime capability snapshots change only after explicit reloads or process restart.
+    - Runtime capability snapshots change only after process restart.
     """
     |> String.trim()
   end
