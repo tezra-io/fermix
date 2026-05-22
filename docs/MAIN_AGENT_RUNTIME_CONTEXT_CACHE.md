@@ -1,634 +1,367 @@
 # Main Agent Runtime Context Cache
 
-**Status:** Draft
-**Date:** 2026-05-19
+**Status:** Design approved 2026-05-21. Code cleanup pending (see §7).
+**Date:** 2026-05-19 draft; 2026-05-21 implemented draft; 2026-05-21 revised to server-epoch policy; 2026-05-21 collapsed to single refresh boundary (`fermix restart`).
 **Author:** Sujeeth / Aira
 **Depends on:** `docs/MILESTONE_4_5_PROMPT_BOOTSTRAP_ARCHITECTURE.md`, `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md`, `docs/MESSAGE_GATEWAY_ARCHITECTURE.md`
-**Context:** Follow-up improvement after the message gateway work and the first performance telemetry slice. This document intentionally does not change the gateway architecture doc.
+
+## TL;DR
+
+Runtime context is pinned to a MainAgent server epoch. The main agent builds the markdown-backed prompt base and the capability runtime once on the first inbound message, then reuses that immutable snapshot across every message in the epoch.
+
+Prompt, config, skill source, and tool source changes are not hot-reloaded into active runtime context. **`fermix restart` is the only supported refresh boundary.** There is no in-process reload command, no telemetry-driven invalidation, and no separate "skill reload" verb. This keeps the hot path simple, avoids stale async rebuild races, and gives operators one mental model.
+
+Provider calls remain stateless: Fermix still sends the cached prompt and selected tools to the provider on each request. The local cache avoids repeated local work; provider prompt caching is only an opportunistic latency/cost optimization.
+
+`/compact` is only a conversation-history operation. It never reloads prompt files, skills, MCP tools, or runtime context.
 
 ---
 
 ## 1. Problem / Goal
 
-The message gateway work centralized channel authorization and made remote owner traffic resolve to `:operator`. That fixed the trust path, but it also exposed a separate runtime concern: the main agent still rebuilds prompt context and selects capabilities on every message, then provider adapters rebuild/send tool schemas on every LLM request.
+The main agent currently has multiple runtime inputs:
 
-The current cost profile is mostly provider latency, but the runtime should still avoid repeated local work on the hot path. More importantly, the code should have one explicit model for when prompt files, skills, MCP tools, and provider tool payloads are refreshed.
+- bootstrap/system prompt files
+- `USER.md` and `MEMORY.md`
+- generated runtime sections
+- skills and capability registry entries
+- provider tool schemas derived from capabilities
+- conversation history
 
-**Goal:** add a warmed, versioned runtime context snapshot owned by `MainAgent`, so stable prompt parts and capability views are built at startup and refreshed only on explicit invalidation boundaries.
+Only conversation history is expected to change per message. The other inputs are runtime sources. Rebuilding and rescanning them on every message is unnecessary, and hot-reloading them inside active tasks creates correctness risks.
 
-This is an improvement to the M4.5 prompt composition and M4.9 capability runtime. It is not a gateway redesign.
+**Goal:** define one explicit lifecycle for the main agent runtime context:
 
-### 1.1 Assumptions
+1. Build the runtime context once per MainAgent server epoch.
+2. Reuse it across messages.
+3. Refresh it only by restarting the server (`fermix restart`).
+4. Keep execution-time authorization authoritative even if prompt text is pinned.
 
-- `/compact` should keep its current job: compact active conversation history.
-- Prompt markdown files should be reloaded only when their source changes or a refresh is explicitly requested.
-- Capability snapshots should be rebuilt only when the capability registry, skill snapshot, or profile inputs change.
-- Provider tool schemas can be cached locally, but provider-side payload cost remains until Fermix adopts a server-side provider session or equivalent.
-- Auto compaction can be used as a low-priority refresh checkpoint when runtime context is already dirty, but compaction alone does not make prompt files or capabilities stale.
+There is intentionally **one refresh command** (`fermix restart`). A separate `fermix reload` is rejected: doctor is read-only diagnostics, no other command currently mutates runtime state, and a second refresh verb only saves a few seconds of restart latency at the cost of an extra concept for operators and an extra in-process code path to maintain. Restart preserves conversation history (`ConversationStore` is persistent), so the operator-visible cost is small.
 
----
+This document is not a gateway redesign and does not change owner/guest authorization semantics.
 
-## 2. Terminology
+## 2. Terms
 
 | Term | Meaning |
 | --- | --- |
 | Conversation key | `{channel, chat_id, thread_scope}` used by `ConversationStore`. This is the durable chat history boundary. |
 | Provider turn | One `AgentLoop.run/1` invocation for a user message. It can include multiple provider calls if the model calls tools. |
-| Runtime context | Prompt base, generated runtime prompt section, selected capabilities, and optional provider tool payloads used to start a provider turn. |
-| Runtime profile | The subset of runtime context determined by trust, policy, allowlist, and excluded capability categories. |
-| Prompt memory files | `USER.md` and `MEMORY.md`, rebuilt by `PromptFiles.rebuild/4` from durable memory rows. |
-| Conversation compaction | Rewriting older conversation history into a compact summary via `Compactor.compact/2`. This is separate from prompt memory file rebuilds. |
+| Runtime context | File-backed prompt base, generated runtime section, selected capabilities, and prompt accounting used to start a provider turn. |
+| Runtime profile | The runtime section and capability list for a trust profile such as `:operator` or `:guest`. |
+| Server runtime epoch | The period during which one main-agent runtime snapshot is valid. It begins when the snapshot is built and ends on server restart. |
+| Prompt memory files | `USER.md` and `MEMORY.md`, rebuilt from durable memory rows. |
+| Conversation compaction | Rewriting older conversation history into a compact summary. This is separate from runtime context. |
 
-When this doc says "new session", it means a new conversation key or a restarted `MainAgent` process. Current provider calls are stateless HTTP requests; `MainAgent` creates a fresh request session id per message today.
+## 3. Lifecycle Policy
 
----
+Runtime context is immutable during a server runtime epoch. `fermix restart` is the only supported refresh boundary.
 
-## 3. Current Behavior
+| Event | Runtime context behavior |
+| --- | --- |
+| Server start | No hot reload state exists yet. The first accepted turn builds runtime context. |
+| First message in epoch | Build prompt base and runtime profile inside the `MainAgent` GenServer (synchronous), then reuse the snapshot. |
+| Later message in same epoch | Reuse the same snapshot. Do not read prompt markdown files or rescan capabilities. |
+| `/compact` | Replace conversation history only. Do not rebuild runtime context. |
+| Auto compaction | Replace conversation history only. Do not rebuild runtime context. |
+| New conversation key | Reuse the current server runtime context. Do not reload source files. |
+| Prompt memory rebuild (`PromptFiles.rebuild/4`) | Writes new `USER.md` / `MEMORY.md` to disk but does not mutate active runtime context. `fermix restart` is required to pick up new files. |
+| Skill source change (file added/removed under skills dir) | `fermix restart` is required. There is no `MainAgent.reload_skills/1` and no `fermix reload`. |
+| MCP/tool source change | `fermix restart` is required. |
+| Provider route/model/config change | `fermix restart` is required. |
 
-### 3.1 Startup
+This policy intentionally rejects background invalidation and async rebuild inside active message processing.
 
-Application supervision starts the runtime in this order:
+### 3.1 Why no `fermix reload`
 
-1. `CapabilityRegistry`
-2. built-in capability seeding
-3. command capability seeding
-4. `SkillRegistry`
-5. `MCP.Supervisor`
-6. memory and conversation stores
-7. `MainAgent`
+A separate in-process reload was considered and rejected. It would shave ~3–10 seconds off the iteration loop for operators dropping new skills on disk, at the cost of:
 
-At `MainAgent.init/1`, the agent loads `available_skills` from `SkillRegistry.list_detailed/1` and stores that list in GenServer state.
+- A second operator verb (`reload` vs `restart`), with non-obvious rules about which to use when.
+- A daemon-socket route for in-process refresh that must stay synchronized with `fermix restart`'s coverage.
+- Tests that have to assert both refresh paths behave identically for the things both cover.
+- A real but small risk that an in-flight task built against the pre-reload snapshot will reply with text describing skills the new snapshot no longer lists.
 
-What is warmed today:
+For single-owner local usage, skill iteration is occasional. The 5-second restart cost amortizes across many idle minutes. The clarity of one verb outweighs the iteration-loop benefit.
 
-- built-in capabilities are registered before `MainAgent`
-- skill definitions are loaded by `SkillRegistry`
-- skill capabilities are synced into `CapabilityRegistry`
-- MCP servers are supervised and register tools after `tools/list`
-- `MainAgent.available_skills` is loaded once at init and refreshed by `MainAgent.reload_skills/1`
+## 4. Current Provider Boundary
 
-What is not warmed today:
+Fermix provider calls are stateless today. OpenAI Responses/Codex requests send instructions, input, and tools for the turn. Provider adapters may reuse converted tools across continuations inside one provider turn, but Fermix does not rely on provider-side stored sessions as the canonical runtime context.
 
-- composed prompt context
-- prompt file contents from `USER.md` / `MEMORY.md`
-- generated runtime prompt section
-- per-trust filtered capability snapshots
-- provider-specific tool payloads
+Therefore:
 
-### 3.2 Per Message
+- local runtime context caching reduces file I/O, injection scans, runtime-section generation, and capability selection
+- provider prompt caching can help when bytes stay stable
+- provider prompt caching is not a correctness mechanism
+- provider-specific tool payload caching is not part of this design
 
-For every inbound message that reaches `MainAgent`, `run_message_loop/2` does this:
-
-1. Resolve `conversation_key`.
-2. Call `load_prompt_context!/2`.
-3. `PromptComposer.compose_with_metadata/1` loads bootstrap prompt files and `PromptFiles.load/1`.
-4. `RuntimeSections.build/2` generates the runtime section.
-5. Fetch conversation history from `ConversationStore`.
-6. Build `messages = prompt_context.messages ++ history ++ [user_message]`.
-7. Build the tool execution context, including `:source_trust`.
-8. Call `build_loop_runtime/3`.
-9. Call `AgentLoop.run/1`.
-10. Add the user and assistant messages to `ConversationStore`.
-11. Deliver the reply.
-12. Start memory extraction if enabled.
-13. Maybe run auto compaction.
-
-So prompt files are loaded once per user message today.
-
-### 3.3 Per Provider Turn
-
-`AgentLoop.build_state/1` resolves the provider adapter and selects capabilities.
-
-If `AgentLoop.run/1` is not passed an explicit `:capabilities` list, it calls:
-
-```elixir
-CapabilityRegistry.list_for(registry,
-  allowed_tools: allowed_tools,
-  policy: policy,
-  trust: trust,
-  excluded_categories: excluded_categories
-)
-```
-
-That means the selected tool surface is rebuilt once per provider turn today.
-
-### 3.4 Per LLM Invocation
-
-OpenAI Responses and Codex adapters both convert selected capabilities to provider tool schemas:
-
-```elixir
-ResponsesShared.to_provider_tools(capabilities)
-```
-
-On the first provider call, the adapter sends:
-
-- model
-- input/history
-- instructions
-- tools
-- reasoning settings
-- text settings
-
-On continuation calls after tool execution, the adapter carries `tools` in `provider_state` and sends the same tool list again with the continued input.
-
-So provider tool maps are built once per provider turn, then resent on each provider continuation in that turn. Fermix does not currently use provider-side stored responses or server-side sessions to avoid resending tool schemas.
-
-### 3.5 `/compact`
-
-`/compact` is implemented by `FermixChannels.Commands.Compact`.
-
-It:
-
-1. Authorizes through command context.
-2. Reads a snapshot from `ConversationStore`.
-3. Estimates current history tokens.
-4. Resolves the provider route.
-5. Calls `Compactor.compact/2` with a forced budget.
-6. Replaces the conversation history through `ConversationStore.replace_history/3` with `expected_version`.
-7. Emits `[:fermix, :compaction, :forced]`.
-8. Replies with the before/after token count.
-
-It does not:
-
-- reload `USER.md`
-- reload `MEMORY.md`
-- rebuild prompt bootstrap files
-- reload skills
-- refresh MCP tools
-- invalidate capability registry state
-- rebuild provider tool schemas
-
-This is correct for the current design: `/compact` changes conversation history, not prompt resources.
-
-### 3.6 Auto Compaction
-
-After a successful agent reply, `MainAgent.maybe_auto_compact/3` can compact the same conversation history if the estimated history size crosses the configured threshold.
-
-It:
-
-1. Reads conversation history.
-2. Estimates tokens.
-3. Compares against model context window and configured threshold.
-4. Calls `Compactor.compact/2`.
-5. Replaces history through `ConversationStore.replace_history/3`.
-6. Emits `[:fermix, :compaction, :auto]`.
-
-It does not refresh prompt files or capabilities.
-
-### 3.7 Prompt Memory Rebuilds
-
-Prompt memory files are rebuilt by `PromptFiles.rebuild/4`, usually through `Memory.Scheduler`.
-
-Triggers include:
-
-- extraction admission requesting an event rebuild
-- periodic scheduler ticks
-- direct calls in tests or maintenance flows
-
-Prompt memory rebuilds write `USER.md` and `MEMORY.md`. Those files become visible to the agent only the next time `PromptComposer.compose_with_metadata/1` reads them. Because prompt composition happens on every message today, this is eventually visible without explicit notification.
-
-After runtime context caching, prompt memory rebuild must become an explicit invalidation source.
-
-### 3.8 MCP Tool Registration
-
-MCP tools enter the context through the capability registry, not through prompt files.
-
-Flow:
+The desired rule is:
 
 ```text
-MCP.Supervisor
-  -> MCP.Server
-  -> tools/list
-  -> FermixCore.Capabilities.MCP.Capability.from_tool_descriptor/3
-  -> CapabilityRegistry.register/2
-  -> AgentLoop capability selection
-  -> provider tool schema conversion
+cache locally, send every provider turn, keep bytes stable
 ```
 
-MCP capabilities default to:
+## 5. Architecture
 
-- `kind: :mcp`
-- `policy_class: :external_api`
-- `hidden_from_agent?: false`
+Add or keep a small `FermixCore.Agents.RuntimeContext` module owned by `MainAgent`.
 
-Operator turns can see them under the default `:operator` policy. Guest turns cannot see them unless policy is explicitly widened.
+`RuntimeContext` holds:
 
----
-
-## 4. Constraints
-
-1. Trust filtering remains authoritative. A cache must never widen a guest surface because an operator snapshot exists.
-2. Runtime context must be versioned. Callers need to know which prompt and capability revision was used.
-3. Conversation compaction and prompt memory rebuild are separate. Do not merge them into one concept.
-4. Startup should warm the main agent's default runtime context.
-5. New conversation keys should not reload static prompt files or capabilities unless a source changed.
-6. Provider requests are still stateless today. Local caching can reduce CPU and file I/O, but it cannot remove provider-side token/tool payload cost unless provider session reuse is added later.
-7. Voice sessions are separate. Realtime already builds prompt context with `runtime_capabilities: state.capabilities` and excludes channel tools. It can reuse the same cache builder later, but it should not depend on the text-channel gateway.
-
----
-
-## 5. Proposed Architecture
-
-Add a small `FermixCore.Agents.RuntimeContext` module owned by `MainAgent`.
-
-`RuntimeContext` should build and hold:
-
-- base prompt parts loaded from bootstrap files and prompt memory files
-- prompt accounting
+- `agent_id`
+- `built_at_ms`
+- base prompt messages exported from bootstrap prompt files plus `USER.md` / `MEMORY.md`
+- base prompt accounting
 - available skills snapshot
-- filtered capability snapshots by runtime profile
-- generated runtime prompt sections by runtime profile
-- optional provider tool payload snapshots by provider adapter and runtime profile
-- source revisions used to build the snapshot
+- enumerated runtime profiles (`:operator`, `:guest`)
 
-The main agent should use the snapshot on the hot path. Rebuilds happen only through explicit invalidation.
+The struct does **not** carry a `registry_revision`. There is nothing to compare it against under epoch pinning — see §7.5.
 
-### 5.1 Shape
-
-Suggested struct:
-
-```elixir
-defmodule FermixCore.Agents.RuntimeContext do
-  defstruct [
-    :agent_id,
-    :owner_id,
-    :revision,
-    :built_at_ms,
-    :source_versions,
-    :base_messages,
-    :base_accounting,
-    :available_skills,
-    :profiles
-  ]
-end
-```
-
-Each profile entry:
+Each runtime profile holds:
 
 ```elixir
 %{
-  key: profile_key,
-  trust: :operator | :guest | nil,
-  policy: policy,
-  allowed_tools: allowed_tools,
-  excluded_categories: excluded_categories,
+  trust: :operator | :guest,
   capabilities: capabilities,
   runtime_message: %{role: "system", content: runtime_section},
-  accounting: accounting
+  runtime_accounting: accounting_entry
 }
 ```
 
-The full prompt for a message becomes:
+The message path uses:
 
 ```elixir
-profile = RuntimeContext.fetch_profile!(ctx, profile_key)
-prompt_messages = ctx.base_messages ++ [profile.runtime_message]
-messages = prompt_messages ++ history ++ [user_message]
+profile = RuntimeContext.profile_for(ctx, source_trust, capability_registry, opts)
+messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
 ```
 
-This avoids duplicating static prompt text across trust profiles while still making the runtime section match the actual capability surface for that turn.
+`AgentLoop.run/1` receives `capabilities: profile.capabilities` explicitly. When explicit capabilities are passed, `AgentLoop` must not rescan the registry for the same turn.
 
-### 5.2 Runtime Profile Key
+### 5.1 Prompt Base vs Runtime Section
 
-The cache key should include only inputs that change tool visibility:
+`PromptComposer` should keep the file-backed base separate from generated runtime sections:
 
-```elixir
-{
-  trust,
-  normalized_policy,
-  normalized_allowed_tools,
-  normalized_excluded_categories
-}
-```
-
-For current text turns, the important profiles are:
-
-- operator text profile: `trust: :operator`
-- guest text profile: `trust: :guest`
-- voice profile: `trust: :operator, excluded_categories: [:channel]`
-- skill sub-agent profile: derived from skill trust and allowed tools
-
-Channel name should not be part of the key unless channel-specific tool visibility is introduced later.
-
-### 5.3 Prompt Base vs Runtime Section
-
-`PromptComposer` currently builds both file-backed prompt parts and generated runtime parts in one call. For caching, split the responsibility:
-
-1. `PromptComposer.compose_base_with_metadata/1`
-   - loads bootstrap files
+1. `compose_base_with_metadata/1`
+   - loads bootstrap prompt files
    - loads `USER.md` / `MEMORY.md`
-   - returns base system messages and accounting
+   - runs injection scanning
+   - returns ordered parts and accounting
+   - does not append generated runtime text
 
 2. `RuntimeSections.build/2`
-   - receives the exact filtered capabilities for the profile
-   - receives the available skills snapshot
-   - returns the generated runtime section
+   - receives the exact filtered capability list
+   - derives the visible skill catalog from that same capability list
+   - never advertises a skill hidden by the active trust policy
 
-3. `PromptComposer.compose_with_metadata/1`
-   - remains as a compatibility wrapper for tests and realtime until callers are migrated
+3. `compose_with_metadata/1`
+   - remains as a thin wrapper used by `Realtime.SessionServer` only; it composes the base then appends a runtime section built from `runtime_capabilities:`
+   - must not become a second runtime-context design
 
-This makes the cache boundary explicit and keeps generated runtime state out of the file-backed prompt cache.
+### 5.2 Profile Selection
 
-### 5.4 Capability Selection
+Keep the profile space enumerated:
 
-`RuntimeContext` should call `CapabilityRegistry.list_for/2` while building each profile.
+- `:operator` is cached with the runtime context
+- `:guest` is cached with the runtime context
+- voice/realtime keeps its own session-scoped runtime and may reuse the builder later
 
-`AgentLoop.run/1` should receive the selected `capabilities:` list explicitly from `MainAgent`. It already supports this path. When a capabilities list is passed, `AgentLoop` skips registry selection and only indexes the list by name.
+Do not add a normalized profile dictionary keyed by arbitrary allowlists, policy structs, or exclusion sets unless a real caller needs it.
 
-That makes per-message capability selection a cache hit instead of an ETS scan/filter.
+### 5.3 Ownership
 
-### 5.5 Provider Tool Payloads
+`MainAgent` owns runtime context mutation.
 
-Provider tool payloads are adapter-specific. The first implementation can cache capability structs only.
+The first inbound message of an epoch triggers a synchronous build inside `handle_cast({:handle_message, msg}, state)`, before the message task is spawned. The GenServer is briefly busy during the build (a few small file reads, an injection scan, and a runtime-section render — typically a few milliseconds); any other messages enqueued during that window proceed normally after the build completes.
 
-Optional second step:
-
-```elixir
-%{
-  provider_tool_payloads: %{
-    {adapter_module, profile_key, capability_revision} => tools
-  }
-}
-```
-
-This avoids repeated `ResponsesShared.to_provider_tools/1` work, but it does not avoid sending tools to the provider on each stateless request. Treat this as a local CPU/cache optimization only.
-
----
-
-## 6. Invalidation Model
-
-Runtime context should rebuild on source changes, not on every message.
-
-| Source | Current behavior | New behavior |
-| --- | --- | --- |
-| Process start | MainAgent loads available skills only | Build initial runtime context before accepting turns |
-| `/compact` | Replaces conversation history | No runtime context rebuild unless a prompt/capability source is already dirty |
-| Auto compaction | Replaces conversation history after reply | No runtime context rebuild unless a prompt/capability source is already dirty |
-| `PromptFiles.rebuild/4` | Next message sees new files because prompt is reloaded every message | Emit/call runtime invalidation for `:prompt_memory` |
-| `MainAgent.reload_skills/1` | Reloads skills and updates `available_skills` | Reload skills, then rebuild runtime context profiles |
-| MCP server tools discovered | Registers capabilities | Increment capability registry revision and invalidate capability profiles |
-| MCP server disconnected | Unregisters server tools | Increment capability registry revision and invalidate capability profiles |
-| Built-in/command capability changes | Boot-time only today | Revision changes if dynamic refresh is added |
-| Provider route/model changes | Requires daemon restart today | Startup rebuild is enough until live config reload exists |
-
-### 6.1 `/compact` Boundary
-
-`/compact` should remain a history operation. It should not rebuild runtime context by default.
-
-If the product wants `/compact` to be a convenient refresh checkpoint, the rule should be:
-
-1. Run conversation compaction.
-2. Check runtime context dirty flags.
-3. Rebuild only dirty sources.
-4. Return compaction result plus refresh status.
-
-Do not make `/compact` reload prompt files unconditionally. That would reintroduce slow local work on a command whose main job is conversation history compaction.
-
-### 6.2 Auto Compaction Boundary
-
-Auto compaction should not block replies on runtime context rebuild. It runs after reply delivery today and should stay outside the user-visible response path.
-
-Recommended behavior:
-
-- if runtime context is clean, auto compaction only replaces history
-- if runtime context is dirty, auto compaction can schedule an async rebuild after history replacement
-- if async rebuild fails, keep the last good runtime context and log/telemetry the failure
-
-### 6.3 Prompt Memory Rebuild Boundary
-
-`Memory.Scheduler` should notify `MainAgent` after a successful `PromptFiles.rebuild/4`.
-
-Recommended API:
+Spawned message tasks receive the populated `runtime_context` through `task_runtime_state/1`. Tasks never write runtime context back to the GenServer. Task-side write-back (`GenServer.cast(server, {:cache_runtime_context, ctx})`) is explicitly forbidden:
 
 ```elixir
-MainAgent.invalidate_runtime_context(:prompt_memory, agent_id: agent_id)
+# Do NOT do this. Tasks must not publish snapshots into MainAgent state.
+GenServer.cast(server, {:cache_runtime_context, ctx})
 ```
 
-The invalidation should be cheap. Rebuild can be:
+This prevents the failure mode where a long-running task overwrites a newer snapshot with one it built against older state.
 
-- synchronous for explicit user/admin commands
-- asynchronous for extraction and periodic scheduler paths
+If the synchronous build fails (corrupt prompt file, registry unreachable, etc.), `MainAgent` sends a per-message error reply via `msg.reply_fn`, logs the cause, and leaves `state.runtime_context` as `nil`. The next inbound message retries the build. The GenServer does not crash. Boot-time hard failure is **not** required (see §8).
 
-### 6.4 Capability Registry Revision
+## 6. Authorization Rule
 
-`CapabilityRegistry` currently stores capabilities in ETS and serializes writes through the GenServer. Add a revision counter to the GenServer state.
+Prompt text **and the capability set** are server-epoch-pinned.
 
-Write operations that change the table increment the revision:
+Operator/guest trust filtering is applied once when the runtime context is built (via `CapabilityRegistry.list_for/2`) and baked into the cached profile. Per-message execution-time checks that remain authoritative:
 
-- successful `register/2`
-- `unregister/2`
-- `unregister_kind/3`
-- future real `refresh/2`
+- `state.allowed_tools` allowlist filtering inside `AgentLoop.invoke_capability/3` (per-task scoping, not epoch state).
+- Per-capability sandbox/policy enforcement inside each executor (e.g. file path checks, command profile gating).
+- Per-capability argument validation inside each executor.
 
-Expose:
+What is **not** re-checked at execution time:
 
-```elixir
-CapabilityRegistry.revision(server)
-```
+- Whether a capability still exists in `CapabilityRegistry`. The agent dispatches from the cached `state.capabilities_by_name` map (`apps/fermix_core/lib/fermix_core/agent_loop.ex:334`), not the live registry.
+- Whether trust/policy filtering for the active profile has changed mid-epoch.
 
-`RuntimeContext` stores the revision used to build capability profiles. A mismatch marks those profiles dirty.
+Operational consequence: **to remove a tool safely, restart the server.** A capability removed from the registry mid-epoch remains callable from cached snapshots until `fermix restart`. This is consistent with epoch pinning — the design rejects hot reload — but it is a deliberate trade. If a tool must become uncallable immediately (security incident, deprecation with safety implications, etc.), `fermix restart` is the supported response.
 
----
+Execution-time live registry checks were considered and rejected: they would re-introduce a per-call lookup cost on the hot path, and would not actually catch the underlying class of bug (a stale executor closure pointing at a dead MCP server pid still "exists" by name in a freshly-registered registry entry). The honest framing is "restart before removal," not "live re-validation."
 
-## 7. MainAgent Hot Path After Change
+## 7. Cleanup Required From Current Draft Implementation
 
-Per message should become:
+The existing code (shipped 2026-05-21 in the first implementation pass) was written against a hot-reload invalidation model. To match this revised design, clean up the parts that add races, unnecessary machinery, or operator-facing surface that is no longer supported.
 
-1. Resolve `conversation_key`.
-2. Resolve runtime profile from `source_trust`, policy, allowlist, and exclusions.
-3. Fetch warmed runtime profile from `state.runtime_context`.
-4. Fetch conversation history.
-5. Build messages from cached prompt base, cached runtime section, history, and current user message.
-6. Call `AgentLoop.run/1` with explicit `capabilities: profile.capabilities`.
-7. Persist user and assistant messages.
-8. Deliver reply.
-9. Start extraction.
-10. Maybe auto compact conversation history.
+Each step lists what to change and **why**. Success for the cleanup is simple: an active message task cannot publish a runtime-context snapshot back into `MainAgent`, and the only refresh boundary visible to operators is `fermix restart`.
 
-No prompt files or capability registry scans should happen on the clean hot path.
+### 7.1 Remove task-side cache write-back
 
----
+**Change:** delete the `GenServer.cast(server, {:cache_runtime_context, ctx})` path from `run_message_loop/2` and `cache_runtime_context_async/2` in `apps/fermix_core/lib/fermix_core/agents/main_agent.ex`. Delete the matching `handle_cast({:cache_runtime_context, ctx}, state)` handler. Move the cache build into the GenServer in `handle_cast({:handle_message, msg}, state)` (or an explicit pre-spawn step), so the spawned task always receives an already-populated `runtime_context` in `task_runtime_state/1`.
+
+**Reason:** The current task-side write-back is **not safe** under the existing invalidation model — it can restore a stale snapshot. Concrete race against the code as shipped:
+
+1. Task A spawns with `state.runtime_context = nil` and begins building.
+2. While A is still building, an invalidation telemetry event fires; the GenServer processes `handle_cast({:invalidate_runtime_context, _}, state)` (`apps/fermix_core/lib/fermix_core/agents/main_agent.ex:272`) and sets `state.runtime_context = nil`.
+3. Task A finishes its build (against the pre-invalidation source state) and casts `{:cache_runtime_context, stale_ctx}`.
+4. The `handle_cast({:cache_runtime_context, ctx}, state)` handler (`apps/fermix_core/lib/fermix_core/agents/main_agent.ex:264`) unconditionally writes — there is no generation check — so `state.runtime_context = stale_ctx`. Subsequent tasks now read the stale snapshot indefinitely.
+
+This is precisely why task-side write-back must go. Under the revised design the path is removed outright; under any future design that needs cross-process snapshot publishing, every write must carry a generation token and be rejected when the GenServer generation has advanced.
+
+### 7.2 Delete invalidation telemetry handlers
+
+**Change:** delete `attach_invalidation_handlers/1`, `detach_invalidation_handlers/1`, `capabilities_handler_id/1`, `prompt_files_handler_id/1`, and `__handle_invalidation_telemetry__/4` from `main_agent.ex`. Remove the call to `attach_invalidation_handlers/1` from `init/1`. Delete the `handle_cast({:invalidate_runtime_context, reason}, state)` handler and the `emit_runtime_context_invalidate/2` helper. Drop the `[:fermix, :runtime_context, :invalidate]` telemetry event.
+
+**Reason:** Server-epoch pinning means invalidation does not happen during an epoch. Listening for `[:fermix, :capabilities, :changed]` and `[:fermix, :memory, :prompt_files_rebuilt]` is dead code under this design. Worse, leaving the handlers in place would imply hot-reload semantics the design rejects.
+
+### 7.3 Delete prompt-files rebuild telemetry
+
+**Change:** remove the `:telemetry.execute([:fermix, :memory, :prompt_files_rebuilt], ...)` call and its `emit_rebuilt_telemetry/5` helper from `apps/fermix_core/lib/fermix_core/memory/prompt_files.ex`. Remove the matching test in `apps/fermix_core/test/fermix_core/memory/prompt_files_test.exs`.
+
+**Reason:** This event was added solely so `MainAgent` could invalidate its cache when memory was rebuilt. With invalidation gone (see §7.2), no one consumes it. Existing memory pipeline traces already cover the diagnostic case.
+
+### 7.4 Delete `CapabilityRegistry.revision/1` and `[:fermix, :capabilities, :changed]`
+
+**Change:** remove the revision counter from `apps/fermix_core/lib/fermix_core/capabilities/registry.ex`: the `@revision_key` ETS entry, `revision/1`, `bump_revision/2`, the revision field in GenServer state, and the `[:fermix, :capabilities, :changed]` telemetry execute. Remove the `Enum.reject` for the reserved key from `list/2` (no longer needed). Remove revision-related tests from `apps/fermix_core/test/fermix_core/capabilities/registry_test.exs`.
+
+**Reason:** The revision counter was added to support cache invalidation. The only caller is `RuntimeContext.build/1` for the diagnostic `registry_revision` field. With invalidation gone, no one needs to compare revisions. Keeping the counter just to populate a never-read diagnostic field is dead code.
+
+### 7.5 Drop `registry_revision` from `RuntimeContext`
+
+**Change:** remove the `:registry_revision` field from the `%FermixCore.Agents.RuntimeContext{}` struct, its assignment in `build/1`, and the `runtime_context_revision/1` helper in `main_agent.ex`. Remove the corresponding metadata from `[:fermix, :runtime_context, :build]` telemetry.
+
+**Reason:** Consequence of §7.4 — without a revision counter to compare against, recording a frozen revision number on the snapshot has no purpose.
+
+### 7.6 Delete `MainAgent.reload_skills/1`
+
+**Change:** remove the `reload_skills/1` public function, the `handle_call(:reload_skills, ...)` handler, and the `reload_available_skills/1` and `safe_skill_registry_call/1` helpers (if not used elsewhere) from `main_agent.ex`. Remove the existing test usages in `apps/fermix_core/test/fermix_core/agents/main_agent_test.exs`:
+
+- line 1330 — `test "keeps the skill list static until reload_skills/1 is called"`
+- line 1355 — assertion inside the same test
+- line 1374 — second usage in that test
+- line 1423 — usage in a follow-on test
+- line 1448 — usage in a further follow-on test
+- line 1875 — `test "reload_skills/1 invalidates the cache"` (added in the first implementation pass; deletable in full)
+
+Either delete each test block or rewrite its premise to demonstrate that `available_skills` is now epoch-pinned and `reload_skills/1` does not exist. The latter only makes sense for the line-1330 test (which becomes "skills stay pinned for the lifetime of MainAgent"); the others have no analog and should be deleted.
+
+Update the following doc references to remove "call `MainAgent.reload_skills`" guidance and direct operators to `fermix restart`:
+
+- `docs/MILESTONE_2_MULTI_AGENT_ORCHESTRATION.md:915-916`
+- `docs/MILESTONE_6_DEVELOPER_EXPERIENCE.md:200` (currently lists `fermix reload skills`)
+- `docs/MILESTONE_6_DEVELOPER_EXPERIENCE.md:201` (currently lists `fermix reload prompt`)
+- `docs/MILESTONE_6_DEVELOPER_EXPERIENCE.md:426` (currently proposes adding `fermix reload skills` plus a dashboard action)
+- `docs/wiki/skills.html`
+- `docs/wiki/agents.html`
+
+**Reason:** `reload_skills/1` was the in-process refresh path for skill changes. Under server-epoch pinning + single-refresh-boundary policy, it has no role: even if it updated `state.available_skills`, the cached snapshot would still hold the old list and the prompt would not reflect the change. Keeping it would either be dead (no cache effect) or quietly violate the epoch-pinning rule (cache effect = mini-reload back-door). Same reasoning applies to the planned `fermix reload skills` / `fermix reload prompt` surface in MILESTONE_6 — those plans predate the epoch-pinning decision and must be retracted, not just left as future work. Documented public API and roadmap removal: milestone docs, wiki, and tests must all be updated in the same change.
+
+### 7.7 Keep: skill catalog filtering
+
+**Change:** no change. `RuntimeSections.build/2` already derives the skill catalog from the supplied `:capabilities` opt.
+
+**Reason:** Correctness fix. Independent of caching strategy; applies under any policy regime. Without it, a guest profile would advertise skills its trust filter hides.
+
+### 7.8 Keep: explicit `:capabilities` into `AgentLoop.run/1`
+
+**Change:** no change. `run_message_loop/2` already passes `capabilities: profile.capabilities` into `build_loop_runtime/4`.
+
+**Reason:** Avoids redundant `CapabilityRegistry.list_for/2` on every message. The profile already holds the filtered list; reusing it is the point of the cache.
+
+### 7.9 Keep: `/compact` and auto-compaction independence
+
+**Change:** no change. Neither path mutates `state.runtime_context`.
+
+**Reason:** Conversation history and runtime context are orthogonal concerns. Coupling them would re-introduce the multi-purpose command this design rejects.
+
+### 7.10 Keep: provider-specific tool payload caching out of scope
+
+**Change:** no change. `to_provider_tools/1` runs once per provider turn and is reused across continuations by `provider_state`.
+
+**Reason:** A local cache here saves a single microsecond-scale conversion per turn. It does not reduce provider-side payload cost. Not worth the maintenance.
+
+### 7.11 Update telemetry surface
+
+**Change:** retain `[:fermix, :runtime_context, :build]` and `[:fermix, :runtime_context, :cache]` (the latter still reports `:hit | :miss` per turn). Drop `[:fermix, :runtime_context, :invalidate]`. Update the trace handler (`apps/fermix_core/lib/fermix_core/trace/telemetry_handler.ex`) if it referenced any of the removed events.
+
+**Reason:** Cache visibility (build duration, hit ratio) remains useful. Invalidation events are not meaningful under epoch pinning — they would only fire on restart, which is observable through service-level telemetry.
 
 ## 8. Failure Behavior
 
-### 8.1 Startup
+Runtime context build failure should preserve the existing operator-facing behavior: a per-message error reply, not a daemon crash.
 
-Startup should fail loud if the initial runtime context cannot be built. This matches the current behavior where `load_prompt_context!/2` raises on prompt composition failure, but moves the failure to boot instead of first user message.
+If malformed prompt resources are discovered when building the runtime context, `MainAgent` sends an error reply via the failing message's `reply_fn`, logs the cause, and leaves `state.runtime_context` as `nil`. The next inbound message retries the build against current source state. Do not silently continue with a partial prompt.
 
-### 8.2 Async Refresh
-
-If an async refresh fails:
-
-- keep the last good runtime context
-- mark the context stale
-- emit telemetry with the reason
-- log an error
-- retry only on the next explicit invalidation or bounded scheduled refresh
-
-Do not drop to an empty operator profile. An empty profile can hide tools and produce misleading "I do not have access" replies.
-
-### 8.3 Missing Profile
-
-If a message needs a profile that is not cached:
-
-1. Build that profile synchronously from the current runtime context sources.
-2. If build succeeds, store it and continue.
-3. If build fails, return an agent error and do not widen to another trust profile.
-
-Never reuse an operator profile for a guest message.
-
----
+Boot-time hard failure is not required by this design. A server can start cleanly, then fail the first session/turn that attempts to build invalid runtime context. This matches the pre-cache behavior of `load_prompt_context!` and avoids the deploy-time regression where a malformed `USER.md` would block daemon startup.
 
 ## 9. Telemetry
 
-The first telemetry slice already added measurement around:
+Keep telemetry focused on what remains useful under epoch pinning:
 
-- prompt context composition
-- conversation history fetch
-- capability selection
-- provider request payload shape
-- reply delivery
+| Event | Purpose |
+| --- | --- |
+| `[:fermix, :runtime_context, :build]` | Measures the single per-epoch build. Fired once per MainAgent epoch under normal conditions. |
+| `[:fermix, :runtime_context, :cache]` | Per-turn cache result (`:hit` after the first message of the epoch). |
+| `[:fermix, :agent, :prompt_context]` | Reports prompt context bytes/accounting and whether local composition ran (cache hit ⇒ `duration_us: 0`). |
+| `[:fermix, :capabilities, :select]` | Per-turn capability selection. With explicit `:capabilities` passed in, `duration_us` collapses to ~0 — that zero is informative. |
+| Provider telemetry | Reports actual provider request size and latency. |
 
-Add runtime context telemetry:
+Removed: `[:fermix, :runtime_context, :invalidate]`, `[:fermix, :capabilities, :changed]`, `[:fermix, :memory, :prompt_files_rebuilt]`. Reason: they only existed to drive cache invalidation, which is no longer a runtime concern.
 
-| Event | Measurements | Metadata |
-| --- | --- | --- |
-| `[:fermix, :runtime_context, :build]` | `duration_us`, `base_message_bytes`, `profile_count`, `capabilities_count` | `agent`, `revision`, `reason`, `status` |
-| `[:fermix, :runtime_context, :invalidate]` | `count` | `agent`, `reason`, `old_revision` |
-| `[:fermix, :runtime_context, :profile_build]` | `duration_us`, `capabilities_count`, `runtime_message_bytes` | `agent`, `profile_key`, `trust`, `policy` |
-| `[:fermix, :runtime_context, :cache]` | `count` | `agent`, `profile_key`, `result: :hit | :miss | :stale` |
-
-Success criteria:
-
-- clean hot-path prompt composition duration is zero because composition does not run
-- clean hot-path capability selection duration is zero because `AgentLoop` receives capabilities
-- provider telemetry still reports the actual tools and input bytes sent to the provider
-
----
+Do not add telemetry events that imply hot reload if hot reload is not supported.
 
 ## 10. Voice / Realtime
 
 Voice should not move into the message gateway.
 
-Realtime already has a separate session runtime and explicitly excludes channel tools:
+Realtime already has a separate session runtime and explicitly excludes channel tools. It may reuse the same prompt-base/profile builder later, but it should not depend on text-channel gateway state.
 
-```elixir
-CapabilityRegistry.list_for(CapabilityRegistry,
-  trust: :operator,
-  excluded_categories: [:channel]
-)
-```
+Voice follows the same high-level rule: build a session runtime, reuse it across turns, and refresh it at a server restart boundary unless voice defines its own explicit session lifecycle later.
 
-The useful shared piece is the runtime context builder:
+## 11. Non-Goals
 
-- text channels use operator/guest text profiles
-- voice uses operator voice profile with channel tools excluded
-- both can share prompt base loading and capability profile building
-
-Do not make voice depend on Telegram/Discord/Slack gateway state. Voice is click-to-talk operator input, not channel ingress.
-
----
-
-## 11. Implementation Plan
-
-### Stage 1: Source Revisions
-
-Step: add `CapabilityRegistry.revision/1` and increment it on table-changing writes.
-
-Verify:
-
-- registry tests prove revision increments on register/unregister/unregister_kind
-- read-only `list/2` and `find/2` do not increment revision
-
-### Stage 2: Runtime Context Builder
-
-Step: add `FermixCore.Agents.RuntimeContext` with base prompt build and profile build.
-
-Verify:
-
-- base prompt loads bootstrap plus `USER.md` / `MEMORY.md`
-- profile runtime section uses the exact filtered capabilities
-- guest profile excludes non-read-only capability classes
-- voice profile excludes `:channel`
-
-### Stage 3: MainAgent Warmup
-
-Step: build runtime context in `MainAgent.init/1` after `available_skills` is loaded.
-
-Verify:
-
-- startup fails if prompt composition fails
-- `MainAgent.status/1` includes runtime context revision and stale flag
-- no inbound message is processed before warmup succeeds
-
-### Stage 4: MainAgent Hot Path
-
-Step: change `run_message_loop/2` to read cached prompt/profile data and pass `capabilities:` into `AgentLoop.run/1`.
-
-Verify:
-
-- focused test proves `PromptComposer.compose_with_metadata/1` is not called per message on clean cache
-- focused test proves `CapabilityRegistry.list_for/2` is not called inside `AgentLoop` when capabilities are passed
-- telemetry records runtime context cache hit
-
-### Stage 5: Invalidation Hooks
-
-Step: wire invalidation from:
-
-- `MainAgent.reload_skills/1`
-- successful `PromptFiles.rebuild/4` through `Memory.Scheduler`
-- MCP capability registration/unregistration through registry revision checks
-- explicit admin command if added later
-
-Verify:
-
-- prompt memory rebuild invalidates prompt base
-- skill reload invalidates skill catalog and skill capabilities
-- MCP registration invalidates capability profiles
-- `/compact` does not rebuild runtime context unless dirty
-
-### Stage 6: Optional Provider Tool Payload Cache
-
-Step: cache adapter-specific provider tool maps by `{adapter, profile_key, capability_revision}`.
-
-Verify:
-
-- provider tool map conversion is skipped on clean cache
-- request telemetry still reports the actual sent tools
-- cache is invalidated when capability revision changes
-
----
-
-## 12. Non-Goals
-
+- Do not hot-reload prompt/config/source changes into active runtime context.
+- Do not reload all markdown files every message.
+- Do not couple `/compact` or auto-compaction to runtime-context refresh.
+- Do not add a `fermix reload` (or equivalent in-process refresh) command. `fermix restart` is the only refresh boundary.
+- Do not extend `fermix doctor` to mutate runtime state. It stays read-only diagnostics.
+- Do not keep `MainAgent.reload_skills/1`. Documented public API removal — see §7.6.
 - Do not move prompt composition into the message gateway.
 - Do not move voice into the message gateway.
 - Do not change owner/guest authorization semantics.
 - Do not add server-side provider sessions in this slice.
-- Do not change `/compact` into prompt memory rebuild.
-- Do not reload all markdown files every message.
-- Do not hide provider latency behind local cache metrics; provider telemetry remains the source of truth for LLM time.
+- Do not cache provider-specific tool payloads.
+- Do not add a profile dictionary before there is a real multi-profile use case.
+- Do not add a `/runtime_context` admin command in this slice.
 
----
+## 12. Open Questions
 
-## 13. Open Questions
+1. Should provider-side session reuse become a later milestone after local runtime context is stable?
 
-1. Should the runtime prompt list all visible MCP tools, or should it summarize MCP servers while the full tool schema carries exact tool detail?
-2. Should periodic prompt memory rebuild push invalidation directly to `MainAgent`, or should `MainAgent` poll source revisions on a bounded interval?
-3. Should admin commands expose `/context_status` or `/runtime_context` so the owner can inspect revisions, stale state, profile count, and prompt/tool byte sizes?
-4. Should provider-side session reuse be a later milestone for OpenAI Responses/Codex once local caching is clean?
+## 13. Acceptance Criteria
 
----
-
-## 14. Acceptance Criteria
-
-- `MainAgent` builds a runtime context snapshot at startup.
-- Clean text-channel turns do not read prompt markdown files.
-- Clean text-channel turns pass explicit capabilities to `AgentLoop`.
-- Operator and guest profiles are cached separately.
-- Guest cache misses never fall back to operator profiles.
-- `/compact` still compacts only conversation history.
-- Prompt memory rebuild invalidates cached prompt base.
-- Skill reload invalidates cached skill/runtime sections.
-- MCP tool registration changes invalidate cached capability profiles.
-- Telemetry can show whether latency is local runtime work, provider request size, or provider response time.
+- First turn in an epoch builds runtime context once, inside the `MainAgent` GenServer.
+- Later turns in the same epoch do not read prompt markdown files.
+- Later turns in the same epoch pass explicit cached capabilities to `AgentLoop.run/1`.
+- Spawned message tasks never write runtime context back into `MainAgent`.
+- `/compact` and auto-compaction only change conversation history.
+- Prompt memory rebuild does not mutate active runtime context.
+- Capability registry changes do not mutate active runtime context.
+- Skill/MCP/prompt/config source changes are picked up only by `fermix restart` — no in-process reload path remains.
+- `MainAgent.reload_skills/1` does not exist as a public API; `fermix reload skills` / `fermix reload prompt` are removed from the MILESTONE_6 roadmap.
+- Runtime skill catalog is derived from the filtered capability list for the active profile.
+- Per-task execution-time checks remain authoritative for the things that genuinely run per call: `state.allowed_tools`, per-capability executor sandbox/policy enforcement, and argument validation.
+- Capability existence and trust filtering are epoch-pinned. Removing a tool requires `fermix restart` to take effect for the running daemon; this is documented in §6 as the operational rule.
+- Provider requests remain explicit about instructions and tools; provider prompt caching is treated as an optimization only.

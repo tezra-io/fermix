@@ -21,6 +21,7 @@ defmodule FermixChannels.Telegram do
   @bot_api_base "https://api.telegram.org"
   @max_message_length 4096
   @bullet_markdown_pattern ~r/^(\s*)[-*]\s+/u
+  @heading_markdown_pattern ~r/^([ ]{0,3})\#{1,6}[ \t]+(.+?)(?:[ \t]+\#+[ \t]*)?$/u
   @fenced_code_pattern ~r/```([A-Za-z0-9_+-]*)\n([\s\S]*?)```/u
   @inline_markdown_pattern ~r/(\[[^\]\n]+?\]\([^\)\n]+?\)|`[^`\n]+?`|\*\*[^*\n]+?\*\*|~~[^~\n]+?~~|\*[^*\n]+?\*|_[^_\n]+?_)/u
   @link_markdown_pattern ~r/^\[([^\]\n]+)\]\(([^\)\n]+)\)$/u
@@ -98,16 +99,22 @@ defmodule FermixChannels.Telegram do
 
   @impl true
   @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: :ok | {:error, term()}
-  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+  @spec send_media(
+          String.t(),
+          FermixChannels.Channel.media_part(),
+          FermixChannels.Channel.send_opts()
+        ) ::
           :ok | {:error, term()}
-  def send_media(chat_id, media_part, opts \\ []) when is_binary(chat_id) and is_map(media_part) do
+  def send_media(chat_id, media_part, opts \\ [])
+      when is_binary(chat_id) and is_map(media_part) do
     with {:ok, claim} <- Idempotency.claim_outbound_media(:telegram, chat_id, media_part) do
       send_claimed_media(claim, chat_id, media_part, opts)
     end
   end
 
   @impl true
-  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  @spec build_text_reply(FermixChannels.Channel.message()) :: (String.t() ->
+                                                                 :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
     opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
 
@@ -206,7 +213,8 @@ defmodule FermixChannels.Telegram do
         |> maybe_put_form(:caption, Map.get(media_part, :caption))
         |> maybe_put_form(:message_thread_id, Keyword.get(opts, :message_thread_id))
 
-      {:ok, Req.new(url: url, method: :post, form_multipart: fields) |> Req.merge(req_options(opts))}
+      {:ok,
+       Req.new(url: url, method: :post, form_multipart: fields) |> Req.merge(req_options(opts))}
     else
       :error -> {:error, {:unsupported_media_kind, kind}}
       {:error, reason} -> {:error, reason}
@@ -299,8 +307,30 @@ defmodule FermixChannels.Telegram do
   end
 
   defp render_markdown_line(line) do
-    line
-    |> normalize_bullet_marker()
+    case render_heading_line(line) do
+      {:ok, html} ->
+        html
+
+      :error ->
+        line
+        |> normalize_bullet_marker()
+        |> render_inline_markdown()
+    end
+  end
+
+  defp render_heading_line(line) do
+    case Regex.run(@heading_markdown_pattern, line) do
+      [_, indent, content] ->
+        {:ok, indent <> "<b>" <> render_heading_content(content) <> "</b>"}
+
+      nil ->
+        :error
+    end
+  end
+
+  defp render_heading_content(content) do
+    content
+    |> remove_heading_bold_markers()
     |> render_inline_markdown()
   end
 
@@ -358,6 +388,10 @@ defmodule FermixChannels.Telegram do
       segment
 
     "<#{tag}>" <> html_escape(inner) <> "</#{tag}>"
+  end
+
+  defp remove_heading_bold_markers(text) do
+    Regex.replace(~r/\*\*([^*\n]+?)\*\*/u, text, "\\1")
   end
 
   defp render_code_block(lang, body) do
@@ -476,6 +510,7 @@ defmodule FermixChannels.Telegram do
   defp outbound_text_chunks(text, opts) when is_binary(text) do
     if telegram_html?(opts) do
       html_opts = Keyword.put(opts, :parse_mode, "HTML")
+
       split_markdown_for_telegram(text, [])
       |> Enum.map(fn chunk -> {basic_markdown_to_html(chunk), html_opts} end)
     else
@@ -485,7 +520,8 @@ defmodule FermixChannels.Telegram do
   end
 
   defp telegram_html?(opts) do
-    not Keyword.has_key?(opts, :parse_mode) and Keyword.get(opts, :format, :telegram_html) != :plain
+    not Keyword.has_key?(opts, :parse_mode) and
+      Keyword.get(opts, :format, :telegram_html) != :plain
   end
 
   defp split_markdown_for_telegram("", acc), do: Enum.reverse(acc)

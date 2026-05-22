@@ -19,9 +19,11 @@ The repeatable benchmark entrypoint is:
 mix fermix.memory_write_latency --iterations 5000 --warmup 200 --message-bytes 512
 ```
 
-It wrote through the same public `ConversationStore.add_message/4` API twice: once with no repo configured for the memory-only baseline, and once with an enabled SQLite repo using WAL mode.
+It exercises the public `ConversationStore.add_message/4` API twice: once with no repo configured for the memory-only baseline, and once with an enabled SQLite repo (WAL mode) plus a dedicated Task.Supervisor for the async durable path. Only the synchronous return is timed; the asynchronous SQLite commit is observable via the `[:fermix, :memory, :message_persist]` telemetry event.
 
-Local run on 2026-04-24:
+### Historical numbers (pre-2026-05-02, synchronous durable path)
+
+Captured against the original sync-durable implementation. The current code path is async — these numbers are kept as a reference for what the old contract cost, not as a current measurement.
 
 ```text
 memory only: avg=1.2us p50=1us p95=3us p99=4us max=26us
@@ -40,14 +42,16 @@ At two synchronous chat writes per successful agent turn, the measured durable o
 
 On 2026-05-02, durable SQLite persistence moved off the message-delivery path. `ConversationStore.add_message/4` still performs the in-memory hot-window append synchronously, but it now queues the SQLite insert to an async task.
 
+After this change, `add_message/4` returning no longer means the message is durable. The accepted loss window is VM/process shutdown or task termination between the in-memory append and the SQLite insert returning.
+
 Why:
 
-- the active conversation already lives in the current request context and the in-memory `ConversationStore` window
+- the active conversation lives in the in-memory `ConversationStore` hot window during a turn
 - `memory.db` is durability and historical reference, not the thing that should decide whether a generated reply reaches the user
 - a transient local SQLite failure should not drop an already-generated response
 - keeping the in-memory append synchronous preserves next-turn context without blocking on disk
 
-The async durable path logs failures, emits telemetry, and retries boundedly before giving up. Pending writes are versioned against conversation clears so a stale async write is skipped after `ConversationStore.clear/2`.
+The async durable path logs failures, emits telemetry, and retries boundedly before giving up. Pending writes carry a snapshot of the conversation's clear/history version, and the async task re-reads the current version (`{clear_version, history_version}` for `replace_history`, `clear_version` only for plain inserts) before issuing the SQL operation; a mismatch causes the task to skip. This check is **non-atomic** — a `clear/2` or `replace_history/3` that lands after the check but before the SQL commit can still leave a stale row behind. Closing this race needs serialized durable writes per conversation; see §Decision History/2026-05-02.
 
 ## Runtime Telemetry
 
@@ -76,10 +80,16 @@ The initial synchronous durability guarantee was acceptable for Stage 1A product
 
 Keep the in-memory append synchronous and durable SQLite writes asynchronous. This gives the main agent immediate local context for the next turn without making user-visible message delivery depend on SQLite health.
 
-If runtime telemetry shows retry storms, queue growth, or shutdown loss, move from per-message async tasks to a bounded write-behind process:
+Three signals would trigger the move to a bounded write-behind process. Only one is currently observable:
+
+- **Retry storms** — observable today via `status=:error` counts on `[:fermix, :memory, :message_persist]` (`attempt` field surfaces escalation depth).
+- **Queue growth** — not observable. Per-message tasks have no queue; would need a sampled `Task.Supervisor.children/1` cardinality metric.
+- **Shutdown loss** — not observable. A killed task does not emit a `message_persist` event, and the in-memory hot window doesn't survive the shutdown to be compared against on next boot. Would need either a persisted write-intent ledger written *before* `add_message/4` returns (so an unmatched intent on next boot proves loss) or graceful-shutdown drain accounting (a count of pending tasks that flushed vs. were killed, emitted at terminate).
+
+Add the missing two before relying on the trigger. When the trigger fires, move from per-message async tasks to a bounded write-behind process:
 
 - keep the in-memory hot window update synchronous
-- enqueue durable writes to a supervised writer process
+- enqueue durable writes to a supervised writer process (per-conversation, which also closes the stale-write-after-clear race called out in §Async Durability Update)
 - batch inserts in small groups or short intervals
 - expose queue depth and flush latency telemetry
 - flush or reject on shutdown/backpressure instead of silently dropping writes

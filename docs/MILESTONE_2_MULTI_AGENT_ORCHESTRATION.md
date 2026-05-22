@@ -906,19 +906,19 @@ Multi-skill concurrency and capability matching.
 - Keeps `reply_fn`, conversation-history assembly, and channel ingress outside the generic AgentServer abstraction.
 - Lets M2 introduce AgentServer where it provides immediate value first: supervised, ephemeral skill workers.
 
-### Decision-2: MainAgent sees a cached skill snapshot until explicit reload
+### Decision-2: MainAgent sees a cached skill snapshot until restart
 
 `MainAgent` does not watch `~/.fermix/skills/` continuously. It snapshots the sorted skill list from `SkillRegistry` at startup and uses that snapshot in its system prompt.
 
-**Reload contract:**
-- `SkillRegistry.reload/0` refreshes the registry snapshot from disk
-- `MainAgent.reload_skills/0` is the supported runtime entrypoint for refreshing what the LLM sees; it reloads the registry, then swaps in the new skill snapshot for future messages
-- A skill directory created on disk after startup is not visible to the LLM until `MainAgent.reload_skills/0` succeeds
+**Refresh contract:**
+- `SkillRegistry.reload/0` refreshes the registry snapshot from disk for startup-time loading and tests
+- `fermix restart` is the supported operator entrypoint for refreshing what the LLM sees
+- A skill directory created on disk after startup is not visible to the LLM until the daemon restarts
 - Unknown skill names remain hard failures at the registry boundary: `SkillRegistry.load/1` returns `{:error, {:unknown_skill, name}}`
 
 **Rationale:**
 - Keeps the discovery contract deterministic for tests and delegation
-- Avoids implicit filesystem watches or per-message rescans
+- Avoids implicit filesystem watches, per-message rescans, and in-process reload races
 - Lets docs, prompt behavior, and future `invoke_skill` validation share one source of truth
 
 ### OQ-3: Skill agent timeout — how long?

@@ -75,6 +75,73 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     refute content =~ "`content_search`"
   end
 
+  test "build/2 hides skills whose capabilities were filtered out" do
+    # Operator's skill list (the GenServer-side snapshot from SkillRegistry).
+    operator_skill = %AgentDefinition{
+      name: "operator-only-skill",
+      role: :sub,
+      persistent: false,
+      system_prompt: "Operator skill.",
+      capabilities: [],
+      allowed_tools: [],
+      max_iterations: 4,
+      timeout_seconds: 60,
+      parent: nil,
+      delegates_to: []
+    }
+
+    # Filtered capability snapshot for the current turn — does NOT include
+    # the operator-only skill (it was removed by trust/policy filtering).
+    snapshot = [
+      Capability.new(%{
+        name: "read_only_tool",
+        description: "Allowed under guest policy.",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: {__MODULE__, :unused, []},
+        policy_class: :read_only,
+        metadata: %{category: :system, when_to_use: "guest-safe."}
+      })
+    ]
+
+    content = RuntimeSections.build([operator_skill], capabilities: snapshot)
+
+    refute content =~ "operator-only-skill"
+    assert content =~ "## Skill Catalog"
+    assert content =~ "- none loaded"
+  end
+
+  test "build/2 keeps skills whose capabilities are still visible" do
+    skill = %AgentDefinition{
+      name: "shared-skill",
+      role: :sub,
+      persistent: false,
+      system_prompt: "Shared skill.",
+      capabilities: ["analyze"],
+      allowed_tools: ["file_read"],
+      max_iterations: 4,
+      timeout_seconds: 60,
+      parent: nil,
+      delegates_to: []
+    }
+
+    snapshot = [
+      Capability.new(%{
+        name: "shared-skill",
+        description: "Shared skill capability.",
+        parameters: %{"type" => "object"},
+        kind: :skill,
+        executor: {__MODULE__, :unused, []},
+        policy_class: :exec,
+        metadata: %{}
+      })
+    ]
+
+    content = RuntimeSections.build([skill], capabilities: snapshot)
+
+    assert content =~ "- shared-skill: capabilities=analyze; tools=file_read"
+  end
+
   test "build/1 renders 'default' for a skill with absent allowed_tools (nil)" do
     skill = %AgentDefinition{
       name: "loose-skill",

@@ -1,6 +1,11 @@
 defmodule FermixCore.Memory.ConversationWriteBenchmark do
   @moduledoc """
-  Measures the synchronous ConversationStore message enqueue path.
+  Measures the synchronous `ConversationStore.add_message/4` return path.
+
+  Starts its own Task.Supervisor so the durable store actually enqueues async
+  SQLite writes — without that the durable path silently fails with a
+  `:noproc` from `FermixCore.TaskSupervisor` and the numbers reflect a
+  no-op, not real durable enqueue cost.
   """
 
   alias FermixCore.Memory.ConversationStore
@@ -75,51 +80,76 @@ defmodule FermixCore.Memory.ConversationWriteBenchmark do
 
   defp start_servers(database_path) do
     unique = System.unique_integer([:positive])
-    repo = :"conversation_write_benchmark_repo_#{unique}"
-    memory_store = :"conversation_write_benchmark_memory_#{unique}"
-    durable_store = :"conversation_write_benchmark_durable_#{unique}"
 
-    case Repo.start_link(name: repo, enabled: true, database_path: database_path) do
-      {:ok, repo_pid} ->
-        start_stores(repo, repo_pid, memory_store, durable_store)
+    names = %{
+      repo: :"conversation_write_benchmark_repo_#{unique}",
+      memory_store: :"conversation_write_benchmark_memory_#{unique}",
+      durable_store: :"conversation_write_benchmark_durable_#{unique}",
+      durable_supervisor: :"conversation_write_benchmark_sup_#{unique}"
+    }
+
+    case Task.Supervisor.start_link(name: names.durable_supervisor) do
+      {:ok, sup_pid} ->
+        start_repo(names, sup_pid, database_path)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp start_stores(repo, repo_pid, memory_store, durable_store) do
-    case ConversationStore.start_link(name: memory_store, repo: nil) do
+  defp start_repo(names, sup_pid, database_path) do
+    case Repo.start_link(name: names.repo, enabled: true, database_path: database_path) do
+      {:ok, repo_pid} ->
+        start_stores(names, sup_pid, repo_pid)
+
+      {:error, reason} ->
+        stop_server(sup_pid)
+        {:error, reason}
+    end
+  end
+
+  defp start_stores(names, sup_pid, repo_pid) do
+    case ConversationStore.start_link(name: names.memory_store, repo: nil) do
       {:ok, memory_pid} ->
-        start_durable_store(repo, repo_pid, memory_store, memory_pid, durable_store)
+        start_durable_store(names, sup_pid, repo_pid, memory_pid)
 
       {:error, reason} ->
         stop_server(repo_pid)
+        stop_server(sup_pid)
         {:error, reason}
     end
   end
 
-  defp start_durable_store(repo, repo_pid, memory_store, memory_pid, durable_store) do
-    case ConversationStore.start_link(name: durable_store, repo: repo) do
+  defp start_durable_store(names, sup_pid, repo_pid, memory_pid) do
+    case ConversationStore.start_link(
+           name: names.durable_store,
+           repo: names.repo,
+           durable_task_supervisor: names.durable_supervisor
+         ) do
       {:ok, durable_pid} ->
         {:ok,
          %{
            repo: repo_pid,
-           memory_store: memory_store,
+           memory_store: names.memory_store,
            memory_pid: memory_pid,
-           durable_store: durable_store,
-           durable_pid: durable_pid
+           durable_store: names.durable_store,
+           durable_pid: durable_pid,
+           durable_supervisor: sup_pid
          }}
 
       {:error, reason} ->
         stop_server(memory_pid)
         stop_server(repo_pid)
+        stop_server(sup_pid)
         {:error, reason}
     end
   end
 
   defp stop_servers(pids) do
-    Enum.each([pids.memory_pid, pids.durable_pid, pids.repo], &stop_server/1)
+    Enum.each(
+      [pids.memory_pid, pids.durable_pid, pids.durable_supervisor, pids.repo],
+      &stop_server/1
+    )
   end
 
   defp stop_server(pid) when is_pid(pid) do

@@ -28,6 +28,11 @@ defmodule FermixCore.Prompt.PromptComposer do
           accounting: [Accounting.entry()]
         }
 
+  @type base_composition :: %{
+          parts: [prompt_part()],
+          accounting: [Accounting.entry()]
+        }
+
   @spec compose(keyword()) :: {:ok, [message()]} | {:error, term()}
   def compose(opts) when is_list(opts) do
     with {:ok, result} <- compose_with_metadata(opts) do
@@ -35,37 +40,70 @@ defmodule FermixCore.Prompt.PromptComposer do
     end
   end
 
-  @spec compose_with_metadata(keyword()) :: {:ok, composition()} | {:error, term()}
-  def compose_with_metadata(opts) when is_list(opts) do
+  @doc """
+  Compose only the file-backed prompt base (bootstrap + USER.md/MEMORY.md),
+  excluding the generated runtime section. The runtime section is profile-
+  specific (depends on the filtered capability set), so cache holders
+  build it separately per profile via `RuntimeSections.build/2`.
+
+  The returned `parts` list is already injection-scanned and ordered.
+  Callers that want exported `messages` should run `export_messages/1`
+  on the parts (the runtime section is appended afterward).
+  """
+  @spec compose_base_with_metadata(keyword()) :: {:ok, base_composition()} | {:error, term()}
+  def compose_base_with_metadata(opts) when is_list(opts) do
     agent_id = Keyword.get(opts, :agent_id, "main")
-    available_skills = Keyword.get(opts, :available_skills, [])
-    runtime_capabilities = Keyword.get(opts, :runtime_capabilities)
 
     with {:ok, bootstrap} <- BootstrapLoader.load(agent_id, opts),
          {:ok, prompt_memory} <- PromptFiles.load(agent_id) do
       parts =
         agent_id
-        |> build_parts(bootstrap, prompt_memory, available_skills, runtime_capabilities)
+        |> build_base_parts(bootstrap, prompt_memory)
         |> scan_parts()
 
       {:ok,
        %{
-         messages: export_messages(parts),
          parts: parts,
          accounting: Enum.map(parts, &accounting_entry/1)
        }}
     end
   end
 
-  defp build_parts(agent_id, bootstrap, prompt_memory, available_skills, runtime_capabilities) do
+  @doc """
+  Export ordered system messages from prompt parts.
+
+  Exposed so callers that hold a cached base composition can rebuild the
+  full message list (base + runtime section) without re-running scans.
+  """
+  @spec export_parts([prompt_part()]) :: [message()]
+  def export_parts(parts) when is_list(parts), do: export_messages(parts)
+
+  @spec compose_with_metadata(keyword()) :: {:ok, composition()} | {:error, term()}
+  def compose_with_metadata(opts) when is_list(opts) do
+    available_skills = Keyword.get(opts, :available_skills, [])
+    runtime_capabilities = Keyword.get(opts, :runtime_capabilities)
+
+    with {:ok, base} <- compose_base_with_metadata(opts) do
+      runtime = runtime_part(available_skills, runtime_capabilities)
+      parts = base.parts ++ [runtime]
+
+      {:ok,
+       %{
+         messages: export_messages(parts),
+         parts: parts,
+         accounting: base.accounting ++ [accounting_entry(runtime)]
+       }}
+    end
+  end
+
+  defp build_base_parts(agent_id, bootstrap, prompt_memory) do
     [
       bootstrap_part(:identity, :bootstrap, bootstrap.identity),
       bootstrap_part(:soul, :bootstrap, bootstrap.soul),
       bootstrap_part(:agents, :bootstrap, bootstrap.agents),
       memory_part(:user, PromptFiles.user_path(agent_id), prompt_memory.user),
       memory_part(:memory, PromptFiles.memory_path(agent_id), prompt_memory.memory),
-      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime),
-      runtime_part(available_skills, runtime_capabilities)
+      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime)
     ]
     |> Enum.reject(&is_nil/1)
   end

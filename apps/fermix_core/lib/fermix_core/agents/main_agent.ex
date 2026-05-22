@@ -28,6 +28,7 @@ defmodule FermixCore.Agents.MainAgent do
 
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.AgentSupervisor
+  alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.CompactionConfig
@@ -37,7 +38,6 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Scheduler
   alias FermixCore.Memory.Store
-  alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Telemetry
@@ -136,11 +136,6 @@ defmodule FermixCore.Agents.MainAgent do
     GenServer.call(server, :status)
   end
 
-  @spec reload_skills(GenServer.server()) :: {:ok, [String.t()]} | {:error, term()}
-  def reload_skills(server \\ __MODULE__) do
-    GenServer.call(server, :reload_skills)
-  end
-
   # --- GenServer Callbacks ---
 
   @impl true
@@ -174,6 +169,7 @@ defmodule FermixCore.Agents.MainAgent do
       extraction_min_confidence: Config.extraction_min_confidence(opts),
       extraction_debounce_ms: Config.extraction_debounce_ms(opts),
       extraction_model: Config.extraction_model(opts),
+      runtime_context: nil,
       conversations: %{},
       compaction_failures: %{},
       task_refs: %{}
@@ -235,32 +231,29 @@ defmodule FermixCore.Agents.MainAgent do
   def handle_cast({:handle_message, msg}, state) do
     emit_mailbox_telemetry(msg)
     msg = Map.delete(msg, :__fermix_enqueued_at_us)
-    conversation_key = conversation_key(msg)
-    state = enqueue_latest_message(conversation_key, msg, state)
 
     Logger.info("Main Agent received message from #{msg.channel}/#{msg.chat_id}")
 
-    state =
-      state
-      |> maybe_cancel_active_request(conversation_key)
-      |> maybe_start_next_request(conversation_key)
+    case ensure_runtime_context(state, msg) do
+      {:ok, state, cache_status} ->
+        msg = Map.put(msg, :__runtime_context_cache_status, cache_status)
+        conversation_key = conversation_key(msg)
+        state = enqueue_latest_message(conversation_key, msg, state)
 
-    {:noreply, state}
+        state =
+          state
+          |> maybe_cancel_active_request(conversation_key)
+          |> maybe_start_next_request(conversation_key)
+
+        {:noreply, state}
+
+      {:error, state} ->
+        {:noreply, state}
+    end
   end
 
   def handle_cast({:clear_auto_compaction_failure, conversation_key}, state) do
     {:noreply, update_in(state.compaction_failures, &Map.delete(&1, conversation_key))}
-  end
-
-  @impl true
-  def handle_call(:reload_skills, _from, state) do
-    case reload_available_skills(state.skill_registry) do
-      {:ok, names, available_skills} ->
-        {:reply, {:ok, names}, %{state | available_skills: available_skills}}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
   end
 
   @impl true
@@ -450,6 +443,7 @@ defmodule FermixCore.Agents.MainAgent do
         capability_registry: state.capability_registry
       ]
       |> maybe_put_trust(Keyword.get(opts, :source_trust))
+      |> maybe_put_capabilities(Keyword.get(opts, :capabilities))
 
     case resolve_loop_adapter(state) do
       {:adapter, mod, opts} ->
@@ -472,6 +466,11 @@ defmodule FermixCore.Agents.MainAgent do
 
   defp maybe_put_trust(opts, nil), do: opts
   defp maybe_put_trust(opts, trust) when is_atom(trust), do: Keyword.put(opts, :trust, trust)
+
+  defp maybe_put_capabilities(opts, nil), do: opts
+
+  defp maybe_put_capabilities(opts, capabilities) when is_list(capabilities),
+    do: Keyword.put(opts, :capabilities, capabilities)
 
   defp resolve_loop_adapter(state) do
     cond do
@@ -520,6 +519,7 @@ defmodule FermixCore.Agents.MainAgent do
       extraction_min_confidence: state.extraction_min_confidence,
       extraction_debounce_ms: state.extraction_debounce_ms,
       extraction_model: state.extraction_model,
+      runtime_context: state.runtime_context,
       main_agent_server: self(),
       compaction_failures: state.compaction_failures
     }
@@ -540,7 +540,12 @@ defmodule FermixCore.Agents.MainAgent do
   defp run_message_loop(msg, state) do
     start = System.monotonic_time(:millisecond)
     conversation_key = conversation_key(msg)
-    prompt_context = load_prompt_context!(state.memory_agent_id, state.available_skills)
+    %RuntimeContext{} = ctx = state.runtime_context
+    cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
+    source_trust = Map.get(msg, :source_trust)
+    profile = profile_for_trust(ctx, source_trust, state.capability_registry)
+
+    emit_runtime_context_cache_telemetry(state, cache_status, profile)
 
     {history, history_duration_us} =
       Telemetry.timed_us(fn ->
@@ -550,9 +555,9 @@ defmodule FermixCore.Agents.MainAgent do
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
 
     user_message = %{role: "user", content: msg.content}
-    messages = prompt_context.messages ++ history ++ [user_message]
-
-    source_trust = Map.get(msg, :source_trust)
+    messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
+    accounting = RuntimeContext.accounting_for(ctx, profile)
+    emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
 
     context = %{
       agent_name: "main",
@@ -568,7 +573,7 @@ defmodule FermixCore.Agents.MainAgent do
       memory_repo: state.memory_repo,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
-      prompt_accounting: prompt_context.accounting,
+      prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
       reply_fn: msg.reply_fn,
@@ -576,7 +581,12 @@ defmodule FermixCore.Agents.MainAgent do
     }
 
     {{loop_opts, compaction_target}, loop_runtime_duration_us} =
-      Telemetry.timed_us(fn -> build_loop_runtime(state, messages, context, source_trust: source_trust) end)
+      Telemetry.timed_us(fn ->
+        build_loop_runtime(state, messages, context,
+          source_trust: source_trust,
+          capabilities: profile.capabilities
+        )
+      end)
 
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
 
@@ -953,37 +963,104 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
-  defp load_prompt_context!(agent_id, available_skills)
-       when is_binary(agent_id) and is_list(available_skills) do
+  defp ensure_runtime_context(state, msg) do
+    case state.runtime_context do
+      %RuntimeContext{} = ctx ->
+        {:ok, %{state | runtime_context: ctx}, :hit}
+
+      nil ->
+        case build_runtime_context(state) do
+          {:ok, ctx} ->
+            {:ok, %{state | runtime_context: ctx}, :miss}
+
+          {:error, reason} ->
+            handle_runtime_context_build_error(msg, state, reason)
+        end
+    end
+  end
+
+  defp build_runtime_context(state) do
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        PromptComposer.compose_with_metadata(
-          agent_id: agent_id,
-          available_skills: available_skills
+        RuntimeContext.build(
+          agent_id: state.memory_agent_id,
+          available_skills: state.available_skills,
+          capability_registry: state.capability_registry
         )
       end)
 
     case result do
-      {:ok, prompt_context} ->
-        emit_prompt_context_telemetry(agent_id, prompt_context, duration_us)
-        prompt_context
+      {:ok, ctx} ->
+        emit_runtime_context_build(state, ctx, duration_us, :ok, nil)
+        {:ok, ctx}
 
-      {:error, reason} -> raise "prompt composition failed: #{inspect(reason)}"
+      {:error, reason} ->
+        emit_runtime_context_build(state, nil, duration_us, :error, reason)
+        {:error, reason}
     end
   end
 
-  defp emit_prompt_context_telemetry(agent_id, prompt_context, duration_us) do
+  defp handle_runtime_context_build_error(msg, state, reason) do
+    Logger.error("runtime context build failed: #{inspect(reason)}")
+    deliver_reply(msg, "Sorry, I encountered an error processing your message.")
+    {:error, state}
+  end
+
+  defp profile_for_trust(ctx, :operator, registry),
+    do: RuntimeContext.profile_for(ctx, :operator, registry, [])
+
+  defp profile_for_trust(ctx, :guest, registry),
+    do: RuntimeContext.profile_for(ctx, :guest, registry, [])
+
+  # nil trust = least privilege (matches CapabilityRegistry.resolve_policy/2).
+  defp profile_for_trust(ctx, _trust, registry),
+    do: RuntimeContext.profile_for(ctx, :guest, registry, [])
+
+  defp emit_prompt_context_telemetry(agent_id, messages, accounting, cache_status) do
     :telemetry.execute(
       [:fermix, :agent, :prompt_context],
       %{
-        duration_us: duration_us,
-        message_count: length(prompt_context.messages),
-        message_bytes: messages_bytes(prompt_context.messages),
-        part_count: length(prompt_context.parts)
+        duration_us: 0,
+        message_count: length(messages),
+        message_bytes: messages_bytes(messages),
+        part_count: length(accounting)
       },
-      %{agent: agent_id}
+      %{agent: agent_id, cache: cache_status}
     )
   end
+
+  defp emit_runtime_context_cache_telemetry(state, cache_status, profile) do
+    :telemetry.execute(
+      [:fermix, :runtime_context, :cache],
+      %{count: 1},
+      %{
+        agent: state.memory_agent_id,
+        result: cache_status,
+        trust: profile.trust
+      }
+    )
+  end
+
+  defp emit_runtime_context_build(state, ctx, duration_us, status, reason) do
+    metadata = %{
+      agent: state.memory_agent_id,
+      status: status
+    }
+
+    metadata = if reason, do: Map.put(metadata, :reason, reason), else: metadata
+
+    measurements = %{
+      duration_us: duration_us,
+      base_message_bytes: runtime_context_base_bytes(ctx)
+    }
+
+    :telemetry.execute([:fermix, :runtime_context, :build], measurements, metadata)
+  end
+
+  defp runtime_context_base_bytes(%RuntimeContext{base_messages: messages}),
+    do: messages_bytes(messages)
+
+  defp runtime_context_base_bytes(_other), do: 0
 
   defp emit_history_telemetry(msg, conversation_key, history, duration_us) do
     :telemetry.execute(
@@ -1051,7 +1128,8 @@ defmodule FermixCore.Agents.MainAgent do
 
   defp messages_bytes(messages) do
     Enum.reduce(messages, 0, fn message, total ->
-      total + byte_size(to_string(Map.get(message, :content) || Map.get(message, "content") || ""))
+      total +
+        byte_size(to_string(Map.get(message, :content) || Map.get(message, "content") || ""))
     end)
   end
 
@@ -1091,7 +1169,9 @@ defmodule FermixCore.Agents.MainAgent do
       |> add_extraction_route(state)
 
     {result, duration_us} =
-      Telemetry.timed_us(fn -> ExtractionDebouncer.request(opts, server: state.extraction_debouncer) end)
+      Telemetry.timed_us(fn ->
+        ExtractionDebouncer.request(opts, server: state.extraction_debouncer)
+      end)
 
     emit_extraction_dispatch_telemetry(msg, result, duration_us)
     result
@@ -1194,21 +1274,6 @@ defmodule FermixCore.Agents.MainAgent do
     case safe_skill_registry_call(fn -> SkillRegistry.list_detailed(skill_registry) end) do
       {:ok, skills} -> skills
       {:error, _reason} -> []
-    end
-  end
-
-  defp reload_available_skills(skill_registry) do
-    with {:ok, {:ok, names}} <-
-           safe_skill_registry_call(fn -> SkillRegistry.reload(skill_registry) end),
-         {:ok, skills} <-
-           safe_skill_registry_call(fn -> SkillRegistry.list_detailed(skill_registry) end) do
-      {:ok, names, skills}
-    else
-      {:ok, {:error, reason}} ->
-        {:error, reason}
-
-      {:error, reason} ->
-        {:error, {:skill_registry_unavailable, reason}}
     end
   end
 
