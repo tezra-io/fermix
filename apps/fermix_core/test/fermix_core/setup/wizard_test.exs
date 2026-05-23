@@ -1167,6 +1167,38 @@ defmodule FermixCore.Setup.WizardTest do
         Wizard.set_sandbox_overrides(nil, :invalid, nil)
       end
     end
+
+    test "does not persist env-only secrets that are not already in TOML", %{tmp_home: tmp_home} do
+      # Simulate runtime.exs overlaying an OPENAI_API_KEY into Application env
+      # without it being persisted to the TOML on disk. A sandbox-only save
+      # must not leak that secret to disk as plaintext.
+      Application.put_env(:fermix_core, :providers,
+        openai: [auth_mode: :api_key, api_key: "sk-from-env-only"]
+      )
+
+      {:ok, _report} = Wizard.set_sandbox_overrides(:open, nil, nil)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      refute contents =~ "sk-from-env-only"
+      assert contents =~ ~s(mode = "open")
+    end
+
+    test "preserves API key that is already persisted in TOML", %{tmp_home: tmp_home} do
+      File.write!(Path.join(tmp_home, "config.toml"), """
+      [fermix_core.providers.openai]
+      auth_mode = "api_key"
+      api_key = "sk-already-on-disk"
+      """)
+
+      # Re-bootstrap so the in-memory state matches what's now on disk.
+      :ok = ConfigStore.bootstrap_runtime_config()
+
+      {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "sk-already-on-disk"
+      assert contents =~ ~s(mode = "strict")
+    end
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
