@@ -1,6 +1,6 @@
 defmodule FermixCore.MCP.Inbound.Supervisor do
   @moduledoc """
-  Starts the inbound Hermes MCP server when inbound MCP is enabled.
+  Starts the inbound Anubis MCP server when inbound MCP is enabled.
   """
 
   use Supervisor
@@ -21,14 +21,14 @@ defmodule FermixCore.MCP.Inbound.Supervisor do
   def init(opts) do
     config = Keyword.get(opts, :config, Config.current())
     maybe_warn_mcp_reexposure(config)
-    children = if config.enabled?, do: [hermes_child(config, opts)], else: []
+    children = if config.enabled?, do: [anubis_child(config, opts)], else: []
 
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  defp hermes_child(%Config{} = config, opts) do
+  defp anubis_child(%Config{} = config, opts) do
     server = Keyword.get(opts, :server, Server)
-    server_supervisor = Keyword.get(opts, :server_supervisor, Hermes.Server.Supervisor)
+    server_supervisor = Keyword.get(opts, :server_supervisor, Anubis.Server.Supervisor)
 
     server_opts =
       opts
@@ -37,7 +37,7 @@ defmodule FermixCore.MCP.Inbound.Supervisor do
       |> Keyword.put(:request_timeout, config.request_timeout_ms)
 
     %{
-      id: :mcp_inbound_hermes_server,
+      id: :mcp_inbound_anubis_server,
       start: {server_supervisor, :start_link, [server, server_opts]},
       type: :supervisor
     }

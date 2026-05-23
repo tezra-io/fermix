@@ -31,7 +31,7 @@ defmodule FermixCore.MCP.Inbound.SupervisorTest do
     def execute_capability(_name, _args, _context), do: {:error, :not_used}
   end
 
-  defmodule FakeHermesSupervisor do
+  defmodule FakeAnubisSupervisor do
     use GenServer
 
     def start_link(server, opts) do
@@ -40,7 +40,7 @@ defmodule FermixCore.MCP.Inbound.SupervisorTest do
 
     @impl true
     def init({server, opts}) do
-      send(Keyword.fetch!(opts, :test_owner), {:fake_hermes_started, server, opts})
+      send(Keyword.fetch!(opts, :test_owner), {:fake_anubis_started, server, opts})
       {:ok, %{server: server, opts: opts}}
     end
   end
@@ -57,29 +57,29 @@ defmodule FermixCore.MCP.Inbound.SupervisorTest do
     :ok
   end
 
-  test "disabled config starts no Hermes server child" do
+  test "disabled config starts no Anubis server child" do
     pid =
       start_supervised!(
         {InboundSupervisor,
-         config: %Config{enabled?: false}, server_supervisor: FakeHermesSupervisor}
+         config: %Config{enabled?: false}, server_supervisor: FakeAnubisSupervisor}
       )
 
     assert Supervisor.which_children(pid) == []
   end
 
-  test "enabled config starts Hermes server with configured transport and timeout" do
+  test "enabled config starts Anubis server with configured transport and timeout" do
     config = %Config{enabled?: true, transport: :stdio, request_timeout_ms: 12_345}
 
     start_supervised!(
       {InboundSupervisor,
        [
          config: config,
-         server_supervisor: FakeHermesSupervisor,
+         server_supervisor: FakeAnubisSupervisor,
          server_opts: [test_owner: self()]
        ]}
     )
 
-    assert_receive {:fake_hermes_started, Server, opts}
+    assert_receive {:fake_anubis_started, Server, opts}
     assert opts[:transport] == :stdio
     assert opts[:request_timeout] == 12_345
   end
@@ -102,7 +102,7 @@ defmodule FermixCore.MCP.Inbound.SupervisorTest do
           {InboundSupervisor,
            [
              config: config,
-             server_supervisor: FakeHermesSupervisor,
+             server_supervisor: FakeAnubisSupervisor,
              server_opts: [test_owner: self()]
            ]}
         )
