@@ -1,11 +1,10 @@
 defmodule FermixCore.Capabilities.Skill do
   @moduledoc """
-  Wraps a skill `AgentDefinition` as a `%Capability{kind: :skill}`.
+  Runs a skill `AgentDefinition` through the sub-agent execution path.
 
-  The capability's `executor` points at `invoke/3` so the runtime calls
-  back here when the LLM picks the skill by name. `invoke/3` enforces the
-  recursion cap, spawns a supervised sub-agent, waits for the terminal
-  result, writes the journal, and emits telemetry.
+  `invoke/3` is used by the stable `skill_run` built-in. `from_definition/1`
+  remains for compatibility with registry/storage tests, but the live runtime
+  no longer exposes one provider tool per installed skill.
   """
 
   alias FermixCore.Agents.AgentDefinition
@@ -46,8 +45,7 @@ defmodule FermixCore.Capabilities.Skill do
     * `context` — invocation context with `:agent_supervisor`,
       `:task_supervisor`, `:agent_name`, `:session_id`, `:journal_base_dir`,
       `:registry`, `:provider`, `:skill_depth` (defaults 0).
-    * `definition` — bound `AgentDefinition` for this skill (closed over by
-      `from_definition/1`).
+    * `definition` — loaded `AgentDefinition` for this skill.
   """
   @spec invoke(map(), map(), AgentDefinition.t()) :: {:ok, map()}
   def invoke(args, context, %AgentDefinition{} = definition)
@@ -334,13 +332,8 @@ defmodule FermixCore.Capabilities.Skill do
     |> String.trim()
   end
 
-  defp skill_description(%AgentDefinition{system_prompt: prompt}) do
-    prompt
-    |> String.trim()
-    |> String.split(~r/\r?\n\r?\n/, parts: 2)
-    |> hd()
-    |> String.slice(0, 280)
-  end
+  defp skill_description(%AgentDefinition{description: description}) when is_binary(description),
+    do: description
 
   defp skill_parameters do
     %{

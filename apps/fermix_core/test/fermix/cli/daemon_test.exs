@@ -182,6 +182,27 @@ defmodule Fermix.CLI.DaemonTest do
     assert Keyword.get(opts, :session_id) == "daemon-test"
   end
 
+  test "skills_list returns JSON-safe skill summaries", %{socket_path: socket_path} do
+    assert {:ok, reply} = Client.request("skills_list", socket_path: socket_path, timeout: 1_000)
+
+    assert reply["status"] == "ok"
+    assert is_integer(reply["skills"]["count"])
+    assert is_list(reply["skills"]["skills"])
+  end
+
+  test "skills_view returns the selected skill body", %{socket_path: socket_path} do
+    assert {:ok, reply} =
+             Client.request("skills_view",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"name" => "self_knowledge"}
+             )
+
+    assert reply["status"] == "ok"
+    assert reply["skill"]["name"] == "self_knowledge"
+    assert is_binary(reply["skill"]["body"])
+  end
+
   defp mkdir! do
     path =
       Path.join(

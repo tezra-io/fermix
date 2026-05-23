@@ -1,6 +1,8 @@
 defmodule FermixCore.Realtime.SessionServerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Realtime.Config
@@ -38,6 +40,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
         nil -> :ok
         _pid -> Agent.stop(__MODULE__)
       end
+    catch
+      :exit, _reason -> :ok
     end
 
     def start_link(opts) do
@@ -170,6 +174,60 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert file_name in tool_names
     refute channel_name in tool_names
+  end
+
+  test "default runtime path renders skills through RuntimeContext" do
+    fixture = runtime_session_fixture(["voice_skill"])
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: fixture.capability_registry,
+        skill_registry: fixture.skill_registry
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    tool_names = Enum.map(event.session.tools, & &1.name)
+
+    assert event.session.instructions =~ ~s(<skill name="voice_skill")
+    assert "skill_view" in tool_names
+    assert "skill_run" in tool_names
+    refute "voice_skill" in tool_names
+  end
+
+  test "skill reload does not mutate an active realtime session snapshot" do
+    fixture = runtime_session_fixture(["voice_skill"])
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: fixture.capability_registry,
+        skill_registry: fixture.skill_registry
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    write_skill(fixture.skills_dir, "late_skill")
+
+    assert {:ok, summary} = SkillRegistry.reload(fixture.skill_registry)
+    assert "late_skill" in summary.added
+
+    state = :sys.get_state(server)
+    names = Enum.map(state.available_skills, & &1.name)
+
+    assert names == ["voice_skill"]
+    assert state.session_update_event.session.instructions =~ "voice_skill"
+    refute state.session_update_event.session.instructions =~ "late_skill"
   end
 
   test "audio_chunk forwards provider append event and tracks usage", %{server: server} do
@@ -619,5 +677,82 @@ defmodule FermixCore.Realtime.SessionServerTest do
       policy_class: :read_only,
       metadata: %{category: category}
     })
+  end
+
+  defp runtime_session_fixture(skill_names) when is_list(skill_names) do
+    suffix = System.unique_integer([:positive, :monotonic])
+    skills_dir = Path.join(System.tmp_dir!(), "fermix-realtime-skills-#{suffix}")
+    prompt_dir = Path.join(System.tmp_dir!(), "fermix-realtime-prompt-#{suffix}")
+    bootstrap_dir = Path.join(System.tmp_dir!(), "fermix-realtime-bootstrap-#{suffix}")
+    capability_registry = :"realtime_capability_registry_#{suffix}"
+    skill_registry = :"realtime_skill_registry_#{suffix}"
+    previous_memory = Application.get_env(:fermix_core, :memory, [])
+    previous_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
+
+    File.mkdir_p!(skills_dir)
+    File.mkdir_p!(prompt_dir)
+
+    Application.put_env(
+      :fermix_core,
+      :memory,
+      Keyword.merge(previous_memory, prompt_base_dir: prompt_dir, agent_id: "realtime")
+    )
+
+    Application.put_env(:fermix_core, :prompt_bootstrap,
+      bootstrap_dir: bootstrap_dir,
+      accounting_enabled: true
+    )
+
+    {:ok, _} = start_supervised({CapabilityRegistry, [name: capability_registry]})
+    seed_skill_lifecycle_tools(capability_registry)
+    Enum.each(skill_names, &write_skill(skills_dir, &1))
+
+    {:ok, _} =
+      start_supervised(
+        {SkillRegistry,
+         name: skill_registry,
+         skills_dir: skills_dir,
+         core_dir: nil,
+         seed_defaults: false,
+         capability_registry: capability_registry}
+      )
+
+    on_exit(fn ->
+      Application.put_env(:fermix_core, :memory, previous_memory)
+      Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
+      FermixTestSupport.SafeRm.rm_rf!(skills_dir)
+      FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
+      FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
+    end)
+
+    %{
+      capability_registry: capability_registry,
+      skill_registry: skill_registry,
+      skills_dir: skills_dir
+    }
+  end
+
+  defp seed_skill_lifecycle_tools(registry) do
+    [FermixCore.Tools.SkillView, FermixCore.Tools.SkillRun]
+    |> Enum.each(fn tool_module ->
+      :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(tool_module))
+    end)
+  end
+
+  defp write_skill(skills_dir, name) do
+    skill_dir = Path.join(skills_dir, name)
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      """
+      ---
+      name: #{name}
+      description: Use #{name} in realtime tests.
+      allowed_tools: []
+      ---
+      Realtime skill body.
+      """
+    )
   end
 end

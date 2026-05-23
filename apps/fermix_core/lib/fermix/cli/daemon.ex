@@ -17,6 +17,8 @@ defmodule Fermix.CLI.Daemon do
 
   use GenServer
 
+  alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Health
   alias FermixCore.Introspection.Agents
   alias FermixCore.Introspection.Capabilities
@@ -28,6 +30,8 @@ defmodule Fermix.CLI.Daemon do
 
   @recv_timeout_ms 5_000
   @accept_idle_ms 200
+  @skill_name_pattern ~r/^[A-Za-z0-9_-]{1,64}$/
+  @skill_view_max_bytes 65_536
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -176,6 +180,9 @@ defmodule Fermix.CLI.Daemon do
   defp handle_method("health", _request, _state), do: health_reply()
   defp handle_method("agents", _request, _state), do: agents_reply()
   defp handle_method("capabilities", request, _state), do: capabilities_reply(request)
+  defp handle_method("skills_list", _request, _state), do: skills_list_reply()
+  defp handle_method("skills_view", request, _state), do: skills_view_reply(request)
+  defp handle_method("skills_reload", _request, _state), do: skills_reload_reply()
   defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
 
   defp handle_method("shutdown", _request, _state) do
@@ -223,6 +230,55 @@ defmodule Fermix.CLI.Daemon do
       %{status: "ok", capabilities: Wire.json_safe(capabilities)}
     else
       {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  defp skills_list_reply do
+    case safe_daemon_call(fn -> SkillRegistry.snapshot() end) do
+      {:ok, {:ok, snapshot}} ->
+        %{status: "ok", skills: skill_snapshot(snapshot)}
+
+      {:error, reason} ->
+        %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  defp skills_view_reply(request) do
+    name = request |> Map.get("params", %{}) |> Map.get("name", "") |> to_string()
+
+    with :ok <- validate_skill_name(name),
+         {:ok, {:ok, definition}} <- safe_daemon_call(fn -> SkillRegistry.load(name) end),
+         :ok <- within_skill_view_size(definition) do
+      %{status: "ok", skill: skill_detail(definition)}
+    else
+      {:ok, {:error, {:unknown_skill, skill_name}}} ->
+        %{status: "error", reason: "unknown_skill: #{skill_name}"}
+
+      {:error, reason} ->
+        %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  defp within_skill_view_size(%{system_prompt: body}) when is_binary(body) do
+    if byte_size(body) <= @skill_view_max_bytes do
+      :ok
+    else
+      {:error,
+       "skill_body_too_large: #{byte_size(body)} bytes exceeds #{@skill_view_max_bytes}; " <>
+         "split the skill or move long references into separate files"}
+    end
+  end
+
+  defp skills_reload_reply do
+    case safe_daemon_call(fn -> MainAgent.reload_skills() end) do
+      {:ok, {:ok, summary}} ->
+        %{status: "ok", reload: reload_summary(summary)}
+
+      {:ok, {:error, reason}} ->
+        %{status: "error", reason: inspect(reason)}
+
+      {:error, reason} ->
+        %{status: "error", reason: inspect(reason)}
     end
   end
 
@@ -280,6 +336,61 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp normalize_timeout_ms(_timeout_ms, default_timeout_ms), do: default_timeout_ms
+
+  defp validate_skill_name(name) do
+    if String.match?(name, @skill_name_pattern) do
+      :ok
+    else
+      {:error, :invalid_skill_name}
+    end
+  end
+
+  defp skill_snapshot(snapshot) do
+    %{
+      version: Map.get(snapshot, :version),
+      count: length(Map.get(snapshot, :skills, [])),
+      skills: snapshot |> Map.get(:skills, []) |> Enum.map(&skill_summary/1),
+      errors: snapshot |> Map.get(:errors, []) |> Enum.map(&inspect/1)
+    }
+  end
+
+  defp skill_summary(skill) do
+    %{
+      name: skill.name,
+      description: skill.description,
+      trust: Atom.to_string(skill.trust || :operator),
+      source_path: skill.source_path,
+      model: skill.model,
+      allowed_tools: skill.allowed_tools,
+      capabilities: skill.capabilities,
+      max_iterations: skill.max_iterations,
+      timeout_seconds: skill.timeout_seconds
+    }
+  end
+
+  defp skill_detail(skill) do
+    skill
+    |> skill_summary()
+    |> Map.put(:body, skill.system_prompt)
+  end
+
+  defp reload_summary(summary) do
+    %{
+      version: Map.get(summary, :version),
+      count: length(Map.get(summary, :names, [])),
+      names: Map.get(summary, :names, []),
+      added: Map.get(summary, :added, []),
+      removed: Map.get(summary, :removed, []),
+      changed: Map.get(summary, :changed, []),
+      errors: summary |> Map.get(:errors, []) |> Enum.map(&inspect/1)
+    }
+  end
+
+  defp safe_daemon_call(fun) when is_function(fun, 0) do
+    {:ok, fun.()}
+  catch
+    :exit, reason -> {:error, reason}
+  end
 
   defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_to_string(reason) when is_binary(reason), do: reason

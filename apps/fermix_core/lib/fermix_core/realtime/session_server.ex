@@ -5,9 +5,10 @@ defmodule FermixCore.Realtime.SessionServer do
 
   use GenServer
 
+  alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config, as: MemoryConfig
-  alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.CostTracker
@@ -73,37 +74,58 @@ defmodule FermixCore.Realtime.SessionServer do
     Process.flag(:trap_exit, true)
 
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
-    capabilities = Keyword.get_lazy(opts, :capabilities, fn -> default_capabilities(config) end)
+    capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
+    skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
     device_id = Keyword.get(opts, :device_id, "unknown")
-    context = Keyword.get_lazy(opts, :context, fn -> default_context(device_id) end)
 
-    {:ok,
-     %{
-       companion: Keyword.fetch!(opts, :companion),
-       config: config,
-       device_id: device_id,
-       session_scope: Keyword.get(opts, :session_scope, :root),
-       openai_client: Keyword.get(opts, :openai_client, OpenAIClient),
-       openai_pid: nil,
-       api_key: Keyword.get(opts, :api_key),
-       safety_identifier: Keyword.get(opts, :safety_identifier),
-       capabilities: capabilities,
-       tool_bridge: ToolBridge.new(capabilities, context),
-       prompt_loader: Keyword.get(opts, :prompt_loader, &PromptComposer.compose_with_metadata/1),
-       recorder_module: Keyword.get(opts, :recorder_module, ConversationRecorder),
-       recorder_opts: Keyword.get(opts, :recorder_opts, []),
-       usage: CostTracker.new(config),
-       muted?: false,
-       max_session_timer: nil,
-       user_transcript: "",
-       assistant_transcript: "",
-       reconnect_backoff_ms:
-         Keyword.get(opts, :reconnect_backoff_ms, @default_reconnect_backoff_ms),
-       reconnect_attempts: 0,
-       reconnect_timer: nil,
-       session_update_event: nil,
-       current_item_id: nil
-     }}
+    context =
+      opts
+      |> Keyword.get_lazy(:context, fn -> default_context(device_id) end)
+      |> Map.put_new(:capability_registry, capability_registry)
+      |> Map.put_new(:skill_registry, skill_registry)
+
+    prompt_loader = Keyword.get(opts, :prompt_loader)
+
+    case realtime_runtime(opts, prompt_loader, capability_registry, skill_registry) do
+      {:ok, runtime} ->
+        capabilities = runtime.capabilities
+
+        {:ok,
+         %{
+           companion: Keyword.fetch!(opts, :companion),
+           config: config,
+           device_id: device_id,
+           session_scope: Keyword.get(opts, :session_scope, :root),
+           openai_client: Keyword.get(opts, :openai_client, OpenAIClient),
+           openai_pid: nil,
+           api_key: Keyword.get(opts, :api_key),
+           safety_identifier: Keyword.get(opts, :safety_identifier),
+           capability_registry: capability_registry,
+           skill_registry: skill_registry,
+           available_skills: runtime.available_skills,
+           runtime_context: runtime.context,
+           runtime_profile: runtime.profile,
+           capabilities: capabilities,
+           tool_bridge: ToolBridge.new(capabilities, context),
+           prompt_loader: prompt_loader,
+           recorder_module: Keyword.get(opts, :recorder_module, ConversationRecorder),
+           recorder_opts: Keyword.get(opts, :recorder_opts, []),
+           usage: CostTracker.new(config),
+           muted?: false,
+           max_session_timer: nil,
+           user_transcript: "",
+           assistant_transcript: "",
+           reconnect_backoff_ms:
+             Keyword.get(opts, :reconnect_backoff_ms, @default_reconnect_backoff_ms),
+           reconnect_attempts: 0,
+           reconnect_timer: nil,
+           session_update_event: nil,
+           current_item_id: nil
+         }}
+
+      {:error, reason} ->
+        {:stop, reason}
+    end
   end
 
   @impl true
@@ -298,8 +320,7 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp build_session_update_event(state) do
-    with {:ok, prompt} <- state.prompt_loader.(prompt_opts(state)) do
-      instructions = prompt.messages |> Enum.map_join("\n\n", & &1.content)
+    with {:ok, instructions} <- session_instructions(state) do
       tools = ToolBridge.to_openai_tools(state.capabilities)
       {:ok, OpenAIClient.session_update_event(state.config, instructions, tools)}
     end
@@ -360,14 +381,82 @@ defmodule FermixCore.Realtime.SessionServer do
     )
   end
 
+  defp realtime_runtime(opts, prompt_loader, capability_registry, _skill_registry)
+       when is_function(prompt_loader, 1) do
+    capabilities =
+      Keyword.get_lazy(opts, :capabilities, fn ->
+        default_capabilities(capability_registry)
+      end)
+
+    {:ok,
+     %{
+       available_skills: [],
+       context: nil,
+       profile: nil,
+       capabilities: capabilities
+     }}
+  end
+
+  defp realtime_runtime(_opts, nil, capability_registry, skill_registry) do
+    available_skills = load_available_skills(skill_registry)
+
+    with {:ok, context} <-
+           RuntimeContext.build(
+             agent_id: MemoryConfig.agent_id(),
+             available_skills: available_skills,
+             capability_registry: capability_registry
+           ) do
+      profile =
+        RuntimeContext.build_profile(:operator, available_skills, capability_registry,
+          excluded_categories: [:channel]
+        )
+
+      {:ok,
+       %{
+         available_skills: available_skills,
+         context: context,
+         profile: profile,
+         capabilities: profile.capabilities
+       }}
+    end
+  end
+
+  defp realtime_runtime(_opts, prompt_loader, _capability_registry, _skill_registry) do
+    {:error, {:invalid_prompt_loader, prompt_loader}}
+  end
+
+  defp load_available_skills(skill_registry) do
+    case safe_skill_registry_call(fn -> SkillRegistry.list_detailed(skill_registry) end) do
+      {:ok, skills} -> skills
+      {:error, _reason} -> []
+    end
+  end
+
   defp prompt_opts(state) do
     [
       agent_id: MemoryConfig.agent_id(),
-      available_skills: [],
+      available_skills: state.available_skills,
       runtime_capabilities: state.capabilities,
       realtime?: true
     ]
   end
+
+  defp session_instructions(%{prompt_loader: loader} = state) when is_function(loader, 1) do
+    with {:ok, prompt} <- loader.(prompt_opts(state)) do
+      {:ok, prompt.messages |> Enum.map_join("\n\n", & &1.content)}
+    end
+  end
+
+  defp session_instructions(%{runtime_context: %RuntimeContext{} = ctx, runtime_profile: profile}) do
+    instructions =
+      ctx.base_messages
+      |> Kernel.++([profile.runtime_message])
+      |> Enum.map_join("\n\n", & &1.content)
+
+    {:ok, instructions}
+  end
+
+  defp session_instructions(_state), do: {:error, :runtime_context_unavailable}
 
   defp handle_provider_event_internal({:audio_delta, item_id, audio}, state) do
     notify(state.companion, %{type: "state", state: "speaking"})
@@ -539,7 +628,7 @@ defmodule FermixCore.Realtime.SessionServer do
   defp require_binary(value, _name) when is_binary(value) and value != "", do: {:ok, value}
   defp require_binary(_value, name), do: {:error, {:missing, name}}
 
-  defp default_capabilities(%Config{} = _config) do
+  defp default_capabilities(capability_registry) do
     # Realtime keeps parity with Main Agent except for channel-only reply tools,
     # which need an active channel reply function that voice sessions do not have.
     # The prior `tool_policy = "read_only"`/`"broad"` knob was a defensive
@@ -551,10 +640,16 @@ defmodule FermixCore.Realtime.SessionServer do
     # Voice is the operator at the keyboard — same trust level as the
     # human owner messaging from CLI or a remote channel. Declared
     # explicitly at the call site rather than inferred from absence.
-    CapabilityRegistry.list_for(CapabilityRegistry,
+    CapabilityRegistry.list_for(capability_registry,
       trust: :operator,
       excluded_categories: [:channel]
     )
+  end
+
+  defp safe_skill_registry_call(fun) when is_function(fun, 0) do
+    {:ok, fun.()}
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage}) do

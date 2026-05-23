@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
@@ -418,6 +419,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       """
       ---
       name: #{name}
+      description: Use #{name} in tests.
       model: gpt-5.4-mini
       capabilities: ["code"]
       allowed_tools: ["file_read"]
@@ -444,6 +446,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       start_supervised({CapabilityRegistry, [name: capability_registry_name]},
         id: :"test_capability_registry_with_skill_#{suffix}"
       )
+
+    seed_skill_lifecycle_tools(capability_registry_name)
 
     {:ok, _} =
       start_supervised(
@@ -488,6 +492,13 @@ defmodule FermixCore.Agents.MainAgentTest do
       capability_registry: capability_registry_name,
       journal_dir: journal_dir
     }
+  end
+
+  defp seed_skill_lifecycle_tools(registry) do
+    [FermixCore.Tools.SkillView, FermixCore.Tools.SkillRun]
+    |> Enum.each(fn tool_module ->
+      :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(tool_module))
+    end)
   end
 
   setup do
@@ -1389,13 +1400,14 @@ defmodule FermixCore.Agents.MainAgentTest do
              )
     end
 
-    test "keeps the skill list pinned for the MainAgent epoch", %{
+    test "keeps the skill list pinned until explicit reload", %{
       agent: agent,
       skills_dir: skills_dir
     } do
       MockProvider.set_responses([
         mock_response("first"),
-        mock_response("second")
+        mock_response("second"),
+        mock_response("third")
       ])
 
       MainAgent.handle_message(make_message("hello"), agent)
@@ -1412,16 +1424,62 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       [{messages_without_reload, _opts}] = MockProvider.get_calls()
       refute runtime_message(messages_without_reload).content =~ "coding-skill"
+
+      assert {:ok, summary} = MainAgent.reload_skills(agent)
+      assert "coding-skill" in summary.added
+      MockProvider.reset_calls()
+
+      MainAgent.handle_message(make_message("after reload"), agent)
+      assert_receive {:reply, "third"}, 5_000
+
+      [{messages_after_reload, _opts}] = MockProvider.get_calls()
+      assert runtime_message(messages_after_reload).content =~ "coding-skill"
     end
 
-    test "delegates to a skill capability when the LLM picks one by name", ctx do
+    test "reload keeps in-flight requests on their original skill snapshot", %{
+      agent: agent,
+      skills_dir: skills_dir
+    } do
+      MockProvider.set_responses([
+        {:block, :skill_reload_probe, mock_response("first")},
+        mock_response("second")
+      ])
+
+      MainAgent.handle_message(make_message("before reload"), agent)
+
+      assert_receive {:mock_provider_blocked, :skill_reload_probe, provider_pid}, 5_000
+
+      [{messages_before_reload, _opts}] = MockProvider.get_calls()
+      refute runtime_message(messages_before_reload).content =~ "coding-skill"
+
+      write_skill(skills_dir, "coding-skill")
+
+      assert {:ok, summary} = MainAgent.reload_skills(agent)
+      assert "coding-skill" in summary.added
+
+      send(provider_pid, {:continue, :skill_reload_probe})
+      assert_receive {:reply, "first"}, 5_000
+
+      MockProvider.reset_calls()
+
+      MainAgent.handle_message(make_message("after reload"), agent)
+      assert_receive {:reply, "second"}, 5_000
+
+      [{messages_after_reload, _opts}] = MockProvider.get_calls()
+      assert runtime_message(messages_after_reload).content =~ "coding-skill"
+    end
+
+    test "delegates to a skill through skill_run", ctx do
       %{agent: agent, journal_dir: journal_dir} =
         start_agent_with_skill(ctx, "coding-skill", "You solve code tasks.")
 
       MockProvider.set_responses([
         mock_response("",
           tool_calls: [
-            tool_call("call_1", "coding-skill", %{"task" => "Inspect the README"})
+            tool_call("call_1", "skill_run", %{
+              "name" => "coding-skill",
+              "task" => "Inspect the README"
+            })
           ]
         ),
         mock_response("Inspected the README and found the issue."),
@@ -1451,8 +1509,14 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert length(calls) == 3
 
       {_main_messages, main_opts} = hd(calls)
-      coding_cap = Enum.find(main_opts[:capabilities], &(&1.name == "coding-skill"))
-      assert coding_cap.kind == :skill
+      names = Enum.map(main_opts[:capabilities], & &1.name)
+
+      assert "skill_view" in names
+      assert "skill_run" in names
+      refute "coding-skill" in names
+
+      skill_run_cap = Enum.find(main_opts[:capabilities], &(&1.name == "skill_run"))
+      assert skill_run_cap.kind == :builtin
 
       {skill_messages, skill_opts} = Enum.at(calls, 1)
       assert hd(skill_messages).content == "You solve code tasks."
@@ -1478,7 +1542,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       names = Enum.map(opts[:capabilities], & &1.name)
       runtime = runtime_message(messages)
 
-      assert "coding-skill" in names
+      assert "skill_view" in names
+      assert "skill_run" in names
+      refute "coding-skill" in names
       assert "mcp_demo_tool" in names
       assert runtime.content =~ "coding-skill"
       assert runtime.content =~ "mcp_demo_tool"
@@ -1503,6 +1569,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       names = Enum.map(opts[:capabilities], & &1.name)
       runtime = runtime_message(messages)
 
+      refute "skill_view" in names
+      refute "skill_run" in names
       refute "coding-skill" in names
       refute "mcp_demo_tool" in names
       refute runtime.content =~ "coding-skill"
@@ -1963,8 +2031,8 @@ defmodule FermixCore.Agents.MainAgentTest do
       refute "late_guest_tool" in names
     end
 
-    test "does not expose reload_skills/1 as a MainAgent public API" do
-      refute function_exported?(MainAgent, :reload_skills, 1)
+    test "exposes reload_skills/1 as a MainAgent public API" do
+      assert function_exported?(MainAgent, :reload_skills, 1)
     end
 
     test "runtime context build failure replies without crashing the server", %{

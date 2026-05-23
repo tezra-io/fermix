@@ -40,6 +40,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.Store
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Telemetry
 
   @typing_interval_ms 4_000
@@ -134,6 +135,11 @@ defmodule FermixCore.Agents.MainAgent do
   @spec status(GenServer.server()) :: status()
   def status(server \\ __MODULE__) do
     GenServer.call(server, :status)
+  end
+
+  @spec reload_skills(GenServer.server()) :: {:ok, map()} | {:error, term()}
+  def reload_skills(server \\ __MODULE__) do
+    GenServer.call(server, :reload_skills)
   end
 
   # --- GenServer Callbacks ---
@@ -259,6 +265,25 @@ defmodule FermixCore.Agents.MainAgent do
   @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_from_state(state), state}
+  end
+
+  def handle_call(:reload_skills, _from, state) do
+    case SkillRegistry.reload(state.skill_registry) do
+      {:ok, summary} ->
+        active_voice_session_count()
+        |> log_stale_voice_sessions()
+
+        next_state = %{
+          state
+          | available_skills: Map.get(summary, :skills, []),
+            runtime_context: nil
+        }
+
+        {:reply, {:ok, summary}, next_state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:record_auto_compaction_failure, conversation_key, failed_at_ms}, _from, state) do
@@ -1275,6 +1300,25 @@ defmodule FermixCore.Agents.MainAgent do
       {:ok, skills} -> skills
       {:error, _reason} -> []
     end
+  end
+
+  defp active_voice_session_count do
+    SessionSupervisor.active_sessions()
+  catch
+    :exit, reason ->
+      Logger.debug(
+        "Realtime session supervisor unavailable during skill reload: #{inspect(reason)}"
+      )
+
+      0
+  end
+
+  defp log_stale_voice_sessions(0), do: :ok
+
+  defp log_stale_voice_sessions(count) when is_integer(count) and count > 0 do
+    Logger.info(
+      "skills reloaded; #{count} active realtime voice session(s) keep their existing skill snapshot until restarted"
+    )
   end
 
   defp status_from_state(state) do
