@@ -1,12 +1,13 @@
 # Milestone 4.12: Inbound MCP — Expose Fermix as an MCP Server
 
 **Status:** Draft
+**Post-M4.13 note:** Updated to Anubis MCP names in M4.13 (2026-05-23).
 **Date:** 2026-05-16
 **Author:** Sujeeth / Aira
 **Depends on:** M4.9 (`Capability` struct, `CapabilityRegistry`, `Capabilities.MCP.*` outbound, `policy_class`/`hidden_from_agent?` metadata), M4.8 (`fermix` CLI dispatch, daemon control socket), M3 (Phoenix endpoint, `FermixWebWeb.Router`)
 **Blocks:** anything that needs Claude Desktop / Cursor / external-agent access to Fermix capabilities; future M10 security milestone (provides the per-capability authorization surface this milestone exposes).
 **Defers to other milestones:** wizard integration (handled by a follow-up to `Setup.Wizard`), full auth model and per-user ACLs (M10 — Security & Governance), inbound resources/prompts (M4.12 ships tools-only).
-**References:** `apps/fermix_core/lib/fermix_core/capabilities/mcp/supervisor.ex`, `apps/fermix_core/lib/fermix_core/capabilities/mcp/config.ex`, `apps/fermix_core/lib/fermix_core/capabilities/registry.ex`, `apps/fermix_core/lib/fermix_core/setup/config_store.ex`, `apps/fermix_web/lib/fermix_web_web/router.ex`, `apps/fermix_web/lib/fermix_web_web/endpoint.ex`, `apps/fermix_core/lib/fermix_core/application.ex`, `deps/hermes_mcp/lib/hermes/server.ex`, `deps/hermes_mcp/lib/hermes/server/supervisor.ex`, `deps/hermes_mcp/lib/hermes/server/transport/streamable_http.ex`, `deps/hermes_mcp/lib/hermes/server/transport/stdio.ex`, [`/Users/sujshe/projects/hermes-agent/mcp_serve.py`](file:///Users/sujshe/projects/hermes-agent/mcp_serve.py) (closest analogue — Python `hermes mcp serve` exposing a curated MCP tool surface over stdio), [Peekaboo MCP server](https://github.com/steipete/peekaboo), [MCP Streamable HTTP spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
+**References:** `apps/fermix_core/lib/fermix_core/capabilities/mcp/supervisor.ex`, `apps/fermix_core/lib/fermix_core/capabilities/mcp/config.ex`, `apps/fermix_core/lib/fermix_core/capabilities/registry.ex`, `apps/fermix_core/lib/fermix_core/setup/config_store.ex`, `apps/fermix_web/lib/fermix_web_web/router.ex`, `apps/fermix_web/lib/fermix_web_web/endpoint.ex`, `apps/fermix_core/lib/fermix_core/application.ex`, `deps/anubis_mcp/lib/anubis/server.ex`, `deps/anubis_mcp/lib/anubis/server/supervisor.ex`, `deps/anubis_mcp/lib/anubis/server/transport/streamable_http.ex`, `deps/anubis_mcp/lib/anubis/server/transport/stdio.ex`, [`/Users/sujshe/projects/hermes-agent/mcp_serve.py`](file:///Users/sujshe/projects/hermes-agent/mcp_serve.py) (closest analogue — Python `hermes mcp serve` exposing a curated MCP tool surface over stdio), [Peekaboo MCP server](https://github.com/steipete/peekaboo), [MCP Streamable HTTP spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http)
 
 ---
 
@@ -22,7 +23,7 @@ Concretely:
 
 M4.9 (§Non-Goals) explicitly deferred this: *"Inbound MCP — fermix as an MCP server | Outbound … is the immediate value. Inbound … is a smaller follow-on once outbound is stable and the capability shape is settled."* That follow-on is now in scope: outbound has been shipping for two minor versions, the `Capability` shape is settled, `policy_class` / `hidden_from_agent?` metadata exist, and the operator pain ("I have skills and memory in Fermix but my coding agent can't see them") is concrete.
 
-**Goal of M4.12:** ship a single Hermes-backed MCP **server** that exposes a filtered, policy-gated view of `CapabilityRegistry` as MCP tools over either stdio (peekaboo-style, for Claude Desktop / Cursor / local clients) or streamable HTTP (network clients), reuses the existing `Capability` policy metadata for access control, persists its config alongside the existing `[mcp.servers.*]` outbound config in `~/.fermix/config.toml`, and emits a `[:fermix, :mcp, :inbound, :call]` telemetry event for every served call.
+**Goal of M4.12:** ship a single Anubis-backed MCP **server** that exposes a filtered, policy-gated view of `CapabilityRegistry` as MCP tools over either stdio (peekaboo-style, for Claude Desktop / Cursor / local clients) or streamable HTTP (network clients), reuses the existing `Capability` policy metadata for access control, persists its config alongside the existing `[mcp.servers.*]` outbound config in `~/.fermix/config.toml`, and emits a `[:fermix, :mcp, :inbound, :call]` telemetry event for every served call.
 
 After this milestone:
 
@@ -43,7 +44,7 @@ After this milestone:
 - Wizard integration. Operators edit TOML by hand. A separate follow-up adds an `Setup.Wizard` step.
 - Full user-facing approval UX, per-user ACLs, OAuth, role-based access. M10 owns those; this milestone surfaces *static-config* gates so M10 has somewhere to bind.
 - MCP resources (`fermix://memory/...`) and MCP prompts (skill bodies). v1 ships **tools-only**. Resources and prompts are a small follow-on once the tool surface is stable.
-- Streaming tool results. Hermes supports streaming responses; we ship sync-only.
+- Streaming tool results. Anubis supports streaming responses; we ship sync-only.
 - Bidirectional sampling (server-initiated `sampling/createMessage`). Out of scope.
 - Multi-tenant inbound (multiple bearer tokens with different capability sets). One token, one cap set, in v1.
 
@@ -55,22 +56,22 @@ After this milestone:
 
 | Feature | Priority | Type | Description |
 |---------|----------|------|-------------|
-| `FermixCore.MCP.Inbound.Server` (Hermes server module) | P0 | New | A module that `use Hermes.Server, name: "fermix", version: <vsn>, capabilities: [:tools]` and overrides `handle_request/2` to handle **both** `tools/list` and `tools/call` directly — `handle_tool_call/3` is intentionally not implemented. Hermes's default `tools/call` path (`Handlers.Tools.handle_call/3`) looks up the tool name in the registered (compile-time + Frame-registered) tool list and returns "Tool not found" when the name is absent (`deps/hermes_mcp/lib/hermes/server/handlers/tools.ex:30`). Our tool set is runtime data from `CapabilityRegistry`, so we bypass that lookup by handling `tools/call` ourselves and returning the protocol map `%{"content" => [...], "isError" => bool}` directly. Hermes's compile-time `component` macros and `Frame.register_tool/3` are not used. |
-| `FermixCore.MCP.Inbound.Exposure` | P0 | New | Pure module that takes the registry contents + inbound config and returns the filtered MCP tool list. Lives outside the Hermes server module so it is unit-testable without spinning a Hermes supervisor. Implements the gate documented in §4.2. |
+| `FermixCore.MCP.Inbound.Server` (Anubis server module) | P0 | New | A module that `use Anubis.Server, name: "fermix", version: <vsn>, capabilities: [:tools]` and overrides `handle_request/2` to handle **both** `tools/list` and `tools/call` directly — `handle_tool_call/3` is intentionally not implemented. Anubis's default `tools/call` path (`Handlers.Tools.handle_call/3`) looks up the tool name in the registered (compile-time + Frame-registered) tool list and returns "Tool not found" when the name is absent (`deps/anubis_mcp/lib/anubis/server/handlers/tools.ex:30`). Our tool set is runtime data from `CapabilityRegistry`, so we bypass that lookup by handling `tools/call` ourselves and returning the protocol map `%{"content" => [...], "isError" => bool}` directly. Anubis's compile-time `component` macros and `Frame.register_tool/3` are not used. |
+| `FermixCore.MCP.Inbound.Exposure` | P0 | New | Pure module that takes the registry contents + inbound config and returns the filtered MCP tool list. Lives outside the Anubis server module so it is unit-testable without spinning an Anubis supervisor. Implements the gate documented in §4.2. |
 | `FermixCore.MCP.Inbound.Config` | P0 | New | TOML parser for `[mcp.inbound]` and `[mcp.inbound.tools.<name>]` blocks. Mirrors the shape of `FermixCore.Capabilities.MCP.Config` but for the inbound side. `$env:KEY` resolution reused for `auth_token` references. |
-| `FermixCore.MCP.Inbound.Supervisor` | P0 | New | Top-level supervisor that, when `[mcp.inbound] enabled = true`, starts `Hermes.Server.Supervisor` with the configured transport. Added to `FermixCore.Application` between `BuiltinSeeder` / `SkillRegistry` and `McpSupervisor` so the inbound server only starts after the registry is seeded. |
-| Stdio transport via `fermix mcp serve` | P0 | New | New CLI dispatch path in `FermixCore.Application` that starts a minimal supervision tree and runs the inbound Hermes server with `transport: :stdio`. Designed for Claude Desktop launching Fermix as a subprocess. Does not bind any network port, does not start channels or the daemon socket. |
-| Streamable HTTP transport via Phoenix mount | P0 | New | `FermixWebWeb.Router` **always** mounts `/mcp` forwarded to `Hermes.Server.Transport.StreamableHTTP.Plug` (Phoenix router scopes are compile-time; the runtime TOML cannot decide whether the route exists). The route is fronted by `FermixWebWeb.Plugs.McpInboundAuth`, which checks at request time: (a) `enabled = true` and `transport = "streamable_http"`, else `503 mcp inbound disabled`; (b) valid bearer token, else `401`. The Hermes plug never runs when the gate denies. The supervisor only starts the Hermes server child when the same runtime config is satisfied. |
+| `FermixCore.MCP.Inbound.Supervisor` | P0 | New | Top-level supervisor that, when `[mcp.inbound] enabled = true`, starts `Anubis.Server.Supervisor` with the configured transport. Added to `FermixCore.Application` between `BuiltinSeeder` / `SkillRegistry` and `McpSupervisor` so the inbound server only starts after the registry is seeded. |
+| Stdio transport via `fermix mcp serve` | P0 | New | New CLI dispatch path in `FermixCore.Application` that starts a minimal supervision tree and runs the inbound Anubis server with `transport: :stdio`. Designed for Claude Desktop launching Fermix as a subprocess. Does not bind any network port, does not start channels or the daemon socket. |
+| Streamable HTTP transport via Phoenix mount | P0 | New | `FermixWebWeb.Router` **always** mounts `/mcp` forwarded to `Anubis.Server.Transport.StreamableHTTP.Plug` (Phoenix router scopes are compile-time; the runtime TOML cannot decide whether the route exists). The route is fronted by `FermixWebWeb.Plugs.McpInboundAuth`, which checks at request time: (a) `enabled = true` and `transport = "streamable_http"`, else `503 mcp inbound disabled`; (b) valid bearer token, else `401`. The Anubis plug never runs when the gate denies. The supervisor only starts the Anubis server child when the same runtime config is satisfied. |
 | Capability exposure filter | P0 | New | `Exposure.expose_for_inbound(capabilities, config) :: [Capability.t()]` applies, in order: (1) `enabled` gate, (2) per-tool override `exposed = true` force-expose (skips remaining filters), (3) per-tool override `exposed = false` force-hide (drops immediately), (4) `expose_kinds` filter (default `[:builtin]` — see §4.2), (5) `expose_policy_classes` filter (default `[:read_only, :read_write]`), (6) `hidden_from_agent?` filter (capabilities requiring approval are dropped — only the per-tool override can let them through), (7) `allowed_tools` exact allowlist if non-empty, (8) `denied_tools` exact denylist. Failing any gate excludes the capability. No partial exposure (a capability either appears in both `tools/list` and `tools/call` or in neither). |
 | Per-tool override blocks | P0 | New | `[mcp.inbound.tools.<name>]` with `exposed = true \| false` and `description_override = "..."`. `exposed = true` is the **only** per-tool opt-in — it overrides every kind/policy/approval gate and is the single mechanism for force-exposing a capability that fails the default filters (including skills, `hidden_from_agent?` capabilities, and capabilities the operator wants regardless of kind). `exposed = false` is the only force-hide. No separate `approved` field; one opt-in keyword keeps the gate logic readable. `description_override` lets the operator publish a different description to MCP clients than the LLM-facing one. |
 | Bearer-token auth (HTTP) | P0 | New | `auth_token` config key (resolved via `$env:` reference). Plug compares `Authorization: Bearer <token>` against the config value in constant time (`Plug.Crypto.secure_compare/2`). Missing / mismatched token returns `401 Unauthorized` with a single body line; no token enumeration via timing or body content. |
 | Outbound→inbound loop prevention | P0 | New | `:mcp` is excluded from `expose_kinds` default. Operators who include it see a `Logger.warning` at startup naming each `mcp_*` capability that would be re-exposed, plus the recommendation to use the upstream MCP server directly instead. No silent loop, no automatic deduplication. |
 | Capability listing + execution dispatch | P0 | New | A new `FermixCore.MCP.Inbound.CapabilityPort` behaviour with two callbacks: `list_capabilities() :: {:ok, [Capability.t()]}` and `execute_capability(name, args, context) :: {:ok, payload} \| {:error, term()}`. Two implementations: `Local` (queries `CapabilityRegistry` and calls `Capability.execute/3` in-process) and `DaemonProxy` (sends both list and execute requests over the existing daemon control socket). `Inbound.Server` only ever talks to the port — never directly to `CapabilityRegistry` or `Capability.execute/3` — so daemon-up stdio mode resolves *both* the exposed tool list and the call result against the daemon's registry. Anything less would let the stdio subprocess advertise tools the daemon can't execute, or hide tools the daemon could. |
-| `Frame` context propagation | P0 | New | The MCP client's `client_info` (name + version, sent during `initialize`) and session ID are stored in the Hermes `Frame` private state and forwarded into the capability execution context as `mcp_inbound_client: %{name, version, session_id}`. Capabilities that care (audit, rate limiting) can read it. |
+| `Frame` context propagation | P0 | New | The MCP client's `client_info` (name + version, sent during `initialize`) and session ID are stored in the Anubis `Frame` assigns and forwarded into the capability execution context as `mcp_inbound_client: %{name, version, session_id}`. Capabilities that care (audit, rate limiting) can read it. |
 | Telemetry | P0 | New | `[:fermix, :mcp, :inbound, :tools_listed]` (per `tools/list`, measurements `%{count: n}`, metadata `%{client_name, client_version, session_id}`). `[:fermix, :mcp, :inbound, :call]` (per `tools/call`, measurements `%{duration_ms}`, metadata `%{tool_name, client_name, client_version, session_id, result :: :ok | {:error, tag}}`). Plumbed through `Trace.record/3` so JSONL traces include the inbound calls. |
 | Health surface | P1 | New | `FermixCore.Health.report/0` gains an `:mcp_inbound` block with `enabled?`, `transport`, `exposed_count`, `last_call_ts`. Surfaces via `fermix status` and `fermix doctor`. |
 | `fermix mcp list-exposed` CLI | P1 | New | Daemon-socket-backed command that prints the current inbound tool list (with kind, policy_class, description_override-or-original). Mirrors `fermix capabilities` but scoped to the inbound-filtered set. Useful for "why isn't Claude Desktop seeing this tool" diagnosis. |
-| Tests | P0 | New | See §9. Hermes server start/stop, stdio E2E with a `Hermes.Client.Base` test client, HTTP E2E via `Plug.Test`, exposure filter matrix, auth plug positive/negative, loop-prevention warning, telemetry event emission, registry change between `tools/list` and `tools/call`. |
+| Tests | P0 | New | See §9. Anubis server start/stop, stdio E2E with an `Anubis.Client` test client, HTTP E2E via `Plug.Test`, exposure filter matrix, auth plug positive/negative, loop-prevention warning, telemetry event emission, registry change between `tools/list` and `tools/call`. |
 | Documentation | P0 | Docs | README snippet showing the Claude Desktop `claude_desktop_config.json` block (`"fermix": { "command": "fermix", "args": ["mcp", "serve"] }`), the Cursor / HTTP equivalent, and the `[mcp.inbound]` config block with sane defaults. |
 
 ### Non-Goals
@@ -82,7 +83,7 @@ After this milestone:
 | OAuth / mTLS | Same reason as above. Bearer-token + bind-127.0.0.1 is the v1 security posture. | M10 |
 | Inbound resources (`resources/list`, `resources/read`) | Useful for exposing memory entries, journals, traces as MCP resources. Out of scope to keep this milestone surgical; tools-only is enough to integrate Claude Desktop / Cursor. | Follow-on milestone after tools land |
 | Inbound prompts (`prompts/list`, `prompts/get`) | Useful for exposing skill bodies as Claude-Desktop slash commands. Same reason — defer until tool surface is stable. | Follow-on |
-| Streaming tool responses | Hermes supports it; LLM tools today don't depend on it. Adding sync-only is one code path; adding streaming + sync is two. | Follow-on if a real client asks |
+| Streaming tool responses | Anubis supports it; LLM tools today don't depend on it. Adding sync-only is one code path; adding streaming + sync is two. | Follow-on if a real client asks |
 | Server-initiated sampling (`sampling/createMessage`) | Niche: allowing the inbound MCP client to handle text generation on the server's behalf. No current Fermix workflow needs it. | Never, unless a real workflow surfaces |
 | Multiple inbound tokens with different cap sets | Multi-tenant inbound. v1 is one token, one cap set. The shape doesn't preclude multi-tenancy later (a token → policy-class set map is a small extension). | M10 or after |
 | `tools/list` change notifications | When operator edits TOML and `Inbound.Supervisor` reloads, broadcasting `notifications/tools/list_changed` would let connected clients refresh. Useful but not required for v1; clients can also resync at next call. | Follow-on |
@@ -102,44 +103,44 @@ The existing outbound implementation under `FermixCore.Capabilities.MCP.*` is th
 
 - **Top-level `[mcp.*]` TOML namespace** (`[mcp.inbound]`, `[mcp.inbound.tools.<name>]`), not nested under `[fermix_core.*]`. Matches the outbound `[mcp.servers.<name>]` convention.
 - **`Config` module pattern** — a small purpose-built TOML reader scoped to the inbound block (`FermixCore.MCP.Inbound.Config`), echoing `FermixCore.Capabilities.MCP.Config`. Same `$env:` resolution semantics.
-- **`Supervisor + Server + per-thing-isolated-subtree`** — `Inbound.Supervisor` boots Hermes and isolates a crash to the inbound subtree the same way outbound's per-server supervisors isolate one bad MCP child.
+- **`Supervisor + Server + per-thing-isolated-subtree`** — `Inbound.Supervisor` boots Anubis and isolates a crash to the inbound subtree the same way outbound's per-server supervisors isolate one bad MCP child.
 - **Reuse of `policy_class` and `hidden_from_agent?`** — the same metadata outbound consumes from the registry, inbound writes through the exposure filter. No new policy primitives.
 - **No deprecation churn / no parallel registries** — `CapabilityRegistry` is already the single source of truth; inbound only reads it.
 
 What inbound deliberately does *not* mirror from outbound:
 
-- **No per-server isolation tree.** Outbound runs one supervisor per upstream MCP server. Inbound is one Hermes server module total (Fermix is the single MCP "server" identity), so there's no per-thing fan-out.
+- **No per-server isolation tree.** Outbound runs one supervisor per upstream MCP server. Inbound is one Anubis server module total (Fermix is the single MCP "server" identity), so there's no per-thing fan-out.
 - **One port, not a `Discoverer` / `Caller` split.** Outbound separates discovery (`tools/list`) and dispatch (`tools/call`) into two behaviours so per-server tests can stub each independently. Inbound uses a single `CapabilityPort` behaviour (`list_capabilities/0` + `execute_capability/3`) with two impls (`Local` and `DaemonProxy`, §4.1) because the discovery target and the execution target are always the same — either both local in-process or both proxied to the daemon. Splitting them would invite a "list says yes, call says no" drift; keeping them in one behaviour rules that out by construction. Test stubs implement the same single behaviour.
 
 ### hermes-agent `mcp_serve.py` — curated stdio surface (Python sibling)
 
-[`/Users/sujshe/projects/hermes-agent/mcp_serve.py`](file:///Users/sujshe/projects/hermes-agent/mcp_serve.py) is the closest analogue to what M4.12 ships. It's the Python sibling project's `hermes mcp serve` entry point — also a stdio MCP server, also launched from `claude_desktop_config.json` via `"command": "hermes", "args": ["mcp", "serve"]` (`mcp_serve.py:19-27`).
+[`/Users/sujshe/projects/hermes-agent/mcp_serve.py`](file:///Users/sujshe/projects/hermes-agent/mcp_serve.py) is the closest analogue to what M4.12 ships. It's the hermes-agent `hermes mcp serve` entry point — also a stdio MCP server, also launched from `claude_desktop_config.json` via `"command": "hermes", "args": ["mcp", "serve"]` (`mcp_serve.py:19-27`).
 
 What we adopt:
 
 - **The `<binary> mcp serve` CLI shape.** One verb, no required flags, optional `--verbose`. The Claude Desktop config block (`mcp_serve.py:19-27`) is the one we put in our README. Trivially copyable for users coming from hermes-agent.
-- **Stdio-as-primary for local clients.** Hermes-agent doesn't ship HTTP transport. We do, but stdio is the default and the only one needed for the Claude Desktop / Cursor onboarding story.
-- **Lazy / optional dep handling.** Hermes-agent imports `mcp.server.fastmcp` lazily (`mcp_serve.py:49-55`) so the broader CLI works without the MCP SDK. Fermix has `hermes_mcp` as a hard dep already, so this doesn't apply directly — but we mirror the "stay loud if MCP shape unexpectedly fails" posture by raising at config load (§4.7) and at supervisor boot rather than degrading silently.
-- **Read-mostly, writes are explicit and gated.** Hermes-agent exposes nine tools; only `messages_send` and `permissions_respond` are writes, and both are explicitly named (`mcp_serve.py:8-13`). Our default exposure filter mirrors this: `:read_only` + `:read_write` only, no `:exec` / `:network` / `:external_api` without explicit opt-in.
+- **Stdio-as-primary for local clients.** hermes-agent doesn't ship HTTP transport. We do, but stdio is the default and the only one needed for the Claude Desktop / Cursor onboarding story.
+- **Lazy / optional dep handling.** hermes-agent imports `mcp.server.fastmcp` lazily (`mcp_serve.py:49-55`) so the broader CLI works without the MCP SDK. Fermix has `anubis_mcp` as a hard dep already, so this doesn't apply directly — but we mirror the "stay loud if MCP shape unexpectedly fails" posture by raising at config load (§4.7) and at supervisor boot rather than degrading silently.
+- **Read-mostly, writes are explicit and gated.** hermes-agent exposes nine tools; only `messages_send` and `permissions_respond` are writes, and both are explicitly named (`mcp_serve.py:8-13`). Our default exposure filter mirrors this: `:read_only` + `:read_write` only, no `:exec` / `:network` / `:external_api` without explicit opt-in.
 
 What we deliberately diverge on:
 
-- **Curated tool surface vs. 1:1 capability exposure.** Hermes-agent's nine tools are MCP-tool-level wrappers that don't map 1:1 to internal Python primitives. `conversations_list`, `messages_read`, `events_poll` etc. (`mcp_serve.py:469-857`) are purpose-built MCP-shaped surfaces. They read sessions.json + state.db directly, normalize per-message dicts, and emit MCP-friendly JSON.
+- **Curated tool surface vs. 1:1 capability exposure.** hermes-agent's nine tools are MCP-tool-level wrappers that don't map 1:1 to internal Python primitives. `conversations_list`, `messages_read`, `events_poll` etc. (`mcp_serve.py:469-857`) are purpose-built MCP-shaped surfaces. They read sessions.json + state.db directly, normalize per-message dicts, and emit MCP-friendly JSON.
 
   Fermix takes the opposite cut: each `%Capability{}` that passes the filter becomes one MCP tool, 1:1. We do this because:
-  1. **Fermix already has a unified `Capability` shape** (M4.9). Hermes-agent's Python doesn't — they had to invent the MCP surface from scratch.
+  1. **Fermix already has a unified `Capability` shape** (M4.9). hermes-agent's Python doesn't — they had to invent the MCP surface from scratch.
   2. **The Capability shape is already MCP-compatible.** `name`, `description`, `parameters` (JSON Schema) map directly to MCP `Tool { name, description, inputSchema }`. The translation in `Exposure.to_mcp_tool_descriptor/2` is small.
-  3. **Skills can become first-class MCP tools.** A skill installed in `~/.fermix/skills/` is *eligible* for exposure with one `[mcp.inbound.tools.<skill>] exposed = true` block; the operator doesn't write a wrapper. (Skills aren't default-exposed because `Capabilities.Skill.from_definition/1` produces `policy_class: :exec`, and `:exec` is not in the default policy gate — see §4.2.) Hermes-agent has no analogue (their skills are markdown-only documentation).
+  3. **Skills can become first-class MCP tools.** A skill installed in `~/.fermix/skills/` is *eligible* for exposure with one `[mcp.inbound.tools.<skill>] exposed = true` block; the operator doesn't write a wrapper. (Skills aren't default-exposed because `Capabilities.Skill.from_definition/1` produces `policy_class: :exec`, and `:exec` is not in the default policy gate — see §4.2.) hermes-agent has no analogue (their skills are markdown-only documentation).
 
   Curated wrappers (the hermes-agent shape) are a useful **follow-on** — e.g., `fermix_conversations_list`, `fermix_channels_list`, `fermix_journals_list` that read in-process state and expose it as MCP tools the same way hermes-agent does. They're explicitly out of scope for v1 because the 1:1 path already gives Claude Desktop access to memory_recall + memory_store + the skill set, which is the immediate value. See §10.
 
-- **Event polling vs. notifications.** Hermes-agent's `EventBridge` (`mcp_serve.py:204-444`) polls SQLite every 200ms and queues events for `events_poll` / `events_wait` tools, so an MCP client can subscribe to live conversation activity. They built this because the MCP spec's `notifications/*` mechanism isn't well-supported by their target clients yet.
+- **Event polling vs. notifications.** hermes-agent's `EventBridge` (`mcp_serve.py:204-444`) polls SQLite every 200ms and queues events for `events_poll` / `events_wait` tools, so an MCP client can subscribe to live conversation activity. They built this because the MCP spec's `notifications/*` mechanism isn't well-supported by their target clients yet.
 
   Fermix doesn't ship this in v1 — the inbound surface is request/response only. Channel events stream into the daemon already; an MCP-side `events_*` tool would just re-shape them. Worth doing as a follow-on once the curated-wrappers question is settled (the two designs converge).
 
-- **State coordination.** Hermes-agent reads `sessions.json` and `state.db` directly from disk, mtime-checks for changes (`mcp_serve.py:352-376`), and re-reads on change. No daemon coordination. Fermix's tools (`memory_recall`, `list_jobs`, every skill) operate on in-process state (`ConversationStore` ETS, `Memory.Repo` GenServer-mediated SQLite, `Jobs.Registry` ETS). Direct-disk reads cannot see that state. That's why §4.3 introduces the daemon-proxy `CapabilityPort` — to share the daemon's in-process state (both the capability list and tool execution). The hermes-agent "just read the files" trick doesn't translate to Fermix's architecture.
+- **State coordination.** hermes-agent reads `sessions.json` and `state.db` directly from disk, mtime-checks for changes (`mcp_serve.py:352-376`), and re-reads on change. No daemon coordination. Fermix's tools (`memory_recall`, `list_jobs`, every skill) operate on in-process state (`ConversationStore` ETS, `Memory.Repo` GenServer-mediated SQLite, `Jobs.Registry` ETS). Direct-disk reads cannot see that state. That's why §4.3 introduces the daemon-proxy `CapabilityPort` — to share the daemon's in-process state (both the capability list and tool execution). The hermes-agent "just read the files" trick doesn't translate to Fermix's architecture.
 
-- **Approval-request surface.** Hermes-agent's `permissions_list_open` / `permissions_respond` (`mcp_serve.py:823-857`) lets the MCP client observe and respond to internal exec-approval requests. This is M10 territory in Fermix (the user-facing approval UX). Surfacing it as MCP tools is the kind of M10 extension `hidden_from_agent?` was designed to enable, but the policy surface itself doesn't exist yet, so the tools have nothing to wrap. Out of scope.
+- **Approval-request surface.** hermes-agent's `permissions_list_open` / `permissions_respond` (`mcp_serve.py:823-857`) lets the MCP client observe and respond to internal exec-approval requests. This is M10 territory in Fermix (the user-facing approval UX). Surfacing it as MCP tools is the kind of M10 extension `hidden_from_agent?` was designed to enable, but the policy surface itself doesn't exist yet, so the tools have nothing to wrap. Out of scope.
 
 ### Peekaboo — stdio-native, one-process-per-launch (design pattern only)
 
@@ -166,12 +167,12 @@ Where Fermix necessarily diverges from peekaboo:
 
 ### MCP spec — Streamable HTTP is the new transport
 
-The [MCP 2025-03-26 spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) deprecates pure SSE in favour of "Streamable HTTP", which is what Hermes ships as `Hermes.Server.Transport.StreamableHTTP`. The Hermes module exposes a `Plug` for direct Phoenix integration, which removes the need to spawn a second HTTP listener — the existing `FermixWebWeb.Endpoint` mounts `/mcp` and the same TLS/proxy infrastructure that already serves webhooks serves MCP.
+The [MCP 2025-03-26 spec](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) deprecates pure SSE in favour of "Streamable HTTP", which is what Anubis ships as `Anubis.Server.Transport.StreamableHTTP`. The Anubis module exposes a `Plug` for direct Phoenix integration, which removes the need to spawn a second HTTP listener — the existing `FermixWebWeb.Endpoint` mounts `/mcp` and the same TLS/proxy infrastructure that already serves webhooks serves MCP.
 
 Adopted:
 
-- **Streamable HTTP, not deprecated SSE.** Hermes warns on `:sse`; we route around it by going straight to `:streamable_http`.
-- **Phoenix-mounted, not a separate HTTP listener.** `forward "/mcp", Hermes.Server.Transport.StreamableHTTP.Plug, server: ...` in `FermixWebWeb.Router`.
+- **Streamable HTTP, not deprecated SSE.** Anubis warns on `:sse`; we route around it by going straight to `:streamable_http`.
+- **Phoenix-mounted, not a separate HTTP listener.** `forward "/mcp", Anubis.Server.Transport.StreamableHTTP.Plug, server: ...` in `FermixWebWeb.Router`.
 - **Plug-based auth.** The auth middleware is a normal Phoenix plug; reuses the same plug pipeline the rest of the app uses.
 
 ---
@@ -186,16 +187,16 @@ FermixCore.MCP.Inbound (new umbrella namespace; NOT under Capabilities.MCP)
 ├── Supervisor              (Supervisor; in fermix_core supervision tree)
 │   ├── only starts when [mcp.inbound] enabled = true
 │   └── child:
-│       └── Hermes.Server.Supervisor with module: Inbound.Server,
+│       └── Anubis.Server.Supervisor with module: Inbound.Server,
 │                                          transport: <:stdio | {:streamable_http, opts}>
 │
-├── Server                  (use Hermes.Server, name: "fermix", version: <vsn>)
+├── Server                  (use Anubis.Server, name: "fermix", version: <vsn>)
 │   ├── handle_request/2    — overridden to serve BOTH tools/list and tools/call
 │   │                        via CapabilityPort. handle_tool_call/3 is NOT
-│   │                        implemented (would not be called — Hermes routes
+│   │                        implemented (would not be called — Anubis routes
 │   │                        tools/call through its own component lookup, which
 │   │                        does not know about our runtime-built tool list).
-│   └── init/2              — stores client_info into Frame.private for telemetry
+│   └── init/2              — stores client_info into Frame assigns for telemetry
 │
 ├── Exposure                (pure module)
 │   ├── expose_for_inbound(capabilities, config) :: [Capability.t()]
@@ -255,7 +256,7 @@ FermixWebWeb.Router
 
        scope "/mcp" do
          pipe_through :mcp_inbound
-         forward "/", Hermes.Server.Transport.StreamableHTTP.Plug,
+         forward "/", Anubis.Server.Transport.StreamableHTTP.Plug,
            server: FermixCore.MCP.Inbound.Server
        end
 ```
@@ -268,7 +269,7 @@ The exposure filter is a pure function. It runs on every `tools/list` and is re-
 defmodule FermixCore.MCP.Inbound.Exposure do
   @moduledoc """
   Pure gate that decides which `%Capability{}` entries are exposed to inbound
-  MCP clients. Lives outside the Hermes server module so the rules are unit-
+  MCP clients. Lives outside the Anubis server module so the rules are unit-
   testable without a supervisor.
 
   Order of operations (per capability):
@@ -405,7 +406,7 @@ fermix mcp serve            # new CLI dispatch path
      │      since the daemon isn't writing; this process's CapabilityRegistry
      │      is seeded by BuiltinSeeder + SkillRegistry on boot)
      │
-     ├─ Hermes.Server.Transport.STDIO reads JSON-RPC from stdin, writes to stdout
+     ├─ Anubis.Server.Transport.STDIO reads JSON-RPC from stdin, writes to stdout
      ├─ block until stdin closes (Claude Desktop exits)
      └─ on stdin close, supervisor terminates cleanly and the process exits 0
 ```
@@ -429,7 +430,7 @@ The dispatch path `cli_dispatch(["mcp", "serve" | _])` must take two explicit st
 
 The existing file logger (`setup_file_logger/0`) is unaffected — it writes to `~/.fermix/logs/fermix.log` and never touches stdout/stderr.
 
-**Step 2 — Pin the requirement with a regression test.** A startup test runs `fermix mcp serve` against `Hermes.Transport.STDIO`, sends an `initialize` then a no-op `ping`, and asserts:
+**Step 2 — Pin the requirement with a regression test.** A startup test runs `fermix mcp serve` against `Anubis.Server.Transport.STDIO`, sends an `initialize` then a no-op `ping`, and asserts:
 
 1. The stdout byte stream parses as a sequence of well-formed JSON-RPC frames (one per response). No "leading garbage," no log lines, no `IO.puts` output.
 2. A second variant intentionally triggers `Logger.info("hello from inside capability")` from inside a capability call and re-asserts the same well-formed stdout — the log line must not appear in stdout.
@@ -480,7 +481,7 @@ Phoenix Endpoint (existing FermixWebWeb.Endpoint, bound to its existing port)
             │
             └── new scope "/mcp" (ALWAYS mounted at compile time):
                   pipe_through :mcp_inbound
-                  forward "/", Hermes.Server.Transport.StreamableHTTP.Plug,
+                  forward "/", Anubis.Server.Transport.StreamableHTTP.Plug,
                     server: FermixCore.MCP.Inbound.Server
 ```
 
@@ -488,13 +489,13 @@ The route is **always present** in the compiled router. Whether it's reachable i
 
 1. Mount the route unconditionally.
 2. Put a runtime gate in front of it.
-3. Let the Hermes plug behind the gate assume "I will only be called when serving is correct."
+3. Let the Anubis plug behind the gate assume "I will only be called when serving is correct."
 
-The Hermes plug owns the wire protocol (session creation, SSE streaming, message dispatch to the server module). Our only contribution at the HTTP layer is the auth plug, which runs *before* the Hermes plug and may halt before Hermes sees the request.
+The Anubis plug owns the wire protocol (session creation, SSE streaming, message dispatch to the server module). Our only contribution at the HTTP layer is the auth plug, which runs *before* the Anubis plug and may halt before Anubis sees the request.
 
 The Phoenix endpoint's existing bind address is reused; the inbound config does not introduce a separate bind. The operator who wants the MCP endpoint reachable from the network sets the endpoint's bind via the existing `FERMIX_BIND` / `PHX_HOST` mechanisms (same as the rest of the web app). The inbound config carries only the auth token, the kind/policy filters, and the path prefix (default `/mcp`).
 
-When the supervisor sees `transport != "streamable_http"` or `enabled = false`, the Hermes server child does not start, so even a request that somehow bypassed the auth plug would land on a dead transport. That's the second line of defense; the auth plug is the first.
+When the supervisor sees `transport != "streamable_http"` or `enabled = false`, the Anubis server child does not start, so even a request that somehow bypassed the auth plug would land on a dead transport. That's the second line of defense; the auth plug is the first.
 
 #### Auth plug — runtime gate
 
@@ -599,9 +600,9 @@ Claude Desktop / Cursor                                    │
   │              ◄─  mcp_github_create_issue, ...         │
   │                                                       │
   │  tools/call mcp_github_create_issue                   │
-  │              ─►  Fermix → Hermes outbound client      │
+  │              ─►  Fermix → Anubis outbound client      │
   │                                                       │
-  │                  Hermes outbound client ─────────────►│
+  │                  Anubis outbound client ─────────────►│
   │                                            create_issue
 ```
 
@@ -634,17 +635,18 @@ The warning is loud, structured, and emits on every supervisor start (not just f
 
 ### 4.6 Server module — handling tools/list and tools/call directly
 
-`Hermes.Server.Base` calls `module.handle_request/2` for every MCP request. The compiled default (from `Hermes.Server.__before_compile__`) routes `tools/list` and `tools/call` to `Hermes.Server.Handlers.Tools`, which looks up the tool name in the compile-time component list + the per-frame registered tools (`deps/hermes_mcp/lib/hermes/server/handlers/tools.ex:14, 28`). Our tools come from `CapabilityRegistry` at request time — they're never registered via `Frame.register_tool/3` or the `component` macro — so the default routing returns "Tool not found" for every call.
+`Anubis.Server.Session` dispatches to `module.handle_request/2` for every MCP request. The compiled default (from `Anubis.Server.__before_compile__`) routes `tools/list` and `tools/call` to `Anubis.Server.Handlers.Tools`, which looks up the tool name in the compile-time component list + the per-frame registered tools (`deps/anubis_mcp/lib/anubis/server/handlers/tools.ex:14, 28`). Our tools come from `CapabilityRegistry` at request time — they're never registered via `Frame.register_tool/3` or the `component` macro — so the default routing returns "Tool not found" for every call.
 
-The fix is to override `handle_request/2` for **both** `tools/list` and `tools/call` and never fall through to Hermes's tool-lookup path. Everything else (`initialize`, `ping`, etc.) still goes through `super`:
+The fix is to override `handle_request/2` for **both** `tools/list` and `tools/call` and never fall through to Anubis's tool-lookup path. Everything else (`initialize`, `ping`, etc.) still goes through `super`:
 
 ```elixir
 defmodule FermixCore.MCP.Inbound.Server do
-  use Hermes.Server,
+  use Anubis.Server,
     name: "fermix",
     version: Mix.Project.config()[:version] || "0.1.0",
     capabilities: [:tools]
 
+  alias Anubis.Server.Frame
   alias FermixCore.Capabilities.Capability
   alias FermixCore.MCP.Inbound.CapabilityPort
   alias FermixCore.MCP.Inbound.Config, as: InboundConfig
@@ -653,14 +655,17 @@ defmodule FermixCore.MCP.Inbound.Server do
   require Logger
 
   @impl true
-  def init(client_info, frame) do
-    {:ok,
-     put_in(frame.private[:mcp_inbound_client], %{
-       name: Map.get(client_info, "name"),
-       version: Map.get(client_info, "version"),
-       session_id: frame.session_id
-     })}
+  def init(client_info, %Frame{} = frame) when is_map(client_info) do
+    client = %{
+      name: Map.get(client_info, "name"),
+      version: Map.get(client_info, "version"),
+      session_id: frame_session_id(frame)
+    }
+
+    {:ok, Frame.assign(frame, :mcp_inbound_client, client)}
   end
+
+  defp frame_session_id(%Frame{context: %{session_id: session_id}}), do: session_id
 
   # ---- tools/list and tools/call: served directly. Do NOT fall through. ----
 
@@ -697,7 +702,7 @@ defmodule FermixCore.MCP.Inbound.Server do
   # Handlers-generated default — note the call to super/2.
   def handle_request(request, frame), do: super(request, frame)
 
-  # ---- tools/call body — private function, not a Hermes callback ----
+  # ---- tools/call body — private function, not an Anubis callback ----
 
   defp handle_tool_call(name, args, frame) when is_binary(name) and is_map(args) do
     config = InboundConfig.current()
@@ -734,7 +739,7 @@ defmodule FermixCore.MCP.Inbound.Server do
       [:fermix, :mcp, :inbound, :call],
       %{duration_ms: 0},
       Map.merge(
-        frame.private[:mcp_inbound_client] || %{},
+        Map.get(frame.assigns, :mcp_inbound_client, %{}),
         %{tool_name: name, result: {:error, reason}}
       )
     )
@@ -746,9 +751,9 @@ defmodule FermixCore.MCP.Inbound.Server do
   # fields, wrong types, extra unknown keys. The spec expects servers to
   # validate against the published inputSchema and reject with
   # `invalid_params`. We do that at the inbound boundary, before any
-  # capability runs, using Peri (already a hermes_mcp transitive dep).
+  # capability runs, using Peri (already an anubis_mcp transitive dep).
   #
-  # Validation errors return a Hermes.MCP.Error.protocol(:invalid_params, ...)
+  # Validation errors return an Anubis.MCP.Error.protocol(:invalid_params, ...)
   # with a flat message list; the MCP client surfaces the message to its user
   # (e.g., "Claude, the tool reports: file_read: path is required").
   #
@@ -758,7 +763,7 @@ defmodule FermixCore.MCP.Inbound.Server do
   # body, not a typed parameter schema). The single validation point
   # makes the contract uniform regardless of capability source.
   defp validate_args(%Capability{parameters: schema}, args) when is_map(schema) do
-    cleaned = Hermes.Server.Component.__clean_schema_for_peri__(schema)
+    cleaned = Anubis.Server.Component.__clean_schema_for_peri__(schema)
 
     case Peri.validate(cleaned, args) do
       {:ok, validated} -> {:ok, validated}
@@ -768,7 +773,7 @@ defmodule FermixCore.MCP.Inbound.Server do
 
   defp format_arg_errors(errors) when is_list(errors) do
     errors
-    |> Enum.map(&Hermes.Server.Component.Schema.format_errors([&1]))
+    |> Enum.map(&Anubis.Server.Component.Schema.format_errors([&1]))
     |> Enum.join("; ")
   end
 
@@ -813,11 +818,11 @@ defmodule FermixCore.MCP.Inbound.Server do
   defp build_context(frame) do
     %{
       source: :mcp_inbound,
-      mcp_inbound_client: frame.private[:mcp_inbound_client] || %{}
+      mcp_inbound_client: Map.get(frame.assigns, :mcp_inbound_client, %{})
     }
   end
 
-  # ---- MCP wire helpers (build Hermes.MCP.Error / protocol maps) ----
+  # ---- MCP wire helpers (build Anubis.MCP.Error / protocol maps) ----
 
   defp mcp_tool_text_response(text, is_error: is_error?) do
     %{
@@ -835,15 +840,15 @@ defmodule FermixCore.MCP.Inbound.Server do
   end
 
   defp mcp_error_unknown_tool(name) do
-    Hermes.MCP.Error.protocol(:invalid_params, %{message: "Tool not found: #{name}"})
+    Anubis.MCP.Error.protocol(:invalid_params, %{message: "Tool not found: #{name}"})
   end
 
   defp mcp_error_invalid_params(msg) do
-    Hermes.MCP.Error.protocol(:invalid_params, %{message: msg})
+    Anubis.MCP.Error.protocol(:invalid_params, %{message: msg})
   end
 
   defp mcp_error_internal(reason) do
-    Hermes.MCP.Error.execution("inbound capability error", %{reason: inspect(reason)})
+    Anubis.MCP.Error.execution("inbound capability error", %{reason: inspect(reason)})
   end
 end
 ```
@@ -852,24 +857,24 @@ Key invariants:
 
 - **One source for both list and call.** Both call into `CapabilityPort.impl()` — the active port (`Local` in the daemon and in standalone stdio mode; `DaemonProxy` in daemon-proxy stdio mode). Listing and execution always resolve against the same registry. If the daemon goes away mid-session in proxy mode, both `list_capabilities/0` and `execute_capability/3` return `{:error, :daemon_unavailable}` and the MCP client sees a clean error from each call. No "list said it's there but call says no" mismatch from cross-registry queries.
 - **Re-check on call.** Calls re-run the exposure filter against the live capability set, so a tool that vanished (skill hot-reload, outbound server crash, operator edit of TOML) between `tools/list` and `tools/call` returns the standard MCP "Tool not found" error. No "registered but now invisible" half-state.
-- **Args validated at the inbound boundary, not inside the capability.** Every `tools/call` runs `Peri.validate/2` against `capability.parameters` before reaching `execute_and_telemetry/4`. Malformed args (wrong type, missing required field, extra unknown key beyond `additionalProperties`) return `invalid_params` with a flat error message — the capability never sees a malformed payload. This means a future capability author doesn't have to write defensive `case args do %{...} -> ...; _ -> {:error, ...} end` boilerplate just for inbound; the contract is that args reaching the executor already match the published schema. The same `Peri` library and `__clean_schema_for_peri__/1` helper used by Hermes's own component path is reused so the validation semantics are identical regardless of which path a tool call took.
+- **Args validated at the inbound boundary, not inside the capability.** Every `tools/call` runs `Peri.validate/2` against `capability.parameters` before reaching `execute_and_telemetry/4`. Malformed args (wrong type, missing required field, extra unknown key beyond `additionalProperties`) return `invalid_params` with a flat error message — the capability never sees a malformed payload. This means a future capability author doesn't have to write defensive `case args do %{...} -> ...; _ -> {:error, ...} end` boilerplate just for inbound; the contract is that args reaching the executor already match the published schema. The same `Peri` library and `__clean_schema_for_peri__/1` helper used by Anubis's own component path is reused so the validation semantics are identical regardless of which path a tool call took.
 - **`source: :mcp_inbound` in execution context.** Capabilities can branch on this if they want (e.g., a future audit-only mode), but v1 capabilities ignore it. The tag flows into telemetry so traces distinguish "shell called by main agent" from "shell called by Claude Desktop over inbound MCP".
-- **Wire shape is MCP-protocol-map, not `Hermes.Server.Response`.** Because we serve from `handle_request/2` (not `handle_tool_call/3`), Hermes never calls `Response.to_protocol/1` on our reply — the map we return *is* the response body. The map shape (`%{"content" => [...], "isError" => bool}`) matches the spec directly. The capability's own success/error payload (existing `Builtin.Tool.success/1` / `error/1` shape) is normalized in `mcp_tool_response_from_payload/2`.
+- **Wire shape is MCP-protocol-map, not an Anubis callback response struct.** Because we serve from `handle_request/2` (not `handle_tool_call/3`), Anubis never calls `Response.to_protocol/1` on our reply — the map we return *is* the response body. The map shape (`%{"content" => [...], "isError" => bool}`) matches the spec directly. The capability's own success/error payload (existing `Builtin.Tool.success/1` / `error/1` shape) is normalized in `mcp_tool_response_from_payload/2`.
 - **Telemetry is the audit trail.** Every call writes one `[:fermix, :mcp, :inbound, :call]` event with the client name + version + session ID + tool name + result tag. `Trace.TelemetryHandler` already attaches to capability events; we add an attachment for the inbound events so JSONL traces include them under `~/.fermix/traces/`.
 
 #### Request timeout — concrete contract
 
-Hermes's `Server.Supervisor` defaults `request_timeout` to 30 seconds (`deps/hermes_mcp/lib/hermes/server/supervisor.ex:88`). For the Streamable HTTP transport, that timeout is enforced on the *caller* side via a `GenServer.call(..., timeout)` against the server process (`deps/hermes_mcp/lib/hermes/server/transport/streamable_http.ex:344`). When the timeout fires:
+Anubis's `Server.Supervisor` defaults `request_timeout` to 30 seconds (`deps/anubis_mcp/lib/anubis/server/supervisor.ex:88`). For the Streamable HTTP transport, that timeout is enforced on the *caller* side via a `GenServer.call(..., timeout)` against the server process (`deps/anubis_mcp/lib/anubis/server/transport/streamable_http.ex:344`). When the timeout fires:
 
 - The transport caller gets `{:exit, {:timeout, ...}}` and replies to the HTTP client with a JSON-RPC error.
-- **The server callback (`handle_request/2`) continues running uninterrupted.** When it eventually returns `{:reply, response, frame}`, Hermes pushes the response through the session machinery; if the SSE stream has been torn down by the timeout, the response is silently dropped. There is no signal back to our callback that the client gave up.
+- **The server callback (`handle_request/2`) continues running uninterrupted.** When it eventually returns `{:reply, response, frame}`, Anubis pushes the response through the session machinery; if the SSE stream has been torn down by the timeout, the response is silently dropped. There is no signal back to our callback that the client gave up.
 
 This means the inbound server **cannot reliably tag a capability execution as "client-side timed out" from inside `handle_request/2`** — by the time the capability returns, we don't know whether the wire reply went anywhere. Wrapping each call in our own `Task` + `Task.yield_after/2` to observe the timeout would work but adds a process per call and a cancellation story the capability execution path doesn't support today.
 
 The v1 contract is therefore weaker, and stated explicitly:
 
-- **Default timeout: 30s** (the Hermes default, no override unless config sets one).
-- **Operator-configurable** via `[mcp.inbound] request_timeout_ms = 60000`. Plumbed through `Inbound.Supervisor` into `Hermes.Server.Supervisor`'s `request_timeout` option at start time. Edits require a daemon restart (no hot-reload in v1).
+- **Default timeout: 30s** (the Anubis default, no override unless config sets one).
+- **Operator-configurable** via `[mcp.inbound] request_timeout_ms = 60000`. Plumbed through `Inbound.Supervisor` into `Anubis.Server.Supervisor`'s `request_timeout` option at start time. Edits require a daemon restart (no hot-reload in v1).
 - **Tools known to run long** (`delegate`, skill capabilities) are not in the default-exposed set — they require `[mcp.inbound.tools.<name>] exposed = true`. An operator opting one of those in is also expected to raise `request_timeout_ms`.
 - **What the client sees:** on timeout, a JSON-RPC error response from the HTTP transport; nothing further from the server for that request id.
 - **What telemetry sees:** the `[:fermix, :mcp, :inbound, :call]` event fires when the capability completes (or errors), with the **actual** result. It does *not* carry a "client timed out" tag, because the server callback can't observe that. To audit "which inbound calls did the client give up on," correlate the inbound `:call` event's `duration_ms` against the configured `request_timeout_ms` — `duration_ms > request_timeout_ms` is your timeout signal.
@@ -899,9 +904,9 @@ denied_tools = []                                     # exact-name denylist
 server_name = "fermix"
 server_version = "0.1.0"
 
-# Optional: how long Hermes waits for handle_request/2 to return before
+# Optional: how long Anubis waits for handle_request/2 to return before
 # the client sees a JSON-RPC timeout error. Default 30000 (30s, the
-# hermes_mcp default). Raise when exposing long-running tools like
+# anubis_mcp default). Raise when exposing long-running tools like
 # delegate or skill capabilities — the underlying execution does not
 # stop on timeout, only the wire reply.
 request_timeout_ms = 30000
@@ -940,7 +945,7 @@ auth_token = "$env:FERMIX_MCP_INBOUND_TOKEN"          # required when HTTP trans
 | `expose_policy_classes` | never | `["read_only", "read_write"]` | Adding `"exec"`, `"network"`, or `"external_api"` widens the surface. |
 | `allowed_tools` / `denied_tools` | never | `[]` / `[]` | Mutually compatible; `allowed_tools` is an allowlist, `denied_tools` a denylist. Both `[]` means "use kind+policy filters". |
 | `server_name` / `server_version` | never | `"fermix"` / release version | Cosmetic, surfaces in MCP client UI. |
-| `request_timeout_ms` | never | `30000` (Hermes default) | Wire timeout for `handle_request/2`. Capability execution continues after timeout; only the client reply is dropped. Raise when exposing long-running tools. |
+| `request_timeout_ms` | never | `30000` (Anubis default) | Wire timeout for `handle_request/2`. Capability execution continues after timeout; only the client reply is dropped. Raise when exposing long-running tools. |
 | `[mcp.inbound.tools.<name>] exposed` | never | absent (default gate applies) | `true` force-includes (bypasses every gate including `hidden_from_agent?`); `false` force-excludes. The **only** per-tool opt-in keyword. |
 | `[mcp.inbound.tools.<name>] description_override` | never | uses `Capability.description` | Cosmetic. Does not change the underlying capability. |
 | `[mcp.inbound.http] path` | `transport = "streamable_http"` | `"/mcp"` | Mount point on the existing Phoenix endpoint. |
@@ -963,9 +968,9 @@ Same pattern as `Capabilities.MCP.Config` — raise at config load, not on first
 
 ### 4.8 Frame and session lifecycle
 
-Hermes maintains a `Frame` per MCP session. For stdio, there's one session per process (Claude Desktop owns it). For HTTP, there's one session per SSE-stream + message-POST pair (Hermes generates a session ID, the client carries it in headers).
+Anubis maintains a `Frame` per MCP session. For stdio, there's one session per process (Claude Desktop owns it). For HTTP, there's one session per SSE-stream + message-POST pair (Anubis generates a session ID, the client carries it in headers).
 
-`Inbound.Server.init/2` stores the client_info into `frame.private[:mcp_inbound_client]`:
+`Inbound.Server.init/2` stores the client_info into `frame.assigns[:mcp_inbound_client]`:
 
 ```elixir
 %{
@@ -977,7 +982,7 @@ Hermes maintains a `Frame` per MCP session. For stdio, there's one session per p
 
 This propagates into the capability execution context and into every telemetry event for the session. A future M10 per-client ACL gate consumes the same `name` / `version` strings; we surface them now so the policy hook has stable inputs.
 
-Session expiry is owned by Hermes — `Session.Supervisor` already cleans up idle sessions after the configurable `session_idle_timeout` (default 30 minutes). We don't add custom expiry on top.
+Session expiry is owned by Anubis — `Session.Supervisor` already cleans up idle sessions after the configurable `session_idle_timeout` (default 30 minutes). We don't add custom expiry on top.
 
 ### 4.9 Telemetry and traces
 
@@ -1040,28 +1045,28 @@ Same staged-and-reversible approach as M4.9. Compile + tests + credo green betwe
 - Wire `Setup.ConfigStore.apply_mcp_config/0` to also load `[mcp.inbound]` into `Application.put_env(:fermix_core, :mcp_inbound, ...)`.
 - Tests: every Exposure gate in isolation (enabled/disabled, each kind filter, each policy_class filter, hidden_from_agent?, allowed/denied lists, per-tool override force-expose / force-hide / description_override, kind+policy+hidden_from_agent? composition, malformed TOML raises loud).
 
-**Ship gate:** All exposure rules pinned by tests. No transport, no Hermes, no runtime change. Verifiable by reading `Application.get_env(:fermix_core, :mcp_inbound, [])` after a boot with an example TOML.
+**Ship gate:** All exposure rules pinned by tests. No transport, no Anubis, no runtime change. Verifiable by reading `Application.get_env(:fermix_core, :mcp_inbound, [])` after a boot with an example TOML.
 
 ### Stage 2 — Inbound Server module + Local CapabilityPort
 
 - Add `FermixCore.MCP.Inbound.CapabilityPort` behaviour (`list_capabilities/0`, `execute_capability/3`) + `CapabilityPort.Local` impl that reads `CapabilityRegistry` and calls `Capability.execute/3`.
-- Add `FermixCore.MCP.Inbound.Server` (`use Hermes.Server, capabilities: [:tools]`) overriding `handle_request/2` for **both** `tools/list` and `tools/call`. The `handle_tool_call/3` Hermes callback is intentionally not implemented — see §4.6 for the routing rationale. Replies use the MCP protocol map directly (`%{"content" => [...], "isError" => bool}`); errors use `Hermes.MCP.Error.protocol/2` and `Hermes.MCP.Error.execution/2`.
-- Add `FermixCore.MCP.Inbound.Supervisor` (conditionally starts a `Hermes.Server.Supervisor`; transport selection happens inside).
-- For Stage 2, start with `transport: StubTransport` (Hermes ships this for test environments) so the Hermes server can be exercised without binding stdio or HTTP.
+- Add `FermixCore.MCP.Inbound.Server` (`use Anubis.Server, capabilities: [:tools]`) overriding `handle_request/2` for **both** `tools/list` and `tools/call`. The `handle_tool_call/3` Anubis callback is intentionally not implemented — see §4.6 for the routing rationale. Replies use the MCP protocol map directly (`%{"content" => [...], "isError" => bool}`); errors use `Anubis.MCP.Error.protocol/2` and `Anubis.MCP.Error.execution/2`.
+- Add `FermixCore.MCP.Inbound.Supervisor` (conditionally starts an `Anubis.Server.Supervisor`; transport selection happens inside).
+- For Stage 2, start with `transport: StubTransport` (Anubis ships this for test environments) so the Anubis server can be exercised without binding stdio or HTTP.
 - Wire into `FermixCore.Application` between outbound MCP and Repo, conditional on `enabled`.
-- Tests: full server lifecycle with StubTransport. `tools/list` returns the filtered set (via a `Hermes.Client.Base` round-trip, asserting our `handle_request/2` is hit and the protocol response matches the spec). `tools/call` dispatches via `CapabilityPort.Local` to the right capability with `source: :mcp_inbound` in the execution context. A capability that passed list but no longer passes call returns `Tool not found: <name>`. Unknown tool returns the same. Capability that returns `{:error, ...}` surfaces as `Hermes.MCP.Error.execution/2`. Telemetry events fire with correct measurements/metadata. Loop-prevention warning fires on `:mcp` opt-in. Anchor at least one test directly on the wire shape (raw JSON-RPC in, raw JSON-RPC out) so a future Hermes refactor that changes `handle_request/2` semantics fails loud here, not in production.
+- Tests: full server lifecycle with StubTransport. `tools/list` returns the filtered set (via an `Anubis.Client` round-trip, asserting our `handle_request/2` is hit and the protocol response matches the spec). `tools/call` dispatches via `CapabilityPort.Local` to the right capability with `source: :mcp_inbound` in the execution context. A capability that passed list but no longer passes call returns `Tool not found: <name>`. Unknown tool returns the same. Capability that returns `{:error, ...}` surfaces as `Anubis.MCP.Error.execution/2`. Telemetry events fire with correct measurements/metadata. Loop-prevention warning fires on `:mcp` opt-in. Anchor at least one test directly on the wire shape (raw JSON-RPC in, raw JSON-RPC out) so a future Anubis refactor that changes `handle_request/2` semantics fails loud here, not in production.
 
-**Ship gate:** Inbound server callable in-process via a Hermes client against `StubTransport`. Both `tools/list` and `tools/call` proven not to depend on Hermes's component/Frame tool registration. No real transport yet.
+**Ship gate:** Inbound server callable in-process via an Anubis client against `StubTransport`. Both `tools/list` and `tools/call` proven not to depend on Anubis's component/Frame tool registration. No real transport yet.
 
 ### Stage 3 — Streamable HTTP transport via Phoenix
 
 - Add `FermixWebWeb.Plugs.McpInboundAuth` with the two-stage runtime gate: stage 1 returns 503 when `[mcp.inbound]` is disabled or the configured transport is not `streamable_http`; stage 2 returns 401 on missing/wrong bearer token. Uses `Plug.Crypto.secure_compare/2`.
 - Add the `:mcp_inbound` pipeline + `/mcp` scope in `FermixWebWeb.Router`. The route is mounted **unconditionally** at compile time (Phoenix scopes are macro-expanded; runtime TOML cannot decide their existence). The gate lives in the plug.
-- `Inbound.Supervisor` chooses `transport: {:streamable_http, ...}` when configured, otherwise does not start the Hermes server child. The supervisor branch is the second line of defense — even if the auth plug were bypassed, the Hermes transport behind it would not be running.
+- `Inbound.Supervisor` chooses `transport: {:streamable_http, ...}` when configured, otherwise does not start the Anubis server child. The supervisor branch is the second line of defense — even if the auth plug were bypassed, the Anubis transport behind it would not be running.
 - Boot log line for HTTP mode (`/mcp` path + `"auth: bearer"`); existing Phoenix endpoint bind config governs reachability.
-- Tests: `Plug.Test` for the auth plug — disabled config → 503, transport mismatch → 503, missing token → 401, wrong token → 401, right token + enabled + HTTP transport → pass; constant-time compare exercised (assert `Plug.Crypto.secure_compare/2` is the comparison primitive). End-to-end: a `Hermes.Client.Base` configured with `Hermes.Transport.StreamableHTTP` round-trips `initialize`, `tools/list`, and `tools/call` against a test Phoenix endpoint. Misconfig branch: enable HTTP transport without a token in TOML → `Inbound.Config.from_toml/1` raises at config load, daemon boot fails loud.
+- Tests: `Plug.Test` for the auth plug — disabled config → 503, transport mismatch → 503, missing token → 401, wrong token → 401, right token + enabled + HTTP transport → pass; constant-time compare exercised (assert `Plug.Crypto.secure_compare/2` is the comparison primitive). End-to-end: an `Anubis.Client` configured for streamable HTTP round-trips `initialize`, `tools/list`, and `tools/call` against a test Phoenix endpoint. Misconfig branch: enable HTTP transport without a token in TOML → `Inbound.Config.from_toml/1` raises at config load, daemon boot fails loud.
 
-**Ship gate:** Curl + a `Hermes.Client.Base` with `Hermes.Transport.StreamableHTTP` both round-trip an inbound MCP session against a running test daemon. Disabling the config takes effect on the **next** request (no restart needed for the gate; the supervisor restart is required only to free the Hermes server child). Boot fails loud with a useful message when HTTP is on without a token.
+**Ship gate:** Curl + an `Anubis.Client` configured for streamable HTTP both round-trip an inbound MCP session against a running test daemon. Disabling the config takes effect on the **next** request (no restart needed for the gate; the supervisor restart is required only to free the Anubis server child). Boot fails loud with a useful message when HTTP is on without a token.
 
 ### Stage 4 — Stdio transport + `fermix mcp serve` CLI
 
@@ -1072,7 +1077,7 @@ Same staged-and-reversible approach as M4.9. Compile + tests + credo green betwe
 - Add the two daemon socket handlers (mirrors the existing `:status`, `:capabilities`, etc. pattern in `Fermix.CLI.Daemon`):
   - `:mcp_inbound_list` — runs `Exposure.expose_for_inbound(CapabilityRegistry.list(), InboundConfig.current())` and returns the capability list (JSON-serializable subset: name, description, parameters, kind, policy_class, hidden_from_agent?, metadata). No raw `%Capability{}` over the socket — keep the wire decoupled from the struct shape.
   - `:mcp_inbound_execute` — looks up the capability by name, re-applies `Exposure.expose_for_inbound/2`, calls `Capability.execute/3`. Returns the result tuple.
-- Tests: `fermix mcp serve` end-to-end with daemon-up (both `tools/list` and `tools/call` proxy through the daemon) and daemon-down (Local mode reads from this process's own registry). MCP client (a `Hermes.Client.Base` with `Hermes.Transport.STDIO` pointed at our binary) round-trips a session. `CapabilityPort.DaemonProxy` handles `:daemon_unavailable` for both calls cleanly when the daemon disappears mid-session. The list returned in daemon-proxy mode exactly matches what an HTTP-transport client would see from the same daemon (no drift between transports).
+- Tests: `fermix mcp serve` end-to-end with daemon-up (both `tools/list` and `tools/call` proxy through the daemon) and daemon-down (Local mode reads from this process's own registry). MCP client (an `Anubis.Client` configured for stdio and pointed at our binary) round-trips a session. `CapabilityPort.DaemonProxy` handles `:daemon_unavailable` for both calls cleanly when the daemon disappears mid-session. The list returned in daemon-proxy mode exactly matches what an HTTP-transport client would see from the same daemon (no drift between transports).
 
 **Ship gate:** `claude_desktop_config.json` with `"command": "fermix", "args": ["mcp", "serve"]` works end-to-end. Both modes (daemon-up, daemon-down) tested. Daemon-proxy list and daemon-proxy call agree about what is exposed. README documents the Claude Desktop config block.
 
@@ -1119,11 +1124,11 @@ End-to-end smoke test before each ship gate, in addition to the test suite:
 
 3. **Per-tool description overrides — schema overrides too?** v1 only allows `description_override`. The `parameters` JSON Schema is not overridable, because rewriting a JSON Schema safely (preserving required fields, validating against the underlying capability's expectations, etc.) is M10 territory. Worth flagging because operators may want to hide an internal parameter from the MCP client's view. v1 answer: "don't expose tools whose parameter surface is unsuitable for external clients; that's what the deny list is for."
 
-4. **Hermes_mcp server-side API stability.** Fermix is already pinned to `~> 0.13`. Hermes 0.x is pre-1.0 and the server-side `handle_request/2` signature has shifted before. We pin a specific minor and document the bump path in CHANGELOG. M4.12 will fail loud (config-load error) rather than silently degrade if a future Hermes minor changes the Frame shape.
+4. **Anubis_mcp server-side API stability.** Fermix is already pinned to `~> 0.13`. Anubis 0.x is pre-1.0 and the server-side `handle_request/2` signature has shifted before. We pin a specific minor and document the bump path in CHANGELOG. M4.12 will fail loud (config-load error) rather than silently degrade if a future Anubis minor changes the Frame shape.
 
-5. **Sessions vs single inbound process.** A daemon serving HTTP MCP can have many concurrent inbound sessions (one per MCP client). The `Frame.private[:mcp_inbound_client]` and telemetry session_id make session attribution clean. But every session sees the same capability set (one config = one cap set). Per-session capability sets is multi-tenant inbound, which is M10. Just noting that the v1 shape doesn't preclude it — `Inbound.Server.init/2` already has the client_info; a future per-client policy filter is one filter added to `Exposure.expose_for_inbound/2`.
+5. **Sessions vs single inbound process.** A daemon serving HTTP MCP can have many concurrent inbound sessions (one per MCP client). The `Frame.assigns[:mcp_inbound_client]` and telemetry session_id make session attribution clean. But every session sees the same capability set (one config = one cap set). Per-session capability sets is multi-tenant inbound, which is M10. Just noting that the v1 shape doesn't preclude it — `Inbound.Server.init/2` already has the client_info; a future per-client policy filter is one filter added to `Exposure.expose_for_inbound/2`.
 
-6. **Should `tools/list_changed` notifications be sent on capability registry updates?** When a new outbound MCP server registers tools, or a skill hot-reloads, the inbound set changes too. The MCP spec supports `notifications/tools/list_changed`; Hermes ships the send helper. v1 doesn't wire it up — connected clients refresh on next call. Worth a follow-on; not blocking.
+6. **Should `tools/list_changed` notifications be sent on capability registry updates?** When a new outbound MCP server registers tools, or a skill hot-reloads, the inbound set changes too. The MCP spec supports `notifications/tools/list_changed`; Anubis ships the send helper. v1 doesn't wire it up — connected clients refresh on next call. Worth a follow-on; not blocking.
 
 7. **Skill exposure is transitive — should we re-filter the skill's internal `allowed_tools` through the inbound policy gate?** Opting a skill in via `[mcp.inbound.tools.<skill>] exposed = true` exposes the skill *and everything the skill itself can call*. A skill whose SKILL.md frontmatter sets `allowed_tools: ["shell", "web_fetch"]` will, when invoked from inbound, run a sub-agent that can call `shell` and `web_fetch` — even if those capabilities have `[mcp.inbound.tools.shell] exposed = false`. The inbound caller never directly invokes `shell`, but the skill's sub-agent does on its behalf.
 
@@ -1142,9 +1147,9 @@ End-to-end smoke test before each ship gate, in addition to the test suite:
 ### 9.1 Behavioural
 
 - [ ] Stdio: `fermix mcp serve` invoked from a `claude_desktop_config.json` entry round-trips `initialize`, `tools/list`, and at least three `tools/call` invocations (one builtin read like `file_read`, one builtin write like `memory_store`, one skill exposed via `[mcp.inbound.tools.<skill>] exposed = true`) against a daemon-up and a daemon-down configuration. Default-exposed set matches §4.2: `file_read, file_write, file_edit, glob_search, content_search, git_read, memory_recall, memory_store, list_jobs, tool_help, memory_sources_list` (no skills by default).
-- [ ] HTTP: a `Hermes.Client.Base` configured with `Hermes.Transport.StreamableHTTP` against the running daemon's `/mcp` round-trips `initialize`, `tools/list`, and `tools/call` over the network. Wrong token → 401. Inbound disabled or transport mismatch → 503. No token, HTTP enabled → boot fails loud at config load.
-- [ ] Hermes routing: a test that crafts a raw `tools/call` JSON-RPC against `Inbound.Server` returns the actual capability output, not Hermes's default `Tool not found` for unregistered tools. Equivalent test for `tools/list`. This pins our `handle_request/2` override against Hermes's compile-time component machinery.
-- [ ] Arg validation: a `tools/call` whose `arguments` violates the capability's `inputSchema` returns `Hermes.MCP.Error.protocol(:invalid_params, ...)` *without* invoking `Capability.execute/3`. Verified with a fixture: built-in `file_read` called with `arguments: %{"path" => 42}` (wrong type) and `arguments: %{}` (missing required `path`) both fail at the boundary, not inside the capability. Capability telemetry shows zero executions for these calls.
+- [ ] HTTP: an `Anubis.Client` configured for streamable HTTP against the running daemon's `/mcp` round-trips `initialize`, `tools/list`, and `tools/call` over the network. Wrong token → 401. Inbound disabled or transport mismatch → 503. No token, HTTP enabled → boot fails loud at config load.
+- [ ] Anubis routing: a test that crafts a raw `tools/call` JSON-RPC against `Inbound.Server` returns the actual capability output, not Anubis's default `Tool not found` for unregistered tools. Equivalent test for `tools/list`. This pins our `handle_request/2` override against Anubis's compile-time component machinery.
+- [ ] Arg validation: a `tools/call` whose `arguments` violates the capability's `inputSchema` returns `Anubis.MCP.Error.protocol(:invalid_params, ...)` *without* invoking `Capability.execute/3`. Verified with a fixture: built-in `file_read` called with `arguments: %{"path" => 42}` (wrong type) and `arguments: %{}` (missing required `path`) both fail at the boundary, not inside the capability. Capability telemetry shows zero executions for these calls.
 - [ ] Stdio I/O isolation: launching `fermix mcp serve`, sending a `ping`, then forcing a `Logger.info` from inside a capability call, then sending a `tools/call` — the captured stdout contains only well-formed JSON-RPC frames. No log line, no `IO.puts` output, no stray bytes. Regression coverage for the stdout-protocol invariant in §4.3.
 - [ ] Request timeout: with `request_timeout_ms = 50` and a test capability that sleeps 200ms, the inbound HTTP client receives a JSON-RPC timeout error at ~50ms. The same capability, called with `request_timeout_ms = 500`, returns successfully. The inbound `:call` telemetry event fires when the capability completes in **both** cases, carrying the actual result (no client-timeout tag — per §4.6's documented contract that the server callback can't observe client-side timeouts without a Task wrapper). Operators correlate `duration_ms > request_timeout_ms` from the event metadata to identify dropped responses.
 - [ ] Daemon-proxy parity: in stdio daemon-proxy mode, the tool list returned by `tools/list` is byte-identical (modulo session metadata) to the tool list returned by an HTTP-transport client hitting the same daemon. No drift.
@@ -1170,11 +1175,11 @@ Recorded fixtures (table-driven tests in `apps/fermix_core/test/fermix_core/mcp/
 
 ### 9.3 Auth plug
 
-- [ ] Inbound disabled → 503, body `"mcp inbound disabled\n"`, halts before Hermes plug.
+- [ ] Inbound disabled → 503, body `"mcp inbound disabled\n"`, halts before Anubis plug.
 - [ ] Transport configured as `"stdio"` while HTTP request comes in → 503 with the transport-mismatch body line.
-- [ ] Missing `Authorization` header → 401, body `"unauthorized\n"`, halts before Hermes plug.
+- [ ] Missing `Authorization` header → 401, body `"unauthorized\n"`, halts before Anubis plug.
 - [ ] Wrong `Bearer` token → 401.
-- [ ] Correct `Bearer` token + enabled + streamable_http → request reaches Hermes plug (asserted via `Plug.Test` mock).
+- [ ] Correct `Bearer` token + enabled + streamable_http → request reaches Anubis plug (asserted via `Plug.Test` mock).
 - [ ] HTTP transport in config without `auth_token` → boot fails at config load (`Inbound.Config.from_toml/1` raises). Defense-in-depth: even if config bypass happened, the runtime plug returns 401.
 - [ ] Constant-time compare: `Plug.Crypto.secure_compare/2` is the comparison function (asserted via `:meck` or the equivalent test affordance).
 
@@ -1197,7 +1202,7 @@ Concrete next-step milestones this design unlocks but does not deliver:
 - **Inbound resources (`resources/list`, `resources/read`).** Expose memory entries as `fermix://memory/<id>`, journals as `fermix://journals/<skill>/<run_id>`, traces as `fermix://traces/<date>/<event_id>`. Tools-only is enough for the immediate use cases; resources unlock "let Claude Desktop recall a Fermix memory by URI." **~1 week.**
 - **Inbound prompts (`prompts/list`, `prompts/get`).** Expose skill bodies as Claude-Desktop slash commands. Each skill becomes `fermix:skill:<name>`. The MCP client renders the skill prompt with parameter inputs. **~3-4 days, depends on resources.**
 - **`tools/list_changed` notifications.** When `CapabilityRegistry` changes (skill hot-reload, new outbound MCP server's tools registering), broadcast to connected inbound sessions so they refresh their tool list. **~1-2 days.**
-- **Hot-reload of inbound config.** `fermix mcp inbound reload` daemon socket method that re-reads `[mcp.inbound]` from disk and refreshes the Hermes server's exposure filter without restart. **~2 days, depends on the existing reseed pattern from M7+.**
+- **Hot-reload of inbound config.** `fermix mcp inbound reload` daemon socket method that re-reads `[mcp.inbound]` from disk and refreshes the Anubis server's exposure filter without restart. **~2 days, depends on the existing reseed pattern from M7+.**
 - **Approval-surface exposure (M10 territory).** Once M10 ships the approval queue (the user-facing surface for `hidden_from_agent?: true` capabilities), expose `permissions_list_open` / `permissions_respond` as MCP tools so an external agent can drive Fermix's approval gate. The shape hermes-agent landed on (`mcp_serve.py:823-857`) is a reasonable port target. **Blocked on M10 — the approval store doesn't exist yet.**
 - **Per-user inbound auth + ACLs (M10).** Multi-token: each token maps to a policy filter. Token rotation, audit per token, per-token rate limits, per-token capability subset. **M10 territory; this milestone surfaces the static gates that M10 composes on top of.**
 - **mTLS / OAuth for HTTP transport.** Bearer is the v1 posture. mTLS and OAuth are M10.

@@ -4,7 +4,7 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   `%Capability{kind: :mcp}`. The capability's executor closes over
   `{server_name, original_tool_name}` and dispatches through the
   `:caller` module so tests can swap in a stub instead of going through
-  a live `Hermes.Client`.
+  a live `Anubis.Client`.
 
   Default policy class is `:external_api`. MCP tools are visible to the
   agent by default (`hidden_from_agent?: false`); operators can hide
@@ -26,7 +26,7 @@ defmodule FermixCore.Capabilities.MCP.Capability do
 
   @doc """
   Build a `%Capability{}` for an MCP tool. The descriptor uses the keys
-  returned by `Hermes.Client.list_tools/2` (`:name`, `:description`,
+  returned by `Anubis.Client.list_tools/2` (`:name`, `:description`,
   `:input_schema`).
   """
   @spec from_tool_descriptor(String.t(), tool_descriptor(), keyword()) :: Capability.t()
@@ -36,7 +36,7 @@ defmodule FermixCore.Capabilities.MCP.Capability do
     sanitized_candidate = Naming.candidate(server, original)
     sanitized = Naming.register(server, original, sanitized_candidate)
 
-    caller = Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Hermes)
+    caller = Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Anubis)
     overrides = Keyword.get(opts, :tool_overrides, %{})
     policy_class = Map.get(overrides, :policy_class, :external_api)
     hidden_from_agent? = Map.get(overrides, :hidden_from_agent?, false)
