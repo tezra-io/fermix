@@ -48,9 +48,15 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, assign(socket, :active_tab, tab_id) |> assign(:saved_flash, nil)}
   end
 
-  def handle_event("provider_changed", %{"provider" => provider_str}, socket) do
-    provider = String.to_existing_atom(provider_str)
-    form = Map.merge(socket.assigns.provider_form, %{provider: provider})
+  def handle_event("provider_changed", %{"provider_form" => params}, socket) do
+    current = socket.assigns.provider_form
+    provider = parse_provider_field(Map.get(params, "provider"), current.provider)
+    default_model = present_or(Map.get(params, "default_model"), current.default_model)
+
+    reasoning_effort =
+      parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort)
+
+    form = %{provider: provider, default_model: default_model, reasoning_effort: reasoning_effort}
 
     {:noreply,
      socket
@@ -406,6 +412,22 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_provider("openai"), do: :openai
   defp normalize_provider("openai_codex"), do: :openai_codex
   defp normalize_provider("anthropic"), do: :anthropic
+
+  defp parse_provider_field("openai", _default), do: :openai
+  defp parse_provider_field("openai_codex", _default), do: :openai_codex
+  defp parse_provider_field("anthropic", _default), do: :anthropic
+  defp parse_provider_field(_, default), do: default
+
+  defp parse_effort_field(field, _default)
+       when field in ~w(none minimal low medium high xhigh) do
+    String.to_existing_atom(field)
+  end
+
+  defp parse_effort_field(_, default), do: default
+
+  defp present_or(nil, default), do: default
+  defp present_or("", default), do: default
+  defp present_or(value, _default) when is_binary(value), do: value
 
   defp provider_block(snapshot, provider) do
     snapshot

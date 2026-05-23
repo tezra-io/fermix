@@ -70,6 +70,27 @@ defmodule FermixWebWeb.SetupLiveTest do
   end
 
   describe "Provider form" do
+    test "phx-change updates the model list without crashing the LV", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      # Submit a change with provider=anthropic but keep the model+effort at
+      # their initial (openai-rendered) values so form validation passes. The
+      # LV's re-render after handle_event/3 should swap the model list.
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{
+            provider: "anthropic",
+            default_model: "gpt-5.5",
+            reasoning_effort: "none"
+          }
+        )
+        |> render_change()
+
+      assert html =~ "claude-sonnet-4-6"
+      refute html =~ "gpt-5.5</option>"
+    end
+
     test "submitting persists provider, model, reasoning effort and api key", %{
       conn: conn,
       tmp_home: tmp_home
