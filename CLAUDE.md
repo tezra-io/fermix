@@ -66,6 +66,7 @@ mix format --check-formatted
 - `docs/MILESTONE_4_10_CODEX_PARITY.md` — M4.10 design (shipped) — Codex tool calls, provider/model/effort persistence, wizard step, doctor auth probe
 - `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` — M4.11 design (draft) — cron jobs, persistent memory sources, isolated runs
 - `docs/MILESTONE_4_12_INBOUND_MCP.md` — M4.12 design (draft) — Fermix as an MCP server (stdio + streamable HTTP), `[mcp.inbound]` config, policy-gated capability exposure, `fermix mcp serve`
+- `docs/MILESTONE_4_13_ANUBIS_MIGRATION.md` — M4.13 design (shipped) — MCP dependency migration from Hermes to Anubis for outbound and inbound MCP surfaces
 - `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` — M5 design (shipped core) — workspace-rooted sandbox floor, modes (`strict`/`standard`/`open`), command profiles (`bare`/`assistant`/`extended`), hardline blocklist, `fermix grant` UX, env passthrough via `source = "command"` (no Fermix-owned keystore — defers to operator's OS helpers like `security`/`secret-tool`/`pass`/`op`), `SafeRm` test discipline
 - `docs/POST_M5_PLAN.md` — Post-M5 plan (draft) — finishes M5's unshipped halves (wizard secret writer, `auth.json` perms refusal, doctor trace scan, deny-message audit, rename migration error) and unifies MCP env routing through `Sandbox.Env`
 - `docs/MILESTONE_7_ADVANCED_TOOLS.md` — M7 design — keyless built-in tool catalog (file/git/web/delegate/skill_create), capability metadata + dynamic prompt summary, self-knowledge skill

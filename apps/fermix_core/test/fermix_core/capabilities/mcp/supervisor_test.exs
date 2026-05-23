@@ -33,7 +33,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     def list_tools(_client), do: {:error, :transport_closed}
   end
 
-  defmodule FakeHermes do
+  defmodule FakeAnubis do
     @moduledoc false
     use GenServer
 
@@ -41,14 +41,14 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
     @impl true
     def init(opts) do
-      send(opts[:reporter], {:fake_hermes_started, opts})
+      send(opts[:reporter], {:fake_anubis_started, opts})
       {:ok, opts}
     end
   end
 
-  defmodule RecordingHermesStarter do
+  defmodule RecordingAnubisStarter do
     @moduledoc false
-    @behaviour FermixCore.Capabilities.MCP.HermesStarter
+    @behaviour FermixCore.Capabilities.MCP.AnubisStarter
 
     @impl true
     def child_specs_for(server) do
@@ -56,9 +56,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
       case Map.get(server, :command) do
         cmd when is_binary(cmd) and cmd != "" and is_pid(reporter) ->
-          send(reporter, {:hermes_starter_invoked, server})
+          send(reporter, {:anubis_starter_invoked, server})
 
-          client_name = :"recording_hermes_client_#{server.name}"
+          client_name = :"recording_anubis_client_#{server.name}"
 
           base_opts = [
             name: client_name,
@@ -69,8 +69,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           ]
 
           spec =
-            Supervisor.child_spec({FakeHermes, base_opts},
-              id: {:fake_hermes, server.name},
+            Supervisor.child_spec({FakeAnubis, base_opts},
+              id: {:fake_anubis, server.name},
               restart: :permanent
             )
 
@@ -179,7 +179,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     refute Enum.any?(cap_names(cap_registry), &String.starts_with?(&1, "mcp_broken_"))
   end
 
-  test "spawns the configured Hermes starter once per server with command/args/env", %{
+  test "spawns the configured Anubis starter once per server with command/args/env", %{
     cap_registry: cap_registry,
     suffix: suffix
   } do
@@ -187,10 +187,10 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       start_supervised(
         {McpSupervisor,
          [
-           name: :"mcp_sup_hermes_#{suffix}",
-           mcp_registry: :"mcp_sup_hermes_reg_#{suffix}",
+           name: :"mcp_sup_anubis_#{suffix}",
+           mcp_registry: :"mcp_sup_anubis_reg_#{suffix}",
            capability_registry: cap_registry,
-           hermes_starter: RecordingHermesStarter,
+           anubis_starter: RecordingAnubisStarter,
            servers: [
              %{
                name: "github",
@@ -203,15 +203,15 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
              }
            ]
          ]},
-        id: :mcp_supervisor_hermes_test
+        id: :mcp_supervisor_anubis_test
       )
 
-    assert_receive {:hermes_starter_invoked, server}, 500
+    assert_receive {:anubis_starter_invoked, server}, 500
     assert server.command == "npx"
     assert server.args == ["-y", "@modelcontextprotocol/server-github"]
     assert server.env["TOKEN"] == "secret"
 
-    assert_receive {:fake_hermes_started, opts}, 500
+    assert_receive {:fake_anubis_started, opts}, 500
     assert opts[:command] == "npx"
     assert opts[:env]["TOKEN"] == "secret"
   end
@@ -222,7 +222,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
   } do
     System.put_env("FERMIX_MCP_PASS_TOKEN", "from-env")
 
-    Application.put_env(:fermix_core, :sandbox,
+    Application.put_env(
+      :fermix_core,
+      :sandbox,
       SandboxConfig.normalize(env: [allow: ["FERMIX_MCP_PASS_TOKEN"]])
     )
 
@@ -233,7 +235,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            name: :"mcp_sup_pass_env_#{suffix}",
            mcp_registry: :"mcp_sup_pass_env_reg_#{suffix}",
            capability_registry: cap_registry,
-           hermes_starter: RecordingHermesStarter,
+           anubis_starter: RecordingAnubisStarter,
            servers: [
              %{
                name: "github",
@@ -249,7 +251,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         id: :mcp_supervisor_pass_env_test
       )
 
-    assert_receive {:fake_hermes_started, opts}, 500
+    assert_receive {:fake_anubis_started, opts}, 500
     assert opts[:env]["FERMIX_MCP_PASS_TOKEN"] == "from-env"
     assert opts[:env]["PATH"] == "/opt/custom/bin"
   end
@@ -268,7 +270,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
            name: :"mcp_sup_pass_env_all_#{suffix}",
            mcp_registry: :"mcp_sup_pass_env_all_reg_#{suffix}",
            capability_registry: cap_registry,
-           hermes_starter: RecordingHermesStarter,
+           anubis_starter: RecordingAnubisStarter,
            servers: [
              %{
                name: "github",
@@ -283,7 +285,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         id: :mcp_supervisor_pass_env_all_test
       )
 
-    assert_receive {:fake_hermes_started, opts}, 500
+    assert_receive {:fake_anubis_started, opts}, 500
     assert opts[:env]["FERMIX_MCP_PASS_TOKEN"] == "from-env"
   end
 
@@ -298,7 +300,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         name: :"mcp_sup_pass_env_denied_#{suffix}",
         mcp_registry: :"mcp_sup_pass_env_denied_reg_#{suffix}",
         capability_registry: cap_registry,
-        hermes_starter: RecordingHermesStarter,
+        anubis_starter: RecordingAnubisStarter,
         servers: [%{name: "github", command: "npx", pass_env: ["FERMIX_MCP_PASS_TOKEN"]}]
       )
     end
@@ -308,7 +310,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     cap_registry: cap_registry,
     suffix: suffix
   } do
-    Application.put_env(:fermix_core, :sandbox,
+    Application.put_env(
+      :fermix_core,
+      :sandbox,
       SandboxConfig.normalize(env: [mode: :all, deny: ["FERMIX_MCP_PASS_TOKEN"]])
     )
 
@@ -317,13 +321,13 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
         name: :"mcp_sup_pass_env_all_denied_#{suffix}",
         mcp_registry: :"mcp_sup_pass_env_all_denied_reg_#{suffix}",
         capability_registry: cap_registry,
-        hermes_starter: RecordingHermesStarter,
+        anubis_starter: RecordingAnubisStarter,
         servers: [%{name: "github", command: "npx", pass_env: ["FERMIX_MCP_PASS_TOKEN"]}]
       )
     end
   end
 
-  test "skips Hermes starter for servers without command (test/discoverer-only path)", %{
+  test "skips Anubis starter for servers without command (test/discoverer-only path)", %{
     cap_registry: cap_registry,
     suffix: suffix
   } do
@@ -331,10 +335,10 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       start_supervised(
         {McpSupervisor,
          [
-           name: :"mcp_sup_no_hermes_#{suffix}",
-           mcp_registry: :"mcp_sup_no_hermes_reg_#{suffix}",
+           name: :"mcp_sup_no_anubis_#{suffix}",
+           mcp_registry: :"mcp_sup_no_anubis_reg_#{suffix}",
            capability_registry: cap_registry,
-           hermes_starter: RecordingHermesStarter,
+           anubis_starter: RecordingAnubisStarter,
            servers: [
              %{
                name: "github",
@@ -344,11 +348,11 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
              }
            ]
          ]},
-        id: :mcp_supervisor_no_hermes_test
+        id: :mcp_supervisor_no_anubis_test
       )
 
-    refute_receive {:hermes_starter_invoked, _server}, 100
-    refute_receive {:fake_hermes_started, _opts}, 100
+    refute_receive {:anubis_starter_invoked, _server}, 100
+    refute_receive {:fake_anubis_started, _opts}, 100
   end
 
   defp cap_names(cap_registry) do

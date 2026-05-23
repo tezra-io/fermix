@@ -1,6 +1,6 @@
 defmodule FermixCore.Capabilities.MCP.Registry do
   @moduledoc """
-  In-memory map from MCP server name to its `Hermes.Client.Base` pid.
+  In-memory map from MCP server name to its `Anubis.Client` pid.
 
   Per-server supervisors register themselves here when their client
   comes up so dispatch can resolve `server_name → client_pid` without

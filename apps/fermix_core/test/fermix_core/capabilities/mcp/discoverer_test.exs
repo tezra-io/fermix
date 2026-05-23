@@ -1,11 +1,11 @@
-defmodule FermixCore.Capabilities.MCP.Discoverer.HermesTest do
+defmodule FermixCore.Capabilities.MCP.Discoverer.AnubisTest do
   use ExUnit.Case, async: true
 
-  alias FermixCore.Capabilities.MCP.Discoverer.Hermes, as: HermesDiscoverer
+  alias FermixCore.Capabilities.MCP.Discoverer.Anubis, as: AnubisDiscoverer
 
   describe "interpret_response/1" do
     test "unwraps a successful tools/list response and normalizes each tool" do
-      response = %Hermes.MCP.Response{
+      response = %Anubis.MCP.Response{
         result: %{
           "tools" => [
             %{
@@ -20,7 +20,7 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.HermesTest do
         is_error: false
       }
 
-      assert {:ok, tools} = HermesDiscoverer.interpret_response({:ok, response})
+      assert {:ok, tools} = AnubisDiscoverer.interpret_response({:ok, response})
       assert length(tools) == 2
 
       [click, see] = tools
@@ -33,26 +33,26 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.HermesTest do
       assert see.input_schema == %{type: "object", properties: %{}}
     end
 
-    test "treats Hermes.MCP.Response with is_error: true as an error" do
-      response = %Hermes.MCP.Response{
+    test "treats Anubis.MCP.Response with is_error: true as an error" do
+      response = %Anubis.MCP.Response{
         result: %{"message" => "permission denied"},
         id: "req_err",
         is_error: true
       }
 
       assert {:error, {:tools_error, ^response}} =
-               HermesDiscoverer.interpret_response({:ok, response})
+               AnubisDiscoverer.interpret_response({:ok, response})
     end
 
     test "returns :unexpected_tools_response when the result has no tools key" do
-      response = %Hermes.MCP.Response{result: %{"prompts" => []}, id: "req_x", is_error: false}
+      response = %Anubis.MCP.Response{result: %{"prompts" => []}, id: "req_x", is_error: false}
 
       assert {:error, {:unexpected_tools_response, ^response}} =
-               HermesDiscoverer.interpret_response({:ok, response})
+               AnubisDiscoverer.interpret_response({:ok, response})
     end
 
     test "propagates transport errors verbatim" do
-      assert {:error, :timeout} = HermesDiscoverer.interpret_response({:error, :timeout})
+      assert {:error, :timeout} = AnubisDiscoverer.interpret_response({:error, :timeout})
     end
   end
 end

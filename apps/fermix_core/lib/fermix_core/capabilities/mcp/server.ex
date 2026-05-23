@@ -4,9 +4,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   one configured server.
 
   On init it discovers the server's tool list via the configured
-  `Discoverer` (defaults to `Hermes` in production, swappable in tests),
+  `Discoverer` (defaults to `Anubis` in production, swappable in tests),
   builds an `MCP.Capability` for each tool, and registers it with the
-  capability registry. The Hermes client pid is published to
+  capability registry. The Anubis client pid is published to
   `MCP.Registry` so dispatch can resolve `server_name -> client_pid`.
 
   On terminate it unregisters all of its capabilities (matched by
@@ -45,8 +45,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
     state = %{
       server_name: Keyword.fetch!(opts, :server_name),
       client: Keyword.get(opts, :client),
-      discoverer: Keyword.get(opts, :discoverer, FermixCore.Capabilities.MCP.Discoverer.Hermes),
-      caller: Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Hermes),
+      discoverer: Keyword.get(opts, :discoverer, FermixCore.Capabilities.MCP.Discoverer.Anubis),
+      caller: Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Anubis),
       tools_overrides: Keyword.get(opts, :tools_overrides, %{}),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       mcp_registry: Keyword.get(opts, :mcp_registry, McpRegistry),
@@ -138,7 +138,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
       else: Logger.warning(message)
   end
 
-  defp expected_startup_error?(%Hermes.MCP.Error{reason: :internal_error, data: %{message: msg}})
+  defp expected_startup_error?(%Anubis.MCP.Error{reason: :internal_error, data: %{message: msg}})
        when is_binary(msg) do
     String.contains?(msg, "Server capabilities not set")
   end
@@ -157,7 +157,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
         McpRegistry.register(state.mcp_registry, state.server_name, pid)
 
       nil ->
-        {:error, {:hermes_client_not_started, client}}
+        {:error, {:anubis_client_not_started, client}}
     end
   end
 

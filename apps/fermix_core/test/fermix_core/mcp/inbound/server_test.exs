@@ -1,15 +1,14 @@
 defmodule FermixCore.MCP.Inbound.ServerTest do
   use ExUnit.Case, async: false
 
+  alias Anubis.MCP.Error
+  alias Anubis.Server.Frame
+  alias Anubis.Server.Registry, as: AnubisRegistry
+  alias Anubis.Server.Session, as: AnubisSession
   alias FermixCore.Capabilities.Capability
   alias FermixCore.MCP.Inbound.CapabilityPort
   alias FermixCore.MCP.Inbound.Config
   alias FermixCore.MCP.Inbound.Server
-  alias Hermes.MCP.Error
-  alias Hermes.Server.Base, as: HermesServerBase
-  alias Hermes.Server.Frame
-  alias Hermes.Server.Registry, as: HermesRegistry
-  alias Hermes.Server.Session.Supervisor, as: HermesSessionSupervisor
 
   defmodule StubPort do
     @behaviour CapabilityPort
@@ -95,9 +94,7 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
     assert Server.server_info() == %{"name" => "fermix-dev", "version" => "9.9.9"}
   end
 
-  test "Hermes wire boundary returns configured identity and dynamic tools" do
-    ensure_hermes_registry_started()
-
+  test "Anubis wire boundary returns configured identity and dynamic tools" do
     Application.put_env(:fermix_core, :mcp_inbound, %Config{
       enabled?: true,
       server_name: "fermix-dev",
@@ -106,22 +103,24 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
       tool_overrides: %{"echo" => %{description_override: "Wire echo"}}
     })
 
-    session_id = "wire-session"
     server = start_wire_server()
 
     assert %{"result" => %{"serverInfo" => %{"name" => "fermix-dev", "version" => "9.9.9"}}} =
-             server |> request(initialize_request(), session_id) |> decode_response()
+             server |> request(initialize_request()) |> decode_response()
 
-    GenServer.cast(server, {:notification, initialized_notification(), session_id, %{}})
+    GenServer.cast(server, {:mcp_notification, initialized_notification(), %{}})
     :sys.get_state(server)
 
     assert %{"result" => %{"tools" => [%{"name" => "echo", "description" => "Wire echo"}]}} =
-             server |> request(tools_list_request(), session_id) |> decode_response()
+             server |> request(tools_list_request()) |> decode_response()
 
     assert %{"result" => %{"content" => [%{"text" => "done"}], "isError" => false}} =
-             server |> request(tools_call_request(), session_id) |> decode_response()
+             server |> request(tools_call_request()) |> decode_response()
 
-    assert_receive {:stub_execute, "echo", %{"text" => "hello"}, _context}
+    assert_receive {:stub_execute, "echo", %{"text" => "hello"}, context}
+    assert context.mcp_inbound_client.client_name == "wire-client"
+    assert context.mcp_inbound_client.client_version == "1.0"
+    assert context.mcp_inbound_client.session_id == "stdio"
   end
 
   test "tools/call validates args, executes through the active port, and replies with text" do
@@ -233,7 +232,7 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
 
   defp frame do
     %Frame{
-      private: %{
+      assigns: %{
         mcp_inbound_client: %{
           client_name: "test-client",
           client_version: "1.0",
@@ -243,35 +242,31 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
     }
   end
 
-  defp ensure_hermes_registry_started do
-    case Process.whereis(HermesRegistry) do
-      nil -> start_supervised!(HermesRegistry)
-      _pid -> :ok
-    end
-  end
-
   defp start_wire_server do
-    server = HermesRegistry.server(:"inbound_wire_server_#{System.unique_integer([:positive])}")
+    suffix = System.unique_integer([:positive])
+    server = AnubisRegistry.stdio_session_name(Server)
+    task_supervisor = :"inbound_wire_task_supervisor_#{suffix}"
 
     start_supervised!(
-      {HermesSessionSupervisor, server: Server, registry: HermesRegistry},
-      id: :inbound_wire_session_supervisor
+      {Task.Supervisor, name: task_supervisor},
+      id: :"inbound_wire_task_supervisor_#{suffix}"
     )
 
     start_supervised!(
-      {HermesServerBase,
-       module: Server,
+      {AnubisSession,
+       session_id: "stdio",
+       server_module: Server,
        name: server,
-       transport: [layer: Hermes.Server.Transport.STDIO, name: :inbound_wire_transport],
-       registry: HermesRegistry},
-      id: :inbound_wire_base
+       transport: [layer: Anubis.Server.Transport.STDIO, name: :inbound_wire_transport],
+       task_supervisor: task_supervisor},
+      id: :"inbound_wire_session_#{suffix}"
     )
 
     server
   end
 
-  defp request(server, payload, session_id) do
-    GenServer.call(server, {:request, payload, session_id, %{}})
+  defp request(server, payload) do
+    GenServer.call(server, {:mcp_request, payload, %{}})
   end
 
   defp decode_response({:ok, encoded}) do
@@ -284,6 +279,8 @@ defmodule FermixCore.MCP.Inbound.ServerTest do
       "id" => "init-1",
       "method" => "initialize",
       "params" => %{
+        # Keep the fixture on an older supported MCP version so the test covers negotiation,
+        # not just Anubis's current latest default.
         "protocolVersion" => "2025-03-26",
         "capabilities" => %{},
         "clientInfo" => %{"name" => "wire-client", "version" => "1.0"}

@@ -1,21 +1,21 @@
 defmodule FermixCore.MCP.Inbound.Server do
   @moduledoc """
-  Hermes-backed MCP server exposing filtered Fermix capabilities as tools.
+  Anubis-backed MCP server exposing filtered Fermix capabilities as tools.
   """
 
-  use Hermes.Server,
+  use Anubis.Server,
     name: "fermix",
     version: "0.1.0",
     capabilities: [:tools]
 
+  alias Anubis.MCP.Error
+  alias Anubis.Server.Component.Schema
+  alias Anubis.Server.Frame
+  alias Anubis.Server.Handlers
   alias FermixCore.Capabilities.Capability
   alias FermixCore.MCP.Inbound.CapabilityPort
   alias FermixCore.MCP.Inbound.Config
   alias FermixCore.MCP.Inbound.Exposure
-  alias Hermes.MCP.Error
-  alias Hermes.Server.Component.Schema
-  alias Hermes.Server.Frame
-  alias Hermes.Server.Handlers
 
   @impl true
   def server_info do
@@ -28,10 +28,10 @@ defmodule FermixCore.MCP.Inbound.Server do
     client = %{
       client_name: Map.get(client_info, "name"),
       client_version: Map.get(client_info, "version"),
-      session_id: Frame.get_mcp_session_id(frame)
+      session_id: frame_session_id(frame)
     }
 
-    {:ok, Frame.put_private(frame, :mcp_inbound_client, client)}
+    {:ok, Frame.assign(frame, :mcp_inbound_client, client)}
   end
 
   @impl true
@@ -158,8 +158,11 @@ defmodule FermixCore.MCP.Inbound.Server do
   end
 
   defp client_context(frame) do
-    Map.get(frame.private, :mcp_inbound_client, %{})
+    Map.get(frame.assigns, :mcp_inbound_client, %{})
   end
+
+  # Anubis refreshes read-only session context before each callback.
+  defp frame_session_id(%Frame{context: %{session_id: session_id}}), do: session_id
 
   defp client_metadata(frame) do
     client = client_context(frame)
