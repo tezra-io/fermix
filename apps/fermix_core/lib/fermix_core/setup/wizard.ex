@@ -539,7 +539,13 @@ defmodule FermixCore.Setup.Wizard do
       |> maybe_put_sandbox_profile(profile)
       |> maybe_put_sandbox_allow(allow)
 
-    commit_snapshot(Map.put(snapshot, :sandbox, sandbox))
+    # Strip env-only secrets so a sandbox-only update does not persist
+    # OS-env-overlaid values (e.g. OPENAI_API_KEY from the shell) to TOML
+    # as plaintext. Anything already in the persisted TOML stays put.
+    snapshot
+    |> Map.put(:sandbox, sandbox)
+    |> drop_unanswered_env_only_secrets([])
+    |> commit_snapshot()
   end
 
   defp commit_snapshot(snapshot) do
