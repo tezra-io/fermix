@@ -13,7 +13,7 @@ defmodule FermixCore.Memory.Config do
   @extraction_timeout_ms 90_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75
-  @extraction_debounce_seconds 60
+  @extraction_debounce_seconds 86_400
   @prompt_files_rebuild_hours 12
   @compaction_token_budget 8_000
   @loop_detection_window 10
