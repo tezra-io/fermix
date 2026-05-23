@@ -45,6 +45,40 @@ defmodule FermixCore.Memory.ExtractionDebouncerTest do
     assert Keyword.fetch!(opts, :conversation_key) == {"telegram", "chat_1", :root}
   end
 
+  test "throttles repeated extractions per conversation key inside the window" do
+    task_supervisor =
+      start_supervised!(
+        {Task.Supervisor,
+         name: :"extraction_throttle_task_#{System.unique_integer([:positive])}"},
+        id: :throttle_task_supervisor
+      )
+
+    debouncer =
+      start_supervised!(
+        {ExtractionDebouncer,
+         [
+           name: :"extraction_throttle_debouncer_#{System.unique_integer([:positive])}",
+           task_supervisor: task_supervisor,
+           extractor_module: TestExtractor,
+           extraction_debounce_ms: 300,
+           min_coalesce_window_ms: 50
+         ]},
+        id: :throttle_debouncer
+      )
+
+    # First fire after coalesce window (~50ms).
+    assert :ok = request_extract(debouncer, "first")
+    assert_receive {:extracted, _opts_1}, 250
+
+    # Second request lands inside the 300ms throttle window — it must wait
+    # for the window to expire rather than firing within the coalesce delay.
+    assert :ok = request_extract(debouncer, "second")
+    refute_receive {:extracted, _opts}, 150
+    assert_receive {:extracted, opts_2}, 500
+
+    assert Keyword.fetch!(opts_2, :messages) == [%{role: "user", content: "second"}]
+  end
+
   test "does not coalesce different conversations", %{debouncer: debouncer} do
     assert :ok = request_extract(debouncer, "first", {"telegram", "chat_1", :root})
     assert :ok = request_extract(debouncer, "second", {"telegram", "chat_2", :root})
