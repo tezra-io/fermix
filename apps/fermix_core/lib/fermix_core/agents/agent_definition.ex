@@ -20,6 +20,7 @@ defmodule FermixCore.Agents.AgentDefinition do
 
   @type t :: %__MODULE__{
           name: String.t(),
+          description: String.t(),
           role: role(),
           persistent: boolean(),
           system_prompt: String.t(),
@@ -39,6 +40,7 @@ defmodule FermixCore.Agents.AgentDefinition do
 
   @enforce_keys [
     :name,
+    :description,
     :role,
     :persistent,
     :system_prompt,
@@ -51,6 +53,7 @@ defmodule FermixCore.Agents.AgentDefinition do
   ]
   defstruct [
     :name,
+    :description,
     :role,
     :persistent,
     :system_prompt,
@@ -76,6 +79,7 @@ defmodule FermixCore.Agents.AgentDefinition do
   def new(attrs) when is_map(attrs) do
     with {:ok, name} <- fetch_required_string(attrs, "name"),
          :ok <- validate_name(name),
+         {:ok, description} <- fetch_required_string(attrs, "description"),
          {:ok, system_prompt} <- fetch_required_string(attrs, "system_prompt"),
          {:ok, role} <- parse_role(get(attrs, "role", :sub)),
          {:ok, persistent} <-
@@ -91,6 +95,7 @@ defmodule FermixCore.Agents.AgentDefinition do
       {:ok,
        %__MODULE__{
          name: name,
+         description: description,
          role: role,
          persistent: persistent,
          system_prompt: system_prompt,
@@ -160,7 +165,7 @@ defmodule FermixCore.Agents.AgentDefinition do
   defp optional_string(value), do: to_string(value)
 
   defp validate_name(name) do
-    if String.match?(name, ~r/^[a-zA-Z0-9_-]+$/) do
+    if String.match?(name, ~r/^[a-zA-Z0-9_-]{1,64}$/) do
       :ok
     else
       {:error, {:invalid_name, name}}
