@@ -4,10 +4,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   `kind: :builtin` capabilities.
 
   Listed in the supervision tree between `CapabilityRegistry` and
-  `SkillRegistry` so built-ins land first. SkillRegistry's `sync_capabilities/3`
-  refuses to evict an existing built-in, which combined with the boot order
-  guarantees an operator skill named "shell" can never silently shadow the
-  built-in shell tool.
+  `SkillRegistry` so built-ins land first. Skill discovery refuses names that
+  collide with registered capabilities, which prevents an operator skill named
+  "shell" from silently shadowing the built-in shell tool.
 
   `start_link/1` returns `:ignore` so the supervisor records no child pid —
   the work happens before `start_link` returns.
@@ -31,6 +30,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.WebSearch,
     FermixCore.Tools.Delegate,
     FermixCore.Tools.SkillCreate,
+    FermixCore.Tools.SkillView,
+    FermixCore.Tools.SkillRun,
     FermixCore.Tools.ModelRoutingConfig,
     FermixCore.Tools.ToolHelp,
     FermixCore.Tools.MemoryStore,

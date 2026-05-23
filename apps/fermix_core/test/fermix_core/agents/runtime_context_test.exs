@@ -150,6 +150,7 @@ defmodule FermixCore.Agents.RuntimeContextTest do
   } do
     operator_skill = %AgentDefinition{
       name: "operator-skill",
+      description: "Operator skill description.",
       role: :sub,
       persistent: false,
       system_prompt: "Operator-only.",
@@ -161,14 +162,6 @@ defmodule FermixCore.Agents.RuntimeContextTest do
       delegates_to: []
     }
 
-    # Register the skill capability the way SkillRegistry would —
-    # kind: :skill, policy_class: :exec.
-    :ok =
-      CapabilityRegistry.register(
-        registry,
-        cap("operator-skill", kind: :skill, policy_class: :exec)
-      )
-
     {:ok, ctx} =
       RuntimeContext.build(
         agent_id: agent_id,
@@ -176,11 +169,11 @@ defmodule FermixCore.Agents.RuntimeContextTest do
         capability_registry: registry
       )
 
-    assert ctx.operator_profile.runtime_message.content =~ "- operator-skill"
+    assert ctx.operator_profile.runtime_message.content =~ ~s(<skill name="operator-skill")
 
     guest = RuntimeContext.profile_for(ctx, :guest, registry, [])
 
-    refute guest.runtime_message.content =~ "- operator-skill"
+    refute guest.runtime_message.content =~ "operator-skill"
   end
 
   test "messages_for/4 assembles base + runtime + history + user", %{

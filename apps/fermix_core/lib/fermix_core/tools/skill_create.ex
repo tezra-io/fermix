@@ -77,10 +77,10 @@ defmodule FermixCore.Tools.SkillCreate do
   end
 
   defp validate_name(name) do
-    if String.match?(name, ~r/^[a-zA-Z0-9_-]+$/) do
+    if String.match?(name, ~r/^[a-zA-Z0-9_-]{1,64}$/) do
       :ok
     else
-      {:error, "invalid_name: use letters, digits, underscore, or hyphen"}
+      {:error, "invalid_name: use letters, digits, underscore, or hyphen, max 64 chars"}
     end
   end
 

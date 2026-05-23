@@ -15,7 +15,13 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "## Built-in Capability Catalog"
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
-    assert content =~ "Pick a skill capability by name"
+    refute content =~ "Pick a skill capability by name"
+    refute content =~ "snapshots change only after process restart"
+    assert content =~ "Use the Skill Catalog only to decide whether a skill is relevant"
+    assert content =~ "call `skill_view`"
+    assert content =~ "Do not infer detailed behavior from the description alone"
+    assert content =~ "Use supporting files only if the loaded `SKILL.md` asks for them"
+    assert content =~ "Use `skill_run`"
     assert content =~ "cron-style requests"
     assert content =~ "use `schedule_job`"
     assert content =~ "For channel-originated jobs that should report back to the same chat"
@@ -38,6 +44,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   test "build/1 renders a compact skill catalog from available skills" do
     skill = %AgentDefinition{
       name: "coding-skill",
+      description: "Use when code needs to be written.",
       role: :sub,
       persistent: false,
       system_prompt: "You write code.",
@@ -51,8 +58,12 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     content = RuntimeSections.build([skill])
 
-    assert content =~ "- coding-skill: capabilities=code, tests; tools=file_read, shell"
+    assert content =~ ~s(<skills>)
+    assert content =~ ~s(<skill name="coding-skill" trust="operator")
+    assert content =~ "Use when code needs to be written."
+    assert content =~ "</skills>"
     refute content =~ "You write code."
+    refute content =~ "capabilities=code"
   end
 
   test "build/2 renders the supplied capability snapshot instead of global registry built-ins" do
@@ -75,10 +86,11 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     refute content =~ "`content_search`"
   end
 
-  test "build/2 hides skills whose capabilities were filtered out" do
+  test "build/2 hides skills from guest profiles" do
     # Operator's skill list (the GenServer-side snapshot from SkillRegistry).
     operator_skill = %AgentDefinition{
       name: "operator-only-skill",
+      description: "Operator only.",
       role: :sub,
       persistent: false,
       system_prompt: "Operator skill.",
@@ -90,8 +102,6 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
       delegates_to: []
     }
 
-    # Filtered capability snapshot for the current turn — does NOT include
-    # the operator-only skill (it was removed by trust/policy filtering).
     snapshot = [
       Capability.new(%{
         name: "read_only_tool",
@@ -104,16 +114,17 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
       })
     ]
 
-    content = RuntimeSections.build([operator_skill], capabilities: snapshot)
+    content = RuntimeSections.build([operator_skill], capabilities: snapshot, trust: :guest)
 
     refute content =~ "operator-only-skill"
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
   end
 
-  test "build/2 keeps skills whose capabilities are still visible" do
+  test "build/2 keeps skills for operator profiles without requiring skill capabilities" do
     skill = %AgentDefinition{
       name: "shared-skill",
+      description: "Shared skill description.",
       role: :sub,
       persistent: false,
       system_prompt: "Shared skill.",
@@ -125,26 +136,16 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
       delegates_to: []
     }
 
-    snapshot = [
-      Capability.new(%{
-        name: "shared-skill",
-        description: "Shared skill capability.",
-        parameters: %{"type" => "object"},
-        kind: :skill,
-        executor: {__MODULE__, :unused, []},
-        policy_class: :exec,
-        metadata: %{}
-      })
-    ]
+    content = RuntimeSections.build([skill], capabilities: [])
 
-    content = RuntimeSections.build([skill], capabilities: snapshot)
-
-    assert content =~ "- shared-skill: capabilities=analyze; tools=file_read"
+    assert content =~ ~s(<skill name="shared-skill")
+    assert content =~ "Shared skill description."
   end
 
-  test "build/1 renders 'default' for a skill with absent allowed_tools (nil)" do
+  test "build/1 omits allowed_tools from the compact skill catalog" do
     skill = %AgentDefinition{
       name: "loose-skill",
+      description: "Trust-default skill description.",
       role: :sub,
       persistent: false,
       system_prompt: "Trust-default skill.",
@@ -158,6 +159,17 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     content = RuntimeSections.build([skill])
 
-    assert content =~ "- loose-skill: capabilities=none; tools=default"
+    assert content =~ ~s(<skill name="loose-skill")
+    assert content =~ "Trust-default skill description."
+    refute content =~ "tools=default"
+  end
+
+  test "build/1 keeps the section assembly order stable" do
+    content = RuntimeSections.build([])
+
+    assert String.match?(
+             content,
+             ~r/## Runtime Contract.*## Built-in Capability Catalog.*## Skill Catalog/s
+           )
   end
 end

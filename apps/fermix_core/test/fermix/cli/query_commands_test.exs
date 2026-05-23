@@ -7,6 +7,7 @@ defmodule Fermix.CLI.QueryCommandsTest do
   alias Fermix.CLI.CapabilitiesCommand
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.HealthCommand
+  alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.VoiceCommand
 
   setup do
@@ -73,6 +74,16 @@ defmodule Fermix.CLI.QueryCommandsTest do
     assert decoded["counts"]["skill"] == 0
     assert decoded["counts"]["mcp"] == 0
     assert is_list(decoded["capabilities"])
+  end
+
+  test "skills list --json returns installed skill summaries" do
+    {exit_status, output} = run_command(fn -> SkillsCommand.run(["list", "--json"]) end)
+
+    assert exit_status == 0
+    decoded = Jason.decode!(output)
+    assert is_integer(decoded["count"])
+    assert is_list(decoded["skills"])
+    assert Enum.any?(decoded["skills"], &(&1["name"] == "self_knowledge"))
   end
 
   defp run_command(fun) do

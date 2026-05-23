@@ -116,6 +116,7 @@ defmodule FermixCore.Capabilities.SkillTest do
     {:ok, definition} =
       AgentDefinition.new(%{
         "name" => name,
+        "description" => "Use #{name}.",
         "system_prompt" => prompt,
         "model" => "mock-model",
         "allowed_tools" => [],
@@ -159,10 +160,10 @@ defmodule FermixCore.Capabilities.SkillTest do
       assert {Skill, :invoke, [^definition]} = cap.executor
     end
 
-    test "description is the first paragraph of the system prompt, truncated" do
+    test "description comes from the skill definition" do
       definition = build_definition("beta", "Headline line\n\nDetail paragraph here.")
       cap = Skill.from_definition(definition)
-      assert cap.description == "Headline line"
+      assert cap.description == "Use beta."
     end
   end
 

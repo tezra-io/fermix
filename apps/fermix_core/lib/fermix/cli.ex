@@ -21,6 +21,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.SandboxCommand
   alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup
+  alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StatusCommand
   alias Fermix.CLI.StopCommand
@@ -65,6 +66,7 @@ defmodule Fermix.CLI do
   defp dispatch("voice", rest), do: VoiceCommand.run(rest)
   defp dispatch("agents", rest), do: AgentsCommand.run(rest)
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
+  defp dispatch("skills", rest), do: SkillsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
@@ -99,6 +101,7 @@ defmodule Fermix.CLI do
       fermix voice status [--json]                Show local voice companion status
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
+      fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix doctor  [--full]                      Run post-install diagnostics

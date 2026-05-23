@@ -7,7 +7,8 @@ defmodule FermixCore.Agents.RuntimeContext do
   profiles (filtered capabilities + generated runtime section). The cache
   is built lazily on the first inbound message inside the MainAgent
   GenServer and reused across messages for the server runtime epoch.
-  Source changes are picked up by restarting Fermix, not by hot reload.
+  Source changes are picked up by restarting Fermix or by an explicit skill
+  reload, which invalidates this cache before the next message.
 
   ## Ownership model
 
@@ -108,7 +109,9 @@ defmodule FermixCore.Agents.RuntimeContext do
       |> maybe_put(:excluded_categories, Keyword.get(opts, :excluded_categories))
 
     capabilities = CapabilityRegistry.list_for(capability_registry, filter)
-    runtime_content = RuntimeSections.build(available_skills, capabilities: capabilities)
+
+    runtime_content =
+      RuntimeSections.build(available_skills, capabilities: capabilities, trust: trust)
 
     %{
       trust: trust,

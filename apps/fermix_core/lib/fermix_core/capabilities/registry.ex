@@ -9,8 +9,9 @@ defmodule FermixCore.Capabilities.Registry do
   GenServer.
 
   Built-ins are mirrored at boot through `FermixCore.Capabilities.Builtin.from_tool_module/1`.
-  Skills and MCP server tools register themselves through their own
-  supervisors as they come up.
+  MCP server tools register through their own supervisors as they come up.
+  Skills live in `FermixCore.Agents.SkillRegistry` and are exposed through
+  the generated skill catalog plus `skill_view` / `skill_run`.
   """
 
   use GenServer

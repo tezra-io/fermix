@@ -11,6 +11,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   @type skill :: AgentDefinition.t()
 
+  @catalog_max_bytes 16_384
+
   @category_order [
     :file,
     :web,
@@ -38,12 +40,10 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   @spec build([skill()], keyword()) :: String.t()
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
-    visible_skills = visible_skills(available_skills, opts)
-
     [
       runtime_contract(),
       capability_summary_from_opts(opts),
-      skill_catalog(visible_skills)
+      skill_catalog(available_skills, Keyword.get(opts, :trust, :operator))
     ]
     |> Enum.join("\n\n")
   end
@@ -52,28 +52,6 @@ defmodule FermixCore.Prompt.RuntimeSections do
     case Keyword.fetch(opts, :capabilities) do
       {:ok, capabilities} -> format_capability_summary_or_empty(capabilities)
       :error -> capability_summary()
-    end
-  end
-
-  # When the caller supplies a filtered capability snapshot, keep only the
-  # skills whose names survived that filter. Without this the prompt would
-  # advertise skills that the LLM cannot actually invoke under the
-  # caller's policy (e.g. guest trust denies :exec, so skill capabilities
-  # are removed from the tool surface but their names would still appear
-  # in the skill catalog).
-  defp visible_skills(available_skills, opts) do
-    case Keyword.fetch(opts, :capabilities) do
-      {:ok, capabilities} ->
-        visible_names =
-          for capability <- capabilities,
-              capability.kind == :skill,
-              into: MapSet.new(),
-              do: capability.name
-
-        Enum.filter(available_skills, &MapSet.member?(visible_names, &1.name))
-
-      :error ->
-        available_skills
     end
   end
 
@@ -96,13 +74,16 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp runtime_contract do
     """
     ## Runtime Contract
-    - Capabilities are available through the capability registry for built-in tools, skills, and MCP tools.
+    - Capabilities are available through the capability registry for built-in tools and MCP tools.
     - Prefer direct Fermix built-ins over shell, curl, grep, browser, computer-use, or external automation when a built-in owns the verb.
     - For reminders, recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks, use `schedule_job`.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
-    - Pick a skill capability by name when a specialized skill is a better fit than handling the work directly.
-    - Runtime capability snapshots change only after process restart.
+    - Use the Skill Catalog only to decide whether a skill is relevant.
+    - Before following a skill, call `skill_view` with the skill name.
+    - Do not infer detailed behavior from the description alone.
+    - Use supporting files only if the loaded `SKILL.md` asks for them.
+    - Use `skill_run` when a specialized skill should execute as a delegated sub-agent.
     """
     |> String.trim()
   end
@@ -149,22 +130,53 @@ defmodule FermixCore.Prompt.RuntimeSections do
     |> Enum.map_join(" ", &String.capitalize/1)
   end
 
-  defp skill_catalog([]), do: "## Skill Catalog\n- none loaded"
+  defp skill_catalog(_skills, :guest), do: "## Skill Catalog\n- none loaded"
+  defp skill_catalog([], _trust), do: "## Skill Catalog\n- none loaded"
 
-  defp skill_catalog(skills) do
-    body =
+  defp skill_catalog(skills, _trust) do
+    entries =
       skills
+      |> Enum.sort_by(& &1.name)
       |> Enum.map(&format_skill/1)
-      |> Enum.join("\n")
+
+    {visible, omitted} = fit_catalog_entries(entries)
+    omitted_entry = if omitted > 0, do: ["  <omitted count=\"#{omitted}\" />"], else: []
+    body = Enum.join(["<skills>"] ++ visible ++ omitted_entry ++ ["</skills>"], "\n")
 
     "## Skill Catalog\n#{body}"
   end
 
   defp format_skill(%AgentDefinition{} = skill) do
-    "- #{skill.name}: capabilities=#{join_values(skill.capabilities)}; tools=#{join_values(skill.allowed_tools)}"
+    description = xml_escape(skill.description || "")
+    trust = skill.trust || :operator
+    path = xml_escape(skill.source_path || "")
+
+    [
+      "  <skill name=\"#{xml_escape(skill.name)}\" trust=\"#{trust}\" path=\"#{path}\">",
+      "    #{description}",
+      "  </skill>"
+    ]
+    |> Enum.join("\n")
   end
 
-  defp join_values(nil), do: "default"
-  defp join_values([]), do: "none"
-  defp join_values(values), do: Enum.join(values, ", ")
+  defp fit_catalog_entries(entries) do
+    Enum.reduce_while(entries, {[], 0, length(entries)}, fn entry, {acc, bytes, remaining} ->
+      projected = bytes + byte_size(entry) + 1
+
+      if projected <= @catalog_max_bytes do
+        {:cont, {[entry | acc], projected, remaining - 1}}
+      else
+        {:halt, {acc, bytes, remaining}}
+      end
+    end)
+    |> then(fn {acc, _bytes, omitted} -> {Enum.reverse(acc), omitted} end)
+  end
+
+  defp xml_escape(value) when is_binary(value) do
+    value
+    |> String.replace("&", "&amp;")
+    |> String.replace("\"", "&quot;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+  end
 end

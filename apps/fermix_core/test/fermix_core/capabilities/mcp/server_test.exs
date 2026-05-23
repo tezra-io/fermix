@@ -1,6 +1,7 @@
 defmodule FermixCore.Capabilities.MCP.ServerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
@@ -89,6 +90,48 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
   end
 
   describe "init" do
+    test "rejects sanitized MCP names that collide with installed skills", %{
+      cap_registry: cap_registry,
+      mcp_registry: mcp_registry
+    } do
+      suffix = System.unique_integer([:positive])
+      skills_dir = FermixTestSupport.SafeRm.make_tmp_dir!("mcp-skill-collision-#{suffix}")
+      write_skill(skills_dir, "mcp_github_create_issue")
+
+      skill_registry =
+        start_supervised!(
+          {SkillRegistry,
+           name: :"mcp_collision_skill_registry_#{suffix}",
+           skills_dir: skills_dir,
+           core_dir: nil,
+           seed_defaults: false},
+          id: :"mcp_collision_skill_registry_child_#{suffix}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(skills_dir) end)
+
+      StubDiscoverer.set_tools([
+        %{name: "create_issue", description: "Create issue.", input_schema: %{}}
+      ])
+
+      {:ok, _} =
+        start_supervised(
+          {McpServer,
+           [
+             server_name: "github",
+             discoverer: StubDiscoverer,
+             caller: StubCaller,
+             capability_registry: cap_registry,
+             mcp_registry: mcp_registry,
+             skill_registry: skill_registry,
+             fail_fast?: true
+           ]},
+          id: :"mcp_server_skill_collision_#{suffix}"
+        )
+
+      assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
+    end
+
     test "registers each discovered tool as an MCP capability and exposes approved ones", %{
       cap_registry: cap_registry,
       mcp_registry: mcp_registry
@@ -261,5 +304,22 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
     end
+  end
+
+  defp write_skill(skills_dir, name) do
+    skill_dir = Path.join(skills_dir, name)
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      """
+      ---
+      name: #{name}
+      description: Use #{name}.
+      allowed_tools: []
+      ---
+      Body.
+      """
+    )
   end
 end

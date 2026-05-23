@@ -18,7 +18,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   use GenServer
   require Logger
 
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Capability, as: McpCapability
+  alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
@@ -50,6 +52,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
       tools_overrides: Keyword.get(opts, :tools_overrides, %{}),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       mcp_registry: Keyword.get(opts, :mcp_registry, McpRegistry),
+      skill_registry: Keyword.get(opts, :skill_registry, SkillRegistry),
       registered_names: [],
       discovery_attempts: 0,
       max_discovery_attempts: Keyword.get(opts, :max_discovery_attempts, 5),
@@ -165,24 +168,70 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   defp register_descriptor(descriptor, state) do
     overrides = Map.get(state.tools_overrides, descriptor.name, %{})
+    original = descriptor.name
+    sanitized = Naming.candidate(state.server_name, original)
 
-    capability =
-      McpCapability.from_tool_descriptor(state.server_name, descriptor,
-        caller: state.caller,
-        tool_overrides: overrides
-      )
+    with :ok <- reject_skill_name_collision(sanitized, state, original) do
+      capability =
+        McpCapability.from_tool_descriptor(state.server_name, descriptor,
+          caller: state.caller,
+          tool_overrides: overrides
+        )
 
-    case CapabilityRegistry.register(state.capability_registry, capability) do
-      :ok ->
-        [capability.name]
+      case CapabilityRegistry.register(state.capability_registry, capability) do
+        :ok ->
+          [capability.name]
 
-      {:error, {:duplicate_name, _}} ->
+        {:error, {:duplicate_name, _}} ->
+          Logger.warning(
+            "MCP duplicate capability name during registration: #{capability.name} " <>
+              "(server=#{state.server_name}, tool=#{descriptor.name})"
+          )
+
+          []
+      end
+    else
+      {:error, {:skill_name_collision, name}} ->
         Logger.warning(
-          "MCP duplicate capability name during registration: #{capability.name} " <>
-            "(server=#{state.server_name}, tool=#{descriptor.name})"
+          "MCP tool #{state.server_name}/#{original} sanitized to #{name}, " <>
+            "which collides with an installed skill. Rename the MCP tool or skill."
         )
 
         []
     end
+  end
+
+  defp reject_skill_name_collision(name, state, _original) do
+    if name in skill_names(state.skill_registry) do
+      {:error, {:skill_name_collision, name}}
+    else
+      :ok
+    end
+  end
+
+  defp skill_names(nil), do: []
+
+  defp skill_names(server) when is_atom(server) do
+    case Process.whereis(server) do
+      nil ->
+        Logger.debug(
+          "MCP skill-name collision check skipped; skill registry #{server} is not running"
+        )
+
+        []
+
+      _pid ->
+        safe_skill_names(server)
+    end
+  end
+
+  defp skill_names(server), do: safe_skill_names(server)
+
+  defp safe_skill_names(server) do
+    SkillRegistry.list(server)
+  catch
+    :exit, reason ->
+      Logger.debug("MCP skill-name collision check failed: #{inspect(reason)}")
+      []
   end
 end

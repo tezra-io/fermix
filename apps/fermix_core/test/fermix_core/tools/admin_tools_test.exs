@@ -93,6 +93,19 @@ defmodule FermixCore.Tools.AdminToolsTest do
     assert duplicate.error =~ "already exists"
   end
 
+  test "skill_create rejects names beyond the registry limit" do
+    long_name = String.duplicate("a", 65)
+
+    assert {:ok, result} =
+             SkillCreate.execute(
+               %{"name" => long_name, "description" => "Use for long-name tests."},
+               @context
+             )
+
+    assert result.success == false
+    assert result.error =~ "max 64 chars"
+  end
+
   test "model_routing_config reads and updates the routing TOML section" do
     assert {:ok, set_result} =
              ModelRoutingConfig.execute(

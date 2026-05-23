@@ -23,6 +23,8 @@ defmodule FermixCore.Capabilities.Builtin do
     "web_search" => %{policy_class: :network, hidden_from_agent?: false},
     "delegate" => %{policy_class: :external_api, hidden_from_agent?: false},
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false},
+    "skill_view" => %{policy_class: :exec, hidden_from_agent?: false},
+    "skill_run" => %{policy_class: :exec, hidden_from_agent?: false},
     "model_routing_config" => %{policy_class: :read_write, hidden_from_agent?: false},
     "tool_help" => %{policy_class: :read_only, hidden_from_agent?: false},
     "memory_recall" => %{policy_class: :read_only, hidden_from_agent?: false},

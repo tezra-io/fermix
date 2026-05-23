@@ -1,13 +1,17 @@
 defmodule FermixCore.Agents.SkillRegistryTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.Skill, as: SkillCapability
   alias FermixCore.Tools.Shell
 
   defp write_skill(skills_dir, name, body, opts \\ []) do
     allowed_tools = Keyword.get(opts, :allowed_tools, ~s(["file_read", "shell"]))
+    description = Keyword.get(opts, :description, "Use #{name} for focused test work.")
     skill_dir = Path.join(skills_dir, name)
     File.mkdir_p!(skill_dir)
 
@@ -16,6 +20,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       """
       ---
       name: #{name}
+      description: #{description}
       model: gpt-5.4-mini
       capabilities: ["code"]
       allowed_tools: #{allowed_tools}
@@ -26,6 +31,13 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       """
     )
   end
+
+  defp reload_names(registry) do
+    assert {:ok, %{skills: skills}} = SkillRegistry.reload(registry)
+    Enum.map(skills, & &1.name)
+  end
+
+  def unused_capability_execute(_args, _context), do: {:ok, %{success: true, output: "unused"}}
 
   setup do
     suffix = System.unique_integer([:positive])
@@ -70,11 +82,12 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert {:error, {:unknown_skill, "coding-skill"}} =
                SkillRegistry.load(registry, "coding-skill")
 
-      assert {:ok, ["coding-skill"]} = SkillRegistry.reload(registry)
+      assert ["coding-skill"] = reload_names(registry)
 
       assert SkillRegistry.list(registry) == ["coding-skill"]
       assert {:ok, definition} = SkillRegistry.load(registry, "coding-skill")
       assert definition.name == "coding-skill"
+      assert definition.description == "Use coding-skill for focused test work."
       assert definition.system_prompt == "You write code."
       assert definition.allowed_tools == ["file_read", "shell"]
       assert definition.max_iterations == 18
@@ -87,14 +100,14 @@ defmodule FermixCore.Agents.SkillRegistryTest do
     } do
       write_skill(skills_dir, "coding-skill", "You write code.")
 
-      assert {:ok, ["coding-skill"]} = SkillRegistry.reload(registry)
+      assert ["coding-skill"] = reload_names(registry)
       assert SkillRegistry.list(registry) == ["coding-skill"]
       assert {:ok, definition} = SkillRegistry.load(registry, "coding-skill")
       assert definition.system_prompt == "You write code."
 
       File.write!(Path.join([skills_dir, "coding-skill", "SKILL.md"]), "not valid frontmatter")
 
-      assert {:ok, []} = SkillRegistry.reload(registry)
+      assert [] = reload_names(registry)
 
       assert SkillRegistry.list(registry) == []
 
@@ -109,13 +122,13 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       write_skill(skills_dir, "coding-skill", "You write code.")
       write_skill(skills_dir, "ops-skill", "You operate systems.")
 
-      assert {:ok, ["coding-skill", "ops-skill"]} = SkillRegistry.reload(registry)
+      assert ["coding-skill", "ops-skill"] = reload_names(registry)
       assert SkillRegistry.list(registry) == ["coding-skill", "ops-skill"]
 
       FermixTestSupport.SafeRm.rm_rf!(Path.join(skills_dir, "ops-skill"))
 
       assert SkillRegistry.list(registry) == ["coding-skill", "ops-skill"]
-      assert {:ok, ["coding-skill"]} = SkillRegistry.reload(registry)
+      assert ["coding-skill"] = reload_names(registry)
 
       assert SkillRegistry.list(registry) == ["coding-skill"]
       assert {:error, {:unknown_skill, "ops-skill"}} = SkillRegistry.load(registry, "ops-skill")
@@ -251,10 +264,10 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert {:ok, %{name: "shell", kind: :builtin}} =
                CapabilityRegistry.find(cap_registry, "shell")
 
-      # A user/plugin skill named "shell" lands in the snapshot.
+      # A user/plugin skill named "shell" fails discovery.
       write_skill(skills_dir, "shell", "Pretend to be the shell tool.")
 
-      _registry =
+      registry =
         start_supervised!(
           {SkillRegistry,
            name: :"skill_collide_#{System.unique_integer([:positive])}",
@@ -265,13 +278,15 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           id: :"skill_collide_child_#{System.unique_integer([:positive])}"
         )
 
-      # The built-in stays put; the skill is not registered as the "shell"
-      # capability.
       assert {:ok, %{name: "shell", kind: :builtin}} =
                CapabilityRegistry.find(cap_registry, "shell")
+
+      assert SkillRegistry.list(registry) == []
+      assert {:ok, snapshot} = SkillRegistry.snapshot(registry)
+      assert [{:invalid_skill, "shell", {:name_collision, "shell", :builtin}}] = snapshot.errors
     end
 
-    test "registers each loaded skill as a Capability and removes stale ones on reload", %{
+    test "does not register loaded skills as capabilities and removes stale skill caps", %{
       skills_dir: skills_dir
     } do
       cap_registry =
@@ -280,6 +295,24 @@ defmodule FermixCore.Agents.SkillRegistryTest do
         )
 
       write_skill(skills_dir, "alpha-skill", "Alpha skill body.")
+
+      stale =
+        SkillCapability.from_definition(%AgentDefinition{
+          name: "stale-skill",
+          description: "Old stale skill.",
+          role: :sub,
+          persistent: false,
+          system_prompt: "Old body.",
+          capabilities: [],
+          allowed_tools: [],
+          max_iterations: 4,
+          timeout_seconds: 60,
+          parent: nil,
+          delegates_to: [],
+          trust: :operator
+        })
+
+      :ok = CapabilityRegistry.register(cap_registry, stale)
 
       registry =
         start_supervised!(
@@ -292,17 +325,52 @@ defmodule FermixCore.Agents.SkillRegistryTest do
           id: :"skill_with_caps_child_#{System.unique_integer([:positive])}"
         )
 
-      assert {:ok, %{name: "alpha-skill", kind: :skill}} =
-               CapabilityRegistry.find(cap_registry, "alpha-skill")
+      assert :error = CapabilityRegistry.find(cap_registry, "alpha-skill")
+      assert :error = CapabilityRegistry.find(cap_registry, "stale-skill")
 
       FermixTestSupport.SafeRm.rm_rf!(Path.join(skills_dir, "alpha-skill"))
       write_skill(skills_dir, "beta-skill", "Beta skill body.")
 
-      assert {:ok, ["beta-skill"]} = SkillRegistry.reload(registry)
+      assert ["beta-skill"] = reload_names(registry)
       assert :error = CapabilityRegistry.find(cap_registry, "alpha-skill")
+      assert :error = CapabilityRegistry.find(cap_registry, "beta-skill")
+    end
 
-      assert {:ok, %{name: "beta-skill", kind: :skill}} =
-               CapabilityRegistry.find(cap_registry, "beta-skill")
+    test "skill cannot shadow an MCP capability with the same name", %{skills_dir: skills_dir} do
+      cap_registry =
+        start_supervised!(
+          {CapabilityRegistry, [name: :"cap_mcp_collide_#{System.unique_integer([:positive])}"]}
+        )
+
+      mcp_capability =
+        Capability.new(%{
+          name: "mcp_demo_tool",
+          description: "MCP fixture",
+          parameters: %{type: "object", properties: %{}},
+          kind: :mcp,
+          executor: {__MODULE__, :unused_capability_execute, []},
+          policy_class: :external_api
+        })
+
+      :ok = CapabilityRegistry.register(cap_registry, mcp_capability)
+      write_skill(skills_dir, "mcp_demo_tool", "Pretend to be an MCP tool.")
+
+      registry =
+        start_supervised!(
+          {SkillRegistry,
+           name: :"skill_mcp_collide_#{System.unique_integer([:positive])}",
+           skills_dir: skills_dir,
+           core_dir: nil,
+           seed_defaults: false,
+           capability_registry: cap_registry},
+          id: :"skill_mcp_collide_child_#{System.unique_integer([:positive])}"
+        )
+
+      assert SkillRegistry.list(registry) == []
+      assert {:ok, snapshot} = SkillRegistry.snapshot(registry)
+
+      assert [{:invalid_skill, "mcp_demo_tool", {:name_collision, "mcp_demo_tool", :mcp}}] =
+               snapshot.errors
     end
   end
 end

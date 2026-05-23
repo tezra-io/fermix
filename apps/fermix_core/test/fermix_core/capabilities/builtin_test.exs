@@ -55,6 +55,11 @@ defmodule FermixCore.Capabilities.BuiltinTest do
       assert cap.policy_class == :read_write
     end
 
+    test "wraps skill lifecycle tools as operator-only exec capabilities" do
+      assert Builtin.from_tool_module(FermixCore.Tools.SkillView).policy_class == :exec
+      assert Builtin.from_tool_module(FermixCore.Tools.SkillRun).policy_class == :exec
+    end
+
     test "wraps scheduled job management tools with expected policy classes" do
       assert Builtin.from_tool_module(FermixCore.Tools.ScheduleJob).policy_class == :read_write
       assert Builtin.from_tool_module(FermixCore.Tools.ListJobs).policy_class == :read_only
@@ -80,6 +85,8 @@ defmodule FermixCore.Capabilities.BuiltinTest do
         FermixCore.Tools.WebSearch,
         FermixCore.Tools.Delegate,
         FermixCore.Tools.SkillCreate,
+        FermixCore.Tools.SkillView,
+        FermixCore.Tools.SkillRun,
         FermixCore.Tools.ModelRoutingConfig,
         FermixCore.Tools.ToolHelp,
         FermixCore.Tools.MemoryStore,
