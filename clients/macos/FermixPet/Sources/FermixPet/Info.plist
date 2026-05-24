@@ -7,6 +7,8 @@
   <string>io.tezra.FermixPet</string>
   <key>CFBundleName</key>
   <string>FermixPet</string>
+  <key>CFBundleIconFile</key>
+  <string>FermixPet.icns</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>FermixPet uses microphone input only while you explicitly start a voice call.</string>
 </dict>

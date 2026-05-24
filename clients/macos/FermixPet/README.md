@@ -19,14 +19,18 @@ Run from source:
 
 ```sh
 cd clients/macos/FermixPet
-swift run FermixPet
+./script/build_and_run.sh
 ```
 
 When testing against a dev daemon:
 
 ```sh
-FERMIX_HOME=/Users/sujshe/.fermix-dev swift run FermixPet
+FERMIX_HOME=/Users/sujshe/.fermix-dev ./script/build_and_run.sh
 ```
+
+Use the script instead of `swift run FermixPet` for normal GUI testing. It
+stages a local `.app` bundle under `.build/app` so Dock, Quit, microphone
+permissions, and app identity use the FermixPet bundle metadata.
 
 On first listen, macOS should prompt for microphone access. If it was denied
 previously, enable `FermixPet` in System Settings -> Privacy & Security ->
