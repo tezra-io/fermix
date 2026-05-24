@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 11 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 13 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -119,6 +119,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     tavily_api_key = "tavily-old"
     exa_api_key = "exa-old"
     parallel_api_key = "parallel-old"
+    brave_api_key = "brave-old"
+    perplexity_api_key = "perplexity-old"
 
     [fermix_channels.telegram]
     bot_token = "telegram-old"
@@ -144,6 +146,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       tavily_api_key: "tavily-old",
       exa_api_key: "exa-old",
       parallel_api_key: "parallel-old",
+      brave_api_key: "brave-old",
+      perplexity_api_key: "perplexity-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",

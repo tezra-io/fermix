@@ -163,6 +163,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
 
       assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
                       %{adapter: :responses} = metadata}
+
       assert measurements.duration_ms >= 0
       assert metadata.input_items == 1
       assert metadata.input_bytes > 0
@@ -324,11 +325,16 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       refute Map.has_key?(decoded, "reasoning")
     end
 
-    test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
-      for level <- [:minimal, :low, :medium, :high, :xhigh] do
+    test "sends reasoning: %{effort: <level>} for each supported non-:none level" do
+      for level <- [:low, :medium, :high, :xhigh] do
         decoded = capture_body(reasoning_effort: level)
         assert decoded["reasoning"] == %{"effort" => Atom.to_string(level)}
       end
+    end
+
+    test "clamps :max to the OpenAI ceiling (xhigh)" do
+      decoded = capture_body(reasoning_effort: :max)
+      assert decoded["reasoning"] == %{"effort" => "xhigh"}
     end
 
     test "sends strict text.format schema when supplied" do

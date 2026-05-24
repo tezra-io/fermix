@@ -105,6 +105,72 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Provider saved."
       assert html =~ "Voice companion"
     end
+
+    test "provider pane offers canonical reasoning effort levels (xhigh, not minimal)", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Reasoning effort"
+      assert html =~ ~s(value="xhigh")
+      refute html =~ ~s(value="minimal")
+    end
+
+    test "selecting a new keyed backend persists its key", %{conn: conn, tmp_home: tmp_home} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"search\"]")
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_search\"]", search_form: %{backend: "brave"})
+        |> render_change()
+
+      assert html =~ "search_form[brave_api_key]"
+      refute html =~ "search_form[perplexity_api_key]"
+
+      view
+      |> form("form[phx-submit=\"save_search\"]",
+        search_form: %{backend: "brave", brave_api_key: "brave-live-test"}
+      )
+      |> render_submit()
+
+      web_search =
+        :fermix_core
+        |> Application.get_env(:tools, [])
+        |> Keyword.get(:web_search, [])
+
+      assert Keyword.get(web_search, :backend) == :brave
+      assert Keyword.get(web_search, :brave_api_key) == "brave-live-test"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "brave")
+      assert contents =~ ~s(brave_api_key = "@keyring")
+    end
+
+    test "Save & next persists the backend (same as Save search, then advances)", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_search\"]", search_form: %{backend: "duckduckgo"})
+      |> render_submit(%{"__nav" => "next"})
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.tools.web_search]"
+      assert contents =~ ~s(backend = "duckduckgo")
+    end
   end
 
   describe "Search form" do

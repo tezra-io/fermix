@@ -132,7 +132,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             backend: :tavily,
             tavily_api_key: "@keyring",
             exa_api_key: "@keyring",
-            parallel_api_key: "@keyring"
+            parallel_api_key: "@keyring",
+            brave_api_key: "@keyring",
+            perplexity_api_key: "@keyring"
           ]
         ]
       ],
@@ -157,6 +159,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :tavily_api_key) == "@keyring"
     assert Keyword.get(web_search, :exa_api_key) == "@keyring"
     assert Keyword.get(web_search, :parallel_api_key) == "@keyring"
+    assert Keyword.get(web_search, :brave_api_key) == "@keyring"
+    assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
   end
 
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do
@@ -745,6 +749,24 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     anthropic = Keyword.get(providers, :anthropic, [])
     assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
     assert Keyword.get(anthropic, :api_key) == "sk-ant"
+  end
+
+  test "load_runtime_config migrates a persisted reasoning_effort = \"minimal\" to :low" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openai]
+    reasoning_effort = "minimal"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    openai = loaded.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
+    assert Keyword.get(openai, :reasoning_effort) == :low
   end
 
   test "save_snapshot preserves dormant provider blocks when only one provider is updated" do

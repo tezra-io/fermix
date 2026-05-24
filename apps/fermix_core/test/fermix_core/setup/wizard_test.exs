@@ -468,6 +468,39 @@ defmodule FermixCore.Setup.WizardTest do
     refute :slack_owner_user_id in keys
     refute :whatsapp_owner_user_id in keys
     refute :signal_owner_user_id in keys
+    # OpenAI is wired for effort, so reconfigure offers reasoning_effort.
+    assert :reasoning_effort in keys
+  end
+
+  test "reconfigure omits reasoning_effort for a provider that can't use it (Anthropic)" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-effort-reconfigure-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [anthropic: [api_key: "sk-ant", default_model: "claude-opus-4-7"]],
+          agent: [name: "fermix", provider: :anthropic],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: []
+      })
+
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    keys =
+      Wizard.report().wizard
+      |> Wizard.reconfigure_prompts([])
+      |> Enum.map(& &1.key)
+
+    refute :reasoning_effort in keys
   end
 
   test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
@@ -578,6 +611,11 @@ defmodule FermixCore.Setup.WizardTest do
     refute Enum.any?(prompts, &(&1.key == :provider))
     assert Enum.any?(prompts, &(&1.key == :default_model and &1.required?))
     assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
+
+    # CLI offers the canonical OpenAI/Codex levels, no `minimal`.
+    effort_prompt = Enum.find(prompts, &(&1.key == :reasoning_effort))
+    assert effort_prompt.label =~ "none/low/medium/high/xhigh"
+    refute effort_prompt.label =~ "minimal"
   end
 
   test "prompts for missing OpenAI API key when env-only auth makes readiness pass" do
