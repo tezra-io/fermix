@@ -5,7 +5,7 @@ defmodule FermixCore.Net.Guard do
 
   import Bitwise
 
-  @sensitive_headers ~w(authorization cookie set-cookie proxy-authorization x-api-key x-auth-token)
+  @sensitive_headers ~w(authorization cookie set-cookie proxy-authorization x-api-key x-auth-token x-subscription-token)
 
   @type resolver :: (String.t() -> {:ok, [:inet.ip_address()]} | {:error, term()})
   @type opts :: [resolver: resolver()]

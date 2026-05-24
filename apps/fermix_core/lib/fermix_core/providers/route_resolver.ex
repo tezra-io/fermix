@@ -20,7 +20,7 @@ defmodule FermixCore.Providers.RouteResolver do
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Providers.ReasoningEffort
 
   @default_openai_base_url "https://api.openai.com/v1"
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
@@ -179,9 +179,17 @@ defmodule FermixCore.Providers.RouteResolver do
   defp validate_reasoning_effort!(nil), do: :ok
 
   defp validate_reasoning_effort!(value) do
-    # maybe_reasoning_field/1 owns the enum. Reuse it as the validator —
-    # one source of truth.
-    _ = ResponsesShared.maybe_reasoning_field(value)
-    :ok
+    # ReasoningEffort owns the canonical enum — reuse it as the validator.
+    # Per-provider supportedness (clamp/reject) is applied at request-build
+    # time in the adapter, not here.
+    case ReasoningEffort.parse(value) do
+      {:ok, _level} ->
+        :ok
+
+      :error ->
+        raise ArgumentError,
+              "invalid reasoning_effort: #{inspect(value)}; " <>
+                "expected one of #{inspect(ReasoningEffort.levels())}"
+    end
   end
 end

@@ -195,6 +195,7 @@ defmodule FermixCore.Tools.WebToolsTest do
     sensitive_headers = [
       {"authorization", "Bearer secret"},
       {"x-api-key", "key-secret"},
+      {"X-Subscription-Token", "brave-secret"},
       {"user-agent", "fermix-test"}
     ]
 
@@ -207,7 +208,8 @@ defmodule FermixCore.Tools.WebToolsTest do
     search_context =
       Map.merge(@context, %{
         req_options: [headers: sensitive_headers, plug: {Req.Test, web_search_id}],
-        net_resolver: public_resolver()
+        net_resolver: public_resolver(),
+        tool_trace: %{request_headers: [%{name: "stale", value: "not-from-backend"}]}
       })
 
     assert {:ok, %{success: true}} =
@@ -221,6 +223,7 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements,
                     %{
                       tool: "web_search",
+                      backend: search_backend,
                       request_headers: search_headers,
                       result_count: search_result_count
                     }}
@@ -229,9 +232,12 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert %{name: "x-api-key", value: "***REDACTED***"} in fetch_headers
     assert %{name: "authorization", value: "***REDACTED***"} in search_headers
     assert %{name: "x-api-key", value: "***REDACTED***"} in search_headers
+    assert %{name: "X-Subscription-Token", value: "***REDACTED***"} in search_headers
+    assert search_backend == "duckduckgo"
     assert is_integer(search_result_count) and search_result_count > 0
     refute inspect(fetch_headers) =~ "secret"
     refute inspect(search_headers) =~ "secret"
+    refute inspect(search_headers) =~ "not-from-backend"
 
     :telemetry.detach(fetch_handler)
     :telemetry.detach(search_handler)

@@ -10,7 +10,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
-  alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.SecretPaths
@@ -838,6 +838,14 @@ defmodule FermixCore.Setup.ConfigStore do
       :parallel_api_key,
       normalize_string(lookup(config, "parallel_api_key", :parallel_api_key))
     )
+    |> put_if_present(
+      :brave_api_key,
+      normalize_string(lookup(config, "brave_api_key", :brave_api_key))
+    )
+    |> put_if_present(
+      :perplexity_api_key,
+      normalize_string(lookup(config, "perplexity_api_key", :perplexity_api_key))
+    )
   end
 
   defp normalize_web_search_tool(_config), do: []
@@ -847,29 +855,35 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_web_search_backend(:tavily), do: :tavily
   defp normalize_web_search_backend(:exa), do: :exa
   defp normalize_web_search_backend(:parallel), do: :parallel
+  defp normalize_web_search_backend(:brave), do: :brave
+  defp normalize_web_search_backend(:perplexity), do: :perplexity
   defp normalize_web_search_backend("duckduckgo"), do: :duckduckgo
   defp normalize_web_search_backend("tavily"), do: :tavily
   defp normalize_web_search_backend("exa"), do: :exa
   defp normalize_web_search_backend("parallel"), do: :parallel
+  defp normalize_web_search_backend("brave"), do: :brave
+  defp normalize_web_search_backend("perplexity"), do: :perplexity
   defp normalize_web_search_backend(_value), do: nil
 
-  # Validates against the canonical enum owned by ResponsesShared.
+  # Canonical enum + per-provider mapping live in ReasoningEffort.
   # Returns the atom on success, or nil on unknown input — consistent
   # with the rest of this module (normalize_auth_mode, normalize_mode).
   # Hand-edited TOML with an invalid effort silently drops to nil; the
   # wizard never writes an invalid value, and route_resolver still
   # validates at the public boundary, so misconfig surfaces cleanly.
+  # `minimal` (removed from the enum) migrates up to `low` so an upgrade
+  # with a persisted `minimal` keeps working instead of dropping to nil.
   defp normalize_reasoning_effort(nil), do: nil
 
   defp normalize_reasoning_effort(value) do
-    valid = ResponsesShared.valid_reasoning_efforts()
-
-    cond do
-      is_atom(value) and value in valid -> value
-      is_binary(value) -> Enum.find(valid, fn atom -> Atom.to_string(atom) == value end)
-      true -> nil
+    case value |> migrate_reasoning_effort() |> ReasoningEffort.parse() do
+      {:ok, level} -> level
+      :error -> nil
     end
   end
+
+  defp migrate_reasoning_effort(value) when value in [:minimal, "minimal"], do: :low
+  defp migrate_reasoning_effort(value), do: value
 
   defp has_provider_key?(config) when is_map(config) do
     Map.has_key?(config, "provider") or Map.has_key?(config, :provider)

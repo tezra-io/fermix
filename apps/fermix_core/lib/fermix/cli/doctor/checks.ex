@@ -179,6 +179,29 @@ defmodule Fermix.CLI.Doctor.Checks do
     error in ArgumentError -> fail("compaction", Exception.message(error))
   end
 
+  @spec web_search(boolean()) :: result()
+  def web_search(full? \\ false) do
+    [full: full?]
+    |> ProviderProbe.web_search_report()
+    |> format_web_search()
+  end
+
+  defp format_web_search(%{credential_present?: false} = report) do
+    warn("web search", "backend #{report.backend} selected but no credential configured")
+  end
+
+  defp format_web_search(%{probe_result: :ok, result_count: count} = report) do
+    ok("web search", "backend #{report.backend}, live probe ok (#{count} result(s))")
+  end
+
+  defp format_web_search(%{probe_result: tag} = report) do
+    warn("web search", "backend #{report.backend}, live probe #{tag}")
+  end
+
+  defp format_web_search(report) do
+    ok("web search", "backend #{report.backend} configured")
+  end
+
   @spec command_owner_config() :: result()
   def command_owner_config do
     report = ProviderProbe.command_owner_report()
@@ -235,9 +258,14 @@ defmodule Fermix.CLI.Doctor.Checks do
     path = AuthStore.path()
 
     case AuthStore.validate_permissions(path) do
-      :ok -> auth_ok_result(path)
-      {:error, {:insecure_permissions, ^path, mode}} -> fail("auth perms", AuthStore.permissions_message(path, mode))
-      {:error, reason} -> fail("auth perms", "stat #{path}: #{inspect(reason)}")
+      :ok ->
+        auth_ok_result(path)
+
+      {:error, {:insecure_permissions, ^path, mode}} ->
+        fail("auth perms", AuthStore.permissions_message(path, mode))
+
+      {:error, reason} ->
+        fail("auth perms", "stat #{path}: #{inspect(reason)}")
     end
   end
 
@@ -250,10 +278,15 @@ defmodule Fermix.CLI.Doctor.Checks do
 
         secrets ->
           names = Enum.map_join(secrets, ", ", & &1.env)
-          warn("setup secrets", "plaintext setup secrets found: #{names}; run `fermix setup --migrate-secrets`")
+
+          warn(
+            "setup secrets",
+            "plaintext setup secrets found: #{names}; run `fermix setup --migrate-secrets`"
+          )
       end
     else
-      {:error, reason} -> fail("setup secrets", "could not inspect config.toml: #{inspect(reason)}")
+      {:error, reason} ->
+        fail("setup secrets", "could not inspect config.toml: #{inspect(reason)}")
     end
   end
 
