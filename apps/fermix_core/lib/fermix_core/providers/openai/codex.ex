@@ -51,7 +51,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     resolved_instructions = instructions || @default_instructions
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort))
+
+    reasoning =
+      codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai_codex))
+
     include = codex_include(reasoning)
     text = text_field(opts)
 
@@ -99,7 +102,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     } = provider_state
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort))
+
+    reasoning =
+      codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai_codex))
+
     include = codex_include(reasoning)
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)

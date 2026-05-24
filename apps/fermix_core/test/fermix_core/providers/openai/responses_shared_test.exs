@@ -3,47 +3,43 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
 
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
-  describe "valid_reasoning_efforts/0" do
-    test "returns the canonical hermes-agent compatible enum" do
-      assert ResponsesShared.valid_reasoning_efforts() ==
-               [:none, :minimal, :low, :medium, :high, :xhigh]
-    end
-  end
-
-  describe "maybe_reasoning_field/1" do
+  describe "maybe_reasoning_field/2" do
     test "returns nil for nil, :none, and \"none\" — caller omits the body field" do
-      assert ResponsesShared.maybe_reasoning_field(nil) == nil
-      assert ResponsesShared.maybe_reasoning_field(:none) == nil
-      assert ResponsesShared.maybe_reasoning_field("none") == nil
+      assert ResponsesShared.maybe_reasoning_field(nil, :openai) == nil
+      assert ResponsesShared.maybe_reasoning_field(:none, :openai) == nil
+      assert ResponsesShared.maybe_reasoning_field("none", :openai) == nil
     end
 
-    test "returns %{effort: <string>} for each valid level (atom)" do
-      for level <- [:minimal, :low, :medium, :high, :xhigh] do
-        assert ResponsesShared.maybe_reasoning_field(level) == %{effort: Atom.to_string(level)}
+    test "returns %{effort: <string>} for each supported level (atom and string)" do
+      for level <- [:low, :medium, :high, :xhigh] do
+        assert ResponsesShared.maybe_reasoning_field(level, :openai) ==
+                 %{effort: Atom.to_string(level)}
+
+        assert ResponsesShared.maybe_reasoning_field(Atom.to_string(level), :openai) ==
+                 %{effort: Atom.to_string(level)}
       end
     end
 
-    test "returns %{effort: <string>} for each valid level (string)" do
-      for level <- ["minimal", "low", "medium", "high", "xhigh"] do
-        assert ResponsesShared.maybe_reasoning_field(level) == %{effort: level}
-      end
+    test "clamps a level above the provider ceiling (:max -> xhigh on OpenAI-family)" do
+      assert ResponsesShared.maybe_reasoning_field(:max, :openai) == %{effort: "xhigh"}
+      assert ResponsesShared.maybe_reasoning_field(:max, :openai_codex) == %{effort: "xhigh"}
     end
 
-    test "raises ArgumentError on an unknown atom level" do
-      assert_raise ArgumentError, ~r/invalid reasoning_effort: :weird/, fn ->
-        ResponsesShared.maybe_reasoning_field(:weird)
+    test "raises ArgumentError on a removed level (minimal)" do
+      assert_raise ArgumentError, ~r/invalid reasoning_effort: :minimal/, fn ->
+        ResponsesShared.maybe_reasoning_field(:minimal, :openai)
       end
     end
 
     test "raises ArgumentError on an unknown string level" do
       assert_raise ArgumentError, ~r/invalid reasoning_effort: \"absurd\"/, fn ->
-        ResponsesShared.maybe_reasoning_field("absurd")
+        ResponsesShared.maybe_reasoning_field("absurd", :openai)
       end
     end
 
     test "raises ArgumentError on a non-atom non-string value" do
       assert_raise ArgumentError, ~r/invalid reasoning_effort: 7/, fn ->
-        ResponsesShared.maybe_reasoning_field(7)
+        ResponsesShared.maybe_reasoning_field(7, :openai)
       end
     end
   end

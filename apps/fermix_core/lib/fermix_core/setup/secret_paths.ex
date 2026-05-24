@@ -36,6 +36,18 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :brave_api_key,
+      env: "BRAVE_API_KEY",
+      path: [:fermix_core, :tools, :web_search, :brave_api_key],
+      sandbox_env: true
+    },
+    %{
+      key: :perplexity_api_key,
+      env: "PERPLEXITY_API_KEY",
+      path: [:fermix_core, :tools, :web_search, :perplexity_api_key],
+      sandbox_env: true
+    },
+    %{
       key: :telegram_bot_token,
       env: "TELEGRAM_BOT_TOKEN",
       path: [:fermix_channels, :telegram, :bot_token]

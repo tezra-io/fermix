@@ -12,6 +12,33 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "web_search/1" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "offline reports the active backend and credential state" do
+      Application.put_env(:fermix_core, :tools, web_search: [])
+
+      result = Checks.web_search(false)
+
+      assert result.name == "web search"
+      assert result.status == :ok
+      assert result.detail =~ "duckduckgo"
+    end
+
+    test "warns when a keyed backend has no credential configured" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :tavily])
+
+      result = Checks.web_search(false)
+
+      assert result.status == :warn
+      assert result.detail =~ "tavily"
+    end
+  end
+
   describe "service_unit/0" do
     test "warns when no unit is installed (test environment has none)" do
       result = Checks.service_unit()

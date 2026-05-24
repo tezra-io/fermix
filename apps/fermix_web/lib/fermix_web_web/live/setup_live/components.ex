@@ -2,6 +2,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.ReasoningEffort
 
   @channels [
     {:telegram, "Telegram"},
@@ -278,7 +279,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <legend class="label pb-1 text-sm font-medium">Reasoning effort</legend>
       <div class="flex flex-wrap gap-3">
         <label
-          :for={effort <- ~w(none minimal low medium high)}
+          :for={effort <- effort_levels(@provider_form.provider)}
           class="label cursor-pointer gap-2 rounded-field px-2 py-1 hover:bg-base-100"
         >
           <input
@@ -293,6 +294,10 @@ defmodule FermixWebWeb.SetupLive.Components do
       </div>
     </fieldset>
     """
+  end
+
+  defp effort_levels(provider) do
+    provider |> ReasoningEffort.levels_for() |> Enum.map(&Atom.to_string/1)
   end
 
   defp realtime_pane(assigns) do
@@ -481,6 +486,18 @@ defmodule FermixWebWeb.SetupLive.Components do
               description="Research search API"
               checked={@search_form.backend == :parallel}
             />
+            <.search_backend_option
+              value="brave"
+              label="Brave"
+              description="Independent search API"
+              checked={@search_form.backend == :brave}
+            />
+            <.search_backend_option
+              value="perplexity"
+              label="Perplexity"
+              description="Structured search API"
+              checked={@search_form.backend == :perplexity}
+            />
           </div>
         </fieldset>
 
@@ -502,6 +519,18 @@ defmodule FermixWebWeb.SetupLive.Components do
             label="Parallel API key"
             name="search_form[parallel_api_key]"
             set={@search_form.parallel_api_key_set}
+          />
+          <.secret_input
+            :if={@search_form.backend == :brave}
+            label="Brave API key"
+            name="search_form[brave_api_key]"
+            set={@search_form.brave_api_key_set}
+          />
+          <.secret_input
+            :if={@search_form.backend == :perplexity}
+            label="Perplexity API key"
+            name="search_form[perplexity_api_key]"
+            set={@search_form.perplexity_api_key_set}
           />
           <p :if={@search_form.backend == :duckduckgo} class="text-sm text-base-content/60">
             DuckDuckGo needs no API key — nothing else to configure here.

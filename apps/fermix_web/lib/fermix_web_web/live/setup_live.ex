@@ -6,6 +6,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.Doctor
@@ -133,6 +134,8 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:tavily_api_key, params["tavily_api_key"])
       |> maybe_put_string(:exa_api_key, params["exa_api_key"])
       |> maybe_put_string(:parallel_api_key, params["parallel_api_key"])
+      |> maybe_put_string(:brave_api_key, params["brave_api_key"])
+      |> maybe_put_string(:perplexity_api_key, params["perplexity_api_key"])
 
     {:noreply, save_answers(socket, answers, "Search saved.", Map.get(root, "__nav"))}
   end
@@ -371,7 +374,9 @@ defmodule FermixWebWeb.SetupLive do
       backend: normalize_search_backend(Keyword.get(web_search, :backend)),
       tavily_api_key_set: secret_set?(web_search, :tavily_api_key),
       exa_api_key_set: secret_set?(web_search, :exa_api_key),
-      parallel_api_key_set: secret_set?(web_search, :parallel_api_key)
+      parallel_api_key_set: secret_set?(web_search, :parallel_api_key),
+      brave_api_key_set: secret_set?(web_search, :brave_api_key),
+      perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key)
     }
   end
 
@@ -461,12 +466,12 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_provider_field("anthropic", _default), do: :anthropic
   defp parse_provider_field(_, default), do: default
 
-  defp parse_effort_field(field, _default)
-       when field in ~w(none minimal low medium high xhigh) do
-    String.to_existing_atom(field)
+  defp parse_effort_field(field, default) do
+    case ReasoningEffort.parse(field) do
+      {:ok, level} -> level
+      :error -> default
+    end
   end
-
-  defp parse_effort_field(_, default), do: default
 
   defp parse_sandbox_mode("strict", _default), do: :strict
   defp parse_sandbox_mode("standard", _default), do: :standard
@@ -483,10 +488,14 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_search_backend(:tavily), do: :tavily
   defp normalize_search_backend(:exa), do: :exa
   defp normalize_search_backend(:parallel), do: :parallel
+  defp normalize_search_backend(:brave), do: :brave
+  defp normalize_search_backend(:perplexity), do: :perplexity
   defp normalize_search_backend("duckduckgo"), do: :duckduckgo
   defp normalize_search_backend("tavily"), do: :tavily
   defp normalize_search_backend("exa"), do: :exa
   defp normalize_search_backend("parallel"), do: :parallel
+  defp normalize_search_backend("brave"), do: :brave
+  defp normalize_search_backend("perplexity"), do: :perplexity
   defp normalize_search_backend(_value), do: :duckduckgo
 
   defp parse_env_allow(value) when is_binary(value) do

@@ -6,7 +6,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -19,7 +19,7 @@ defmodule FermixCore.Setup.Wizard do
   require Logger
 
   @type provider :: ModelCatalog.provider()
-  @type reasoning_effort :: :none | :minimal | :low | :medium | :high | :xhigh
+  @type reasoning_effort :: :none | :low | :medium | :high | :xhigh | :max
 
   @type answer ::
           {:openai_api_key, String.t()}
@@ -38,6 +38,8 @@ defmodule FermixCore.Setup.Wizard do
           | {:tavily_api_key, String.t()}
           | {:exa_api_key, String.t()}
           | {:parallel_api_key, String.t()}
+          | {:brave_api_key, String.t()}
+          | {:perplexity_api_key, String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -149,12 +151,21 @@ defmodule FermixCore.Setup.Wizard do
 
     specs
     |> Enum.filter(fn prompt ->
-      prompt.key in @reconfigure_prompt_keys or
+      (prompt.key in @reconfigure_prompt_keys and reconfigure_offered?(prompt, persisted)) or
         realtime_reconfigure_followup?(prompt, answers) or
         channel_owner_reconfigure?(prompt, persisted)
     end)
     |> Enum.map(&Map.put(&1, :required?, true))
   end
+
+  # reasoning_effort is only wired for OpenAI/Codex (`put_reasoning_effort/2`
+  # rejects other providers and the Anthropic adapter doesn't send it yet), so
+  # don't offer it on reconfigure for a provider that can't persist or use it.
+  defp reconfigure_offered?(%{key: :reasoning_effort}, persisted) do
+    persisted_provider(persisted) in [:openai, :openai_codex]
+  end
+
+  defp reconfigure_offered?(_prompt, _persisted), do: true
 
   defp prompt_specs(%WizardState{} = state) do
     # Channel-secret prompts read from the persisted TOML snapshot rather than
@@ -225,7 +236,7 @@ defmodule FermixCore.Setup.Wizard do
       %{
         key: :reasoning_effort,
         label:
-          "Reasoning effort (#{Enum.map_join(ResponsesShared.valid_reasoning_efforts(), "/", &Atom.to_string/1)}; blank = high)",
+          "Reasoning effort (#{Enum.map_join(ReasoningEffort.levels_for(context.prompt_provider), "/", &Atom.to_string/1)}; blank = high)",
         default: :high,
         required?:
           (context.provider_unset? or context.prompt_provider in [:openai, :openai_codex]) and
@@ -872,24 +883,16 @@ defmodule FermixCore.Setup.Wizard do
             "unknown provider #{inspect(value)}; expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &Atom.to_string/1)}"
   end
 
-  defp parse_reasoning_effort!(value) when is_atom(value) do
-    valid = ResponsesShared.valid_reasoning_efforts()
+  defp parse_reasoning_effort!(value) do
+    case ReasoningEffort.parse(value) do
+      {:ok, level} ->
+        level
 
-    if value in valid do
-      value
-    else
-      raise ArgumentError,
-            "invalid reasoning_effort #{inspect(value)}; expected one of #{inspect(valid)}"
+      :error ->
+        raise ArgumentError,
+              "invalid reasoning_effort #{inspect(value)}; " <>
+                "expected one of #{Enum.map_join(ReasoningEffort.levels(), ", ", &Atom.to_string/1)}"
     end
-  end
-
-  defp parse_reasoning_effort!(value) when is_binary(value) do
-    trimmed = value |> String.trim() |> String.downcase()
-    valid = ResponsesShared.valid_reasoning_efforts()
-
-    Enum.find(valid, fn atom -> Atom.to_string(atom) == trimmed end) ||
-      raise ArgumentError,
-            "invalid reasoning_effort #{inspect(value)}; expected one of #{Enum.map_join(valid, ", ", &Atom.to_string/1)}"
   end
 
   defp active_provider(snapshot) do
@@ -1102,7 +1105,11 @@ defmodule FermixCore.Setup.Wizard do
           secret_snapshot_value(:tavily_api_key, Keyword.get(answers, :tavily_api_key)),
         exa_api_key: secret_snapshot_value(:exa_api_key, Keyword.get(answers, :exa_api_key)),
         parallel_api_key:
-          secret_snapshot_value(:parallel_api_key, Keyword.get(answers, :parallel_api_key))
+          secret_snapshot_value(:parallel_api_key, Keyword.get(answers, :parallel_api_key)),
+        brave_api_key:
+          secret_snapshot_value(:brave_api_key, Keyword.get(answers, :brave_api_key)),
+        perplexity_api_key:
+          secret_snapshot_value(:perplexity_api_key, Keyword.get(answers, :perplexity_api_key))
       ]
       |> reject_nil_values()
 
@@ -1119,6 +1126,8 @@ defmodule FermixCore.Setup.Wizard do
   defp normalize_web_search_backend(:tavily), do: :tavily
   defp normalize_web_search_backend(:exa), do: :exa
   defp normalize_web_search_backend(:parallel), do: :parallel
+  defp normalize_web_search_backend(:brave), do: :brave
+  defp normalize_web_search_backend(:perplexity), do: :perplexity
 
   defp normalize_web_search_backend(value) when is_binary(value) do
     case String.trim(value) |> String.downcase() do
@@ -1126,6 +1135,8 @@ defmodule FermixCore.Setup.Wizard do
       "tavily" -> :tavily
       "exa" -> :exa
       "parallel" -> :parallel
+      "brave" -> :brave
+      "perplexity" -> :perplexity
       invalid -> raise ArgumentError, "invalid web_search_backend #{inspect(invalid)}"
     end
   end

@@ -18,58 +18,52 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Telemetry
 
   @type tool_result :: %{required(:call_id) => String.t(), required(:output) => term()}
 
-  @valid_reasoning_efforts ~w(none minimal low medium high xhigh)a
-
   @doc """
-  Returns the list of accepted `reasoning_effort` values (atoms).
+  Builds the OpenAI-family `reasoning` body field for `provider`, or `nil`
+  to indicate "omit".
 
-  Mirrors hermes-agent's `VALID_REASONING_EFFORTS`. `:none` is the
-  "disable reasoning" sentinel — caller-side, that means "omit the
-  reasoning field entirely from the request body". The wizard surfaces
-  the same list to the user.
+  The canonical effort enum and per-provider mapping live in
+  `FermixCore.Providers.ReasoningEffort`; this only wraps the mapped value
+  in the `%{effort: ...}` shape both Responses adapters share. `:none` (and
+  `nil`) omit the field; a level above the provider's ceiling clamps (e.g.
+  `:max` -> `"xhigh"` on OpenAI). Invalid or provider-unsupported values
+  raise — config bugs we refuse to silently round-trip (CLAUDE.md #6, #12).
+  Per-*model* rejection (a model that doesn't accept `xhigh`) stays the
+  API's 400 to decide.
   """
-  @spec valid_reasoning_efforts() :: [atom()]
-  def valid_reasoning_efforts, do: @valid_reasoning_efforts
-
-  @doc """
-  Builds the `reasoning` body field, or `nil` to indicate "omit".
-
-  Returns `nil` for `nil`, `:none`, or `"none"`. Returns
-  `%{effort: "..."}` for the other valid levels. Raises `ArgumentError`
-  on any other value — invalid effort levels are configuration bugs we
-  refuse to silently round-trip (CLAUDE.md #6, #12).
-
-  Per-model rejection (e.g., a model that doesn't accept `xhigh`) is
-  intentionally NOT clamped here (design §4 Q2). The API's 400 is the
-  source of truth.
-  """
-  @spec maybe_reasoning_field(atom() | String.t() | nil) ::
+  @spec maybe_reasoning_field(atom() | String.t() | nil, ReasoningEffort.provider()) ::
           %{required(:effort) => String.t()} | nil
-  def maybe_reasoning_field(nil), do: nil
-  def maybe_reasoning_field(:none), do: nil
-  def maybe_reasoning_field("none"), do: nil
+  def maybe_reasoning_field(nil, _provider), do: nil
 
-  def maybe_reasoning_field(effort) when effort in @valid_reasoning_efforts do
-    %{effort: Atom.to_string(effort)}
-  end
-
-  def maybe_reasoning_field(effort) when is_binary(effort) do
-    case Enum.find(@valid_reasoning_efforts, fn atom -> Atom.to_string(atom) == effort end) do
-      nil -> raise_invalid_effort!(effort)
-      _atom -> %{effort: effort}
+  def maybe_reasoning_field(effort, provider) do
+    case ReasoningEffort.parse(effort) do
+      {:ok, level} -> reasoning_field(level, provider)
+      :error -> raise_invalid_effort!(effort)
     end
   end
 
-  def maybe_reasoning_field(effort), do: raise_invalid_effort!(effort)
+  defp reasoning_field(level, provider) do
+    case ReasoningEffort.to_provider(level, provider) do
+      :omit ->
+        nil
+
+      {:ok, value} ->
+        %{effort: value}
+
+      {:error, {:unsupported, lvl, prov}} ->
+        raise ArgumentError, "reasoning_effort #{lvl} is not supported by #{prov}"
+    end
+  end
 
   defp raise_invalid_effort!(effort) do
     raise ArgumentError,
           "invalid reasoning_effort: #{inspect(effort)}; " <>
-            "expected one of #{inspect(@valid_reasoning_efforts)}"
+            "expected one of #{inspect(ReasoningEffort.levels())}"
   end
 
   @spec to_provider_tools([Capability.t()]) :: [map()]

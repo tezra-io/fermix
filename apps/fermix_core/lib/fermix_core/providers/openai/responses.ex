@@ -50,7 +50,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     {instructions, input} = ResponsesShared.build_input(messages)
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
     text = text_field(opts)
 
     body =
@@ -86,7 +86,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       provider_state
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ output_items ++ outputs

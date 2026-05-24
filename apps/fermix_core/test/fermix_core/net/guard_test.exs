@@ -49,6 +49,7 @@ defmodule FermixCore.Net.GuardTest do
       {"Authorization", "Bearer abc"},
       {"cookie", "sid=1"},
       {"x-api-key", "secret"},
+      {"X-Subscription-Token", "brave-secret"},
       {"Content-Type", "text/html"}
     ]
 
@@ -56,6 +57,7 @@ defmodule FermixCore.Net.GuardTest do
              {"Authorization", "***REDACTED***"},
              {"cookie", "***REDACTED***"},
              {"x-api-key", "***REDACTED***"},
+             {"X-Subscription-Token", "***REDACTED***"},
              {"Content-Type", "text/html"}
            ]
   end

@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Tools.WebSearch
 
   @type provider :: :openai | :openai_codex | :anthropic
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
@@ -38,6 +39,12 @@ defmodule FermixCore.Setup.Doctor do
           owner_user_id: String.t() | nil,
           command_allowlist: [String.t()]
         }
+  @type web_search_report :: %{
+          :backend => atom(),
+          :credential_present? => boolean(),
+          optional(:probe_result) => atom(),
+          optional(:result_count) => non_neg_integer()
+        }
   @type model_window :: %{
           provider: provider(),
           model: String.t(),
@@ -53,6 +60,7 @@ defmodule FermixCore.Setup.Doctor do
   @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
+  @web_search_probe_query "fermix web search health check"
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])
@@ -103,6 +111,57 @@ defmodule FermixCore.Setup.Doctor do
         command_allowlist: FermixCore.Config.channel_command_allowlist(channel)
       }
     end)
+  end
+
+  @doc """
+  Reports the active `web_search` backend and whether its credential is present.
+
+  Offline by default (no network). With `full: true` and a configured
+  credential, runs a one-result live probe through the backend and adds
+  `:probe_result` / `:result_count`. Inject `req_options`/`net_resolver`
+  to stub the probe in tests.
+  """
+  @spec web_search_report(keyword()) :: web_search_report()
+  def web_search_report(opts \\ []) do
+    full? = Keyword.get(opts, :full, false)
+    config = WebSearch.config()
+    {backend, module} = WebSearch.active_backend(config)
+    present? = module.configured?(config)
+    base = %{backend: backend, credential_present?: present?}
+
+    if full? and present? do
+      Map.merge(base, web_search_probe(module, config, opts))
+    else
+      base
+    end
+  end
+
+  defp web_search_probe(module, config, opts) do
+    probe_opts = Keyword.put(config, :context, web_search_probe_context(opts))
+
+    case module.search(@web_search_probe_query, probe_opts) do
+      {:ok, results, _trace} -> %{probe_result: :ok, result_count: length(results)}
+      {:error, reason, _trace} -> %{probe_result: web_search_probe_tag(reason), result_count: 0}
+    end
+  end
+
+  defp web_search_probe_context(opts) do
+    Enum.reduce([:req_options, :net_resolver], %{}, fn key, acc ->
+      case Keyword.get(opts, key) do
+        nil -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
+  defp web_search_probe_tag(reason) do
+    cond do
+      String.starts_with?(reason, "auth_failed") -> :auth_failed
+      String.starts_with?(reason, "rate_limited") -> :rate_limited
+      String.starts_with?(reason, "provider_error") -> :provider_error
+      String.starts_with?(reason, "parser_changed") -> :parser_changed
+      true -> :network
+    end
   end
 
   @spec active_provider() :: provider()

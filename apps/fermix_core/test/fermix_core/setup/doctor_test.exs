@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.DoctorTest do
     original_providers = Application.get_env(:fermix_core, :providers, [])
     original_agent = Application.get_env(:fermix_core, :agent, [])
     original_compaction = Application.get_env(:fermix_core, :compaction, [])
+    original_tools = Application.get_env(:fermix_core, :tools, [])
 
     original_channels =
       for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
@@ -18,6 +19,7 @@ defmodule FermixCore.Setup.DoctorTest do
       Application.put_env(:fermix_core, :providers, original_providers)
       Application.put_env(:fermix_core, :agent, original_agent)
       Application.put_env(:fermix_core, :compaction, original_compaction)
+      Application.put_env(:fermix_core, :tools, original_tools)
 
       Enum.each(original_channels, fn {channel, config} ->
         Application.put_env(:fermix_channels, channel, config)
@@ -379,6 +381,166 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
                Doctor.probe_provider(:openai, req_options: [adapter: adapter])
+    end
+  end
+
+  describe "web_search_report/1" do
+    test "offline reports the duckduckgo default with no credential required" do
+      put_web_search([])
+
+      report = Doctor.web_search_report()
+
+      assert report.backend == :duckduckgo
+      assert report.credential_present? == true
+      refute Map.has_key?(report, :probe_result)
+    end
+
+    test "offline reports a keyed backend credential as present when set" do
+      put_web_search(backend: :tavily, tavily_api_key: "tvly-secret")
+
+      assert %{backend: :tavily, credential_present?: true} = Doctor.web_search_report()
+    end
+
+    test "offline reports a keyed backend credential as missing without a key" do
+      put_web_search(backend: :tavily)
+
+      assert %{backend: :tavily, credential_present?: false} = Doctor.web_search_report()
+    end
+
+    test "offline never reaches the network" do
+      id = unique_plug(self())
+      put_web_search(backend: :tavily, tavily_api_key: "tvly-secret")
+
+      Doctor.web_search_report(
+        req_options: [plug: {Req.Test, id}],
+        net_resolver: public_resolver()
+      )
+
+      refute_received :web_search_probe_request
+    end
+
+    test "--full runs a live probe for the keyless backend" do
+      id = stub_duckduckgo()
+      put_web_search([])
+
+      report =
+        Doctor.web_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: public_resolver()
+        )
+
+      assert report.backend == :duckduckgo
+      assert report.credential_present? == true
+      assert report.probe_result == :ok
+      assert report.result_count == 1
+    end
+
+    test "--full maps a keyed backend auth failure to :auth_failed" do
+      id = stub_status(401)
+      put_web_search(backend: :tavily, tavily_api_key: "tvly-secret")
+
+      report =
+        Doctor.web_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: public_resolver()
+        )
+
+      assert report.probe_result == :auth_failed
+      assert report.result_count == 0
+    end
+
+    test "--full skips the probe when the credential is missing" do
+      id = unique_plug(self())
+      put_web_search(backend: :tavily)
+
+      report =
+        Doctor.web_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: public_resolver()
+        )
+
+      assert report.credential_present? == false
+      refute Map.has_key?(report, :probe_result)
+      refute_received :web_search_probe_request
+    end
+
+    test "--full maps a probe network failure to :network without crashing" do
+      id = stub_status(200)
+      put_web_search(backend: :tavily, tavily_api_key: "tvly-secret")
+
+      report =
+        Doctor.web_search_report(
+          full: true,
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: private_resolver()
+        )
+
+      assert report.probe_result == :network
+      assert report.result_count == 0
+    end
+  end
+
+  defp put_web_search(config) do
+    Application.put_env(:fermix_core, :tools, web_search: config)
+  end
+
+  defp private_resolver do
+    fn "api.tavily.com" -> {:ok, [{10, 0, 0, 1}]} end
+  end
+
+  defp unique_plug(test_pid) do
+    id = :"web_search_probe_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      send(test_pid, :web_search_probe_request)
+      Plug.Conn.send_resp(conn, 200, "{}")
+    end)
+
+    id
+  end
+
+  defp stub_status(status) do
+    id = :"web_search_status_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(status, "{}")
+    end)
+
+    id
+  end
+
+  defp stub_duckduckgo do
+    id = :"web_search_ddg_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(id, fn conn ->
+      Plug.Conn.send_resp(conn, 200, ddg_fixture())
+    end)
+
+    id
+  end
+
+  defp ddg_fixture do
+    """
+    <html><body>
+      <div class="result">
+        <h2 class="result__title">
+          <a class="result__a" href="https://example.com/fermix">Fermix</a>
+        </h2>
+        <a class="result__snippet">Elixir agent platform.</a>
+      </div>
+    </body></html>
+    """
+  end
+
+  defp public_resolver do
+    fn
+      "api.tavily.com" -> {:ok, [{93, 184, 216, 34}]}
+      "html.duckduckgo.com" -> {:ok, [{52, 149, 246, 39}]}
     end
   end
 end
