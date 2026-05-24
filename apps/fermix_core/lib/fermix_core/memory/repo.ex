@@ -16,6 +16,7 @@ defmodule FermixCore.Memory.Repo do
   @job_expiry_migration_version 5
   @job_creator_trust_migration_version 6
   @trust_rename_migration_version 7
+  @fermix_md_rename_migration_version 8
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -261,6 +262,23 @@ defmodule FermixCore.Memory.Repo do
     WHERE created_by_trust IN ('owner_remote', 'local', 'core');
   UPDATE scheduled_jobs SET created_by_trust = 'guest'
     WHERE created_by_trust = 'third_party';
+  """
+
+  # Prompt-resource rename: the agent operating-rules file moved from
+  # `AGENTS.md` to `FERMIX.md` to avoid collision with the workspace
+  # `AGENTS.md` convention. Existing resource rows and revision history are
+  # rewritten in place so versioning continues unbroken. The stored
+  # `resource_path` basename is rewritten too (both basenames are 9 chars):
+  # `BootstrapRename` renames the file with identical content, so the loader's
+  # next commit returns `:unchanged` and skips the resource upsert — leaving a
+  # stale `AGENTS.md` path that `Registry.rollback/5` would resolve and recreate
+  # on disk. The on-disk file rename is handled separately by `BootstrapRename`.
+  @fermix_md_rename_schema_sql """
+  UPDATE resources SET resource_type = 'fermix_md' WHERE resource_type = 'agents_md';
+  UPDATE resource_revisions SET resource_type = 'fermix_md' WHERE resource_type = 'agents_md';
+  UPDATE resources
+    SET resource_path = substr(resource_path, 1, length(resource_path) - 9) || 'FERMIX.md'
+    WHERE resource_type = 'fermix_md' AND resource_path LIKE '%/AGENTS.md';
   """
 
   @type message_attrs :: %{
@@ -1010,7 +1028,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_jobs_migration(conn, versions),
          :ok <- apply_job_expiry_migration(conn, versions),
          :ok <- apply_job_creator_trust_migration(conn, versions),
-         :ok <- apply_trust_rename_migration(conn, versions) do
+         :ok <- apply_trust_rename_migration(conn, versions),
+         :ok <- apply_fermix_md_rename_migration(conn, versions) do
       :ok
     end
   end
@@ -1135,6 +1154,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@trust_rename_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@trust_rename_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_fermix_md_rename_migration(conn, versions) do
+    if Enum.member?(versions, @fermix_md_rename_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@fermix_md_rename_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@fermix_md_rename_migration_version});
         COMMIT;
         """
       )

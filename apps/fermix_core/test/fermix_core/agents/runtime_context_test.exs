@@ -69,7 +69,7 @@ defmodule FermixCore.Agents.RuntimeContextTest do
     registry: registry
   } do
     write_bootstrap(agent_id, "IDENTITY.md", "identity content")
-    write_bootstrap(agent_id, "AGENTS.md", "agents content")
+    write_bootstrap(agent_id, "FERMIX.md", "agents content")
     write_memory(agent_id, "USER.md", "user content")
 
     :ok = CapabilityRegistry.register(registry, cap("read_tool", policy_class: :read_only))

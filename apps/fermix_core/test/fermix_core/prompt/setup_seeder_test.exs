@@ -88,7 +88,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
       assert Enum.map(results, & &1.name) == [
                :identity,
-               :agents,
+               :fermix,
                :soul,
                :realtime,
                :user,
@@ -99,14 +99,14 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert Enum.all?(results, &is_integer(&1.revision_id))
 
       identity_path = BootstrapPaths.identity_path(agent_id)
-      agents_path = BootstrapPaths.agents_path(agent_id)
+      fermix_path = BootstrapPaths.fermix_path(agent_id)
       soul_path = BootstrapPaths.soul_path(agent_id)
       realtime_path = BootstrapPaths.realtime_path(agent_id)
       user_path = PromptFiles.user_path(agent_id)
       memory_path = PromptFiles.memory_path(agent_id)
 
       assert File.read!(identity_path) == Defaults.identity_md()
-      assert File.read!(agents_path) == Defaults.agents_md()
+      assert File.read!(fermix_path) == Defaults.fermix_md()
       assert File.read!(soul_path) == Defaults.soul_md()
       assert File.read!(realtime_path) == Defaults.realtime_md()
 
@@ -122,7 +122,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
       for {resource_type, expected_content} <- [
             {:identity_md, Defaults.identity_md()},
-            {:agents_md, Defaults.agents_md()},
+            {:fermix_md, Defaults.fermix_md()},
             {:soul_md, Defaults.soul_md()},
             {:realtime_md, Defaults.realtime_md()}
           ] do
@@ -202,7 +202,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert File.read!(BootstrapPaths.identity_path(agent_id)) == "operator-edited identity"
 
       assert_received {:seed, %{name: :identity, outcome: :skipped_exists}}
-      assert_received {:seed, %{name: :agents, outcome: :skipped_exists}}
+      assert_received {:seed, %{name: :fermix, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :soul, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :realtime, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :user, outcome: :skipped_exists}}
@@ -243,7 +243,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
           for path <- [
                 BootstrapPaths.identity_path(agent_id),
-                BootstrapPaths.agents_path(agent_id),
+                BootstrapPaths.fermix_path(agent_id),
                 BootstrapPaths.soul_path(agent_id),
                 PromptFiles.user_path(agent_id),
                 PromptFiles.memory_path(agent_id)
