@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 8 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 11 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -77,8 +77,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s(source = "command")
     assert contents =~ ~s(command = "/usr/bin/security")
-    assert contents =~ ~s("OPENAI_API_KEY" in [sandbox.env].allow) or
-             contents =~ ~s(allow = ["OPENAI_API_KEY"])
+    assert contents =~ ~r/allow = \[[^\]]*"OPENAI_API_KEY"/
 
     refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
     refute contents =~ ~s([sandbox.env.SLACK_BOT_TOKEN])
@@ -116,6 +115,11 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_core.providers.openai]
     api_key = "sk-old"
 
+    [fermix_core.tools.web_search]
+    tavily_api_key = "tavily-old"
+    exa_api_key = "exa-old"
+    parallel_api_key = "parallel-old"
+
     [fermix_channels.telegram]
     bot_token = "telegram-old"
 
@@ -137,6 +141,9 @@ defmodule FermixCore.Setup.SecretMigrationTest do
   defp secret_values do
     %{
       openai_api_key: "sk-old",
+      tavily_api_key: "tavily-old",
+      exa_api_key: "exa-old",
+      parallel_api_key: "parallel-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",

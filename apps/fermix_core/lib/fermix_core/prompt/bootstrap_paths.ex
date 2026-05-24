@@ -35,9 +35,9 @@ defmodule FermixCore.Prompt.BootstrapPaths do
     Path.join(agent_dir(agent_id, opts), "IDENTITY.md")
   end
 
-  @spec agents_path(String.t(), keyword()) :: String.t()
-  def agents_path(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
-    Path.join(agent_dir(agent_id, opts), "AGENTS.md")
+  @spec fermix_path(String.t(), keyword()) :: String.t()
+  def fermix_path(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
+    Path.join(agent_dir(agent_id, opts), "FERMIX.md")
   end
 
   @spec soul_path(String.t(), keyword()) :: String.t()

@@ -164,7 +164,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert_received {:mix_shell, :info, ["status: ready"]}
     assert_received {:mix_shell, :info, ["Prompt files:"]}
     assert File.exists?(BootstrapPaths.identity_path("main"))
-    assert File.exists?(BootstrapPaths.agents_path("main"))
+    assert File.exists?(BootstrapPaths.fermix_path("main"))
     assert File.exists?(BootstrapPaths.soul_path("main"))
   end
 

@@ -3,6 +3,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Repo
+  alias FermixCore.Resource.Registry
 
   defmodule ExitingRepo do
     use GenServer
@@ -38,7 +39,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8]} = Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -51,10 +52,44 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8]} = Repo.migration_versions(server: repo)
+  end
+
+  test "fermix_md migration rewrites resource_path so rollback targets FERMIX.md", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    dir = Path.join(System.tmp_dir!(), "fermix-md-rename-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    legacy_path = Path.join(dir, "AGENTS.md")
+    fermix_path = Path.join(dir, "FERMIX.md")
+
+    # Simulate a pre-rename install: an `agents_md` resource registered at the
+    # legacy AGENTS.md path with two revisions, then drop the v8 marker so the
+    # migration re-runs against the legacy rows on the next open.
+    seed_legacy_agents_md(repo, legacy_path)
+    drop_migration_version(db_path, 8)
+
+    assert :ok = Repo.migrate(server: repo)
+
+    selector = %{agent_id: "main", resource_type: "fermix_md", scope_id: "global"}
+    assert {:ok, migrated} = Repo.get_resource(selector, server: repo)
+    assert migrated.resource_path == fermix_path
+
+    # BootstrapRename already moved the file: current content lives at FERMIX.md
+    # and the legacy AGENTS.md is gone.
+    File.write!(fermix_path, "rev-two")
+
+    assert {:ok, rolled_back} = Registry.rollback("main", "fermix_md", "global", 1, repo: repo)
+    assert rolled_back.revision == 3
+
+    assert File.read!(fermix_path) == "rev-one"
+    refute File.exists?(legacy_path)
   end
 
   test "resource migration creates required tables and indexes", %{db_path: db_path, repo: repo} do
@@ -118,19 +153,19 @@ defmodule FermixCore.Memory.RepoTest do
   test "supports resource registry and revision queries through the repo API", %{repo: repo} do
     resource = %{
       agent_id: "main",
-      resource_type: "agents_md",
+      resource_type: "fermix_md",
       scope_id: "global",
       current_revision: 0,
-      resource_path: "/tmp/AGENTS.md"
+      resource_path: "/tmp/FERMIX.md"
     }
 
     assert {:ok, registered} = Repo.upsert_resource(resource, server: repo)
     assert registered.current_revision == 0
-    assert registered.resource_path == "/tmp/AGENTS.md"
+    assert registered.resource_path == "/tmp/FERMIX.md"
 
     revision = %{
       agent_id: "main",
-      resource_type: "agents_md",
+      resource_type: "fermix_md",
       scope_id: "global",
       revision: 1,
       parent_revision: nil,
@@ -477,6 +512,47 @@ defmodule FermixCore.Memory.RepoTest do
                },
                server: repo
              )
+  end
+
+  defp seed_legacy_agents_md(repo, legacy_path) do
+    base = %{agent_id: "main", resource_type: "agents_md", scope_id: "global"}
+
+    {:ok, _} =
+      Repo.upsert_resource(Map.merge(base, %{current_revision: 0, resource_path: legacy_path}),
+        server: repo
+      )
+
+    Enum.each([{1, "rev-one", nil}, {2, "rev-two", 1}], fn {revision, content, parent} ->
+      {:ok, _} =
+        Repo.insert_revision(
+          Map.merge(base, %{
+            revision: revision,
+            parent_revision: parent,
+            content_hash: sha256_hex(content),
+            content: content,
+            byte_size: byte_size(content),
+            mutation_source: "seed",
+            provenance: %{"trigger" => "seed"}
+          }),
+          server: repo
+        )
+    end)
+
+    {:ok, _} =
+      Repo.upsert_resource(Map.merge(base, %{current_revision: 2, resource_path: legacy_path}),
+        server: repo
+      )
+  end
+
+  defp drop_migration_version(db_path, version) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+    :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 2000;")
+    :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = #{version};")
+    :ok = Sqlite3.close(conn)
+  end
+
+  defp sha256_hex(content) do
+    :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
   end
 
   defp sqlite_values(conn, sql, params) do

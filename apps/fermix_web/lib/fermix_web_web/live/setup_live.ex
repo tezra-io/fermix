@@ -1,43 +1,45 @@
 defmodule FermixWebWeb.SetupLive do
   use FermixWebWeb, :live_view
 
+  alias Fermix.CLI.Service
+  alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
+  alias FermixWebWeb.SetupLive.Components
 
   @tabs [
-    %{id: "provider", label: "Provider", component: "provider:*"},
-    %{id: "realtime", label: "Realtime", component: "realtime"},
-    %{id: "channels", label: "Channels", component: "channel:*"},
-    %{id: "tools", label: "Tools", component: nil},
-    %{id: "skills", label: "Skills", component: nil},
-    %{id: "search", label: "Search", component: nil},
-    %{id: "sandbox", label: "Sandbox", component: nil},
-    %{id: "memory", label: "Memory", component: nil},
-    %{id: "personalization", label: "Personalization", component: "personalization"},
-    %{id: "doctor", label: "Doctor", component: nil}
+    %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
+    %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
+    %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
+    %{id: "skills", label: "Skills", component: nil, description: "Agent skills"},
+    %{id: "search", label: "Search", component: nil, description: "Web search"},
+    %{id: "sandbox", label: "Sandbox", component: nil, description: "Execution policy"},
+    %{id: "memory", label: "Memory", component: nil, description: "Recall tuning"},
+    %{
+      id: "personalization",
+      label: "Personalization",
+      component: "personalization",
+      description: "User profile"
+    },
+    %{id: "doctor", label: "Doctor", component: nil, description: "Final checks"}
   ]
-
-  # ANSI Shadow font, rendered ahead of time so render/1 stays cheap.
-  @ascii_fermix """
-  ███████╗███████╗██████╗ ███╗   ███╗██╗██╗  ██╗
-  ██╔════╝██╔════╝██╔══██╗████╗ ████║██║╚██╗██╔╝
-  █████╗  █████╗  ██████╔╝██╔████╔██║██║ ╚███╔╝
-  ██╔══╝  ██╔══╝  ██╔══██╗██║╚██╔╝██║██║ ██╔██╗
-  ██║     ███████╗██║  ██║██║ ╚═╝ ██║██║██╔╝ ██╗
-  ╚═╝     ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝╚═╝  ╚═╝
-  """
 
   @impl true
   def mount(_params, _session, socket) do
-    # Compute a fresh report on mount so the LV reflects the persisted TOML
-    # without mutating BootReport's cached state (which other routes rely on).
     report = Wizard.report()
 
     socket =
       socket
       |> assign(:page_title, "Fermix setup")
-      |> assign(:active_tab, "provider")
+      |> assign(:active_tab, next_action_tab(report))
       |> assign(:saved_flash, nil)
+      |> assign(:doctor_result, nil)
+      |> assign(:restarting, false)
       |> assign_report(report)
 
     {:ok, socket}
@@ -45,7 +47,16 @@ defmodule FermixWebWeb.SetupLive do
 
   @impl true
   def handle_event("select_tab", %{"tab" => tab_id}, socket) do
-    {:noreply, assign(socket, :active_tab, tab_id) |> assign(:saved_flash, nil)}
+    active_tab = if tab_known?(tab_id), do: tab_id, else: socket.assigns.active_tab
+    {:noreply, assign(socket, :active_tab, active_tab) |> assign(:saved_flash, nil)}
+  end
+
+  def handle_event("next_step", _params, socket) do
+    {:noreply, assign(socket, :active_tab, next_tab(socket.assigns.active_tab))}
+  end
+
+  def handle_event("previous_step", _params, socket) do
+    {:noreply, assign(socket, :active_tab, previous_tab(socket.assigns.active_tab))}
   end
 
   def handle_event("provider_changed", %{"provider_form" => params}, socket) do
@@ -64,7 +75,7 @@ defmodule FermixWebWeb.SetupLive do
      |> assign(:provider_models, models_for_safe(provider))}
   end
 
-  def handle_event("save_provider", %{"provider_form" => params}, socket) do
+  def handle_event("save_provider", %{"provider_form" => params} = root, socket) do
     answers =
       []
       |> maybe_put_string(:provider, params["provider"])
@@ -72,298 +83,140 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
       |> maybe_put_string(:openai_api_key, params["openai_api_key"])
 
-    case Wizard.save_answers(socket.assigns.report.wizard, answers) do
-      {:ok, report} ->
-        {:noreply, socket |> assign_report(report) |> assign(:saved_flash, "Provider saved.")}
-
-      {:error, reason} ->
-        {:noreply, socket |> assign(:saved_flash, "Save failed: #{inspect(reason)}")}
-    end
+    {:noreply, save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"))}
   end
 
-  def handle_event("save_personalization", %{"personalization_form" => params}, socket) do
+  def handle_event("save_realtime", %{"realtime_form" => params} = root, socket) do
+    answers =
+      []
+      |> maybe_put_string(:realtime_enabled, params["enabled"])
+      |> maybe_put_string(:realtime_api_key, params["api_key"])
+      |> maybe_put_string(:realtime_voice, params["voice"])
+      |> maybe_put_string(:realtime_max_session_minutes, params["max_session_minutes"])
+      |> maybe_put_string(:realtime_max_cost_cents, params["max_cost_cents"])
+      |> maybe_put_string(:realtime_persist_transcripts, params["persist_transcripts"])
+
+    {:noreply, save_answers(socket, answers, "Realtime saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("save_channels", %{"channels_form" => params} = root, socket) do
+    answers =
+      []
+      |> maybe_put_string(:telegram_bot_token, params["telegram_bot_token"])
+      |> maybe_put_string(:telegram_owner_user_id, params["telegram_owner_user_id"])
+      |> maybe_put_string(:whatsapp_access_token, params["whatsapp_access_token"])
+      |> maybe_put_string(:whatsapp_phone_number_id, params["whatsapp_phone_number_id"])
+      |> maybe_put_string(:whatsapp_verify_token, params["whatsapp_verify_token"])
+      |> maybe_put_string(:whatsapp_app_secret, params["whatsapp_app_secret"])
+      |> maybe_put_string(:whatsapp_owner_user_id, params["whatsapp_owner_user_id"])
+      |> maybe_put_string(:discord_bot_token, params["discord_bot_token"])
+      |> maybe_put_string(:discord_bot_user_id, params["discord_bot_user_id"])
+      |> maybe_put_string(:discord_owner_user_id, params["discord_owner_user_id"])
+      |> maybe_put_string(:slack_bot_token, params["slack_bot_token"])
+      |> maybe_put_string(:slack_signing_secret, params["slack_signing_secret"])
+      |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
+      |> maybe_put_string(:signal_account, params["signal_account"])
+      |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
+
+    {:noreply, save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("search_changed", %{"search_form" => params}, socket) do
+    backend = normalize_search_backend(Map.get(params, "backend"))
+    {:noreply, assign(socket, :search_form, %{socket.assigns.search_form | backend: backend})}
+  end
+
+  def handle_event("save_search", %{"search_form" => params} = root, socket) do
+    answers =
+      []
+      |> maybe_put_string(:web_search_backend, params["backend"])
+      |> maybe_put_string(:tavily_api_key, params["tavily_api_key"])
+      |> maybe_put_string(:exa_api_key, params["exa_api_key"])
+      |> maybe_put_string(:parallel_api_key, params["parallel_api_key"])
+
+    {:noreply, save_answers(socket, answers, "Search saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("save_memory", %{"memory_form" => params} = root, socket) do
+    answers =
+      []
+      |> maybe_put_string(:compaction_threshold, params["compaction_threshold"])
+      |> maybe_put_string(:extraction_timeout_ms, params["extraction_timeout_ms"])
+
+    {:noreply, save_answers(socket, answers, "Memory saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("save_sandbox", %{"sandbox_form" => params} = root, socket) do
+    current = socket.assigns.sandbox_form
+    mode = parse_sandbox_mode(Map.get(params, "mode"), current.mode)
+    profile = parse_sandbox_profile(Map.get(params, "profile"), current.profile)
+    env_allow = parse_env_allow(Map.get(params, "env_allow", ""))
+
+    result = Wizard.set_sandbox_overrides(mode, profile, env_allow)
+    {:noreply, save_result(result, socket, "Sandbox saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("save_personalization", %{"personalization_form" => params} = root, socket) do
     answers =
       []
       |> maybe_put_string(:user_name, params["user_name"])
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
 
-    case Wizard.save_answers(socket.assigns.report.wizard, answers) do
-      {:ok, report} ->
-        {:noreply,
-         socket |> assign_report(report) |> assign(:saved_flash, "Personalization saved.")}
+    {:noreply, save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"))}
+  end
 
-      {:error, reason} ->
-        {:noreply, socket |> assign(:saved_flash, "Save failed: #{inspect(reason)}")}
+  def handle_event("run_doctor", _params, socket) do
+    {:noreply, assign(socket, :doctor_result, Doctor.probe_active())}
+  end
+
+  def handle_event("apply_restart", _params, socket) do
+    if Service.supervised?() do
+      Process.send_after(self(), :perform_restart, 600)
+      {:noreply, assign(socket, :restarting, true)}
+    else
+      {:noreply,
+       assign(
+         socket,
+         :saved_flash,
+         "Nothing to restart from here — no OS-supervised Fermix service is running this process. " <>
+           "In dev, stop and re-run `mix fermix.dev`; an installed service restarts itself from this button."
+       )}
     end
+  end
+
+  @impl true
+  def handle_info(:perform_restart, socket) do
+    # Supervised release only (gated in apply_restart): exit non-zero so the OS
+    # supervisor relaunches the daemon — launchd KeepAlive on any exit, systemd
+    # Restart=on-failure on non-zero. The LiveView reconnects once it is back.
+    System.stop(1)
+    {:noreply, socket}
   end
 
   @impl true
   def render(assigns) do
     ~H"""
-    <div class="min-h-screen bg-base-200">
-      <div class="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-        <.ascii_header report={@report} />
-
-        <div class="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-[14rem_1fr]">
-          <.tab_rail tabs={@tabs} active_tab={@active_tab} report={@report} />
-
-          <section class="rounded-box border border-base-300 bg-base-100 p-6 shadow-sm">
-            <.flash_banner :if={@saved_flash} message={@saved_flash} />
-            <.restart_banner :if={@report.restart_required?} />
-            <.active_pane
-              active_tab={@active_tab}
-              report={@report}
-              provider_form={@provider_form}
-              provider_models={@provider_models}
-              personalization_form={@personalization_form}
-            />
-          </section>
-        </div>
-      </div>
-    </div>
+    <Components.page
+      active_tab={@active_tab}
+      channels_form={@channels_form}
+      doctor_result={@doctor_result}
+      memory_form={@memory_form}
+      personalization_form={@personalization_form}
+      provider_form={@provider_form}
+      provider_models={@provider_models}
+      realtime_form={@realtime_form}
+      report={@report}
+      restarting={@restarting}
+      sandbox_form={@sandbox_form}
+      search_form={@search_form}
+      saved_flash={@saved_flash}
+      skill_summary={@skill_summary}
+      tabs={@tabs}
+      tool_summary={@tool_summary}
+    />
     """
   end
-
-  # --- Components ---
-
-  attr :report, :map, required: true
-
-  defp ascii_header(assigns) do
-    assigns = assign(assigns, :ascii, @ascii_fermix)
-
-    ~H"""
-    <header class="rounded-box border border-base-300 bg-base-100 px-6 py-5 shadow-sm">
-      <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-        <pre class="text-[10px] leading-[1.1] font-mono text-primary sm:text-xs"><%= @ascii %></pre>
-
-        <div class="flex flex-col items-start gap-2 lg:items-end">
-          <div class={status_badge_class(@report.status)}>{format_status(@report.status)}</div>
-          <code class="rounded bg-base-200 px-2 py-1 font-mono text-xs text-base-content/70">
-            {@report.config_path}
-          </code>
-        </div>
-      </div>
-    </header>
-    """
-  end
-
-  attr :tabs, :list, required: true
-  attr :active_tab, :string, required: true
-  attr :report, :map, required: true
-
-  defp tab_rail(assigns) do
-    ~H"""
-    <nav
-      class="rounded-box border border-base-300 bg-base-100 p-2 shadow-sm"
-      aria-label="Setup categories"
-    >
-      <ul class="space-y-1">
-        <li :for={tab <- @tabs}>
-          <button
-            type="button"
-            phx-click="select_tab"
-            phx-value-tab={tab.id}
-            class={tab_button_class(tab.id, @active_tab)}
-            aria-current={if tab.id == @active_tab, do: "page", else: "false"}
-          >
-            <span class={status_icon_class(tab_status(tab, @report))}>
-              {status_icon(tab_status(tab, @report))}
-            </span>
-            <span class="ml-2 flex-1 text-left">{tab.label}</span>
-          </button>
-        </li>
-      </ul>
-    </nav>
-    """
-  end
-
-  attr :active_tab, :string, required: true
-  attr :report, :map, required: true
-  attr :provider_form, :map, required: true
-  attr :provider_models, :list, required: true
-  attr :personalization_form, :map, required: true
-
-  defp active_pane(assigns) do
-    case assigns.active_tab do
-      "provider" -> provider_pane(assigns)
-      "personalization" -> personalization_pane(assigns)
-      _ -> coming_soon_pane(assigns)
-    end
-  end
-
-  defp provider_pane(assigns) do
-    ~H"""
-    <div>
-      <h2 class="text-xl font-semibold tracking-tight">Provider &amp; Model</h2>
-      <p class="mt-1 text-sm text-base-content/70">
-        Pick a provider and the model that handles each turn. The API key is stored
-        in your OS keychain via the configured secret writer.
-      </p>
-
-      <form phx-submit="save_provider" phx-change="provider_changed" class="mt-6 space-y-5">
-        <label class="form-control w-full max-w-md">
-          <span class="label pb-1 text-sm font-medium">Provider</span>
-          <select name="provider_form[provider]" class="select select-bordered">
-            <option
-              :for={provider <- ModelCatalog.providers()}
-              value={Atom.to_string(provider)}
-              selected={provider == @provider_form.provider}
-            >
-              {Atom.to_string(provider)}
-            </option>
-          </select>
-        </label>
-
-        <label class="form-control w-full max-w-md">
-          <span class="label pb-1 text-sm font-medium">Default model</span>
-          <select name="provider_form[default_model]" class="select select-bordered">
-            <option
-              :for={{id, label, ctx} <- @provider_models}
-              value={id}
-              selected={id == @provider_form.default_model}
-            >
-              {label} ({id} · {format_context(ctx)})
-            </option>
-          </select>
-        </label>
-
-        <label :if={@provider_form.provider == :openai} class="form-control w-full max-w-md">
-          <span class="label pb-1 text-sm font-medium">OpenAI API key</span>
-          <input
-            type="password"
-            name="provider_form[openai_api_key]"
-            placeholder={if api_key_set?(@report), do: "(configured — leave blank to keep)", else: "sk-..."}
-            class="input input-bordered font-mono"
-            value=""
-          />
-          <span class="label pt-1 text-xs text-base-content/60">
-            Stored in the OS keychain. Leave blank to keep the existing value.
-          </span>
-        </label>
-
-        <fieldset
-          :if={@provider_form.provider in [:openai, :openai_codex]}
-          class="form-control"
-        >
-          <legend class="label pb-1 text-sm font-medium">Reasoning effort</legend>
-          <div class="flex flex-wrap gap-3">
-            <label :for={effort <- ~w(none minimal low medium high)} class="label cursor-pointer gap-2">
-              <input
-                type="radio"
-                name="provider_form[reasoning_effort]"
-                value={effort}
-                checked={Atom.to_string(@provider_form.reasoning_effort) == effort}
-                class="radio radio-sm radio-primary"
-              />
-              <span class="text-sm">{effort}</span>
-            </label>
-          </div>
-        </fieldset>
-
-        <div class="pt-2">
-          <button type="submit" class="btn btn-primary">Save</button>
-        </div>
-      </form>
-    </div>
-    """
-  end
-
-  defp personalization_pane(assigns) do
-    ~H"""
-    <div>
-      <h2 class="text-xl font-semibold tracking-tight">Personalization</h2>
-      <p class="mt-1 text-sm text-base-content/70">
-        How the agent should address you and frame replies. These values seed
-        <code class="font-mono text-xs">USER.md</code> in your prompt memory directory.
-      </p>
-
-      <form phx-submit="save_personalization" class="mt-6 space-y-5">
-        <label class="form-control w-full max-w-md">
-          <span class="label pb-1 text-sm font-medium">Your name</span>
-          <input
-            type="text"
-            name="personalization_form[user_name]"
-            value={@personalization_form.user_name}
-            placeholder="e.g. Sujeeth"
-            class="input input-bordered"
-          />
-        </label>
-
-        <label class="form-control w-full max-w-md">
-          <span class="label pb-1 text-sm font-medium">Timezone</span>
-          <input
-            type="text"
-            name="personalization_form[timezone]"
-            value={@personalization_form.timezone}
-            placeholder="e.g. America/Los_Angeles"
-            class="input input-bordered font-mono"
-          />
-          <span class="label pt-1 text-xs text-base-content/60">
-            IANA timezone string. Free-text in M10; validation lands later.
-          </span>
-        </label>
-
-        <label class="form-control w-full max-w-md">
-          <span class="label pb-1 text-sm font-medium">Communication style</span>
-          <input
-            type="text"
-            name="personalization_form[communication_style]"
-            value={@personalization_form.communication_style}
-            placeholder="e.g. concise and direct"
-            class="input input-bordered"
-          />
-        </label>
-
-        <div class="pt-2">
-          <button type="submit" class="btn btn-primary">Save</button>
-        </div>
-      </form>
-    </div>
-    """
-  end
-
-  defp coming_soon_pane(assigns) do
-    ~H"""
-    <div class="flex flex-col items-start gap-2 py-4">
-      <h2 class="text-xl font-semibold tracking-tight">{tab_label(@active_tab)}</h2>
-      <p class="text-sm text-base-content/70">
-        This tab lands in a later M10 stage. The
-        <code class="rounded bg-base-200 px-1 font-mono text-xs">Provider</code>
-        and
-        <code class="rounded bg-base-200 px-1 font-mono text-xs">Personalization</code>
-        tabs are functional today.
-      </p>
-    </div>
-    """
-  end
-
-  attr :message, :string, required: true
-
-  defp flash_banner(assigns) do
-    ~H"""
-    <div
-      class="mb-4 rounded-box border border-success/40 bg-success/10 px-4 py-2 text-sm text-success-content"
-      role="status"
-    >
-      {@message}
-    </div>
-    """
-  end
-
-  defp restart_banner(assigns) do
-    ~H"""
-    <div
-      class="mb-4 rounded-box border border-warning/40 bg-warning/10 px-4 py-2 text-sm"
-      role="status"
-    >
-      Restart required — provider change takes effect after
-      <code class="font-mono">fermix restart</code>.
-    </div>
-    """
-  end
-
-  # --- Assigns helpers ---
 
   defp assign_report(socket, report) do
     snapshot = report.wizard.config_snapshot
@@ -373,8 +226,38 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:tabs, @tabs)
     |> assign(:provider_form, build_provider_form(snapshot))
     |> assign(:provider_models, models_for_safe(current_provider(snapshot)))
+    |> assign(:realtime_form, build_realtime_form(snapshot))
+    |> assign(:channels_form, build_channels_form(snapshot))
+    |> assign(:search_form, build_search_form(snapshot))
+    |> assign(:sandbox_form, build_sandbox_form(snapshot))
+    |> assign(:memory_form, build_memory_form(snapshot))
     |> assign(:personalization_form, build_personalization_form(snapshot))
+    |> assign(:tool_summary, tool_summary())
+    |> assign(:skill_summary, skill_summary())
   end
+
+  defp save_answers(socket, answers, message, nav) do
+    socket.assigns.report.wizard
+    |> Wizard.save_answers(answers)
+    |> save_result(socket, message, nav)
+  end
+
+  defp save_result({:ok, report}, socket, message, nav) do
+    socket
+    |> assign_report(report)
+    |> assign(:saved_flash, message)
+    |> maybe_advance(nav)
+  end
+
+  defp save_result({:error, reason}, socket, _message, _nav) do
+    assign(socket, :saved_flash, "Save failed: #{inspect(reason)}")
+  end
+
+  defp maybe_advance(socket, "next") do
+    assign(socket, :active_tab, next_tab(socket.assigns.active_tab))
+  end
+
+  defp maybe_advance(socket, _nav), do: socket
 
   defp build_provider_form(snapshot) do
     provider = current_provider(snapshot)
@@ -388,9 +271,122 @@ defmodule FermixWebWeb.SetupLive do
     }
   end
 
+  defp build_realtime_form(snapshot) do
+    config = snapshot |> get_fermix_core(:realtime) |> RealtimeConfig.normalize()
+
+    %{
+      enabled: config.enabled?,
+      voice: config.voice,
+      max_session_minutes: config.max_session_minutes,
+      max_cost_cents: config.max_estimated_cost_cents_per_session,
+      persist_transcripts: config.persist_transcripts?,
+      api_key_set: api_key_configured?(snapshot)
+    }
+  end
+
+  defp build_channels_form(snapshot) do
+    channels = Map.get(snapshot, :fermix_channels, [])
+
+    %{
+      telegram: telegram_form(channels),
+      whatsapp: whatsapp_form(channels),
+      discord: discord_form(channels),
+      slack: slack_form(channels),
+      signal: signal_form(channels)
+    }
+  end
+
+  defp telegram_form(channels) do
+    config = Keyword.get(channels, :telegram, [])
+
+    %{
+      enabled: channel_enabled?(config, true),
+      bot_token_set: secret_set?(config, :bot_token),
+      owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
+    }
+  end
+
+  defp whatsapp_form(channels) do
+    config = Keyword.get(channels, :whatsapp, [])
+
+    %{
+      enabled: channel_enabled?(config, false),
+      access_token_set: secret_set?(config, :access_token),
+      phone_number_id: safe_string(Keyword.get(config, :phone_number_id)),
+      verify_token_set: secret_set?(config, :verify_token),
+      app_secret_set: secret_set?(config, :app_secret),
+      owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
+    }
+  end
+
+  defp discord_form(channels) do
+    config = Keyword.get(channels, :discord, [])
+
+    %{
+      enabled: channel_enabled?(config, false),
+      bot_token_set: secret_set?(config, :bot_token),
+      bot_user_id: safe_string(Keyword.get(config, :bot_user_id)),
+      owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
+    }
+  end
+
+  defp slack_form(channels) do
+    config = Keyword.get(channels, :slack, [])
+
+    %{
+      enabled: channel_enabled?(config, false),
+      bot_token_set: secret_set?(config, :bot_token),
+      signing_secret_set: secret_set?(config, :signing_secret),
+      owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
+    }
+  end
+
+  defp signal_form(channels) do
+    config = Keyword.get(channels, :signal, [])
+
+    %{
+      enabled: channel_enabled?(config, false),
+      account: safe_string(Keyword.get(config, :account)),
+      owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
+    }
+  end
+
+  defp build_sandbox_form(snapshot) do
+    sandbox = snapshot |> Map.get(:sandbox) |> SandboxConfig.normalize()
+
+    %{
+      mode: sandbox.mode,
+      profile: sandbox.commands.profile,
+      env_allow: Enum.join(sandbox.env.allow, "\n")
+    }
+  end
+
+  defp build_search_form(snapshot) do
+    web_search =
+      snapshot
+      |> get_fermix_core(:tools)
+      |> Keyword.get(:web_search, [])
+
+    %{
+      backend: normalize_search_backend(Keyword.get(web_search, :backend)),
+      tavily_api_key_set: secret_set?(web_search, :tavily_api_key),
+      exa_api_key_set: secret_set?(web_search, :exa_api_key),
+      parallel_api_key_set: secret_set?(web_search, :parallel_api_key)
+    }
+  end
+
+  defp build_memory_form(snapshot) do
+    compaction = snapshot |> get_fermix_core(:compaction) |> CompactionConfig.normalize()
+    memory = get_fermix_core(snapshot, :memory)
+
+    %{
+      compaction_threshold: safe_string(CompactionConfig.threshold(compaction)),
+      extraction_timeout_ms: safe_string(Keyword.get(memory, :extraction_timeout_ms, 90_000))
+    }
+  end
+
   defp build_personalization_form(snapshot) do
-    personalization =
-      snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:personalization, [])
+    personalization = get_fermix_core(snapshot, :personalization)
 
     %{
       user_name: Keyword.get(personalization, :user_name, ""),
@@ -399,19 +395,66 @@ defmodule FermixWebWeb.SetupLive do
     }
   end
 
+  defp tool_summary do
+    if Process.whereis(CapabilityRegistry) do
+      tools = CapabilityRegistry.list(CapabilityRegistry, kind: :builtin, include_hidden?: true)
+
+      %{
+        available: true,
+        count: length(tools),
+        hidden_count: Enum.count(tools, & &1.hidden_from_agent?),
+        policy_counts: Enum.frequencies_by(tools, & &1.policy_class),
+        web_search: Enum.any?(tools, &(&1.name == "web_search"))
+      }
+    else
+      empty_tool_summary()
+    end
+  end
+
+  defp empty_tool_summary do
+    %{available: false, count: 0, hidden_count: 0, policy_counts: %{}, web_search: false}
+  end
+
+  defp skill_summary do
+    if Process.whereis(SkillRegistry) do
+      skills = SkillRegistry.list_detailed()
+
+      %{
+        available: true,
+        count: length(skills),
+        operator_count: Enum.count(skills, &(&1.trust == :operator)),
+        guest_count: Enum.count(skills, &(&1.trust == :guest)),
+        names: skills |> Enum.map(& &1.name) |> Enum.take(6)
+      }
+    else
+      empty_skill_summary()
+    end
+  end
+
+  defp empty_skill_summary do
+    %{available: false, count: 0, operator_count: 0, guest_count: 0, names: []}
+  end
+
   defp current_provider(snapshot) do
     snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:agent, [])
+    |> get_fermix_core(:agent)
     |> Keyword.get(:provider)
     |> normalize_provider()
   end
 
+  defp get_fermix_core(snapshot, key) do
+    snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key, [])
+  end
+
   defp normalize_provider(nil), do: :openai
-  defp normalize_provider(provider) when provider in [:openai, :openai_codex, :anthropic], do: provider
+
+  defp normalize_provider(provider) when provider in [:openai, :openai_codex, :anthropic],
+    do: provider
+
   defp normalize_provider("openai"), do: :openai
   defp normalize_provider("openai_codex"), do: :openai_codex
   defp normalize_provider("anthropic"), do: :anthropic
+  defp normalize_provider(_provider), do: :openai
 
   defp parse_provider_field("openai", _default), do: :openai
   defp parse_provider_field("openai_codex", _default), do: :openai_codex
@@ -425,14 +468,42 @@ defmodule FermixWebWeb.SetupLive do
 
   defp parse_effort_field(_, default), do: default
 
+  defp parse_sandbox_mode("strict", _default), do: :strict
+  defp parse_sandbox_mode("standard", _default), do: :standard
+  defp parse_sandbox_mode("open", _default), do: :open
+  defp parse_sandbox_mode(_value, default), do: default
+
+  defp parse_sandbox_profile("bare", _default), do: :bare
+  defp parse_sandbox_profile("assistant", _default), do: :assistant
+  defp parse_sandbox_profile("extended", _default), do: :extended
+  defp parse_sandbox_profile(_value, default), do: default
+
+  defp normalize_search_backend(nil), do: :duckduckgo
+  defp normalize_search_backend(:duckduckgo), do: :duckduckgo
+  defp normalize_search_backend(:tavily), do: :tavily
+  defp normalize_search_backend(:exa), do: :exa
+  defp normalize_search_backend(:parallel), do: :parallel
+  defp normalize_search_backend("duckduckgo"), do: :duckduckgo
+  defp normalize_search_backend("tavily"), do: :tavily
+  defp normalize_search_backend("exa"), do: :exa
+  defp normalize_search_backend("parallel"), do: :parallel
+  defp normalize_search_backend(_value), do: :duckduckgo
+
+  defp parse_env_allow(value) when is_binary(value) do
+    value
+    |> String.split([",", "\n"], trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
   defp present_or(nil, default), do: default
   defp present_or("", default), do: default
   defp present_or(value, _default) when is_binary(value), do: value
 
   defp provider_block(snapshot, provider) do
     snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:providers, [])
+    |> get_fermix_core(:providers)
     |> Keyword.get(provider, [])
   end
 
@@ -442,19 +513,22 @@ defmodule FermixWebWeb.SetupLive do
 
   defp models_for_safe(_), do: ModelCatalog.models_for(:openai)
 
-  defp api_key_set?(report) do
-    report.wizard.config_snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:providers, [])
+  defp api_key_configured?(snapshot) do
+    snapshot
+    |> get_fermix_core(:providers)
     |> Keyword.get(:openai, [])
     |> Keyword.get(:api_key)
     |> present?()
   end
 
+  defp secret_set?(config, key), do: config |> Keyword.get(key) |> present?()
+  defp channel_enabled?(config, default), do: Keyword.get(config, :enabled, default) == true
+
   defp present?(nil), do: false
   defp present?(""), do: false
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present?(_), do: false
+  defp present?(value) when is_list(value), do: value != []
+  defp present?(_), do: true
 
   defp maybe_put_string(answers, _key, nil), do: answers
   defp maybe_put_string(answers, _key, ""), do: answers
@@ -467,27 +541,28 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  # --- View helpers ---
+  defp tab_known?(tab_id), do: Enum.any?(@tabs, &(&1.id == tab_id))
 
-  defp tab_button_class(tab_id, active_tab) do
-    base = "flex w-full items-center rounded-field px-3 py-2 text-sm transition"
-
-    if tab_id == active_tab do
-      base <> " bg-primary text-primary-content shadow-sm"
-    else
-      base <> " hover:bg-base-200 text-base-content/80"
-    end
+  defp next_action_tab(report) do
+    Enum.find_value(@tabs, "provider", fn tab ->
+      if tab_status(tab, report) == :partial, do: tab.id
+    end)
   end
 
-  defp tab_label(tab_id) do
-    Enum.find_value(@tabs, "Setup", fn tab ->
-      if tab.id == tab_id, do: tab.label
-    end)
+  defp next_tab(tab_id), do: adjacent_tab(tab_id, 1)
+  defp previous_tab(tab_id), do: adjacent_tab(tab_id, -1)
+
+  defp adjacent_tab(tab_id, delta) do
+    index = Enum.find_index(@tabs, &(&1.id == tab_id)) || 0
+    next_index = index + delta
+    next_index = max(0, min(next_index, length(@tabs) - 1))
+    Enum.at(@tabs, next_index).id
   end
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")
   defp tab_status(%{component: "channel:*"}, report), do: status_by_prefix(report, "channel:")
+  defp tab_status(%{component: "realtime:*"}, report), do: status_by_prefix(report, "realtime:")
 
   defp tab_status(%{component: component}, report) do
     if Enum.any?(report.wizard.validation_errors, &(&1.component == component)) do
@@ -505,24 +580,8 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp status_icon(:ready), do: "✓"
-  defp status_icon(:partial), do: "!"
-
-  defp status_icon_class(:ready), do: "inline-block w-4 text-success"
-  defp status_icon_class(:partial), do: "inline-block w-4 text-warning"
-
-  defp status_badge_class(:ready), do: "badge badge-success badge-sm font-medium"
-  defp status_badge_class(:setup_required), do: "badge badge-warning badge-sm font-medium"
-  defp status_badge_class(_), do: "badge badge-ghost badge-sm font-medium"
-
-  defp format_status(:ready), do: "Ready"
-  defp format_status(:setup_required), do: "Setup required"
-  defp format_status(status), do: status |> Atom.to_string() |> String.replace("_", " ")
-
-  defp format_context(ctx) when is_integer(ctx) and ctx >= 1000 do
-    "#{div(ctx, 1000)}k ctx"
-  end
-
-  defp format_context(ctx) when is_integer(ctx), do: "#{ctx} ctx"
-  defp format_context(_), do: ""
+  defp safe_string(nil), do: ""
+  defp safe_string(value) when is_binary(value), do: value
+  defp safe_string(value) when is_atom(value), do: Atom.to_string(value)
+  defp safe_string(value), do: to_string(value)
 end

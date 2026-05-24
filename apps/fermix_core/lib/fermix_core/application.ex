@@ -23,6 +23,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
+  alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
   alias FermixCore.Sandbox.CommandCapabilities
@@ -95,6 +96,7 @@ defmodule FermixCore.Application do
   defp start_supervision_tree do
     remember_launch_cwd()
     :ok = ConfigStore.ensure_workspace()
+    :ok = BootstrapRename.run()
     :ok = AuthStore.validate_permissions!()
     setup_file_logger()
     Trace.TelemetryHandler.attach()

@@ -21,9 +21,9 @@ defmodule FermixCore.Prompt.Defaults do
     content
   end
 
-  @spec agents_md() :: String.t()
-  def agents_md do
-    {:ok, content} = TemplateRenderer.render(:agents, %{})
+  @spec fermix_md() :: String.t()
+  def fermix_md do
+    {:ok, content} = TemplateRenderer.render(:fermix, %{})
     content
   end
 

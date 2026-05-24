@@ -658,7 +658,7 @@ defmodule FermixCore.Setup.WizardTest do
 
     assert Enum.map(report.seeding_results, & &1.name) == [
              :identity,
-             :agents,
+             :fermix,
              :soul,
              :realtime,
              :user,
@@ -669,7 +669,7 @@ defmodule FermixCore.Setup.WizardTest do
 
     bootstrap_dir = Application.get_env(:fermix_core, :prompt_bootstrap)[:bootstrap_dir]
     assert File.exists?(Path.join([bootstrap_dir, "main", "IDENTITY.md"]))
-    assert File.exists?(Path.join([bootstrap_dir, "main", "AGENTS.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "FERMIX.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "SOUL.md"]))
   end
 
@@ -710,7 +710,7 @@ defmodule FermixCore.Setup.WizardTest do
     by_name = Map.new(second_results, &{&1.name, &1.outcome})
     assert by_name[:soul] == :seeded
     assert by_name[:identity] == :skipped_exists
-    assert by_name[:agents] == :skipped_exists
+    assert by_name[:fermix] == :skipped_exists
     assert by_name[:user] == :skipped_exists
     assert by_name[:memory] == :skipped_exists
     assert File.exists?(soul_path)

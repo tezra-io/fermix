@@ -1161,3 +1161,15 @@ The key architectural decisions are:
 - make rollback append-only to preserve the full audit trail
 - keep the system operator-controlled with no autonomous prompt mutation
 - treat checkpoint versioning as conversation-scoped, separate from agent-scoped file resources
+
+---
+
+## Update (2026-05-23): `AGENTS.md` renamed to `FERMIX.md`
+
+The agent operating-rules bootstrap file and its resource type were renamed to avoid collision with the *workspace* `AGENTS.md` convention that coding agents read as project context:
+
+- File: `~/.fermix/bootstrap/<agent_id>/AGENTS.md` → `FERMIX.md`
+- Resource type: `agents_md` → `fermix_md`
+- Template: `priv/templates/agents.md.eex` → `fermix.md.eex`
+
+Existing installs migrate automatically: `Memory.Repo` migration v8 rewrites `agents_md` rows in `resources`/`resource_revisions`, and `Prompt.BootstrapRename` renames the on-disk file at boot. The `agents_md` / `AGENTS.md` references above describe the original design and are retained for historical accuracy.

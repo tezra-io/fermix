@@ -85,7 +85,8 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
         memory: Application.get_env(:fermix_core, :memory, []),
-        realtime: Application.get_env(:fermix_core, :realtime, [])
+        realtime: Application.get_env(:fermix_core, :realtime, []),
+        tools: Application.get_env(:fermix_core, :tools, [])
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -151,6 +152,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
+    apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -250,7 +252,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:realtime, [])
-          |> normalize_realtime()
+          |> normalize_realtime(),
+        tools:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:tools, [])
+          |> normalize_tools()
       ],
       sandbox:
         snapshot
@@ -307,7 +314,8 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: [],
         compaction: [],
         memory: [],
-        realtime: []
+        realtime: [],
+        tools: []
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
@@ -472,6 +480,11 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_tools_config(tools_config) do
+    Application.put_env(:fermix_core, :tools, tools_config)
+    :ok
+  end
+
   defp apply_sandbox_config(sandbox_config) do
     Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(sandbox_config))
     :ok
@@ -496,6 +509,7 @@ defmodule FermixCore.Setup.ConfigStore do
     compaction = Keyword.get(fermix_core, :compaction, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
+    tools = Keyword.get(fermix_core, :tools, [])
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
@@ -526,6 +540,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
+      render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
@@ -675,7 +690,8 @@ defmodule FermixCore.Setup.ConfigStore do
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
-        realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"]))
+        realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
+        tools: normalize_tools(get_in(document, ["fermix_core", "tools"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
@@ -792,6 +808,50 @@ defmodule FermixCore.Setup.ConfigStore do
     |> RealtimeConfig.normalize()
     |> RealtimeConfig.to_keyword()
   end
+
+  defp normalize_tools(nil), do: []
+
+  defp normalize_tools(config) when is_map(config) or is_list(config) do
+    []
+    |> put_if_present(
+      :web_search,
+      normalize_web_search_tool(lookup(config, "web_search", :web_search))
+    )
+  end
+
+  defp normalize_tools(_config), do: []
+
+  defp normalize_web_search_tool(nil), do: []
+
+  defp normalize_web_search_tool(config) when is_map(config) or is_list(config) do
+    []
+    |> put_if_present(:backend, normalize_web_search_backend(lookup(config, "backend", :backend)))
+    |> put_if_present(
+      :tavily_api_key,
+      normalize_string(lookup(config, "tavily_api_key", :tavily_api_key))
+    )
+    |> put_if_present(
+      :exa_api_key,
+      normalize_string(lookup(config, "exa_api_key", :exa_api_key))
+    )
+    |> put_if_present(
+      :parallel_api_key,
+      normalize_string(lookup(config, "parallel_api_key", :parallel_api_key))
+    )
+  end
+
+  defp normalize_web_search_tool(_config), do: []
+
+  defp normalize_web_search_backend(nil), do: nil
+  defp normalize_web_search_backend(:duckduckgo), do: :duckduckgo
+  defp normalize_web_search_backend(:tavily), do: :tavily
+  defp normalize_web_search_backend(:exa), do: :exa
+  defp normalize_web_search_backend(:parallel), do: :parallel
+  defp normalize_web_search_backend("duckduckgo"), do: :duckduckgo
+  defp normalize_web_search_backend("tavily"), do: :tavily
+  defp normalize_web_search_backend("exa"), do: :exa
+  defp normalize_web_search_backend("parallel"), do: :parallel
+  defp normalize_web_search_backend(_value), do: nil
 
   # Validates against the canonical enum owned by ResponsesShared.
   # Returns the atom on success, or nil on unknown input — consistent

@@ -34,6 +34,10 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
+          | {:web_search_backend, atom() | String.t()}
+          | {:tavily_api_key, String.t()}
+          | {:exa_api_key, String.t()}
+          | {:parallel_api_key, String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -82,7 +86,7 @@ defmodule FermixCore.Setup.Wizard do
   }
 
   @type seeding_result :: %{
-          name: :identity | :agents | :soul | :realtime | :user | :memory,
+          name: :identity | :fermix | :soul | :realtime | :user | :memory,
           path: String.t(),
           outcome: :seeded | :skipped_exists | :seeded_uncommitted
         }
@@ -496,6 +500,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
+      |> put_web_search_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -1087,6 +1092,62 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_realtime_positive_int(value, key) do
     raise ArgumentError, "invalid #{key} #{inspect(value)}; expected positive integer"
+  end
+
+  defp put_web_search_config(snapshot, answers) do
+    values =
+      [
+        backend: normalize_web_search_backend(Keyword.get(answers, :web_search_backend)),
+        tavily_api_key:
+          secret_snapshot_value(:tavily_api_key, Keyword.get(answers, :tavily_api_key)),
+        exa_api_key: secret_snapshot_value(:exa_api_key, Keyword.get(answers, :exa_api_key)),
+        parallel_api_key:
+          secret_snapshot_value(:parallel_api_key, Keyword.get(answers, :parallel_api_key))
+      ]
+      |> reject_nil_values()
+
+    if values == [] do
+      snapshot
+    else
+      update_web_search_config(snapshot, values)
+    end
+  end
+
+  defp normalize_web_search_backend(nil), do: nil
+  defp normalize_web_search_backend(""), do: nil
+  defp normalize_web_search_backend(:duckduckgo), do: :duckduckgo
+  defp normalize_web_search_backend(:tavily), do: :tavily
+  defp normalize_web_search_backend(:exa), do: :exa
+  defp normalize_web_search_backend(:parallel), do: :parallel
+
+  defp normalize_web_search_backend(value) when is_binary(value) do
+    case String.trim(value) |> String.downcase() do
+      "duckduckgo" -> :duckduckgo
+      "tavily" -> :tavily
+      "exa" -> :exa
+      "parallel" -> :parallel
+      invalid -> raise ArgumentError, "invalid web_search_backend #{inspect(invalid)}"
+    end
+  end
+
+  defp normalize_web_search_backend(value) do
+    raise ArgumentError, "invalid web_search_backend #{inspect(value)}"
+  end
+
+  defp update_web_search_config(snapshot, values) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    tools = Keyword.get(fermix_core, :tools, [])
+
+    web_search =
+      tools
+      |> Keyword.get(:web_search, [])
+      |> Keyword.merge(values)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :tools, Keyword.put(tools, :web_search, web_search))
+    )
   end
 
   defp put_whatsapp_config(snapshot, answers) do

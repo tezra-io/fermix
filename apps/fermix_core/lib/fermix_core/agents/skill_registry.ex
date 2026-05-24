@@ -6,8 +6,11 @@ defmodule FermixCore.Agents.SkillRegistry do
   feed into one snapshot, each tagged with a trust source on load:
 
     * `core_dir` (default: `priv/skills` inside the Fermix release) → `:operator`
-    * `local_dir` (default: `~/.fermix/skills`) → `:operator`
-    * `plugin_dir` (default: `~/.fermix/skills/_plugins`) → `:guest`
+    * `local_dir` (default: `$FERMIX_HOME/skills`, i.e. `~/.fermix/skills`) → `:operator`
+    * `plugin_dir` (default: `$FERMIX_HOME/skills/_plugins`) → `:guest`
+
+  The local and plugin roots resolve through `ConfigStore` so they follow
+  `FERMIX_HOME` (dev daemons, tests) instead of hardcoding the real home.
 
   Bundled and user-installed skills are operator-trusted (the operator
   vetted them by installing). Plugin-loaded skills and anything outside
@@ -25,6 +28,7 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Setup.ConfigStore
 
   @type skill_snapshot :: %{String.t() => AgentDefinition.t()}
   @type reload_error ::
@@ -340,7 +344,7 @@ defmodule FermixCore.Agents.SkillRegistry do
   end
 
   defp default_local_dir do
-    Path.join(System.user_home!(), ".fermix/skills")
+    ConfigStore.workspace_paths().skills
   end
 
   defp default_plugin_dir(local_dir) do

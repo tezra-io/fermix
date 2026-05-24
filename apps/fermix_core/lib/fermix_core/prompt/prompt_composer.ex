@@ -15,7 +15,7 @@ defmodule FermixCore.Prompt.PromptComposer do
   @type message :: %{role: String.t(), content: String.t()}
 
   @type prompt_part :: %{
-          name: :identity | :soul | :agents | :user | :memory | :realtime | :runtime,
+          name: :identity | :soul | :fermix | :user | :memory | :realtime | :runtime,
           kind: :bootstrap | :prompt_memory | :generated,
           source_path: String.t() | nil,
           content: String.t(),
@@ -100,7 +100,7 @@ defmodule FermixCore.Prompt.PromptComposer do
     [
       bootstrap_part(:identity, :bootstrap, bootstrap.identity),
       bootstrap_part(:soul, :bootstrap, bootstrap.soul),
-      bootstrap_part(:agents, :bootstrap, bootstrap.agents),
+      bootstrap_part(:fermix, :bootstrap, bootstrap.fermix),
       memory_part(:user, PromptFiles.user_path(agent_id), prompt_memory.user),
       memory_part(:memory, PromptFiles.memory_path(agent_id), prompt_memory.memory),
       bootstrap_part(:realtime, :bootstrap, bootstrap.realtime)
