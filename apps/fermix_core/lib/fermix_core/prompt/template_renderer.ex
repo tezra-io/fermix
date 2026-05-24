@@ -13,9 +13,9 @@ defmodule FermixCore.Prompt.TemplateRenderer do
 
   require EEx
 
-  @type template_name :: :identity | :agents | :soul | :user | :memory | :realtime
+  @type template_name :: :identity | :fermix | :soul | :user | :memory | :realtime
 
-  @templates [:identity, :agents, :soul, :user, :memory, :realtime]
+  @templates [:identity, :fermix, :soul, :user, :memory, :realtime]
 
   for name <- @templates do
     path =
@@ -39,7 +39,7 @@ defmodule FermixCore.Prompt.TemplateRenderer do
 
     case name do
       :identity -> {:ok, render_identity(list)}
-      :agents -> {:ok, render_agents(list)}
+      :fermix -> {:ok, render_fermix(list)}
       :soul -> {:ok, render_soul(list)}
       :user -> {:ok, render_user(list)}
       :memory -> {:ok, render_memory(list)}

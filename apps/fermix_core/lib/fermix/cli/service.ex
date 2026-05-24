@@ -81,6 +81,18 @@ defmodule Fermix.CLI.Service do
     end
   end
 
+  @doc """
+  True only when this process is the OS-supervised release daemon: a Burrito
+  standalone release whose launchd/systemd unit is installed. False under
+  `mix fermix.dev` and in tests, so callers that self-restart by exiting (and
+  rely on the supervisor to relaunch) never strand a non-supervised process.
+  """
+  @spec supervised?(keyword()) :: boolean()
+  def supervised?(opts \\ []) when is_list(opts) do
+    Burrito.Util.running_standalone?() and
+      (installed?(:user, opts) or installed?(:system, opts))
+  end
+
   @spec spec(scope(), keyword()) :: {:ok, unit_spec()} | {:error, term()}
   def spec(scope, opts \\ []) when scope in [:user, :system] do
     case detect_os(opts) do

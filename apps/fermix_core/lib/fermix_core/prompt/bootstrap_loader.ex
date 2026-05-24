@@ -2,7 +2,7 @@ defmodule FermixCore.Prompt.BootstrapLoader do
   @moduledoc """
   Loads static prompt bootstrap files for an agent.
 
-  Missing or empty `IDENTITY.md` and `AGENTS.md` fall back to rendered
+  Missing or empty `IDENTITY.md` and `FERMIX.md` fall back to rendered
   template content from `Prompt.Defaults` (in-memory only, never written
   to disk). Missing or empty `SOUL.md` is omitted because that layer is
   optional. Setup-time seeding (`Prompt.SetupSeeder`) is the only path
@@ -20,7 +20,7 @@ defmodule FermixCore.Prompt.BootstrapLoader do
 
   @type bootstrap_prompt :: %{
           identity: bootstrap_file(),
-          agents: bootstrap_file(),
+          fermix: bootstrap_file(),
           soul: bootstrap_file() | nil,
           realtime: bootstrap_file() | nil
         }
@@ -29,10 +29,10 @@ defmodule FermixCore.Prompt.BootstrapLoader do
   def load(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
     with :ok <- BootstrapPaths.validate_agent_id(agent_id),
          {:ok, identity} <- load_identity(agent_id, opts),
-         {:ok, agents} <- load_agents(agent_id, opts),
+         {:ok, fermix} <- load_fermix(agent_id, opts),
          {:ok, soul} <- load_soul(agent_id, opts),
          {:ok, realtime} <- load_realtime(agent_id, opts) do
-      {:ok, %{identity: identity, agents: agents, soul: soul, realtime: realtime}}
+      {:ok, %{identity: identity, fermix: fermix, soul: soul, realtime: realtime}}
     end
   end
 
@@ -53,17 +53,17 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     end
   end
 
-  defp load_agents(agent_id, opts) do
-    path = BootstrapPaths.agents_path(agent_id, opts)
+  defp load_fermix(agent_id, opts) do
+    path = BootstrapPaths.fermix_path(agent_id, opts)
 
     case BootstrapFile.read_present(path) do
       {:ok, content} ->
-        file = BootstrapFile.metadata(:agents, path, content, :present)
-        capture_bootstrap_revision(agent_id, :agents_md, file, opts)
+        file = BootstrapFile.metadata(:fermix, path, content, :present)
+        capture_bootstrap_revision(agent_id, :fermix_md, file, opts)
         {:ok, file}
 
       {:missing, _reason} ->
-        {:ok, BootstrapFile.metadata(:agents, path, Defaults.agents_md(), :fallback)}
+        {:ok, BootstrapFile.metadata(:fermix, path, Defaults.fermix_md(), :fallback)}
 
       {:error, reason} ->
         {:error, reason}

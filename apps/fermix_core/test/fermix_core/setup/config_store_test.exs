@@ -12,6 +12,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     compaction = Application.get_env(:fermix_core, :compaction, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    tools = Application.get_env(:fermix_core, :tools, [])
     sandbox = Application.get_env(:fermix_core, :sandbox)
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
     mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
@@ -27,6 +28,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
+      Application.put_env(:fermix_core, :tools, tools)
       restore_sandbox(sandbox)
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
       Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
@@ -114,6 +116,47 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+  end
+
+  test "save/load round-trip preserves web search backend config" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        tools: [
+          web_search: [
+            backend: :tavily,
+            tavily_api_key: "@keyring",
+            exa_api_key: "@keyring",
+            parallel_api_key: "@keyring"
+          ]
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.tools.web_search]"
+    assert contents =~ ~s(backend = "tavily")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    web_search =
+      loaded.fermix_core
+      |> Keyword.get(:tools, [])
+      |> Keyword.get(:web_search, [])
+
+    assert Keyword.get(web_search, :backend) == :tavily
+    assert Keyword.get(web_search, :tavily_api_key) == "@keyring"
+    assert Keyword.get(web_search, :exa_api_key) == "@keyring"
+    assert Keyword.get(web_search, :parallel_api_key) == "@keyring"
   end
 
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do

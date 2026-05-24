@@ -17,7 +17,29 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :providers, :openai, :api_key],
       sandbox_env: true
     },
-    %{key: :telegram_bot_token, env: "TELEGRAM_BOT_TOKEN", path: [:fermix_channels, :telegram, :bot_token]},
+    %{
+      key: :tavily_api_key,
+      env: "TAVILY_API_KEY",
+      path: [:fermix_core, :tools, :web_search, :tavily_api_key],
+      sandbox_env: true
+    },
+    %{
+      key: :exa_api_key,
+      env: "EXA_API_KEY",
+      path: [:fermix_core, :tools, :web_search, :exa_api_key],
+      sandbox_env: true
+    },
+    %{
+      key: :parallel_api_key,
+      env: "PARALLEL_API_KEY",
+      path: [:fermix_core, :tools, :web_search, :parallel_api_key],
+      sandbox_env: true
+    },
+    %{
+      key: :telegram_bot_token,
+      env: "TELEGRAM_BOT_TOKEN",
+      path: [:fermix_channels, :telegram, :bot_token]
+    },
     %{
       key: :whatsapp_access_token,
       env: "WHATSAPP_ACCESS_TOKEN",
@@ -33,8 +55,16 @@ defmodule FermixCore.Setup.SecretPaths do
       env: "WHATSAPP_APP_SECRET",
       path: [:fermix_channels, :whatsapp, :app_secret]
     },
-    %{key: :discord_bot_token, env: "DISCORD_BOT_TOKEN", path: [:fermix_channels, :discord, :bot_token]},
-    %{key: :slack_bot_token, env: "SLACK_BOT_TOKEN", path: [:fermix_channels, :slack, :bot_token]},
+    %{
+      key: :discord_bot_token,
+      env: "DISCORD_BOT_TOKEN",
+      path: [:fermix_channels, :discord, :bot_token]
+    },
+    %{
+      key: :slack_bot_token,
+      env: "SLACK_BOT_TOKEN",
+      path: [:fermix_channels, :slack, :bot_token]
+    },
     %{
       key: :slack_signing_secret,
       env: "SLACK_SIGNING_SECRET",

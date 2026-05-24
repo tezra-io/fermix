@@ -8,8 +8,8 @@ defmodule FermixCore.Resource.Registry do
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Resource.Revision
 
-  @resource_types ~w(identity_md agents_md soul_md realtime_md user_md memory_md checkpoint)
-  @file_resource_types ~w(identity_md agents_md soul_md realtime_md user_md memory_md)
+  @resource_types ~w(identity_md fermix_md soul_md realtime_md user_md memory_md checkpoint)
+  @file_resource_types ~w(identity_md fermix_md soul_md realtime_md user_md memory_md)
   @mutation_sources ~w(seed imported manual_edit extraction_rebuild scheduler_rebuild compaction rollback)
   @max_commit_attempts 4
 
@@ -240,8 +240,8 @@ defmodule FermixCore.Resource.Registry do
     {:ok, Path.join([bootstrap_dir(opts), agent_id, "IDENTITY.md"])}
   end
 
-  defp default_resource_path(agent_id, "agents_md", opts) do
-    {:ok, Path.join([bootstrap_dir(opts), agent_id, "AGENTS.md"])}
+  defp default_resource_path(agent_id, "fermix_md", opts) do
+    {:ok, Path.join([bootstrap_dir(opts), agent_id, "FERMIX.md"])}
   end
 
   defp default_resource_path(agent_id, "soul_md", opts) do

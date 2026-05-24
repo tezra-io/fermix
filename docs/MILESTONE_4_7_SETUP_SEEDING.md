@@ -1056,3 +1056,15 @@ The key architectural decisions are:
 - keep SOUL.md and IDENTITY.md as shipped baselines that the operator (or the agent itself via file tools) edits later
 - add no new GenServers, no new directories, no new dependencies
 - defer auto-evolution of any prompt file to a later milestone (M4.7 explicitly leaves SOUL.md and IDENTITY.md operator-authored)
+
+---
+
+## Update (2026-05-23): `AGENTS.md` renamed to `FERMIX.md`
+
+The rules-only operating-instructions file introduced here was later renamed from `AGENTS.md` to `FERMIX.md` to avoid collision with the *workspace* `AGENTS.md` convention that coding agents read as project context. The IDENTITY ↔ rules split described above is unchanged — only the rules file's name moved:
+
+- File: `~/.fermix/bootstrap/<agent_id>/AGENTS.md` → `FERMIX.md`
+- Resource type: `agents_md` → `fermix_md`
+- Template: `priv/templates/agents.md.eex` → `fermix.md.eex`
+
+Existing installs migrate automatically: `Memory.Repo` migration v8 rewrites `agents_md` rows in `resources`/`resource_revisions`, and `Prompt.BootstrapRename` renames the on-disk file at boot. The `agents_md` / `AGENTS.md` references above describe the original design and are retained for historical accuracy.

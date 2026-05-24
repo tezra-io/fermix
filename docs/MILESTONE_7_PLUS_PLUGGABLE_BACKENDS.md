@@ -1,6 +1,6 @@
 # Milestone 7+: Pluggable Capability Backends
 
-**Status:** Draft
+**Status:** Draft — **`web_search` backends are carved out to M7.2** (`docs/MILESTONE_7_2_PLUGGABLE_WEB_SEARCH.md`), which ships them via config.toml `@keyring` + `Application` env, *not* the `BackendRegistry`/`Auth.Store` design below. Treat the `web_search` rows here as superseded; the `web_fetch`, `http_request`, and DNS-cache scope is unaffected.
 **Date:** 2026-05-09
 **Author:** Sujeeth / Aira
 **Depends on:** M4.8 (`fermix` daemon + control socket), M4.9 (`Capability` behaviour, `CapabilityRegistry`, `BuiltinSeeder`), M4.10 (`Setup.ConfigStore`, wizard step pattern, `Doctor`), M7 (`Tools.WebSearch`, `Tools.WebFetch`, `Net.Guard`, the keyless catalog this milestone makes pluggable)

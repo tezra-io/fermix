@@ -930,11 +930,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       # Should have: composed systems + 2 history messages + new user message
       assert length(messages) == 6
 
-      [identity, agents, runtime, hist_user, hist_assistant, new_user] = messages
+      [identity, fermix, runtime, hist_user, hist_assistant, new_user] = messages
       assert identity.role == "system"
       assert identity.content == Defaults.identity_md()
-      assert agents.role == "system"
-      assert agents.content == Defaults.agents_md()
+      assert fermix.role == "system"
+      assert fermix.content == Defaults.fermix_md()
       assert runtime.role == "system"
       assert runtime.content =~ "## Runtime Contract"
       assert hist_user.role == "user"
@@ -954,9 +954,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "No prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, agents, runtime, user] = messages
+      [identity, fermix, runtime, user] = messages
       assert identity.role == "system"
-      assert agents.role == "system"
+      assert fermix.role == "system"
       assert runtime.role == "system"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
       refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
@@ -968,9 +968,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       bootstrap_dir: bootstrap_dir
     } do
       identity_path = BootstrapPaths.identity_path("main")
-      agents_path = BootstrapPaths.agents_path("main")
+      fermix_path = BootstrapPaths.fermix_path("main")
       refute File.exists?(identity_path)
-      refute File.exists?(agents_path)
+      refute File.exists?(fermix_path)
 
       MockProvider.set_responses([mock_response("Fallback prompt")])
 
@@ -979,14 +979,14 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Fallback prompt"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, agents, runtime, user] = messages
+      [identity, fermix, runtime, user] = messages
 
       refute File.exists?(identity_path)
-      refute File.exists?(agents_path)
+      refute File.exists?(fermix_path)
       refute File.exists?(bootstrap_dir)
 
       assert identity.content == Defaults.identity_md()
-      assert agents.content == Defaults.agents_md()
+      assert fermix.content == Defaults.fermix_md()
       assert runtime.content =~ "## Runtime Contract"
       assert user.content == "Hello first run"
     end
@@ -1004,9 +1004,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, agents, runtime, user] = messages
+      [identity, fermix, runtime, user] = messages
       assert identity.role == "system"
-      assert agents.role == "system"
+      assert fermix.role == "system"
       assert runtime.role == "system"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
       refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
@@ -1026,9 +1026,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, agents, memory_context, runtime, user] = messages
+      [identity, fermix, memory_context, runtime, user] = messages
       assert identity.role == "system"
-      assert agents.role == "system"
+      assert fermix.role == "system"
       assert memory_context.content =~ "<memory-context>"
       assert memory_context.content =~ "USER PROFILE (who the user is)"
       assert memory_context.content =~ "## Preferences\n- editor: vim"
@@ -1044,7 +1044,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       File.mkdir_p!(BootstrapPaths.agent_dir("main"))
       File.write!(BootstrapPaths.identity_path("main"), "IDENTITY bootstrap")
       File.write!(BootstrapPaths.soul_path("main"), "SOUL bootstrap")
-      File.write!(BootstrapPaths.agents_path("main"), "AGENTS bootstrap")
+      File.write!(BootstrapPaths.fermix_path("main"), "AGENTS bootstrap")
       File.mkdir_p!(Path.dirname(PromptFiles.user_path("main")))
       File.write!(PromptFiles.user_path("main"), "USER memory")
       File.write!(PromptFiles.memory_path("main"), "AGENT memory")
