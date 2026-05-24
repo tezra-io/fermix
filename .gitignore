@@ -54,3 +54,6 @@ erl_crash.dump
 # Transient benchmark outputs (track only bench/baseline.json once it lands)
 /bench/current.json
 /bench/soak.json
+
+#Logs
+.playwright-mcp/
