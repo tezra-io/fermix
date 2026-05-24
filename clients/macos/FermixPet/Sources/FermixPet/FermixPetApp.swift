@@ -29,7 +29,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var companionState: CompanionState?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installApplicationIcon()
         NSApp.setActivationPolicy(.regular)
+    }
+
+    private func installApplicationIcon() {
+        guard
+            let url = Bundle.module.url(forResource: "FermixPetIcon", withExtension: "png"),
+            let icon = NSImage(contentsOf: url)
+        else {
+            assertionFailure("Missing FermixPetIcon.png resource")
+            return
+        }
+
+        NSApp.applicationIconImage = icon
+        NSApp.dockTile.display()
     }
 
     // willTerminate is delivered synchronously and gives us a guaranteed
