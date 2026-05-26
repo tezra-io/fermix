@@ -14,18 +14,23 @@ defmodule FermixCore.Auth.Store do
 
   require Logger
 
-  @schema_version 1
+  @schema_version 2
 
-  @type provider :: atom()
+  @type provider :: atom() | String.t()
   @type entry :: %{
-          auth_mode: String.t(),
-          tokens: %{access_token: String.t(), refresh_token: String.t() | nil},
-          expires_at: DateTime.t() | nil,
-          last_refresh: DateTime.t() | nil
+          required(:auth_mode) => String.t(),
+          required(:tokens) => %{access_token: String.t(), refresh_token: String.t() | nil},
+          required(:expires_at) => DateTime.t() | nil,
+          required(:last_refresh) => DateTime.t() | nil,
+          optional(:provider) => String.t() | nil,
+          optional(:account) => map() | nil,
+          optional(:scope_profile) => String.t() | nil,
+          optional(:granted_scopes) => [String.t()],
+          optional(:status) => String.t() | nil
         }
 
   @spec read(provider(), Path.t()) :: {:ok, entry()} | {:error, term()}
-  def read(provider, path \\ default_path()) when is_atom(provider) do
+  def read(provider, path \\ default_path()) when is_atom(provider) or is_binary(provider) do
     with {:ok, raw} <- File.read(path),
          {:ok, data} <- Jason.decode(raw),
          {:ok, providers} <- providers_map(data),
@@ -39,7 +44,8 @@ defmodule FermixCore.Auth.Store do
   end
 
   @spec write(provider(), entry(), Path.t()) :: :ok | {:error, term()}
-  def write(provider, %{} = entry, path \\ default_path()) when is_atom(provider) do
+  def write(provider, %{} = entry, path \\ default_path())
+      when is_atom(provider) or is_binary(provider) do
     with {:ok, current} <- read_for_write(path),
          updated <- put_provider(current, provider, entry),
          :ok <- atomic_write(path, encode(updated)) do
@@ -48,7 +54,8 @@ defmodule FermixCore.Auth.Store do
   end
 
   @spec delete_provider(provider(), Path.t()) :: :ok | {:error, term()}
-  def delete_provider(provider, path \\ default_path()) when is_atom(provider) do
+  def delete_provider(provider, path \\ default_path())
+      when is_atom(provider) or is_binary(provider) do
     with {:ok, current} <- read_existing(path),
          {:ok, updated} <- remove_provider(current, provider),
          :ok <- atomic_write(path, encode(updated)) do
@@ -112,7 +119,7 @@ defmodule FermixCore.Auth.Store do
   defp providers_map(_), do: {:error, :no_providers}
 
   defp fetch_provider(providers, provider) do
-    case Map.get(providers, Atom.to_string(provider)) do
+    case Map.get(providers, provider_key(provider)) do
       nil -> {:error, {:provider_missing, provider}}
       entry -> {:ok, entry}
     end
@@ -128,14 +135,50 @@ defmodule FermixCore.Auth.Store do
 
     %{
       auth_mode: Map.get(entry, "auth_mode") || "chatgpt",
+      provider: Map.get(entry, "provider"),
+      account: normalize_account(Map.get(entry, "account")),
+      scope_profile: Map.get(entry, "scope_profile"),
+      granted_scopes: normalize_string_list(Map.get(entry, "granted_scopes")),
       tokens: %{
         access_token: access,
         refresh_token: Map.get(tokens, "refresh_token")
       },
       expires_at: parse_iso8601(Map.get(entry, "expires_at")),
-      last_refresh: parse_iso8601(Map.get(entry, "last_refresh"))
+      last_refresh: parse_iso8601(Map.get(entry, "last_refresh")),
+      status: Map.get(entry, "status")
     }
   end
+
+  defp normalize_account(account) when is_map(account) do
+    account
+    |> Enum.into(%{}, fn {key, value} -> {normalize_account_key(key), value} end)
+    |> atomize_known_account_keys()
+  end
+
+  defp normalize_account(_account), do: nil
+
+  defp normalize_account_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp normalize_account_key(key) when is_binary(key), do: key
+
+  defp atomize_known_account_keys(account) do
+    account
+    |> maybe_atomize_key("subject", :subject)
+    |> maybe_atomize_key("email", :email)
+    |> maybe_atomize_key("display_name", :display_name)
+  end
+
+  defp maybe_atomize_key(account, string_key, atom_key) do
+    case Map.fetch(account, string_key) do
+      {:ok, value} -> account |> Map.delete(string_key) |> Map.put(atom_key, value)
+      :error -> account
+    end
+  end
+
+  defp normalize_string_list(values) when is_list(values) do
+    Enum.filter(values, &is_binary/1)
+  end
+
+  defp normalize_string_list(_values), do: []
 
   defp parse_iso8601(nil), do: nil
 
@@ -205,7 +248,6 @@ defmodule FermixCore.Auth.Store do
           {:ok, %{"tokens" => _} = flat} -> {:ok, legacy_codex_doc(flat)}
           {:ok, _} -> {:error, :no_providers}
           {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
-          {:error, reason} -> {:error, reason}
         end
 
       {:error, :enoent} ->
@@ -222,22 +264,32 @@ defmodule FermixCore.Auth.Store do
     do: %{"version" => @schema_version, "providers" => %{"openai_codex" => flat}}
 
   defp put_provider(doc, provider, entry) do
-    serialized = %{
-      "auth_mode" => entry.auth_mode,
-      "tokens" => %{
-        "access_token" => entry.tokens.access_token,
-        "refresh_token" => entry.tokens.refresh_token
-      },
-      "expires_at" => entry.expires_at && DateTime.to_iso8601(entry.expires_at),
-      "last_refresh" => DateTime.to_iso8601(DateTime.utc_now())
-    }
+    providers = Map.get(doc, "providers", %{})
+    provider_key = provider_key(provider)
+    existing = Map.get(providers, provider_key, %{})
 
-    providers = Map.put(Map.get(doc, "providers", %{}), Atom.to_string(provider), serialized)
+    serialized =
+      %{
+        "auth_mode" => entry_value(entry, :auth_mode, "chatgpt"),
+        "tokens" => %{
+          "access_token" => entry.tokens.access_token,
+          "refresh_token" => entry.tokens.refresh_token
+        },
+        "expires_at" => encode_datetime(entry_value(entry, :expires_at)),
+        "last_refresh" => DateTime.to_iso8601(DateTime.utc_now())
+      }
+      |> put_serialized("provider", entry_value(entry, :provider))
+      |> put_serialized("account", stringify_account(entry_value(entry, :account)))
+      |> put_serialized("scope_profile", entry_value(entry, :scope_profile))
+      |> put_serialized("granted_scopes", entry_value(entry, :granted_scopes, []))
+      |> put_serialized("status", entry_value(entry, :status))
+
+    providers = Map.put(providers, provider_key, Map.merge(existing, serialized))
     %{"version" => @schema_version, "providers" => providers}
   end
 
   defp remove_provider(%{"providers" => providers}, provider) when is_map(providers) do
-    key = Atom.to_string(provider)
+    key = provider_key(provider)
 
     if Map.has_key?(providers, key) do
       {:ok, %{"version" => @schema_version, "providers" => Map.delete(providers, key)}}
@@ -247,6 +299,29 @@ defmodule FermixCore.Auth.Store do
   end
 
   defp remove_provider(_doc, _provider), do: {:error, :no_providers}
+
+  defp provider_key(provider) when is_atom(provider), do: Atom.to_string(provider)
+  defp provider_key(provider) when is_binary(provider), do: provider
+
+  defp entry_value(entry, key, default \\ nil) when is_map(entry) do
+    Map.get(entry, key, Map.get(entry, Atom.to_string(key), default))
+  end
+
+  defp encode_datetime(nil), do: nil
+  defp encode_datetime(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+
+  defp stringify_account(nil), do: nil
+
+  defp stringify_account(account) when is_map(account) do
+    Enum.into(account, %{}, fn {key, value} -> {account_key(key), value} end)
+  end
+
+  defp account_key(key) when is_atom(key), do: Atom.to_string(key)
+  defp account_key(key) when is_binary(key), do: key
+
+  defp put_serialized(map, _key, nil), do: map
+  defp put_serialized(map, _key, []), do: map
+  defp put_serialized(map, key, value), do: Map.put(map, key, value)
 
   defp encode(doc), do: Jason.encode!(doc, pretty: true) <> "\n"
 

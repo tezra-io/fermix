@@ -23,6 +23,7 @@ defmodule FermixCore.Realtime.SessionServer do
   # Keep this strictly above `OpenAIClient.handshake_timeout_ms/0` so an
   # upstream stall surfaces as a WebSockex timeout, not a GenServer.call exit.
   @call_start_timeout_ms 10_000
+  @runtime_reload_timeout_ms 10_000
   @default_reconnect_backoff_ms [1_000, 2_000, 4_000]
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -69,6 +70,11 @@ defmodule FermixCore.Realtime.SessionServer do
   @spec usage(GenServer.server()) :: CostTracker.t()
   def usage(server), do: GenServer.call(server, :usage)
 
+  @spec reload_runtime(GenServer.server()) ::
+          {:ok, %{tools: non_neg_integer()}} | {:error, term()}
+  def reload_runtime(server),
+    do: GenServer.call(server, :reload_runtime, @runtime_reload_timeout_ms)
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -107,6 +113,8 @@ defmodule FermixCore.Realtime.SessionServer do
            runtime_profile: runtime.profile,
            capabilities: capabilities,
            tool_bridge: ToolBridge.new(capabilities, context),
+           tool_context: context,
+           runtime_capabilities_override: Keyword.get(opts, :capabilities),
            prompt_loader: prompt_loader,
            recorder_module: Keyword.get(opts, :recorder_module, ConversationRecorder),
            recorder_opts: Keyword.get(opts, :recorder_opts, []),
@@ -235,6 +243,15 @@ defmodule FermixCore.Realtime.SessionServer do
   def handle_call(:openai_pid, _from, state), do: {:reply, state.openai_pid, state}
   def handle_call(:usage, _from, state), do: {:reply, state.usage, state}
 
+  def handle_call(:reload_runtime, _from, state) do
+    with {:ok, refreshed} <- refresh_runtime(state),
+         {:ok, refreshed} <- refresh_provider_runtime(refreshed) do
+      {:reply, {:ok, %{tools: length(refreshed.capabilities)}}, refreshed}
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   @impl true
   def handle_info({:openai_realtime_event, event}, state) do
     {:noreply, handle_provider_event_internal(event, state)}
@@ -323,6 +340,53 @@ defmodule FermixCore.Realtime.SessionServer do
     with {:ok, instructions} <- session_instructions(state) do
       tools = ToolBridge.to_openai_tools(state.capabilities)
       {:ok, OpenAIClient.session_update_event(state.config, instructions, tools)}
+    end
+  end
+
+  defp refresh_runtime(state) do
+    with {:ok, runtime} <- realtime_runtime_from_state(state) do
+      {:ok,
+       %{
+         state
+         | available_skills: runtime.available_skills,
+           runtime_context: runtime.context,
+           runtime_profile: runtime.profile,
+           capabilities: runtime.capabilities,
+           tool_bridge: ToolBridge.new(runtime.capabilities, state.tool_context)
+       }}
+    end
+  end
+
+  defp realtime_runtime_from_state(%{prompt_loader: loader} = state)
+       when is_function(loader, 1) do
+    capabilities =
+      state.runtime_capabilities_override || default_capabilities(state.capability_registry)
+
+    {:ok,
+     %{
+       available_skills: [],
+       context: nil,
+       profile: nil,
+       capabilities: capabilities
+     }}
+  end
+
+  defp realtime_runtime_from_state(state) do
+    realtime_runtime([], nil, state.capability_registry, state.skill_registry)
+  end
+
+  defp refresh_provider_runtime(%{session_update_event: nil} = state), do: {:ok, state}
+
+  defp refresh_provider_runtime(%{openai_pid: openai_pid} = state) when is_pid(openai_pid) do
+    with {:ok, event} <- build_session_update_event(state),
+         :ok <- send_provider_event(state.openai_client, openai_pid, event) do
+      {:ok, %{state | session_update_event: event}}
+    end
+  end
+
+  defp refresh_provider_runtime(state) do
+    with {:ok, event} <- build_session_update_event(state) do
+      {:ok, %{state | session_update_event: event}}
     end
   end
 

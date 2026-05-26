@@ -176,6 +176,51 @@ defmodule FermixCore.Realtime.SessionServerTest do
     refute channel_name in tool_names
   end
 
+  test "reload_runtime sends active realtime sessions a refreshed tool list" do
+    suffix = System.unique_integer([:positive])
+    registry = :"realtime_reload_capabilities_#{suffix}"
+    first_name = "voice_first_#{suffix}"
+    second_name = "voice_second_#{suffix}"
+
+    {:ok, _pid} =
+      start_supervised({CapabilityRegistry, [name: registry]},
+        id: :"realtime_reload_capabilities_#{suffix}"
+      )
+
+    :ok = CapabilityRegistry.register(registry, capability(first_name, :file))
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: registry,
+        prompt_loader: fn opts ->
+          capabilities = Keyword.fetch!(opts, :runtime_capabilities)
+          names = Enum.map(capabilities, & &1.name)
+          {:ok, %{messages: [%{role: "system", content: Enum.join(names, ",")}], parts: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+    [initial_event] = FakeOpenAIClient.events(openai)
+    assert [%{name: ^first_name}] = initial_event.session.tools
+
+    :ok = CapabilityRegistry.register(registry, capability(second_name, :file))
+
+    assert {:ok, %{tools: 2}} = SessionServer.reload_runtime(server)
+
+    [_initial_event, refreshed_event] = FakeOpenAIClient.events(openai)
+    refreshed_names = Enum.map(refreshed_event.session.tools, & &1.name)
+
+    assert first_name in refreshed_names
+    assert second_name in refreshed_names
+    assert refreshed_event.session.instructions =~ second_name
+  end
+
   test "default runtime path renders skills through RuntimeContext" do
     fixture = runtime_session_fixture(["voice_skill"])
 

@@ -22,6 +22,7 @@ defmodule FermixCore.Agents.RuntimeContext do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Plugins.PromptCatalog
   alias FermixCore.Prompt.Accounting
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Prompt.RuntimeSections
@@ -111,7 +112,11 @@ defmodule FermixCore.Agents.RuntimeContext do
     capabilities = CapabilityRegistry.list_for(capability_registry, filter)
 
     runtime_content =
-      RuntimeSections.build(available_skills, capabilities: capabilities, trust: trust)
+      RuntimeSections.build(available_skills,
+        capabilities: capabilities,
+        trust: trust,
+        plugins: PromptCatalog.entries(capabilities, Enum.map(available_skills, & &1.name))
+      )
 
     %{
       trust: trust,

@@ -247,7 +247,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
         })
 
       name = start_manager(fermix_auth_path: fermix_path)
-      assert {:ok, "soon"} = TokenManager.get_token(name)
+      assert {:error, "Refresh failed (500): \"test-noop\""} = TokenManager.get_token(name)
       Process.sleep(1_500)
       assert Process.whereis(name) |> Process.alive?()
 

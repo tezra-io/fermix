@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "name": "google_calendar",
+  "display_name": "Google Calendar",
+  "description": "Read schedules, find availability, and optionally create or update events.",
+  "category": "productivity",
+  "version": "1.0.0",
+  "default_enabled": false,
+  "interface": {
+    "short_description": "Manage Google Calendar events and schedules",
+    "developer_name": "Fermix",
+    "brand_color": "#4285F4",
+    "icon": "assets/icon.png",
+    "logo": "assets/logo.png",
+    "privacy_policy_url": "https://policies.google.com/privacy",
+    "terms_of_service_url": "https://policies.google.com/terms"
+  },
+  "auth": {
+    "type": "oauth2",
+    "provider": "google",
+    "profile_key": "google_calendar",
+    "account_mode": "single",
+    "scope_profiles": {
+      "readonly": {
+        "display_name": "Read calendar",
+        "default": true,
+        "scopes": [
+          "openid",
+          "email",
+          "profile",
+          "https://www.googleapis.com/auth/calendar.readonly"
+        ]
+      },
+      "events_write": {
+        "display_name": "Create and update events",
+        "scopes": [
+          "openid",
+          "email",
+          "profile",
+          "https://www.googleapis.com/auth/calendar.readonly",
+          "https://www.googleapis.com/auth/calendar.events"
+        ]
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "google_calendar.search_events",
+      "policy_class": "external_api",
+      "read_only": true,
+      "requires_scope_profile": "readonly"
+    },
+    {
+      "name": "google_calendar.create_event",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scope_profile": "events_write"
+    }
+  ],
+  "skills": [
+    {
+      "name": "google-calendar",
+      "path": "skills/google-calendar/SKILL.md"
+    }
+  ],
+  "health_check": {
+    "kind": "local_readiness",
+    "requires_auth": true
+  }
+}

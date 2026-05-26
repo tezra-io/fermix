@@ -29,6 +29,18 @@ defmodule FermixCore.Setup.ConfigStore do
     logs: "logs"
   ]
 
+  @dynamic_section_fields %{
+    "auth_profile" => :auth_profile,
+    "client_id" => :client_id,
+    "client_secret" => :client_secret,
+    "client_type" => :client_type,
+    "enabled" => :enabled,
+    "redirect_host" => :redirect_host,
+    "redirect_port" => :redirect_port,
+    "scope_profile" => :scope_profile,
+    "unsupported" => :unsupported
+  }
+
   @type runtime_config :: %{
           fermix_core: keyword(),
           sandbox: keyword(),
@@ -86,7 +98,9 @@ defmodule FermixCore.Setup.ConfigStore do
         compaction: Application.get_env(:fermix_core, :compaction, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
-        tools: Application.get_env(:fermix_core, :tools, [])
+        tools: Application.get_env(:fermix_core, :tools, []),
+        plugins: Application.get_env(:fermix_core, :plugins, []),
+        oauth: Application.get_env(:fermix_core, :oauth, %{})
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -153,6 +167,8 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
+    apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
+    apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -257,7 +273,17 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:tools, [])
-          |> normalize_tools()
+          |> normalize_tools(),
+        plugins:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:plugins, [])
+          |> normalize_plugins(),
+        oauth:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:oauth, %{})
+          |> normalize_oauth()
       ],
       sandbox:
         snapshot
@@ -296,12 +322,37 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec ensure_workspace() :: :ok | {:error, term()}
   def ensure_workspace do
-    Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
-      case File.mkdir_p(path) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    result =
+      Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
+        case File.mkdir_p(path) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    if result == :ok, do: cleanup_generated_plugin_skill_dir()
+    result
+  end
+
+  defp cleanup_generated_plugin_skill_dir do
+    plugin_dir = Path.join(workspace_paths().skills, "_plugins")
+
+    case File.ls(plugin_dir) do
+      {:ok, []} ->
+        _ = File.rmdir(plugin_dir)
+        :ok
+
+      {:ok, _entries} ->
+        Logger.warning("Leaving #{plugin_dir} in place because it contains files.")
+        :ok
+
+      {:error, :enoent} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Could not inspect #{plugin_dir}: #{inspect(reason)}")
+        :ok
+    end
   end
 
   defp empty_runtime_config do
@@ -315,7 +366,9 @@ defmodule FermixCore.Setup.ConfigStore do
         compaction: [],
         memory: [],
         realtime: [],
-        tools: []
+        tools: [],
+        plugins: [],
+        oauth: %{}
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
@@ -485,6 +538,16 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_plugins_config(plugins_config) do
+    Application.put_env(:fermix_core, :plugins, plugins_config)
+    :ok
+  end
+
+  defp apply_oauth_config(oauth_config) do
+    Application.put_env(:fermix_core, :oauth, oauth_config)
+    :ok
+  end
+
   defp apply_sandbox_config(sandbox_config) do
     Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(sandbox_config))
     :ok
@@ -510,6 +573,8 @@ defmodule FermixCore.Setup.ConfigStore do
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     tools = Keyword.get(fermix_core, :tools, [])
+    plugins = Keyword.get(fermix_core, :plugins, [])
+    oauth = Keyword.get(fermix_core, :oauth, %{})
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
@@ -541,6 +606,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
+      render_plugins(plugins),
+      render_oauth(oauth),
       render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
@@ -573,6 +640,40 @@ defmodule FermixCore.Setup.ConfigStore do
       |> Enum.join("\n")
 
     Enum.join([header, body], "\n")
+  end
+
+  defp render_plugins([]), do: nil
+
+  defp render_plugins(plugins) when is_list(plugins) do
+    entries = Keyword.get(plugins, :entries, %{})
+
+    [
+      render_section(["fermix_core", "plugins"], Keyword.drop(plugins, [:entries])),
+      render_named_sections(["fermix_core", "plugins"], entries)
+    ]
+    |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+  end
+
+  defp render_oauth(oauth) when oauth in [%{}, []], do: nil
+
+  defp render_oauth(oauth) when is_map(oauth) or is_list(oauth) do
+    render_named_sections(["fermix_core", "oauth"], oauth)
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+  end
+
+  defp render_named_sections(parent, entries) when is_map(entries) do
+    entries
+    |> Enum.sort_by(fn {name, _values} -> name end)
+    |> Enum.map(fn {name, values} -> render_section(parent ++ [name], values) end)
+  end
+
+  defp render_named_sections(parent, entries) when is_list(entries) do
+    entries
+    |> Enum.sort_by(fn {name, _values} -> to_string(name) end)
+    |> Enum.map(fn {name, values} -> render_section(parent ++ [to_string(name)], values) end)
   end
 
   defp render_sandbox([]), do: nil
@@ -691,7 +792,9 @@ defmodule FermixCore.Setup.ConfigStore do
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
-        tools: normalize_tools(get_in(document, ["fermix_core", "tools"]))
+        tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
+        plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
+        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
@@ -820,6 +923,71 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_tools(_config), do: []
+
+  defp normalize_plugins(nil), do: []
+
+  defp normalize_plugins(config) when is_map(config) or is_list(config) do
+    enabled = normalize_string_list(lookup(config, "enabled", :enabled))
+
+    entries =
+      config
+      |> lookup("entries", :entries)
+      |> normalize_named_sections([])
+      |> Map.merge(normalize_named_sections(config, ["enabled", :enabled, "entries", :entries]))
+
+    []
+    |> put_if_present(:enabled, enabled)
+    |> put_if_present(:entries, entries)
+  end
+
+  defp normalize_plugins(_config), do: []
+
+  defp normalize_oauth(nil), do: %{}
+
+  defp normalize_oauth(config) when is_map(config) or is_list(config),
+    do: normalize_named_sections(config, [])
+
+  defp normalize_oauth(_config), do: %{}
+
+  defp normalize_named_sections(nil, _ignored_keys), do: %{}
+
+  defp normalize_named_sections(config, ignored_keys) when is_map(config) do
+    ignored = MapSet.new(Enum.map(ignored_keys, &to_string/1))
+
+    config
+    |> Enum.reject(fn {key, _value} -> MapSet.member?(ignored, to_string(key)) end)
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.into(%{}, fn {key, value} -> {to_string(key), normalize_named_section(value)} end)
+  end
+
+  defp normalize_named_sections(config, ignored_keys) when is_list(config) do
+    ignored = MapSet.new(ignored_keys)
+
+    config
+    |> Enum.reject(fn {key, _value} -> MapSet.member?(ignored, key) end)
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.into(%{}, fn {key, value} -> {to_string(key), normalize_named_section(value)} end)
+  end
+
+  defp normalize_named_section(values) when is_map(values) do
+    values
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.map(fn {key, value} -> {to_field_atom(key), value} end)
+  end
+
+  defp normalize_named_section(values) when is_list(values) do
+    Enum.map(values, fn {key, value} -> {to_field_atom(key), value} end)
+  end
+
+  defp normalize_named_section(_values), do: []
+
+  defp normalize_string_list(values) when is_list(values) do
+    values
+    |> Enum.map(&normalize_string/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_string_list(_values), do: nil
 
   defp normalize_web_search_tool(nil), do: []
 
@@ -1180,6 +1348,9 @@ defmodule FermixCore.Setup.ConfigStore do
   defp lookup(config, _string_key, atom_key) when is_list(config) do
     Keyword.get(config, atom_key)
   end
+
+  defp to_field_atom(key) when is_atom(key), do: key
+  defp to_field_atom(key) when is_binary(key), do: Map.get(@dynamic_section_fields, key, key)
 
   defp put_if_present(keyword, _key, nil), do: keyword
   defp put_if_present(keyword, key, value), do: Keyword.put(keyword, key, value)

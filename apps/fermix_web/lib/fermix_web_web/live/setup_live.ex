@@ -3,8 +3,14 @@ defmodule FermixWebWeb.SetupLive do
 
   alias Fermix.CLI.Service
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Plugins.Auth, as: PluginAuth
+  alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Health, as: PluginHealth
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -17,7 +23,7 @@ defmodule FermixWebWeb.SetupLive do
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
     %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
-    %{id: "skills", label: "Skills", component: nil, description: "Agent skills"},
+    %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
     %{id: "search", label: "Search", component: nil, description: "Web search"},
     %{id: "sandbox", label: "Sandbox", component: nil, description: "Execution policy"},
     %{id: "memory", label: "Memory", component: nil, description: "Recall tuning"},
@@ -41,6 +47,9 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
       |> assign(:restarting, false)
+      |> assign(:plugin_scope_overrides, %{})
+      |> assign(:plugin_auth_tasks, %{})
+      |> assign(:plugin_auth_url, nil)
       |> assign_report(report)
 
     {:ok, socket}
@@ -140,6 +149,85 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, save_answers(socket, answers, "Search saved.", Map.get(root, "__nav"))}
   end
 
+  def handle_event("save_google_oauth", %{"google_oauth_form" => params}, socket) do
+    current = current_oauth_provider(socket, "google")
+
+    opts = [
+      client_id: present_or(params["client_id"], Keyword.get(current, :client_id)),
+      client_secret: present_or(params["client_secret"], Keyword.get(current, :client_secret)),
+      redirect_port:
+        parse_int(params["redirect_port"], Keyword.get(current, :redirect_port, 1455))
+    ]
+
+    result = PluginConfig.set_oauth_provider("google", opts)
+    {:noreply, save_config_result(result, socket, "Google OAuth client saved.")}
+  end
+
+  def handle_event("plugin_scope_changed", %{"plugin" => name, "scope_profile" => scope}, socket) do
+    case validate_plugin_scope(name, scope) do
+      :ok ->
+        overrides = Map.put(socket.assigns.plugin_scope_overrides, name, scope)
+
+        {:noreply,
+         socket
+         |> assign(:plugin_scope_overrides, overrides)
+         |> refresh_plugin_summary()
+         |> assign(:saved_flash, "Plugin scope staged.")}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, :saved_flash, "Scope change failed: #{Redaction.format(reason)}")}
+    end
+  end
+
+  def handle_event("plugin_enable", %{"name" => name}, socket) do
+    with {:ok, plugin} <- PluginRegistry.find(name),
+         {:ok, _snapshot} <- PluginConfig.enable(name) do
+      socket = refresh_report(socket, "Plugin enabled.")
+      {:noreply, maybe_start_plugin_auth(socket, plugin)}
+    else
+      :error ->
+        {:noreply, assign(socket, :saved_flash, "Plugin not found: #{name}")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :saved_flash, "Save failed: #{Redaction.format(reason)}")}
+    end
+  end
+
+  def handle_event("plugin_disable", %{"name" => name}, socket) do
+    result = PluginConfig.disable(name)
+    {:noreply, save_config_result(result, socket, "Plugin disabled.")}
+  end
+
+  def handle_event("plugin_connect", %{"name" => name}, socket) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} -> {:noreply, start_plugin_auth_or_explain(socket, plugin)}
+      :error -> {:noreply, assign(socket, :saved_flash, "Plugin not found: #{name}")}
+      {:error, reason} -> {:noreply, assign(socket, :saved_flash, Redaction.format(reason))}
+    end
+  end
+
+  def handle_event("plugin_disconnect", %{"name" => name}, socket) do
+    case PluginAuth.logout(name) do
+      :ok ->
+        {:noreply, refresh_report(socket, "Plugin disconnected.")}
+
+      {:error, reason} ->
+        {:noreply, assign(socket, :saved_flash, "Disconnect failed: #{Redaction.format(reason)}")}
+    end
+  end
+
+  def handle_event("plugin_check", %{"name" => name}, socket) do
+    case PluginHealth.check(name) do
+      {:ok, _result} ->
+        {:noreply, assign(socket, :saved_flash, "Plugin check passed.")}
+
+      {:error, reason} ->
+        {:noreply,
+         assign(socket, :saved_flash, "Plugin check failed: #{Redaction.format(reason)}")}
+    end
+  end
+
   def handle_event("save_memory", %{"memory_form" => params} = root, socket) do
     answers =
       []
@@ -189,6 +277,34 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   @impl true
+  def handle_info({:plugin_auth_url, name, url}, socket) do
+    auth_url = %{name: name, display_name: plugin_display_name(name), url: url}
+
+    {:noreply,
+     socket
+     |> assign(:plugin_auth_url, auth_url)
+     |> assign(:saved_flash, "Opening #{auth_url.display_name} sign-in.")
+     |> push_event("plugin-auth-open", %{url: url})}
+  end
+
+  def handle_info({ref, result}, socket) when is_reference(ref) do
+    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
+      {nil, _tasks} ->
+        {:noreply, socket}
+
+      {task, tasks} ->
+        Process.demonitor(ref, [:flush])
+        {:noreply, finish_plugin_auth(socket, task, tasks, result)}
+    end
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
+    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
+      {nil, _tasks} -> {:noreply, socket}
+      {task, tasks} -> {:noreply, fail_plugin_auth(socket, task, tasks, reason)}
+    end
+  end
+
   def handle_info(:perform_restart, socket) do
     # Supervised release only (gated in apply_restart): exit non-zero so the OS
     # supervisor relaunches the daemon — launchd KeepAlive on any exit, systemd
@@ -208,6 +324,8 @@ defmodule FermixWebWeb.SetupLive do
       personalization_form={@personalization_form}
       provider_form={@provider_form}
       provider_models={@provider_models}
+      plugin_auth_url={@plugin_auth_url}
+      plugin_summary={@plugin_summary}
       realtime_form={@realtime_form}
       report={@report}
       restarting={@restarting}
@@ -237,6 +355,10 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:personalization_form, build_personalization_form(snapshot))
     |> assign(:tool_summary, tool_summary())
     |> assign(:skill_summary, skill_summary())
+    |> assign(
+      :plugin_summary,
+      plugin_summary(snapshot, Map.get(socket.assigns, :plugin_scope_overrides, %{}))
+    )
   end
 
   defp save_answers(socket, answers, message, nav) do
@@ -253,7 +375,29 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp save_result({:error, reason}, socket, _message, _nav) do
-    assign(socket, :saved_flash, "Save failed: #{inspect(reason)}")
+    assign(socket, :saved_flash, "Save failed: #{Redaction.format(reason)}")
+  end
+
+  defp save_config_result({:ok, _snapshot}, socket, message), do: refresh_report(socket, message)
+
+  defp save_config_result({:error, reason}, socket, _message) do
+    assign(socket, :saved_flash, "Save failed: #{Redaction.format(reason)}")
+  end
+
+  defp refresh_report(socket, message) do
+    Wizard.report()
+    |> then(&assign_report(socket, &1))
+    |> assign(:saved_flash, message)
+  end
+
+  defp refresh_plugin_summary(socket) do
+    snapshot = socket.assigns.report.wizard.config_snapshot
+
+    assign(
+      socket,
+      :plugin_summary,
+      plugin_summary(snapshot, socket.assigns.plugin_scope_overrides)
+    )
   end
 
   defp maybe_advance(socket, "next") do
@@ -440,6 +584,215 @@ defmodule FermixWebWeb.SetupLive do
     %{available: false, count: 0, operator_count: 0, guest_count: 0, names: []}
   end
 
+  defp plugin_summary(snapshot, scope_overrides) do
+    case PluginRegistry.list() do
+      {:ok, plugins} ->
+        %{
+          available: true,
+          google_oauth: google_oauth_form(snapshot),
+          plugins: Enum.map(plugins, &plugin_card(&1, snapshot, scope_overrides)),
+          later: ["GitHub", "Notion", "Linear", "Filesystem watcher", "Web search migration"]
+        }
+
+      {:error, reason} ->
+        %{
+          available: false,
+          error: Redaction.format(reason),
+          google_oauth: %{},
+          plugins: [],
+          later: []
+        }
+    end
+  end
+
+  defp plugin_card(plugin, snapshot, scope_overrides) do
+    enabled? = plugin.name in enabled_plugins(snapshot)
+    scope_profile = Map.get(scope_overrides, plugin.name, PluginConfig.configured_scope(plugin))
+
+    %{
+      name: plugin.name,
+      display_name: plugin.display_name,
+      description: plugin.description,
+      category: plugin.category,
+      provider: Map.get(plugin.auth, :provider),
+      logo: plugin_asset_data_uri(plugin, "logo") || plugin_asset_data_uri(plugin, "icon"),
+      auth_type: plugin.auth.type,
+      scope_profiles: plugin.scope_profiles,
+      scope_profile: scope_profile,
+      account: PluginStatus.account_label(plugin),
+      enabled?: enabled?,
+      status: PluginStatus.status(plugin, scope_profile)
+    }
+  end
+
+  defp plugin_asset_data_uri(plugin, key) do
+    plugin.interface
+    |> Map.get(key)
+    |> asset_data_uri(Path.dirname(plugin.path))
+  end
+
+  defp asset_data_uri(nil, _plugin_dir), do: nil
+
+  defp asset_data_uri(rel_path, plugin_dir) when is_binary(rel_path) do
+    path = Path.join(plugin_dir, rel_path)
+    mime = asset_mime!(Path.extname(path))
+
+    "data:#{mime};base64,#{Base.encode64(File.read!(path))}"
+  end
+
+  defp asset_mime!(".png"), do: "image/png"
+  defp asset_mime!(".svg"), do: "image/svg+xml"
+  defp asset_mime!(ext), do: raise(ArgumentError, "unsupported plugin asset type: #{ext}")
+
+  defp enabled_plugins(snapshot) do
+    snapshot
+    |> get_fermix_core(:plugins)
+    |> Keyword.get(:enabled, [])
+  end
+
+  defp google_oauth_form(snapshot) do
+    config = snapshot |> get_fermix_core(:oauth) |> oauth_provider("google")
+
+    %{
+      client_id: Keyword.get(config, :client_id, ""),
+      client_secret_set: Keyword.get(config, :client_secret) |> present?(),
+      redirect_port: Keyword.get(config, :redirect_port, 1455)
+    }
+  end
+
+  defp current_oauth_provider(socket, provider) do
+    socket.assigns.report.wizard.config_snapshot
+    |> get_fermix_core(:oauth)
+    |> oauth_provider(provider)
+  end
+
+  defp oauth_provider(oauth, provider) when is_map(oauth), do: Map.get(oauth, provider, [])
+
+  defp oauth_provider(oauth, "google") when is_list(oauth), do: Keyword.get(oauth, :google, [])
+  defp oauth_provider(_oauth, _provider), do: []
+
+  defp maybe_start_plugin_auth(socket, %{auth: %{type: :oauth2}} = plugin) do
+    start_plugin_auth_or_explain(socket, plugin)
+  end
+
+  defp maybe_start_plugin_auth(socket, _plugin), do: socket
+
+  defp start_plugin_auth_or_explain(socket, plugin) do
+    cond do
+      missing_plugin_client_config?(plugin) ->
+        assign(
+          socket,
+          :saved_flash,
+          "Save a Google OAuth desktop client first, then connect #{plugin.display_name}."
+        )
+
+      plugin_auth_running?(socket, plugin.name) ->
+        assign(socket, :saved_flash, "#{plugin.display_name} sign-in is already open.")
+
+      true ->
+        start_plugin_auth(socket, plugin)
+    end
+  end
+
+  defp start_plugin_auth(socket, plugin) do
+    scope_profile = staged_scope(socket, plugin)
+    parent = self()
+
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
+        plugin_auth_runner().(plugin.name,
+          scope_profile: scope_profile,
+          opener: plugin_auth_opener(parent, plugin.name),
+          puts: fn _message -> :ok end
+        )
+      end)
+
+    tasks = Map.put(socket.assigns.plugin_auth_tasks, task.ref, plugin_auth_task(plugin))
+
+    socket
+    |> assign(:plugin_auth_tasks, tasks)
+    |> assign(:saved_flash, "Opening #{plugin.display_name} sign-in.")
+  end
+
+  defp plugin_auth_runner do
+    Application.get_env(:fermix_web, :plugin_auth_runner, &PluginAuth.login/2)
+  end
+
+  defp plugin_auth_opener(parent, name) do
+    fn url ->
+      send(parent, {:plugin_auth_url, name, url})
+      :ok
+    end
+  end
+
+  defp plugin_auth_task(plugin), do: %{name: plugin.name, display_name: plugin.display_name}
+
+  defp plugin_auth_running?(socket, name) do
+    socket.assigns.plugin_auth_tasks
+    |> Map.values()
+    |> Enum.any?(&(&1.name == name))
+  end
+
+  defp finish_plugin_auth(socket, task, tasks, {:ok, _entry}) do
+    socket
+    |> assign(:plugin_auth_tasks, tasks)
+    |> refresh_report("#{task.display_name} connected.")
+  end
+
+  defp finish_plugin_auth(socket, task, tasks, {:error, reason}) do
+    fail_plugin_auth(socket, task, tasks, reason)
+  end
+
+  defp fail_plugin_auth(socket, task, tasks, reason) do
+    socket
+    |> assign(:plugin_auth_tasks, tasks)
+    |> assign(:saved_flash, "#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+  end
+
+  defp missing_plugin_client_config?(%{auth: %{provider: "google"}}) do
+    PluginConfig.oauth_provider("google")
+    |> Keyword.get(:client_id)
+    |> blank?()
+  end
+
+  defp missing_plugin_client_config?(_plugin), do: false
+
+  defp plugin_display_name(name) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} -> plugin.display_name
+      _other -> name
+    end
+  end
+
+  defp staged_scope(socket, plugin) do
+    Map.get(
+      socket.assigns.plugin_scope_overrides,
+      plugin.name,
+      PluginConfig.configured_scope(plugin)
+    )
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(_value), do: false
+
+  defp validate_plugin_scope(name, scope) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} ->
+        if scope in plugin.scope_profiles do
+          :ok
+        else
+          {:error, {:unknown_scope_profile, name, scope}}
+        end
+
+      :error ->
+        {:error, {:unknown_plugin, name}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp current_provider(snapshot) do
     snapshot
     |> get_fermix_core(:agent)
@@ -505,6 +858,15 @@ defmodule FermixWebWeb.SetupLive do
     |> Enum.reject(&(&1 == ""))
     |> Enum.uniq()
   end
+
+  defp parse_int(value, default) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {int, ""} -> int
+      _other -> default
+    end
+  end
+
+  defp parse_int(_value, default), do: default
 
   defp present_or(nil, default), do: default
   defp present_or("", default), do: default
