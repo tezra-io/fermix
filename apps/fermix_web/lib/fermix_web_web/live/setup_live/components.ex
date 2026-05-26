@@ -1,6 +1,7 @@
 defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
 
@@ -19,6 +20,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
+  attr :plugin_auth_url, :map, default: nil
+  attr :plugin_summary, :map, required: true
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
   attr :sandbox_form, :map, required: true
@@ -68,6 +71,8 @@ defmodule FermixWebWeb.SetupLive.Components do
               personalization_form={@personalization_form}
               provider_form={@provider_form}
               provider_models={@provider_models}
+              plugin_auth_url={@plugin_auth_url}
+              plugin_summary={@plugin_summary}
               realtime_form={@realtime_form}
               report={@report}
               sandbox_form={@sandbox_form}
@@ -176,6 +181,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
+  attr :plugin_auth_url, :map, default: nil
+  attr :plugin_summary, :map, required: true
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
   attr :sandbox_form, :map, required: true
@@ -189,7 +196,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("provider", assigns), do: provider_pane(assigns)
   defp render_active_pane("realtime", assigns), do: realtime_pane(assigns)
   defp render_active_pane("channels", assigns), do: channels_pane(assigns)
-  defp render_active_pane("skills", assigns), do: skills_pane(assigns)
+  defp render_active_pane("plugins", assigns), do: plugins_pane(assigns)
   defp render_active_pane("search", assigns), do: search_pane(assigns)
   defp render_active_pane("sandbox", assigns), do: sandbox_pane(assigns)
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
@@ -422,29 +429,36 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp skills_pane(assigns) do
+  defp plugins_pane(assigns) do
     ~H"""
     <div>
       <.pane_header
-        title="Installed skills"
-        subtitle="Inspect the skill catalog discovered from bundled, local, and plugin skill roots."
+        title="Integrations"
+        subtitle="Set up your Google OAuth desktop client below, then connect each integration. Connecting signs you in and enables the plugin."
       />
-      <div class="mt-6 grid gap-4 md:grid-cols-3">
-        <.stat_box label="Skills" value={@skill_summary.count} />
-        <.stat_box label="Operator trusted" value={@skill_summary.operator_count} />
-        <.stat_box label="Guest scoped" value={@skill_summary.guest_count} />
+
+      <.google_plugin_group
+        :if={@plugin_summary.available}
+        plugin_summary={@plugin_summary}
+        plugin_auth_url={@plugin_auth_url}
+      />
+
+      <div
+        :if={@plugin_summary.available && non_google_plugins(@plugin_summary.plugins) != []}
+        class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3"
+      >
+        <.plugin_card :for={plugin <- non_google_plugins(@plugin_summary.plugins)} plugin={plugin} />
       </div>
+
       <.info_panel class="mt-5">
-        <p :if={@skill_summary.available && @skill_summary.names != []}>
-          Loaded: {Enum.join(@skill_summary.names, ", ")}.
+        <p :if={@plugin_summary.available}>
+          coming later: {Enum.join(@plugin_summary.later, ", ")}.
         </p>
-        <p :if={@skill_summary.available && @skill_summary.names == []}>
-          No skills are installed yet.
-        </p>
-        <p :if={!@skill_summary.available}>
-          The skill registry is not running in this process yet. Start the daemon to see live skills.
+        <p :if={!@plugin_summary.available}>
+          Plugin catalog unavailable: {@plugin_summary.error}
         </p>
       </.info_panel>
+
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
     """
@@ -654,6 +668,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       />
       <div class="mt-6 space-y-4">
         <.validation_list report={@report} />
+        <.skill_summary_panel skill_summary={@skill_summary} />
         <.tool_summary_panel tool_summary={@tool_summary} />
         <.doctor_result result={@doctor_result} />
       </div>
@@ -768,6 +783,185 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  attr :plugin_summary, :map, required: true
+  attr :plugin_auth_url, :map, default: nil
+
+  defp google_plugin_group(assigns) do
+    ~H"""
+    <section
+      data-plugin-group="google"
+      class="mt-5 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 class="text-sm font-semibold">Google</h3>
+          <p class="text-xs text-base-content/55">Calendar, Gmail, and Drive</p>
+        </div>
+        <span class="badge badge-ghost badge-sm">OAuth desktop client</span>
+      </div>
+
+      <form phx-submit="save_google_oauth" class="mt-3 rounded-field bg-base-200/50 p-3">
+        <div class="grid items-end gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_8rem_auto]">
+          <.text_input
+            label="Client ID (required)"
+            name="google_oauth_form[client_id]"
+            value={@plugin_summary.google_oauth.client_id}
+          />
+          <.secret_input
+            label="Desktop secret (optional)"
+            name="google_oauth_form[client_secret]"
+            set={@plugin_summary.google_oauth.client_secret_set}
+          />
+          <.number_field
+            label="Port"
+            name="google_oauth_form[redirect_port]"
+            value={@plugin_summary.google_oauth.redirect_port}
+          />
+          <button type="submit" class="btn btn-outline btn-sm">
+            <.icon name="hero-key" class="size-4" /> Save
+          </button>
+        </div>
+      </form>
+
+      <p
+        :if={@plugin_summary.google_oauth.client_id in [nil, ""]}
+        class="mt-3 rounded-field border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-base-content/80"
+      >
+        Add your Client ID above and Save before connecting these integrations.
+      </p>
+
+      <div
+        :if={@plugin_auth_url}
+        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-primary/30 bg-primary/10 px-3 py-2 text-sm"
+      >
+        <span>Opening {@plugin_auth_url.display_name} sign-in.</span>
+        <a class="btn btn-primary btn-xs" href={@plugin_auth_url.url} target="_blank" rel="noreferrer">
+          Open sign-in
+        </a>
+      </div>
+
+      <div class="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+        <.plugin_card
+          :for={plugin <- google_plugins(@plugin_summary.plugins)}
+          plugin={plugin}
+          label={strip_google_prefix(plugin.display_name)}
+        />
+      </div>
+    </section>
+    """
+  end
+
+  attr :plugin, :map, required: true
+  attr :label, :string, default: nil
+
+  defp plugin_card(assigns) do
+    ~H"""
+    <section
+      data-plugin-name={@plugin.name}
+      class="flex h-full w-full flex-col rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
+    >
+      <div class="flex items-start gap-3">
+        <div class="grid size-10 shrink-0 place-items-center overflow-hidden rounded-field border border-base-300 bg-base-100">
+          <img
+            :if={@plugin.logo}
+            src={@plugin.logo}
+            alt=""
+            class="size-8 object-contain"
+            loading="lazy"
+          />
+          <span :if={!@plugin.logo} class="text-sm font-semibold">
+            {String.first(@plugin.display_name)}
+          </span>
+        </div>
+
+        <div class="min-w-0 flex-1">
+          <h3 class="truncate text-sm font-semibold">{@label || @plugin.display_name}</h3>
+          <div :if={@plugin.status != :not_configured} class="mt-1">
+            <.status_pill status={@plugin.status} />
+          </div>
+        </div>
+      </div>
+
+      <div
+        :if={@plugin.account}
+        class="mt-3 rounded-field bg-base-200/60 px-2 py-1.5 text-xs"
+      >
+        <span class="text-base-content/55">Account</span>
+        <span class="block truncate font-medium">{@plugin.account}</span>
+      </div>
+
+      <form id={"plugin-scope-#{@plugin.name}"} phx-change="plugin_scope_changed" class="mt-3">
+        <input type="hidden" name="plugin" value={@plugin.name} />
+        <label class="form-control w-full">
+          <span class="label py-1 text-xs font-medium text-base-content/55">Permission profile</span>
+          <select name="scope_profile" class="select select-bordered select-sm w-full bg-base-100">
+            <option
+              :for={profile <- @plugin.scope_profiles}
+              value={profile}
+              selected={profile == @plugin.scope_profile}
+            >
+              {profile}
+            </option>
+          </select>
+        </label>
+      </form>
+
+      <div class="mt-auto flex flex-wrap items-center justify-between gap-2 border-t border-base-300 pt-3">
+        <span class="text-xs text-base-content/55">
+          {if @plugin.enabled?, do: "Enabled", else: "Disabled"}
+        </span>
+        <div class="flex flex-wrap justify-end gap-1.5">
+          <button
+            :if={!@plugin.enabled?}
+            type="button"
+            class="btn btn-primary btn-xs"
+            phx-click="plugin_enable"
+            phx-value-name={@plugin.name}
+          >
+            <.icon name="hero-plus" class="size-3.5" /> {plugin_primary_action(@plugin)}
+          </button>
+          <button
+            :if={@plugin.enabled? && @plugin.auth_type == :oauth2 && @plugin.status != :ready}
+            type="button"
+            class="btn btn-outline btn-xs"
+            phx-click="plugin_connect"
+            phx-value-name={@plugin.name}
+          >
+            {plugin_action_label(@plugin.status)}
+          </button>
+          <button
+            :if={@plugin.enabled? && @plugin.status == :ready}
+            type="button"
+            class="btn btn-outline btn-xs"
+            phx-click="plugin_check"
+            phx-value-name={@plugin.name}
+          >
+            <.icon name="hero-check-circle" class="size-3.5" /> Check
+          </button>
+          <button
+            :if={@plugin.enabled? && @plugin.account}
+            type="button"
+            class="btn btn-ghost btn-xs"
+            phx-click="plugin_disconnect"
+            phx-value-name={@plugin.name}
+          >
+            Disconnect
+          </button>
+          <button
+            :if={@plugin.enabled?}
+            type="button"
+            class="btn btn-ghost btn-xs"
+            phx-click="plugin_disable"
+            phx-value-name={@plugin.name}
+          >
+            Disable
+          </button>
+        </div>
+      </div>
+    </section>
+    """
+  end
+
   attr :title, :string, required: true
   attr :status, :atom, required: true
   attr :enabled, :boolean, required: true
@@ -827,18 +1021,6 @@ defmodule FermixWebWeb.SetupLive.Components do
       name={@field.name}
       value={@field.value}
     />
-    """
-  end
-
-  attr :label, :string, required: true
-  attr :value, :any, required: true
-
-  defp stat_box(assigns) do
-    ~H"""
-    <div class="rounded-box border border-base-300 bg-base-200/60 p-4">
-      <p class="text-xs font-medium uppercase text-base-content/50">{@label}</p>
-      <p class="mt-2 text-2xl font-semibold">{@value}</p>
-    </div>
     """
   end
 
@@ -934,7 +1116,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp status_pill(assigns) do
     ~H"""
-    <span class={status_pill_class(@status)}>{status_pill_label(@status)}</span>
+    <span class={["shrink-0 whitespace-nowrap", status_pill_class(@status)]}>
+      {status_pill_label(@status)}
+    </span>
     """
   end
 
@@ -994,6 +1178,34 @@ defmodule FermixWebWeb.SetupLive.Components do
       <p :if={!@tool_summary.available} class="mt-3 text-sm text-base-content/70">
         The capability registry is not running in this process yet. Start the daemon to see live tools.
       </p>
+    </section>
+    """
+  end
+
+  attr :skill_summary, :map, required: true
+
+  defp skill_summary_panel(assigns) do
+    ~H"""
+    <section class="rounded-box border border-base-300 p-4">
+      <div class="flex items-center justify-between gap-3">
+        <h3 class="font-semibold">Skill summary</h3>
+        <div class="badge badge-ghost badge-sm">read only</div>
+      </div>
+
+      <dl class="mt-4 grid gap-3 sm:grid-cols-3">
+        <div class="rounded-field bg-base-200/60 p-3">
+          <dt class="text-xs font-medium uppercase text-base-content/50">Skills</dt>
+          <dd class="mt-1 text-xl font-semibold">{@skill_summary.count}</dd>
+        </div>
+        <div class="rounded-field bg-base-200/60 p-3">
+          <dt class="text-xs font-medium uppercase text-base-content/50">Operator trusted</dt>
+          <dd class="mt-1 text-xl font-semibold">{@skill_summary.operator_count}</dd>
+        </div>
+        <div class="rounded-field bg-base-200/60 p-3">
+          <dt class="text-xs font-medium uppercase text-base-content/50">Guest scoped</dt>
+          <dd class="mt-1 text-xl font-semibold">{@skill_summary.guest_count}</dd>
+        </div>
+      </dl>
     </section>
     """
   end
@@ -1171,11 +1383,36 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp status_pill_class(:ready), do: "badge badge-success badge-sm"
   defp status_pill_class(:partial), do: "badge badge-warning badge-sm"
+  defp status_pill_class(:needs_auth), do: "badge badge-warning badge-sm"
+  defp status_pill_class(:needs_client_config), do: "badge badge-warning badge-sm"
+  defp status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
+  defp status_pill_class(:error), do: "badge badge-error badge-sm"
+  defp status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
   defp status_pill_class(_), do: "badge badge-ghost badge-sm"
 
   defp status_pill_label(:ready), do: "Ready"
   defp status_pill_label(:partial), do: "Needs setup"
+  defp status_pill_label(:needs_auth), do: "Needs auth"
+  defp status_pill_label(:needs_client_config), do: "needs client config"
+  defp status_pill_label(:reauthorization_required), do: "Reauthorize"
+  defp status_pill_label(:error), do: "Error"
+  defp status_pill_label(:not_configured), do: "Not configured"
   defp status_pill_label(_), do: "Unknown"
+
+  defp plugin_primary_action(%{auth_type: :oauth2}), do: "Connect"
+  defp plugin_primary_action(_plugin), do: "Enable"
+
+  defp plugin_action_label(:needs_client_config), do: "Configure"
+  defp plugin_action_label(:needs_auth), do: "Connect"
+  defp plugin_action_label(:reauthorization_required), do: "Reauthorize"
+  defp plugin_action_label(:ready), do: "Check"
+  defp plugin_action_label(_status), do: "Enable"
+
+  defp strip_google_prefix("Google " <> rest), do: rest
+  defp strip_google_prefix(name), do: name
+
+  defp google_plugins(plugins), do: Enum.filter(plugins, &(&1.provider == "google"))
+  defp non_google_plugins(plugins), do: Enum.reject(plugins, &(&1.provider == "google"))
 
   defp status_badge_class(:ready), do: "badge badge-success badge-sm font-medium"
   defp status_badge_class(:setup_required), do: "badge badge-warning badge-sm font-medium"
@@ -1229,6 +1466,8 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp doctor_error({:error, {:server_error, status, _body}}),
     do: "Provider returned HTTP #{status}."
 
-  defp doctor_error({:error, {:network, reason}}), do: "Network error: #{inspect(reason)}"
-  defp doctor_error({:error, reason}), do: inspect(reason)
+  defp doctor_error({:error, {:network, reason}}),
+    do: "Network error: #{Redaction.format(reason)}"
+
+  defp doctor_error({:error, reason}), do: Redaction.format(reason)
 end

@@ -246,6 +246,41 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       # plugin nested inside local_dir is still tagged :guest.
       assert definition.trust == :guest
     end
+
+    test "enabled bundled plugin skills load directly from priv plugins" do
+      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+
+      Application.put_env(:fermix_core, :plugins,
+        enabled: ["google_calendar"],
+        entries: %{"google_calendar" => [scope_profile: "readonly"]}
+      )
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :plugins, plugins)
+        FermixTestSupport.SafeRm.rm_rf!(local)
+      end)
+
+      registry =
+        start_supervised!(
+          {SkillRegistry,
+           name: :"classifier_bundled_plugin_#{System.unique_integer([:positive])}",
+           skills_dir: local,
+           core_dir: nil,
+           plugin_dir: Path.join(local, "_plugins"),
+           seed_defaults: false},
+          id: :"classifier_bundled_plugin_child_#{System.unique_integer([:positive])}"
+        )
+
+      [definition] = SkillRegistry.list_detailed(registry)
+      assert definition.name == "google-calendar"
+      assert definition.trust == :guest
+
+      assert definition.source_path =~
+               "/priv/plugins/google_calendar/skills/google-calendar/SKILL.md"
+
+      refute File.exists?(Path.join(local, "_plugins/google-calendar"))
+    end
   end
 
   describe "capability_registry integration" do

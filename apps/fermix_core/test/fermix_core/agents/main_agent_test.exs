@@ -11,6 +11,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.PromptFiles
+  alias FermixCore.Plugins.Runtime
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
 
@@ -1987,6 +1988,58 @@ defmodule FermixCore.Agents.MainAgentTest do
       [{_messages, opts}] = MockProvider.get_calls()
       names = Enum.map(opts[:capabilities], & &1.name)
       refute "noop_after_first" in names
+    end
+
+    test "plugin runtime reload clears the active runtime context",
+         %{agent: agent, capability_registry: registry, skill_registry: skill_registry} do
+      MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
+
+      MainAgent.handle_message(make_message("first", chat_id: "runctx_plugin_reload"), agent)
+      assert_receive {:reply, "OK"}, 5_000
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :miss}},
+                     5_000
+
+      capability =
+        Capability.new(%{
+          name: "after_plugin_reload",
+          description: "Visible after plugin reload.",
+          parameters: %{type: "object"},
+          kind: :builtin,
+          executor: {__MODULE__, :unused, []},
+          policy_class: :read_only
+        })
+
+      :ok = CapabilityRegistry.register(registry, capability)
+
+      assert {:ok, _summary} =
+               Runtime.reload(
+                 capability_registry: registry,
+                 skill_registry: skill_registry,
+                 main_agent: agent,
+                 realtime_supervisor: nil
+               )
+
+      MockProvider.reset_calls()
+
+      MainAgent.handle_message(
+        make_message("after reload", chat_id: "runctx_plugin_reload"),
+        agent
+      )
+
+      assert_receive {:reply, "OK"}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
+
+      assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
+                      %{result: :miss}},
+                     5_000
+
+      [{_messages, opts}] = MockProvider.get_calls()
+      names = Enum.map(opts[:capabilities], & &1.name)
+      assert "after_plugin_reload" in names
     end
 
     test "guest profile is also pinned for the MainAgent epoch",

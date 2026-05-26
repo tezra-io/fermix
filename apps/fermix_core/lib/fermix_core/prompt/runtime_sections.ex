@@ -43,8 +43,10 @@ defmodule FermixCore.Prompt.RuntimeSections do
     [
       runtime_contract(),
       capability_summary_from_opts(opts),
+      plugin_index_from_opts(opts),
       skill_catalog(available_skills, Keyword.get(opts, :trust, :operator))
     ]
+    |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
   end
 
@@ -97,6 +99,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp format_capability_summary(capabilities) do
     body =
       capabilities
+      |> Enum.reject(&(&1.metadata[:category] == :plugin))
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -128,6 +131,36 @@ defmodule FermixCore.Prompt.RuntimeSections do
     |> String.replace("_", " ")
     |> String.split()
     |> Enum.map_join(" ", &String.capitalize/1)
+  end
+
+  defp plugin_index_from_opts(opts) do
+    opts |> Keyword.get(:plugins, []) |> plugin_index()
+  end
+
+  defp plugin_index([]), do: ""
+
+  defp plugin_index(plugins) when is_list(plugins) do
+    body =
+      plugins
+      |> Enum.sort_by(& &1.name)
+      |> Enum.map_join("\n", &format_plugin/1)
+
+    "## Plugins\n" <>
+      "Each plugin bundles a skill and tools. Open its skill with `skill_view`, then call its tools.\n" <>
+      "<plugins>\n#{body}\n</plugins>"
+  end
+
+  defp format_plugin(entry) do
+    name = xml_escape(entry.name)
+    tools = entry.tools |> Enum.join(", ") |> xml_escape()
+
+    case entry.skills do
+      [] ->
+        "  <plugin name=\"#{name}\">#{tools}</plugin>"
+
+      skills ->
+        "  <plugin name=\"#{name}\" skill=\"#{skills |> Enum.join(", ") |> xml_escape()}\">#{tools}</plugin>"
+    end
   end
 
   defp skill_catalog(_skills, :guest), do: "## Skill Catalog\n- none loaded"

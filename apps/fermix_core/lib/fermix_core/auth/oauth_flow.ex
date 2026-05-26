@@ -1,9 +1,8 @@
 defmodule FermixCore.Auth.OAuthFlow do
   @moduledoc """
-  Native OAuth Authorization Code + PKCE flow against ChatGPT
-  (`auth.openai.com`).
+  Native OAuth Authorization Code + PKCE loopback flows.
 
-  Mirrors the Codex CLI / RustyClaw contract:
+  The zero-argument flow mirrors the Codex CLI / RustyClaw contract:
 
     * `client_id` `app_EMoamEEZ73f0CkXaXp7hrann`
     * `redirect_uri` `http://localhost:1455/auth/callback`
@@ -16,11 +15,12 @@ defmodule FermixCore.Auth.OAuthFlow do
   the refresh chain is independent. This avoids the `refresh_token_reused`
   race that occurs when two tools share a refresh token.
 
-  `start_loopback/1` opens the browser, listens on `127.0.0.1:1455`,
-  captures the auth code, and exchanges it for tokens.
+  `start_loopback/2` accepts provider metadata for first-party plugins.
   """
 
   alias FermixCore.Auth.Browser
+  alias FermixCore.Auth.OAuthProvider
+  alias FermixCore.Auth.Redaction
 
   require Logger
 
@@ -38,6 +38,7 @@ defmodule FermixCore.Auth.OAuthFlow do
           access_token: String.t(),
           refresh_token: String.t() | nil,
           id_token: String.t() | nil,
+          scope: String.t() | nil,
           expires_at: DateTime.t() | nil
         }
 
@@ -45,6 +46,7 @@ defmodule FermixCore.Auth.OAuthFlow do
           port: :inet.port_number(),
           opener: (String.t() -> :ok | {:error, term()}) | nil,
           timeout_ms: pos_integer(),
+          port_fallbacks: non_neg_integer(),
           req_options: keyword(),
           puts: (String.t() -> any())
         ]
@@ -66,6 +68,42 @@ defmodule FermixCore.Auth.OAuthFlow do
           with :ok <- announce_and_open(puts, opener, url),
                {:ok, code} <- await_callback(listener, pkce.state, timeout_ms) do
             exchange_code(code, pkce.code_verifier, req_options)
+          end
+
+        :ok = :gen_tcp.close(listener)
+        result
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  @spec start_loopback(OAuthProvider.t(), loopback_opts()) :: {:ok, map()} | {:error, term()}
+  def start_loopback(%OAuthProvider{} = provider, opts) when is_list(opts) do
+    port = Keyword.get(opts, :port, provider.redirect_port)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
+    opener = Keyword.get(opts, :opener, &open_browser/1)
+    req_options = Keyword.get(opts, :req_options, [])
+    userinfo_req_options = Keyword.get(opts, :userinfo_req_options, [])
+    puts = Keyword.get(opts, :puts, &IO.puts/1)
+
+    pkce = generate_pkce()
+
+    case listen_with_fallback(port, Keyword.get(opts, :port_fallbacks, 5)) do
+      {:ok, listener} ->
+        {:ok, actual_port} = :inet.port(listener)
+        redirect_uri = redirect_uri(provider, actual_port)
+        url = authorize_url(provider, pkce, redirect_uri)
+
+        result =
+          with :ok <- announce_and_open_optional(puts, opener, url),
+               {:ok, code} <- await_callback(listener, pkce.state, timeout_ms),
+               {:ok, tokens} <-
+                 exchange_code(provider, code, pkce.code_verifier, redirect_uri, req_options) do
+            userinfo =
+              fetch_userinfo_best_effort(provider, tokens.access_token, userinfo_req_options)
+
+            {:ok, Map.put(tokens, :userinfo, userinfo)}
           end
 
         :ok = :gen_tcp.close(listener)
@@ -99,6 +137,27 @@ defmodule FermixCore.Auth.OAuthFlow do
     ]
 
     @authorize_url <> "?" <> URI.encode_query(params)
+  end
+
+  @spec authorize_url(OAuthProvider.t(), pkce(), String.t()) :: String.t()
+  def authorize_url(
+        %OAuthProvider{} = provider,
+        %{code_challenge: code_challenge, state: state},
+        redirect_uri
+      ) do
+    params =
+      %{
+        "response_type" => "code",
+        "client_id" => provider.client_id,
+        "redirect_uri" => redirect_uri,
+        "scope" => Enum.join(provider.scopes, " "),
+        "code_challenge" => code_challenge,
+        "code_challenge_method" => "S256",
+        "state" => state
+      }
+      |> Map.merge(provider.extra_authorize_params)
+
+    provider.authorize_url <> "?" <> URI.encode_query(params)
   end
 
   @spec parse_callback_path(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
@@ -135,10 +194,78 @@ defmodule FermixCore.Auth.OAuthFlow do
         parse_token_response(body)
 
       {:ok, %{status: status, body: body}} ->
-        {:error, "Token exchange failed (#{status}): #{inspect(body)}"}
+        {:error, "Token exchange failed (#{status}): #{Redaction.format(body)}"}
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @spec exchange_code(OAuthProvider.t(), String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, tokens()} | {:error, term()}
+  def exchange_code(%OAuthProvider{} = provider, code, code_verifier, redirect_uri, req_options)
+      when is_binary(code) and is_binary(code_verifier) and is_binary(redirect_uri) and
+             is_list(req_options) do
+    body =
+      %{
+        "grant_type" => "authorization_code",
+        "code" => code,
+        "client_id" => provider.client_id,
+        "redirect_uri" => redirect_uri,
+        "code_verifier" => code_verifier
+      }
+      |> maybe_put_param("client_secret", provider.client_secret)
+      |> URI.encode_query()
+
+    request =
+      Req.new(
+        url: provider.token_url,
+        method: :post,
+        body: body,
+        headers: [{"content-type", "application/x-www-form-urlencoded"}]
+      )
+
+    case request |> Req.merge(req_options) |> Req.request() do
+      {:ok, %{status: 200, body: body}} ->
+        parse_token_response(body)
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, "Token exchange failed (#{status}): #{Redaction.format(body)}"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec fetch_userinfo(OAuthProvider.t(), String.t(), keyword()) ::
+          {:ok, map() | nil} | {:error, term()}
+  def fetch_userinfo(%OAuthProvider{userinfo_url: nil}, _access_token, _req_options),
+    do: {:ok, nil}
+
+  def fetch_userinfo(%OAuthProvider{} = provider, access_token, req_options)
+      when is_binary(access_token) and is_list(req_options) do
+    request =
+      Req.new(
+        method: :get,
+        url: provider.userinfo_url,
+        headers: [{"authorization", "Bearer #{access_token}"}]
+      )
+
+    case request |> Req.merge(req_options) |> Req.request() do
+      {:ok, %{status: 200, body: body}} when is_map(body) -> {:ok, body}
+      {:ok, %{status: status, body: body}} -> {:error, {:userinfo_failed, status, body}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_userinfo_best_effort(provider, access_token, req_options) do
+    case fetch_userinfo(provider, access_token, req_options) do
+      {:ok, userinfo} ->
+        userinfo
+
+      {:error, reason} ->
+        Logger.warning("OAuthFlow: userinfo fetch failed: #{Redaction.format(reason)}")
+        nil
     end
   end
 
@@ -174,6 +301,45 @@ defmodule FermixCore.Auth.OAuthFlow do
     end
   end
 
+  defp listen_with_fallback(0, _fallbacks), do: listen(0)
+
+  defp listen_with_fallback(port, fallbacks)
+       when is_integer(port) and port > 0 and is_integer(fallbacks) and fallbacks >= 0 do
+    port
+    |> candidate_ports(fallbacks)
+    |> do_listen_with_fallback(nil)
+  end
+
+  defp candidate_ports(port, fallbacks) do
+    0..fallbacks
+    |> Enum.map(&(&1 + port))
+    |> Enum.filter(&(&1 <= 65_535))
+  end
+
+  defp do_listen_with_fallback([], {:error, _reason} = err), do: err
+  defp do_listen_with_fallback([], nil), do: {:error, {:listen_failed, nil, :no_candidate_port}}
+
+  defp do_listen_with_fallback([port | rest], _last_error) do
+    case listen(port) do
+      {:ok, listener} ->
+        {:ok, listener}
+
+      {:error, {:listen_failed, _port, :eaddrinuse}} = err ->
+        do_listen_with_fallback(rest, err)
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  defp redirect_uri(%OAuthProvider{} = provider, port) do
+    "http://#{provider.redirect_host}:#{port}#{provider.redirect_path}"
+  end
+
+  defp maybe_put_param(params, _key, nil), do: params
+  defp maybe_put_param(params, _key, ""), do: params
+  defp maybe_put_param(params, key, value), do: Map.put(params, key, value)
+
   defp announce_and_open(puts, nil, url) do
     puts.("Open this URL in your browser to sign in:\n  #{url}")
     :ok
@@ -187,9 +353,28 @@ defmodule FermixCore.Auth.OAuthFlow do
         :ok
 
       {:error, reason} ->
-        Logger.warning("OAuthFlow: opener failed (#{inspect(reason)}); printing URL")
+        Logger.warning("OAuthFlow: opener failed (#{Redaction.format(reason)}); printing URL")
         puts.("Open this URL in your browser to sign in:\n  #{url}")
         {:error, {:opener_failed, reason, url}}
+    end
+  end
+
+  defp announce_and_open_optional(puts, nil, url) do
+    puts.("Open this URL in your browser to sign in:\n  #{url}")
+    :ok
+  end
+
+  defp announce_and_open_optional(puts, opener, url) when is_function(opener, 1) do
+    puts.("Opening browser for plugin authorization...")
+
+    case opener.(url) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("OAuthFlow: opener failed (#{Redaction.format(reason)}); printing URL")
+        puts.("Open this URL in your browser to sign in:\n  #{url}")
+        :ok
     end
   end
 
@@ -329,6 +514,7 @@ defmodule FermixCore.Auth.OAuthFlow do
        access_token: access,
        refresh_token: body["refresh_token"],
        id_token: body["id_token"],
+       scope: body["scope"],
        expires_at: expires_at
      }}
   end

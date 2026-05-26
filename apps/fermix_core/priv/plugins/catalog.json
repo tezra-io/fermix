@@ -1,0 +1,7 @@
+{
+  "plugins": [
+    "google_calendar",
+    "gmail",
+    "google_drive"
+  ]
+}

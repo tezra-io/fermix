@@ -13,6 +13,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     tools = Application.get_env(:fermix_core, :tools, [])
+    plugins = Application.get_env(:fermix_core, :plugins, [])
+    oauth = Application.get_env(:fermix_core, :oauth, %{})
     sandbox = Application.get_env(:fermix_core, :sandbox)
     mcp_servers = Application.get_env(:fermix_core, :mcp_servers, [])
     mcp_inbound = Application.get_env(:fermix_core, :mcp_inbound, InboundConfig.default())
@@ -29,6 +31,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :tools, tools)
+      Application.put_env(:fermix_core, :plugins, plugins)
+      Application.put_env(:fermix_core, :oauth, oauth)
       restore_sandbox(sandbox)
       Application.put_env(:fermix_core, :mcp_servers, mcp_servers)
       Application.put_env(:fermix_core, :mcp_inbound, mcp_inbound)
@@ -161,6 +165,70 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :parallel_api_key) == "@keyring"
     assert Keyword.get(web_search, :brave_api_key) == "@keyring"
     assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
+  end
+
+  test "save/load round-trips plugin and oauth provider config" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        plugins: [
+          enabled: ["google_calendar"],
+          entries: %{
+            "google_calendar" => [
+              scope_profile: "readonly",
+              auth_profile: "google_calendar:primary"
+            ],
+            "removed_plugin" => [
+              enabled: false,
+              unsupported: true
+            ]
+          }
+        ],
+        oauth: %{
+          "google" => [
+            client_type: "desktop_public_pkce",
+            client_id: "123.apps.googleusercontent.com",
+            client_secret: "desktop-secret",
+            redirect_host: "127.0.0.1",
+            redirect_port: 1455
+          ]
+        }
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.plugins]"
+    assert contents =~ ~s(enabled = ["google_calendar"])
+    assert contents =~ "[fermix_core.plugins.google_calendar]"
+    assert contents =~ ~s(auth_profile = "google_calendar:primary")
+    assert contents =~ "[fermix_core.plugins.removed_plugin]"
+    assert contents =~ "unsupported = true"
+    assert contents =~ "[fermix_core.oauth.google]"
+    assert contents =~ ~s(client_secret = "desktop-secret")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+    oauth = Keyword.get(loaded.fermix_core, :oauth, [])
+
+    assert Keyword.get(plugins, :enabled) == ["google_calendar"]
+    entries = Keyword.get(plugins, :entries, %{})
+    assert Keyword.get(entries["google_calendar"], :scope_profile) == "readonly"
+    assert Keyword.get(entries["removed_plugin"], :unsupported) == true
+
+    google = Map.get(oauth, "google", [])
+    assert Keyword.get(google, :client_type) == "desktop_public_pkce"
+    assert Keyword.get(google, :client_id) == "123.apps.googleusercontent.com"
+    assert Keyword.get(google, :client_secret) == "desktop-secret"
+    assert Keyword.get(google, :redirect_port) == 1455
   end
 
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do

@@ -7,9 +7,10 @@ defmodule FermixCore.Agents.SkillRegistry do
 
     * `core_dir` (default: `priv/skills` inside the Fermix release) → `:operator`
     * `local_dir` (default: `$FERMIX_HOME/skills`, i.e. `~/.fermix/skills`) → `:operator`
-    * `plugin_dir` (default: `$FERMIX_HOME/skills/_plugins`) → `:guest`
+    * `plugin_dir` (legacy `$FERMIX_HOME/skills/_plugins`) → `:guest`
+    * `plugin_skill_dirs` (enabled bundled plugin skill roots) → `:guest`
 
-  The local and plugin roots resolve through `ConfigStore` so they follow
+  The local and legacy plugin roots resolve through `ConfigStore` so they follow
   `FERMIX_HOME` (dev daemons, tests) instead of hardcoding the real home.
 
   Bundled and user-installed skills are operator-trusted (the operator
@@ -28,6 +29,7 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Setup.ConfigStore
 
   @type skill_snapshot :: %{String.t() => AgentDefinition.t()}
@@ -75,7 +77,9 @@ defmodule FermixCore.Agents.SkillRegistry do
     dirs = %{
       core_dir: Keyword.get(opts, :core_dir, default_core_dir()),
       local_dir: local_dir,
-      plugin_dir: Keyword.get(opts, :plugin_dir, default_plugin_dir(local_dir))
+      plugin_dir: Keyword.get(opts, :plugin_dir, default_plugin_dir(local_dir)),
+      plugin_skill_dirs:
+        Keyword.get(opts, :plugin_skill_dirs, PluginRegistry.enabled_skill_dirs())
     }
 
     capability_registry = Keyword.get(opts, :capability_registry)
@@ -127,22 +131,21 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   def handle_call(:reload, _from, state) do
     cleanup_stale_skill_capabilities(state.capability_registry)
-    {definitions, errors} = discover(state.dirs, state.capability_registry)
+    dirs = refresh_plugin_skill_dirs(state.dirs)
+    {definitions, errors} = discover(dirs, state.capability_registry)
     log_discovery_errors(errors)
 
     version = state.version + 1
     summary = reload_summary(state.definitions, definitions, errors, version)
 
     {:reply, {:ok, summary},
-     %{state | definitions: definitions, errors: errors, version: version}}
+     %{state | dirs: dirs, definitions: definitions, errors: errors, version: version}}
   end
 
   defp discover(dirs, capability_registry) do
-    [:core_dir, :local_dir, :plugin_dir]
-    |> Enum.flat_map(fn key ->
-      dir = Map.fetch!(dirs, key)
-      list_skill_paths(dir)
-    end)
+    dirs
+    |> discovery_dirs()
+    |> Enum.flat_map(fn {_source, dir} -> list_skill_paths(dir) end)
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.reduce({%{}, []}, fn path, {definitions, errors} ->
@@ -189,9 +192,29 @@ defmodule FermixCore.Agents.SkillRegistry do
     cond do
       under?(skill_dir, dirs.core_dir) -> :operator
       under?(skill_dir, dirs.plugin_dir) -> :guest
+      under_any?(skill_dir, Map.get(dirs, :plugin_skill_dirs, [])) -> :guest
       under?(skill_dir, dirs.local_dir) -> :operator
       true -> :guest
     end
+  end
+
+  defp discovery_dirs(dirs) do
+    base = [
+      {:core_dir, Map.get(dirs, :core_dir)},
+      {:local_dir, Map.get(dirs, :local_dir)},
+      {:plugin_dir, Map.get(dirs, :plugin_dir)}
+    ]
+
+    plugin_dirs =
+      dirs
+      |> Map.get(:plugin_skill_dirs, [])
+      |> Enum.map(&{:plugin_skill_dir, &1})
+
+    base ++ plugin_dirs
+  end
+
+  defp refresh_plugin_skill_dirs(dirs) do
+    Map.put(dirs, :plugin_skill_dirs, PluginRegistry.enabled_skill_dirs())
   end
 
   defp under?(_path, nil), do: false
@@ -202,6 +225,10 @@ defmodule FermixCore.Agents.SkillRegistry do
 
     expanded_path == expanded_root or
       String.starts_with?(expanded_path, expanded_root <> "/")
+  end
+
+  defp under_any?(path, roots) when is_list(roots) do
+    Enum.any?(roots, &under?(path, &1))
   end
 
   defp validate_no_capability_collision(_definition, nil), do: :ok
