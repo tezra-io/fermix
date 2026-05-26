@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "name": "google_drive",
+  "display_name": "Google Drive",
+  "description": "Search Drive file metadata from Fermix with a connected Google account.",
+  "category": "productivity",
+  "version": "1.0.0",
+  "default_enabled": false,
+  "interface": {
+    "short_description": "Work across Drive files",
+    "developer_name": "Fermix",
+    "brand_color": "#0F9D58",
+    "icon": "assets/app-icon.png",
+    "logo": "assets/app-icon.png",
+    "privacy_policy_url": "https://policies.google.com/privacy",
+    "terms_of_service_url": "https://policies.google.com/terms"
+  },
+  "auth": {
+    "type": "oauth2",
+    "provider": "google",
+    "profile_key": "google_drive",
+    "account_mode": "single",
+    "scope_profiles": {
+      "readonly": {
+        "display_name": "Read Drive metadata",
+        "default": true,
+        "scopes": [
+          "openid",
+          "email",
+          "profile",
+          "https://www.googleapis.com/auth/drive.metadata.readonly"
+        ]
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "google_drive.search_files",
+      "policy_class": "external_api",
+      "read_only": true,
+      "requires_scope_profile": "readonly"
+    }
+  ],
+  "skills": [
+    {
+      "name": "google-drive",
+      "path": "skills/google-drive/SKILL.md"
+    }
+  ],
+  "health_check": {
+    "kind": "local_readiness",
+    "requires_auth": true
+  }
+}

@@ -12,6 +12,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -23,6 +24,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
+  alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
@@ -106,10 +108,12 @@ defmodule FermixCore.Application do
       [
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Trace, trace_opts()},
+        TokenSupervisor,
         maybe_token_manager(),
         CapabilityRegistry,
         BuiltinSeeder,
         {CommandCapabilities, capability_registry: CapabilityRegistry},
+        {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,

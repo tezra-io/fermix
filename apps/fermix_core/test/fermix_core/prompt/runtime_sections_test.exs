@@ -172,4 +172,51 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
              ~r/## Runtime Contract.*## Built-in Capability Catalog.*## Skill Catalog/s
            )
   end
+
+  test "build/2 renders a plugin index from supplied plugin entries" do
+    plugins = [
+      %{
+        name: "google_calendar",
+        tools: ["google_calendar.search_events"],
+        skills: ["google-calendar"]
+      }
+    ]
+
+    content = RuntimeSections.build([], capabilities: [], plugins: plugins)
+
+    assert content =~ "## Plugins"
+
+    assert content =~
+             ~s(<plugin name="google_calendar" skill="google-calendar">google_calendar.search_events</plugin>)
+  end
+
+  test "build/2 omits the plugin index when no plugins are supplied" do
+    refute RuntimeSections.build([], capabilities: []) =~ "## Plugins"
+  end
+
+  test "build/2 omits the skill attribute for a plugin with no loaded skill" do
+    plugins = [%{name: "weather", tools: ["weather.lookup"], skills: []}]
+
+    content = RuntimeSections.build([], capabilities: [], plugins: plugins)
+
+    assert content =~ ~s(<plugin name="weather">weather.lookup</plugin>)
+  end
+
+  test "build/2 keeps plugin-owned capabilities out of the built-in catalog" do
+    snapshot = [
+      Capability.new(%{
+        name: "google_calendar.search_events",
+        description: "Google Calendar",
+        parameters: %{"type" => "object"},
+        kind: :builtin,
+        executor: {__MODULE__, :unused, []},
+        policy_class: :external_api,
+        metadata: %{category: :plugin, plugin_owned?: true, plugin: "google_calendar"}
+      })
+    ]
+
+    content = RuntimeSections.build([], capabilities: snapshot)
+
+    refute content =~ "google_calendar.search_events"
+  end
 end
