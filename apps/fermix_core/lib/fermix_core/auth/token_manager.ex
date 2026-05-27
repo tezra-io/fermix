@@ -294,12 +294,13 @@ defmodule FermixCore.Auth.TokenManager do
 
   defp google_provider(config, entry) do
     client_id = Keyword.get(config, :client_id)
+    client_secret = Keyword.get(config, :client_secret)
 
-    if is_binary(client_id) and client_id != "" do
+    if present?(client_id) and present?(client_secret) do
       {:ok,
        OAuthProvider.google(
          client_id: client_id,
-         client_secret: Keyword.get(config, :client_secret),
+         client_secret: client_secret,
          redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
          redirect_port: Keyword.get(config, :redirect_port, 1455),
          scopes: Map.get(entry, :granted_scopes, [])
@@ -308,6 +309,9 @@ defmodule FermixCore.Auth.TokenManager do
       {:error, :needs_client_config}
     end
   end
+
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_value), do: false
 
   defp apply_tokens(entry, tokens) do
     %{

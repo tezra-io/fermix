@@ -40,6 +40,8 @@ defmodule FermixCore.HealthTest do
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]
     )
 
+    Application.put_env(:fermix_core, :realtime, enabled: false)
+
     Application.put_env(:fermix_channels, :telegram,
       enabled: true,
       mode: :webhook,
@@ -75,6 +77,7 @@ defmodule FermixCore.HealthTest do
              grants: Path.join(tmp_home, "grants"),
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
+             plugins: Path.join(tmp_home, "plugins"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),

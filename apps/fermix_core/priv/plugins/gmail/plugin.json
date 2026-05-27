@@ -20,41 +20,26 @@
     "provider": "google",
     "profile_key": "gmail",
     "account_mode": "single",
-    "scope_profiles": {
-      "readonly": {
-        "display_name": "Read mail",
-        "default": true,
-        "scopes": [
-          "openid",
-          "email",
-          "profile",
-          "https://www.googleapis.com/auth/gmail.readonly"
-        ]
-      },
-      "send": {
-        "display_name": "Send mail",
-        "scopes": [
-          "openid",
-          "email",
-          "profile",
-          "https://www.googleapis.com/auth/gmail.readonly",
-          "https://www.googleapis.com/auth/gmail.send"
-        ]
-      }
-    }
+    "scopes": [
+      "openid",
+      "email",
+      "profile",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send"
+    ]
   },
   "tools": [
     {
       "name": "gmail.search_messages",
       "policy_class": "external_api",
       "read_only": true,
-      "requires_scope_profile": "readonly"
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
     },
     {
       "name": "gmail.send_message",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scope_profile": "send"
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.send"]
     }
   ],
   "skills": [

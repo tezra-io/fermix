@@ -13,9 +13,7 @@ defmodule Fermix.CLI.PluginsCommand do
   alias FermixCore.Plugins.Status
 
   @json_switches [json: :boolean]
-  @scope_switches [scope: :string, json: :boolean]
   @login_switches [
-    scope: :string,
     account: :string,
     no_browser: :boolean,
     port: :integer,
@@ -63,8 +61,8 @@ defmodule Fermix.CLI.PluginsCommand do
   end
 
   defp enable(name, argv) do
-    with {:ok, opts} <- parse_opts(argv, @scope_switches),
-         {:ok, _snapshot} <- Config.enable(name, scope_profile: Keyword.get(opts, :scope)) do
+    with {:ok, opts} <- parse_opts(argv, @json_switches),
+         {:ok, _snapshot} <- Config.enable(name) do
       print(%{enabled: name}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("enabled #{name}")
       end)
@@ -175,7 +173,6 @@ defmodule Fermix.CLI.PluginsCommand do
       display_name: plugin.display_name,
       enabled: plugin.name in Config.enabled_plugins(),
       status: Status.status(plugin),
-      scope_profile: Config.configured_scope(plugin),
       account: Status.account_label(plugin)
     }
   end
@@ -185,7 +182,6 @@ defmodule Fermix.CLI.PluginsCommand do
       name: plugin.name,
       display_name: plugin.display_name,
       auth: plugin.auth.type,
-      scope_profiles: plugin.scope_profiles,
       category: plugin.category
     }
   end
@@ -243,7 +239,6 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp login_opts(opts) do
     []
-    |> maybe_put(:scope_profile, Keyword.get(opts, :scope))
     |> maybe_put(:port, Keyword.get(opts, :port))
     |> maybe_put(:timeout_ms, timeout_ms(Keyword.get(opts, :timeout)))
     |> maybe_put_no_browser(Keyword.get(opts, :no_browser, false))
@@ -271,12 +266,12 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp print_plugin_rows(%{plugins: rows}) do
     Enum.each(rows, fn row ->
-      IO.puts("#{row.name}\t#{row.status}\t#{row.scope_profile}\t#{row.account || "-"}")
+      IO.puts("#{row.name}\t#{row.status}\t#{row.account || "-"}")
     end)
   end
 
   defp print_catalog_rows(%{plugins: rows}) do
-    Enum.each(rows, &IO.puts("#{&1.name}\t#{&1.auth}\t#{Enum.join(&1.scope_profiles, ",")}"))
+    Enum.each(rows, &IO.puts("#{&1.name}\t#{&1.auth}\t#{&1.category}"))
   end
 
   defp print_doctor_rows(%{plugins: rows}) do
@@ -322,7 +317,7 @@ defmodule Fermix.CLI.PluginsCommand do
   defp usage do
     IO.puts(:stderr, """
     usage: fermix plugins [list|catalog|enable NAME|disable NAME|doctor [NAME]|reload] [--json]
-           fermix plugins auth [login|reauthorize|refresh|logout] NAME [--scope PROFILE] [--json]
+           fermix plugins auth [login|reauthorize|refresh|logout] NAME [--json]
            fermix plugins auth status [NAME] [--json]
     """)
 

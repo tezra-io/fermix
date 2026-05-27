@@ -83,10 +83,7 @@ defmodule Fermix.CLI.PluginsCommandTest do
     Application.put_env(:fermix_core, :plugins,
       enabled: ["google_calendar"],
       entries: %{
-        "google_calendar" => [
-          scope_profile: "readonly",
-          auth_profile: "google_calendar:primary"
-        ]
+        "google_calendar" => [auth_profile: "google_calendar:primary"]
       }
     )
 
@@ -99,7 +96,6 @@ defmodule Fermix.CLI.PluginsCommandTest do
         auth_mode: "oauth2",
         provider: "google",
         account: %{email: "suj@example.com"},
-        scope_profile: "readonly",
         granted_scopes: [
           "openid",
           "email",

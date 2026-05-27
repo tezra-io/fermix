@@ -7,8 +7,8 @@ defmodule FermixCore.Plugins.Status do
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Plugin
 
-  @spec status(Plugin.t(), String.t() | nil) :: atom()
-  def status(%Plugin{} = plugin, scope_profile \\ nil) do
+  @spec status(Plugin.t()) :: atom()
+  def status(%Plugin{} = plugin) do
     cond do
       plugin.name not in Config.enabled_plugins() ->
         :not_configured
@@ -20,7 +20,7 @@ defmodule FermixCore.Plugins.Status do
         :needs_client_config
 
       true ->
-        auth_status(plugin, scope_profile || Config.configured_scope(plugin))
+        auth_status(plugin)
     end
   end
 
@@ -46,45 +46,23 @@ defmodule FermixCore.Plugins.Status do
     end
   end
 
-  @spec required_scopes(Plugin.t(), String.t()) :: [String.t()]
-  def required_scopes(%Plugin{auth: %{type: :none}}, _scope_profile), do: []
-
-  def required_scopes(%Plugin{} = plugin, scope_profile) do
-    plugin.auth
-    |> Map.get(:scope_profiles, %{})
-    |> Map.get(scope_profile, %{})
-    |> Map.get("scopes", [])
-    |> Enum.filter(&is_binary/1)
-  end
-
-  @spec scope_satisfies?(Plugin.t(), String.t(), String.t()) :: boolean()
-  def scope_satisfies?(%Plugin{} = plugin, selected_profile, required_profile) do
-    selected = MapSet.new(required_scopes(plugin, selected_profile))
-    required = MapSet.new(required_scopes(plugin, required_profile))
-    MapSet.subset?(required, selected)
-  end
-
   defp missing_client_config?(%Plugin{auth: %{provider: "google", type: :oauth2}}) do
-    Config.oauth_provider("google")
-    |> Keyword.get(:client_id)
-    |> blank?()
+    config = Config.oauth_provider("google")
+    blank?(Keyword.get(config, :client_id)) or blank?(Keyword.get(config, :client_secret))
   end
 
   defp missing_client_config?(_plugin), do: false
 
-  defp auth_status(plugin, scope_profile) do
-    auth_profile = Config.auth_profile(plugin)
-    required = required_scopes(plugin, scope_profile)
-
-    case Store.read(auth_profile) do
+  defp auth_status(plugin) do
+    case Store.read(Config.auth_profile(plugin)) do
       {:ok, %{status: "reauthorization_required"}} ->
         :reauthorization_required
 
       {:ok, %{status: "invalidated"}} ->
         :reauthorization_required
 
-      {:ok, entry} ->
-        if scopes_granted?(entry, required), do: :ready, else: :needs_auth
+      {:ok, _entry} ->
+        :ready
 
       {:error, {:provider_missing, _profile}} ->
         :needs_auth
@@ -97,14 +75,8 @@ defmodule FermixCore.Plugins.Status do
     end
   end
 
-  defp scopes_granted?(_entry, []), do: true
-
-  defp scopes_granted?(entry, required) do
-    granted = entry |> Map.get(:granted_scopes, []) |> MapSet.new()
-    required |> MapSet.new() |> MapSet.subset?(granted)
-  end
-
   defp blank?(nil), do: true
   defp blank?(""), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
   defp blank?(_value), do: false
 end

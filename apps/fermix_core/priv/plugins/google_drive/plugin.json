@@ -20,25 +20,19 @@
     "provider": "google",
     "profile_key": "google_drive",
     "account_mode": "single",
-    "scope_profiles": {
-      "readonly": {
-        "display_name": "Read Drive metadata",
-        "default": true,
-        "scopes": [
-          "openid",
-          "email",
-          "profile",
-          "https://www.googleapis.com/auth/drive.metadata.readonly"
-        ]
-      }
-    }
+    "scopes": [
+      "openid",
+      "email",
+      "profile",
+      "https://www.googleapis.com/auth/drive.metadata.readonly"
+    ]
   },
   "tools": [
     {
       "name": "google_drive.search_files",
       "policy_class": "external_api",
       "read_only": true,
-      "requires_scope_profile": "readonly"
+      "requires_scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"]
     }
   ],
   "skills": [

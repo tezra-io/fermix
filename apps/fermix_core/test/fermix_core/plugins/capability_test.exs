@@ -13,7 +13,11 @@ defmodule FermixCore.Plugins.CapabilityTest do
     registry = :"plugin_caps_#{System.unique_integer([:positive])}"
 
     System.put_env("FERMIX_HOME", home)
-    Application.put_env(:fermix_core, :oauth, %{"google" => [client_id: "client"]})
+
+    Application.put_env(:fermix_core, :oauth, %{
+      "google" => [client_id: "client", client_secret: "desktop-secret"]
+    })
+
     start_supervised!({CapabilityRegistry, name: registry})
 
     on_exit(fn ->
@@ -36,10 +40,7 @@ defmodule FermixCore.Plugins.CapabilityTest do
     Application.put_env(:fermix_core, :plugins,
       enabled: ["google_calendar"],
       entries: %{
-        "google_calendar" => [
-          scope_profile: "events_write",
-          auth_profile: "google_calendar:primary"
-        ]
+        "google_calendar" => [auth_profile: "google_calendar:primary"]
       }
     )
 
@@ -48,7 +49,6 @@ defmodule FermixCore.Plugins.CapabilityTest do
                auth_mode: "oauth2",
                provider: "google",
                account: %{email: "suj@example.com"},
-               scope_profile: "events_write",
                granted_scopes: [
                  "openid",
                  "email",
@@ -71,13 +71,40 @@ defmodule FermixCore.Plugins.CapabilityTest do
     assert cap.policy_class == :external_api
     assert cap.metadata.plugin == "google_calendar"
     assert cap.metadata.auth_profile == "google_calendar:primary"
-    assert cap.metadata.scope_profile == "events_write"
+  end
+
+  test "registers only tools whose required scopes were granted", %{registry: registry} do
+    Application.put_env(:fermix_core, :plugins,
+      enabled: ["google_calendar"],
+      entries: %{"google_calendar" => [auth_profile: "google_calendar:primary"]}
+    )
+
+    assert :ok =
+             Store.write("google_calendar:primary", %{
+               auth_mode: "oauth2",
+               provider: "google",
+               account: %{email: "suj@example.com"},
+               granted_scopes: [
+                 "openid",
+                 "email",
+                 "profile",
+                 "https://www.googleapis.com/auth/calendar.readonly"
+               ],
+               tokens: %{access_token: "AT", refresh_token: "RT"},
+               expires_at: DateTime.utc_now() |> DateTime.add(3600),
+               last_refresh: nil,
+               status: "ready"
+             })
+
+    assert {:ok, %{registered: names}} = Capabilities.reload(registry)
+    assert "google_calendar.search_events" in names
+    refute "google_calendar.create_event" in names
   end
 
   test "unregisters plugin tools when plugin is disabled", %{registry: registry} do
     Application.put_env(:fermix_core, :plugins,
       enabled: [],
-      entries: %{"google_calendar" => [enabled: false, scope_profile: "readonly"]}
+      entries: %{"google_calendar" => [enabled: false]}
     )
 
     assert {:ok, %{registered: []}} = Capabilities.reload(registry)

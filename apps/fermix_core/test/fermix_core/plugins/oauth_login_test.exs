@@ -89,7 +89,6 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
 
     assert {:ok, entry} =
              Auth.login("google_calendar",
-               scope_profile: "readonly",
                port: port,
                opener: opener,
                timeout_ms: 5_000,
@@ -100,7 +99,6 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
 
     assert entry.provider == "google"
     assert entry.account.email == "suj@example.com"
-    assert entry.scope_profile == "readonly"
 
     assert {:ok, stored} = Store.read("google_calendar:primary")
     assert stored.tokens.access_token == "google_at"
@@ -129,7 +127,16 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     Application.put_env(:fermix_core, :oauth, %{})
 
     assert {:error, :needs_client_config} =
-             Auth.login("google_calendar", scope_profile: "readonly")
+             Auth.login("google_calendar")
+  end
+
+  test "Google OAuth login requires the desktop secret" do
+    Application.put_env(:fermix_core, :oauth, %{
+      "google" => [client_id: "123.apps.googleusercontent.com"]
+    })
+
+    assert {:error, :needs_client_config} =
+             Auth.login("google_calendar")
   end
 
   test "userinfo failure does not discard minted OAuth tokens" do
@@ -170,7 +177,6 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
 
     assert {:ok, entry} =
              Auth.login("google_calendar",
-               scope_profile: "readonly",
                port: port,
                opener: opener,
                timeout_ms: 5_000,

@@ -28,7 +28,7 @@ Use `tool_help` when exact parameters, examples, or failure modes for one built-
 
 Built-ins ship with the binary and do not need installation. They are always present unless a future built-in explicitly requires setup and is not configured.
 
-Skills live under the Fermix skills directories. Core skills ship under `priv/skills`; local operator skills live under `~/.fermix/skills`; plugin skills live under `~/.fermix/skills/_plugins`. Skills can have their own instructions and allowed-tool boundaries.
+Skills live under the Fermix skills directories. Core skills ship under `priv/skills`; local operator skills live under `~/.fermix/skills`; enabled plugin skills are seeded under `~/.fermix/plugins/<plugin>/skills` and load with guest trust. Skills can have their own instructions and allowed-tool boundaries.
 
 ## What Fermix can do
 

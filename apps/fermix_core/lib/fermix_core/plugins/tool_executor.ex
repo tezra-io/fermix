@@ -316,10 +316,10 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp format_scope_error(plugin_name, tool) do
-    profile = Map.get(tool, "requires_scope_profile", "requested")
+    scopes = tool |> Map.get("requires_scopes", []) |> Enum.join(", ")
 
-    "#{plugin_name} needs `#{profile}`. Run `fermix plugins auth reauthorize #{plugin_name} " <>
-      "--scope #{profile}`."
+    "#{plugin_name} is missing a required scope (#{scopes}). " <>
+      "Run `fermix plugins auth reauthorize #{plugin_name}` and grant it at sign-in."
   end
 
   defp format_auth_error(plugin_name, :reauthorization_required) do

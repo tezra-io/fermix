@@ -1,5 +1,5 @@
 defmodule FermixCore.Agents.SkillRegistryTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.SkillRegistry
@@ -50,6 +50,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
          name: :"skill_registry_#{suffix}",
          skills_dir: skills_dir,
          core_dir: nil,
+         plugin_skill_dirs: [],
          seed_defaults: false}
       )
 
@@ -150,6 +151,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            skills_dir: skills_dir,
            core_dir: nil,
            bundled_dir: bundled,
+           plugin_skill_dirs: [],
            seed_defaults: true},
           id: :"seeded_skill_registry_child_#{System.unique_integer([:positive])}"
         )
@@ -173,6 +175,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"classifier_core_#{System.unique_integer([:positive])}",
            skills_dir: local,
            core_dir: core,
+           plugin_skill_dirs: [],
            seed_defaults: false},
           id: :"classifier_core_child_#{System.unique_integer([:positive])}"
         )
@@ -193,6 +196,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"classifier_local_#{System.unique_integer([:positive])}",
            skills_dir: local,
            core_dir: nil,
+           plugin_skill_dirs: [],
            seed_defaults: false},
           id: :"classifier_local_child_#{System.unique_integer([:positive])}"
         )
@@ -201,12 +205,13 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert definition.trust == :operator
     end
 
-    test "skills under the plugin dir are tagged as :guest (untrusted)" do
-      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
-      plugin_dir = Path.join(local, "_plugins")
-      File.mkdir_p!(plugin_dir)
-      write_skill(plugin_dir, "plugin-skill", "Plugin skill body.")
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
+    test "skills under workspace plugins are tagged as :guest (untrusted)" do
+      home = Path.join(System.tmp_dir!(), "fermix-home-#{System.unique_integer([:positive])}")
+      local = Path.join(home, "skills")
+      plugin_skills = Path.join([home, "plugins", "fixture_plugin", "skills"])
+      File.mkdir_p!(plugin_skills)
+      write_skill(plugin_skills, "plugin-skill", "Plugin skill body.")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       registry =
         start_supervised!(
@@ -214,7 +219,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"classifier_plugin_#{System.unique_integer([:positive])}",
            skills_dir: local,
            core_dir: nil,
-           plugin_dir: plugin_dir,
+           plugin_skill_dirs: [plugin_skills],
            seed_defaults: false},
           id: :"classifier_plugin_child_#{System.unique_integer([:positive])}"
         )
@@ -223,42 +228,23 @@ defmodule FermixCore.Agents.SkillRegistryTest do
       assert definition.trust == :guest
     end
 
-    test "plugin_dir takes precedence over local_dir when nested inside it" do
-      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
-      plugin_dir = Path.join(local, "_plugins")
-      File.mkdir_p!(plugin_dir)
-      write_skill(plugin_dir, "nested-plugin", "Plugin nested inside local dir.")
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
-
-      registry =
-        start_supervised!(
-          {SkillRegistry,
-           name: :"classifier_nested_#{System.unique_integer([:positive])}",
-           skills_dir: local,
-           core_dir: nil,
-           plugin_dir: plugin_dir,
-           seed_defaults: false},
-          id: :"classifier_nested_child_#{System.unique_integer([:positive])}"
-        )
-
-      [definition] = SkillRegistry.list_detailed(registry)
-      # plugin_dir is checked before local_dir in classify_source/2 so a
-      # plugin nested inside local_dir is still tagged :guest.
-      assert definition.trust == :guest
-    end
-
-    test "enabled bundled plugin skills load directly from priv plugins" do
-      local = Path.join(System.tmp_dir!(), "fermix-local-#{System.unique_integer([:positive])}")
+    test "enabled bundled plugin skills seed into the workspace plugins dir" do
+      home = Path.join(System.tmp_dir!(), "fermix-home-#{System.unique_integer([:positive])}")
+      local = Path.join(home, "skills")
       plugins = Application.get_env(:fermix_core, :plugins, [])
+      previous_home = System.get_env("FERMIX_HOME")
+
+      System.put_env("FERMIX_HOME", home)
 
       Application.put_env(:fermix_core, :plugins,
         enabled: ["google_calendar"],
-        entries: %{"google_calendar" => [scope_profile: "readonly"]}
+        entries: %{"google_calendar" => [auth_profile: "google_calendar:primary"]}
       )
 
       on_exit(fn ->
+        restore_env("FERMIX_HOME", previous_home)
         Application.put_env(:fermix_core, :plugins, plugins)
-        FermixTestSupport.SafeRm.rm_rf!(local)
+        FermixTestSupport.SafeRm.rm_rf!(home)
       end)
 
       registry =
@@ -267,21 +253,43 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"classifier_bundled_plugin_#{System.unique_integer([:positive])}",
            skills_dir: local,
            core_dir: nil,
-           plugin_dir: Path.join(local, "_plugins"),
            seed_defaults: false},
           id: :"classifier_bundled_plugin_child_#{System.unique_integer([:positive])}"
         )
 
+      skill_path =
+        Path.join([
+          home,
+          "plugins",
+          "google_calendar",
+          "skills",
+          "google-calendar",
+          "SKILL.md"
+        ])
+
       [definition] = SkillRegistry.list_detailed(registry)
       assert definition.name == "google-calendar"
       assert definition.trust == :guest
+      assert definition.source_path == skill_path
+      assert File.exists?(skill_path)
 
-      assert definition.source_path =~
-               "/priv/plugins/google_calendar/skills/google-calendar/SKILL.md"
+      File.write!(skill_path, """
+      ---
+      name: google-calendar
+      description: Workspace copy.
+      ---
+      Workspace override.
+      """)
 
-      refute File.exists?(Path.join(local, "_plugins/google-calendar"))
+      assert ["google-calendar"] = reload_names(registry)
+      assert {:ok, definition} = SkillRegistry.load(registry, "google-calendar")
+      assert definition.description == "Workspace copy."
+      assert definition.system_prompt == "Workspace override."
     end
   end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 
   describe "capability_registry integration" do
     test "skill cannot evict an existing built-in capability with the same name", %{
@@ -308,6 +316,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"skill_collide_#{System.unique_integer([:positive])}",
            skills_dir: skills_dir,
            core_dir: nil,
+           plugin_skill_dirs: [],
            seed_defaults: false,
            capability_registry: cap_registry},
           id: :"skill_collide_child_#{System.unique_integer([:positive])}"
@@ -355,6 +364,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"skill_with_caps_#{System.unique_integer([:positive])}",
            skills_dir: skills_dir,
            core_dir: nil,
+           plugin_skill_dirs: [],
            seed_defaults: false,
            capability_registry: cap_registry},
           id: :"skill_with_caps_child_#{System.unique_integer([:positive])}"
@@ -396,6 +406,7 @@ defmodule FermixCore.Agents.SkillRegistryTest do
            name: :"skill_mcp_collide_#{System.unique_integer([:positive])}",
            skills_dir: skills_dir,
            core_dir: nil,
+           plugin_skill_dirs: [],
            seed_defaults: false,
            capability_registry: cap_registry},
           id: :"skill_mcp_collide_child_#{System.unique_integer([:positive])}"

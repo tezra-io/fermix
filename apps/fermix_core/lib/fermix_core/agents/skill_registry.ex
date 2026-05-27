@@ -7,10 +7,9 @@ defmodule FermixCore.Agents.SkillRegistry do
 
     * `core_dir` (default: `priv/skills` inside the Fermix release) → `:operator`
     * `local_dir` (default: `$FERMIX_HOME/skills`, i.e. `~/.fermix/skills`) → `:operator`
-    * `plugin_dir` (legacy `$FERMIX_HOME/skills/_plugins`) → `:guest`
-    * `plugin_skill_dirs` (enabled bundled plugin skill roots) → `:guest`
+    * `plugin_skill_dirs` (enabled plugin skill roots under `$FERMIX_HOME/plugins`) → `:guest`
 
-  The local and legacy plugin roots resolve through `ConfigStore` so they follow
+  Local and plugin roots resolve through `ConfigStore` so they follow
   `FERMIX_HOME` (dev daemons, tests) instead of hardcoding the real home.
 
   Bundled and user-installed skills are operator-trusted (the operator
@@ -77,7 +76,6 @@ defmodule FermixCore.Agents.SkillRegistry do
     dirs = %{
       core_dir: Keyword.get(opts, :core_dir, default_core_dir()),
       local_dir: local_dir,
-      plugin_dir: Keyword.get(opts, :plugin_dir, default_plugin_dir(local_dir)),
       plugin_skill_dirs:
         Keyword.get(opts, :plugin_skill_dirs, PluginRegistry.enabled_skill_dirs())
     }
@@ -191,7 +189,6 @@ defmodule FermixCore.Agents.SkillRegistry do
 
     cond do
       under?(skill_dir, dirs.core_dir) -> :operator
-      under?(skill_dir, dirs.plugin_dir) -> :guest
       under_any?(skill_dir, Map.get(dirs, :plugin_skill_dirs, [])) -> :guest
       under?(skill_dir, dirs.local_dir) -> :operator
       true -> :guest
@@ -201,8 +198,7 @@ defmodule FermixCore.Agents.SkillRegistry do
   defp discovery_dirs(dirs) do
     base = [
       {:core_dir, Map.get(dirs, :core_dir)},
-      {:local_dir, Map.get(dirs, :local_dir)},
-      {:plugin_dir, Map.get(dirs, :plugin_dir)}
+      {:local_dir, Map.get(dirs, :local_dir)}
     ]
 
     plugin_dirs =
@@ -372,10 +368,6 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   defp default_local_dir do
     ConfigStore.workspace_paths().skills
-  end
-
-  defp default_plugin_dir(local_dir) do
-    Path.join(local_dir, "_plugins")
   end
 
   defp default_core_dir do

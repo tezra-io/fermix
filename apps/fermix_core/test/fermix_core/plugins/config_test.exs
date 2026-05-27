@@ -36,12 +36,11 @@ defmodule FermixCore.Plugins.ConfigTest do
   end
 
   test "enables and disables a plugin while retaining auth profile config", %{home: home} do
-    assert {:ok, _snapshot} = Config.enable("google_calendar", scope_profile: "readonly")
+    assert {:ok, _snapshot} = Config.enable("google_calendar")
 
     plugins = Application.get_env(:fermix_core, :plugins)
     assert Keyword.get(plugins, :enabled) == ["google_calendar"]
     entries = Keyword.fetch!(plugins, :entries)
-    assert Keyword.get(entries["google_calendar"], :scope_profile) == "readonly"
     assert Keyword.get(entries["google_calendar"], :auth_profile) == "google_calendar:primary"
 
     assert {:ok, _snapshot} = Config.disable("google_calendar")
@@ -55,49 +54,6 @@ defmodule FermixCore.Plugins.ConfigTest do
     contents = File.read!(Path.join(home, "config.toml"))
     assert contents =~ "[fermix_core.plugins.google_calendar]"
     assert contents =~ "enabled = false"
-  end
-
-  test "default OAuth scope selection does not enable a disabled plugin" do
-    assert {:ok, _snapshot} = Config.set_scope_profile("google_calendar", "readonly")
-
-    plugins = Application.get_env(:fermix_core, :plugins)
-    assert Keyword.get(plugins, :enabled, []) == []
-    entries = Keyword.fetch!(plugins, :entries)
-    assert Keyword.get(entries["google_calendar"], :scope_profile) == "readonly"
-    assert Keyword.get(entries["google_calendar"], :auth_profile) == "google_calendar:primary"
-
-    assert {:ok, _snapshot} = Config.enable("google_calendar")
-
-    plugins = Application.get_env(:fermix_core, :plugins)
-    assert Keyword.get(plugins, :enabled) == ["google_calendar"]
-    entries = Keyword.fetch!(plugins, :entries)
-    assert Keyword.get(entries["google_calendar"], :scope_profile) == "readonly"
-  end
-
-  test "scope upgrade is not persisted before matching OAuth consent" do
-    readonly_scope = ["https://www.googleapis.com/auth/calendar.readonly"]
-
-    assert {:ok, _snapshot} = Config.enable("google_calendar", scope_profile: "readonly")
-
-    :ok =
-      Store.write("google_calendar:primary", %{
-        auth_mode: "oauth2",
-        provider: "google",
-        account: %{email: "suj@example.com"},
-        scope_profile: "readonly",
-        granted_scopes: readonly_scope,
-        tokens: %{access_token: "AT", refresh_token: "RT"},
-        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
-        last_refresh: DateTime.utc_now(),
-        status: "ready"
-      })
-
-    assert {:error, {:authorization_required, "google_calendar", "events_write"}} =
-             Config.set_scope_profile("google_calendar", "events_write")
-
-    plugins = Application.get_env(:fermix_core, :plugins)
-    entries = Keyword.fetch!(plugins, :entries)
-    assert Keyword.get(entries["google_calendar"], :scope_profile) == "readonly"
   end
 
   test "disabling a plugin stops its retained credential refresh manager" do
@@ -114,7 +70,6 @@ defmodule FermixCore.Plugins.ConfigTest do
         auth_mode: "oauth2",
         provider: "google",
         account: %{email: "suj@example.com"},
-        scope_profile: "readonly",
         granted_scopes: ["https://www.googleapis.com/auth/calendar.readonly"],
         tokens: %{access_token: "AT", refresh_token: "RT"},
         expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
@@ -125,7 +80,7 @@ defmodule FermixCore.Plugins.ConfigTest do
     assert {:ok, "AT"} = TokenManager.get_token("google_calendar:primary")
     assert Registry.lookup(TokenRegistry, "google_calendar:primary") != []
 
-    assert {:ok, _snapshot} = Config.enable("google_calendar", scope_profile: "readonly")
+    assert {:ok, _snapshot} = Config.enable("google_calendar")
     assert {:ok, _snapshot} = Config.disable("google_calendar")
 
     assert Registry.lookup(TokenRegistry, "google_calendar:primary") == []
@@ -158,11 +113,19 @@ defmodule FermixCore.Plugins.ConfigTest do
     refute File.exists?(Path.join(System.fetch_env!("FERMIX_HOME"), "config.toml"))
   end
 
-  test "rejects unknown plugins and scope profiles without writing config" do
-    assert {:error, {:unknown_plugin, "missing"}} = Config.enable("missing")
+  test "rejects google oauth config without the desktop secret" do
+    assert {:error, {:missing_oauth_client_field, "google", :client_secret}} =
+             Config.set_oauth_provider("google",
+               client_id: "123.apps.googleusercontent.com",
+               redirect_port: 1455
+             )
 
-    assert {:error, {:unknown_scope_profile, "google_calendar", "bad"}} =
-             Config.enable("google_calendar", scope_profile: "bad")
+    assert Application.get_env(:fermix_core, :oauth) == %{}
+    refute File.exists?(Path.join(System.fetch_env!("FERMIX_HOME"), "config.toml"))
+  end
+
+  test "rejects unknown plugins without writing config" do
+    assert {:error, {:unknown_plugin, "missing"}} = Config.enable("missing")
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     assert Keyword.get(loaded.fermix_core, :plugins) == []

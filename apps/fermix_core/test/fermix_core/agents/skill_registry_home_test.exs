@@ -14,7 +14,7 @@ defmodule FermixCore.Agents.SkillRegistryHomeTest do
     System.put_env("FERMIX_HOME", home)
     on_exit(fn -> restore_env("FERMIX_HOME", previous) end)
 
-    # No skills_dir/plugin_dir opts: force the FERMIX_HOME-derived defaults.
+    # No skills_dir opts: force the FERMIX_HOME-derived defaults.
     # core_dir: nil isolates discovery from the bundled priv/skills set.
     registry =
       start_supervised!(
