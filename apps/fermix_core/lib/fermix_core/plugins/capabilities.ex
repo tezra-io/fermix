@@ -26,12 +26,12 @@ defmodule FermixCore.Plugins.Capabilities do
   end
 
   defp register_plugin(server, %Plugin{} = plugin) do
-    scope_profile = Config.configured_scope(plugin)
+    granted = plugin |> Status.granted_scopes() |> MapSet.new()
 
     plugin.tools
-    |> Enum.filter(&tool_available?(plugin, scope_profile, &1))
+    |> Enum.filter(&tool_granted?(granted, &1))
     |> Enum.flat_map(fn tool ->
-      capability = capability(plugin, scope_profile, tool)
+      capability = capability(plugin, tool)
 
       case CapabilityRegistry.register(server, capability) do
         :ok -> [capability.name]
@@ -40,12 +40,14 @@ defmodule FermixCore.Plugins.Capabilities do
     end)
   end
 
-  defp tool_available?(plugin, selected_profile, tool) do
-    required_profile = Map.get(tool, "requires_scope_profile", selected_profile)
-    Status.scope_satisfies?(plugin, selected_profile, required_profile)
+  defp tool_granted?(granted, tool) do
+    tool
+    |> Map.get("requires_scopes", [])
+    |> MapSet.new()
+    |> MapSet.subset?(granted)
   end
 
-  defp capability(plugin, scope_profile, tool) do
+  defp capability(plugin, tool) do
     name = Map.fetch!(tool, "name")
     auth_profile = Config.auth_profile(plugin)
 
@@ -61,7 +63,6 @@ defmodule FermixCore.Plugins.Capabilities do
         plugin: plugin.name,
         plugin_tool: name,
         auth_profile: auth_profile,
-        scope_profile: scope_profile,
         read_only?: Map.get(tool, "read_only") == true,
         category: :plugin,
         when_to_use: plugin.display_name,

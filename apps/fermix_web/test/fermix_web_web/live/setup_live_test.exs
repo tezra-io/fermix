@@ -3,6 +3,9 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias FermixCore.Auth.Store
+  alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Setup.ConfigStore
 
   setup do
@@ -119,16 +122,62 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ "Weather"
       assert html =~ "OAuth desktop client"
       assert html =~ "coming later"
+      refute html =~ "data-plugin-auth-trigger"
       refute html =~ "Installed skills"
     end
 
-    test "plugins pane saves OAuth config and enables plugins", %{
+    test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do
+      parent = self()
+
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, _opts ->
+        send(parent, {:unexpected_plugin_auth, name})
+        {:error, :unexpected_auth_start}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      html =
+        view
+        |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
+        |> render_click()
+
+      assert html =~ "Save a Google OAuth desktop client first"
+      refute_receive {:unexpected_plugin_auth, _name}, 50
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      refute "google_calendar" in Keyword.get(plugins, :enabled, [])
+    end
+
+    test "saving Google OAuth requires a desktop secret before auth opens", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_google_oauth\"]",
+          google_oauth_form: %{client_id: "123.apps.googleusercontent.com", redirect_port: "1455"}
+        )
+        |> render_submit()
+
+      assert html =~ "Google OAuth Client secret is required."
+      refute html =~ ~s(data-plugin-auth-trigger="true")
+      assert Application.get_env(:fermix_core, :oauth, %{}) == %{}
+    end
+
+    test "plugins pane saves OAuth config and enables plugins after auth succeeds", %{
       conn: conn,
       tmp_home: tmp_home
     } do
-      Application.put_env(:fermix_web, :plugin_auth_runner, fn _name, opts ->
-        Keyword.fetch!(opts, :opener).("https://auth.example/login")
-        {:error, :test_auth_skipped}
+      parent = self()
+
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, opts ->
+        Keyword.fetch!(opts, :opener).("https://auth.example/#{name}")
+        :ok = write_ready_plugin_auth(name)
+        {:ok, _snapshot} = PluginConfig.enable(name)
+        send(parent, {:plugin_auth_started, name})
+        {:ok, %{status: "ready"}}
       end)
 
       {:ok, view, _html} = live(conn, "/setup")
@@ -150,29 +199,32 @@ defmodule FermixWebWeb.SetupLiveTest do
       google = Application.get_env(:fermix_core, :oauth) |> Map.fetch!("google")
       assert Keyword.get(google, :client_id) == "123.apps.googleusercontent.com"
       assert Keyword.get(google, :client_secret) == "desktop-secret"
+      assert render(view) =~ ~s(data-plugin-auth-trigger="true")
 
       html =
         view
         |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_drive"]|)
         |> render_click()
 
-      assert html =~ "Needs auth"
+      assert html =~ "Opening Google Drive sign-in"
+      assert_receive {:plugin_auth_started, "google_drive"}
+      html = render(view)
+      assert html =~ "Google Drive connected."
+      assert html =~ "Ready"
+
       plugins = Application.get_env(:fermix_core, :plugins)
-      assert "google_drive" in Keyword.get(plugins, :enabled)
+      assert "google_drive" in Keyword.get(plugins, :enabled, [])
 
       html =
         view
         |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
         |> render_click()
 
-      assert html =~ "Needs auth"
-
-      html =
-        view
-        |> element(~s|button[phx-click="plugin_connect"][phx-value-name="google_calendar"]|)
-        |> render_click()
-
       assert html =~ "Opening Google Calendar sign-in"
+      assert_receive {:plugin_auth_started, "google_calendar"}
+      html = render(view)
+      assert html =~ "Google Calendar connected."
+      assert html =~ "Ready"
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ "[fermix_core.oauth.google]"
@@ -181,69 +233,13 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(enabled = ["google_drive", "google_calendar"])
     end
 
-    test "oauth scope selection is staged until the CLI consent flow succeeds", %{
-      conn: conn,
-      tmp_home: tmp_home
-    } do
-      parent = self()
-
-      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, opts ->
-        send(parent, {:plugin_auth_started, name, Keyword.fetch!(opts, :scope_profile)})
-        Keyword.fetch!(opts, :opener).("https://auth.example/#{name}")
-        {:error, :test_auth_skipped}
-      end)
-
-      {:ok, view, _html} = live(conn, "/setup")
-
-      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
-
-      view
-      |> form("form[phx-submit=\"save_google_oauth\"]",
-        google_oauth_form: %{
-          client_id: "123.apps.googleusercontent.com",
-          client_secret: "desktop-secret",
-          redirect_port: "1455"
-        }
-      )
-      |> render_submit()
-
-      view
-      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
-      |> render_click()
-
-      assert_receive {:plugin_auth_started, "google_calendar", "readonly"}
-
-      html =
-        view
-        |> form("#plugin-scope-google_calendar", %{
-          "plugin" => "google_calendar",
-          "scope_profile" => "events_write"
-        })
-        |> render_change()
-
-      assert html =~ "events_write"
-
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
-      refute contents =~ ~s(scope_profile = "events_write")
-
-      html =
-        view
-        |> element(~s|button[phx-click="plugin_connect"][phx-value-name="google_calendar"]|)
-        |> render_click()
-
-      assert_receive {:plugin_auth_started, "google_calendar", "events_write"}
-      assert html =~ "Opening Google Calendar sign-in"
-      assert render(view) =~ "https://auth.example/google_calendar"
-      refute html =~ "desktop-secret"
-    end
-
     test "oauth plugin enable starts web auth and exposes the provider URL", %{
       conn: conn
     } do
       parent = self()
 
       Application.put_env(:fermix_web, :plugin_auth_runner, fn name, opts ->
-        send(parent, {:plugin_auth_started, name, Keyword.fetch!(opts, :scope_profile)})
+        send(parent, {:plugin_auth_started, name})
         Keyword.fetch!(opts, :opener).("https://auth.example/#{name}")
         {:ok, %{status: "ready"}}
       end)
@@ -266,7 +262,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
       |> render_click()
 
-      assert_receive {:plugin_auth_started, "google_calendar", "readonly"}
+      assert_receive {:plugin_auth_started, "google_calendar"}
       assert render(view) =~ "https://auth.example/google_calendar"
     end
 
@@ -545,6 +541,56 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = view |> element("button", "Apply & restart") |> render_click()
       assert html =~ "Nothing to restart from here"
     end
+  end
+
+  describe "notification banner" do
+    test "styles errors and successes distinctly and no longer nags about restart", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      error_html =
+        view
+        |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
+        |> render_click()
+
+      assert error_html =~ "Save a Google OAuth desktop client first"
+      assert error_html =~ ~s(role="alert")
+      assert error_html =~ "bg-error"
+      assert error_html =~ "hero-x-circle"
+
+      ok_html =
+        view
+        |> form("form[phx-submit=\"save_google_oauth\"]",
+          google_oauth_form: %{
+            client_id: "123.apps.googleusercontent.com",
+            client_secret: "desktop-secret",
+            redirect_port: "1455"
+          }
+        )
+        |> render_submit()
+
+      assert ok_html =~ "Google OAuth client saved."
+      assert ok_html =~ ~s(role="status")
+      assert ok_html =~ "bg-success"
+      assert ok_html =~ "hero-check-circle"
+      refute ok_html =~ "Changes need a restart to take effect"
+    end
+  end
+
+  defp write_ready_plugin_auth(name) do
+    {:ok, plugin} = PluginRegistry.find(name)
+
+    Store.write(PluginConfig.default_auth_profile(plugin), %{
+      auth_mode: "oauth2",
+      provider: plugin.auth.provider,
+      account: %{email: "#{name}@example.com"},
+      scope_profile: "default",
+      granted_scopes: [],
+      tokens: %{access_token: "AT", refresh_token: "RT"},
+      expires_at: DateTime.utc_now() |> DateTime.add(3600),
+      last_refresh: nil,
+      status: "ready"
+    })
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)

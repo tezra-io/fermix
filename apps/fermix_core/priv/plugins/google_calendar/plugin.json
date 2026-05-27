@@ -20,41 +20,26 @@
     "provider": "google",
     "profile_key": "google_calendar",
     "account_mode": "single",
-    "scope_profiles": {
-      "readonly": {
-        "display_name": "Read calendar",
-        "default": true,
-        "scopes": [
-          "openid",
-          "email",
-          "profile",
-          "https://www.googleapis.com/auth/calendar.readonly"
-        ]
-      },
-      "events_write": {
-        "display_name": "Create and update events",
-        "scopes": [
-          "openid",
-          "email",
-          "profile",
-          "https://www.googleapis.com/auth/calendar.readonly",
-          "https://www.googleapis.com/auth/calendar.events"
-        ]
-      }
-    }
+    "scopes": [
+      "openid",
+      "email",
+      "profile",
+      "https://www.googleapis.com/auth/calendar.readonly",
+      "https://www.googleapis.com/auth/calendar.events"
+    ]
   },
   "tools": [
     {
       "name": "google_calendar.search_events",
       "policy_class": "external_api",
       "read_only": true,
-      "requires_scope_profile": "readonly"
+      "requires_scopes": ["https://www.googleapis.com/auth/calendar.readonly"]
     },
     {
       "name": "google_calendar.create_event",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scope_profile": "events_write"
+      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
     }
   ],
   "skills": [

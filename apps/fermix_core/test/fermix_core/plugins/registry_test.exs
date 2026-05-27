@@ -21,7 +21,7 @@ defmodule FermixCore.Plugins.RegistryTest do
     assert drive.display_name == "Google Drive"
     assert drive.auth.type == :oauth2
     assert drive.auth.provider == "google"
-    assert drive.scope_profiles == ["readonly"]
+    assert "https://www.googleapis.com/auth/drive.metadata.readonly" in drive.auth.scopes
     assert Map.get(drive.interface, "logo") == "assets/app-icon.png"
   end
 
@@ -56,33 +56,24 @@ defmodule FermixCore.Plugins.RegistryTest do
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
   end
 
-  test "rejects write tools that require the default read profile" do
+  test "rejects tools without required scopes" do
+    tool = %{"name" => "bad_plugin.read", "read_only" => true}
+    manifest = valid_oauth_manifest("bad_plugin") |> Map.put("tools", [tool])
+
+    assert {:error, {:missing_tool_scopes, "bad_plugin.read"}} =
+             Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
+  end
+
+  test "rejects tools that require a scope outside auth.scopes" do
     tool = %{
       "name" => "bad_plugin.write",
       "read_only" => false,
-      "requires_scope_profile" => "readonly"
+      "requires_scopes" => ["https://www.googleapis.com/auth/gmail.send"]
     }
 
     manifest = valid_oauth_manifest("bad_plugin") |> Map.put("tools", [tool])
 
-    assert {:error, {:write_tool_requires_default_scope, "bad_plugin.write", "readonly"}} =
-             Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
-  end
-
-  test "rejects non-monotonic OAuth scope profiles" do
-    auth =
-      valid_oauth_manifest("bad_plugin")
-      |> Map.fetch!("auth")
-      |> put_in(["scope_profiles", "events_write", "scopes"], [
-        "openid",
-        "email",
-        "profile",
-        "https://www.googleapis.com/auth/calendar.events"
-      ])
-
-    manifest = valid_oauth_manifest("bad_plugin") |> Map.put("auth", auth)
-
-    assert {:error, {:non_monotonic_scope_profile, "events_write", "readonly"}} =
+    assert {:error, {:unknown_tool_scopes, "bad_plugin.write"}} =
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
   end
 
@@ -116,26 +107,13 @@ defmodule FermixCore.Plugins.RegistryTest do
       "provider" => "google",
       "profile_key" => name,
       "account_mode" => "single",
-      "scope_profiles" => %{
-        "readonly" => %{
-          "default" => true,
-          "scopes" => [
-            "openid",
-            "email",
-            "profile",
-            "https://www.googleapis.com/auth/calendar.readonly"
-          ]
-        },
-        "events_write" => %{
-          "scopes" => [
-            "openid",
-            "email",
-            "profile",
-            "https://www.googleapis.com/auth/calendar.readonly",
-            "https://www.googleapis.com/auth/calendar.events"
-          ]
-        }
-      }
+      "scopes" => [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/calendar.readonly",
+        "https://www.googleapis.com/auth/calendar.events"
+      ]
     })
     |> Map.put("health_check", %{"kind" => "local_readiness", "requires_auth" => true})
   end

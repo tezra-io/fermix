@@ -51,6 +51,7 @@ workspace_paths =
     %{
       bootstrap: Path.join(fermix_home, "bootstrap"),
       skills: Path.join(fermix_home, "skills"),
+      plugins: Path.join(fermix_home, "plugins"),
       journals: Path.join(fermix_home, "journals"),
       traces: Path.join(fermix_home, "traces"),
       logs: Path.join(fermix_home, "logs")

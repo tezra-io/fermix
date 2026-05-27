@@ -12,20 +12,17 @@ defmodule FermixCore.Plugins.Auth do
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Runtime
-  alias FermixCore.Plugins.Status
 
   @spec login(String.t(), keyword()) :: {:ok, Store.entry()} | {:error, term()}
   def login(name, opts \\ []) when is_binary(name) and is_list(opts) do
     started_at = System.monotonic_time(:millisecond)
 
     with {:ok, plugin} <- fetch_oauth_plugin(name),
-         {:ok, scope_profile} <- resolve_scope_profile(plugin, opts),
-         {:ok, provider} <- oauth_provider(plugin, scope_profile, opts),
+         {:ok, provider} <- oauth_provider(plugin, opts),
          {:ok, tokens} <- OAuthFlow.start_loopback(provider, flow_opts(opts)),
-         {:ok, granted_scopes} <- validate_granted_scopes(plugin, scope_profile, tokens),
-         entry <- entry_from_tokens(plugin, scope_profile, granted_scopes, tokens),
+         entry <- entry_from_tokens(plugin, tokens),
          :ok <- Store.write(Config.default_auth_profile(plugin), entry),
-         {:ok, _snapshot} <- Config.enable(plugin.name, scope_profile: scope_profile) do
+         {:ok, _snapshot} <- Config.enable(plugin.name) do
       reload_token_manager(plugin)
       emit_auth_event(:login, plugin.name, entry.status, started_at)
       {:ok, entry}
@@ -90,32 +87,23 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
-  defp resolve_scope_profile(plugin, opts) do
-    scope_profile = Keyword.get(opts, :scope_profile) || Config.configured_scope(plugin)
-
-    if scope_profile in plugin.scope_profiles do
-      {:ok, scope_profile}
-    else
-      {:error, {:unknown_scope_profile, plugin.name, scope_profile}}
-    end
-  end
-
-  defp oauth_provider(%Plugin{auth: %{provider: "google"}} = plugin, scope_profile, opts) do
+  defp oauth_provider(%Plugin{auth: %{provider: "google"}} = plugin, opts) do
     config = Config.oauth_provider("google")
     client_id = Keyword.get(config, :client_id)
+    client_secret = Keyword.get(config, :client_secret)
 
     cond do
       Keyword.get(config, :client_type, "desktop_public_pkce") != "desktop_public_pkce" ->
         {:error, {:invalid_oauth_client_type, "google", Keyword.get(config, :client_type)}}
 
-      is_binary(client_id) and client_id != "" ->
+      present?(client_id) and present?(client_secret) ->
         {:ok,
          OAuthProvider.google(
            client_id: client_id,
-           client_secret: Keyword.get(config, :client_secret),
+           client_secret: client_secret,
            redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
            redirect_port: Keyword.get(opts, :port) || Keyword.get(config, :redirect_port, 1455),
-           scopes: Status.required_scopes(plugin, scope_profile)
+           scopes: plugin.auth.scopes
          )}
 
       true ->
@@ -123,9 +111,12 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
-  defp oauth_provider(%Plugin{} = plugin, _scope_profile, _opts) do
+  defp oauth_provider(%Plugin{} = plugin, _opts) do
     {:error, {:unsupported_oauth_provider, plugin.auth.provider}}
   end
+
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_value), do: false
 
   defp flow_opts(opts) do
     []
@@ -150,30 +141,18 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
-  defp validate_granted_scopes(plugin, scope_profile, tokens) do
-    required = Status.required_scopes(plugin, scope_profile)
-    granted = granted_scopes(tokens, required)
-
-    if MapSet.subset?(MapSet.new(required), MapSet.new(granted)) do
-      {:ok, granted}
-    else
-      {:error, {:insufficient_scope, required, granted}}
-    end
-  end
-
   defp granted_scopes(%{scope: scope}, _requested) when is_binary(scope) and scope != "" do
     String.split(scope, ~r/\s+/, trim: true)
   end
 
   defp granted_scopes(_tokens, requested), do: requested
 
-  defp entry_from_tokens(plugin, scope_profile, granted_scopes, tokens) do
+  defp entry_from_tokens(plugin, tokens) do
     %{
       auth_mode: "oauth2",
       provider: plugin.auth.provider,
       account: account_from_userinfo(Map.get(tokens, :userinfo)),
-      scope_profile: scope_profile,
-      granted_scopes: granted_scopes,
+      granted_scopes: granted_scopes(tokens, plugin.auth.scopes),
       tokens: %{
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token
