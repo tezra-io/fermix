@@ -7,7 +7,7 @@ defmodule FermixCore.Plugins.Plugin do
           type: :none | :oauth2,
           provider: String.t() | nil,
           account_mode: String.t() | nil,
-          scope_profiles: map()
+          scopes: [String.t()]
         }
 
   @type t :: %__MODULE__{
@@ -20,7 +20,6 @@ defmodule FermixCore.Plugins.Plugin do
           default_enabled?: boolean(),
           interface: map(),
           auth: auth(),
-          scope_profiles: [String.t()],
           tools: [map()],
           skills: [map()],
           health_check: map() | nil,
@@ -36,7 +35,6 @@ defmodule FermixCore.Plugins.Plugin do
     :version,
     :default_enabled?,
     :auth,
-    :scope_profiles,
     :tools,
     :skills,
     :path
@@ -49,7 +47,6 @@ defmodule FermixCore.Plugins.Plugin do
     :category,
     :version,
     :auth,
-    :scope_profiles,
     :health_check,
     :path,
     default_enabled?: false,

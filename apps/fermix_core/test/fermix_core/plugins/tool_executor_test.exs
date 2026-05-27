@@ -116,13 +116,14 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{
                  "name" => "google_calendar.create_event",
                  "read_only" => false,
-                 "requires_scope_profile" => "events_write"
+                 "requires_scopes" => ["https://www.googleapis.com/auth/calendar.events"]
                }
              )
 
     assert result.success == false
-    assert result.error =~ "needs `events_write`"
-    assert result.error =~ "fermix plugins auth reauthorize google_calendar --scope events_write"
+    assert result.error =~ "missing a required scope"
+    assert result.error =~ "https://www.googleapis.com/auth/calendar.events"
+    assert result.error =~ "fermix plugins auth reauthorize google_calendar"
     refute result.error =~ "secret-access-token"
   end
 

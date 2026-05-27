@@ -23,6 +23,7 @@ defmodule FermixCore.Setup.ConfigStore do
     grants: "grants",
     bootstrap: "bootstrap",
     skills: "skills",
+    plugins: "plugins",
     journals: "journals",
     realtime: "realtime",
     traces: "traces",
@@ -61,6 +62,7 @@ defmodule FermixCore.Setup.ConfigStore do
           grants: String.t(),
           bootstrap: String.t(),
           skills: String.t(),
+          plugins: String.t(),
           journals: String.t(),
           realtime: String.t(),
           traces: String.t(),
@@ -330,29 +332,7 @@ defmodule FermixCore.Setup.ConfigStore do
         end
       end)
 
-    if result == :ok, do: cleanup_generated_plugin_skill_dir()
     result
-  end
-
-  defp cleanup_generated_plugin_skill_dir do
-    plugin_dir = Path.join(workspace_paths().skills, "_plugins")
-
-    case File.ls(plugin_dir) do
-      {:ok, []} ->
-        _ = File.rmdir(plugin_dir)
-        :ok
-
-      {:ok, _entries} ->
-        Logger.warning("Leaving #{plugin_dir} in place because it contains files.")
-        :ok
-
-      {:error, :enoent} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("Could not inspect #{plugin_dir}: #{inspect(reason)}")
-        :ok
-    end
   end
 
   defp empty_runtime_config do

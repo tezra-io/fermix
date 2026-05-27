@@ -4,6 +4,7 @@ defmodule FermixCore.Plugins.Registry do
   """
 
   alias FermixCore.Plugins.Plugin
+  alias FermixCore.Setup.ConfigStore
 
   @manifest_fields ~w(
     schema_version
@@ -20,7 +21,7 @@ defmodule FermixCore.Plugins.Registry do
     health_check
   )
 
-  @auth_fields ~w(type provider profile_key account_mode scope_profiles)
+  @auth_fields ~w(type provider profile_key account_mode scopes)
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
 
   @spec list() :: {:ok, [Plugin.t()]} | {:error, term()}
@@ -54,7 +55,7 @@ defmodule FermixCore.Plugins.Registry do
       {:ok, plugins} ->
         plugins
         |> Enum.filter(&(&1.name in enabled))
-        |> Enum.flat_map(&plugin_skill_dirs/1)
+        |> Enum.flat_map(&seeded_plugin_skill_dirs/1)
         |> Enum.uniq()
         |> Enum.sort()
 
@@ -79,7 +80,6 @@ defmodule FermixCore.Plugins.Registry do
            default_enabled?: Map.get(manifest, "default_enabled", false) == true,
            interface: Map.get(manifest, "interface", %{}),
            auth: auth,
-           scope_profiles: scope_profile_names(auth),
            tools: Map.get(manifest, "tools", []),
            skills: Map.get(manifest, "skills", []),
            health_check: Map.get(manifest, "health_check"),
@@ -159,7 +159,7 @@ defmodule FermixCore.Plugins.Registry do
          provider: Map.get(auth, "provider"),
          profile_key: Map.get(auth, "profile_key"),
          account_mode: Map.get(auth, "account_mode"),
-         scope_profiles: Map.get(auth, "scope_profiles", %{})
+         scopes: Map.get(auth, "scopes", [])
        }}
     end
   end
@@ -170,14 +170,6 @@ defmodule FermixCore.Plugins.Registry do
   defp auth_type("oauth2"), do: {:ok, :oauth2}
   defp auth_type(other), do: {:error, {:invalid_auth_type, other}}
 
-  defp scope_profile_names(%{type: :none}), do: ["basic"]
-
-  defp scope_profile_names(%{scope_profiles: profiles}) when is_map(profiles) do
-    profiles |> Map.keys() |> Enum.sort()
-  end
-
-  defp scope_profile_names(_auth), do: []
-
   defp validate_catalog_name(name, %Plugin{name: name}), do: :ok
 
   defp validate_catalog_name(name, %Plugin{name: plugin_name}),
@@ -185,7 +177,7 @@ defmodule FermixCore.Plugins.Registry do
 
   defp validate_manifest(%Plugin{} = plugin) do
     with :ok <- validate_oauth_health(plugin),
-         :ok <- validate_scope_profiles(plugin),
+         :ok <- validate_scopes(plugin),
          :ok <- validate_tools(plugin),
          :ok <- validate_skills(plugin) do
       :ok
@@ -197,14 +189,17 @@ defmodule FermixCore.Plugins.Registry do
 
   defp validate_oauth_health(_plugin), do: :ok
 
-  defp validate_scope_profiles(%Plugin{auth: %{type: :none}}), do: :ok
+  defp validate_scopes(%Plugin{auth: %{type: :none}}), do: :ok
 
-  defp validate_scope_profiles(%Plugin{auth: %{scope_profiles: profiles}}) do
-    case default_scope_profile(profiles) do
-      {:ok, default_name} -> validate_profile_supersets(profiles, default_name)
-      {:error, _reason} = err -> err
+  defp validate_scopes(%Plugin{name: name, auth: %{scopes: scopes}}) do
+    if is_list(scopes) and scopes != [] and Enum.all?(scopes, &valid_scope?/1) do
+      :ok
+    else
+      {:error, {:invalid_scopes, name}}
     end
   end
+
+  defp valid_scope?(scope), do: is_binary(scope) and scope != ""
 
   defp validate_tools(%Plugin{} = plugin) do
     case reject_duplicate_names(plugin.tools, "name", :duplicate_tool_name) do
@@ -222,7 +217,7 @@ defmodule FermixCore.Plugins.Registry do
   defp validate_tool(%Plugin{name: plugin_name} = plugin, %{"name" => name} = tool)
        when is_binary(name) do
     if String.starts_with?(name, plugin_name <> ".") do
-      validate_write_tool_scope(plugin, tool)
+      validate_tool_scopes(plugin, tool)
     else
       {:error, {:tool_name_not_namespaced, name, plugin_name}}
     end
@@ -230,43 +225,22 @@ defmodule FermixCore.Plugins.Registry do
 
   defp validate_tool(_plugin, tool), do: {:error, {:invalid_tool, tool}}
 
-  defp validate_write_tool_scope(
-         %Plugin{auth: %{type: :oauth2, scope_profiles: profiles}},
-         %{"name" => name, "read_only" => false} = tool
-       ) do
-    required = Map.get(tool, "requires_scope_profile")
+  defp validate_tool_scopes(%Plugin{auth: %{type: :none}}, _tool), do: :ok
 
-    with {:ok, default_name} <- default_scope_profile(profiles) do
-      cond do
-        not is_binary(required) ->
-          {:error, {:missing_tool_scope_profile, name}}
+  defp validate_tool_scopes(%Plugin{auth: %{scopes: scopes}}, %{"name" => name} = tool) do
+    required = Map.get(tool, "requires_scopes", [])
 
-        required == default_name ->
-          {:error, {:write_tool_requires_default_scope, name, default_name}}
+    cond do
+      not (is_list(required) and required != [] and Enum.all?(required, &valid_scope?/1)) ->
+        {:error, {:missing_tool_scopes, name}}
 
-        Map.has_key?(profiles, required) ->
-          :ok
+      not MapSet.subset?(MapSet.new(required), MapSet.new(scopes)) ->
+        {:error, {:unknown_tool_scopes, name}}
 
-        true ->
-          {:error, {:unknown_tool_scope_profile, name, required}}
-      end
+      true ->
+        :ok
     end
   end
-
-  defp validate_write_tool_scope(
-         %Plugin{auth: %{type: :oauth2, scope_profiles: profiles}},
-         %{"name" => name} = tool
-       ) do
-    required = Map.get(tool, "requires_scope_profile")
-
-    if is_nil(required) or Map.has_key?(profiles, required) do
-      :ok
-    else
-      {:error, {:unknown_tool_scope_profile, name, required}}
-    end
-  end
-
-  defp validate_write_tool_scope(_plugin, _tool), do: :ok
 
   defp validate_skills(%Plugin{} = plugin) do
     case reject_duplicate_names(plugin.skills, "name", :duplicate_skill_name) do
@@ -312,48 +286,8 @@ defmodule FermixCore.Plugins.Registry do
     if Regex.match?(@name_regex, name), do: :ok, else: {:error, {:invalid_name, name}}
   end
 
-  defp validate_profile_supersets(profiles, default_name) do
-    default_scopes = profiles |> profile_scopes(default_name) |> MapSet.new()
-
-    profiles
-    |> Map.keys()
-    |> Enum.reject(&(&1 == default_name))
-    |> Enum.reduce_while(:ok, fn profile_name, :ok ->
-      validate_profile_superset(profiles, profile_name, default_name, default_scopes)
-    end)
-  end
-
-  defp validate_profile_superset(profiles, profile_name, default_name, default_scopes) do
-    scopes = profiles |> profile_scopes(profile_name) |> MapSet.new()
-
-    if MapSet.subset?(default_scopes, scopes) do
-      {:cont, :ok}
-    else
-      {:halt, {:error, {:non_monotonic_scope_profile, profile_name, default_name}}}
-    end
-  end
-
   defp continue_or_halt(:ok), do: {:cont, :ok}
   defp continue_or_halt({:error, reason}), do: {:halt, {:error, reason}}
-
-  defp default_scope_profile(profiles) when is_map(profiles) do
-    profiles
-    |> Enum.find(fn {_name, profile} -> Map.get(profile, "default") == true end)
-    |> case do
-      {name, _profile} -> {:ok, name}
-      nil -> profiles |> Map.keys() |> Enum.sort() |> List.first() |> default_scope_result()
-    end
-  end
-
-  defp default_scope_result(nil), do: {:error, :missing_scope_profiles}
-  defp default_scope_result(name), do: {:ok, name}
-
-  defp profile_scopes(profiles, name) do
-    profiles
-    |> Map.get(name, %{})
-    |> Map.get("scopes", [])
-    |> Enum.filter(&is_binary/1)
-  end
 
   defp reject_duplicate_names(items, key, tag) do
     items
@@ -419,17 +353,37 @@ defmodule FermixCore.Plugins.Registry do
   defp tool_names(%Plugin{tools: tools}), do: tools |> Enum.map(&Map.get(&1, "name"))
   defp skill_names(%Plugin{skills: skills}), do: skills |> Enum.map(&Map.get(&1, "name"))
 
-  defp plugin_skill_dirs(%Plugin{skills: []}), do: []
+  defp seeded_plugin_skill_dirs(%Plugin{skills: []}), do: []
 
-  defp plugin_skill_dirs(%Plugin{} = plugin) do
-    plugin_dir = Path.dirname(plugin.path)
+  defp seeded_plugin_skill_dirs(%Plugin{} = plugin) do
+    seed_plugin_skills(plugin)
+    [workspace_plugin_skills_dir(plugin)]
+  end
 
-    plugin.skills
-    |> Enum.map(&Map.get(&1, "path"))
-    |> Enum.filter(&is_binary/1)
-    |> Enum.map(fn rel_path ->
-      plugin_dir |> Path.join(rel_path) |> Path.dirname() |> Path.dirname()
-    end)
+  defp seed_plugin_skills(plugin) do
+    source = source_plugin_skills_dir(plugin)
+    target = workspace_plugin_skills_dir(plugin)
+
+    cond do
+      File.dir?(target) ->
+        :ok
+
+      File.exists?(target) ->
+        raise ArgumentError, "plugin skill target exists but is not a directory: #{target}"
+
+      true ->
+        File.mkdir_p!(Path.dirname(target))
+        File.cp_r!(source, target)
+        :ok
+    end
+  end
+
+  defp source_plugin_skills_dir(%Plugin{} = plugin) do
+    plugin.path |> Path.dirname() |> Path.join("skills")
+  end
+
+  defp workspace_plugin_skills_dir(%Plugin{name: name}) do
+    Path.join([ConfigStore.workspace_paths().plugins, name, "skills"])
   end
 
   defp enabled_plugin_names do

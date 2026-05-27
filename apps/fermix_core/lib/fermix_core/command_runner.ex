@@ -81,19 +81,32 @@ defmodule FermixCore.CommandRunner do
       nil ->
         # The port closed before we could read its OS pid — rare but
         # observed under heavy umbrella-test parallelism. Drain any
-        # final exit_status message; treat as a normal completion.
-        drain_orphan(port, limits.timeout_ms)
+        # queued output and final exit_status message; treat as a
+        # normal completion.
+        drain_orphan(port, deadline, limits, [], 0)
     end
   end
 
-  defp drain_orphan(port, timeout_ms) do
+  defp drain_orphan(port, deadline, limits, acc, total) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
     receive do
+      {^port, {:data, chunk}} ->
+        new_total = total + byte_size(chunk)
+
+        if new_total > limits.max_output_bytes do
+          _ = safe_port_close(port)
+          {:ok, %{exit: 124, stdout: take_prefix(acc, limits.max_output_bytes), truncated?: true}}
+        else
+          drain_orphan(port, deadline, limits, [acc | chunk], new_total)
+        end
+
       {^port, {:exit_status, exit_code}} ->
-        {:ok, %{exit: exit_code, stdout: "", truncated?: false}}
+        {:ok, %{exit: exit_code, stdout: IO.iodata_to_binary(acc), truncated?: false}}
     after
-      timeout_ms ->
+      remaining ->
         _ = safe_port_close(port)
-        {:error, {:timeout, timeout_ms}}
+        {:error, {:timeout, limits.timeout_ms}}
     end
   end
 
@@ -181,7 +194,8 @@ defmodule FermixCore.CommandRunner do
           {k, v}
 
         other ->
-          raise ArgumentError, "CommandRunner env entry must be {String, String}: #{inspect(other)}"
+          raise ArgumentError,
+                "CommandRunner env entry must be {String, String}: #{inspect(other)}"
       end)
 
     [{:env, encoded} | port_opts]

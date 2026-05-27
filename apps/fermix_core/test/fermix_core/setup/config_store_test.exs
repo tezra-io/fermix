@@ -64,6 +64,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              grants: Path.join(tmp_home, "grants"),
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
+             plugins: Path.join(tmp_home, "plugins"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),
@@ -180,7 +181,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           enabled: ["google_calendar"],
           entries: %{
             "google_calendar" => [
-              scope_profile: "readonly",
               auth_profile: "google_calendar:primary"
             ],
             "removed_plugin" => [
@@ -221,7 +221,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert Keyword.get(plugins, :enabled) == ["google_calendar"]
     entries = Keyword.get(plugins, :entries, %{})
-    assert Keyword.get(entries["google_calendar"], :scope_profile) == "readonly"
+    assert Keyword.get(entries["google_calendar"], :auth_profile) == "google_calendar:primary"
     assert Keyword.get(entries["removed_plugin"], :unsupported) == true
 
     google = Map.get(oauth, "google", [])

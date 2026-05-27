@@ -3,28 +3,21 @@ defmodule FermixCore.Plugins.Config do
   Persists plugin enablement and provider client configuration.
   """
 
-  alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Runtime
-  alias FermixCore.Plugins.Status
   alias FermixCore.Setup.ConfigStore
 
   require Logger
 
   @type snapshot_result :: {:ok, ConfigStore.runtime_config()} | {:error, term()}
 
-  @spec enable(String.t(), keyword()) :: snapshot_result()
-  def enable(name, opts \\ []) when is_binary(name) and is_list(opts) do
-    snapshot = ConfigStore.current_snapshot()
-    plugins = get_plugins(snapshot)
-
-    with {:ok, plugin} <- fetch_plugin(name),
-         {:ok, scope_profile} <- resolve_scope_profile(plugin, plugins, opts),
-         :ok <- authorize_scope_change(plugin, scope_profile, plugins) do
-      snapshot
-      |> update_plugins(fn plugins -> enable_plugin(plugins, plugin, scope_profile) end)
+  @spec enable(String.t()) :: snapshot_result()
+  def enable(name) when is_binary(name) do
+    with {:ok, plugin} <- fetch_plugin(name) do
+      ConfigStore.current_snapshot()
+      |> update_plugins(fn plugins -> enable_plugin(plugins, plugin) end)
       |> commit()
     end
   end
@@ -41,19 +34,6 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
-  @spec set_scope_profile(String.t(), String.t()) :: snapshot_result()
-  def set_scope_profile(name, scope_profile)
-      when is_binary(name) and is_binary(scope_profile) do
-    with {:ok, plugin} <- fetch_plugin(name),
-         {:ok, scope_profile} <- validate_scope_profile(plugin, scope_profile),
-         plugins <- get_plugins(ConfigStore.current_snapshot()),
-         :ok <- authorize_scope_change(plugin, scope_profile, plugins) do
-      ConfigStore.current_snapshot()
-      |> update_plugins(fn plugins -> set_plugin_scope(plugins, plugin, scope_profile) end)
-      |> commit()
-    end
-  end
-
   @spec set_oauth_provider(String.t(), keyword()) :: snapshot_result()
   def set_oauth_provider(provider, opts) when is_binary(provider) and is_list(opts) do
     with {:ok, provider_config} <- normalize_oauth_provider(provider, opts) do
@@ -61,13 +41,6 @@ defmodule FermixCore.Plugins.Config do
       |> update_oauth(provider, provider_config)
       |> commit()
     end
-  end
-
-  @spec configured_scope(Plugin.t()) :: String.t()
-  def configured_scope(%Plugin{} = plugin) do
-    plugin
-    |> plugin_entry()
-    |> Keyword.get(:scope_profile, default_scope_profile(plugin))
   end
 
   @spec auth_profile(Plugin.t()) :: String.t()
@@ -93,20 +66,6 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
-  @spec default_scope_profile(Plugin.t()) :: String.t()
-  def default_scope_profile(%Plugin{auth: %{type: :none}}), do: "basic"
-
-  def default_scope_profile(%Plugin{auth: %{scope_profiles: profiles}}) when is_map(profiles) do
-    profiles
-    |> Enum.find(fn {_name, profile} -> Map.get(profile, "default") == true end)
-    |> case do
-      {name, _profile} -> name
-      nil -> profiles |> Map.keys() |> Enum.sort() |> List.first()
-    end
-  end
-
-  def default_scope_profile(_plugin), do: "basic"
-
   @spec default_auth_profile(Plugin.t()) :: String.t()
   def default_auth_profile(%Plugin{name: name, auth: auth}) do
     profile_key = Map.get(auth, :profile_key) || name
@@ -121,76 +80,19 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
-  defp resolve_scope_profile(%Plugin{} = plugin, plugins, opts) do
-    scope =
-      Keyword.get(opts, :scope_profile) ||
-        plugin_entry(plugin, plugins)
-        |> Keyword.get(:scope_profile, default_scope_profile(plugin))
-
-    validate_scope_profile(plugin, scope)
-  end
-
-  defp validate_scope_profile(%Plugin{} = plugin, scope) do
-    if scope in plugin.scope_profiles do
-      {:ok, scope}
-    else
-      {:error, {:unknown_scope_profile, plugin.name, scope}}
-    end
-  end
-
-  defp authorize_scope_change(%Plugin{auth: %{type: :none}}, _scope_profile, _plugins), do: :ok
-
-  defp authorize_scope_change(%Plugin{} = plugin, scope_profile, plugins) do
-    current_scope = plugin_entry(plugin, plugins) |> Keyword.get(:scope_profile)
-
-    cond do
-      scope_profile == current_scope ->
-        :ok
-
-      is_nil(current_scope) and scope_profile == default_scope_profile(plugin) ->
-        :ok
-
-      granted_scope?(plugin, scope_profile, plugins) ->
-        :ok
-
-      true ->
-        {:error, {:authorization_required, plugin.name, scope_profile}}
-    end
-  end
-
-  defp granted_scope?(plugin, scope_profile, plugins) do
-    auth_profile =
-      plugin_entry(plugin, plugins)
-      |> Keyword.get(:auth_profile, default_auth_profile(plugin))
-
-    with {:ok, entry} <- Store.read(auth_profile) do
-      granted = entry |> Map.get(:granted_scopes, []) |> MapSet.new()
-      required = plugin |> Status.required_scopes(scope_profile) |> MapSet.new()
-      MapSet.subset?(required, granted)
-    else
-      _reason -> false
-    end
-  end
-
-  defp get_plugins(snapshot) do
-    snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:plugins, [])
-  end
-
   defp update_plugins(snapshot, fun) when is_function(fun, 1) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     plugins = fermix_core |> Keyword.get(:plugins, []) |> fun.()
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :plugins, plugins))
   end
 
-  defp enable_plugin(plugins, plugin, scope_profile) do
+  defp enable_plugin(plugins, plugin) do
     enabled = plugins |> Keyword.get(:enabled, []) |> add_enabled(plugin.name)
 
     entries =
       plugins
       |> Keyword.get(:entries, %{})
-      |> Map.put(plugin.name, plugin_config(plugin, scope_profile))
+      |> Map.put(plugin.name, plugin_config(plugin))
 
     plugins
     |> Keyword.put(:enabled, enabled)
@@ -216,37 +118,10 @@ defmodule FermixCore.Plugins.Config do
     |> Keyword.put(:entries, entries)
   end
 
-  defp set_plugin_scope(plugins, plugin, scope_profile) do
-    entries =
-      plugins
-      |> Keyword.get(:entries, %{})
-      |> Map.put(plugin.name, scoped_plugin_config(plugins, plugin, scope_profile))
+  defp plugin_config(%Plugin{auth: %{type: :none}}), do: []
 
-    Keyword.put(plugins, :entries, entries)
-  end
-
-  defp plugin_config(%Plugin{auth: %{type: :none}}, scope_profile) do
-    [scope_profile: scope_profile]
-  end
-
-  defp plugin_config(%Plugin{} = plugin, scope_profile) do
-    [
-      scope_profile: scope_profile,
-      auth_profile: default_auth_profile(plugin)
-    ]
-  end
-
-  defp scoped_plugin_config(plugins, %Plugin{auth: %{type: :none}} = plugin, scope_profile) do
-    plugin
-    |> plugin_entry(plugins)
-    |> Keyword.put(:scope_profile, scope_profile)
-  end
-
-  defp scoped_plugin_config(plugins, %Plugin{} = plugin, scope_profile) do
-    plugin
-    |> plugin_entry(plugins)
-    |> Keyword.put(:scope_profile, scope_profile)
-    |> Keyword.put_new(:auth_profile, default_auth_profile(plugin))
+  defp plugin_config(%Plugin{} = plugin) do
+    [auth_profile: default_auth_profile(plugin)]
   end
 
   defp add_enabled(enabled, name) do
@@ -279,10 +154,18 @@ defmodule FermixCore.Plugins.Config do
   defp normalize_oauth_provider("google" = provider, opts) do
     client_type = Keyword.get(opts, :client_type, "desktop_public_pkce")
 
-    if client_type == "desktop_public_pkce" do
-      {:ok, normalized_oauth_provider(opts, client_type)}
-    else
-      {:error, {:invalid_oauth_client_type, provider, client_type}}
+    cond do
+      client_type != "desktop_public_pkce" ->
+        {:error, {:invalid_oauth_client_type, provider, client_type}}
+
+      blank?(Keyword.get(opts, :client_id)) ->
+        {:error, {:missing_oauth_client_field, provider, :client_id}}
+
+      blank?(Keyword.get(opts, :client_secret)) ->
+        {:error, {:missing_oauth_client_field, provider, :client_secret}}
+
+      true ->
+        {:ok, normalized_oauth_provider(opts, client_type)}
     end
   end
 
@@ -298,8 +181,13 @@ defmodule FermixCore.Plugins.Config do
       redirect_host: Keyword.get(opts, :redirect_host, "127.0.0.1"),
       redirect_port: Keyword.get(opts, :redirect_port, 1455)
     ]
-    |> Enum.reject(fn {_key, value} -> is_nil(value) or value == "" end)
+    |> Enum.reject(fn {_key, value} -> blank?(value) end)
   end
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_value), do: false
 
   defp normalize_oauth_map(oauth) when is_map(oauth), do: oauth
 
