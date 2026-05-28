@@ -96,15 +96,14 @@ defmodule FermixCore.Memory.SchedulerTest do
            ]
   end
 
-  test "enqueues periodic rebuilds", %{
+  test "does not schedule periodic rebuilds automatically", %{
     task_supervisor: task_supervisor,
     rebuilder_state: rebuilder_state
   } do
     _scheduler = start_scheduler(task_supervisor, rebuilder_state, periodic_interval_ms: 30)
 
-    assert_receive {:rebuild_started, "main", "default", :periodic, _pid}, 1_000
-    assert_receive {:rebuild_finished, "main", "default", :periodic}, 1_000
-    assert TestRebuilder.calls(rebuilder_state) != []
+    refute_receive {:rebuild_started, "main", "default", :periodic, _pid}, 100
+    assert TestRebuilder.calls(rebuilder_state) == []
   end
 
   test "forwards request provenance and supplies scheduler provenance for periodic rebuilds", %{

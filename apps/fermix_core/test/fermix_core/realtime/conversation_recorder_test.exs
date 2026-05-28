@@ -11,9 +11,9 @@ defmodule FermixCore.Realtime.ConversationRecorderTest do
     end
   end
 
-  defmodule FakeDebouncer do
-    def request(opts, request_opts) do
-      send(Keyword.fetch!(request_opts, :test_pid), {:request_extraction, opts, request_opts})
+  defmodule FakeReviewer do
+    def start_background(opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:request_review, opts})
       :ok
     end
   end
@@ -32,27 +32,22 @@ defmodule FermixCore.Realtime.ConversationRecorderTest do
     assert :ok =
              ConversationRecorder.record_turn(config, "device-1", "user", "hello",
                repo_module: FakeRepo,
-               extraction_debouncer: FakeDebouncer,
+               memory_reviewer: FakeReviewer,
                test_pid: self()
              )
 
     refute_received {:insert_message, _attrs, _opts}
-    refute_received {:request_extraction, _opts, _request_opts}
+    refute_received {:request_review, _opts}
   end
 
-  test "writes voice_turn transcript rows with realtime source metadata and requests extraction" do
+  test "writes voice_turn transcript rows with realtime source metadata and requests review" do
     config = Config.normalize(enabled: true, persist_transcripts: true)
 
     assert :ok =
              ConversationRecorder.record_turn(config, "device-1", "assistant", "hello back",
                repo_module: FakeRepo,
                repo: :memory_repo,
-               extraction_debouncer: FakeDebouncer,
-               extraction_debouncer_server: :debouncer,
-               provider: :openai,
-               memory_store: :memory_store,
-               scheduler: :scheduler,
-               extraction_enabled: true,
+               memory_reviewer: FakeReviewer,
                agent_id: "main",
                owner_id: "owner",
                test_pid: self()
@@ -72,17 +67,18 @@ defmodule FermixCore.Realtime.ConversationRecorderTest do
     assert attrs.metadata.source_id == "local:device-1"
     assert attrs.metadata.device_id == "device-1"
 
-    assert_receive {:request_extraction, extraction_opts, request_opts}
-    assert Keyword.get(request_opts, :server) == :debouncer
+    assert_receive {:request_review, review_opts}
 
-    assert Keyword.get(extraction_opts, :conversation_key) ==
+    assert Keyword.get(review_opts, :conversation_key) ==
              {"realtime", "local:device-1", :root}
 
-    assert Keyword.get(extraction_opts, :source_type) == "realtime"
-    assert Keyword.get(extraction_opts, :source_id) == "local:device-1"
+    assert Keyword.get(review_opts, :source_type) == "realtime"
+    assert Keyword.get(review_opts, :source_id) == "local:device-1"
 
-    assert Keyword.get(extraction_opts, :messages) == [
-             %{role: "assistant", content: "hello back"}
-           ]
+    # The voice path no longer carries a provider/route; the reviewer
+    # resolves the configured main-model route itself.
+    refute Keyword.has_key?(review_opts, :provider)
+    refute Keyword.has_key?(review_opts, :adapter)
+    refute Keyword.has_key?(review_opts, :route_key)
   end
 end

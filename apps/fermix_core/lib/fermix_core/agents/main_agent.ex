@@ -35,8 +35,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Memory.ExtractionDebouncer
-  alias FermixCore.Memory.Scheduler
+  alias FermixCore.Memory.Reviewer
   alias FermixCore.Memory.Store
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
@@ -100,7 +99,7 @@ defmodule FermixCore.Agents.MainAgent do
           provider: atom() | nil,
           model: String.t() | nil,
           memory: %{
-            extraction_enabled: boolean(),
+            review_interval_hours: non_neg_integer(),
             agent_id: String.t(),
             owner_id: String.t()
           }
@@ -142,6 +141,12 @@ defmodule FermixCore.Agents.MainAgent do
     GenServer.call(server, :reload_skills)
   end
 
+  @spec invalidate_runtime_context(GenServer.server(), atom()) :: :ok
+  def invalidate_runtime_context(server \\ __MODULE__, reason \\ :external)
+      when is_atom(reason) do
+    GenServer.call(server, {:invalidate_runtime_context, reason})
+  end
+
   # --- GenServer Callbacks ---
 
   @impl true
@@ -165,16 +170,14 @@ defmodule FermixCore.Agents.MainAgent do
       journal_base_dir: Keyword.get(opts, :journal_base_dir),
       memory_store: Keyword.get(opts, :memory_store, Store),
       memory_repo: Keyword.get(opts, :memory_repo, Config.repo_server(opts)),
-      memory_scheduler: Keyword.get(opts, :memory_scheduler, Scheduler),
-      extraction_debouncer: Keyword.get(opts, :extraction_debouncer, ExtractionDebouncer),
+      memory_reviewer: Keyword.get(opts, :memory_reviewer, Reviewer),
       memory_agent_id: Config.agent_id(opts),
       memory_owner_id: Config.owner_id(opts),
-      extraction_enabled: Config.extraction_enabled?(opts),
       extraction_timeout_ms: Config.extraction_timeout_ms(opts),
-      extraction_context_messages: Config.extraction_context_messages(opts),
-      extraction_min_confidence: Config.extraction_min_confidence(opts),
-      extraction_debounce_ms: Config.extraction_debounce_ms(opts),
-      extraction_model: Config.extraction_model(opts),
+      review_interval_hours: Config.review_interval_hours(opts),
+      review_max_messages: Config.review_max_messages(opts),
+      review_input_token_budget: Config.review_input_token_budget(opts),
+      review_failure_backoff_ms: Config.review_failure_backoff_ms(opts),
       runtime_context: nil,
       conversations: %{},
       compaction_failures: %{},
@@ -284,6 +287,10 @@ defmodule FermixCore.Agents.MainAgent do
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
+  end
+
+  def handle_call({:invalidate_runtime_context, _reason}, _from, state) do
+    {:reply, :ok, %{state | runtime_context: nil}}
   end
 
   def handle_call({:record_auto_compaction_failure, conversation_key, failed_at_ms}, _from, state) do
@@ -534,16 +541,14 @@ defmodule FermixCore.Agents.MainAgent do
       journal_base_dir: state.journal_base_dir,
       memory_store: state.memory_store,
       memory_repo: state.memory_repo,
-      memory_scheduler: state.memory_scheduler,
-      extraction_debouncer: state.extraction_debouncer,
+      memory_reviewer: state.memory_reviewer,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
-      extraction_enabled: state.extraction_enabled,
       extraction_timeout_ms: state.extraction_timeout_ms,
-      extraction_context_messages: state.extraction_context_messages,
-      extraction_min_confidence: state.extraction_min_confidence,
-      extraction_debounce_ms: state.extraction_debounce_ms,
-      extraction_model: state.extraction_model,
+      review_interval_hours: state.review_interval_hours,
+      review_max_messages: state.review_max_messages,
+      review_input_token_budget: state.review_input_token_budget,
+      review_failure_backoff_ms: state.review_failure_backoff_ms,
       runtime_context: state.runtime_context,
       main_agent_server: self(),
       compaction_failures: state.compaction_failures
@@ -655,7 +660,7 @@ defmodule FermixCore.Agents.MainAgent do
         )
 
         deliver_reply(msg, result.response)
-        maybe_start_extraction(msg, history, result.response, state)
+        maybe_start_memory_review(msg, state)
         maybe_auto_compact(conversation_key, state, compaction_target)
 
       {:error, reason} ->
@@ -1165,46 +1170,37 @@ defmodule FermixCore.Agents.MainAgent do
   defp maybe_put_reply_reason(metadata, {:error, reason}), do: Map.put(metadata, :reason, reason)
   defp maybe_put_reply_reason(metadata, _result), do: metadata
 
-  defp maybe_start_extraction(_msg, _history, _assistant_response, %{extraction_enabled: false}),
-    do: :ok
-
-  defp maybe_start_extraction(msg, history, assistant_response, state) do
+  defp maybe_start_memory_review(msg, state) do
     opts =
       [
         provider: state.provider,
-        messages: extraction_messages(history, msg.content, assistant_response),
         agent_id: state.memory_agent_id,
         owner_id: state.memory_owner_id,
         conversation_key: conversation_key(msg),
-        chat_mode: chat_mode(msg),
-        # F-09: forward source trust so the admission gate can refuse to
-        # promote instruction/correction categories from remote-low-trust
-        # channels into the durable prompt context. Trust is set by the
-        # ingress gateway (`FermixChannels.Ingress.Authorizer`).
         source_trust: Map.get(msg, :source_trust),
-        memory_store: state.memory_store,
-        scheduler: state.memory_scheduler,
         repo: state.memory_repo,
+        task_supervisor: state.task_supervisor,
+        main_agent_server: state.main_agent_server,
         extraction_timeout_ms: state.extraction_timeout_ms,
-        extraction_context_messages: state.extraction_context_messages,
-        extraction_min_confidence: state.extraction_min_confidence,
-        extraction_debounce_ms: state.extraction_debounce_ms,
-        extraction_model: state.extraction_model
+        review_interval_hours: state.review_interval_hours,
+        review_max_messages: state.review_max_messages,
+        review_input_token_budget: state.review_input_token_budget,
+        review_failure_backoff_ms: state.review_failure_backoff_ms
       ]
-      |> add_extraction_route(state)
+      |> add_reviewer_route(state)
 
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        ExtractionDebouncer.request(opts, server: state.extraction_debouncer)
+        state.memory_reviewer.start_background(opts)
       end)
 
-    emit_extraction_dispatch_telemetry(msg, result, duration_us)
+    emit_review_dispatch_telemetry(msg, result, duration_us)
     result
   end
 
-  defp emit_extraction_dispatch_telemetry(msg, result, duration_us) do
+  defp emit_review_dispatch_telemetry(msg, result, duration_us) do
     :telemetry.execute(
-      [:fermix, :memory, :extraction_dispatch],
+      [:fermix, :memory, :review_dispatch],
       %{duration_us: duration_us},
       %{
         agent: "main",
@@ -1219,14 +1215,14 @@ defmodule FermixCore.Agents.MainAgent do
   defp dispatch_status({:error, _reason}), do: :error
   defp dispatch_status(_other), do: :ok
 
-  defp add_extraction_route(opts, %{adapter: adapter, adapter_opts: adapter_opts})
+  defp add_reviewer_route(opts, %{adapter: adapter, adapter_opts: adapter_opts})
        when not is_nil(adapter) do
     opts
     |> Keyword.put(:adapter, adapter)
     |> Keyword.put(:adapter_opts, adapter_opts)
   end
 
-  defp add_extraction_route(opts, state) do
+  defp add_reviewer_route(opts, state) do
     case resolve_loop_adapter(state) do
       {:route, route_key, adapter_opts} ->
         opts
@@ -1238,61 +1234,6 @@ defmodule FermixCore.Agents.MainAgent do
         |> Keyword.put(:adapter, mod)
         |> Keyword.put(:adapter_opts, adapter_opts)
     end
-  end
-
-  defp extraction_messages(history, user_content, assistant_content) do
-    history
-    |> Enum.map(fn message ->
-      %{role: message.role, content: message.content}
-    end)
-    |> Kernel.++([
-      %{role: "user", content: user_content},
-      %{role: "assistant", content: assistant_content}
-    ])
-  end
-
-  defp chat_mode(%{chat_mode: mode}) do
-    normalize_chat_mode(mode)
-  end
-
-  defp chat_mode(%{metadata: metadata}) when is_map(metadata) do
-    metadata_chat_mode(metadata)
-  end
-
-  defp chat_mode(_msg), do: :direct
-
-  defp normalize_chat_mode(:direct), do: :direct
-  defp normalize_chat_mode(:shared), do: :shared
-  defp normalize_chat_mode("direct"), do: :direct
-  defp normalize_chat_mode("shared"), do: :shared
-  defp normalize_chat_mode(_mode), do: :direct
-
-  defp metadata_chat_mode(metadata) do
-    explicit_metadata_chat_mode(metadata) || inferred_metadata_chat_mode(metadata) || :direct
-  end
-
-  defp explicit_metadata_chat_mode(metadata) do
-    case metadata_value(metadata, :chat_mode) do
-      value when value in [:direct, "direct"] -> :direct
-      value when value in [:shared, "shared"] -> :shared
-      _other -> nil
-    end
-  end
-
-  defp inferred_metadata_chat_mode(metadata) do
-    cond do
-      metadata_value(metadata, :chat_type) == "private" -> :direct
-      metadata_value(metadata, :chat_type) in ["group", "supergroup", "channel"] -> :shared
-      metadata_value(metadata, :channel_type) == "im" -> :direct
-      metadata_value(metadata, :channel_type) in ["channel", "group", "mpim"] -> :shared
-      not is_nil(metadata_value(metadata, :guild_id)) -> :shared
-      not is_nil(metadata_value(metadata, :group_id)) -> :shared
-      true -> nil
-    end
-  end
-
-  defp metadata_value(metadata, key) do
-    Map.get(metadata, key) || Map.get(metadata, Atom.to_string(key))
   end
 
   defp load_available_skills(skill_registry) do
@@ -1339,7 +1280,7 @@ defmodule FermixCore.Agents.MainAgent do
       provider: Keyword.get(state.adapter_overrides, :provider) || provider_name(state.provider),
       model: Keyword.get(state.adapter_overrides, :model),
       memory: %{
-        extraction_enabled: state.extraction_enabled,
+        review_interval_hours: state.review_interval_hours,
         agent_id: state.memory_agent_id,
         owner_id: state.memory_owner_id
       }

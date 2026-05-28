@@ -602,7 +602,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Memory tuning"
-        subtitle="Tune compaction and background extraction limits for durable memory."
+        subtitle="Tune compaction and background review limits for durable memory."
       />
       <form phx-submit="save_memory" class="mt-6 space-y-5">
         <div class="grid gap-4 lg:grid-cols-2">

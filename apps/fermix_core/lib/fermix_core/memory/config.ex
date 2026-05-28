@@ -13,8 +13,10 @@ defmodule FermixCore.Memory.Config do
   @extraction_timeout_ms 90_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75
-  @extraction_debounce_seconds 86_400
-  @prompt_files_rebuild_hours 12
+  @review_interval_hours 24
+  @review_max_messages 40
+  @review_input_token_budget 4_000
+  @review_failure_backoff_ms 300_000
   @compaction_token_budget 8_000
   @loop_detection_window 10
   @loop_detection_warn_threshold 3
@@ -71,26 +73,6 @@ defmodule FermixCore.Memory.Config do
       Keyword.get(memory_config(), :extraction_min_confidence, @extraction_min_confidence)
     )
     |> normalize_probability!(:extraction_min_confidence)
-  end
-
-  @spec extraction_debounce_ms(options()) :: non_neg_integer()
-  def extraction_debounce_ms(opts \\ []) do
-    cond do
-      Keyword.has_key?(opts, :extraction_debounce_ms) ->
-        opts
-        |> Keyword.fetch!(:extraction_debounce_ms)
-        |> normalize_non_negative_integer!(:extraction_debounce_ms)
-
-      Keyword.has_key?(opts, :extraction_debounce_seconds) ->
-        opts
-        |> Keyword.fetch!(:extraction_debounce_seconds)
-        |> debounce_seconds_to_ms()
-
-      true ->
-        memory_config()
-        |> Keyword.get(:extraction_debounce_seconds, @extraction_debounce_seconds)
-        |> debounce_seconds_to_ms()
-    end
   end
 
   @spec database_path(options()) :: String.t()
@@ -157,6 +139,46 @@ defmodule FermixCore.Memory.Config do
     )
   end
 
+  @spec review_interval_hours(options()) :: non_neg_integer()
+  def review_interval_hours(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :review_interval_hours,
+      Keyword.get(memory_config(), :review_interval_hours, @review_interval_hours)
+    )
+    |> normalize_non_negative_integer!(:review_interval_hours)
+  end
+
+  @spec review_max_messages(options()) :: pos_integer()
+  def review_max_messages(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :review_max_messages,
+      Keyword.get(memory_config(), :review_max_messages, @review_max_messages)
+    )
+    |> normalize_positive_integer!(:review_max_messages)
+  end
+
+  @spec review_input_token_budget(options()) :: pos_integer()
+  def review_input_token_budget(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :review_input_token_budget,
+      Keyword.get(memory_config(), :review_input_token_budget, @review_input_token_budget)
+    )
+    |> normalize_positive_integer!(:review_input_token_budget)
+  end
+
+  @spec review_failure_backoff_ms(options()) :: non_neg_integer()
+  def review_failure_backoff_ms(opts \\ []) do
+    opts
+    |> Keyword.get(
+      :review_failure_backoff_ms,
+      Keyword.get(memory_config(), :review_failure_backoff_ms, @review_failure_backoff_ms)
+    )
+    |> normalize_non_negative_integer!(:review_failure_backoff_ms)
+  end
+
   @spec compaction_enabled?(options()) :: boolean()
   def compaction_enabled?(opts \\ []) do
     Keyword.get(
@@ -215,26 +237,6 @@ defmodule FermixCore.Memory.Config do
     |> normalize_positive_integer!(:loop_detection_kill_threshold)
   end
 
-  @spec prompt_files_rebuild_hours(options()) :: pos_integer()
-  def prompt_files_rebuild_hours(opts \\ []) do
-    opts
-    |> Keyword.get(
-      :prompt_files_rebuild_hours,
-      Keyword.get(memory_config(), :prompt_files_rebuild_hours, @prompt_files_rebuild_hours)
-    )
-    |> normalize_positive_integer!(:prompt_files_rebuild_hours)
-  end
-
-  @spec prompt_files_rebuild_interval_ms(options()) :: pos_integer()
-  def prompt_files_rebuild_interval_ms(opts \\ []) do
-    opts
-    |> Keyword.get_lazy(
-      :periodic_interval_ms,
-      fn -> prompt_files_rebuild_hours(opts) * 60 * 60 * 1_000 end
-    )
-    |> normalize_positive_integer!(:periodic_interval_ms)
-  end
-
   defp memory_config do
     Application.get_env(:fermix_core, :memory, [])
   end
@@ -254,12 +256,6 @@ defmodule FermixCore.Memory.Config do
 
   defp normalize_non_negative_integer!(value, key) do
     raise ArgumentError, "#{key} must be a non-negative integer, got: #{inspect(value)}"
-  end
-
-  defp debounce_seconds_to_ms(value) do
-    value
-    |> normalize_non_negative_integer!(:extraction_debounce_seconds)
-    |> Kernel.*(1_000)
   end
 
   defp normalize_probability!(value, _key)

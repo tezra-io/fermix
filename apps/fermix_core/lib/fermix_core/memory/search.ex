@@ -321,6 +321,8 @@ defmodule FermixCore.Memory.Search do
   end
 
   defp repo_search_memories(repo, search_term, selector, limit) do
+    selector = Map.put_new(selector, :archived?, false)
+
     case Repo.search_memories(search_term, selector: selector, limit: limit, server: repo) do
       {:ok, results} -> results
       {:error, :disabled} -> []

@@ -1,6 +1,6 @@
 defmodule FermixCore.Memory.Scheduler do
   @moduledoc """
-  Debounced event-driven and periodic prompt-memory rebuild scheduling.
+  Debounced event-driven prompt-memory rebuild scheduling.
   """
 
   use GenServer
@@ -36,14 +36,10 @@ defmodule FermixCore.Memory.Scheduler do
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       rebuild_module: Keyword.get(opts, :rebuild_module, PromptFiles),
       rebuild_opts: Keyword.get(opts, :rebuild_opts, []),
-      periodic_interval_ms: Config.prompt_files_rebuild_interval_ms(opts),
-      periodic_agent_ids: Keyword.get(opts, :periodic_agent_ids, [Config.agent_id(opts)]),
-      periodic_owner_id: Keyword.get(opts, :periodic_owner_id, Config.owner_id(opts)),
       jobs: %{},
       task_refs: %{}
     }
 
-    schedule_tick(state)
     {:ok, state}
   end
 
@@ -53,16 +49,6 @@ defmodule FermixCore.Memory.Scheduler do
   end
 
   @impl true
-  def handle_info(:tick, state) do
-    next_state =
-      Enum.reduce(state.periodic_agent_ids, state, fn agent_id, acc ->
-        enqueue_rebuild(acc, agent_id, state.periodic_owner_id, :periodic, scheduler_provenance())
-      end)
-
-    schedule_tick(next_state)
-    {:noreply, next_state}
-  end
-
   def handle_info({:rebuild_result, agent_id, reason, {:error, rebuild_reason}}, state) do
     Logger.error("memory rebuild failed for #{agent_id} (#{reason}): #{inspect(rebuild_reason)}")
 
@@ -82,11 +68,6 @@ defmodule FermixCore.Memory.Scheduler do
         {:noreply, complete_job(%{state | task_refs: task_refs}, agent_id)}
     end
   end
-
-  defp schedule_tick(%{enabled: false}), do: :ok
-
-  defp schedule_tick(%{periodic_interval_ms: interval_ms}),
-    do: Process.send_after(self(), :tick, interval_ms)
 
   defp enqueue_rebuild(%{enabled: false} = state, _agent_id, _owner_id, _reason, _provenance),
     do: state

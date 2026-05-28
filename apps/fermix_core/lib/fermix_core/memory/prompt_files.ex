@@ -61,7 +61,7 @@ defmodule FermixCore.Memory.PromptFiles do
 
   defp load_memories(agent_id, owner_id) do
     case Repo.get_memories(
-           %{agent_id: agent_id, owner_id: owner_id},
+           %{agent_id: agent_id, owner_id: owner_id, archived?: false},
            server: Config.repo_server()
          ) do
       {:ok, memories} -> {:ok, memories}
