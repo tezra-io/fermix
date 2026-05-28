@@ -318,6 +318,42 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
   end
 
+  defmodule ReviewProbe do
+    @state :main_agent_review_probe
+
+    def init(test_pid \\ self()) do
+      cleanup()
+      {:ok, _} = Agent.start_link(fn -> %{test_pid: test_pid, mode: :ok} end, name: @state)
+      :ok
+    end
+
+    def set_mode(mode), do: Agent.update(@state, &%{&1 | mode: mode})
+
+    def cleanup do
+      if Process.whereis(@state), do: Agent.stop(@state)
+    end
+
+    def start_background(opts) do
+      %{test_pid: test_pid, mode: mode} = Agent.get(@state, & &1)
+      send(test_pid, {:memory_review_started, opts, self()})
+
+      case mode do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
+
+        :block ->
+          send(test_pid, {:memory_review_blocked, self()})
+
+          receive do
+            :continue_review -> :ok
+          end
+      end
+    end
+  end
+
   # -- Helpers --
 
   defp mock_response(content, opts \\ []) do
@@ -582,6 +618,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       Application.put_env(:fermix_core, :compaction, previous_compaction_config)
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap_config)
       MockProvider.cleanup()
+      ReviewProbe.cleanup()
       FermixTestSupport.SafeRm.rm_rf!(skills_dir)
       FermixTestSupport.SafeRm.rm_rf!(journal_dir)
       FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
@@ -1204,12 +1241,12 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, _}, 5_000
     end
 
-    test "skips background extraction when extraction is disabled", %{
+    test "skips background memory review when memory is disabled", %{
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
     } do
-      agent_name = :"extract_disabled_main_agent_#{System.unique_integer([:positive])}"
+      agent_name = :"review_disabled_main_agent_#{System.unique_integer([:positive])}"
 
       {:ok, _} =
         start_supervised(
@@ -1219,27 +1256,28 @@ defmodule FermixCore.Agents.MainAgentTest do
              provider: MockProvider,
              skill_registry: skill_registry,
              conversation_store: conv_store,
-             task_supervisor: task_supervisor,
-             extraction_enabled: false
+             task_supervisor: task_supervisor
            ]},
           id: agent_name
         )
 
-      MockProvider.set_responses([mock_response("No extraction")])
+      MockProvider.set_responses([mock_response("No review")])
 
       MainAgent.handle_message(make_message("Hello"), agent_name)
 
-      assert_receive {:reply, "No extraction"}, 5_000
+      assert_receive {:reply, "No review"}, 5_000
       assert eventually(fn -> length(MockProvider.get_calls()) == 1 end)
-      refute eventually(fn -> length(MockProvider.get_calls()) > 1 end)
+      refute_receive {:memory_review_started, _opts, _pid}, 100
     end
 
-    test "does not block reply delivery while background extraction is slow", %{
+    test "does not block reply delivery while background review is slow", %{
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
     } do
-      agent_name = :"extract_slow_main_agent_#{System.unique_integer([:positive])}"
+      ReviewProbe.init()
+      ReviewProbe.set_mode(:block)
+      agent_name = :"review_slow_main_agent_#{System.unique_integer([:positive])}"
 
       {:ok, _} =
         start_supervised(
@@ -1250,30 +1288,28 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true,
-             extraction_debounce_ms: 0
+             memory_reviewer: ReviewProbe,
+             enabled: true
            ]},
           id: agent_name
         )
 
-      MockProvider.set_responses([
-        mock_response("Reply first"),
-        {:block, :extract, mock_response("[]")}
-      ])
+      MockProvider.set_responses([mock_response("Reply first")])
 
-      MainAgent.handle_message(make_message("Hello with slow extraction"), agent_name)
+      MainAgent.handle_message(make_message("Hello with slow review"), agent_name)
 
       assert_receive {:reply, "Reply first"}, 5_000
-      assert_receive {:mock_provider_blocked, :extract, extraction_pid}, 5_000
-      send(extraction_pid, {:continue, :extract})
+      assert_receive {:memory_review_blocked, review_pid}, 5_000
+      send(review_pid, :continue_review)
     end
 
-    test "passes Telegram shared-chat metadata through to background extraction", %{
+    test "passes source trust through to background review", %{
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
     } do
-      agent_name = :"extract_shared_mode_main_agent_#{System.unique_integer([:positive])}"
+      ReviewProbe.init()
+      agent_name = :"review_trust_main_agent_#{System.unique_integer([:positive])}"
 
       {:ok, _} =
         start_supervised(
@@ -1284,47 +1320,32 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true,
-             extraction_debounce_ms: 0
+             memory_reviewer: ReviewProbe,
+             enabled: true
            ]},
           id: agent_name
         )
 
-      MockProvider.set_responses([
-        mock_response("Shared chat reply"),
-        mock_response("[]")
-      ])
+      MockProvider.set_responses([mock_response("Shared chat reply")])
 
       MainAgent.handle_message(
-        make_message("Remember this from the group chat",
-          metadata: %{chat_type: "group"}
-        ),
+        make_message("Remember this from the group chat", source_trust: :guest),
         agent_name
       )
 
       assert_receive {:reply, "Shared chat reply"}, 5_000
-      assert eventually(fn -> length(MockProvider.get_calls()) == 2 end, 80)
-
-      [{main_messages, _main_opts}, {extraction_messages, _extraction_opts}] =
-        MockProvider.get_calls()
-
-      assert Enum.any?(
-               main_messages,
-               &(&1.role == "user" and &1.content == "Remember this from the group chat")
-             )
-
-      assert Enum.any?(
-               extraction_messages,
-               &(&1.role == "system" and &1.content =~ "Current chat mode: shared.")
-             )
+      assert_receive {:memory_review_started, review_opts, _pid}, 5_000
+      assert Keyword.get(review_opts, :source_trust) == :guest
     end
 
-    test "keeps reply handling successful when background extraction fails", %{
+    test "keeps reply handling successful when background review fails to start", %{
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
     } do
-      agent_name = :"extract_fail_main_agent_#{System.unique_integer([:positive])}"
+      ReviewProbe.init()
+      ReviewProbe.set_mode({:error, :review_failed})
+      agent_name = :"review_fail_main_agent_#{System.unique_integer([:positive])}"
 
       {:ok, _} =
         start_supervised(
@@ -1335,70 +1356,18 @@ defmodule FermixCore.Agents.MainAgentTest do
              skill_registry: skill_registry,
              conversation_store: conv_store,
              task_supervisor: task_supervisor,
-             extraction_enabled: true,
-             extraction_debounce_ms: 0
+             memory_reviewer: ReviewProbe,
+             enabled: true
            ]},
           id: agent_name
         )
 
-      MockProvider.set_responses([
-        mock_response("Reply survives extraction failure"),
-        {:error, :extraction_failed}
-      ])
+      MockProvider.set_responses([mock_response("Reply survives review failure")])
 
-      MainAgent.handle_message(make_message("Hello with failing extraction"), agent_name)
+      MainAgent.handle_message(make_message("Hello with failing review"), agent_name)
 
-      assert_receive {:reply, "Reply survives extraction failure"}, 5_000
-      assert eventually(fn -> length(MockProvider.get_calls()) == 2 end)
-    end
-
-    test "debounces rapid-fire extraction without blocking replies", %{
-      skill_registry: skill_registry,
-      conv_store: conv_store,
-      task_supervisor: task_supervisor
-    } do
-      agent_name = :"extract_debounce_main_agent_#{System.unique_integer([:positive])}"
-      chat_id = "chat_#{System.unique_integer([:positive])}"
-
-      {:ok, _} =
-        start_supervised(
-          {MainAgent,
-           [
-             name: agent_name,
-             provider: MockProvider,
-             skill_registry: skill_registry,
-             conversation_store: conv_store,
-             task_supervisor: task_supervisor,
-             extraction_enabled: true,
-             extraction_debounce_ms: 80
-           ]},
-          id: agent_name
-        )
-
-      MockProvider.set_responses([
-        mock_response("Reply one"),
-        mock_response("Reply two"),
-        {:block, :extract, mock_response("[]")}
-      ])
-
-      MainAgent.handle_message(make_message("first", chat_id: chat_id), agent_name)
-      assert_receive {:reply, "Reply one"}, 5_000
-
-      MainAgent.handle_message(make_message("second", chat_id: chat_id), agent_name)
-      assert_receive {:reply, "Reply two"}, 5_000
-
-      refute_receive {:mock_provider_blocked, :extract, _pid}, 40
-      assert_receive {:mock_provider_blocked, :extract, extraction_pid}, 1_000
-      send(extraction_pid, {:continue, :extract})
-
-      assert eventually(fn -> length(MockProvider.get_calls()) == 3 end)
-
-      [_first_main, _second_main, {extraction_messages, _opts}] = MockProvider.get_calls()
-
-      assert Enum.any?(
-               extraction_messages,
-               &(&1.role == "user" and &1.content =~ "[user] second")
-             )
+      assert_receive {:reply, "Reply survives review failure"}, 5_000
+      assert_receive {:memory_review_started, _review_opts, _pid}, 5_000
     end
 
     test "keeps the skill list pinned until explicit reload", %{

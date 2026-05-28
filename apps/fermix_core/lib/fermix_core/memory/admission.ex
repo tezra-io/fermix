@@ -67,6 +67,11 @@ defmodule FermixCore.Memory.Admission do
     prompt_target(category, scope_type)
   end
 
+  @spec category_allowed?(String.t(), atom() | nil) :: boolean()
+  def category_allowed?(category, source_trust) when is_binary(category) do
+    MapSet.member?(@valid_categories, category) and trust_allows_category?(category, source_trust)
+  end
+
   defp admission_context(opts) do
     %{
       agent_id: Keyword.fetch!(opts, :agent_id),
@@ -285,7 +290,8 @@ defmodule FermixCore.Memory.Admission do
              owner_id: ctx.owner_id,
              scope_type: scope_type,
              scope_id: scope_id,
-             key: key
+             key: key,
+             archived?: false
            },
            server: ctx.repo
          ) do
@@ -306,7 +312,7 @@ defmodule FermixCore.Memory.Admission do
 
   defp prompt_backed_existing_memory(ctx, key) do
     case Repo.get_memories(
-           %{agent_id: ctx.agent_id, owner_id: ctx.owner_id, key: key},
+           %{agent_id: ctx.agent_id, owner_id: ctx.owner_id, key: key, archived?: false},
            server: ctx.repo
          ) do
       {:ok, memories} -> Enum.find(memories, &prompt_backed_memory?/1)

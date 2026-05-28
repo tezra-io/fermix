@@ -1,13 +1,11 @@
 defmodule FermixCore.Realtime.ConversationRecorder do
   @moduledoc """
-  Persists final Realtime voice transcripts and triggers normal memory extraction.
+  Persists final Realtime voice transcripts and triggers memory review.
   """
 
   alias FermixCore.Memory.Config, as: MemoryConfig
-  alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Scheduler
-  alias FermixCore.Memory.Store
+  alias FermixCore.Memory.Reviewer
   alias FermixCore.Realtime.Config
 
   @kind "voice_turn"
@@ -47,7 +45,7 @@ defmodule FermixCore.Realtime.ConversationRecorder do
 
   defp record_messages(%Config{} = config, device_id, messages, opts) do
     with :ok <- insert_messages(config, device_id, messages, opts) do
-      maybe_request_extraction(device_id, messages, opts)
+      maybe_request_review(device_id, opts)
     end
   end
 
@@ -108,41 +106,41 @@ defmodule FermixCore.Realtime.ConversationRecorder do
     }
   end
 
-  defp maybe_request_extraction(device_id, messages, opts) do
-    if Keyword.get(opts, :request_extraction?, true) and MemoryConfig.extraction_enabled?(opts) do
-      request_extraction(device_id, messages, opts)
+  defp maybe_request_review(device_id, opts) do
+    if Keyword.get(opts, :request_review?, true) do
+      request_review(device_id, opts)
     else
       :ok
     end
   end
 
-  defp request_extraction(device_id, messages, opts) do
+  defp request_review(device_id, opts) do
     source = source_id(device_id)
-    debouncer = Keyword.get(opts, :extraction_debouncer, ExtractionDebouncer)
+    reviewer = Keyword.get(opts, :memory_reviewer, Reviewer)
 
-    extraction_opts =
+    review_opts =
       [
-        provider: Keyword.get(opts, :provider, active_provider()),
-        messages: messages,
         agent_id: Keyword.get(opts, :agent_id, MemoryConfig.agent_id(opts)),
         owner_id: Keyword.get(opts, :owner_id, MemoryConfig.owner_id(opts)),
         conversation_key: conversation_key(device_id, Keyword.get(opts, :session_scope, :root)),
-        chat_mode: :direct,
-        memory_store: Keyword.get(opts, :memory_store, Store),
-        scheduler: Keyword.get(opts, :scheduler, Scheduler),
         repo: Keyword.get(opts, :repo, MemoryConfig.repo_server(opts)),
+        task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
         extraction_timeout_ms: MemoryConfig.extraction_timeout_ms(opts),
-        extraction_context_messages: MemoryConfig.extraction_context_messages(opts),
-        extraction_min_confidence: MemoryConfig.extraction_min_confidence(opts),
-        extraction_debounce_ms: MemoryConfig.extraction_debounce_ms(opts),
-        extraction_model: MemoryConfig.extraction_model(opts),
         source_type: @source_type,
         source_id: source,
         source_name: "Realtime voice",
         source_description: "Local Realtime voice companion transcript"
       ]
+      |> maybe_put_test_pid(opts)
 
-    debouncer.request(extraction_opts, debouncer_opts(opts))
+    reviewer.start_background(review_opts)
+  end
+
+  defp maybe_put_test_pid(review_opts, opts) do
+    case Keyword.get(opts, :test_pid) do
+      nil -> review_opts
+      test_pid -> Keyword.put(review_opts, :test_pid, test_pid)
+    end
   end
 
   defp repo_opts(repo, opts) do
@@ -151,17 +149,5 @@ defmodule FermixCore.Realtime.ConversationRecorder do
     |> Keyword.put(:server, repo)
   end
 
-  defp debouncer_opts(opts) do
-    opts
-    |> Keyword.take([:test_pid])
-    |> Keyword.put(:server, Keyword.get(opts, :extraction_debouncer_server, ExtractionDebouncer))
-  end
-
   defp source_id(device_id), do: "local:" <> device_id
-
-  defp active_provider do
-    :fermix_core
-    |> Application.get_env(:agent, [])
-    |> Keyword.get(:provider, :openai)
-  end
 end

@@ -1144,6 +1144,34 @@ defmodule FermixCore.Setup.ConfigStore do
         lookup(config, "extraction_timeout_ms", :extraction_timeout_ms)
       )
     )
+    |> put_if_present(
+      :review_interval_hours,
+      normalize_non_negative_integer(
+        lookup(config, "review_interval_hours", :review_interval_hours),
+        :review_interval_hours
+      )
+    )
+    |> put_if_present(
+      :review_max_messages,
+      normalize_positive_memory_integer(
+        lookup(config, "review_max_messages", :review_max_messages),
+        :review_max_messages
+      )
+    )
+    |> put_if_present(
+      :review_input_token_budget,
+      normalize_positive_memory_integer(
+        lookup(config, "review_input_token_budget", :review_input_token_budget),
+        :review_input_token_budget
+      )
+    )
+    |> put_if_present(
+      :review_failure_backoff_ms,
+      normalize_non_negative_integer(
+        lookup(config, "review_failure_backoff_ms", :review_failure_backoff_ms),
+        :review_failure_backoff_ms
+      )
+    )
   end
 
   defp normalize_extraction_timeout_ms(nil), do: nil
@@ -1153,6 +1181,26 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_extraction_timeout_ms(value) do
     raise ArgumentError,
           "invalid memory.extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+  end
+
+  defp normalize_positive_memory_integer(nil, _key), do: nil
+
+  defp normalize_positive_memory_integer(value, _key) when is_integer(value) and value > 0,
+    do: value
+
+  defp normalize_positive_memory_integer(value, key) do
+    raise ArgumentError,
+          "invalid memory.#{key} #{inspect(value)}; expected positive integer"
+  end
+
+  defp normalize_non_negative_integer(nil, _key), do: nil
+
+  defp normalize_non_negative_integer(value, _key) when is_integer(value) and value >= 0,
+    do: value
+
+  defp normalize_non_negative_integer(value, key) do
+    raise ArgumentError,
+          "invalid memory.#{key} #{inspect(value)}; expected non-negative integer"
   end
 
   defp normalize_delivery_mode(:none), do: "none"

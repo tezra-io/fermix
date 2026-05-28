@@ -16,6 +16,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
+  alias Fermix.CLI.MemoryCommand
   alias Fermix.CLI.PluginsCommand
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
@@ -70,6 +71,7 @@ defmodule Fermix.CLI do
   defp dispatch("skills", rest), do: SkillsCommand.run(rest)
   defp dispatch("plugins", rest), do: PluginsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
+  defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
@@ -105,6 +107,8 @@ defmodule Fermix.CLI do
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills
       fermix plugins [list|catalog|enable NAME|disable NAME|auth ...] [--json]
+      fermix memory review --now [--conversation KEY] [--json]
+      fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix doctor  [--full]                      Run post-install diagnostics
