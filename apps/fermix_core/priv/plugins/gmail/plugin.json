@@ -30,13 +30,15 @@
   },
   "tools": [
     {
-      "name": "gmail.search_messages",
+      "name": "gmail_search_messages",
+      "description": "Search Gmail messages.",
       "policy_class": "external_api",
       "read_only": true,
       "requires_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
     },
     {
-      "name": "gmail.send_message",
+      "name": "gmail_send_message",
+      "description": "Send an email with Gmail.",
       "policy_class": "external_api",
       "read_only": false,
       "requires_scopes": ["https://www.googleapis.com/auth/gmail.send"]

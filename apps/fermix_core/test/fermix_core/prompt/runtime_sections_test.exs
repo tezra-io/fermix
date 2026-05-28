@@ -177,7 +177,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     plugins = [
       %{
         name: "google_calendar",
-        tools: ["google_calendar.search_events"],
+        tools: ["google_calendar_search_events"],
         skills: ["google-calendar"]
       }
     ]
@@ -187,7 +187,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "## Plugins"
 
     assert content =~
-             ~s(<plugin name="google_calendar" skill="google-calendar">google_calendar.search_events</plugin>)
+             ~s(<plugin name="google_calendar" skill="google-calendar">google_calendar_search_events</plugin>)
   end
 
   test "build/2 omits the plugin index when no plugins are supplied" do
@@ -205,7 +205,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   test "build/2 keeps plugin-owned capabilities out of the built-in catalog" do
     snapshot = [
       Capability.new(%{
-        name: "google_calendar.search_events",
+        name: "google_calendar_search_events",
         description: "Google Calendar",
         parameters: %{"type" => "object"},
         kind: :builtin,
@@ -217,6 +217,6 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     content = RuntimeSections.build([], capabilities: snapshot)
 
-    refute content =~ "google_calendar.search_events"
+    refute content =~ "google_calendar_search_events"
   end
 end

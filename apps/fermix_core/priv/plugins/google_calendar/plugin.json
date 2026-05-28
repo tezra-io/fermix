@@ -30,13 +30,15 @@
   },
   "tools": [
     {
-      "name": "google_calendar.search_events",
+      "name": "google_calendar_search_events",
+      "description": "Search Google Calendar events.",
       "policy_class": "external_api",
       "read_only": true,
       "requires_scopes": ["https://www.googleapis.com/auth/calendar.readonly"]
     },
     {
-      "name": "google_calendar.create_event",
+      "name": "google_calendar_create_event",
+      "description": "Create a Google Calendar event.",
       "policy_class": "external_api",
       "read_only": false,
       "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
