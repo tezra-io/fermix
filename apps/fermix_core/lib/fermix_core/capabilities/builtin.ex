@@ -30,6 +30,7 @@ defmodule FermixCore.Capabilities.Builtin do
     "memory_recall" => %{policy_class: :read_only, hidden_from_agent?: false},
     "memory_store" => %{policy_class: :read_write, hidden_from_agent?: false},
     "schedule_job" => %{policy_class: :read_write, hidden_from_agent?: false},
+    "update_job" => %{policy_class: :read_write, hidden_from_agent?: false},
     "list_jobs" => %{policy_class: :read_only, hidden_from_agent?: false},
     "pause_job" => %{policy_class: :read_write, hidden_from_agent?: false},
     "resume_job" => %{policy_class: :read_write, hidden_from_agent?: false},
