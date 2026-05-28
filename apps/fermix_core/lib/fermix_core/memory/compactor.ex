@@ -131,8 +131,18 @@ defmodule FermixCore.Memory.Compactor do
     %{
       role: "system",
       content:
-        "Summarize older conversation context into one reusable checkpoint. " <>
-          "Preserve decisions, unresolved questions, durable facts, and active context."
+        """
+        Summarize the older conversation into one reusable checkpoint.
+
+        Messages are timestamped and in chronological order; later messages
+        supersede earlier ones. When information is updated, corrected, or a question
+        is later answered, keep only the latest state and drop what it replaced.
+        Never carry a question forward as open if it was resolved later.
+
+        Preserve decisions, durable facts, and context still active as of the most
+        recent messages. State each item once; do not repeat information.
+        """
+        |> String.trim()
     }
   end
 
@@ -328,7 +338,14 @@ defmodule FermixCore.Memory.Compactor do
   defp repo_server(_context), do: {:error, :missing_checkpoint_context}
 
   defp render_message(message) do
-    "[#{role(message)}] #{content(message)}"
+    "[#{render_timestamp(message)}#{role(message)}] #{content(message)}"
+  end
+
+  defp render_timestamp(message) do
+    case Map.get(message, :timestamp) || Map.get(message, "timestamp") do
+      %DateTime{} = timestamp -> "#{Calendar.strftime(timestamp, "%Y-%m-%d %H:%M")} "
+      _missing -> ""
+    end
   end
 
   defp message_text(message) do

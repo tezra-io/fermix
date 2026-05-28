@@ -333,6 +333,36 @@ defmodule FermixCore.Memory.CompactorTest do
     assert body =~ "previous checkpoint"
   end
 
+  test "instructs the summarizer to supersede stale info, dedup, and timestamp older turns",
+       %{repo: repo} do
+    stub_summaries(["summary 1"])
+
+    messages = [
+      %{role: "system", content: "base prompt"},
+      %{
+        role: "user",
+        content: String.duplicate("older turn ", 80),
+        timestamp: ~U[2026-05-20 09:00:00Z]
+      },
+      %{role: "user", content: "new turn"}
+    ]
+
+    assert {:ok, %{compacted?: true}} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 60,
+               route: route(),
+               context: context(repo)
+             )
+
+    assert_received {:summary_request, body}
+    # Time-aware supersession + dedup instructions reach the summarizer.
+    assert body =~ "supersede"
+    assert body =~ "do not repeat information"
+    # Older turns are rendered with their timestamp so recency is legible.
+    assert body =~ "2026-05-20 09:00"
+  end
+
   test "routes summaries through Adapter.chat/3 with empty capabilities" do
     stub_summaries(["routed summary"])
 
