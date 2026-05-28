@@ -17,6 +17,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     plugins = Application.get_env(:fermix_core, :plugins, [])
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
+    plugin_auth_url_timeout_ms = Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -32,6 +33,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_core, :plugins, [])
     Application.put_env(:fermix_core, :oauth, %{})
     Application.delete_env(:fermix_web, :plugin_auth_runner)
+    Application.delete_env(:fermix_web, :plugin_auth_url_timeout_ms)
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -42,6 +44,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_core, :plugins, plugins)
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
+      restore_env(:fermix_web, :plugin_auth_url_timeout_ms, plugin_auth_url_timeout_ms)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -103,6 +106,15 @@ defmodule FermixWebWeb.SetupLiveTest do
         refute html =~ "coming soon"
         refute html =~ "later M10 stage"
       end
+    end
+
+    test "channels pane marks unconfigured channels as not configured, not ready", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"channels\"]") |> render_click()
+
+      # Disabled/unconfigured channels must not render a green "Ready" pill.
+      assert html =~ "Not configured"
     end
 
     test "plugins pane renders bundled plugin cards", %{conn: conn} do
@@ -211,6 +223,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = render(view)
       assert html =~ "Google Drive connected."
       assert html =~ "Ready"
+      refute html =~ "https://auth.example/google_drive"
 
       plugins = Application.get_env(:fermix_core, :plugins)
       assert "google_drive" in Keyword.get(plugins, :enabled, [])
@@ -225,6 +238,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = render(view)
       assert html =~ "Google Calendar connected."
       assert html =~ "Ready"
+      refute html =~ "https://auth.example/google_calendar"
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ "[fermix_core.oauth.google]"
@@ -233,7 +247,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(enabled = ["google_drive", "google_calendar"])
     end
 
-    test "oauth plugin enable starts web auth and exposes the provider URL", %{
+    test "oauth plugin enable clears the fallback URL after auth completes", %{
       conn: conn
     } do
       parent = self()
@@ -263,7 +277,43 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_click()
 
       assert_receive {:plugin_auth_started, "google_calendar"}
+      refute render(view) =~ "https://auth.example/google_calendar"
+    end
+
+    test "oauth fallback sign-in link expires while auth is pending", %{conn: conn} do
+      parent = self()
+      Application.put_env(:fermix_web, :plugin_auth_url_timeout_ms, 20)
+
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, opts ->
+        Keyword.fetch!(opts, :opener).("https://auth.example/#{name}")
+        send(parent, {:plugin_auth_started, name})
+        Process.sleep(200)
+        {:error, :cancelled}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_google_oauth\"]",
+        google_oauth_form: %{
+          client_id: "123.apps.googleusercontent.com",
+          client_secret: "desktop-secret",
+          redirect_port: "1455"
+        }
+      )
+      |> render_submit()
+
+      view
+      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
+      |> render_click()
+
+      assert_receive {:plugin_auth_started, "google_calendar"}
       assert render(view) =~ "https://auth.example/google_calendar"
+
+      Process.sleep(60)
+      refute render(view) =~ "https://auth.example/google_calendar"
     end
 
     test "doctor pane keeps read-only skill count", %{conn: conn} do
