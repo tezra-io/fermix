@@ -57,6 +57,17 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  @spec update_job(String.t(), map(), keyword()) ::
+          {:ok, Repo.scheduled_job_row()} | {:error, term()}
+  def update_job(id, attrs, opts \\ []) when is_binary(id) and is_map(attrs) and is_list(opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
+         {:ok, job_patch, source_patch} <- normalize_update_attrs(job, attrs, now) do
+      apply_job_update(job, job_patch, source_patch, now, opts)
+    end
+  end
+
   @spec remove_job(String.t(), keyword()) :: :ok | {:error, term()}
   def remove_job(id, opts \\ []) when is_binary(id) and is_list(opts) do
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
@@ -93,6 +104,51 @@ defmodule FermixCore.Jobs.Registry do
     end
   end
 
+  defp apply_job_update(job, job_patch, source_patch, now, opts) do
+    attrs = job |> Map.merge(job_patch) |> Map.put(:updated_at, now)
+
+    with {:ok, updated} <- Repo.upsert_scheduled_job(attrs, repo_opts(opts)),
+         :ok <- update_source(updated.memory_source_id, source_patch, opts) do
+      notify_scheduler(opts)
+      {:ok, updated}
+    end
+  end
+
+  defp normalize_update_attrs(job, attrs, now) do
+    task = optional_update_string(attrs, :task_prompt, fallback: :task)
+    description = optional_update_string(attrs, :description)
+    schedule = optional_update_string(attrs, :schedule)
+
+    with {:ok, schedule_job_patch, schedule_source_patch} <- schedule_patch(job, schedule, now) do
+      job_patch =
+        %{}
+        |> put_present(:task_prompt, task)
+        |> put_present(:description, description)
+        |> Map.merge(schedule_job_patch)
+
+      source_patch =
+        %{}
+        |> put_present(:description, description)
+        |> Map.merge(schedule_source_patch)
+
+      if map_size(job_patch) == 0,
+        do: {:error, :empty_update},
+        else: {:ok, job_patch, source_patch}
+    end
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp schedule_patch(_job, nil, _now), do: {:ok, %{}, %{}}
+
+  defp schedule_patch(job, schedule_expr, now) do
+    with {:ok, parsed} <- Schedule.parse(schedule_expr, timezone: job.timezone, now: now) do
+      {:ok,
+       %{schedule_kind: parsed.kind, schedule_expr: parsed.expr, next_run_at: parsed.next_run_at},
+       %{schedule_summary: parsed.summary}}
+    end
+  end
+
   defp next_run_at_for_resume(%{schedule_kind: "once"} = job, now) do
     with :ok <- ensure_not_expired(job, now),
          {:ok, parsed} <- Schedule.parse(job.schedule_expr, timezone: job.timezone, now: now) do
@@ -120,10 +176,16 @@ defmodule FermixCore.Jobs.Registry do
   end
 
   defp mark_source(source_id, status, opts) do
+    update_source(source_id, %{status: status}, opts)
+  end
+
+  defp update_source(_source_id, patch, _opts) when map_size(patch) == 0, do: :ok
+
+  defp update_source(source_id, patch, opts) do
     case Repo.get_memory_source(source_id, repo_opts(opts)) do
       {:ok, source} ->
         source
-        |> Map.put(:status, status)
+        |> Map.merge(patch)
         |> Map.put(:updated_at, DateTime.utc_now())
         |> Repo.upsert_memory_source(repo_opts(opts))
         |> case do
@@ -331,6 +393,25 @@ defmodule FermixCore.Jobs.Registry do
       value -> raise ArgumentError, "expected #{inspect(key)} to be a map, got: #{inspect(value)}"
     end
   end
+
+  defp optional_update_string(attrs, key, opts \\ []) do
+    case fetch_field(attrs, key, Keyword.get(opts, :fallback)) do
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      value when is_binary(value) ->
+        value
+
+      value ->
+        raise ArgumentError, "expected #{inspect(key)} to be a string, got: #{inspect(value)}"
+    end
+  end
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   defp optional_future_datetime(attrs, key, now) do
     case fetch_field(attrs, key) do

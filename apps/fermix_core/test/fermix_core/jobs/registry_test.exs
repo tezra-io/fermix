@@ -201,6 +201,80 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert still_paused.state == "paused"
   end
 
+  test "update_job revises the task prompt without disturbing the schedule", %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{name: "Weather", schedule: "every 15 minutes", task_prompt: "Send weather."},
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert job.next_run_at == ~U[2026-05-02 14:15:00Z]
+
+    assert {:ok, updated} =
+             Registry.update_job(job.id, %{task_prompt: "Send weather for 94105."},
+               repo: repo,
+               now: ~U[2026-05-02 14:05:00Z]
+             )
+
+    assert updated.task_prompt == "Send weather for 94105."
+    assert updated.schedule_expr == "every 15 minutes"
+    assert updated.next_run_at == ~U[2026-05-02 14:15:00Z]
+  end
+
+  test "update_job accepts the task alias, reschedules, and syncs the source", %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{name: "Digest", schedule: "every 15 minutes", task_prompt: "Old."},
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert {:ok, updated} =
+             Registry.update_job(
+               job.id,
+               %{task: "New task.", schedule: "every 30 minutes", description: "Refreshed."},
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert updated.task_prompt == "New task."
+    assert updated.schedule_kind == "interval"
+    assert updated.schedule_expr == "every 30 minutes"
+    assert updated.next_run_at == ~U[2026-05-02 14:30:00Z]
+
+    assert {:ok, source} = Registry.get_memory_source(job.memory_source_id, repo: repo)
+    assert source.schedule_summary == "every 30 minutes"
+    assert source.description == "Refreshed."
+  end
+
+  test "update_job rejects an empty patch and unknown jobs", %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{name: "Empty", schedule: "every 15 minutes", task_prompt: "Do."},
+               repo: repo
+             )
+
+    assert {:error, :empty_update} = Registry.update_job(job.id, %{}, repo: repo)
+    assert {:error, :not_found} = Registry.update_job("missing_job", %{task: "x"}, repo: repo)
+  end
+
+  test "update_job rejects an invalid schedule and leaves the job unchanged", %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{name: "Stable", schedule: "every 15 minutes", task_prompt: "Keep."},
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert {:error, {:invalid_schedule, "sometimes"}} =
+             Registry.update_job(job.id, %{schedule: "sometimes"}, repo: repo)
+
+    assert {:ok, unchanged} = Registry.get_job(job.id, repo: repo)
+    assert unchanged.schedule_expr == "every 15 minutes"
+    assert unchanged.task_prompt == "Keep."
+  end
+
   test "rejects invalid schedules before writing anything", %{repo: repo} do
     assert {:error, {:invalid_schedule, "sometimes"}} =
              Registry.create_job(

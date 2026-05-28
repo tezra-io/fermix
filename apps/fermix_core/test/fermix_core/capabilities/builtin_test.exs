@@ -62,6 +62,7 @@ defmodule FermixCore.Capabilities.BuiltinTest do
 
     test "wraps scheduled job management tools with expected policy classes" do
       assert Builtin.from_tool_module(FermixCore.Tools.ScheduleJob).policy_class == :read_write
+      assert Builtin.from_tool_module(FermixCore.Tools.UpdateJob).policy_class == :read_write
       assert Builtin.from_tool_module(FermixCore.Tools.ListJobs).policy_class == :read_only
       assert Builtin.from_tool_module(FermixCore.Tools.PauseJob).policy_class == :read_write
       assert Builtin.from_tool_module(FermixCore.Tools.ResumeJob).policy_class == :read_write
