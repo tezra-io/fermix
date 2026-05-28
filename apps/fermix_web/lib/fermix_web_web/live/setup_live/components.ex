@@ -416,7 +416,6 @@ defmodule FermixWebWeb.SetupLive.Components do
             :for={section <- @channel_sections}
             title={section.title}
             status={section.status}
-            enabled={section.enabled}
           >
             <.channel_field :for={field <- section.fields} field={field} />
           </.integration_panel>
@@ -433,7 +432,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Integrations"
-        subtitle="Set up your Google OAuth desktop client below, then connect each integration. Connecting signs you in and enables the plugin."
+        subtitle="Connect an integration to sign in and enable its tools. Provider setup (like a Google OAuth client) sits with each group below."
       />
 
       <.google_plugin_group
@@ -952,17 +951,13 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :title, :string, required: true
   attr :status, :atom, required: true
-  attr :enabled, :boolean, required: true
   slot :inner_block, required: true
 
   defp integration_panel(assigns) do
     ~H"""
     <section class="rounded-box border border-base-300 bg-base-100/80 p-4 shadow-sm">
       <div class="mb-4 flex items-center justify-between gap-3">
-        <div>
-          <h3 class="font-semibold">{@title}</h3>
-          <p class="text-xs text-base-content/60">{if @enabled, do: "Enabled", else: "Disabled"}</p>
-        </div>
+        <h3 class="font-semibold">{@title}</h3>
         <.status_pill status={@status} />
       </div>
       <div class="grid items-start gap-3 sm:grid-cols-2">{render_slot(@inner_block)}</div>
@@ -1250,8 +1245,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       %{
         title: title,
-        enabled: form.enabled,
-        status: channel_status(report, key),
+        status: channel_status(report, key, form.enabled),
         fields: channel_fields(key, form)
       }
     end)
@@ -1329,7 +1323,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     end
   end
 
-  defp channel_status(report, channel), do: status_by_prefix(report, "channel:#{channel}")
+  defp channel_status(_report, _channel, false), do: :not_configured
+  defp channel_status(report, channel, true), do: status_by_prefix(report, "channel:#{channel}")
 
   defp status_by_prefix(report, prefix) do
     if Enum.any?(report.wizard.validation_errors, &String.starts_with?(&1.component, prefix)) do
