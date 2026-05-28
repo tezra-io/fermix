@@ -8,6 +8,7 @@ defmodule FermixCore.Tools.JobsTest do
   alias FermixCore.Tools.RemoveJob
   alias FermixCore.Tools.ResumeJob
   alias FermixCore.Tools.ScheduleJob
+  alias FermixCore.Tools.UpdateJob
 
   setup do
     unique = System.unique_integer([:positive])
@@ -86,6 +87,54 @@ defmodule FermixCore.Tools.JobsTest do
     assert %{"sources" => [%{"status" => "removed"}]} = Jason.decode!(final_sources.output)
   end
 
+  test "update_job edits an existing job's task and schedule in place", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Weather",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Send weather.",
+                 "allowed_tools" => []
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(
+               %{
+                 "job_id" => job_id,
+                 "task" => "Send weather for 94105.",
+                 "schedule" => "every 30 minutes"
+               },
+               context
+             )
+
+    assert updated.success == true
+    payload = Jason.decode!(updated.output)
+    assert payload["id"] == job_id
+    assert payload["schedule_expr"] == "every 30 minutes"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.task_prompt == "Send weather for 94105."
+    assert job.schedule_expr == "every 30 minutes"
+  end
+
+  test "update_job requires at least one field to change", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "NoOp", "schedule" => "every 15 minutes", "task" => "Do."},
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, result} = UpdateJob.execute(%{"job_id" => job_id}, context)
+    assert result.success == false
+    assert result.error =~ "at least one of task, schedule, or description"
+  end
+
   test "schedule_job exposes and persists runner timeout controls", %{context: context} do
     params = ScheduleJob.parameters()
     assert Map.has_key?(params.properties, :timeout_seconds)
@@ -99,6 +148,8 @@ defmodule FermixCore.Tools.JobsTest do
 
     assert params.properties.task.description =~
              "Keep lifecycle timing in schedule and expires_at"
+
+    assert params.properties.task.description =~ "cannot see this conversation"
 
     assert params.properties.expires_at.description =~ "temporary"
     assert params.properties.delivery_mode.description =~ "delivery_mode"

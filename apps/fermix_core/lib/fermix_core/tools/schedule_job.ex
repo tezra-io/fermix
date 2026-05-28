@@ -38,7 +38,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         task: %{
           type: "string",
           description:
-            "Work instructions for the future Fermix scheduled run. Do not execute the task now unless the user separately asks for an immediate run. Keep lifecycle timing in schedule and expires_at, not in the task text."
+            "Work instructions for the future Fermix scheduled run. Do not execute the task now unless the user separately asks for an immediate run. Keep lifecycle timing in schedule and expires_at, not in the task text. Bake any values the run will need (such as a location, zip code, or account) into this text — scheduled runs run in isolation and cannot see this conversation. Use update_job to revise these instructions later."
         },
         description: %{type: "string", description: "Short description for the source catalog."},
         timezone: %{type: "string", description: "IANA timezone label stored with the job."},
