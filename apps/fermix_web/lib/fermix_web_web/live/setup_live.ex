@@ -36,6 +36,8 @@ defmodule FermixWebWeb.SetupLive do
     %{id: "doctor", label: "Doctor", component: nil, description: "Final checks"}
   ]
 
+  @default_plugin_auth_url_timeout_ms 300_000
+
   @impl true
   def mount(_params, _session, socket) do
     report = Wizard.report()
@@ -257,12 +259,17 @@ defmodule FermixWebWeb.SetupLive do
   @impl true
   def handle_info({:plugin_auth_url, name, url}, socket) do
     auth_url = %{name: name, display_name: plugin_display_name(name), url: url}
+    Process.send_after(self(), {:clear_plugin_auth_url, name, url}, plugin_auth_url_timeout_ms())
 
     {:noreply,
      socket
      |> assign(:plugin_auth_url, auth_url)
      |> flash_info("Opening #{auth_url.display_name} sign-in.")
      |> push_event("plugin-auth-open", %{url: url})}
+  end
+
+  def handle_info({:clear_plugin_auth_url, name, url}, socket) do
+    {:noreply, maybe_clear_plugin_auth_url(socket, name, url)}
   end
 
   def handle_info({ref, result}, socket) when is_reference(ref) do
@@ -691,6 +698,7 @@ defmodule FermixWebWeb.SetupLive do
 
     socket
     |> assign(:plugin_auth_tasks, tasks)
+    |> assign(:plugin_auth_url, nil)
     |> flash_info("Opening #{plugin.display_name} sign-in.")
   end
 
@@ -716,6 +724,7 @@ defmodule FermixWebWeb.SetupLive do
   defp finish_plugin_auth(socket, task, tasks, {:ok, _entry}) do
     socket
     |> assign(:plugin_auth_tasks, tasks)
+    |> assign(:plugin_auth_url, nil)
     |> refresh_report("#{task.display_name} connected.")
   end
 
@@ -726,7 +735,22 @@ defmodule FermixWebWeb.SetupLive do
   defp fail_plugin_auth(socket, task, tasks, reason) do
     socket
     |> assign(:plugin_auth_tasks, tasks)
+    |> assign(:plugin_auth_url, nil)
     |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+  end
+
+  defp maybe_clear_plugin_auth_url(socket, name, url) do
+    case socket.assigns.plugin_auth_url do
+      %{name: ^name, url: ^url} -> assign(socket, :plugin_auth_url, nil)
+      _other -> socket
+    end
+  end
+
+  defp plugin_auth_url_timeout_ms do
+    case Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms) do
+      value when is_integer(value) and value > 0 -> value
+      _other -> @default_plugin_auth_url_timeout_ms
+    end
   end
 
   defp missing_plugin_client_config?(%{auth: %{provider: "google"}}) do

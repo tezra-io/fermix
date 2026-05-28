@@ -63,14 +63,17 @@ defmodule FermixCore.Plugins.CapabilityTest do
              })
 
     assert {:ok, %{registered: names}} = Capabilities.reload(registry)
-    assert "google_calendar.search_events" in names
-    assert "google_calendar.create_event" in names
+    assert "google_calendar_search_events" in names
+    assert "google_calendar_create_event" in names
 
-    assert {:ok, cap} = CapabilityRegistry.find(registry, "google_calendar.create_event")
+    assert {:ok, cap} = CapabilityRegistry.find(registry, "google_calendar_create_event")
     assert cap.kind == :builtin
     assert cap.policy_class == :external_api
+    assert cap.description == "Create a Google Calendar event."
+    assert byte_size(cap.description) <= 100
     assert cap.metadata.plugin == "google_calendar"
     assert cap.metadata.auth_profile == "google_calendar:primary"
+    assert cap.metadata.when_to_use == "Create a Google Calendar event."
   end
 
   test "registers only tools whose required scopes were granted", %{registry: registry} do
@@ -97,8 +100,8 @@ defmodule FermixCore.Plugins.CapabilityTest do
              })
 
     assert {:ok, %{registered: names}} = Capabilities.reload(registry)
-    assert "google_calendar.search_events" in names
-    refute "google_calendar.create_event" in names
+    assert "google_calendar_search_events" in names
+    refute "google_calendar_create_event" in names
   end
 
   test "unregisters plugin tools when plugin is disabled", %{registry: registry} do
@@ -108,6 +111,6 @@ defmodule FermixCore.Plugins.CapabilityTest do
     )
 
     assert {:ok, %{registered: []}} = Capabilities.reload(registry)
-    assert :error = CapabilityRegistry.find(registry, "google_calendar.search_events")
+    assert :error = CapabilityRegistry.find(registry, "google_calendar_search_events")
   end
 end

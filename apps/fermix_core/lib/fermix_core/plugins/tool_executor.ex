@@ -14,7 +14,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   @gmail_base "https://gmail.googleapis.com/gmail/v1"
 
   @spec parameters(String.t()) :: map()
-  def parameters("google_calendar.search_events") do
+  def parameters("google_calendar_search_events") do
     object_schema(["query"], %{
       "query" => %{type: "string", description: "Text query for events."},
       "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
@@ -22,7 +22,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
     })
   end
 
-  def parameters("google_calendar.create_event") do
+  def parameters("google_calendar_create_event") do
     object_schema(["summary", "start", "end"], %{
       "summary" => %{type: "string"},
       "description" => %{type: "string"},
@@ -33,14 +33,14 @@ defmodule FermixCore.Plugins.ToolExecutor do
     })
   end
 
-  def parameters("gmail.search_messages") do
+  def parameters("gmail_search_messages") do
     object_schema(["query"], %{
       "query" => %{type: "string", description: "Gmail search query."},
       "max_results" => %{type: "integer", description: "Maximum messages, default 10."}
     })
   end
 
-  def parameters("google_drive.search_files") do
+  def parameters("google_drive_search_files") do
     object_schema(["query"], %{
       "query" => %{type: "string", description: "Text to search for in Drive file names."},
       "max_results" => %{type: "integer", description: "Maximum files, default 10."},
@@ -48,7 +48,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
     })
   end
 
-  def parameters("gmail.send_message") do
+  def parameters("gmail_send_message") do
     object_schema(["to", "subject", "body"], %{
       "to" => %{type: "string"},
       "subject" => %{type: "string"},
@@ -81,7 +81,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp dispatch(
-         "google_calendar.search_events",
+         "google_calendar_search_events",
          args,
          context,
          plugin_name,
@@ -110,7 +110,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp dispatch(
-         "google_calendar.create_event",
+         "google_calendar_create_event",
          args,
          context,
          plugin_name,
@@ -139,7 +139,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
     )
   end
 
-  defp dispatch("gmail.search_messages", args, context, plugin_name, auth_profile, token, tool) do
+  defp dispatch("gmail_search_messages", args, context, plugin_name, auth_profile, token, tool) do
     params =
       %{
         "q" => Map.get(args, "query"),
@@ -157,7 +157,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp dispatch(
-         "google_drive.search_files",
+         "google_drive_search_files",
          args,
          context,
          plugin_name,
@@ -182,7 +182,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
     )
   end
 
-  defp dispatch("gmail.send_message", args, context, plugin_name, auth_profile, token, tool) do
+  defp dispatch("gmail_send_message", args, context, plugin_name, auth_profile, token, tool) do
     raw =
       [
         "To: #{Map.get(args, "to")}",

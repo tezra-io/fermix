@@ -9,17 +9,17 @@ Use this skill when the Google Calendar plugin is enabled and connected. It turn
 
 ## Tools
 
-- `google_calendar.search_events` (read-only) — find events. Args: `query`, optional `calendar_id` (default `primary`), `max_results` (default 10).
-- `google_calendar.create_event` (write; requires the `events_write` permission profile) — add an event. Args: `summary`, `start`, `end` (ISO 8601), optional `description`, `calendar_id`, `time_zone` (IANA).
+- `google_calendar_search_events` (read-only) — find events. Args: `query`, optional `calendar_id` (default `primary`), `max_results` (default 10).
+- `google_calendar_create_event` (write; requires the `events_write` permission profile) — add an event. Args: `summary`, `start`, `end` (ISO 8601), optional `description`, `calendar_id`, `time_zone` (IANA).
 
-If only `readonly` is granted, `create_event` is unavailable — tell the user to reconnect with "Create and update events" to write.
+If only `readonly` is granted, `google_calendar_create_event` is unavailable — tell the user to reconnect with "Create and update events" to write.
 
 ## Workflow
 
 1. Read before reasoning: search the relevant window before answering availability or "what's on my calendar" questions.
 2. Normalize relative time ("tomorrow afternoon", "next week") into explicit dates and an IANA timezone before searching or proposing slots. State the timezone you used.
 3. Keep searches bounded — focused `query`, small `max_results`; widen only if needed.
-4. For create requests, confirm the exact summary, start, end, and timezone with the user before calling `create_event`. Never invent attendees, links, or times.
+4. For create requests, confirm the exact summary, start, end, and timezone with the user before calling `google_calendar_create_event`. Never invent attendees, links, or times.
 
 ## Output
 
@@ -35,4 +35,4 @@ Read and create only. There is no update, reschedule, delete, reminder, recurrin
 
 - "What's on my calendar tomorrow?" → search the day's window, summarize with times + timezone.
 - "Am I free Thursday 2–4pm Pacific?" → search that window, report conflicts.
-- "Add a 30-min sync Friday 10am Pacific." → confirm details, then `create_event` (needs `events_write`).
+- "Add a 30-min sync Friday 10am Pacific." → confirm details, then `google_calendar_create_event` (needs `events_write`).

@@ -53,7 +53,7 @@ defmodule FermixCore.Plugins.Capabilities do
 
     Capability.new(%{
       name: name,
-      description: plugin.display_name,
+      description: tool_description(plugin, tool),
       parameters: ToolExecutor.parameters(name),
       kind: :builtin,
       executor: {ToolExecutor, :execute, [plugin.name, tool]},
@@ -65,10 +65,17 @@ defmodule FermixCore.Plugins.Capabilities do
         auth_profile: auth_profile,
         read_only?: Map.get(tool, "read_only") == true,
         category: :plugin,
-        when_to_use: plugin.display_name,
+        when_to_use: tool_description(plugin, tool),
         examples: [],
         failure_modes: []
       }
     })
+  end
+
+  defp tool_description(%Plugin{} = plugin, tool) do
+    case Map.get(tool, "description") do
+      description when is_binary(description) and description != "" -> description
+      _missing -> plugin.display_name
+    end
   end
 end

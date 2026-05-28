@@ -23,6 +23,8 @@ defmodule FermixCore.Plugins.Registry do
 
   @auth_fields ~w(type provider profile_key account_mode scopes)
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
+  @tool_name_regex ~r/^[A-Za-z0-9_-]{1,64}$/
+  @max_tool_description_bytes 100
 
   @spec list() :: {:ok, [Plugin.t()]} | {:error, term()}
   def list do
@@ -216,14 +218,37 @@ defmodule FermixCore.Plugins.Registry do
 
   defp validate_tool(%Plugin{name: plugin_name} = plugin, %{"name" => name} = tool)
        when is_binary(name) do
-    if String.starts_with?(name, plugin_name <> ".") do
+    with :ok <- validate_tool_name(name),
+         :ok <- validate_tool_namespace(name, plugin_name),
+         :ok <- validate_tool_description(tool, name) do
       validate_tool_scopes(plugin, tool)
-    else
-      {:error, {:tool_name_not_namespaced, name, plugin_name}}
     end
   end
 
   defp validate_tool(_plugin, tool), do: {:error, {:invalid_tool, tool}}
+
+  defp validate_tool_name(name) do
+    if Regex.match?(@tool_name_regex, name),
+      do: :ok,
+      else: {:error, {:invalid_tool_name, name}}
+  end
+
+  defp validate_tool_namespace(name, plugin_name) do
+    if String.starts_with?(name, plugin_name <> "_"),
+      do: :ok,
+      else: {:error, {:tool_name_not_namespaced, name, plugin_name}}
+  end
+
+  defp validate_tool_description(%{"description" => description}, name)
+       when is_binary(description) do
+    description = String.trim(description)
+
+    if description != "" and byte_size(description) <= @max_tool_description_bytes,
+      do: :ok,
+      else: {:error, {:invalid_tool_description, name}}
+  end
+
+  defp validate_tool_description(_tool, name), do: {:error, {:invalid_tool_description, name}}
 
   defp validate_tool_scopes(%Plugin{auth: %{type: :none}}, _tool), do: :ok
 

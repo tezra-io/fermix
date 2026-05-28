@@ -33,11 +33,36 @@ defmodule FermixCore.Plugins.RegistryTest do
   end
 
   test "rejects duplicate tool names" do
-    tool = %{"name" => "bad_plugin.search", "read_only" => true}
+    tool = valid_tool("bad_plugin_search")
     manifest = valid_manifest("bad_plugin") |> Map.put("tools", [tool, tool])
 
-    assert {:error, {:duplicate_tool_name, "bad_plugin.search"}} =
+    assert {:error, {:duplicate_tool_name, "bad_plugin_search"}} =
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
+  end
+
+  test "rejects provider-incompatible tool names" do
+    tool = valid_tool("bad_plugin.search")
+    manifest = valid_manifest("bad_plugin") |> Map.put("tools", [tool])
+
+    assert {:error, {:invalid_tool_name, "bad_plugin.search"}} =
+             Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
+  end
+
+  test "rejects missing or verbose tool descriptions" do
+    missing = Map.delete(valid_tool("bad_plugin_search"), "description")
+    verbose = valid_tool("bad_plugin_search", String.duplicate("x", 101))
+
+    assert {:error, {:invalid_tool_description, "bad_plugin_search"}} =
+             Registry.decode_manifest(
+               valid_manifest("bad_plugin") |> Map.put("tools", [missing]),
+               "/tmp/bad/plugin.json"
+             )
+
+    assert {:error, {:invalid_tool_description, "bad_plugin_search"}} =
+             Registry.decode_manifest(
+               valid_manifest("bad_plugin") |> Map.put("tools", [verbose]),
+               "/tmp/bad/plugin.json"
+             )
   end
 
   test "rejects duplicate skill names" do
@@ -57,23 +82,24 @@ defmodule FermixCore.Plugins.RegistryTest do
   end
 
   test "rejects tools without required scopes" do
-    tool = %{"name" => "bad_plugin.read", "read_only" => true}
+    tool = valid_tool("bad_plugin_read")
     manifest = valid_oauth_manifest("bad_plugin") |> Map.put("tools", [tool])
 
-    assert {:error, {:missing_tool_scopes, "bad_plugin.read"}} =
+    assert {:error, {:missing_tool_scopes, "bad_plugin_read"}} =
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
   end
 
   test "rejects tools that require a scope outside auth.scopes" do
     tool = %{
-      "name" => "bad_plugin.write",
+      "name" => "bad_plugin_write",
+      "description" => "Write bad plugin data.",
       "read_only" => false,
       "requires_scopes" => ["https://www.googleapis.com/auth/gmail.send"]
     }
 
     manifest = valid_oauth_manifest("bad_plugin") |> Map.put("tools", [tool])
 
-    assert {:error, {:unknown_tool_scopes, "bad_plugin.write"}} =
+    assert {:error, {:unknown_tool_scopes, "bad_plugin_write"}} =
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
   end
 
@@ -116,5 +142,9 @@ defmodule FermixCore.Plugins.RegistryTest do
       ]
     })
     |> Map.put("health_check", %{"kind" => "local_readiness", "requires_auth" => true})
+  end
+
+  defp valid_tool(name, description \\ "Search bad plugin data.") do
+    %{"name" => name, "description" => description, "read_only" => true}
   end
 end

@@ -30,18 +30,18 @@ defmodule FermixCore.Plugins.PromptCatalogTest do
 
   test "entries/2 derives tools from plugin-owned capabilities only" do
     caps = [
-      plugin_cap("google_calendar.search_events", "google_calendar"),
+      plugin_cap("google_calendar_search_events", "google_calendar"),
       builtin_cap("file_read")
     ]
 
     assert [entry] = PromptCatalog.entries(caps, ["google-calendar"])
     assert entry.name == "google_calendar"
-    assert entry.tools == ["google_calendar.search_events"]
+    assert entry.tools == ["google_calendar_search_events"]
     assert entry.skills == ["google-calendar"]
   end
 
   test "entries/2 lists only skills that are actually loaded" do
-    caps = [plugin_cap("google_calendar.search_events", "google_calendar")]
+    caps = [plugin_cap("google_calendar_search_events", "google_calendar")]
 
     assert [entry] = PromptCatalog.entries(caps, [])
     assert entry.skills == []

@@ -29,7 +29,8 @@
   },
   "tools": [
     {
-      "name": "google_drive.search_files",
+      "name": "google_drive_search_files",
+      "description": "Search Google Drive file metadata.",
       "policy_class": "external_api",
       "read_only": true,
       "requires_scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"]

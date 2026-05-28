@@ -108,7 +108,7 @@ defmodule Fermix.CLI.PluginsCommandTest do
         status: "ready"
       })
 
-    assert :error = CapabilityRegistry.find("google_calendar.search_events")
+    assert :error = CapabilityRegistry.find("google_calendar_search_events")
 
     output =
       capture_io(fn ->
@@ -116,7 +116,7 @@ defmodule Fermix.CLI.PluginsCommandTest do
       end)
 
     assert output =~ "plugins reloaded"
-    assert {:ok, capability} = CapabilityRegistry.find("google_calendar.search_events")
+    assert {:ok, capability} = CapabilityRegistry.find("google_calendar_search_events")
     assert capability.metadata[:plugin] == "google_calendar"
   end
 
