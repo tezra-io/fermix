@@ -247,20 +247,12 @@ memory_database_path =
 memory_prompt_base_dir =
   System.get_env("FERMIX_MEMORY_PROMPT_DIR") || memory_paths.prompt_base_dir
 
-memory_extraction_debounce_seconds =
-  case System.get_env("FERMIX_MEMORY_EXTRACTION_DEBOUNCE_SECONDS") do
-    nil -> Keyword.get(existing_memory, :extraction_debounce_seconds, 60)
-    "" -> Keyword.get(existing_memory, :extraction_debounce_seconds, 60)
-    seconds -> String.to_integer(seconds)
-  end
-
 config :fermix_core,
        :memory,
        Keyword.merge(existing_memory,
          enabled: memory_enabled,
          database_path: memory_database_path,
-         prompt_base_dir: memory_prompt_base_dir,
-         extraction_debounce_seconds: memory_extraction_debounce_seconds
+         prompt_base_dir: memory_prompt_base_dir
        )
 
 realtime_env =

@@ -20,7 +20,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
@@ -75,6 +74,11 @@ defmodule FermixCore.Application do
     System.halt(run_cli(argv))
   end
 
+  defp cli_dispatch(["memory" | _] = argv) do
+    {:ok, _pid} = start_supervision_tree()
+    System.halt(run_cli(argv))
+  end
+
   # version / help / start / stop / unknown — strictly read-only, no side
   # effects. Halt before any sibling app starts so there is no file
   # logger, no `Memory.Repo`, no `TokenManager`, no port bind.
@@ -119,7 +123,6 @@ defmodule FermixCore.Application do
         Repo,
         ConversationStore,
         Store,
-        ExtractionDebouncer,
         MemoryScheduler,
         BootReport,
         AgentSupervisor,

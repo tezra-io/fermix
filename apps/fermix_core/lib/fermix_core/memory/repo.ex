@@ -17,6 +17,7 @@ defmodule FermixCore.Memory.Repo do
   @job_creator_trust_migration_version 6
   @trust_rename_migration_version 7
   @fermix_md_rename_migration_version 8
+  @memory_review_migration_version 9
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -281,6 +282,32 @@ defmodule FermixCore.Memory.Repo do
     WHERE resource_type = 'fermix_md' AND resource_path LIKE '%/AGENTS.md';
   """
 
+  @memory_review_schema_sql """
+  ALTER TABLE memories ADD COLUMN archived_at TEXT;
+  ALTER TABLE memories ADD COLUMN archived_by TEXT;
+  ALTER TABLE memories ADD COLUMN archive_reason TEXT;
+
+  CREATE TABLE IF NOT EXISTS memory_review_state (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    thread_scope TEXT NOT NULL,
+    last_reviewed_message_id INTEGER,
+    last_reviewed_at TEXT,
+    last_review_started_at TEXT,
+    last_review_completed_at TEXT,
+    last_review_status TEXT,
+    last_review_failed_at TEXT,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, channel, chat_id, thread_scope)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_messages_review_tail
+    ON messages(agent_id, owner_id, channel, chat_id, thread_scope, role, id);
+  """
+
   @type message_attrs :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
@@ -336,7 +363,33 @@ defmodule FermixCore.Memory.Repo do
           optional(:source_type) => String.t(),
           optional(:session_id) => String.t(),
           optional(:run_id) => String.t(),
-          optional(:key) => String.t()
+          optional(:key) => String.t(),
+          optional(:id) => pos_integer(),
+          optional(:archived?) => boolean()
+        }
+
+  @type memory_review_selector :: %{
+          required(:agent_id) => String.t(),
+          required(:owner_id) => String.t(),
+          required(:channel) => String.t(),
+          required(:chat_id) => String.t(),
+          required(:thread_scope) => String.t() | atom() | integer()
+        }
+
+  @type memory_review_state_row :: %{
+          agent_id: String.t(),
+          owner_id: String.t(),
+          channel: String.t(),
+          chat_id: String.t(),
+          thread_scope: String.t(),
+          last_reviewed_message_id: integer() | nil,
+          last_reviewed_at: DateTime.t() | nil,
+          last_review_started_at: DateTime.t() | nil,
+          last_review_completed_at: DateTime.t() | nil,
+          last_review_status: String.t() | nil,
+          last_review_failed_at: DateTime.t() | nil,
+          failure_count: non_neg_integer(),
+          updated_at: DateTime.t()
         }
 
   @type memory_key_selector :: %{
@@ -442,6 +495,9 @@ defmodule FermixCore.Memory.Repo do
           source_description: String.t() | nil,
           session_id: String.t() | nil,
           run_id: String.t() | nil,
+          archived_at: DateTime.t() | nil,
+          archived_by: String.t() | nil,
+          archive_reason: String.t() | nil,
           created_at: DateTime.t(),
           updated_at: DateTime.t()
         }
@@ -464,6 +520,9 @@ defmodule FermixCore.Memory.Repo do
           source_description: String.t() | nil,
           session_id: String.t() | nil,
           run_id: String.t() | nil,
+          archived_at: DateTime.t() | nil,
+          archived_by: String.t() | nil,
+          archive_reason: String.t() | nil,
           created_at: DateTime.t(),
           updated_at: DateTime.t(),
           rank: float()
@@ -591,6 +650,26 @@ defmodule FermixCore.Memory.Repo do
     call({:delete_memories, selector}, opts)
   end
 
+  @spec update_memory_value(memory_selector(), String.t(), keyword()) ::
+          {:ok, memory_row()} | {:error, :not_found | term()}
+  def update_memory_value(selector, value, opts \\ [])
+      when is_map(selector) and is_binary(value) do
+    call({:update_memory_value, selector, value}, opts)
+  end
+
+  @spec archive_memory(memory_selector(), String.t(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, memory_row()} | {:error, :not_found | term()}
+  def archive_memory(selector, archived_by, reason, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_binary(archived_by) and is_binary(reason) do
+    call({:archive_memory, selector, archived_by, reason, now}, opts)
+  end
+
+  @spec restore_memory(pos_integer(), keyword()) ::
+          {:ok, memory_row()} | {:error, :not_found | term()}
+  def restore_memory(id, opts \\ []) when is_integer(id) and id > 0 do
+    call({:restore_memory, id}, opts)
+  end
+
   @spec search_memories(String.t(), keyword()) :: {:ok, [memory_search_row()]} | {:error, term()}
   def search_memories(query, opts \\ []) when is_binary(query) do
     call(
@@ -605,6 +684,64 @@ defmodule FermixCore.Memory.Repo do
       {:search_messages, query, Keyword.get(opts, :selector, %{}), Keyword.get(opts, :limit, 10)},
       opts
     )
+  end
+
+  @spec get_user_messages_after(
+          memory_review_selector(),
+          non_neg_integer() | nil,
+          pos_integer(),
+          keyword()
+        ) ::
+          {:ok, [message_row()]} | {:error, term()}
+  def get_user_messages_after(selector, last_id, limit, opts \\ [])
+      when is_map(selector) and (is_nil(last_id) or (is_integer(last_id) and last_id >= 0)) and
+             is_integer(limit) and limit > 0 do
+    call({:get_user_messages_after, selector, last_id || 0, limit}, opts)
+  end
+
+  @spec list_review_conversations(map(), keyword()) ::
+          {:ok, [memory_review_selector()]} | {:error, term()}
+  def list_review_conversations(selector \\ %{}, opts \\ []) when is_map(selector) do
+    call({:list_review_conversations, selector}, opts)
+  end
+
+  @spec get_memory_review_state(memory_review_selector(), keyword()) ::
+          {:ok, memory_review_state_row()} | {:error, :not_found | term()}
+  def get_memory_review_state(selector, opts \\ []) when is_map(selector) do
+    call({:get_memory_review_state, selector}, opts)
+  end
+
+  @spec claim_memory_review(memory_review_selector(), DateTime.t(), non_neg_integer(), keyword()) ::
+          {:ok, memory_review_state_row()} | {:error, :concurrent_run | term()}
+  def claim_memory_review(selector, %DateTime{} = now, stale_after_ms, opts \\ [])
+      when is_map(selector) and is_integer(stale_after_ms) and stale_after_ms >= 0 do
+    call({:claim_memory_review, selector, now, stale_after_ms}, opts)
+  end
+
+  @spec complete_memory_review(
+          memory_review_selector(),
+          :ok | :nothing_to_save,
+          non_neg_integer(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, memory_review_state_row()} | {:error, term()}
+  def complete_memory_review(
+        selector,
+        status,
+        last_reviewed_message_id,
+        %DateTime{} = now,
+        opts \\ []
+      )
+      when is_map(selector) and status in [:ok, :nothing_to_save] and
+             is_integer(last_reviewed_message_id) and last_reviewed_message_id >= 0 do
+    call({:complete_memory_review, selector, status, last_reviewed_message_id, now}, opts)
+  end
+
+  @spec fail_memory_review(memory_review_selector(), DateTime.t(), keyword()) ::
+          {:ok, memory_review_state_row()} | {:error, term()}
+  def fail_memory_review(selector, %DateTime{} = now, opts \\ []) when is_map(selector) do
+    call({:fail_memory_review, selector, now}, opts)
   end
 
   @spec upsert_resource(resource_attrs(), keyword()) :: {:ok, resource_row()} | {:error, term()}
@@ -850,6 +987,21 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:update_memory_value, selector, value}, _from, state) do
+    reply = with_connection(state, &update_memory_value_row(&1, selector, value))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:archive_memory, selector, archived_by, reason, now}, _from, state) do
+    reply = with_connection(state, &archive_memory_row(&1, selector, archived_by, reason, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:restore_memory, id}, _from, state) do
+    reply = with_connection(state, &restore_memory_row(&1, id))
+    {:reply, reply, state}
+  end
+
   def handle_call({:search_memories, query, selector, limit}, _from, state) do
     reply = with_connection(state, &search_memory_rows(&1, query, selector, limit))
     {:reply, reply, state}
@@ -857,6 +1009,38 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:search_messages, query, selector, limit}, _from, state) do
     reply = with_connection(state, &search_message_rows(&1, query, selector, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_user_messages_after, selector, last_id, limit}, _from, state) do
+    reply = with_connection(state, &fetch_user_messages_after(&1, selector, last_id, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_review_conversations, selector}, _from, state) do
+    reply = with_connection(state, &fetch_review_conversations(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_memory_review_state, selector}, _from, state) do
+    reply = with_connection(state, &fetch_memory_review_state(&1, selector))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_memory_review, selector, now, stale_after_ms}, _from, state) do
+    reply = with_connection(state, &claim_memory_review_row(&1, selector, now, stale_after_ms))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:complete_memory_review, selector, status, last_id, now}, _from, state) do
+    reply =
+      with_connection(state, &complete_memory_review_row(&1, selector, status, last_id, now))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call({:fail_memory_review, selector, now}, _from, state) do
+    reply = with_connection(state, &fail_memory_review_row(&1, selector, now))
     {:reply, reply, state}
   end
 
@@ -1029,7 +1213,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_expiry_migration(conn, versions),
          :ok <- apply_job_creator_trust_migration(conn, versions),
          :ok <- apply_trust_rename_migration(conn, versions),
-         :ok <- apply_fermix_md_rename_migration(conn, versions) do
+         :ok <- apply_fermix_md_rename_migration(conn, versions),
+         :ok <- apply_memory_review_migration(conn, versions) do
       :ok
     end
   end
@@ -1170,6 +1355,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@fermix_md_rename_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@fermix_md_rename_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_memory_review_migration(conn, versions) do
+    if Enum.member?(versions, @memory_review_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@memory_review_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@memory_review_migration_version});
         COMMIT;
         """
       )
@@ -1317,6 +1518,9 @@ defmodule FermixCore.Memory.Repo do
                source_description = excluded.source_description,
                session_id = excluded.session_id,
                run_id = excluded.run_id,
+               archived_at = NULL,
+               archived_by = NULL,
+               archive_reason = NULL,
                updated_at = excluded.updated_at
              """,
              memory_insert_params(memory)
@@ -1369,6 +1573,192 @@ defmodule FermixCore.Memory.Repo do
   defp delete_memory_row(conn, selector) do
     {where_sql, params} = memory_where_clause(selector)
     execute(conn, "DELETE FROM memories WHERE #{where_sql}", params)
+  end
+
+  defp update_memory_value_row(conn, selector, value) do
+    {where_sql, params} = memory_where_clause(selector)
+    now = timestamp_string(DateTime.utc_now())
+
+    with :ok <-
+           execute(
+             conn,
+             "UPDATE memories SET value = ?, updated_at = ? WHERE #{where_sql}",
+             [value, now | params]
+           ) do
+      fetch_memory(conn, selector)
+    end
+  end
+
+  defp archive_memory_row(conn, selector, archived_by, reason, now) do
+    {where_sql, params} = memory_where_clause(selector)
+    archived_at = timestamp_string(now)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE memories
+             SET archived_at = ?, archived_by = ?, archive_reason = ?, updated_at = ?
+             WHERE #{where_sql}
+             """,
+             [archived_at, archived_by, reason, archived_at | params]
+           ) do
+      fetch_memory(conn, Map.delete(selector, :archived?))
+    end
+  end
+
+  defp restore_memory_row(conn, id) do
+    now = timestamp_string(DateTime.utc_now())
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE memories
+             SET archived_at = NULL, archived_by = NULL, archive_reason = NULL, updated_at = ?
+             WHERE id = ?
+             """,
+             [now, id]
+           ) do
+      fetch_memory(conn, %{id: id})
+    end
+  end
+
+  defp fetch_user_messages_after(conn, selector, last_id, limit) do
+    review_selector = normalize_memory_review_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM messages
+             WHERE agent_id = ?
+               AND owner_id = ?
+               AND channel = ?
+               AND chat_id = ?
+               AND thread_scope = ?
+               AND role = 'user'
+               AND id > ?
+             ORDER BY id ASC
+             LIMIT ?
+             """,
+             [
+               review_selector.agent_id,
+               review_selector.owner_id,
+               review_selector.channel,
+               review_selector.chat_id,
+               review_selector.thread_scope,
+               last_id,
+               limit
+             ]
+           ) do
+      {:ok, Enum.map(rows, &message_row/1)}
+    end
+  end
+
+  defp fetch_review_conversations(conn, selector) do
+    {where_sql, params} = review_conversation_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT DISTINCT agent_id, owner_id, channel, chat_id, thread_scope
+             FROM messages
+             WHERE role = 'user' AND #{where_sql}
+             ORDER BY agent_id ASC, owner_id ASC, channel ASC, chat_id ASC, thread_scope ASC
+             """,
+             params
+           ) do
+      {:ok, Enum.map(rows, &review_conversation_row/1)}
+    end
+  end
+
+  defp fetch_memory_review_state(conn, selector) do
+    review_selector = normalize_memory_review_selector(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM memory_review_state
+             WHERE agent_id = ? AND owner_id = ? AND channel = ? AND chat_id = ? AND thread_scope = ?
+             LIMIT 1
+             """,
+             memory_review_selector_params(review_selector)
+           ) do
+      case rows do
+        [row] -> {:ok, memory_review_state_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp claim_memory_review_row(conn, selector, now, stale_after_ms) do
+    review_selector = normalize_memory_review_selector(selector)
+
+    case fetch_memory_review_state(conn, review_selector) do
+      {:ok, row} ->
+        if active_review?(row, now, stale_after_ms) do
+          {:error, :concurrent_run}
+        else
+          upsert_memory_review_started(conn, review_selector, row, now)
+        end
+
+      {:error, :not_found} ->
+        upsert_memory_review_started(conn, review_selector, empty_review_state(), now)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp complete_memory_review_row(conn, selector, status, last_id, now) do
+    review_selector = normalize_memory_review_selector(selector)
+    now_string = timestamp_string(now)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE memory_review_state
+             SET last_reviewed_message_id = ?,
+                 last_reviewed_at = ?,
+                 last_review_completed_at = ?,
+                 last_review_status = ?,
+                 last_review_failed_at = NULL,
+                 failure_count = 0,
+                 updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND channel = ? AND chat_id = ? AND thread_scope = ?
+             """,
+             [last_id, now_string, now_string, Atom.to_string(status), now_string] ++
+               memory_review_selector_params(review_selector)
+           ) do
+      fetch_memory_review_state(conn, review_selector)
+    end
+  end
+
+  defp fail_memory_review_row(conn, selector, now) do
+    review_selector = normalize_memory_review_selector(selector)
+    now_string = timestamp_string(now)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             UPDATE memory_review_state
+             SET last_review_status = 'failed',
+                 last_review_failed_at = ?,
+                 failure_count = failure_count + 1,
+                 updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND channel = ? AND chat_id = ? AND thread_scope = ?
+             """,
+             [now_string, now_string] ++ memory_review_selector_params(review_selector)
+           ) do
+      fetch_memory_review_state(conn, review_selector)
+    end
   end
 
   defp search_memory_rows(conn, query, selector, limit) do
@@ -2371,6 +2761,17 @@ defmodule FermixCore.Memory.Repo do
   defp normalize_message_selector(selector) do
     %{
       agent_id: fetch_string!(selector, :agent_id),
+      owner_id: optional_string!(selector, :owner_id),
+      channel: fetch_string!(selector, :channel),
+      chat_id: fetch_string!(selector, :chat_id),
+      thread_scope: Scope.normalize_thread_scope(Map.fetch!(selector, :thread_scope))
+    }
+  end
+
+  defp normalize_memory_review_selector(selector) do
+    %{
+      agent_id: fetch_string!(selector, :agent_id),
+      owner_id: fetch_string!(selector, :owner_id),
       channel: fetch_string!(selector, :channel),
       chat_id: fetch_string!(selector, :chat_id),
       thread_scope: Scope.normalize_thread_scope(Map.fetch!(selector, :thread_scope))
@@ -2684,9 +3085,7 @@ defmodule FermixCore.Memory.Repo do
     selector
     |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
     |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map_reduce([], fn {key, value}, params ->
-      {"#{column_name(key)} = ?", params ++ [value]}
-    end)
+    |> Enum.map_reduce([], &memory_where_term/2)
     |> join_where_clause()
   end
 
@@ -2694,11 +3093,36 @@ defmodule FermixCore.Memory.Repo do
     selector
     |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
     |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map_reduce([], fn {key, value}, params ->
-      {"memories.#{search_memory_column_name(key)} = ?", params ++ [value]}
+    |> Enum.map_reduce([], &search_memory_where_term/2)
+    |> join_where_clause()
+  end
+
+  defp review_conversation_where_clause(selector) do
+    selector
+    |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn
+      {:thread_scope, value}, params ->
+        {"thread_scope = ?", params ++ [Scope.normalize_thread_scope(value)]}
+
+      {key, value}, params ->
+        {"#{message_column_name(key)} = ?", params ++ [fetch_string_value!(key, value)]}
     end)
     |> join_where_clause()
   end
+
+  defp memory_where_term({:archived?, false}, params), do: {"archived_at IS NULL", params}
+  defp memory_where_term({:archived?, true}, params), do: {"archived_at IS NOT NULL", params}
+  defp memory_where_term({key, value}, params), do: {"#{column_name(key)} = ?", params ++ [value]}
+
+  defp search_memory_where_term({:archived?, false}, params),
+    do: {"memories.archived_at IS NULL", params}
+
+  defp search_memory_where_term({:archived?, true}, params),
+    do: {"memories.archived_at IS NOT NULL", params}
+
+  defp search_memory_where_term({key, value}, params),
+    do: {"memories.#{search_memory_column_name(key)} = ?", params ++ [value]}
 
   defp message_where_clause(selector) do
     selector
@@ -2731,6 +3155,7 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp column_name(:key), do: "\"key\""
+  defp column_name(:id), do: "id"
 
   defp column_name(key)
        when key in [
@@ -2742,12 +3167,14 @@ defmodule FermixCore.Memory.Repo do
               :source_id,
               :source_type,
               :session_id,
-              :run_id
+              :run_id,
+              :archived_by
             ] do
     Atom.to_string(key)
   end
 
   defp search_memory_column_name(:key), do: "\"key\""
+  defp search_memory_column_name(:id), do: "id"
 
   defp search_memory_column_name(key)
        when key in [
@@ -2759,7 +3186,8 @@ defmodule FermixCore.Memory.Repo do
               :source_id,
               :source_type,
               :session_id,
-              :run_id
+              :run_id,
+              :archived_by
             ] do
     Atom.to_string(key)
   end
@@ -2797,6 +3225,84 @@ defmodule FermixCore.Memory.Repo do
               :kind
             ] do
     Atom.to_string(key)
+  end
+
+  defp memory_review_selector_params(selector) do
+    [
+      selector.agent_id,
+      selector.owner_id,
+      selector.channel,
+      selector.chat_id,
+      selector.thread_scope
+    ]
+  end
+
+  defp empty_review_state do
+    %{
+      last_reviewed_message_id: nil,
+      last_reviewed_at: nil,
+      last_review_started_at: nil,
+      last_review_completed_at: nil,
+      last_review_status: nil,
+      last_review_failed_at: nil,
+      failure_count: 0
+    }
+  end
+
+  defp active_review?(row, now, stale_after_ms) do
+    started = row.last_review_started_at
+    completed = row.last_review_completed_at
+    failed = row.last_review_failed_at
+
+    not is_nil(started) and newer_than?(started, completed) and newer_than?(started, failed) and
+      DateTime.diff(now, started, :millisecond) < stale_after_ms
+  end
+
+  defp newer_than?(_started, nil), do: true
+  defp newer_than?(started, other), do: DateTime.compare(started, other) == :gt
+
+  defp upsert_memory_review_started(conn, selector, existing, now) do
+    now_string = timestamp_string(now)
+
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO memory_review_state (
+               agent_id,
+               owner_id,
+               channel,
+               chat_id,
+               thread_scope,
+               last_reviewed_message_id,
+               last_reviewed_at,
+               last_review_started_at,
+               last_review_completed_at,
+               last_review_status,
+               last_review_failed_at,
+               failure_count,
+               updated_at
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(agent_id, owner_id, channel, chat_id, thread_scope)
+             DO UPDATE SET
+               last_review_started_at = excluded.last_review_started_at,
+               updated_at = excluded.updated_at
+             """,
+             memory_review_selector_params(selector) ++
+               [
+                 existing.last_reviewed_message_id,
+                 optional_timestamp_string(existing.last_reviewed_at),
+                 now_string,
+                 optional_timestamp_string(existing.last_review_completed_at),
+                 existing.last_review_status,
+                 optional_timestamp_string(existing.last_review_failed_at),
+                 existing.failure_count,
+                 now_string
+               ]
+           ) do
+      fetch_memory_review_state(conn, selector)
+    end
   end
 
   defp message_row([
@@ -2848,7 +3354,10 @@ defmodule FermixCore.Memory.Repo do
          source_name,
          source_description,
          session_id,
-         run_id
+         run_id,
+         archived_at,
+         archived_by,
+         archive_reason
        ]) do
     %{
       id: id,
@@ -2868,6 +3377,9 @@ defmodule FermixCore.Memory.Repo do
       source_description: source_description,
       session_id: session_id,
       run_id: run_id,
+      archived_at: parse_optional_timestamp(archived_at),
+      archived_by: archived_by,
+      archive_reason: archive_reason,
       created_at: parse_timestamp!(created_at),
       updated_at: parse_timestamp!(updated_at)
     }
@@ -2925,6 +3437,9 @@ defmodule FermixCore.Memory.Repo do
          source_description,
          session_id,
          run_id,
+         archived_at,
+         archived_by,
+         archive_reason,
          rank
        ]) do
     memory_row([
@@ -2946,9 +3461,54 @@ defmodule FermixCore.Memory.Repo do
       source_name,
       source_description,
       session_id,
-      run_id
+      run_id,
+      archived_at,
+      archived_by,
+      archive_reason
     ])
     |> Map.put(:rank, rank * 1.0)
+  end
+
+  defp review_conversation_row([agent_id, owner_id, channel, chat_id, thread_scope]) do
+    %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      channel: channel,
+      chat_id: chat_id,
+      thread_scope: thread_scope
+    }
+  end
+
+  defp memory_review_state_row([
+         agent_id,
+         owner_id,
+         channel,
+         chat_id,
+         thread_scope,
+         last_reviewed_message_id,
+         last_reviewed_at,
+         last_review_started_at,
+         last_review_completed_at,
+         last_review_status,
+         last_review_failed_at,
+         failure_count,
+         updated_at
+       ]) do
+    %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      channel: channel,
+      chat_id: chat_id,
+      thread_scope: thread_scope,
+      last_reviewed_message_id: last_reviewed_message_id,
+      last_reviewed_at: parse_optional_timestamp(last_reviewed_at),
+      last_review_started_at: parse_optional_timestamp(last_review_started_at),
+      last_review_completed_at: parse_optional_timestamp(last_review_completed_at),
+      last_review_status: last_review_status,
+      last_review_failed_at: parse_optional_timestamp(last_review_failed_at),
+      failure_count: failure_count,
+      updated_at: parse_timestamp!(updated_at)
+    }
   end
 
   defp resource_row([

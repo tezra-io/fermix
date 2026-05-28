@@ -338,7 +338,8 @@ defmodule FermixCore.Memory.Store do
       agent_id: scope_ref.agent_id,
       owner_id: scope_ref.owner_id,
       scope_type: scope_ref.scope_type,
-      scope_id: scope_ref.scope_id
+      scope_id: scope_ref.scope_id,
+      archived?: false
     }
   end
 
