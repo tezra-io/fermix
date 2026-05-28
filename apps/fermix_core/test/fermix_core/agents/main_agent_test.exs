@@ -623,7 +623,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   end
 
   defp request_kind(%{"messages" => messages}) do
-    if Enum.any?(messages, &(get_in(&1, ["content"]) =~ "Summarize older conversation")) do
+    if Enum.any?(messages, &(get_in(&1, ["content"]) =~ "reusable checkpoint")) do
       :summary
     else
       :chat
