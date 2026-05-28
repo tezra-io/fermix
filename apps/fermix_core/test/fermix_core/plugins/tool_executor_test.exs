@@ -36,7 +36,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"query" => "Q2 Plan", "max_results" => 3},
                context,
                "google_drive",
-               %{"name" => "google_drive.search_files", "read_only" => true}
+               %{"name" => "google_drive_search_files", "read_only" => true}
              )
 
     assert result.success == true
@@ -80,7 +80,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"query" => "standup"},
                context,
                "google_calendar",
-               %{"name" => "google_calendar.search_events", "read_only" => true}
+               %{"name" => "google_calendar_search_events", "read_only" => true}
              )
 
     assert result.success == true
@@ -114,7 +114,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                context,
                "google_calendar",
                %{
-                 "name" => "google_calendar.create_event",
+                 "name" => "google_calendar_create_event",
                  "read_only" => false,
                  "requires_scopes" => ["https://www.googleapis.com/auth/calendar.events"]
                }
@@ -139,7 +139,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"query" => "standup"},
                context,
                "google_calendar",
-               %{"name" => "google_calendar.search_events", "read_only" => true}
+               %{"name" => "google_calendar_search_events", "read_only" => true}
              )
 
     assert result.success == false
