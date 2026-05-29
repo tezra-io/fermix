@@ -20,7 +20,7 @@ defmodule FermixCore.Health do
       key: :telegram,
       name: "telegram",
       default_enabled: true,
-      runtime_modes: %{polling: FermixChannels.Telegram.Poller}
+      runtime_modes: %{polling: FermixChannels.Channels.Telegram.Poller}
     },
     %{
       key: :whatsapp,
@@ -32,7 +32,7 @@ defmodule FermixCore.Health do
       key: :discord,
       name: "discord",
       default_enabled: false,
-      runtime_modes: %{gateway: FermixChannels.Discord.Gateway}
+      runtime_modes: %{gateway: FermixChannels.Channels.Discord.Gateway}
     },
     %{
       key: :slack,
@@ -44,7 +44,7 @@ defmodule FermixCore.Health do
       key: :signal,
       name: "signal",
       default_enabled: false,
-      runtime_modes: %{subprocess: FermixChannels.Signal.Listener}
+      runtime_modes: %{subprocess: FermixChannels.Channels.Signal.Listener}
     }
   ]
 

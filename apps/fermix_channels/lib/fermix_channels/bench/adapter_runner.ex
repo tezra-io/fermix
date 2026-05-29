@@ -1,14 +1,14 @@
 defmodule FermixChannels.Bench.AdapterRunner do
   @moduledoc false
 
+  alias FermixChannels.Channels.Discord
+  alias FermixChannels.Channels.Signal
+  alias FermixChannels.Channels.Slack
+  alias FermixChannels.Channels.Telegram
+  alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.CLI
-  alias FermixChannels.Discord
   alias FermixChannels.Dispatcher
-  alias FermixChannels.Idempotency
-  alias FermixChannels.Signal
-  alias FermixChannels.Slack
-  alias FermixChannels.Telegram
-  alias FermixChannels.WhatsApp
+  alias FermixChannels.Gateway.Idempotency
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Bench.MockProvider
   alias FermixCore.Bench.Recorder

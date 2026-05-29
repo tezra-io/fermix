@@ -592,7 +592,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             chat_id: "8217352118",
             thread_ts: "42"
           ],
-          delivery_channels: %{"telegram" => FermixChannels.Telegram}
+          delivery_channels: %{"telegram" => FermixChannels.Channels.Telegram}
         ]
       ],
       fermix_channels: [],

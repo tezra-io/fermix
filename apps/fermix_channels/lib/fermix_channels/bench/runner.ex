@@ -6,7 +6,7 @@ defmodule FermixChannels.Bench.Runner do
   alias FermixChannels.Bench.AdapterRunner
   alias FermixChannels.Bench.ReplyChannel
   alias FermixChannels.Dispatcher
-  alias FermixChannels.Message
+  alias FermixChannels.Gateway.Message
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Bench.MockProvider
   alias FermixCore.Bench.Recorder

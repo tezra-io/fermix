@@ -77,11 +77,11 @@ config :fermix_core, :jobs,
   default_timeout_ms: 1_800_000,
   delivery_timeout_ms: 60_000,
   delivery_channels: %{
-    "telegram" => FermixChannels.Telegram,
-    "slack" => FermixChannels.Slack,
-    "discord" => FermixChannels.Discord,
-    "signal" => FermixChannels.Signal,
-    "whatsapp" => FermixChannels.WhatsApp,
+    "telegram" => FermixChannels.Channels.Telegram,
+    "slack" => FermixChannels.Channels.Slack,
+    "discord" => FermixChannels.Channels.Discord,
+    "signal" => FermixChannels.Channels.Signal,
+    "whatsapp" => FermixChannels.Channels.WhatsApp,
     "cli" => FermixChannels.CLI
   }
 

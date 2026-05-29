@@ -4,7 +4,7 @@ defmodule FermixChannels.CLITest do
   import ExUnit.CaptureIO
 
   alias FermixChannels.CLI
-  alias FermixChannels.Message
+  alias FermixChannels.Gateway.Message
 
   defmodule TestAgent do
     def handle_message(message, test_pid) do
