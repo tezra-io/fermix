@@ -6,6 +6,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
 
+### Added — Subagents Orchestration
+- `subagents` built-in: the main agent can spawn one or more temporary
+  generic subagents for independent delegated work, run them concurrently
+  up to a bounded cap, and synthesize the structured results. Each worker
+  inherits the parent turn's trust and runs with the parent's policy classes
+  minus `:read_write` (read, web, MCP/plugins, skills, sandbox-bounded
+  `shell`; no direct local/Fermix-state writes), with its `tool_context`
+  sanitized so it cannot reply on Fermix's channel or reach the parent's
+  memory. Recursive fanout is bounded by a `subagent_depth` guard.
+- `skill_list` built-in so a subagent can discover installed skills on
+  demand before delegating to one via `skill_run`.
+- `FermixCore.Agents.WorkerRun`: shared one-shot worker lifecycle
+  (spawn → run → timeout → normalize → stop) reused by `skill_run` and
+  `subagents`. `FermixCore.Capabilities.Registry.default_policy_classes/1`
+  exposes a trust's baseline class set.
+
+### Removed
+- The `delegate` built-in and the `routing.delegate_model` config key
+  (and its `model_routing_config` surface). Delegated work now goes through
+  `subagents` (general, tool-using) or `skill_run` (named skill); existing
+  `delegate_model` config entries are ignored.
+
 ### Added — M7.1 (Conversation Lifecycle)
 - Per-model context-window catalog and `[fermix_core.compaction]` threshold
   config for automatic post-turn conversation compaction.
@@ -53,8 +75,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added — M7 (Advanced Tools)
 - Built-in catalog expanded with `file_edit`, `glob_search`, `content_search`,
-  `git_read`, `git_write`, `web_fetch`, `web_search`, `delegate`,
-  `skill_create`, `model_routing_config`, and `tool_help`.
+  `git_read`, `git_write`, `web_fetch`, `web_search`, `skill_create`,
+  `model_routing_config`, and `tool_help`.
 - Capability metadata schema for built-ins: `when_to_use`, `examples`,
   `failure_modes`, `requires_setup`, and `category`. Runtime prompts now
   generate a compact built-in catalog from this metadata.

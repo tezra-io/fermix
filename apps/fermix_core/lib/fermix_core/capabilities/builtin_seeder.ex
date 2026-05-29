@@ -28,10 +28,11 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.GitWrite,
     FermixCore.Tools.WebFetch,
     FermixCore.Tools.WebSearch,
-    FermixCore.Tools.Delegate,
     FermixCore.Tools.SkillCreate,
     FermixCore.Tools.SkillView,
     FermixCore.Tools.SkillRun,
+    FermixCore.Tools.SkillList,
+    FermixCore.Tools.Subagents,
     FermixCore.Tools.ModelRoutingConfig,
     FermixCore.Tools.ToolHelp,
     FermixCore.Tools.MemoryStore,
@@ -77,6 +78,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
     :ignore
   end
+
+  @doc """
+  The built-in tool modules seeded into the capability registry at boot.
+  Exposed for the classification guard test that asserts every built-in has an
+  explicit `policy_class` (see `FermixCore.Capabilities.Builtin`).
+  """
+  @spec builtin_tool_modules() :: [module()]
+  def builtin_tool_modules, do: @builtin_tool_modules
 
   defp builtin_modules(opts) do
     Keyword.get(opts, :tool_modules, @builtin_tool_modules)
