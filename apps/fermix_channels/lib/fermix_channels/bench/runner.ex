@@ -5,7 +5,7 @@ defmodule FermixChannels.Bench.Runner do
 
   alias FermixChannels.Bench.AdapterRunner
   alias FermixChannels.Bench.ReplyChannel
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.MainAgent
@@ -252,7 +252,7 @@ defmodule FermixChannels.Bench.Runner do
     end
 
     :ok =
-      Dispatcher.dispatch([message],
+      Gateway.ingest([message],
         channel: ReplyChannel,
         agent: Queue,
         agent_server: env.queue,

@@ -12,6 +12,8 @@ defmodule FermixChannels.Gateway.Source do
   See `docs/MESSAGE_GATEWAY_ARCHITECTURE.md` §9.1.
   """
 
+  alias FermixChannels.Gateway.ChannelRegistry
+
   @enforce_keys [:channel]
   defstruct [:channel, :channel_key, :sender_id, :sender_name, :chat_id, :thread_id]
 
@@ -24,14 +26,6 @@ defmodule FermixChannels.Gateway.Source do
           thread_id: String.t() | nil
         }
 
-  @remote_channel_keys %{
-    "telegram" => :telegram,
-    "whatsapp" => :whatsapp,
-    "slack" => :slack,
-    "discord" => :discord,
-    "signal" => :signal
-  }
-
   @spec from_message(map()) :: t()
   def from_message(message) when is_map(message) do
     channel = require_binary(message, :channel)
@@ -39,7 +33,7 @@ defmodule FermixChannels.Gateway.Source do
 
     %__MODULE__{
       channel: channel,
-      channel_key: Map.get(@remote_channel_keys, channel),
+      channel_key: ChannelRegistry.channel_key(channel),
       sender_id: sender_id_from_metadata(metadata),
       sender_name: metadata_value(metadata, :sender_name),
       chat_id: optional_binary(message, :chat_id),
