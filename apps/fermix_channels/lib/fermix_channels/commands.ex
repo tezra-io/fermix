@@ -5,7 +5,7 @@ defmodule FermixChannels.Commands do
 
   alias FermixChannels.Commands.Registry
   alias FermixChannels.Message
-  alias FermixCore.Channels.Outbound
+  alias FermixCore.Reply
   alias FermixCore.Telemetry
 
   @type result ::
@@ -21,7 +21,7 @@ defmodule FermixChannels.Commands do
     end
   end
 
-  @spec dispatch(result(), Outbound.reply_fn(), map()) ::
+  @spec dispatch(result(), Reply.reply_fn(), map()) ::
           :ok | :passthrough | {:error, term()}
   def dispatch(command_result, reply_fn, context) do
     {result, duration_us} =

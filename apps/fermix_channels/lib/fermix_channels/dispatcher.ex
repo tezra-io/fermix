@@ -9,12 +9,13 @@ defmodule FermixChannels.Dispatcher do
   require Logger
 
   alias FermixChannels.Commands
+  alias FermixChannels.Gateway.Transcription
   alias FermixChannels.Ingress.Authorizer
   alias FermixChannels.Ingress.Source
   alias FermixChannels.Message
-  alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Reply
   alias FermixCore.Telemetry
 
   @spec dispatch([Message.t() | map()], keyword()) :: :ok | {:error, term()}
@@ -83,7 +84,7 @@ defmodule FermixChannels.Dispatcher do
   @spec observe_reply(
           (() -> term()),
           :override | :text | :media,
-          Outbound.media_kind() | nil,
+          Reply.media_kind() | nil,
           Message.t()
         ) ::
           :ok | {:error, term()}
@@ -136,7 +137,7 @@ defmodule FermixChannels.Dispatcher do
     with {:ok, reply_message} <- normalize_result,
          {:ok, authorization} <- authorize(reply_message),
          {:ok, reply_message} <-
-           FermixCore.Transcription.maybe_transcribe_message(
+           Transcription.maybe_transcribe_message(
              channel,
              reply_message,
              transcription_opts

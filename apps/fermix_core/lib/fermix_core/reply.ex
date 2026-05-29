@@ -1,6 +1,7 @@
-defmodule FermixCore.Channels.Outbound do
+defmodule FermixCore.Reply do
   @moduledoc """
-  Shared outbound reply contract for channel adapters and channel-aware tools.
+  Outbound reply contract: the text/media reply shape that core produces
+  (agent turns, the `send_attachment` tool) and the channel layer delivers.
   """
 
   @type media_kind :: :image | :document | :audio | :video | :voice
