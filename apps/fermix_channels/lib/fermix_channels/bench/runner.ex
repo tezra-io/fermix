@@ -7,6 +7,7 @@ defmodule FermixChannels.Bench.Runner do
   alias FermixChannels.Bench.ReplyChannel
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Bench.MockProvider
   alias FermixCore.Bench.Recorder
@@ -162,9 +163,14 @@ defmodule FermixChannels.Bench.Runner do
     try do
       processed =
         cond do
-          Map.get(spec, :contention?, false) -> run_contention_samples!(env, spec, first_index, samples)
-          Map.get(spec, :multi?, false) -> run_parallel_samples!(env, spec, first_index, samples)
-          true -> run_sequential_samples!(env, spec, first_index, samples)
+          Map.get(spec, :contention?, false) ->
+            run_contention_samples!(env, spec, first_index, samples)
+
+          Map.get(spec, :multi?, false) ->
+            run_parallel_samples!(env, spec, first_index, samples)
+
+          true ->
+            run_sequential_samples!(env, spec, first_index, samples)
         end
 
       {Recorder.samples(recorder), processed}
@@ -188,7 +194,7 @@ defmodule FermixChannels.Bench.Runner do
     |> Enum.chunk_every(@multi_conversation_count)
     |> Enum.reduce(0, fn indexes, count ->
       Enum.each(indexes, &dispatch_sample!(env, spec, &1, :sample))
-      wait_until_idle_or_deadline(env.agent, @batch_reply_timeout_ms)
+      wait_until_idle_or_deadline(env.queue, @batch_reply_timeout_ms)
       count + drain_replies(0)
     end)
   end
@@ -198,7 +204,7 @@ defmodule FermixChannels.Bench.Runner do
     |> sample_range(samples)
     |> Enum.each(fn index -> dispatch_sample!(env, spec, index, :sample) end)
 
-    wait_until_idle!(env.agent)
+    wait_until_idle!(env.queue)
     drain_replies(0)
   end
 
@@ -249,8 +255,8 @@ defmodule FermixChannels.Bench.Runner do
     :ok =
       Dispatcher.dispatch([message],
         channel: ReplyChannel,
-        agent: MainAgent,
-        agent_server: env.agent,
+        agent: Queue,
+        agent_server: env.queue,
         conversation_store: env.conversation_store,
         reply_fn: reply_fn
       )
@@ -279,7 +285,10 @@ defmodule FermixChannels.Bench.Runner do
   defp content_for(_spec, index), do: "bench message #{index}"
 
   defp chat_id(%{contention?: true}, _index, _label), do: "shared-contention"
-  defp chat_id(%{multi?: true}, index, _label), do: "multi-#{rem(index, @multi_conversation_count)}"
+
+  defp chat_id(%{multi?: true}, index, _label),
+    do: "multi-#{rem(index, @multi_conversation_count)}"
+
   defp chat_id(_spec, index, label), do: "#{label}-#{index}"
 
   defp await_reply!(ref) do
@@ -296,7 +305,7 @@ defmodule FermixChannels.Bench.Runner do
   end
 
   defp wait_until_idle_or_deadline_loop(agent, deadline) do
-    status = MainAgent.status(agent)
+    status = Queue.status(agent)
 
     cond do
       status.active_requests == 0 and status.pending_requests == 0 ->
@@ -317,7 +326,7 @@ defmodule FermixChannels.Bench.Runner do
   end
 
   defp wait_until_idle!(agent, deadline) do
-    status = MainAgent.status(agent)
+    status = Queue.status(agent)
 
     cond do
       status.active_requests == 0 and status.pending_requests == 0 ->
@@ -349,6 +358,7 @@ defmodule FermixChannels.Bench.Runner do
     conversation_store = :"#{name}_conversation_store_#{unique}"
     capability_registry = :"#{name}_capability_registry_#{unique}"
     agent = :"#{name}_main_agent_#{unique}"
+    queue = :"#{name}_gateway_queue_#{unique}"
 
     {:ok, task_pid} = Task.Supervisor.start_link(name: task_supervisor)
     {:ok, store_pid} = ConversationStore.start_link(name: conversation_store, repo: nil)
@@ -367,6 +377,9 @@ defmodule FermixChannels.Bench.Runner do
         adapter_opts: adapter_opts(spec)
       )
 
+    {:ok, queue_pid} =
+      Queue.start_link(name: queue, main_agent: agent, task_supervisor: task_supervisor)
+
     %{
       task_supervisor: task_supervisor,
       task_pid: task_pid,
@@ -375,7 +388,9 @@ defmodule FermixChannels.Bench.Runner do
       capability_registry: capability_registry,
       registry_pid: registry_pid,
       agent: agent,
-      agent_pid: agent_pid
+      agent_pid: agent_pid,
+      queue: queue,
+      queue_pid: queue_pid
     }
   end
 
@@ -409,7 +424,9 @@ defmodule FermixChannels.Bench.Runner do
   end
 
   defp preseed_history(_env, %{history: nil}, _warmup, _samples), do: empty_setup()
-  defp preseed_history(_env, spec, _warmup, _samples) when not is_map_key(spec, :history), do: empty_setup()
+
+  defp preseed_history(_env, spec, _warmup, _samples) when not is_map_key(spec, :history),
+    do: empty_setup()
 
   defp preseed_history(env, spec, warmup, samples) do
     history_count = Map.fetch!(spec, :history)
@@ -448,14 +465,15 @@ defmodule FermixChannels.Bench.Runner do
       role = if rem(history_index, 2) == 0, do: "assistant", else: "user"
 
       :ok =
-        ConversationStore.add_message(key, role, "history #{history_index}",
-          server: store
-        )
+        ConversationStore.add_message(key, role, "history #{history_index}", server: store)
     end)
   end
 
   defp stop_env(env) do
-    Enum.each([env.agent_pid, env.registry_pid, env.store_pid, env.task_pid], &stop_pid/1)
+    Enum.each(
+      [env.queue_pid, env.agent_pid, env.registry_pid, env.store_pid, env.task_pid],
+      &stop_pid/1
+    )
   end
 
   defp stop_pid(pid) when is_pid(pid) do

@@ -3,15 +3,15 @@ defmodule FermixChannels.CLI do
   Local CLI channel integration.
 
   CLI input is normalized into the same message contract as remote channels and
-  can be dispatched through `FermixChannels.Dispatcher` into `MainAgent`.
+  can be dispatched through `FermixChannels.Dispatcher` into the gateway queue.
   """
 
   @behaviour FermixChannels.Gateway.Channel
 
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Queue
   alias FermixChannels.Telemetry, as: ChannelTelemetry
-  alias FermixCore.Agents.MainAgent
   alias FermixCore.Telemetry
 
   @channel "cli"
@@ -57,8 +57,8 @@ defmodule FermixChannels.CLI do
     with {:ok, messages} <- parse_input(input, opts) do
       Dispatcher.dispatch(messages,
         channel: __MODULE__,
-        agent: Keyword.get(opts, :agent, MainAgent),
-        agent_server: Keyword.get(opts, :agent_server, MainAgent)
+        agent: Keyword.get(opts, :agent, Queue),
+        agent_server: Keyword.get(opts, :agent_server, Queue)
       )
     end
   end
@@ -77,8 +77,8 @@ defmodule FermixChannels.CLI do
          :ok <-
            Dispatcher.dispatch([message],
              channel: __MODULE__,
-             agent: Keyword.get(opts, :agent, MainAgent),
-             agent_server: Keyword.get(opts, :agent_server, MainAgent),
+             agent: Keyword.get(opts, :agent, Queue),
+             agent_server: Keyword.get(opts, :agent_server, Queue),
              reply_fn: fn
                {:text, text} ->
                  send(parent, {ref, {:reply, text}})
@@ -110,8 +110,13 @@ defmodule FermixChannels.CLI do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: {:error, :media_unsupported}
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part(), FermixChannels.Gateway.Channel.send_opts()) ::
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          {:error, :media_unsupported}
+  @spec send_media(
+          String.t(),
+          FermixChannels.Gateway.Channel.media_part(),
+          FermixChannels.Gateway.Channel.send_opts()
+        ) ::
           {:error, :media_unsupported}
   def send_media(_chat_id, _media_part, _opts \\ []), do: {:error, :media_unsupported}
 
