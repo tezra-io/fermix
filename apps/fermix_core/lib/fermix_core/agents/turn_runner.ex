@@ -3,20 +3,23 @@ defmodule FermixCore.Agents.TurnRunner do
   Executes a single agent turn for the Main Agent.
 
   Given a normalized channel message and a `turn_state` snapshot (provider,
-  registries, memory config, and the prebuilt runtime context), it reads
+  registries, memory config, and the prebuilt runtime context), `run/3` reads
   conversation history, builds the prompt, runs the agent loop, persists the
-  exchange, delivers the reply via the message's `reply_fn`, dispatches a
-  background memory review, and runs auto-compaction *after* delivery.
+  exchange, and RETURNS the response — it does not deliver it. The gateway owns
+  delivery, typing, and post-turn finalization.
+
+  `deliver` (the third argument) is the gateway delivery closure. It is exposed
+  to mid-turn channel tools (`send_attachment`) via the agent-loop context, so
+  every channel send — mid-turn and final — flows through the same gateway
+  delivery path. `finalize/2` runs memory review + auto-compaction; the gateway
+  calls it after delivering the reply, because compaction is synchronous and
+  must not delay the reply.
 
   Turn execution is pure of scheduling: the caller owns single-flight,
   cancellation, and task supervision. `MainAgent` owns the runtime-context
   cache and hands a built snapshot in via `turn_state`; compaction-failure
   backoff state lives in `MainAgent` and is read/written through
   `turn_state.main_agent_server`.
-
-  Reply delivery still flows through the channel `reply_fn` closure in this
-  stage; the pure `{:ok, response}` contract and `Gateway.Delivery` land in a
-  later migration stage.
   """
 
   require Logger
@@ -29,24 +32,45 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Reply
   alias FermixCore.Telemetry
 
-  @typing_interval_ms 4_000
-  @typing_timeout_ms 300_000
   @auto_compaction_failure_backoff_ms 60_000
 
   @doc """
-  Run one agent turn. Side effects (reply, persistence, memory review,
-  compaction) happen inside; always returns `:ok` — the caller monitors the
-  task and ignores the value.
+  Run one agent turn and return its response. The caller (gateway) owns
+  delivery, typing, and post-turn finalization (`finalize/2`). `deliver` is the
+  gateway delivery closure, exposed to mid-turn channel tools via the
+  agent-loop context.
   """
-  @spec run(map(), map()) :: :ok
-  def run(msg, turn_state) do
-    with_typing_indicator(msg, fn -> run_message_loop(msg, turn_state) end)
+  @spec run(map(), map(), Reply.reply_fn()) :: {:ok, String.t()} | {:error, term()}
+  def run(msg, turn_state, deliver) when is_function(deliver, 1) do
+    run_message_loop(msg, turn_state, deliver)
+  end
+
+  @doc """
+  Post-turn finalization (success path only): dispatch background memory review
+  and run auto-compaction. Separated from `run/3` so the gateway can deliver the
+  reply first — compaction is synchronous and must not delay it.
+  """
+  @spec finalize(map(), map()) :: :ok
+  def finalize(msg, turn_state) do
+    maybe_start_memory_review(msg, turn_state)
+    maybe_auto_compact(ConversationKey.from(msg), turn_state, compaction_target(turn_state))
     :ok
   end
 
-  defp run_message_loop(msg, state) do
+  @doc "Map an agent-loop error reason to the user-facing reply text."
+  @spec error_reply(term()) :: String.t()
+  def error_reply(reason) do
+    if auth_error?(reason) do
+      "Authentication failed — run `fermix auth login` from the host and try again."
+    else
+      "Sorry, I encountered an error processing your message."
+    end
+  end
+
+  defp run_message_loop(msg, state, deliver) do
     start = System.monotonic_time(:millisecond)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
@@ -85,11 +109,11 @@ defmodule FermixCore.Agents.TurnRunner do
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
-      reply_fn: msg.reply_fn,
+      reply_fn: deliver,
       channel: msg.channel
     }
 
-    {{loop_opts, compaction_target}, loop_runtime_duration_us} =
+    {loop_opts, loop_runtime_duration_us} =
       Telemetry.timed_us(fn ->
         build_loop_runtime(state, messages, context,
           source_trust: source_trust,
@@ -138,9 +162,7 @@ defmodule FermixCore.Agents.TurnRunner do
           "Agent loop completed in #{result.iterations} iterations, #{result.total_tokens} tokens"
         )
 
-        deliver_reply(msg, result.response)
-        maybe_start_memory_review(msg, state)
-        maybe_auto_compact(conversation_key, state, compaction_target)
+        {:ok, result.response}
 
       {:error, reason} ->
         Logger.error("Agent loop failed: #{inspect(reason)}")
@@ -151,22 +173,11 @@ defmodule FermixCore.Agents.TurnRunner do
           %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
         )
 
-        deliver_reply(msg, agent_loop_error_message(reason))
+        {:error, reason}
     end
   end
 
-  # Map an `AgentLoop.run/1` error reason to a user-facing reply. Auth
-  # failures get a specific message pointing at `fermix auth login`
-  # because that's the actionable fix; everything else gets the
-  # generic line. See `auth_error?/1` for the recognised patterns.
-  defp agent_loop_error_message(reason) do
-    if auth_error?(reason) do
-      "Authentication failed — run `fermix auth login` from the host and try again."
-    else
-      "Sorry, I encountered an error processing your message."
-    end
-  end
-
+  # See `error_reply/1` for the auth-vs-generic mapping these patterns drive.
   defp auth_error?(:no_auth_file), do: true
   defp auth_error?(:auth_invalidated), do: true
   defp auth_error?(:refresh_failed), do: true
@@ -185,100 +196,6 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp auth_error?(_other), do: false
 
-  defp with_typing_indicator(%{typing_fn: typing_fn} = msg, fun)
-       when is_function(typing_fn, 0) and is_function(fun, 0) do
-    pid =
-      spawn_link(fn ->
-        typing_loop(
-          typing_fn,
-          positive_integer(Map.get(msg, :typing_interval_ms), @typing_interval_ms),
-          monotonic_ms() + positive_integer(Map.get(msg, :typing_timeout_ms), @typing_timeout_ms)
-        )
-      end)
-
-    try do
-      fun.()
-    after
-      stop_typing_loop(pid)
-    end
-  end
-
-  defp with_typing_indicator(_msg, fun) when is_function(fun, 0), do: fun.()
-
-  defp typing_loop(typing_fn, interval_ms, deadline_ms) do
-    case emit_typing(typing_fn) do
-      :ok ->
-        wait_for_next_typing_tick(typing_fn, interval_ms, deadline_ms)
-
-      {:error, _reason} ->
-        :ok
-    end
-  end
-
-  defp wait_for_next_typing_tick(typing_fn, interval_ms, deadline_ms) do
-    now = monotonic_ms()
-
-    if now >= deadline_ms do
-      :ok
-    else
-      receive do
-        :stop -> :ok
-      after
-        min(interval_ms, deadline_ms - now) ->
-          typing_loop(typing_fn, interval_ms, deadline_ms)
-      end
-    end
-  end
-
-  defp emit_typing(typing_fn) do
-    case typing_fn.() do
-      :ok ->
-        :ok
-
-      {:error, reason} = error ->
-        Logger.warning("Typing indicator failed: #{inspect(reason)}")
-        error
-
-      other ->
-        Logger.warning("Typing indicator returned unexpected result: #{inspect(other)}")
-        {:error, other}
-    end
-  rescue
-    error in [Req.TransportError] ->
-      Logger.warning("Typing indicator transport failed: #{Exception.message(error)}")
-      {:error, error}
-  catch
-    :exit, {:noproc, _details} = reason ->
-      Logger.warning("Typing indicator adapter unavailable: #{inspect(reason)}")
-      {:error, reason}
-
-    :exit, :noproc ->
-      Logger.warning("Typing indicator adapter unavailable: :noproc")
-      {:error, :noproc}
-  end
-
-  defp stop_typing_loop(pid) when is_pid(pid) do
-    ref = Process.monitor(pid)
-    send(pid, :stop)
-
-    receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} ->
-        :ok
-    after
-      100 ->
-        Process.exit(pid, :kill)
-
-        receive do
-          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
-        after
-          100 -> :ok
-        end
-    end
-  end
-
-  defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
-  defp positive_integer(_value, default), do: default
-
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   defp build_loop_runtime(state, messages, context, opts) do
@@ -293,20 +210,23 @@ defmodule FermixCore.Agents.TurnRunner do
 
     case resolve_loop_adapter(state) do
       {:adapter, mod, opts} ->
-        loop_opts =
-          base
-          |> Keyword.put(:adapter, mod)
-          |> Keyword.put(:adapter_opts, opts)
-
-        {loop_opts, {mod, direct_adapter_route_key(state, opts), opts}}
+        base
+        |> Keyword.put(:adapter, mod)
+        |> Keyword.put(:adapter_opts, opts)
 
       {:route, key, opts} ->
-        loop_opts =
-          base
-          |> Keyword.put(:route_key, key)
-          |> Keyword.put(:adapter_opts, opts)
+        base
+        |> Keyword.put(:route_key, key)
+        |> Keyword.put(:adapter_opts, opts)
+    end
+  end
 
-        {loop_opts, {nil, key, opts}}
+  # The compaction route mirrors the loop's adapter/route resolution; finalize/2
+  # recomputes it (cheap) so run/3 needn't thread it through its return value.
+  defp compaction_target(state) do
+    case resolve_loop_adapter(state) do
+      {:adapter, mod, opts} -> {mod, direct_adapter_route_key(state, opts), opts}
+      {:route, key, opts} -> {nil, key, opts}
     end
   end
 
@@ -495,30 +415,6 @@ defmodule FermixCore.Agents.TurnRunner do
     :ok
   end
 
-  defp deliver_reply(msg, response) do
-    {result, duration_us} = Telemetry.timed_us(fn -> msg.reply_fn.({:text, response}) end)
-    emit_reply_telemetry(msg, response, result, duration_us)
-
-    case result do
-      :ok ->
-        :ok
-
-      {:error, reason} = error ->
-        Logger.error("Main Agent reply delivery failed: #{inspect(reason)}")
-
-        :telemetry.execute(
-          [:fermix, :agent, :reply_error],
-          %{count: 1},
-          %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
-        )
-
-        error
-
-      _other ->
-        :ok
-    end
-  end
-
   defp profile_for_trust(ctx, :operator, registry),
     do: RuntimeContext.profile_for(ctx, :operator, registry, [])
 
@@ -585,33 +481,12 @@ defmodule FermixCore.Agents.TurnRunner do
     )
   end
 
-  defp emit_reply_telemetry(msg, response, result, duration_us) do
-    :telemetry.execute(
-      [:fermix, :agent, :reply],
-      %{duration_us: duration_us, response_bytes: byte_size(response || "")},
-      %{
-        agent: "main",
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        status: reply_status(result)
-      }
-      |> maybe_put_reply_reason(result)
-    )
-  end
-
   defp messages_bytes(messages) do
     Enum.reduce(messages, 0, fn message, total ->
       total +
         byte_size(to_string(Map.get(message, :content) || Map.get(message, "content") || ""))
     end)
   end
-
-  defp reply_status(:ok), do: :ok
-  defp reply_status({:error, _reason}), do: :error
-  defp reply_status(_other), do: :ok
-
-  defp maybe_put_reply_reason(metadata, {:error, reason}), do: Map.put(metadata, :reason, reason)
-  defp maybe_put_reply_reason(metadata, _result), do: metadata
 
   defp maybe_start_memory_review(msg, state) do
     opts =

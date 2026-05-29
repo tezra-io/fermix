@@ -10,12 +10,13 @@ defmodule FermixChannels.Dispatcher do
 
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
+  alias FermixChannels.Gateway.Delivery
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
   alias FermixChannels.Gateway.Transcription
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Reply
   alias FermixCore.Telemetry
 
   @spec dispatch([Message.t() | map()], keyword()) :: :ok | {:error, term()}
@@ -48,71 +49,6 @@ defmodule FermixChannels.Dispatcher do
     end)
   end
 
-  defp build_reply_fn(_channel, %Message{} = message, reply_fn) when is_function(reply_fn, 1) do
-    fn part ->
-      observe_reply(fn -> reply_fn.(part) end, :override, nil, message)
-    end
-  end
-
-  defp build_reply_fn(channel, %Message{} = message, _reply_fn),
-    do: build_reply_fn(channel, message)
-
-  defp build_reply_fn(channel, %Message{} = message) do
-    text_reply = text_reply_fn(channel, message)
-    media_reply = media_reply_fn(channel, message)
-
-    fn
-      {:text, text} when is_binary(text) ->
-        observe_reply(fn -> text_reply.(text) end, :text, nil, message)
-
-      {:media, %{kind: kind} = media_part} ->
-        observe_reply(fn -> media_reply.(media_part) end, :media, kind, message)
-
-      other ->
-        {:error, {:invalid_reply_part, other}}
-    end
-  end
-
-  defp text_reply_fn(channel, message) do
-    channel.build_text_reply(message)
-  end
-
-  defp media_reply_fn(channel, message) do
-    channel.build_media_reply(message)
-  end
-
-  @spec observe_reply(
-          (() -> term()),
-          :override | :text | :media,
-          Reply.media_kind() | nil,
-          Message.t()
-        ) ::
-          :ok | {:error, term()}
-  defp observe_reply(fun, reply_type, media_kind, message) when is_function(fun, 0) do
-    {result, duration_us} = Telemetry.timed_us(fun)
-
-    emit_channel_reply_telemetry(message, result, reply_type, media_kind, duration_us)
-    observe_reply_result(result, reply_type, media_kind)
-  end
-
-  defp observe_reply_result(:ok, _reply_type, _media_kind), do: :ok
-
-  defp observe_reply_result({:error, reason} = error, reply_type, media_kind) do
-    Logger.error("Channel reply delivery failed: #{inspect(reason)}")
-
-    if reply_type == :media do
-      :telemetry.execute(
-        [:fermix, :channel, :media_send_error],
-        %{count: 1},
-        %{kind: media_kind, reason: reason}
-      )
-    end
-
-    error
-  end
-
-  defp observe_reply_result(_other, _reply_type, _media_kind), do: :ok
-
   defp build_typing_fn(channel, %Message{reply_target: reply_target}) do
     if function_exported?(channel, :start_typing, 1) do
       fn -> channel.start_typing(reply_target) end
@@ -131,7 +67,9 @@ defmodule FermixChannels.Dispatcher do
          conversation_store,
          command_context_opts
        ) do
-    {normalize_result, normalize_duration_us} = Telemetry.timed_us(fn -> normalize_message(message) end)
+    {normalize_result, normalize_duration_us} =
+      Telemetry.timed_us(fn -> normalize_message(message) end)
+
     emit_normalize_telemetry(message, normalize_result, normalize_duration_us)
 
     with {:ok, reply_message} <- normalize_result,
@@ -142,7 +80,9 @@ defmodule FermixChannels.Dispatcher do
              reply_message,
              transcription_opts
            ) do
-      reply_fn = build_reply_fn(channel, reply_message, reply_fn_override)
+      reply_fn =
+        Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
+
       typing_fn = build_typing_fn(channel, reply_message)
 
       context =
@@ -395,22 +335,6 @@ defmodule FermixChannels.Dispatcher do
       [:fermix, :dispatcher, :agent_delivery],
       %{duration_us: duration_us},
       %{channel: message.channel, status: result_status(result)}
-    )
-  end
-
-  defp emit_channel_reply_telemetry(message, result, reply_type, media_kind, duration_us) do
-    metadata =
-      %{
-        channel: message.channel,
-        reply_type: reply_type,
-        status: result_status(result)
-      }
-      |> maybe_put_metadata(:media_kind, media_kind)
-
-    :telemetry.execute(
-      [:fermix, :channel, :reply],
-      %{duration_us: duration_us},
-      metadata
     )
   end
 
