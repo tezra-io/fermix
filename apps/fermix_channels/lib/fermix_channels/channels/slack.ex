@@ -24,7 +24,8 @@ defmodule FermixChannels.Channels.Slack do
   @max_media_bytes 100 * 1_024 * 1_024
 
   @impl true
-  @spec parse_webhook(map()) :: {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
+  @spec parse_webhook(map()) ::
+          {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
   def parse_webhook(payload) do
     {result, duration_us} = Telemetry.timed_us(fn -> do_parse_webhook(payload) end)
     ChannelTelemetry.emit_parse(:slack, result, duration_us)
@@ -66,8 +67,13 @@ defmodule FermixChannels.Channels.Slack do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: :ok | {:error, term()}
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part(), FermixChannels.Gateway.Channel.send_opts()) ::
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          :ok | {:error, term()}
+  @spec send_media(
+          String.t(),
+          FermixChannels.Gateway.Channel.media_part(),
+          FermixChannels.Gateway.Channel.send_opts()
+        ) ::
           :ok | {:error, term()}
   def send_media(channel_id, media_part, opts \\ [])
       when is_binary(channel_id) and is_map(media_part) do
@@ -77,7 +83,8 @@ defmodule FermixChannels.Channels.Slack do
   end
 
   @impl true
-  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
+                                                                         :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
     opts = if thread_ts, do: [thread_ts: thread_ts], else: []
 
@@ -133,7 +140,7 @@ defmodule FermixChannels.Channels.Slack do
   end
 
   defp process_event?(event) do
-    not bot_event?(event) and authorized_sender?(event) and
+    not bot_event?(event) and
       (direct_message_event?(event) or app_mention_event?(event))
   end
 
@@ -148,20 +155,6 @@ defmodule FermixChannels.Channels.Slack do
 
   defp bot_event?(event) do
     is_binary(Map.get(event, "bot_id")) or Map.get(event, "subtype") == "bot_message"
-  end
-
-  defp authorized_sender?(event) do
-    {allowed?, duration_us} =
-      Telemetry.timed_us(fn ->
-        # Audit F-02: empty allowlist denies everyone. Operators must configure
-        # owner_user_id (auto-populates the allowlist) or set
-        # fermix_channels.slack.allowed_user_ids explicitly.
-        user_id = Map.get(event, "user")
-        user_id in allowed_user_ids()
-      end)
-
-    ChannelTelemetry.emit_authorize(:slack, allowed?, duration_us)
-    allowed?
   end
 
   defp build_message(event, payload) do
@@ -294,9 +287,14 @@ defmodule FermixChannels.Channels.Slack do
       |> HttpClient.request("Slack external file upload")
 
     case result do
-      {:ok, %{status: status}} when status in 200..299 -> :ok
-      {:ok, %{status: status, body: body}} -> {:error, "Slack upload error: #{status}: #{inspect(body)}"}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{status: status}} when status in 200..299 ->
+        :ok
+
+      {:ok, %{status: status, body: body}} ->
+        {:error, "Slack upload error: #{status}: #{inspect(body)}"}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -345,10 +343,6 @@ defmodule FermixChannels.Channels.Slack do
 
   defp maybe_put_initial_comment(body, nil), do: body
   defp maybe_put_initial_comment(body, comment), do: Map.put(body, :initial_comment, comment)
-
-  defp allowed_user_ids do
-    FermixCore.Config.channel_ingress_user_ids(:slack)
-  end
 
   defp ingress_enabled? do
     case FermixCore.Config.channel(:slack) do

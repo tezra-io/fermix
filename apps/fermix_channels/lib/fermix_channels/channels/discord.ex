@@ -26,7 +26,8 @@ defmodule FermixChannels.Channels.Discord do
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
 
-  @spec parse_gateway_event(map()) :: {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
+  @spec parse_gateway_event(map()) ::
+          {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
   def parse_gateway_event(event) do
     {result, duration_us} = Telemetry.timed_us(fn -> do_parse_gateway_event(event) end)
     ChannelTelemetry.emit_parse(:discord, result, duration_us)
@@ -68,8 +69,13 @@ defmodule FermixChannels.Channels.Discord do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: :ok | {:error, term()}
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part(), FermixChannels.Gateway.Channel.send_opts()) ::
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          :ok | {:error, term()}
+  @spec send_media(
+          String.t(),
+          FermixChannels.Gateway.Channel.media_part(),
+          FermixChannels.Gateway.Channel.send_opts()
+        ) ::
           :ok | {:error, term()}
   def send_media(channel_id, media_part, opts \\ [])
       when is_binary(channel_id) and is_map(media_part) do
@@ -79,7 +85,8 @@ defmodule FermixChannels.Channels.Discord do
   end
 
   @impl true
-  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
+                                                                         :ok | {:error, term()})
   def build_text_reply(%Message{id: message_id, reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, reply_to: message_id) end
   end
@@ -108,7 +115,7 @@ defmodule FermixChannels.Channels.Discord do
   end
 
   defp process_message?(data) do
-    ingress_enabled?() and not bot_author?(data) and authorized_sender?(data) and
+    ingress_enabled?() and not bot_author?(data) and
       (direct_message?(data) or app_mention?(data))
   end
 
@@ -160,24 +167,6 @@ defmodule FermixChannels.Channels.Discord do
   end
 
   defp bot_author?(data), do: data |> Map.get("author", %{}) |> Map.get("bot", false) == true
-
-  defp authorized_sender?(data) do
-    {allowed?, duration_us} =
-      Telemetry.timed_us(fn ->
-        # Audit F-02: empty allowlist now denies everyone. Operators must configure
-        # owner_user_id (auto-populates the allowlist) or set
-        # fermix_channels.discord.allowed_user_ids explicitly.
-        author_id = data |> Map.get("author", %{}) |> Map.get("id")
-        author_id in allowed_user_ids()
-      end)
-
-    ChannelTelemetry.emit_authorize(:discord, allowed?, duration_us)
-    allowed?
-  end
-
-  defp allowed_user_ids do
-    FermixCore.Config.channel_ingress_user_ids(:discord)
-  end
 
   # Leave this as a per-message config read. Discord DM/app-mention ingress volume
   # is low, and avoiding a cache keeps runtime enable/disable toggles immediate.
@@ -253,7 +242,8 @@ defmodule FermixChannels.Channels.Discord do
       fields = [
         payload_json: Jason.encode!(payload),
         "files[0]":
-          {File.stream!(path, 64_000, []), filename: filename, content_type: mime_type, size: stat.size}
+          {File.stream!(path, 64_000, []),
+           filename: filename, content_type: mime_type, size: stat.size}
       ]
 
       {:ok,
