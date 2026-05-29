@@ -21,7 +21,7 @@ defmodule FermixChannelsTest do
       Application.put_env(:fermix_channels, :telegram, enabled: true, owner_user_id: "111")
       on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
 
-      assert [{FermixChannels.Telegram.Poller, []}] =
+      assert [{FermixChannels.Channels.Telegram.Poller, []}] =
                FermixChannels.Application.polling_children([enabled: true], ready_report)
 
       assert [] =
@@ -58,7 +58,7 @@ defmodule FermixChannelsTest do
       Application.put_env(:fermix_channels, :signal, enabled: true, owner_user_id: "+1234")
       on_exit(fn -> Application.put_env(:fermix_channels, :signal, previous) end)
 
-      assert [{FermixChannels.Signal.Listener, []}] =
+      assert [{FermixChannels.Channels.Signal.Listener, []}] =
                FermixChannels.Application.subprocess_children(config, ready_report)
 
       assert [] = FermixChannels.Application.subprocess_children(config, setup_required_report)
