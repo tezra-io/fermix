@@ -25,23 +25,25 @@ defmodule FermixChannels.Gateway.QueueTest do
   end
 
   # Controllable turn runner: announces each turn to the test, then blocks until
-  # told to reply or crash. Lets the queue's scheduling be observed directly,
-  # without a real provider or core turn.
+  # told to reply (returns the response — the QUEUE delivers it) or crash. Lets
+  # the queue's scheduling + delivery be observed without a real provider/turn.
   defmodule FakeRunner do
-    def run(msg, turn_state) do
+    def run(msg, turn_state, _deliver) do
       send(turn_state.test_pid, {:turn_started, msg.content, self()})
 
       receive do
         {:proceed, :reply} ->
-          msg.reply_fn.({:text, "reply:" <> msg.content})
-          :ok
+          {:ok, "reply:" <> msg.content}
 
         {:proceed, :crash} ->
           raise "boom"
       after
-        15_000 -> :ok
+        15_000 -> {:ok, "reply:" <> msg.content}
       end
     end
+
+    def finalize(_msg, _turn_state), do: :ok
+    def error_reply(_reason), do: "error reply"
   end
 
   setup do

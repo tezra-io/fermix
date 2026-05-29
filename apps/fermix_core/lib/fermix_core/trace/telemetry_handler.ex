@@ -29,9 +29,9 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_event: "history_load"
     },
     %{
-      event: [:fermix, :agent, :reply],
+      event: [:fermix, :channel, :reply],
       trace_type: :agent_event,
-      agent_field: :agent,
+      agent_field: :channel,
       trace_event: "reply_delivery"
     },
     %{
