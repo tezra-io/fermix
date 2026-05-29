@@ -8,10 +8,10 @@ defmodule FermixCore.Capabilities.Skill do
   """
 
   alias FermixCore.Agents.AgentDefinition
-  alias FermixCore.Agents.AgentServer
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Agents.PersistencePolicy
+  alias FermixCore.Agents.WorkerRun
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Capability
 
@@ -69,27 +69,25 @@ defmodule FermixCore.Capabilities.Skill do
   end
 
   defp run_skill_invocation(definition, task, task_context, context, current_depth, start_ms) do
-    case AgentSupervisor.spawn_agent(agent_supervisor(context), definition,
+    forced_task = force_skill_prompt(definition.name, task, task_context)
+
+    worker_context =
+      context
+      |> Map.delete(:agent_name)
+      |> Map.put(:skill_depth, current_depth + 1)
+
+    case WorkerRun.run(definition, forced_task, worker_context,
            parent: self(),
            parent_name: Map.get(context, :agent_name, "main"),
            parent_session: Map.get(context, :session_id),
            provider: Map.get(context, :provider, FermixCore.Providers.OpenAI),
            capability_registry:
              Map.get(context, :capability_registry, FermixCore.Capabilities.Registry),
-           task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor)
+           task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor),
+           agent_supervisor: agent_supervisor(context),
+           timeout_seconds: definition.timeout_seconds
          ) do
-      {:ok, pid, session_id} ->
-        terminal =
-          run_skill_worker(
-            agent_supervisor(context),
-            pid,
-            task,
-            task_context,
-            definition,
-            context,
-            current_depth
-          )
-
+      {:ok, session_id, terminal} ->
         finalize_invocation(
           definition,
           session_id,
@@ -100,46 +98,9 @@ defmodule FermixCore.Capabilities.Skill do
           context
         )
 
-      {:error, reason} ->
+      {:error, {:spawn_failed, reason}} ->
         Logger.error("Failed to spawn skill agent #{definition.name}: #{inspect(reason)}")
         {:ok, Tool.error("Failed to spawn skill: #{format_reason(reason)}")}
-    end
-  end
-
-  defp run_skill_worker(
-         agent_supervisor,
-         pid,
-         task,
-         task_context,
-         definition,
-         context,
-         current_depth
-       ) do
-    forced_task = force_skill_prompt(definition.name, task, task_context)
-    sub_context = sub_agent_context(context, current_depth + 1)
-
-    pid
-    |> start_skill_waiter(forced_task, sub_context)
-    |> await_skill_result(definition.timeout_seconds)
-    |> normalize_worker_result(agent_supervisor, pid, definition.timeout_seconds)
-  end
-
-  defp start_skill_waiter(pid, task, context) do
-    Task.async(fn ->
-      try do
-        AgentServer.run_task(pid, task, context, timeout: :infinity)
-      catch
-        :exit, reason -> {:error, {:agent_server_exit, reason}}
-      end
-    end)
-  end
-
-  defp await_skill_result(waiter, timeout_seconds) do
-    timeout_ms = max(timeout_seconds, 1) * 1_000
-
-    case Task.yield(waiter, timeout_ms) || Task.shutdown(waiter, :brutal_kill) do
-      {:ok, reply} -> reply
-      nil -> {:error, :timeout}
     end
   end
 
@@ -200,78 +161,6 @@ defmodule FermixCore.Capabilities.Skill do
 
   defp build_tool_result(skill_name, %{message: message}) do
     Tool.error("Skill '#{skill_name}' failed: #{message}")
-  end
-
-  defp normalize_worker_result({:ok, loop_result}, agent_supervisor, pid, _timeout_seconds) do
-    AgentSupervisor.stop_agent(agent_supervisor, pid, :normal)
-
-    %{
-      success?: true,
-      status: :completed,
-      output: loop_result.response,
-      summary: loop_result.response,
-      result: loop_result.response,
-      failure: nil
-    }
-  end
-
-  defp normalize_worker_result({:error, :timeout}, agent_supervisor, pid, timeout_seconds) do
-    AgentSupervisor.stop_agent(agent_supervisor, pid, :timeout)
-    timeout_message = "Skill timed out after #{timeout_seconds}s"
-
-    %{
-      success?: false,
-      status: :timed_out,
-      message: timeout_message,
-      summary: timeout_message,
-      result: nil,
-      failure: timeout_message
-    }
-  end
-
-  defp normalize_worker_result(
-         {:error, {:task_crashed, reason}},
-         _agent_supervisor,
-         _pid,
-         _timeout_seconds
-       ) do
-    %{
-      success?: false,
-      status: :crashed,
-      message: "Skill crashed: #{format_reason(reason)}",
-      summary: "Skill worker crashed during execution.",
-      result: nil,
-      failure: format_reason(reason)
-    }
-  end
-
-  defp normalize_worker_result(
-         {:error, {:agent_server_exit, reason}},
-         _agent_supervisor,
-         _pid,
-         _timeout_seconds
-       ) do
-    %{
-      success?: false,
-      status: :crashed,
-      message: "Skill exited unexpectedly: #{format_reason(reason)}",
-      summary: "Skill worker exited unexpectedly.",
-      result: nil,
-      failure: format_reason(reason)
-    }
-  end
-
-  defp normalize_worker_result({:error, reason}, agent_supervisor, pid, _timeout_seconds) do
-    AgentSupervisor.stop_agent(agent_supervisor, pid, :error)
-
-    %{
-      success?: false,
-      status: :failed,
-      message: format_reason(reason),
-      summary: "Skill execution failed.",
-      result: nil,
-      failure: format_reason(reason)
-    }
   end
 
   defp write_journal(
@@ -361,16 +250,6 @@ defmodule FermixCore.Capabilities.Skill do
       %{count: 1},
       %{skill: skill_name, depth: depth, cap: @max_skill_depth}
     )
-  end
-
-  defp sub_agent_context(context, new_depth) do
-    %{
-      task_context: nil,
-      tool_context:
-        context
-        |> Map.delete(:agent_name)
-        |> Map.put(:skill_depth, new_depth)
-    }
   end
 
   defp agent_supervisor(context),

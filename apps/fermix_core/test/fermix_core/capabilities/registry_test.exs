@@ -168,6 +168,24 @@ defmodule FermixCore.Capabilities.RegistryTest do
     end
   end
 
+  describe "default_policy_classes/1" do
+    test "operator gets the full class surface" do
+      assert Enum.sort(Registry.default_policy_classes(:operator)) ==
+               Enum.sort([:read_only, :read_write, :exec, :network, :external_api])
+    end
+
+    test "guest and nil collapse to read-only" do
+      assert Registry.default_policy_classes(:guest) == [:read_only]
+      assert Registry.default_policy_classes(nil) == [:read_only]
+    end
+
+    test "operator minus :read_write is the subagent worker surface" do
+      classes = Registry.default_policy_classes(:operator) -- [:read_write]
+      assert Enum.sort(classes) == Enum.sort([:read_only, :exec, :network, :external_api])
+      refute :read_write in classes
+    end
+  end
+
   describe "list/2 with :kind" do
     test "filters by capability kind", %{registry: reg} do
       :ok = Registry.register(reg, cap("a", kind: :builtin))

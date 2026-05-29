@@ -2,6 +2,7 @@ defmodule FermixCore.Capabilities.BuiltinTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.BuiltinSeeder
 
   describe "from_tool_module/1" do
     test "wraps Tools.Shell with policy_class :exec" do
@@ -84,7 +85,6 @@ defmodule FermixCore.Capabilities.BuiltinTest do
         FermixCore.Tools.GitWrite,
         FermixCore.Tools.WebFetch,
         FermixCore.Tools.WebSearch,
-        FermixCore.Tools.Delegate,
         FermixCore.Tools.SkillCreate,
         FermixCore.Tools.SkillView,
         FermixCore.Tools.SkillRun,
@@ -108,6 +108,19 @@ defmodule FermixCore.Capabilities.BuiltinTest do
         |> Enum.map(& &1.name)
 
       assert names == []
+    end
+
+    test "every seeded built-in has an explicit policy_class classification" do
+      classified = MapSet.new(Builtin.classified_names())
+
+      unclassified =
+        BuiltinSeeder.builtin_tool_modules()
+        |> Enum.map(& &1.name())
+        |> Enum.reject(&MapSet.member?(classified, &1))
+
+      assert unclassified == [],
+             "built-ins missing an explicit @policy_defaults entry (would default to " <>
+               ":read_only and silently join the subagent surface): #{inspect(unclassified)}"
     end
   end
 end

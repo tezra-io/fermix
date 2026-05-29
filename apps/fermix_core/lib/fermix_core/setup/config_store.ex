@@ -1107,10 +1107,6 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_routing(config) do
     []
     |> put_if_present(
-      :delegate_model,
-      normalize_string(lookup(config, "delegate_model", :delegate_model))
-    )
-    |> put_if_present(
       :default_provider,
       normalize_string(lookup(config, "default_provider", :default_provider))
     )

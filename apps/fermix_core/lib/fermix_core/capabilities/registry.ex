@@ -262,6 +262,22 @@ defmodule FermixCore.Capabilities.Registry do
   def resolve_policy(:guest, _policy), do: @guest_default_policy
   def resolve_policy(nil, _policy), do: @guest_default_policy
 
+  @doc """
+  Return the concrete policy-class list a `trust` is granted by default,
+  before any explicit policy narrowing: `:operator` gets the full surface,
+  `:guest`/`nil` get read-only.
+
+  This flattens the `[allow: ..., deny: ...]` default spec into the effective
+  class set. Callers that need a trust's baseline classes — e.g. the `subagents`
+  tool computing "parent classes minus `:read_write`" — should use this rather
+  than reaching into the policy-spec shape.
+  """
+  @spec default_policy_classes(trust()) :: [Capability.policy_class()]
+  def default_policy_classes(trust) do
+    {allow, deny} = normalize_policy(resolve_policy(trust, nil))
+    allow -- deny
+  end
+
   defp apply_kind(capabilities, :all), do: capabilities
 
   defp apply_kind(capabilities, kind) when kind in [:builtin, :skill, :mcp] do

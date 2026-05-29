@@ -21,10 +21,11 @@ defmodule FermixCore.Capabilities.Builtin do
     "git_write" => %{policy_class: :read_write, hidden_from_agent?: false},
     "web_fetch" => %{policy_class: :network, hidden_from_agent?: false},
     "web_search" => %{policy_class: :network, hidden_from_agent?: false},
-    "delegate" => %{policy_class: :external_api, hidden_from_agent?: false},
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false},
     "skill_view" => %{policy_class: :exec, hidden_from_agent?: false},
     "skill_run" => %{policy_class: :exec, hidden_from_agent?: false},
+    "skill_list" => %{policy_class: :read_only, hidden_from_agent?: false},
+    "subagents" => %{policy_class: :external_api, hidden_from_agent?: false},
     "model_routing_config" => %{policy_class: :read_write, hidden_from_agent?: false},
     "tool_help" => %{policy_class: :read_only, hidden_from_agent?: false},
     "memory_recall" => %{policy_class: :read_only, hidden_from_agent?: false},
@@ -39,6 +40,15 @@ defmodule FermixCore.Capabilities.Builtin do
     "browser" => %{policy_class: :network, hidden_from_agent?: false},
     "send_attachment" => %{policy_class: :read_only, hidden_from_agent?: false}
   }
+
+  @doc """
+  Names with an explicit `policy_class` classification. A built-in NOT in this
+  set silently defaults to `:read_only` (`from_tool_module/1`), which would let a
+  forgotten write-capable tool join the read-only-derived subagent surface — so a
+  test asserts every seeded built-in appears here. Exposed for that guard.
+  """
+  @spec classified_names() :: [String.t()]
+  def classified_names, do: Map.keys(@policy_defaults)
 
   @spec from_tool_module(module()) :: Capability.t()
   def from_tool_module(tool_module) when is_atom(tool_module) do

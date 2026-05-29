@@ -337,8 +337,9 @@ The current built-in capability set is:
 | `git_write` | Stage, commit, checkout, or pull changes; push is deferred to M10 approval |
 | `web_fetch` | Fetch a public URL and return markdown-light text |
 | `web_search` | Search the public web through the keyless DuckDuckGo HTML backend |
-| `delegate` | Ask another configured model for one bounded answer |
+| `subagents` | Run one or more temporary subagents for delegated work, concurrently up to a cap |
 | `skill_create` | Scaffold a local skill with starter eval cases |
+| `skill_list` | List installed skills available to run via `skill_run` |
 | `model_routing_config` | Read or update local model-routing config |
 | `tool_help` | Return full docs for one registered capability |
 | `memory_store` | Store key-value facts |
