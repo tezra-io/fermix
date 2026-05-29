@@ -5,7 +5,7 @@ defmodule FermixWebWeb.WebhookController do
 
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Channels.WhatsApp
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.Queue
 
@@ -171,7 +171,7 @@ defmodule FermixWebWeb.WebhookController do
   end
 
   defp run_dispatch(messages, opts) do
-    case Dispatcher.dispatch(messages, opts) do
+    case Gateway.ingest(messages, opts) do
       :ok ->
         :ok
 

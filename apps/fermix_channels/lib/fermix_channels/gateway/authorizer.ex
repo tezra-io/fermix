@@ -28,18 +28,19 @@ defmodule FermixChannels.Gateway.Authorizer do
   """
 
   alias FermixChannels.Gateway.Authorization
+  alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Source
   alias FermixCore.Config
 
-  @local_channels ~w(cli daemon)
-
   @spec resolve(Source.t()) ::
           {:ok, Authorization.t()} | {:error, :unauthorized | :unknown_channel}
-  def resolve(%Source{channel: channel}) when channel in @local_channels do
-    {:ok, %Authorization{role: :operator, trust: :operator}}
+  def resolve(%Source{channel_key: nil, channel: channel}) do
+    if ChannelRegistry.local?(channel) do
+      {:ok, %Authorization{role: :operator, trust: :operator}}
+    else
+      {:error, :unknown_channel}
+    end
   end
-
-  def resolve(%Source{channel_key: nil}), do: {:error, :unknown_channel}
 
   def resolve(%Source{channel_key: key, sender_id: sender_id}) when is_atom(key) do
     cond do

@@ -12,7 +12,7 @@ defmodule FermixChannels.Channels.Discord.Gateway do
   require Logger
 
   alias FermixChannels.Channels.Discord
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Queue
 
   @default_reconnect_ms 5_000
@@ -130,7 +130,7 @@ defmodule FermixChannels.Channels.Discord.Gateway do
   end
 
   defp handle_dispatch_result(messages, state) do
-    case Dispatcher.dispatch(messages,
+    case Gateway.ingest(messages,
            channel: Discord,
            agent: state.agent,
            agent_server: state.agent_server

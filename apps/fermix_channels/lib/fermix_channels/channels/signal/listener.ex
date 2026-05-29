@@ -9,7 +9,7 @@ defmodule FermixChannels.Channels.Signal.Listener do
   require Logger
 
   alias FermixChannels.Channels.Signal
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Queue
 
   @default_poll_interval_ms 1_000
@@ -79,7 +79,7 @@ defmodule FermixChannels.Channels.Signal.Listener do
   end
 
   defp handle_dispatch_result(messages, state) do
-    case Dispatcher.dispatch(messages,
+    case Gateway.ingest(messages,
            channel: Signal,
            agent: state.agent,
            agent_server: state.agent_server

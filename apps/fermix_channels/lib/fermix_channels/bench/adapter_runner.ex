@@ -7,7 +7,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.CLI
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.MainAgent
@@ -173,7 +173,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
     end
 
     :ok =
-      Dispatcher.dispatch([message],
+      Gateway.ingest([message],
         channel: adapter_module(channel),
         agent: Queue,
         agent_server: env.queue,

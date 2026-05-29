@@ -8,7 +8,7 @@ defmodule FermixChannels.CLI do
 
   @behaviour FermixChannels.Gateway.Channel
 
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -55,7 +55,7 @@ defmodule FermixChannels.CLI do
   @spec dispatch_input(String.t(), keyword()) :: :ok | {:error, :empty_input}
   def dispatch_input(input, opts \\ []) when is_binary(input) do
     with {:ok, messages} <- parse_input(input, opts) do
-      Dispatcher.dispatch(messages,
+      Gateway.ingest(messages,
         channel: __MODULE__,
         agent: Keyword.get(opts, :agent, Queue),
         agent_server: Keyword.get(opts, :agent_server, Queue)
@@ -75,7 +75,7 @@ defmodule FermixChannels.CLI do
     # transport exists here.
     with {:ok, [message]} <- parse_input(input, opts),
          :ok <-
-           Dispatcher.dispatch([message],
+           Gateway.ingest([message],
              channel: __MODULE__,
              agent: Keyword.get(opts, :agent, Queue),
              agent_server: Keyword.get(opts, :agent_server, Queue),

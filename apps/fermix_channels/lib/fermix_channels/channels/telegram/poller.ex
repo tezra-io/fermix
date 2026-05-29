@@ -18,7 +18,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   require Logger
 
   alias FermixChannels.Channels.Telegram
-  alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Queue
 
   @bot_api_base "https://api.telegram.org"
@@ -183,7 +183,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   end
 
   defp handle_dispatch_result(messages, state) do
-    case Dispatcher.dispatch(messages,
+    case Gateway.ingest(messages,
            channel: Telegram,
            agent: state.agent,
            agent_server: state.agent_server
