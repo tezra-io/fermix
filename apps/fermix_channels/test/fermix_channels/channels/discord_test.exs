@@ -140,16 +140,6 @@ defmodule FermixChannels.Channels.DiscordTest do
                }
              ]
     end
-
-    test "drops senders outside the allowlist" do
-      Application.put_env(:fermix_channels, :discord,
-        enabled: true,
-        bot_user_id: "999",
-        allowed_user_ids: ["222"]
-      )
-
-      assert {:ok, []} = Discord.parse_gateway_event(dm_event("blocked"))
-    end
   end
 
   describe "webhook transport" do

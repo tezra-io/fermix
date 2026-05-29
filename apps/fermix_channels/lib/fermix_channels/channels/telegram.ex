@@ -49,7 +49,8 @@ defmodule FermixChannels.Channels.Telegram do
   @spec parse_webhook(map()) :: {:error, :unsupported_transport}
   def parse_webhook(_params), do: {:error, :unsupported_transport}
 
-  @spec parse_update(map()) :: {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
+  @spec parse_update(map()) ::
+          {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
   def parse_update(update) do
     {result, duration_us} = Telemetry.timed_us(fn -> do_parse_update(update) end)
     ChannelTelemetry.emit_parse(:telegram, result, duration_us)
@@ -98,7 +99,8 @@ defmodule FermixChannels.Channels.Telegram do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: :ok | {:error, term()}
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          :ok | {:error, term()}
   @spec send_media(
           String.t(),
           FermixChannels.Gateway.Channel.media_part(),
@@ -114,7 +116,7 @@ defmodule FermixChannels.Channels.Telegram do
 
   @impl true
   @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
-                                                                 :ok | {:error, term()})
+                                                                         :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target, thread_ts: thread_ts}) do
     opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
 
@@ -457,48 +459,31 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # Ingress authorization is centralized in the gateway dispatcher
+  # (`FermixChannels.Gateway.Authorizer`); the adapter parses every message and
+  # records the sender id in `metadata.user_id` so the gateway can authorize.
   defp parse_message(msg) do
     user_id = get_in(msg, ["from", "id"])
+    chat_id = msg |> get_in(["chat", "id"]) |> to_string()
 
-    if authorized_user?(user_id) do
-      chat_id = msg |> get_in(["chat", "id"]) |> to_string()
+    sender =
+      get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
 
-      sender =
-        get_in(msg, ["from", "username"]) || get_in(msg, ["from", "first_name"]) || "unknown"
+    content = msg["text"] || msg["caption"] || ""
 
-      content = msg["text"] || msg["caption"] || ""
+    message =
+      Message.new!(%{
+        id: to_string(msg["message_id"]),
+        content: content,
+        sender: sender,
+        channel: "telegram",
+        chat_id: chat_id,
+        reply_target: chat_id,
+        thread_ts: msg["message_thread_id"],
+        metadata: %{chat_type: get_in(msg, ["chat", "type"]), user_id: to_string(user_id)}
+      })
 
-      message =
-        Message.new!(%{
-          id: to_string(msg["message_id"]),
-          content: content,
-          sender: sender,
-          channel: "telegram",
-          chat_id: chat_id,
-          reply_target: chat_id,
-          thread_ts: msg["message_thread_id"],
-          metadata: %{chat_type: get_in(msg, ["chat", "type"]), user_id: to_string(user_id)}
-        })
-
-      {:ok, [message]}
-    else
-      {:ok, []}
-    end
-  end
-
-  defp authorized_user?(user_id) do
-    {allowed?, duration_us} =
-      Telemetry.timed_us(fn ->
-        allowed = FermixCore.Config.channel_ingress_user_ids(:telegram)
-
-        # Audit F-02: empty allowlist now denies everyone (was fail-open).
-        # Operators must configure owner_user_id (auto-populates the allowlist)
-        # or set fermix_channels.telegram.allowed_user_ids explicitly.
-        to_string(user_id) in allowed
-      end)
-
-    ChannelTelemetry.emit_authorize(:telegram, allowed?, duration_us)
-    allowed?
+    {:ok, [message]}
   end
 
   defp maybe_emit_inbound_message(channel, {:ok, messages}, duration_us) when messages != [] do

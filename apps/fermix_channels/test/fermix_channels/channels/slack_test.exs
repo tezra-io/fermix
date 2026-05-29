@@ -113,17 +113,6 @@ defmodule FermixChannels.Channels.SlackTest do
 
       assert {:ok, []} = Slack.parse_webhook(payload)
     end
-
-    test "drops senders outside the allowlist" do
-      Application.put_env(:fermix_channels, :slack,
-        enabled: true,
-        bot_token: "xoxb-test-token",
-        signing_secret: "slack-signing-secret",
-        allowed_user_ids: ["U99999"]
-      )
-
-      assert {:ok, []} = Slack.parse_webhook(dm_payload("blocked"))
-    end
   end
 
   describe "dispatch and reply" do

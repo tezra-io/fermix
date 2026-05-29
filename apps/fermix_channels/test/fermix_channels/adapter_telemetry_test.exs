@@ -27,31 +27,26 @@ defmodule FermixChannels.AdapterTelemetryTest do
     :ok
   end
 
-  test "emits bounded parse and authorization telemetry for inbound adapters" do
+  test "emits bounded parse telemetry for inbound adapters" do
     handler_id = attach_adapter_events(self())
 
     assert {:ok, [_]} = Telegram.parse_update(telegram_update())
-    assert_event(:telegram, [:fermix, :channel, :authorize], :allowed)
     assert_event(:telegram, [:fermix, :channel, :parse], :ok)
     assert_message_event(:telegram, :inbound)
 
     assert {:ok, [_]} = Discord.parse_gateway_event(discord_event())
-    assert_event(:discord, [:fermix, :channel, :authorize], :allowed)
     assert_event(:discord, [:fermix, :channel, :parse], :ok)
     assert_message_event(:discord, :inbound)
 
     assert {:ok, [_]} = Slack.parse_webhook(slack_payload())
-    assert_event(:slack, [:fermix, :channel, :authorize], :allowed)
     assert_event(:slack, [:fermix, :channel, :parse], :ok)
     assert_message_event(:slack, :inbound)
 
     assert {:ok, [_]} = WhatsApp.parse_webhook(whatsapp_payload())
-    assert_event(:whatsapp, [:fermix, :channel, :authorize], :allowed)
     assert_event(:whatsapp, [:fermix, :channel, :parse], :ok)
     assert_message_event(:whatsapp, :inbound)
 
     assert {:ok, [_]} = Signal.parse_receive_entry(signal_entry())
-    assert_event(:signal, [:fermix, :channel, :authorize], :allowed)
     assert_event(:signal, [:fermix, :channel, :parse], :ok)
     assert_message_event(:signal, :inbound)
 
@@ -76,7 +71,11 @@ defmodule FermixChannels.AdapterTelemetryTest do
     assert :ok = Slack.send_message("C1", "hello", req_options: [plug: {Req.Test, :adapter}])
     assert_message_event(:slack, :outbound)
 
-    assert :ok = WhatsApp.send_message("15551234567", "hello", req_options: [plug: {Req.Test, :adapter}])
+    assert :ok =
+             WhatsApp.send_message("15551234567", "hello",
+               req_options: [plug: {Req.Test, :adapter}]
+             )
+
     assert_message_event(:whatsapp, :outbound)
 
     assert :ok =
@@ -119,7 +118,9 @@ defmodule FermixChannels.AdapterTelemetryTest do
   end
 
   defp assert_message_event(channel, direction) do
-    assert_receive {:adapter_telemetry, [:fermix, :channel, :message], measurements, metadata}, 1_000
+    assert_receive {:adapter_telemetry, [:fermix, :channel, :message], measurements, metadata},
+                   1_000
+
     assert measurements.duration_us >= 0
     assert measurements.count >= 1
     assert metadata.channel == channel

@@ -67,8 +67,13 @@ defmodule FermixChannels.Channels.Signal do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: :ok | {:error, term()}
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part(), FermixChannels.Gateway.Channel.send_opts()) ::
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          :ok | {:error, term()}
+  @spec send_media(
+          String.t(),
+          FermixChannels.Gateway.Channel.media_part(),
+          FermixChannels.Gateway.Channel.send_opts()
+        ) ::
           :ok | {:error, term()}
   def send_media(recipient, media_part, opts \\ [])
       when is_binary(recipient) and is_map(media_part) do
@@ -78,7 +83,8 @@ defmodule FermixChannels.Channels.Signal do
   end
 
   @impl true
-  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
+                                                                         :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target, metadata: metadata}) do
     reply_opts =
       []
@@ -114,9 +120,6 @@ defmodule FermixChannels.Channels.Signal do
         nil
 
       not direct_message?(data_message) ->
-        nil
-
-      not authorized_sender?(sender_id) ->
         nil
 
       true ->
@@ -167,7 +170,8 @@ defmodule FermixChannels.Channels.Signal do
     result =
       with {:ok, account} <- account(),
            :ok <- validate_media(media_part),
-           {:ok, :ok, duration_us} <- timed_signal_attachment_send(account, recipient, media_part, opts) do
+           {:ok, :ok, duration_us} <-
+             timed_signal_attachment_send(account, recipient, media_part, opts) do
         emit_outbound_telemetry(duration_us)
       end
 
@@ -232,23 +236,6 @@ defmodule FermixChannels.Channels.Signal do
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image
   defp attachment_kind(_mime_type), do: :file
-
-  defp authorized_sender?(sender_id) do
-    {allowed?, duration_us} =
-      Telemetry.timed_us(fn ->
-        # Audit F-02: empty allowlist denies everyone. Operators must configure
-        # owner_user_id (auto-populates the allowlist) or set
-        # fermix_channels.signal.allowed_sender_ids explicitly.
-        sender_id in allowed_sender_ids()
-      end)
-
-    ChannelTelemetry.emit_authorize(:signal, allowed?, duration_us)
-    allowed?
-  end
-
-  defp allowed_sender_ids do
-    FermixCore.Config.channel_ingress_user_ids(:signal)
-  end
 
   defp ingress_enabled? do
     case FermixCore.Config.channel(:signal) do
