@@ -4,7 +4,7 @@ defmodule FermixChannels.Command do
   """
 
   alias FermixChannels.Message
-  alias FermixCore.Channels.Outbound
+  alias FermixCore.Reply
 
   @callback name() :: String.t()
   @callback aliases() :: [String.t()]
@@ -13,7 +13,7 @@ defmodule FermixChannels.Command do
               :ok | {:error, :unauthorized}
   @callback execute(
               Message.t(),
-              reply_fn :: Outbound.reply_fn(),
+              reply_fn :: Reply.reply_fn(),
               context :: map()
             ) :: :ok | {:error, term()}
 end
