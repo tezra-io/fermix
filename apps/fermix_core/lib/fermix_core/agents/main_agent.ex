@@ -30,7 +30,6 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
-  alias FermixCore.Channels.Outbound
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
@@ -40,6 +39,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Realtime.SessionSupervisor
+  alias FermixCore.Reply
   alias FermixCore.Telemetry
 
   @typing_interval_ms 4_000
@@ -54,7 +54,7 @@ defmodule FermixCore.Agents.MainAgent do
           :sender => String.t(),
           :channel => String.t(),
           :chat_id => String.t(),
-          :reply_fn => Outbound.reply_fn(),
+          :reply_fn => Reply.reply_fn(),
           optional(:typing_fn) => (-> any()),
           optional(:typing_interval_ms) => pos_integer(),
           optional(:typing_timeout_ms) => pos_integer(),

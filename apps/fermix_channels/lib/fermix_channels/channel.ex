@@ -7,7 +7,7 @@ defmodule FermixChannels.Channel do
   send outbound messages, and optionally verify webhook authenticity.
   """
 
-  alias FermixCore.Channels.Outbound
+  alias FermixCore.Reply
 
   @type message :: FermixChannels.Message.t()
 
@@ -18,8 +18,8 @@ defmodule FermixChannels.Channel do
           thread_ts: String.t()
         ]
 
-  @type media_part :: Outbound.media_part()
-  @type reply_fn :: Outbound.reply_fn()
+  @type media_part :: Reply.media_part()
+  @type reply_fn :: Reply.reply_fn()
 
   @doc """
   Parse a webhook payload into messages.
