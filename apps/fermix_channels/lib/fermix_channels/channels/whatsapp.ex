@@ -47,7 +47,8 @@ defmodule FermixChannels.Channels.WhatsApp do
   }
 
   @impl true
-  @spec parse_webhook(map()) :: {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
+  @spec parse_webhook(map()) ::
+          {:ok, [FermixChannels.Gateway.Channel.message()]} | {:error, term()}
   def parse_webhook(params) do
     {result, duration_us} = Telemetry.timed_us(fn -> do_parse_webhook(params) end)
     ChannelTelemetry.emit_parse(:whatsapp, result, duration_us)
@@ -111,8 +112,13 @@ defmodule FermixChannels.Channels.WhatsApp do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: :ok | {:error, term()}
-  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part(), FermixChannels.Gateway.Channel.send_opts()) ::
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          :ok | {:error, term()}
+  @spec send_media(
+          String.t(),
+          FermixChannels.Gateway.Channel.media_part(),
+          FermixChannels.Gateway.Channel.send_opts()
+        ) ::
           :ok | {:error, term()}
   def send_media(to, media_part, opts \\ []) when is_binary(to) and is_map(media_part) do
     with {:ok, claim} <- Idempotency.claim_outbound_media(:whatsapp, to, media_part) do
@@ -121,7 +127,8 @@ defmodule FermixChannels.Channels.WhatsApp do
   end
 
   @impl true
-  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() -> :ok | {:error, term()})
+  @spec build_text_reply(FermixChannels.Gateway.Channel.message()) :: (String.t() ->
+                                                                         :ok | {:error, term()})
   def build_text_reply(%Message{reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, []) end
   end
@@ -190,14 +197,10 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   defp parse_change(_change), do: []
 
+  # Ingress authorization is centralized in the gateway dispatcher; the adapter
+  # parses every message and records the sender id in metadata for the gateway.
   defp parse_message(message, contacts, phone_number_id) do
-    sender_id = Map.get(message, "from")
-
-    if authorized_sender?(sender_id) do
-      [build_message(message, contacts, phone_number_id)]
-    else
-      []
-    end
+    [build_message(message, contacts, phone_number_id)]
   end
 
   defp build_message(message, contacts, phone_number_id) do
@@ -265,23 +268,6 @@ defmodule FermixChannels.Channels.WhatsApp do
     end
   end
 
-  defp authorized_sender?(sender_id) do
-    {allowed?, duration_us} =
-      Telemetry.timed_us(fn ->
-        # Audit F-02: empty allowlist denies everyone. Operators must configure
-        # owner_user_id (auto-populates the allowlist) or set
-        # fermix_channels.whatsapp.allowed_sender_ids explicitly.
-        sender_id in allowed_sender_ids()
-      end)
-
-    ChannelTelemetry.emit_authorize(:whatsapp, allowed?, duration_us)
-    allowed?
-  end
-
-  defp allowed_sender_ids do
-    FermixCore.Config.channel_ingress_user_ids(:whatsapp)
-  end
-
   defp ingress_enabled? do
     case FermixCore.Config.channel(:whatsapp) do
       {:ok, config} -> Keyword.get(config, :enabled, false) == true
@@ -342,7 +328,12 @@ defmodule FermixChannels.Channels.WhatsApp do
     ]
 
     result =
-      Req.new(url: url, method: :post, form_multipart: fields, auth: {:bearer, config.access_token})
+      Req.new(
+        url: url,
+        method: :post,
+        form_multipart: fields,
+        auth: {:bearer, config.access_token}
+      )
       |> Req.merge(config.req_options)
       |> HttpClient.request("WhatsApp media upload")
 
@@ -429,7 +420,8 @@ defmodule FermixChannels.Channels.WhatsApp do
   defp maybe_put_caption(payload, nil), do: payload
   defp maybe_put_caption(payload, caption), do: Map.put(payload, :caption, caption)
 
-  defp maybe_put_filename(payload, "document", filename) when is_binary(filename) and filename != "" do
+  defp maybe_put_filename(payload, "document", filename)
+       when is_binary(filename) and filename != "" do
     Map.put(payload, :filename, filename)
   end
 
@@ -513,7 +505,10 @@ defmodule FermixChannels.Channels.WhatsApp do
   # here and rely on `preflight_size_cap/1` to drop oversized payloads
   # before the request even leaves Fermix.
   defp enforce_size_cap(body) when byte_size(body) > @max_media_bytes do
-    Logger.error("WhatsApp media download exceeded #{@max_media_bytes}-byte cap; refusing payload")
+    Logger.error(
+      "WhatsApp media download exceeded #{@max_media_bytes}-byte cap; refusing payload"
+    )
+
     {:error, "WhatsApp media download exceeded #{@max_media_bytes}-byte cap"}
   end
 
