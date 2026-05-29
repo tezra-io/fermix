@@ -56,7 +56,9 @@ defmodule FermixChannels.Gateway.Idempotency do
     ttl_ms = Keyword.get(opts, :ttl_ms, @default_ttl_ms)
 
     {result, duration_us} =
-      Telemetry.timed_us(fn -> GenServer.call(server, {:check_and_record, {channel, message_id}, ttl_ms}) end)
+      Telemetry.timed_us(fn ->
+        GenServer.call(server, {:check_and_record, {channel, message_id}, ttl_ms})
+      end)
 
     emit_idempotency_check(channel, result, duration_us)
     result

@@ -25,7 +25,9 @@ defmodule Mix.Tasks.FermixBenchTest do
       assert before?(text, "  dispatcher_normalize:", "  ingress_authorize:")
       assert before?(text, "  ingress_authorize:", "  agent_mailbox:")
       assert File.exists?(output)
-      assert %{"scenarios" => %{"shared_text_minimal" => _scenario}} = Jason.decode!(File.read!(output))
+
+      assert %{"scenarios" => %{"shared_text_minimal" => _scenario}} =
+               Jason.decode!(File.read!(output))
     after
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end

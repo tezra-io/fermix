@@ -1,10 +1,10 @@
 defmodule FermixChannels.Gateway.Commands.SandboxTest do
   use ExUnit.Case, async: false
 
-  alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Authorizer
-  alias FermixChannels.Gateway.Source
+  alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Source
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
 
@@ -57,7 +57,8 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
       command_allowlist: ["owner-2"]
     )
 
-    token = propose_grant(root, message("/grant path #{root}", user_id: "owner-1", thread_ts: "t1"))
+    token =
+      propose_grant(root, message("/grant path #{root}", user_id: "owner-1", thread_ts: "t1"))
 
     assert :ok = dispatch(message("/confirm #{token}", user_id: "owner-2", thread_ts: "t1"))
     assert_receive {:sandbox_reply, "Confirmation failed: :origin_mismatch"}
@@ -141,8 +142,8 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
         :ok
 
       text ->
-      send(test_pid, {:sandbox_reply, text})
-      :ok
+        send(test_pid, {:sandbox_reply, text})
+        :ok
     end
   end
 

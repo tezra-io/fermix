@@ -24,7 +24,8 @@ defmodule FermixChannels.Gateway.Commands.Authorization do
 
   alias FermixChannels.Gateway.Authorization
 
-  @spec owner_only(FermixChannels.Gateway.Message.t(), map(), map()) :: :ok | {:error, :unauthorized}
+  @spec owner_only(FermixChannels.Gateway.Message.t(), map(), map()) ::
+          :ok | {:error, :unauthorized}
   def owner_only(_message, _metadata, %{authorization: %Authorization{role: :operator}}), do: :ok
 
   def owner_only(%{channel: channel}, metadata, %{authorization: %Authorization{role: :guest}}) do
