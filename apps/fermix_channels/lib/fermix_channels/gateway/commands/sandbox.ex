@@ -38,7 +38,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     do: propose({:add_env_passthrough, name, [source: :env, name: name]}, message, reply_fn)
 
   defp dispatch("sandbox", ["env", "set", name, "--", command | args], message, reply_fn),
-    do: propose({:add_env_passthrough, name, [source: :command, command: command, args: args]}, message, reply_fn)
+    do:
+      propose(
+        {:add_env_passthrough, name, [source: :command, command: command, args: args]},
+        message,
+        reply_fn
+      )
 
   defp dispatch("sandbox", ["env", command, name], _message, reply_fn)
        when command in ["deny", "unset"],

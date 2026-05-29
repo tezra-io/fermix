@@ -190,28 +190,8 @@ defmodule FermixChannels.Gateway.Queue do
          conversation,
          %{request_id: request_id, message: msg}
        ) do
-    case checkout(state, msg) do
-      {:ok, turn_state, cache_status} ->
-        msg = Map.put(msg, :__runtime_context_cache_status, cache_status)
-        start_turn_task(state, conversation_key, conversation, request_id, msg, turn_state)
-
-      {:error, reason} ->
-        handle_checkout_error(state, conversation_key, conversation, request_id, msg, reason)
-    end
-  end
-
-  # Checking out blocks the queue on a `MainAgent` call only while a
-  # runtime-context cache miss builds; hits return immediately. A dead/restarting
-  # MainAgent surfaces as `{:error, {:checkout_unavailable, _}}` rather than
-  # crashing the queue.
-  defp checkout(state, msg) do
-    MainAgent.checkout_turn_state(state.main_agent, msg)
-  catch
-    :exit, reason -> {:error, {:checkout_unavailable, reason}}
-  end
-
-  defp start_turn_task(state, conversation_key, conversation, request_id, msg, turn_state) do
-    task = turn_task(state.turn_runner, self(), conversation_key, request_id, msg, turn_state)
+    task =
+      turn_task(state.main_agent, state.turn_runner, self(), conversation_key, request_id, msg)
 
     case Task.Supervisor.start_child(state.task_supervisor, task) do
       {:ok, pid} ->
@@ -227,11 +207,14 @@ defmodule FermixChannels.Gateway.Queue do
     end
   end
 
-  # The turn task: type while the core turn runs, deliver its returned reply
-  # (rejecting it if a newer message superseded this turn), then finalize
-  # (memory review + auto-compaction). Finalize runs after delivery so
+  # The turn task: checkout the turn-state snapshot, type while the core turn
+  # runs, deliver its returned reply (rejecting it if a newer message superseded
+  # this turn), then finalize (memory review + auto-compaction). Checkout runs
+  # HERE, in the task — not in the queue loop — so a slow runtime-context build
+  # (cold start or a post-invalidation cache miss) never blocks other
+  # conversations from enqueuing/canceling. Finalize runs after delivery so
   # compaction never delays the reply, and only on the success path.
-  defp turn_task(runner, queue, conversation_key, request_id, msg, turn_state) do
+  defp turn_task(main_agent, runner, queue, conversation_key, request_id, msg) do
     typing_fn = Map.get(msg, :typing_fn)
 
     typing_opts = [
@@ -240,16 +223,40 @@ defmodule FermixChannels.Gateway.Queue do
     ]
 
     turn = %{
+      main_agent: main_agent,
       runner: runner,
       queue: queue,
       conversation_key: conversation_key,
       request_id: request_id,
       deliver: Map.fetch!(msg, :reply_fn),
-      turn_state: turn_state,
-      core_msg: Map.drop(msg, [:reply_fn, :typing_fn, :typing_interval_ms, :typing_timeout_ms])
+      msg: msg
     }
 
-    fn -> Typing.with_indicator(typing_fn, typing_opts, fn -> run_and_deliver(turn) end) end
+    fn -> Typing.with_indicator(typing_fn, typing_opts, fn -> checkout_and_run(turn) end) end
+  end
+
+  defp checkout_and_run(%{main_agent: main_agent, msg: msg} = turn) do
+    case checkout(main_agent, msg) do
+      {:ok, turn_state, cache_status} ->
+        core_msg =
+          msg
+          |> Map.drop([:reply_fn, :typing_fn, :typing_interval_ms, :typing_timeout_ms])
+          |> Map.put(:__runtime_context_cache_status, cache_status)
+
+        run_and_deliver(Map.merge(turn, %{turn_state: turn_state, core_msg: core_msg}))
+
+      {:error, reason} ->
+        deliver_checkout_error(turn, reason)
+    end
+  end
+
+  # Blocks only this task while a runtime-context cache miss builds; hits return
+  # immediately. A dead/restarting MainAgent surfaces as
+  # {:error, {:checkout_unavailable, _}} rather than crashing the task.
+  defp checkout(main_agent, msg) do
+    MainAgent.checkout_turn_state(main_agent, msg)
+  catch
+    :exit, reason -> {:error, {:checkout_unavailable, reason}}
   end
 
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
@@ -271,23 +278,22 @@ defmodule FermixChannels.Gateway.Queue do
     end
   end
 
-  defp handle_checkout_error(state, conversation_key, conversation, request_id, msg, reason) do
+  defp deliver_checkout_error(turn, reason) do
     {text, agent_unavailable?} = checkout_error_reply(reason)
 
     Logger.error(
-      "Turn #{request_id} checkout failed for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
+      "Turn #{turn.request_id} checkout failed for #{format_conversation_key(turn.conversation_key)}: #{inspect(reason)}"
     )
 
     if agent_unavailable? do
       :telemetry.execute(
         [:fermix, :gateway, :queue, :agent_unavailable],
         %{count: 1},
-        %{channel: msg.channel}
+        %{channel: turn.msg.channel}
       )
     end
 
-    send_error_reply_async(msg, text)
-    put_conversation_runtime(state, conversation_key, %{conversation | pending: nil})
+    maybe_deliver(turn, text)
   end
 
   defp checkout_error_reply({:checkout_unavailable, _reason}),

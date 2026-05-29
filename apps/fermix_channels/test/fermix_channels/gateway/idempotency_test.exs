@@ -150,17 +150,13 @@ defmodule FermixChannels.Gateway.IdempotencyTest do
       media_part = %{kind: :document, path: path, filename: "report.txt"}
 
       assert {:ok, {:fresh, _claim}} =
-               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
-                 server: server
-               )
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part, server: server)
 
       assert {:ok, :duplicate} =
-               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
-                 server: server
-               )
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part, server: server)
 
-      assert_receive {:telemetry, [:fermix, :idempotency, :outbound_media_claim],
-                      measurements, metadata}
+      assert_receive {:telemetry, [:fermix, :idempotency, :outbound_media_claim], measurements,
+                      metadata}
 
       assert measurements.duration_us >= 0
       assert metadata.channel == :telegram
@@ -169,9 +165,7 @@ defmodule FermixChannels.Gateway.IdempotencyTest do
       File.write!(path, "two")
 
       assert {:ok, {:fresh, _claim}} =
-               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
-                 server: server
-               )
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part, server: server)
     after
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
@@ -192,9 +186,7 @@ defmodule FermixChannels.Gateway.IdempotencyTest do
         for _i <- 1..50 do
           Task.async(fn ->
             result =
-              Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
-                server: server
-              )
+              Idempotency.claim_outbound_media(:telegram, "chat-1", media_part, server: server)
 
             send(parent, {:result, result})
           end)
@@ -227,16 +219,12 @@ defmodule FermixChannels.Gateway.IdempotencyTest do
       media_part = %{kind: :document, path: path, filename: "report.txt"}
 
       assert {:ok, {:fresh, claim}} =
-               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
-                 server: server
-               )
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part, server: server)
 
       assert :ok = Idempotency.release_outbound_media_claim(claim, server: server)
 
       assert {:ok, {:fresh, _claim}} =
-               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part,
-                 server: server
-               )
+               Idempotency.claim_outbound_media(:telegram, "chat-1", media_part, server: server)
     after
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end

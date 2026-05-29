@@ -1,18 +1,20 @@
 defmodule FermixChannels.Gateway.CommandsTest do
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
+  alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Commands.Authorization
   alias FermixChannels.Gateway.Commands.Compact
-  alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
-  alias FermixChannels.Gateway.Authorizer
-  alias FermixChannels.Gateway.Source
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Source
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
 
-  defp operator_ctx, do: %{authorization: %IngressAuthorization{role: :operator, trust: :operator}}
+  defp operator_ctx,
+    do: %{authorization: %IngressAuthorization{role: :operator, trust: :operator}}
+
   defp guest_ctx, do: %{authorization: %IngressAuthorization{role: :guest, trust: :guest}}
 
   defp context_for(%Message{} = msg, base) do
@@ -388,8 +390,8 @@ defmodule FermixChannels.Gateway.CommandsTest do
         :ok
 
       text ->
-      send(test_pid, {:compact_reply, text})
-      :ok
+        send(test_pid, {:compact_reply, text})
+        :ok
     end
   end
 

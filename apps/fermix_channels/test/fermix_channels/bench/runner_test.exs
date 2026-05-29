@@ -49,7 +49,10 @@ defmodule FermixChannels.Bench.RunnerTest do
     scenario = report.scenarios["shared_single_flight_contention"]
     assert scenario.messages_dispatched == 5
     assert scenario.messages_processed < scenario.messages_dispatched
-    assert scenario.messages_superseded == scenario.messages_dispatched - scenario.messages_processed
+
+    assert scenario.messages_superseded ==
+             scenario.messages_dispatched - scenario.messages_processed
+
     assert scenario.stages["dispatcher_normalize"].count == 5
     assert scenario.stages["agent_message"].count == scenario.messages_processed
   end
@@ -153,6 +156,6 @@ defmodule FermixChannels.Bench.RunnerTest do
 
   test "rejects unknown scenarios" do
     assert {:error, {:unknown_scenarios, ["missing"]}} =
-      Runner.run(scenarios: ["missing"], samples: 1, warmup: 0, output: nil)
+             Runner.run(scenarios: ["missing"], samples: 1, warmup: 0, output: nil)
   end
 end

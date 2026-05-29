@@ -44,7 +44,8 @@ defmodule FermixChannels.Gateway.Commands.Compact do
         context: compaction_context(conversation_key, context)
       ]
 
-    {compaction_result, duration_us} = Telemetry.timed_us(fn -> Compactor.compact(history, opts) end)
+    {compaction_result, duration_us} =
+      Telemetry.timed_us(fn -> Compactor.compact(history, opts) end)
 
     case compaction_result do
       {:ok, %{messages: compacted, compacted?: true}} ->
