@@ -36,6 +36,7 @@ defmodule FermixCore.Introspection.Agents do
       server
       |> MainAgent.status()
       |> normalize_main_status()
+      |> merge_queue_status()
 
     {:ok, status}
   catch
@@ -61,7 +62,7 @@ defmodule FermixCore.Introspection.Agents do
   end
 
   defp normalize_main_status(status) when is_map(status) do
-    activity = Map.get(status, :activity, Map.get(status, :status, :unknown))
+    activity = Map.get(status, :activity, :idle)
 
     %{
       name: Map.get(status, :name),
@@ -78,6 +79,38 @@ defmodule FermixCore.Introspection.Agents do
       model: Map.get(status, :model),
       memory: Map.get(status, :memory)
     }
+  end
+
+  # Queue counts live in the gateway (`FermixChannels.Gateway.Queue`), which core
+  # must not depend on at compile time. The channels app registers itself as the
+  # `:queue_status_provider` at boot; absent (core-only), counts stay at zero.
+  defp merge_queue_status(status) do
+    case queue_status() do
+      %{} = queue ->
+        activity = Map.get(queue, :activity, :idle)
+
+        %{
+          status
+          | activity: activity,
+            status: activity,
+            active_conversations: Map.get(queue, :active_conversations, 0),
+            pending_conversations: Map.get(queue, :pending_conversations, 0),
+            active_requests: Map.get(queue, :active_requests, 0),
+            pending_requests: Map.get(queue, :pending_requests, 0)
+        }
+
+      nil ->
+        status
+    end
+  end
+
+  defp queue_status do
+    case Application.get_env(:fermix_core, :queue_status_provider) do
+      provider when is_atom(provider) and not is_nil(provider) -> provider.status()
+      _unset -> nil
+    end
+  catch
+    :exit, _reason -> nil
   end
 
   defp normalize_worker_status(status) when is_map(status) do

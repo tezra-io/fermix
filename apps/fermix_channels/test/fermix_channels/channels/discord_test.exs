@@ -202,6 +202,12 @@ defmodule FermixChannels.Channels.DiscordTest do
            ]}
         )
 
+      queue =
+        start_supervised!(
+          {FermixChannels.Gateway.Queue,
+           [name: :"queue_#{System.unique_integer([:positive])}", main_agent: agent]}
+        )
+
       Req.Test.stub(:discord, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         send(test_pid, {:discord_request, conn.request_path, Jason.decode!(body)})
@@ -216,8 +222,8 @@ defmodule FermixChannels.Channels.DiscordTest do
       assert :ok =
                Dispatcher.dispatch(messages,
                  channel: Discord,
-                 agent: MainAgent,
-                 agent_server: agent
+                 agent: FermixChannels.Gateway.Queue,
+                 agent_server: queue
                )
 
       assert_receive {:discord_request, "/api/v10/channels/dm-channel-1/messages", body}, 5_000

@@ -13,7 +13,7 @@ defmodule FermixChannels.Channels.Discord.Gateway do
 
   alias FermixChannels.Channels.Discord
   alias FermixChannels.Dispatcher
-  alias FermixCore.Agents.MainAgent
+  alias FermixChannels.Gateway.Queue
 
   @default_reconnect_ms 5_000
 
@@ -31,12 +31,13 @@ defmodule FermixChannels.Channels.Discord.Gateway do
   @impl true
   def init(opts) do
     state = %{
-      agent: Keyword.get(opts, :agent, MainAgent),
-      agent_server: Keyword.get(opts, :agent_server, MainAgent),
+      agent: Keyword.get(opts, :agent, Queue),
+      agent_server: Keyword.get(opts, :agent_server, Queue),
       connect?: Keyword.get(opts, :connect?, true),
       reconnect_ms: Keyword.get(opts, :reconnect_ms, @default_reconnect_ms),
       req_options: Keyword.get(opts, :req_options, []),
-      socket_client: Keyword.get(opts, :socket_client, FermixChannels.Channels.Discord.Gateway.Socket),
+      socket_client:
+        Keyword.get(opts, :socket_client, FermixChannels.Channels.Discord.Gateway.Socket),
       socket_options: Keyword.get(opts, :socket_options, []),
       socket: nil,
       socket_ref: nil
