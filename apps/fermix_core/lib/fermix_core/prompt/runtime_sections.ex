@@ -42,6 +42,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
     [
       runtime_contract(),
+      sub_agent_orchestration(),
       capability_summary_from_opts(opts),
       plugin_index_from_opts(opts),
       skill_catalog(available_skills, Keyword.get(opts, :trust, :operator))
@@ -86,6 +87,17 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Do not infer detailed behavior from the description alone.
     - Use supporting files only if the loaded `SKILL.md` asks for them.
     - Use `skill_run` when a specialized skill should execute as a delegated sub-agent.
+    """
+    |> String.trim()
+  end
+
+  defp sub_agent_orchestration do
+    """
+    ## Sub-Agent Orchestration
+    - Use `subagents` when a request has independent substantial parts and delegation is likely to improve speed, coverage, or quality. You may use it even if the user did not explicitly ask for subagents.
+    - Describe each task as a goal. Do not name which tools a subagent should use — it selects its own from a controlled surface (read, web, MCP/plugins, skills, sandbox-bounded shell; no direct writes).
+    - Keep fanout modest. Do not delegate trivial work, tightly-coupled reasoning, or work where coordination overhead exceeds the benefit.
+    - Do not claim work ran in parallel unless `subagents` ran multiple workers concurrently. Synthesize the returned results yourself and state any important gaps or failures.
     """
     |> String.trim()
   end

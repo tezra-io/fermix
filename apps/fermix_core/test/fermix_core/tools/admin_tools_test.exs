@@ -4,26 +4,10 @@ defmodule FermixCore.Tools.AdminToolsTest do
   # tests reading those globals.
   use ExUnit.Case, async: false
 
-  alias FermixCore.Tools.Delegate
   alias FermixCore.Tools.ModelRoutingConfig
   alias FermixCore.Tools.SkillCreate
 
   @context %{agent_name: "test_agent", conversation_key: :test}
-
-  defmodule DelegateAdapter do
-    def chat(messages, capabilities, opts) do
-      send(self(), {:delegate_seen, messages, capabilities, opts})
-
-      {:ok,
-       %{
-         content: "delegated answer",
-         tool_calls: [],
-         provider_state: nil,
-         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
-         model: Keyword.fetch!(opts, :model)
-       }}
-    end
-  end
 
   setup do
     home =
@@ -41,34 +25,6 @@ defmodule FermixCore.Tools.AdminToolsTest do
     end)
 
     %{home: home}
-  end
-
-  test "delegate uses routing.delegate_model from config; main agent does not pass model" do
-    previous_routing = Application.get_env(:fermix_core, :routing)
-    Application.put_env(:fermix_core, :routing, delegate_model: "gpt-routed")
-
-    on_exit(fn ->
-      case previous_routing do
-        nil -> Application.delete_env(:fermix_core, :routing)
-        value -> Application.put_env(:fermix_core, :routing, value)
-      end
-    end)
-
-    context = Map.merge(@context, %{delegate_adapter: DelegateAdapter})
-
-    assert {:ok, result} = Delegate.execute(%{"prompt" => "Summarize this."}, context)
-
-    assert result.success == true
-    assert result.output == "delegated answer"
-    assert_received {:delegate_seen, [%{role: "user", content: "Summarize this."}], [], opts}
-    assert Keyword.fetch!(opts, :model) == "gpt-routed"
-  end
-
-  test "delegate parameters schema exposes only prompt" do
-    schema = Delegate.parameters()
-
-    assert schema.required == ["prompt"]
-    assert Map.keys(schema.properties) == [:prompt]
   end
 
   test "skill_create scaffolds SKILL.md and eval cases under FERMIX_HOME", %{home: home} do
@@ -109,7 +65,7 @@ defmodule FermixCore.Tools.AdminToolsTest do
   test "model_routing_config reads and updates the routing TOML section" do
     assert {:ok, set_result} =
              ModelRoutingConfig.execute(
-               %{"action" => "set", "key" => "delegate_model", "value" => "gpt-5.4-mini"},
+               %{"action" => "set", "key" => "coding_model", "value" => "gpt-5.4-mini"},
                @context
              )
 
@@ -119,7 +75,7 @@ defmodule FermixCore.Tools.AdminToolsTest do
              ModelRoutingConfig.execute(%{"action" => "read"}, @context)
 
     assert read_result.success == true
-    assert Jason.decode!(read_result.output)["delegate_model"] == "gpt-5.4-mini"
+    assert Jason.decode!(read_result.output)["coding_model"] == "gpt-5.4-mini"
   end
 
   test "model_routing_config read normalizes config load failures", %{home: home} do

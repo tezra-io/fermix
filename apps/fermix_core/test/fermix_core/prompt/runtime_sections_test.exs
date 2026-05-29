@@ -27,6 +27,8 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     assert content =~ "For channel-originated jobs that should report back to the same chat"
     assert content =~ "Use `expires_at` for temporary"
     assert content =~ "Prefer direct Fermix built-ins over shell"
+    assert content =~ "## Sub-Agent Orchestration"
+    assert content =~ "Use `subagents` when a request has independent substantial parts"
   end
 
   test "capability_summary/1 renders registered built-ins from metadata" do
