@@ -405,15 +405,27 @@ defmodule FermixCore.Agents.MainAgentTest do
   defp reply_payload({:text, text}), do: text
   defp reply_payload(response), do: response
 
-  # Synchronously execute one core turn. Single-flight scheduling (the queue)
-  # lives in `FermixChannels.Gateway.Queue` and is exercised in its own suite;
-  # these tests drive turn execution directly through checkout + TurnRunner.
+  # Synchronously execute one core turn the way the gateway task does: checkout,
+  # run (returns the response), deliver via the message's reply_fn, then finalize
+  # (memory review + auto-compaction). Single-flight scheduling, typing, and the
+  # delivery closure itself live in the gateway and are exercised in its suites.
   defp run_turn(msg, agent) do
     {:ok, turn_state, cache_status} = MainAgent.checkout_turn_state(agent, msg)
+    deliver = Map.fetch!(msg, :reply_fn)
 
-    msg
-    |> Map.put(:__runtime_context_cache_status, cache_status)
-    |> TurnRunner.run(turn_state)
+    core_msg =
+      msg
+      |> Map.drop([:reply_fn, :typing_fn, :typing_interval_ms, :typing_timeout_ms])
+      |> Map.put(:__runtime_context_cache_status, cache_status)
+
+    case TurnRunner.run(core_msg, turn_state, deliver) do
+      {:ok, response} ->
+        deliver.({:text, response})
+        TurnRunner.finalize(core_msg, turn_state)
+
+      {:error, reason} ->
+        deliver.({:text, TurnRunner.error_reply(reason)})
+    end
   end
 
   defp tool_call(id, name, arguments) do
@@ -703,70 +715,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert :ok = run_turn(msg, agent)
 
       assert_receive {:reply, "Hello back!"}, 5_000
-    end
-
-    test "runs typing_fn while a request is active and stops after reply", %{agent: agent} do
-      test_pid = self()
-
-      MockProvider.set_responses([{:block, :typing_probe, mock_response("done")}])
-
-      msg =
-        make_message("Slow request",
-          typing_interval_ms: 20,
-          typing_timeout_ms: 500,
-          typing_fn: fn ->
-            send(test_pid, :typing_tick)
-            :ok
-          end
-        )
-
-      task = Task.async(fn -> run_turn(msg, agent) end)
-
-      assert_receive :typing_tick, 500
-      assert_receive {:mock_provider_blocked, :typing_probe, provider_pid}, 5_000
-      assert_receive :typing_tick, 200
-
-      send(provider_pid, {:continue, :typing_probe})
-      assert_receive {:reply, "done"}, 5_000
-      refute_receive :typing_tick, 100
-      assert :ok = Task.await(task)
-    end
-
-    test "continues the request when typing_fn reports an expected adapter error", %{agent: agent} do
-      MockProvider.set_responses([mock_response("done")])
-
-      msg =
-        make_message("Request with typing transport failure",
-          typing_fn: fn -> {:error, %Req.TransportError{reason: :econnrefused}} end
-        )
-
-      assert :ok = run_turn(msg, agent)
-      assert_receive {:reply, "done"}, 5_000
-    end
-
-    test "an unexpected typing_fn exception crashes the turn instead of being swallowed", %{
-      agent: agent
-    } do
-      test_pid = self()
-      MockProvider.set_responses([{:block, :typing_raise_probe, mock_response("done")}])
-
-      msg =
-        make_message("Request with broken typing callback",
-          typing_fn: fn ->
-            send(test_pid, :typing_called)
-            raise ArgumentError, "broken typing callback"
-          end
-        )
-
-      capture_log(fn ->
-        {pid, ref} = spawn_monitor(fn -> run_turn(msg, agent) end)
-
-        assert_receive :typing_called, 500
-        assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 5_000
-        refute reason == :normal
-      end)
-
-      refute_receive {:reply, _response}, 100
     end
 
     test "stores user and assistant messages in conversation store", %{
@@ -1486,15 +1434,17 @@ defmodule FermixCore.Agents.MainAgentTest do
   # -- Telemetry --
 
   describe "telemetry" do
-    test "emits prompt, history, and reply telemetry on success", %{agent: agent} do
+    test "emits prompt, history, and loop telemetry on success", %{agent: agent} do
       test_pid = self()
       handler_id = "test-agent-runtime-#{System.unique_integer()}"
 
+      # Final-reply telemetry moved to the channel layer ([:fermix, :channel,
+      # :reply], emitted by Gateway.Delivery) in Stage 6 — covered by the
+      # channel suites, not this core turn test.
       events = [
         [:fermix, :agent, :prompt_context],
         [:fermix, :agent, :history],
-        [:fermix, :agent, :loop_runtime],
-        [:fermix, :agent, :reply]
+        [:fermix, :agent, :loop_runtime]
       ]
 
       :telemetry.attach_many(
@@ -1540,14 +1490,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert loop_metadata.agent == "main"
       assert loop_metadata.channel == "telegram"
       assert loop_metadata.trust == :operator
-
-      assert_receive {:telemetry, [:fermix, :agent, :reply], reply_measurements, reply_metadata},
-                     5_000
-
-      assert reply_measurements.duration_us >= 0
-      assert reply_measurements.response_bytes == 2
-      assert reply_metadata.status == :ok
-      assert reply_metadata.channel == "telegram"
     end
 
     test "emits [:fermix, :agent, :message] on success", %{agent: agent} do

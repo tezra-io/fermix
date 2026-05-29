@@ -26,6 +26,7 @@ defmodule FermixChannels.Gateway.Queue do
 
   require Logger
 
+  alias FermixChannels.Gateway.Typing
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.TurnRunner
@@ -59,6 +60,18 @@ defmodule FermixChannels.Gateway.Queue do
   @spec status(GenServer.server()) :: status()
   def status(server \\ __MODULE__) do
     GenServer.call(server, :status)
+  end
+
+  @doc """
+  Whether a turn's reply may still be delivered: true only if it is the active
+  request for its conversation and no newer message has superseded it. The turn
+  task checks this before delivering, so a superseded turn's reply is rejected
+  before delivery. (Cancellation also kills the task; this guards the
+  post-`run` race.)
+  """
+  @spec deliverable?(GenServer.server(), ConversationKey.t(), pos_integer()) :: boolean()
+  def deliverable?(server, conversation_key, request_id) do
+    GenServer.call(server, {:deliverable?, conversation_key, request_id})
   end
 
   # --- GenServer Callbacks ---
@@ -96,6 +109,16 @@ defmodule FermixChannels.Gateway.Queue do
   @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_from_state(state), state}
+  end
+
+  def handle_call({:deliverable?, conversation_key, request_id}, _from, state) do
+    deliverable =
+      case Map.get(state.conversations, conversation_key) do
+        %{active: %{request_id: ^request_id}, pending: nil} -> true
+        _conversation -> false
+      end
+
+    {:reply, deliverable, state}
   end
 
   @impl true
@@ -188,11 +211,9 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   defp start_turn_task(state, conversation_key, conversation, request_id, msg, turn_state) do
-    runner = state.turn_runner
+    task = turn_task(state.turn_runner, self(), conversation_key, request_id, msg, turn_state)
 
-    case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           runner.run(msg, turn_state)
-         end) do
+    case Task.Supervisor.start_child(state.task_supervisor, task) do
       {:ok, pid} ->
         mark_request_started(state, conversation_key, conversation, request_id, pid)
 
@@ -203,6 +224,50 @@ defmodule FermixChannels.Gateway.Queue do
 
         send_error_reply_async(msg, "Sorry, I encountered an error processing your message.")
         put_conversation_runtime(state, conversation_key, %{conversation | pending: nil})
+    end
+  end
+
+  # The turn task: type while the core turn runs, deliver its returned reply
+  # (rejecting it if a newer message superseded this turn), then finalize
+  # (memory review + auto-compaction). Finalize runs after delivery so
+  # compaction never delays the reply, and only on the success path.
+  defp turn_task(runner, queue, conversation_key, request_id, msg, turn_state) do
+    typing_fn = Map.get(msg, :typing_fn)
+
+    typing_opts = [
+      interval_ms: Map.get(msg, :typing_interval_ms),
+      timeout_ms: Map.get(msg, :typing_timeout_ms)
+    ]
+
+    turn = %{
+      runner: runner,
+      queue: queue,
+      conversation_key: conversation_key,
+      request_id: request_id,
+      deliver: Map.fetch!(msg, :reply_fn),
+      turn_state: turn_state,
+      core_msg: Map.drop(msg, [:reply_fn, :typing_fn, :typing_interval_ms, :typing_timeout_ms])
+    }
+
+    fn -> Typing.with_indicator(typing_fn, typing_opts, fn -> run_and_deliver(turn) end) end
+  end
+
+  defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
+    case runner.run(core_msg, turn_state, turn.deliver) do
+      {:ok, response} ->
+        maybe_deliver(turn, response)
+        runner.finalize(core_msg, turn_state)
+
+      {:error, reason} ->
+        maybe_deliver(turn, runner.error_reply(reason))
+    end
+  end
+
+  defp maybe_deliver(turn, text) do
+    if deliverable?(turn.queue, turn.conversation_key, turn.request_id) do
+      turn.deliver.({:text, text})
+    else
+      :ok
     end
   end
 
