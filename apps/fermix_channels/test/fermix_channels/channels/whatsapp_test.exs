@@ -198,6 +198,12 @@ defmodule FermixChannels.Channels.WhatsAppTest do
            ]}
         )
 
+      queue =
+        start_supervised!(
+          {FermixChannels.Gateway.Queue,
+           [name: :"queue_#{System.unique_integer([:positive])}", main_agent: agent]}
+        )
+
       Req.Test.stub(:whatsapp, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         send(test_pid, {:whatsapp_request, conn.request_path, Jason.decode!(body)})
@@ -212,8 +218,8 @@ defmodule FermixChannels.Channels.WhatsAppTest do
       assert :ok =
                Dispatcher.dispatch(messages,
                  channel: WhatsApp,
-                 agent: MainAgent,
-                 agent_server: agent
+                 agent: FermixChannels.Gateway.Queue,
+                 agent_server: queue
                )
 
       assert_receive {:whatsapp_request, "/v19.0/123456789/messages", body}, 5_000
@@ -236,6 +242,12 @@ defmodule FermixChannels.Channels.WhatsAppTest do
              provider: StaticProvider,
              conversation_store: conversation_store
            ]}
+        )
+
+      queue =
+        start_supervised!(
+          {FermixChannels.Gateway.Queue,
+           [name: :"queue_#{System.unique_integer([:positive])}", main_agent: agent]}
         )
 
       Req.Test.stub(:whatsapp, fn conn ->
@@ -282,8 +294,8 @@ defmodule FermixChannels.Channels.WhatsAppTest do
       assert :ok =
                Dispatcher.dispatch(messages,
                  channel: WhatsApp,
-                 agent: MainAgent,
-                 agent_server: agent,
+                 agent: FermixChannels.Gateway.Queue,
+                 agent_server: queue,
                  transcription: [backend: FakeTranscriptionBackend, test_pid: self()]
                )
 

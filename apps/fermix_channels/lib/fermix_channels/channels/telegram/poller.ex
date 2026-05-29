@@ -19,7 +19,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
 
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Dispatcher
-  alias FermixCore.Agents.MainAgent
+  alias FermixChannels.Gateway.Queue
 
   @bot_api_base "https://api.telegram.org"
   @default_error_backoff_ms 5_000
@@ -45,8 +45,8 @@ defmodule FermixChannels.Channels.Telegram.Poller do
       error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms),
       transient_backoff_ms:
         Keyword.get(opts, :transient_backoff_ms, @default_transient_backoff_ms),
-      agent: Keyword.get(opts, :agent, MainAgent),
-      agent_server: Keyword.get(opts, :agent_server, MainAgent)
+      agent: Keyword.get(opts, :agent, Queue),
+      agent_server: Keyword.get(opts, :agent_server, Queue)
     }
 
     if state.poll_interval == :immediate do

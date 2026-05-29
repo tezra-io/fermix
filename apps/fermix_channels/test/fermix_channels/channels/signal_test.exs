@@ -142,14 +142,20 @@ defmodule FermixChannels.Channels.SignalTest do
            ]}
         )
 
+      queue =
+        start_supervised!(
+          {FermixChannels.Gateway.Queue,
+           [name: :"queue_#{System.unique_integer([:positive])}", main_agent: agent]}
+        )
+
       listener =
         start_supervised!(
           {Listener,
            [
              name: :"signal_listener_#{System.unique_integer([:positive])}",
              poll_interval: :manual,
-             agent: MainAgent,
-             agent_server: agent,
+             agent: FermixChannels.Gateway.Queue,
+             agent_server: queue,
              client: FakeSignalClient,
              client_opts: [
                test_pid: test_pid,

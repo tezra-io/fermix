@@ -14,8 +14,14 @@ defmodule FermixChannels.Application do
     readiness = Readiness.report()
     log_missing_ingress_authorization(readiness)
 
+    # The gateway owns the turn queue; core introspection reads its status
+    # through this runtime-registered provider (no compile-time core→channels
+    # dependency). Registered here so the provider is present iff the queue runs.
+    Application.put_env(:fermix_core, :queue_status_provider, FermixChannels.Gateway.Queue)
+
     children =
       [
+        FermixChannels.Gateway.Queue,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Idempotency
       ]
@@ -46,7 +52,9 @@ defmodule FermixChannels.Application do
   def log_missing_ingress_authorization(_readiness_report), do: :ok
 
   @doc false
-  @spec polling_children(keyword(), Readiness.report()) :: [{FermixChannels.Channels.Telegram.Poller, []}]
+  @spec polling_children(keyword(), Readiness.report()) :: [
+          {FermixChannels.Channels.Telegram.Poller, []}
+        ]
   def polling_children(config, %{status: :ready}) when is_list(config) do
     if enabled?(config) and ingress_authorized?(:telegram) do
       [{FermixChannels.Channels.Telegram.Poller, []}]
@@ -58,7 +66,9 @@ defmodule FermixChannels.Application do
   def polling_children(config, _readiness_report) when is_list(config), do: []
 
   @doc false
-  @spec gateway_children(keyword(), Readiness.report()) :: [{FermixChannels.Channels.Discord.Gateway, []}]
+  @spec gateway_children(keyword(), Readiness.report()) :: [
+          {FermixChannels.Channels.Discord.Gateway, []}
+        ]
   def gateway_children(config, %{status: :ready}) when is_list(config) do
     if config[:mode] == :gateway and enabled?(config) and ingress_authorized?(:discord) do
       [{FermixChannels.Channels.Discord.Gateway, []}]

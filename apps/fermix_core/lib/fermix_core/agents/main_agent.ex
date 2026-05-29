@@ -1,23 +1,18 @@
 defmodule FermixCore.Agents.MainAgent do
   @moduledoc """
-  Persistent Main Agent GenServer.
+  Persistent Main Agent runtime holder.
 
-  Receives channel messages, builds conversation context from history,
-  runs the agent loop in a non-blocking Task, and sends responses
-  back via the message's reply_fn callback.
+  Owns the per-agent runtime-context cache (system prompt + capability surface),
+  its invalidation, and conversation auto-compaction failure backoff. Channel
+  messages no longer arrive here directly — the gateway (`FermixChannels.Gateway.Queue`)
+  owns single-flight scheduling and calls `checkout_turn_state/2` to obtain a
+  built turn-state snapshot, then runs the turn via `FermixCore.Agents.TurnRunner`.
 
-  Same-conversation requests are single-flight. Each conversation keeps at most
-  one active request task plus one pending replacement. If a newer message
-  arrives while that conversation already has work in flight, the active task is
-  canceled, the pending slot is replaced with the newest message, and only that
-  newest message is started once the older task exits. Different conversations
-  continue independently.
-
-  Conversation identity is `{channel, chat_id, thread_scope}`. `thread_ts` is
-  the canonical threaded-conversation identifier when present. `thread_scope` is
-  accepted only as a fallback conversation-key segment for direct callers that
-  do not provide `thread_ts`; channel adapters should put platform thread IDs in
-  `thread_ts`.
+  Keeping the cache here (rather than in the gateway) preserves the one-way
+  dependency: core builds runtime context from skills, capabilities, and memory;
+  the gateway never reconstructs core state. Invalidation is driven by core
+  lifecycle events — skill reload (`reload_skills/1`) and memory-review writes
+  (`invalidate_runtime_context/2`, called by the reviewer).
 
   Started by Application supervisor with :permanent restart.
   """
@@ -26,26 +21,23 @@ defmodule FermixCore.Agents.MainAgent do
 
   require Logger
 
-  alias FermixCore.AgentLoop
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
-  alias FermixCore.Memory.CompactionConfig
-  alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Reviewer
   alias FermixCore.Memory.Store
-  alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.RouteResolver
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Reply
   alias FermixCore.Telemetry
 
-  @typing_interval_ms 4_000
-  @typing_timeout_ms 300_000
-  @auto_compaction_failure_backoff_ms 60_000
   @max_auto_compaction_failures 512
+
+  # GenServer.call timeout for checkout: a runtime-context cache miss builds the
+  # context inline (skills + capabilities + memory). Bounded generously so a
+  # cold first turn never times out, while still failing rather than hanging.
+  @checkout_timeout_ms 30_000
 
   @type thread_scope :: :root | String.t() | integer()
 
@@ -62,39 +54,10 @@ defmodule FermixCore.Agents.MainAgent do
           optional(:thread_scope) => thread_scope() | nil
         }
 
-  @type conversation_key :: {
-          channel :: String.t(),
-          chat_id :: String.t(),
-          thread_scope()
-        }
-
-  @type pending_request :: %{
-          request_id: pos_integer(),
-          message: channel_message()
-        }
-
-  @type active_request :: %{
-          request_id: pos_integer(),
-          pid: pid(),
-          monitor_ref: reference()
-        }
-
-  @type conversation_runtime :: %{
-          next_request_id: non_neg_integer(),
-          active: active_request() | nil,
-          pending: pending_request() | nil
-        }
-
   @type status :: %{
           name: String.t(),
           health: :online,
-          activity: :idle | :running,
-          status: :idle | :running,
           pid: pid(),
-          active_conversations: non_neg_integer(),
-          pending_conversations: non_neg_integer(),
-          active_requests: non_neg_integer(),
-          pending_requests: non_neg_integer(),
           available_skills: [String.t()],
           provider: atom() | nil,
           model: String.t() | nil,
@@ -113,22 +76,14 @@ defmodule FermixCore.Agents.MainAgent do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @spec handle_message(channel_message(), GenServer.server()) :: :ok
-  def handle_message(
-        %{
-          content: content,
-          sender: sender,
-          channel: channel,
-          chat_id: chat_id,
-          reply_fn: reply_fn
-        } =
-          msg,
-        server \\ __MODULE__
-      )
-      when is_binary(content) and is_binary(sender) and is_binary(channel) and
-             is_binary(chat_id) and is_function(reply_fn, 1) do
-    msg = Map.put(msg, :__fermix_enqueued_at_us, System.monotonic_time(:microsecond))
-    GenServer.cast(server, {:handle_message, msg})
+  @doc """
+  Ensure the runtime context is built (caching on miss) and return a turn-state
+  snapshot for `FermixCore.Agents.TurnRunner.run/2` plus the cache status.
+  """
+  @spec checkout_turn_state(GenServer.server(), channel_message()) ::
+          {:ok, map(), :hit | :miss} | {:error, term()}
+  def checkout_turn_state(server \\ __MODULE__, msg) do
+    GenServer.call(server, {:checkout_turn_state, msg}, @checkout_timeout_ms)
   end
 
   @spec status(GenServer.server()) :: status()
@@ -179,9 +134,7 @@ defmodule FermixCore.Agents.MainAgent do
       review_input_token_budget: Config.review_input_token_budget(opts),
       review_failure_backoff_ms: Config.review_failure_backoff_ms(opts),
       runtime_context: nil,
-      conversations: %{},
-      compaction_failures: %{},
-      task_refs: %{}
+      compaction_failures: %{}
     }
 
     {:ok, state}
@@ -237,35 +190,16 @@ defmodule FermixCore.Agents.MainAgent do
   defp maybe_put_override(overrides, key, value), do: Keyword.put(overrides, key, value)
 
   @impl true
-  def handle_cast({:handle_message, msg}, state) do
-    emit_mailbox_telemetry(msg)
-    msg = Map.delete(msg, :__fermix_enqueued_at_us)
-
-    Logger.info("Main Agent received message from #{msg.channel}/#{msg.chat_id}")
-
-    case ensure_runtime_context(state, msg) do
+  def handle_call({:checkout_turn_state, _msg}, _from, state) do
+    case ensure_runtime_context(state) do
       {:ok, state, cache_status} ->
-        msg = Map.put(msg, :__runtime_context_cache_status, cache_status)
-        conversation_key = conversation_key(msg)
-        state = enqueue_latest_message(conversation_key, msg, state)
+        {:reply, {:ok, turn_state(state), cache_status}, state}
 
-        state =
-          state
-          |> maybe_cancel_active_request(conversation_key)
-          |> maybe_start_next_request(conversation_key)
-
-        {:noreply, state}
-
-      {:error, state} ->
-        {:noreply, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
-  def handle_cast({:clear_auto_compaction_failure, conversation_key}, state) do
-    {:noreply, update_in(state.compaction_failures, &Map.delete(&1, conversation_key))}
-  end
-
-  @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_from_state(state), state}
   end
@@ -303,230 +237,16 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   @impl true
-  def handle_info({:DOWN, ref, :process, _pid, reason}, state) do
-    case Map.pop(state.task_refs, ref) do
-      {nil, _task_refs} ->
-        {:noreply, state}
-
-      {conversation_key, task_refs} ->
-        state =
-          state
-          |> Map.put(:task_refs, task_refs)
-          |> clear_active_request(conversation_key, ref, reason)
-          |> maybe_start_next_request(conversation_key)
-
-        {:noreply, state}
-    end
+  def handle_cast({:clear_auto_compaction_failure, conversation_key}, state) do
+    {:noreply, update_in(state.compaction_failures, &Map.delete(&1, conversation_key))}
   end
 
   # --- Internals ---
 
-  defp conversation_key(%{channel: channel, chat_id: chat_id} = msg) do
-    {channel, chat_id, thread_scope(msg)}
-  end
-
-  defp thread_scope(%{thread_ts: thread_ts}) when not is_nil(thread_ts), do: thread_ts
-
-  defp thread_scope(%{thread_scope: thread_scope})
-       when thread_scope == :root or is_binary(thread_scope) or is_integer(thread_scope),
-       do: thread_scope
-
-  defp thread_scope(_msg), do: :root
-
-  defp empty_conversation_runtime do
-    %{next_request_id: 0, active: nil, pending: nil}
-  end
-
-  defp enqueue_latest_message(conversation_key, msg, state) do
-    conversation =
-      state.conversations
-      |> Map.get(conversation_key, empty_conversation_runtime())
-      |> Map.update!(:next_request_id, &(&1 + 1))
-
-    pending = %{request_id: conversation.next_request_id, message: msg}
-
-    put_conversation_runtime(state, conversation_key, %{conversation | pending: pending})
-  end
-
-  defp maybe_cancel_active_request(state, conversation_key) do
-    case get_in(state, [:conversations, conversation_key, :active]) do
-      nil ->
-        state
-
-      %{pid: pid, request_id: request_id} ->
-        Logger.info(
-          "Canceling in-flight Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}"
-        )
-
-        case Task.Supervisor.terminate_child(state.task_supervisor, pid) do
-          :ok ->
-            state
-
-          {:error, :not_found} ->
-            state
-        end
-    end
-  end
-
-  defp maybe_start_next_request(state, conversation_key) do
-    case Map.get(state.conversations, conversation_key, empty_conversation_runtime()) do
-      %{active: nil, pending: pending_request} = conversation when not is_nil(pending_request) ->
-        start_pending_request(state, conversation_key, conversation, pending_request)
-
-      _conversation ->
-        state
-    end
-  end
-
-  defp start_pending_request(
-         state,
-         conversation_key,
-         conversation,
-         %{request_id: request_id, message: msg}
-       ) do
-    task_state = task_runtime_state(state)
-
-    case Task.Supervisor.start_child(state.task_supervisor, fn ->
-           process_message(msg, task_state)
-         end) do
-      {:ok, pid} ->
-        mark_request_started(state, conversation_key, conversation, request_id, pid)
-
-      {:error, reason} ->
-        handle_request_start_error(
-          state,
-          conversation_key,
-          conversation,
-          request_id,
-          msg,
-          reason
-        )
-    end
-  end
-
-  defp mark_request_started(state, conversation_key, conversation, request_id, pid) do
-    monitor_ref = Process.monitor(pid)
-
-    Logger.info(
-      "Starting Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}"
-    )
-
-    conversation = %{
-      conversation
-      | active: %{request_id: request_id, pid: pid, monitor_ref: monitor_ref},
-        pending: nil
-    }
-
-    state
-    |> put_conversation_runtime(conversation_key, conversation)
-    |> update_in([:task_refs], &Map.put(&1, monitor_ref, conversation_key))
-  end
-
-  defp handle_request_start_error(
-         state,
-         conversation_key,
-         conversation,
-         request_id,
-         msg,
-         reason
-       ) do
-    Logger.error(
-      "Failed to start Main Agent request #{request_id} for #{format_conversation_key(conversation_key)}: #{inspect(reason)}"
-    )
-
-    send_reply_async(msg, "Sorry, I encountered an error processing your message.")
-
-    state
-    |> put_conversation_runtime(conversation_key, %{conversation | pending: nil})
-  end
-
-  defp send_reply_async(msg, response) do
-    spawn(fn -> deliver_reply(msg, response) end)
-    :ok
-  end
-
-  defp clear_active_request(state, conversation_key, monitor_ref, reason) do
-    case Map.get(state.conversations, conversation_key) do
-      %{active: %{monitor_ref: ^monitor_ref, request_id: request_id}} = conversation ->
-        Logger.info(
-          "Main Agent request #{request_id} exited for #{format_conversation_key(conversation_key)} with reason #{inspect(reason)}"
-        )
-
-        put_conversation_runtime(state, conversation_key, %{conversation | active: nil})
-
-      _conversation ->
-        state
-    end
-  end
-
-  defp put_conversation_runtime(state, conversation_key, %{active: nil, pending: nil}) do
-    update_in(state.conversations, &Map.delete(&1, conversation_key))
-  end
-
-  defp put_conversation_runtime(state, conversation_key, conversation_runtime) do
-    update_in(state.conversations, &Map.put(&1, conversation_key, conversation_runtime))
-  end
-
-  defp build_loop_runtime(state, messages, context, opts) do
-    base =
-      [
-        messages: messages,
-        context: context,
-        capability_registry: state.capability_registry
-      ]
-      |> maybe_put_trust(Keyword.get(opts, :source_trust))
-      |> maybe_put_capabilities(Keyword.get(opts, :capabilities))
-
-    case resolve_loop_adapter(state) do
-      {:adapter, mod, opts} ->
-        loop_opts =
-          base
-          |> Keyword.put(:adapter, mod)
-          |> Keyword.put(:adapter_opts, opts)
-
-        {loop_opts, {mod, direct_adapter_route_key(state, opts), opts}}
-
-      {:route, key, opts} ->
-        loop_opts =
-          base
-          |> Keyword.put(:route_key, key)
-          |> Keyword.put(:adapter_opts, opts)
-
-        {loop_opts, {nil, key, opts}}
-    end
-  end
-
-  defp maybe_put_trust(opts, nil), do: opts
-  defp maybe_put_trust(opts, trust) when is_atom(trust), do: Keyword.put(opts, :trust, trust)
-
-  defp maybe_put_capabilities(opts, nil), do: opts
-
-  defp maybe_put_capabilities(opts, capabilities) when is_list(capabilities),
-    do: Keyword.put(opts, :capabilities, capabilities)
-
-  defp resolve_loop_adapter(state) do
-    cond do
-      state.adapter ->
-        {:adapter, state.adapter, state.adapter_opts}
-
-      adapter_capable?(state.provider) ->
-        # Test wiring: a provider that also implements the Adapter
-        # behaviour can stand in as the adapter without separate plumbing.
-        {:adapter, state.provider, Keyword.put(state.adapter_opts, :model, "mock-model")}
-
-      true ->
-        {route_key, adapter_opts} = RouteResolver.resolve!(state.adapter_overrides)
-        {:route, route_key, adapter_opts}
-    end
-  end
-
-  defp adapter_capable?(nil), do: false
-
-  defp adapter_capable?(mod) when is_atom(mod) do
-    Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
-  end
-
-  defp task_runtime_state(state) do
+  # Snapshot of everything `TurnRunner.run/2` needs to execute a turn. Built
+  # under the GenServer (so the runtime context is the freshly-cached one) and
+  # handed to the gateway, which runs the turn in a supervised task.
+  defp turn_state(state) do
     %{
       provider: state.provider,
       capability_registry: state.capability_registry,
@@ -555,445 +275,7 @@ defmodule FermixCore.Agents.MainAgent do
     }
   end
 
-  defp format_conversation_key({channel, chat_id, :root}), do: "#{channel}/#{chat_id}"
-
-  defp format_conversation_key({channel, chat_id, thread_scope}) do
-    "#{channel}/#{chat_id}/#{inspect(thread_scope)}"
-  end
-
-  defp process_message(msg, state) do
-    with_typing_indicator(msg, fn ->
-      run_message_loop(msg, state)
-    end)
-  end
-
-  defp run_message_loop(msg, state) do
-    start = System.monotonic_time(:millisecond)
-    conversation_key = conversation_key(msg)
-    %RuntimeContext{} = ctx = state.runtime_context
-    cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
-    source_trust = Map.get(msg, :source_trust)
-    profile = profile_for_trust(ctx, source_trust, state.capability_registry)
-
-    emit_runtime_context_cache_telemetry(state, cache_status, profile)
-
-    {history, history_duration_us} =
-      Telemetry.timed_us(fn ->
-        ConversationStore.get_history(conversation_key, server: state.conversation_store)
-      end)
-
-    emit_history_telemetry(msg, conversation_key, history, history_duration_us)
-
-    user_message = %{role: "user", content: msg.content}
-    messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
-    accounting = RuntimeContext.accounting_for(ctx, profile)
-    emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
-
-    context = %{
-      agent_name: "main",
-      conversation_key: conversation_key,
-      session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
-      capability_registry: state.capability_registry,
-      provider: state.provider,
-      skill_registry: state.skill_registry,
-      agent_supervisor: state.agent_supervisor,
-      task_supervisor: state.task_supervisor,
-      journal_base_dir: state.journal_base_dir,
-      memory_store: state.memory_store,
-      memory_repo: state.memory_repo,
-      memory_agent_id: state.memory_agent_id,
-      memory_owner_id: state.memory_owner_id,
-      prompt_accounting: accounting,
-      source_channel: msg.channel,
-      source_trust: source_trust,
-      reply_fn: msg.reply_fn,
-      channel: msg.channel
-    }
-
-    {{loop_opts, compaction_target}, loop_runtime_duration_us} =
-      Telemetry.timed_us(fn ->
-        build_loop_runtime(state, messages, context,
-          source_trust: source_trust,
-          capabilities: profile.capabilities
-        )
-      end)
-
-    emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
-
-    case AgentLoop.run(loop_opts) do
-      {:ok, result} ->
-        duration_ms = System.monotonic_time(:millisecond) - start
-
-        ConversationStore.add_message(
-          conversation_key,
-          "user",
-          msg.content,
-          server: state.conversation_store,
-          sender: msg.sender,
-          agent_id: state.memory_agent_id,
-          owner_id: state.memory_owner_id,
-          metadata: Map.get(msg, :metadata)
-        )
-
-        ConversationStore.add_message(
-          conversation_key,
-          "assistant",
-          result.response,
-          server: state.conversation_store,
-          sender: "main",
-          agent_id: state.memory_agent_id,
-          owner_id: state.memory_owner_id
-        )
-
-        :telemetry.execute(
-          [:fermix, :agent, :message],
-          %{
-            iterations: result.iterations,
-            total_tokens: result.total_tokens,
-            duration_ms: duration_ms
-          },
-          %{channel: msg.channel, chat_id: msg.chat_id, sender: msg.sender}
-        )
-
-        Logger.info(
-          "Agent loop completed in #{result.iterations} iterations, #{result.total_tokens} tokens"
-        )
-
-        deliver_reply(msg, result.response)
-        maybe_start_memory_review(msg, state)
-        maybe_auto_compact(conversation_key, state, compaction_target)
-
-      {:error, reason} ->
-        Logger.error("Agent loop failed: #{inspect(reason)}")
-
-        :telemetry.execute(
-          [:fermix, :agent, :message_error],
-          %{count: 1},
-          %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
-        )
-
-        deliver_reply(msg, agent_loop_error_message(reason))
-    end
-  end
-
-  # Map an `AgentLoop.run/1` error reason to a user-facing reply. Auth
-  # failures get a specific message pointing at `fermix auth login`
-  # because that's the actionable fix; everything else gets the
-  # generic line. See `auth_error?/1` for the recognised patterns.
-  defp agent_loop_error_message(reason) do
-    if auth_error?(reason) do
-      "Authentication failed — run `fermix auth login` from the host and try again."
-    else
-      "Sorry, I encountered an error processing your message."
-    end
-  end
-
-  defp auth_error?(:no_auth_file), do: true
-  defp auth_error?(:auth_invalidated), do: true
-  defp auth_error?(:refresh_failed), do: true
-  defp auth_error?(:invalid_grant), do: true
-  defp auth_error?({:auth_invalidated, _body}), do: true
-  defp auth_error?({:refresh_failed, _reason}), do: true
-  defp auth_error?({:provider_error, status, _body}) when status in [401, 403], do: true
-  defp auth_error?(%{status: status}) when status in [401, 403], do: true
-
-  defp auth_error?(reason) when is_binary(reason) do
-    String.match?(
-      reason,
-      ~r/\b(401|403|Unauthorized|refresh_token_reused|invalid_grant|invalid_token|no_auth_file|auth_invalidated)\b/i
-    )
-  end
-
-  defp auth_error?(_other), do: false
-
-  defp with_typing_indicator(%{typing_fn: typing_fn} = msg, fun)
-       when is_function(typing_fn, 0) and is_function(fun, 0) do
-    pid =
-      spawn_link(fn ->
-        typing_loop(
-          typing_fn,
-          positive_integer(Map.get(msg, :typing_interval_ms), @typing_interval_ms),
-          monotonic_ms() + positive_integer(Map.get(msg, :typing_timeout_ms), @typing_timeout_ms)
-        )
-      end)
-
-    try do
-      fun.()
-    after
-      stop_typing_loop(pid)
-    end
-  end
-
-  defp with_typing_indicator(_msg, fun) when is_function(fun, 0), do: fun.()
-
-  defp typing_loop(typing_fn, interval_ms, deadline_ms) do
-    case emit_typing(typing_fn) do
-      :ok ->
-        wait_for_next_typing_tick(typing_fn, interval_ms, deadline_ms)
-
-      {:error, _reason} ->
-        :ok
-    end
-  end
-
-  defp wait_for_next_typing_tick(typing_fn, interval_ms, deadline_ms) do
-    now = monotonic_ms()
-
-    if now >= deadline_ms do
-      :ok
-    else
-      receive do
-        :stop -> :ok
-      after
-        min(interval_ms, deadline_ms - now) ->
-          typing_loop(typing_fn, interval_ms, deadline_ms)
-      end
-    end
-  end
-
-  defp emit_typing(typing_fn) do
-    case typing_fn.() do
-      :ok ->
-        :ok
-
-      {:error, reason} = error ->
-        Logger.warning("Typing indicator failed: #{inspect(reason)}")
-        error
-
-      other ->
-        Logger.warning("Typing indicator returned unexpected result: #{inspect(other)}")
-        {:error, other}
-    end
-  rescue
-    error in [Req.TransportError] ->
-      Logger.warning("Typing indicator transport failed: #{Exception.message(error)}")
-      {:error, error}
-  catch
-    :exit, {:noproc, _details} = reason ->
-      Logger.warning("Typing indicator adapter unavailable: #{inspect(reason)}")
-      {:error, reason}
-
-    :exit, :noproc ->
-      Logger.warning("Typing indicator adapter unavailable: :noproc")
-      {:error, :noproc}
-  end
-
-  defp stop_typing_loop(pid) when is_pid(pid) do
-    ref = Process.monitor(pid)
-    send(pid, :stop)
-
-    receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} ->
-        :ok
-    after
-      100 ->
-        Process.exit(pid, :kill)
-
-        receive do
-          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
-        after
-          100 -> :ok
-        end
-    end
-  end
-
-  defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
-  defp positive_integer(_value, default), do: default
-
-  defp monotonic_ms, do: System.monotonic_time(:millisecond)
-
-  defp maybe_auto_compact(conversation_key, state, compaction_target) do
-    config = Application.get_env(:fermix_core, :compaction, [])
-
-    cond do
-      not CompactionConfig.enabled?(config) ->
-        :ok
-
-      auto_compaction_in_backoff?(conversation_key, state) ->
-        emit_auto_compaction_skipped(conversation_key, :failure_backoff)
-
-      true ->
-        maybe_auto_compact_now(conversation_key, state, compaction_target, config)
-    end
-  end
-
-  defp maybe_auto_compact_now(conversation_key, state, compaction_target, config) do
-    with {:ok, history} <- conversation_history(conversation_key, state) do
-      {adapter, route_key, adapter_opts} = compaction_target
-      before_tokens = Compactor.estimate_tokens(history)
-      context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
-      threshold = CompactionConfig.threshold(config)
-
-      if before_tokens / context_window >= threshold do
-        run_auto_compaction(
-          conversation_key,
-          history,
-          before_tokens,
-          adapter,
-          route_key,
-          adapter_opts,
-          context_window,
-          state
-        )
-      else
-        emit_auto_compaction_skipped(conversation_key, :under_threshold)
-      end
-    else
-      {:error, reason} -> emit_auto_compaction_skipped(conversation_key, reason)
-    end
-  end
-
-  defp conversation_history(conversation_key, state) do
-    {:ok, ConversationStore.get_history(conversation_key, server: state.conversation_store)}
-  catch
-    :exit, reason -> {:error, {:conversation_history_unavailable, reason}}
-  end
-
-  defp direct_adapter_route_key(state, adapter_opts) do
-    %{
-      provider: :mock,
-      model: Keyword.get(adapter_opts, :model, Keyword.get(state.adapter_opts, :model, "mock")),
-      auth_mode: :api_key,
-      base_url: "mock://"
-    }
-  end
-
-  defp run_auto_compaction(
-         conversation_key,
-         history,
-         before_tokens,
-         adapter,
-         route_key,
-         adapter_opts,
-         context_window,
-         state
-       ) do
-    budget = trunc(0.5 * context_window)
-
-    {compaction_result, duration_us} =
-      Telemetry.timed_us(fn ->
-        Compactor.compact(history,
-          enabled: true,
-          token_budget: budget,
-          route: {route_key, adapter_opts},
-          adapter: adapter,
-          context: compaction_context(conversation_key, state)
-        )
-      end)
-
-    case compaction_result do
-      {:ok, %{messages: compacted, compacted?: true}} ->
-        after_tokens = Compactor.estimate_tokens(compacted)
-
-        :ok =
-          ConversationStore.replace_history(conversation_key, compacted,
-            server: state.conversation_store,
-            agent_id: state.memory_agent_id,
-            owner_id: state.memory_owner_id
-          )
-
-        :telemetry.execute(
-          [:fermix, :compaction, :auto],
-          %{before_tokens: before_tokens, after_tokens: after_tokens, duration_us: duration_us},
-          %{
-            conversation_key: conversation_key,
-            provider: route_key.provider,
-            model: route_key.model
-          }
-        )
-
-        clear_auto_compaction_failure(state, conversation_key)
-
-      {:ok, %{compacted?: false}} ->
-        emit_auto_compaction_skipped(conversation_key, :nothing_to_compact)
-
-      {:error, reason} ->
-        Logger.error("auto-compaction failed: #{inspect(reason)}")
-        emit_auto_compaction_skipped(conversation_key, reason)
-        record_auto_compaction_failure(state, conversation_key)
-    end
-  end
-
-  defp compaction_context(conversation_key, state) do
-    %{
-      conversation_key: conversation_key,
-      memory_repo: state.memory_repo,
-      memory_agent_id: state.memory_agent_id,
-      memory_owner_id: state.memory_owner_id
-    }
-  end
-
-  defp auto_compaction_in_backoff?(conversation_key, state) do
-    case Map.get(state.compaction_failures, conversation_key) do
-      failed_at when is_integer(failed_at) ->
-        monotonic_ms() - failed_at < @auto_compaction_failure_backoff_ms
-
-      _no_failure ->
-        false
-    end
-  end
-
-  defp prune_auto_compaction_failures(failures)
-       when map_size(failures) <= @max_auto_compaction_failures do
-    failures
-  end
-
-  defp prune_auto_compaction_failures(failures) do
-    failures
-    |> Enum.sort_by(fn {_conversation_key, failed_at} -> failed_at end, :desc)
-    |> Enum.take(@max_auto_compaction_failures)
-    |> Map.new()
-  end
-
-  defp record_auto_compaction_failure(state, conversation_key) do
-    GenServer.call(
-      state.main_agent_server,
-      {:record_auto_compaction_failure, conversation_key, monotonic_ms()}
-    )
-
-    :ok
-  end
-
-  defp clear_auto_compaction_failure(state, conversation_key) do
-    GenServer.cast(state.main_agent_server, {:clear_auto_compaction_failure, conversation_key})
-    :ok
-  end
-
-  defp emit_auto_compaction_skipped(conversation_key, reason) do
-    :telemetry.execute(
-      [:fermix, :compaction, :auto_skipped],
-      %{count: 1},
-      %{conversation_key: conversation_key, reason: reason}
-    )
-
-    :ok
-  end
-
-  defp deliver_reply(msg, response) do
-    {result, duration_us} = Telemetry.timed_us(fn -> msg.reply_fn.({:text, response}) end)
-    emit_reply_telemetry(msg, response, result, duration_us)
-
-    case result do
-      :ok ->
-        :ok
-
-      {:error, reason} = error ->
-        Logger.error("Main Agent reply delivery failed: #{inspect(reason)}")
-
-        :telemetry.execute(
-          [:fermix, :agent, :reply_error],
-          %{count: 1},
-          %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
-        )
-
-        error
-
-      _other ->
-        :ok
-    end
-  end
-
-  defp ensure_runtime_context(state, msg) do
+  defp ensure_runtime_context(state) do
     case state.runtime_context do
       %RuntimeContext{} = ctx ->
         {:ok, %{state | runtime_context: ctx}, :hit}
@@ -1004,7 +286,8 @@ defmodule FermixCore.Agents.MainAgent do
             {:ok, %{state | runtime_context: ctx}, :miss}
 
           {:error, reason} ->
-            handle_runtime_context_build_error(msg, state, reason)
+            Logger.error("runtime context build failed: #{inspect(reason)}")
+            {:error, reason}
         end
     end
   end
@@ -1030,47 +313,6 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
-  defp handle_runtime_context_build_error(msg, state, reason) do
-    Logger.error("runtime context build failed: #{inspect(reason)}")
-    deliver_reply(msg, "Sorry, I encountered an error processing your message.")
-    {:error, state}
-  end
-
-  defp profile_for_trust(ctx, :operator, registry),
-    do: RuntimeContext.profile_for(ctx, :operator, registry, [])
-
-  defp profile_for_trust(ctx, :guest, registry),
-    do: RuntimeContext.profile_for(ctx, :guest, registry, [])
-
-  # nil trust = least privilege (matches CapabilityRegistry.resolve_policy/2).
-  defp profile_for_trust(ctx, _trust, registry),
-    do: RuntimeContext.profile_for(ctx, :guest, registry, [])
-
-  defp emit_prompt_context_telemetry(agent_id, messages, accounting, cache_status) do
-    :telemetry.execute(
-      [:fermix, :agent, :prompt_context],
-      %{
-        duration_us: 0,
-        message_count: length(messages),
-        message_bytes: messages_bytes(messages),
-        part_count: length(accounting)
-      },
-      %{agent: agent_id, cache: cache_status}
-    )
-  end
-
-  defp emit_runtime_context_cache_telemetry(state, cache_status, profile) do
-    :telemetry.execute(
-      [:fermix, :runtime_context, :cache],
-      %{count: 1},
-      %{
-        agent: state.memory_agent_id,
-        result: cache_status,
-        trust: profile.trust
-      }
-    )
-  end
-
   defp emit_runtime_context_build(state, ctx, duration_us, status, reason) do
     metadata = %{
       agent: state.memory_agent_id,
@@ -1092,70 +334,6 @@ defmodule FermixCore.Agents.MainAgent do
 
   defp runtime_context_base_bytes(_other), do: 0
 
-  defp emit_history_telemetry(msg, conversation_key, history, duration_us) do
-    :telemetry.execute(
-      [:fermix, :agent, :history],
-      %{
-        duration_us: duration_us,
-        message_count: length(history),
-        message_bytes: messages_bytes(history)
-      },
-      %{
-        agent: "main",
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        conversation_key: inspect(conversation_key)
-      }
-    )
-  end
-
-  defp emit_loop_runtime_telemetry(msg, conversation_key, source_trust, duration_us) do
-    :telemetry.execute(
-      [:fermix, :agent, :loop_runtime],
-      %{duration_us: duration_us},
-      %{
-        agent: "main",
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        conversation_key: inspect(conversation_key),
-        trust: source_trust
-      }
-    )
-  end
-
-  defp emit_mailbox_telemetry(msg) do
-    enqueued_at = Map.get(msg, :__fermix_enqueued_at_us)
-    duration_us = mailbox_duration_us(enqueued_at)
-
-    :telemetry.execute(
-      [:fermix, :agent, :mailbox],
-      %{duration_us: duration_us},
-      %{channel: Map.get(msg, :channel), status: :ok}
-    )
-  end
-
-  defp mailbox_duration_us(enqueued_at) when is_integer(enqueued_at) do
-    System.monotonic_time(:microsecond)
-    |> Kernel.-(enqueued_at)
-    |> max(0)
-  end
-
-  defp mailbox_duration_us(_missing_timestamp), do: 0
-
-  defp emit_reply_telemetry(msg, response, result, duration_us) do
-    :telemetry.execute(
-      [:fermix, :agent, :reply],
-      %{duration_us: duration_us, response_bytes: byte_size(response || "")},
-      %{
-        agent: "main",
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        status: reply_status(result)
-      }
-      |> maybe_put_reply_reason(result)
-    )
-  end
-
   defp messages_bytes(messages) do
     Enum.reduce(messages, 0, fn message, total ->
       total +
@@ -1163,77 +341,16 @@ defmodule FermixCore.Agents.MainAgent do
     end)
   end
 
-  defp reply_status(:ok), do: :ok
-  defp reply_status({:error, _reason}), do: :error
-  defp reply_status(_other), do: :ok
-
-  defp maybe_put_reply_reason(metadata, {:error, reason}), do: Map.put(metadata, :reason, reason)
-  defp maybe_put_reply_reason(metadata, _result), do: metadata
-
-  defp maybe_start_memory_review(msg, state) do
-    opts =
-      [
-        provider: state.provider,
-        agent_id: state.memory_agent_id,
-        owner_id: state.memory_owner_id,
-        conversation_key: conversation_key(msg),
-        source_trust: Map.get(msg, :source_trust),
-        repo: state.memory_repo,
-        task_supervisor: state.task_supervisor,
-        main_agent_server: state.main_agent_server,
-        extraction_timeout_ms: state.extraction_timeout_ms,
-        review_interval_hours: state.review_interval_hours,
-        review_max_messages: state.review_max_messages,
-        review_input_token_budget: state.review_input_token_budget,
-        review_failure_backoff_ms: state.review_failure_backoff_ms
-      ]
-      |> add_reviewer_route(state)
-
-    {result, duration_us} =
-      Telemetry.timed_us(fn ->
-        state.memory_reviewer.start_background(opts)
-      end)
-
-    emit_review_dispatch_telemetry(msg, result, duration_us)
-    result
+  defp prune_auto_compaction_failures(failures)
+       when map_size(failures) <= @max_auto_compaction_failures do
+    failures
   end
 
-  defp emit_review_dispatch_telemetry(msg, result, duration_us) do
-    :telemetry.execute(
-      [:fermix, :memory, :review_dispatch],
-      %{duration_us: duration_us},
-      %{
-        agent: "main",
-        channel: msg.channel,
-        chat_id: msg.chat_id,
-        status: dispatch_status(result)
-      }
-    )
-  end
-
-  defp dispatch_status(:ok), do: :ok
-  defp dispatch_status({:error, _reason}), do: :error
-  defp dispatch_status(_other), do: :ok
-
-  defp add_reviewer_route(opts, %{adapter: adapter, adapter_opts: adapter_opts})
-       when not is_nil(adapter) do
-    opts
-    |> Keyword.put(:adapter, adapter)
-    |> Keyword.put(:adapter_opts, adapter_opts)
-  end
-
-  defp add_reviewer_route(opts, state) do
-    case resolve_loop_adapter(state) do
-      {:route, route_key, adapter_opts} ->
-        opts
-        |> Keyword.put(:route_key, route_key)
-        |> Keyword.put(:adapter_opts, adapter_opts)
-
-      {:adapter, mod, adapter_opts} ->
-        opts
-        |> Keyword.put(:adapter, mod)
-        |> Keyword.put(:adapter_opts, adapter_opts)
-    end
+  defp prune_auto_compaction_failures(failures) do
+    failures
+    |> Enum.sort_by(fn {_conversation_key, failed_at} -> failed_at end, :desc)
+    |> Enum.take(@max_auto_compaction_failures)
+    |> Map.new()
   end
 
   defp load_available_skills(skill_registry) do
@@ -1263,19 +380,10 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   defp status_from_state(state) do
-    counts = conversation_counts(state.conversations)
-    activity = request_activity(counts)
-
     %{
       name: "main",
       health: :online,
-      activity: activity,
-      status: activity,
       pid: self(),
-      active_conversations: counts.active_conversations,
-      pending_conversations: counts.pending_conversations,
-      active_requests: counts.active_requests,
-      pending_requests: counts.pending_requests,
       available_skills: skill_names(state.available_skills),
       provider: Keyword.get(state.adapter_overrides, :provider) || provider_name(state.provider),
       model: Keyword.get(state.adapter_overrides, :model),
@@ -1286,36 +394,6 @@ defmodule FermixCore.Agents.MainAgent do
       }
     }
   end
-
-  defp request_activity(%{active_requests: active_requests}) when active_requests > 0,
-    do: :running
-
-  defp request_activity(%{active_requests: active_requests}) when active_requests == 0, do: :idle
-
-  defp conversation_counts(conversations) when is_map(conversations) do
-    Enum.reduce(
-      conversations,
-      %{
-        active_conversations: 0,
-        pending_conversations: 0,
-        active_requests: 0,
-        pending_requests: 0
-      },
-      fn {_key, runtime}, counts ->
-        active? = Map.get(runtime, :active) != nil
-        pending? = Map.get(runtime, :pending) != nil
-
-        counts
-        |> increment_if(:active_conversations, active?)
-        |> increment_if(:pending_conversations, pending?)
-        |> increment_if(:active_requests, active?)
-        |> increment_if(:pending_requests, pending?)
-      end
-    )
-  end
-
-  defp increment_if(counts, key, true), do: Map.update!(counts, key, &(&1 + 1))
-  defp increment_if(counts, _key, false), do: counts
 
   defp skill_names(skills) when is_list(skills) do
     skills

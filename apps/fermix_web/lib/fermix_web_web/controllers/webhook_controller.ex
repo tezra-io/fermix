@@ -7,7 +7,7 @@ defmodule FermixWebWeb.WebhookController do
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Idempotency
-  alias FermixCore.Agents.MainAgent
+  alias FermixChannels.Gateway.Queue
 
   @auth_errors [
     :invalid_signature,
@@ -112,8 +112,8 @@ defmodule FermixWebWeb.WebhookController do
 
     case dispatch_async(fresh,
            channel: channel_module,
-           agent: MainAgent,
-           agent_server: MainAgent
+           agent: Queue,
+           agent_server: Queue
          ) do
       :ok ->
         :telemetry.execute(

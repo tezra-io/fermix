@@ -6,19 +6,6 @@ defmodule FermixChannels.Channels.TelegramTest do
 
   # -- fixtures --
 
-  defp message_payload(overrides \\ %{}) do
-    base = %{
-      "message" => %{
-        "message_id" => 42,
-        "text" => "hello bot",
-        "chat" => %{"id" => 123_456},
-        "from" => %{"id" => 111, "username" => "alice", "first_name" => "Alice"}
-      }
-    }
-
-    Map.merge(base, overrides)
-  end
-
   defp stub_telegram(test_pid, status, body) do
     Req.Test.stub(:telegram, fn conn ->
       {:ok, req_body, conn} = Plug.Conn.read_body(conn)

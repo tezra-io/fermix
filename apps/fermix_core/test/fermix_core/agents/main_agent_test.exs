@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -404,6 +405,17 @@ defmodule FermixCore.Agents.MainAgentTest do
   defp reply_payload({:text, text}), do: text
   defp reply_payload(response), do: response
 
+  # Synchronously execute one core turn. Single-flight scheduling (the queue)
+  # lives in `FermixChannels.Gateway.Queue` and is exercised in its own suite;
+  # these tests drive turn execution directly through checkout + TurnRunner.
+  defp run_turn(msg, agent) do
+    {:ok, turn_state, cache_status} = MainAgent.checkout_turn_state(agent, msg)
+
+    msg
+    |> Map.put(:__runtime_context_cache_status, cache_status)
+    |> TurnRunner.run(turn_state)
+  end
+
   defp tool_call(id, name, arguments) do
     %{
       "id" => id,
@@ -683,42 +695,12 @@ defmodule FermixCore.Agents.MainAgentTest do
 
   # -- Client API --
 
-  describe "status/1" do
-    test "reports active request counts without exposing message content", %{agent: agent} do
-      MockProvider.set_responses([{:block, :status_probe, mock_response("done")}])
-
-      msg = make_message("private status content")
-      assert :ok = MainAgent.handle_message(msg, agent)
-
-      assert_receive {:mock_provider_blocked, :status_probe, provider_pid}, 5_000
-
-      status = MainAgent.status(agent)
-
-      assert status.name == "main"
-      assert status.health == :online
-      assert status.activity == :running
-      assert status.status == :running
-      assert is_pid(status.pid)
-      assert status.active_conversations == 1
-      assert status.pending_conversations == 0
-      assert status.active_requests == 1
-      assert status.pending_requests == 0
-      assert status.available_skills == ["self_knowledge"]
-      assert status.memory.agent_id == "main"
-      assert status.memory.owner_id == "default"
-      refute inspect(status) =~ "private status content"
-
-      send(provider_pid, {:continue, :status_probe})
-      assert_receive {:reply, "done"}, 5_000
-    end
-  end
-
-  describe "handle_message/2" do
+  describe "turn execution" do
     test "returns response via reply_fn", %{agent: agent} do
       MockProvider.set_responses([mock_response("Hello back!")])
 
       msg = make_message("Hello")
-      assert :ok = MainAgent.handle_message(msg, agent)
+      assert :ok = run_turn(msg, agent)
 
       assert_receive {:reply, "Hello back!"}, 5_000
     end
@@ -738,7 +720,7 @@ defmodule FermixCore.Agents.MainAgentTest do
           end
         )
 
-      assert :ok = MainAgent.handle_message(msg, agent)
+      task = Task.async(fn -> run_turn(msg, agent) end)
 
       assert_receive :typing_tick, 500
       assert_receive {:mock_provider_blocked, :typing_probe, provider_pid}, 5_000
@@ -747,6 +729,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       send(provider_pid, {:continue, :typing_probe})
       assert_receive {:reply, "done"}, 5_000
       refute_receive :typing_tick, 100
+      assert :ok = Task.await(task)
     end
 
     test "continues the request when typing_fn reports an expected adapter error", %{agent: agent} do
@@ -757,11 +740,13 @@ defmodule FermixCore.Agents.MainAgentTest do
           typing_fn: fn -> {:error, %Req.TransportError{reason: :econnrefused}} end
         )
 
-      assert :ok = MainAgent.handle_message(msg, agent)
+      assert :ok = run_turn(msg, agent)
       assert_receive {:reply, "done"}, 5_000
     end
 
-    test "does not swallow unexpected typing_fn exceptions as healthy requests", %{agent: agent} do
+    test "an unexpected typing_fn exception crashes the turn instead of being swallowed", %{
+      agent: agent
+    } do
       test_pid = self()
       MockProvider.set_responses([{:block, :typing_raise_probe, mock_response("done")}])
 
@@ -774,19 +759,14 @@ defmodule FermixCore.Agents.MainAgentTest do
         )
 
       capture_log(fn ->
-        assert :ok = MainAgent.handle_message(msg, agent)
+        {pid, ref} = spawn_monitor(fn -> run_turn(msg, agent) end)
+
         assert_receive :typing_called, 500
-        assert eventually(fn -> MainAgent.status(agent).active_requests == 0 end)
+        assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 5_000
+        refute reason == :normal
       end)
 
       refute_receive {:reply, _response}, 100
-
-      receive do
-        {:mock_provider_blocked, :typing_raise_probe, provider_pid} ->
-          send(provider_pid, {:continue, :typing_raise_probe})
-      after
-        0 -> :ok
-      end
     end
 
     test "stores user and assistant messages in conversation store", %{
@@ -797,7 +777,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       chat_id = "chat_#{System.unique_integer([:positive])}"
       msg = make_message("How are you?", chat_id: chat_id)
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "I'm fine"}, 5_000
       flush_conv_store(conv_store)
@@ -862,7 +842,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       long_content = String.duplicate("older turn ", 25_000)
 
       assert :ok =
-               MainAgent.handle_message(
+               run_turn(
                  make_message(long_content, chat_id: chat_id),
                  agent_name
                )
@@ -907,7 +887,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       long_content = String.duplicate("direct adapter turn ", 25_000)
 
       assert :ok =
-               MainAgent.handle_message(
+               run_turn(
                  make_message(long_content, chat_id: chat_id),
                  agent
                )
@@ -958,7 +938,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("Follow-up answer")])
 
       msg = make_message("Follow-up question", chat_id: chat_id)
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "Follow-up answer"}, 5_000
 
@@ -987,7 +967,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("No prompt files")])
 
       msg = make_message("Hello without memory files")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "No prompt files"}, 5_000
 
@@ -1012,7 +992,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("Fallback prompt")])
 
-      MainAgent.handle_message(make_message("Hello first run"), agent)
+      run_turn(make_message("Hello first run"), agent)
 
       assert_receive {:reply, "Fallback prompt"}, 5_000
 
@@ -1037,7 +1017,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("Empty prompt files")])
 
       msg = make_message("Hello with empty files")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
@@ -1059,7 +1039,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("Prompt memory loaded")])
 
       msg = make_message("Hello with prompt memory")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
@@ -1089,7 +1069,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("Composed prompt loaded")])
 
-      MainAgent.handle_message(make_message("Hello with bootstrap"), agent)
+      run_turn(make_message("Hello with bootstrap"), agent)
 
       assert_receive {:reply, "Composed prompt loaded"}, 5_000
 
@@ -1124,7 +1104,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([{:error, "API down"}])
 
       msg = make_message("Hello")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "error"
@@ -1135,7 +1115,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([{:error, :no_auth_file}])
 
       msg = make_message("Hello")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "Authentication failed"
@@ -1148,7 +1128,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([{:error, "OpenAI returned 401 Unauthorized"}])
 
       msg = make_message("Hello")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "Authentication failed"
@@ -1159,7 +1139,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([{:error, {:auth_invalidated, %{"error" => "invalid_grant"}}}])
 
       msg = make_message("Hello")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, error_msg}, 5_000
       assert error_msg =~ "Authentication failed"
@@ -1182,7 +1162,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("Thread answer")])
 
       msg = make_message("Thread follow-up", chat_id: chat_id, thread_ts: 456)
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "Thread answer"}, 5_000
 
@@ -1191,54 +1171,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert Enum.any?(messages, &(&1.content == "Thread history"))
       assert ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store) == []
       assert ConversationStore.get_history({"telegram", chat_id, 456}, server: conv_store) != []
-    end
-
-    test "clears pending state and replies when request task cannot start", %{
-      skill_registry: skill_registry,
-      conv_store: conv_store
-    } do
-      agent_name = :"start_error_main_agent_#{System.unique_integer([:positive])}"
-      task_sup_name = :"start_error_task_sup_#{System.unique_integer([:positive])}"
-      chat_id = "chat_#{System.unique_integer([:positive])}"
-
-      {:ok, _} =
-        start_supervised(
-          {Task.Supervisor, [name: task_sup_name, max_children: 0]},
-          id: task_sup_name
-        )
-
-      {:ok, _} =
-        start_supervised(
-          {MainAgent,
-           [
-             name: agent_name,
-             provider: MockProvider,
-             skill_registry: skill_registry,
-             conversation_store: conv_store,
-             task_supervisor: task_sup_name
-           ]},
-          id: agent_name
-        )
-
-      MainAgent.handle_message(make_message("Hello", chat_id: chat_id), agent_name)
-
-      assert_receive {:reply, error_msg}, 5_000
-      assert error_msg =~ "error"
-
-      state = :sys.get_state(agent_name)
-
-      refute Map.has_key?(state.conversations, {"telegram", chat_id, :root})
-      assert state.task_refs == %{}
-    end
-
-    test "is non-blocking — returns :ok before processing completes", %{agent: agent} do
-      MockProvider.set_responses([mock_response("OK")])
-
-      msg = make_message("Hello")
-      assert :ok = MainAgent.handle_message(msg, agent)
-
-      # Clean up the Task
-      assert_receive {:reply, _}, 5_000
     end
 
     test "skips background memory review when memory is disabled", %{
@@ -1263,7 +1195,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("No review")])
 
-      MainAgent.handle_message(make_message("Hello"), agent_name)
+      run_turn(make_message("Hello"), agent_name)
 
       assert_receive {:reply, "No review"}, 5_000
       assert eventually(fn -> length(MockProvider.get_calls()) == 1 end)
@@ -1296,7 +1228,8 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("Reply first")])
 
-      MainAgent.handle_message(make_message("Hello with slow review"), agent_name)
+      slow_msg = make_message("Hello with slow review")
+      spawn(fn -> run_turn(slow_msg, agent_name) end)
 
       assert_receive {:reply, "Reply first"}, 5_000
       assert_receive {:memory_review_blocked, review_pid}, 5_000
@@ -1328,7 +1261,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("Shared chat reply")])
 
-      MainAgent.handle_message(
+      run_turn(
         make_message("Remember this from the group chat", source_trust: :guest),
         agent_name
       )
@@ -1364,7 +1297,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("Reply survives review failure")])
 
-      MainAgent.handle_message(make_message("Hello with failing review"), agent_name)
+      run_turn(make_message("Hello with failing review"), agent_name)
 
       assert_receive {:reply, "Reply survives review failure"}, 5_000
       assert_receive {:memory_review_started, _review_opts, _pid}, 5_000
@@ -1380,7 +1313,7 @@ defmodule FermixCore.Agents.MainAgentTest do
         mock_response("third")
       ])
 
-      MainAgent.handle_message(make_message("hello"), agent)
+      run_turn(make_message("hello"), agent)
       assert_receive {:reply, "first"}, 5_000
 
       [{messages_before, _opts}] = MockProvider.get_calls()
@@ -1389,7 +1322,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       write_skill(skills_dir, "coding-skill")
       MockProvider.reset_calls()
 
-      MainAgent.handle_message(make_message("hello again"), agent)
+      run_turn(make_message("hello again"), agent)
       assert_receive {:reply, "second"}, 5_000
 
       [{messages_without_reload, _opts}] = MockProvider.get_calls()
@@ -1399,7 +1332,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert "coding-skill" in summary.added
       MockProvider.reset_calls()
 
-      MainAgent.handle_message(make_message("after reload"), agent)
+      run_turn(make_message("after reload"), agent)
       assert_receive {:reply, "third"}, 5_000
 
       [{messages_after_reload, _opts}] = MockProvider.get_calls()
@@ -1415,7 +1348,8 @@ defmodule FermixCore.Agents.MainAgentTest do
         mock_response("second")
       ])
 
-      MainAgent.handle_message(make_message("before reload"), agent)
+      before_msg = make_message("before reload")
+      first_turn = Task.async(fn -> run_turn(before_msg, agent) end)
 
       assert_receive {:mock_provider_blocked, :skill_reload_probe, provider_pid}, 5_000
 
@@ -1429,10 +1363,11 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       send(provider_pid, {:continue, :skill_reload_probe})
       assert_receive {:reply, "first"}, 5_000
+      assert :ok = Task.await(first_turn)
 
       MockProvider.reset_calls()
 
-      MainAgent.handle_message(make_message("after reload"), agent)
+      run_turn(make_message("after reload"), agent)
       assert_receive {:reply, "second"}, 5_000
 
       [{messages_after_reload, _opts}] = MockProvider.get_calls()
@@ -1461,7 +1396,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       # channel trust — use the local "cli" channel so the dispatcher
       # gateway classifies the message as :operator and keeps the full
       # capability surface visible.
-      MainAgent.handle_message(make_message("Use the coding skill.", channel: "cli"), agent)
+      run_turn(make_message("Use the coding skill.", channel: "cli"), agent)
 
       assert_receive {:reply, "Done. The coding skill inspected the README and found the issue."},
                      5_000
@@ -1501,7 +1436,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("owner surface")])
 
-      MainAgent.handle_message(
+      run_turn(
         make_message("What can you use?", source_trust: :operator),
         agent
       )
@@ -1528,7 +1463,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.set_responses([mock_response("helper surface")])
 
-      MainAgent.handle_message(
+      run_turn(
         make_message("What can you use?", source_trust: :guest),
         agent
       )
@@ -1545,180 +1480,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       refute "mcp_demo_tool" in names
       refute runtime.content =~ "coding-skill"
       refute runtime.content =~ "mcp_demo_tool"
-    end
-
-    test "supersedes an in-flight request with the newest same-conversation message", %{
-      skill_registry: skill_registry,
-      conv_store: conv_store,
-      task_supervisor: task_supervisor
-    } do
-      test_pid = self()
-      chat_id = "chat_#{System.unique_integer([:positive])}"
-      agent_name = :"controlled_main_agent_#{System.unique_integer([:positive])}"
-
-      :ok = ControlledProvider.init(test_pid)
-
-      on_exit(fn ->
-        ControlledProvider.cleanup()
-      end)
-
-      ControlledProvider.set_plans(%{
-        "first" => {:block, mock_response("stale reply")},
-        "second" => mock_response("fresh reply")
-      })
-
-      {:ok, _} =
-        start_supervised(
-          {MainAgent,
-           [
-             name: agent_name,
-             provider: ControlledProvider,
-             skill_registry: skill_registry,
-             conversation_store: conv_store,
-             task_supervisor: task_supervisor
-           ]},
-          id: agent_name
-        )
-
-      first_msg =
-        make_message("first",
-          chat_id: chat_id,
-          reply_fn: fn response ->
-            send(test_pid, {:reply, :first, response})
-          end
-        )
-
-      second_msg =
-        make_message("second",
-          chat_id: chat_id,
-          reply_fn: fn response ->
-            send(test_pid, {:reply, :second, response})
-          end
-        )
-
-      MainAgent.handle_message(first_msg, agent_name)
-
-      assert_receive {:controlled_provider_called, "first", first_pid, first_messages, _opts},
-                     5_000
-
-      assert Enum.map(Enum.filter(first_messages, &(&1.role == "user")), & &1.content) == [
-               "first"
-             ]
-
-      first_ref = Process.monitor(first_pid)
-
-      MainAgent.handle_message(second_msg, agent_name)
-
-      assert_receive {:DOWN, ^first_ref, :process, ^first_pid, reason}, 5_000
-      refute reason == :normal
-
-      assert_receive {:controlled_provider_called, "second", _second_pid, second_messages, _opts},
-                     5_000
-
-      assert Enum.map(Enum.filter(second_messages, &(&1.role == "user")), & &1.content) == [
-               "second"
-             ]
-
-      assert_receive {:reply, :second, "fresh reply"}, 5_000
-      refute_receive {:reply, :first, _response}, 200
-
-      flush_conv_store(conv_store)
-
-      assert ConversationStore.get_history({"telegram", chat_id, :root}, server: conv_store)
-             |> Enum.map(&{&1.role, &1.content}) == [
-               {"user", "second"},
-               {"assistant", "fresh reply"}
-             ]
-
-      assert Enum.map(ControlledProvider.get_calls(), fn {content, _messages, _opts} ->
-               content
-             end) == [
-               "first",
-               "second"
-             ]
-    end
-
-    test "keeps different conversations independent while one chat has blocked work", %{
-      skill_registry: skill_registry,
-      conv_store: conv_store,
-      task_supervisor: task_supervisor
-    } do
-      test_pid = self()
-      agent_name = :"controlled_main_agent_#{System.unique_integer([:positive])}"
-      first_chat_id = "chat_#{System.unique_integer([:positive])}"
-      second_chat_id = "chat_#{System.unique_integer([:positive])}"
-
-      :ok = ControlledProvider.init(test_pid)
-
-      on_exit(fn ->
-        ControlledProvider.cleanup()
-      end)
-
-      ControlledProvider.set_plans(%{
-        "blocked" => {:block, mock_response("chat one reply")},
-        "other" => mock_response("chat two reply")
-      })
-
-      {:ok, _} =
-        start_supervised(
-          {MainAgent,
-           [
-             name: agent_name,
-             provider: ControlledProvider,
-             skill_registry: skill_registry,
-             conversation_store: conv_store,
-             task_supervisor: task_supervisor
-           ]},
-          id: agent_name
-        )
-
-      blocked_msg =
-        make_message("blocked",
-          chat_id: first_chat_id,
-          reply_fn: fn response ->
-            send(test_pid, {:reply, :blocked, response})
-          end
-        )
-
-      other_msg =
-        make_message("other",
-          chat_id: second_chat_id,
-          reply_fn: fn response ->
-            send(test_pid, {:reply, :other, response})
-          end
-        )
-
-      MainAgent.handle_message(blocked_msg, agent_name)
-
-      assert_receive {:controlled_provider_called, "blocked", blocked_pid, _messages, _opts},
-                     5_000
-
-      assert Process.alive?(blocked_pid)
-
-      MainAgent.handle_message(other_msg, agent_name)
-
-      assert_receive {:controlled_provider_called, "other", _other_pid, _messages, _opts}, 5_000
-      assert_receive {:reply, :other, "chat two reply"}, 5_000
-      assert Process.alive?(blocked_pid)
-
-      send(blocked_pid, {:continue, "blocked"})
-      assert_receive {:reply, :blocked, "chat one reply"}, 5_000
-
-      flush_conv_store(conv_store)
-
-      assert ConversationStore.get_history({"telegram", second_chat_id, :root},
-               server: conv_store
-             )
-             |> Enum.map(&{&1.role, &1.content}) == [
-               {"user", "other"},
-               {"assistant", "chat two reply"}
-             ]
-
-      assert ConversationStore.get_history({"telegram", first_chat_id, :root}, server: conv_store)
-             |> Enum.map(&{&1.role, &1.content}) == [
-               {"user", "blocked"},
-               {"assistant", "chat one reply"}
-             ]
     end
   end
 
@@ -1750,7 +1511,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("OK", total_tokens: 42)])
 
       msg = make_message("Test")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "OK"}, 5_000
 
@@ -1789,33 +1550,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert reply_metadata.channel == "telegram"
     end
 
-    test "emits mailbox pickup telemetry on message cast", %{agent: agent} do
-      test_pid = self()
-      handler_id = "test-agent-mailbox-#{System.unique_integer([:positive])}"
-
-      :telemetry.attach(
-        handler_id,
-        [:fermix, :agent, :mailbox],
-        fn event, measurements, metadata, _config ->
-          send(test_pid, {:telemetry, event, measurements, metadata})
-        end,
-        nil
-      )
-
-      on_exit(fn -> :telemetry.detach(handler_id) end)
-
-      MockProvider.set_responses([mock_response("OK")])
-
-      msg = make_message("Test")
-      MainAgent.handle_message(msg, agent)
-
-      assert_receive {:telemetry, [:fermix, :agent, :mailbox], measurements, metadata}, 5_000
-      assert measurements.duration_us >= 0
-      assert metadata.channel == "telegram"
-      assert metadata.status == :ok
-      assert_receive {:reply, "OK"}, 5_000
-    end
-
     test "emits [:fermix, :agent, :message] on success", %{agent: agent} do
       test_pid = self()
       handler_id = "test-agent-message-#{System.unique_integer()}"
@@ -1832,7 +1566,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([mock_response("OK", total_tokens: 42)])
 
       msg = make_message("Test")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:telemetry, [:fermix, :agent, :message], measurements, metadata}, 5_000
       assert measurements.iterations == 1
@@ -1860,7 +1594,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       MockProvider.set_responses([{:error, "API fail"}])
 
       msg = make_message("Test")
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:telemetry, [:fermix, :agent, :message_error], _, metadata}, 5_000
       assert metadata.channel == "telegram"
@@ -1897,7 +1631,7 @@ defmodule FermixCore.Agents.MainAgentTest do
          %{agent: agent} = ctx do
       MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
 
-      MainAgent.handle_message(make_message("hello", chat_id: "runctx_1"), agent)
+      run_turn(make_message("hello", chat_id: "runctx_1"), agent)
       assert_receive {:reply, "OK"}, 5_000
 
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build],
@@ -1910,7 +1644,7 @@ defmodule FermixCore.Agents.MainAgentTest do
                       %{result: :miss}},
                      5_000
 
-      MainAgent.handle_message(make_message("again", chat_id: "runctx_1"), ctx.agent)
+      run_turn(make_message("again", chat_id: "runctx_1"), ctx.agent)
       assert_receive {:reply, "OK"}, 5_000
 
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
@@ -1925,7 +1659,7 @@ defmodule FermixCore.Agents.MainAgentTest do
          %{agent: agent, capability_registry: registry} do
       MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
 
-      MainAgent.handle_message(make_message("first", chat_id: "runctx_2"), agent)
+      run_turn(make_message("first", chat_id: "runctx_2"), agent)
       assert_receive {:reply, "OK"}, 5_000
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
 
@@ -1946,7 +1680,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       :ok = CapabilityRegistry.register(registry, capability)
       MockProvider.reset_calls()
 
-      MainAgent.handle_message(make_message("second", chat_id: "runctx_2"), agent)
+      run_turn(make_message("second", chat_id: "runctx_2"), agent)
       assert_receive {:reply, "OK"}, 5_000
 
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _, %{result: :hit}},
@@ -1963,7 +1697,7 @@ defmodule FermixCore.Agents.MainAgentTest do
          %{agent: agent, capability_registry: registry, skill_registry: skill_registry} do
       MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
 
-      MainAgent.handle_message(make_message("first", chat_id: "runctx_plugin_reload"), agent)
+      run_turn(make_message("first", chat_id: "runctx_plugin_reload"), agent)
       assert_receive {:reply, "OK"}, 5_000
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
 
@@ -1993,7 +1727,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       MockProvider.reset_calls()
 
-      MainAgent.handle_message(
+      run_turn(
         make_message("after reload", chat_id: "runctx_plugin_reload"),
         agent
       )
@@ -2015,7 +1749,7 @@ defmodule FermixCore.Agents.MainAgentTest do
          %{agent: agent, capability_registry: registry} do
       MockProvider.set_responses([mock_response("OK"), mock_response("OK")])
 
-      MainAgent.handle_message(make_message("first", chat_id: "runctx_guest"), agent)
+      run_turn(make_message("first", chat_id: "runctx_guest"), agent)
       assert_receive {:reply, "OK"}, 5_000
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :build], _, _}, 5_000
 
@@ -2041,7 +1775,7 @@ defmodule FermixCore.Agents.MainAgentTest do
         |> make_message(chat_id: "runctx_guest")
         |> Map.put(:source_trust, :guest)
 
-      MainAgent.handle_message(guest_msg, agent)
+      run_turn(guest_msg, agent)
       assert_receive {:reply, "OK"}, 5_000
 
       assert_receive {:runctx_telemetry, [:fermix, :runtime_context, :cache], _,
@@ -2057,7 +1791,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert function_exported?(MainAgent, :reload_skills, 1)
     end
 
-    test "runtime context build failure replies without crashing the server", %{
+    test "runtime context build failure returns an error without crashing the server", %{
       skill_registry: skill_registry,
       capability_registry: capability_registry,
       conv_store: conv_store,
@@ -2082,11 +1816,12 @@ defmodule FermixCore.Agents.MainAgentTest do
           id: agent_name
         )
 
+      # Checkout fails closed (the gateway surfaces the user-facing reply); the
+      # build error must not crash the runtime holder.
       log =
         capture_log(fn ->
-          MainAgent.handle_message(make_message("broken", chat_id: "runctx_bad"), agent_name)
-          assert_receive {:reply, reply}, 5_000
-          assert reply =~ "error processing your message"
+          assert {:error, _reason} =
+                   MainAgent.checkout_turn_state(agent_name, make_message("broken"))
         end)
 
       assert Process.alive?(pid)
@@ -2096,44 +1831,6 @@ defmodule FermixCore.Agents.MainAgentTest do
   end
 
   def unused(_args, _ctx, _extra \\ nil), do: {:ok, :ok}
-
-  # -- Validation --
-
-  describe "message validation" do
-    test "rejects messages missing required fields", %{agent: agent} do
-      assert_raise FunctionClauseError, fn ->
-        apply(MainAgent, :handle_message, [%{content: "hi"}, agent])
-      end
-    end
-
-    test "rejects non-binary content", %{agent: agent} do
-      msg = %{
-        content: 123,
-        sender: "user",
-        channel: "telegram",
-        chat_id: "chat_1",
-        reply_fn: fn _ -> :ok end
-      }
-
-      assert_raise FunctionClauseError, fn ->
-        MainAgent.handle_message(msg, agent)
-      end
-    end
-
-    test "rejects non-function reply_fn", %{agent: agent} do
-      msg = %{
-        content: "hi",
-        sender: "user",
-        channel: "telegram",
-        chat_id: "chat_1",
-        reply_fn: "not a function"
-      }
-
-      assert_raise FunctionClauseError, fn ->
-        MainAgent.handle_message(msg, agent)
-      end
-    end
-  end
 
   # -- GenServer lifecycle --
 

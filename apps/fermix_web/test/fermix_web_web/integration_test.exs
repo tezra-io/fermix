@@ -8,6 +8,7 @@ defmodule FermixWebWeb.IntegrationTest do
   use FermixWebWeb.ConnCase
 
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
@@ -177,6 +178,16 @@ defmodule FermixWebWeb.IntegrationTest do
     {:ok, conversation_store: conversation_store, capability_registry: capability_registry}
   end
 
+  # The turn queue lives in FermixChannels.Gateway.Queue; here we drive the core
+  # turn directly through checkout + TurnRunner to exercise the pipeline.
+  defp run_turn(msg, agent) do
+    {:ok, turn_state, cache_status} = MainAgent.checkout_turn_state(agent, msg)
+
+    msg
+    |> Map.put(:__runtime_context_cache_status, cache_status)
+    |> TurnRunner.run(turn_state)
+  end
+
   describe "full pipeline: webhook → agent → response" do
     test "simple message gets agent response", %{
       conversation_store: cs,
@@ -204,7 +215,7 @@ defmodule FermixWebWeb.IntegrationTest do
         reply_fn: fn response -> send(test_pid, {:reply, reply_payload(response)}) end
       }
 
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "Hello from the integration test!"}, 5_000
 
@@ -248,7 +259,7 @@ defmodule FermixWebWeb.IntegrationTest do
         reply_fn: fn response -> send(test_pid, {:reply, reply_payload(response)}) end
       }
 
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "The command output was captured."}, 10_000
 

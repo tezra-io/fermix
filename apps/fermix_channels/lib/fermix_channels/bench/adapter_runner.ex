@@ -9,6 +9,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
   alias FermixChannels.CLI
   alias FermixChannels.Dispatcher
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Bench.MockProvider
   alias FermixCore.Bench.Recorder
@@ -26,7 +27,11 @@ defmodule FermixChannels.Bench.AdapterRunner do
   # CLI has no channel-owned media transport, so there is no cli_send_media scenario.
   @scenario_specs %{
     "telegram_parse_inbound" => %{channel: :telegram, kind: :parse, samples: @adapter_samples},
-    "telegram_send_short_text" => %{channel: :telegram, kind: :send_short_text, samples: @adapter_samples},
+    "telegram_send_short_text" => %{
+      channel: :telegram,
+      kind: :send_short_text,
+      samples: @adapter_samples
+    },
     "telegram_send_long_text_split" => %{
       channel: :telegram,
       kind: :send_long_text_split,
@@ -35,19 +40,35 @@ defmodule FermixChannels.Bench.AdapterRunner do
     "telegram_send_media" => %{channel: :telegram, kind: :send_media, samples: @media_samples},
     "telegram_e2e_text" => %{channel: :telegram, kind: :e2e, samples: @e2e_samples},
     "discord_parse_inbound" => %{channel: :discord, kind: :parse, samples: @adapter_samples},
-    "discord_send_short_text" => %{channel: :discord, kind: :send_short_text, samples: @adapter_samples},
+    "discord_send_short_text" => %{
+      channel: :discord,
+      kind: :send_short_text,
+      samples: @adapter_samples
+    },
     "discord_send_media" => %{channel: :discord, kind: :send_media, samples: @media_samples},
     "discord_e2e_text" => %{channel: :discord, kind: :e2e, samples: @e2e_samples},
     "slack_parse_inbound" => %{channel: :slack, kind: :parse, samples: @adapter_samples},
-    "slack_send_short_text" => %{channel: :slack, kind: :send_short_text, samples: @adapter_samples},
+    "slack_send_short_text" => %{
+      channel: :slack,
+      kind: :send_short_text,
+      samples: @adapter_samples
+    },
     "slack_send_media" => %{channel: :slack, kind: :send_media, samples: @media_samples},
     "slack_e2e_text" => %{channel: :slack, kind: :e2e, samples: @e2e_samples},
     "whatsapp_parse_inbound" => %{channel: :whatsapp, kind: :parse, samples: @adapter_samples},
-    "whatsapp_send_short_text" => %{channel: :whatsapp, kind: :send_short_text, samples: @adapter_samples},
+    "whatsapp_send_short_text" => %{
+      channel: :whatsapp,
+      kind: :send_short_text,
+      samples: @adapter_samples
+    },
     "whatsapp_send_media" => %{channel: :whatsapp, kind: :send_media, samples: @media_samples},
     "whatsapp_e2e_text" => %{channel: :whatsapp, kind: :e2e, samples: @e2e_samples},
     "signal_parse_inbound" => %{channel: :signal, kind: :parse, samples: @adapter_samples},
-    "signal_send_short_text" => %{channel: :signal, kind: :send_short_text, samples: @adapter_samples},
+    "signal_send_short_text" => %{
+      channel: :signal,
+      kind: :send_short_text,
+      samples: @adapter_samples
+    },
     "signal_send_media" => %{channel: :signal, kind: :send_media, samples: @media_samples},
     "signal_e2e_text" => %{channel: :signal, kind: :e2e, samples: @e2e_samples},
     "cli_parse_inbound" => %{channel: :cli, kind: :parse, samples: @adapter_samples},
@@ -83,7 +104,9 @@ defmodule FermixChannels.Bench.AdapterRunner do
     before_snapshot = runtime_snapshot()
 
     {result, wall_time_us} =
-      Telemetry.timed_us(fn -> with_env(spec, fn env -> run_samples(spec, env, samples, warmup, events) end) end)
+      Telemetry.timed_us(fn ->
+        with_env(spec, fn env -> run_samples(spec, env, samples, warmup, events) end)
+      end)
 
     %{
       messages_dispatched: samples,
@@ -152,14 +175,14 @@ defmodule FermixChannels.Bench.AdapterRunner do
     :ok =
       Dispatcher.dispatch([message],
         channel: adapter_module(channel),
-        agent: MainAgent,
-        agent_server: env.agent,
+        agent: Queue,
+        agent_server: env.queue,
         conversation_store: env.conversation_store,
         reply_fn: reply_fn
       )
 
     await_e2e_reply!(ref)
-    wait_until_idle!(env.agent)
+    wait_until_idle!(env.queue)
   end
 
   defp run_sample!(%{kind: :webhook_idempotency, channel: channel}, env, index) do
@@ -214,6 +237,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
     conversation_store = :"adapter_bench_conversation_store_#{unique}"
     capability_registry = :"adapter_bench_capability_registry_#{unique}"
     agent = :"adapter_bench_main_agent_#{unique}"
+    queue = :"adapter_bench_gateway_queue_#{unique}"
 
     {:ok, task_pid} = Task.Supervisor.start_link(name: task_supervisor)
     {:ok, store_pid} = ConversationStore.start_link(name: conversation_store, repo: nil)
@@ -232,13 +256,18 @@ defmodule FermixChannels.Bench.AdapterRunner do
         adapter_opts: [bench_script: :text, model: "bench-mock"]
       )
 
+    {:ok, queue_pid} =
+      Queue.start_link(name: queue, main_agent: agent, task_supervisor: task_supervisor)
+
     %{
       task_pid: task_pid,
       store_pid: store_pid,
       registry_pid: registry_pid,
       agent_pid: agent_pid,
+      queue_pid: queue_pid,
       conversation_store: conversation_store,
       agent: agent,
+      queue: queue,
       setup: %{
         environments_started: 1,
         history_conversations_seeded: 0,
@@ -251,7 +280,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
     if is_binary(Map.get(env, :media_path)), do: File.rm(env.media_path)
 
     env
-    |> Map.take([:agent_pid, :registry_pid, :store_pid, :task_pid])
+    |> Map.take([:queue_pid, :agent_pid, :registry_pid, :store_pid, :task_pid])
     |> Map.values()
     |> Enum.each(&stop_pid/1)
   end
@@ -364,10 +393,15 @@ defmodule FermixChannels.Bench.AdapterRunner do
   defp send_text(:signal, target, text, _env), do: Signal.send_message(target, text)
   defp send_text(:cli, target, text, _env), do: CLI.send_message(target, text)
 
-  defp send_media(:telegram, target, media_part, _env), do: Telegram.send_media(target, media_part)
+  defp send_media(:telegram, target, media_part, _env),
+    do: Telegram.send_media(target, media_part)
+
   defp send_media(:discord, target, media_part, _env), do: Discord.send_media(target, media_part)
   defp send_media(:slack, target, media_part, _env), do: Slack.send_media(target, media_part)
-  defp send_media(:whatsapp, target, media_part, _env), do: WhatsApp.send_media(target, media_part)
+
+  defp send_media(:whatsapp, target, media_part, _env),
+    do: WhatsApp.send_media(target, media_part)
+
   defp send_media(:signal, target, media_part, _env), do: Signal.send_media(target, media_part)
 
   defp adapter_module(:telegram), do: Telegram
@@ -401,8 +435,11 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
   defp await_e2e_reply!(ref) do
     receive do
-      {:adapter_e2e_reply, ^ref, :ok} -> :ok
-      {:adapter_e2e_reply, ^ref, {:error, reason}} -> raise "adapter e2e failed: #{inspect(reason)}"
+      {:adapter_e2e_reply, ^ref, :ok} ->
+        :ok
+
+      {:adapter_e2e_reply, ^ref, {:error, reason}} ->
+        raise "adapter e2e failed: #{inspect(reason)}"
     after
       @reply_timeout_ms -> raise "adapter e2e reply timed out"
     end
@@ -414,7 +451,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
   end
 
   defp wait_until_idle!(agent, deadline) do
-    status = MainAgent.status(agent)
+    status = Queue.status(agent)
 
     cond do
       status.active_requests == 0 and status.pending_requests == 0 ->
@@ -523,7 +560,9 @@ defmodule FermixChannels.Bench.AdapterRunner do
   end
 
   defp write_media_file! do
-    path = Path.join(System.tmp_dir!(), "fermix-bench-media-#{System.unique_integer([:positive])}.png")
+    path =
+      Path.join(System.tmp_dir!(), "fermix-bench-media-#{System.unique_integer([:positive])}.png")
+
     {:ok, file} = File.open(path, [:write, :binary])
 
     try do
@@ -542,7 +581,9 @@ defmodule FermixChannels.Bench.AdapterRunner do
   end
 
   defp throughput(_processed, 0), do: 0.0
-  defp throughput(processed, wall_time_us), do: Float.round(processed * 1_000_000 / wall_time_us, 2)
+
+  defp throughput(processed, wall_time_us),
+    do: Float.round(processed * 1_000_000 / wall_time_us, 2)
 
   defp runtime_snapshot do
     %{

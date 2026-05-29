@@ -10,7 +10,7 @@ defmodule FermixChannels.Channels.Signal.Listener do
 
   alias FermixChannels.Channels.Signal
   alias FermixChannels.Dispatcher
-  alias FermixCore.Agents.MainAgent
+  alias FermixChannels.Gateway.Queue
 
   @default_poll_interval_ms 1_000
   @default_error_backoff_ms 5_000
@@ -26,8 +26,8 @@ defmodule FermixChannels.Channels.Signal.Listener do
     state = %{
       poll_interval: Keyword.get(opts, :poll_interval, @default_poll_interval_ms),
       error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms),
-      agent: Keyword.get(opts, :agent, MainAgent),
-      agent_server: Keyword.get(opts, :agent_server, MainAgent),
+      agent: Keyword.get(opts, :agent, Queue),
+      agent_server: Keyword.get(opts, :agent_server, Queue),
       client: Keyword.get(opts, :client),
       client_opts: Keyword.get(opts, :client_opts, [])
     }
