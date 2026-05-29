@@ -4,7 +4,7 @@ defmodule FermixChannels.DispatcherTest do
   import ExUnit.CaptureLog
 
   alias FermixChannels.Dispatcher
-  alias FermixChannels.Message
+  alias FermixChannels.Gateway.Message
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
@@ -114,7 +114,7 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   # The dispatcher now resolves source trust through
-  # `FermixChannels.Ingress.Authorizer` before delivering to the agent, so
+  # `FermixChannels.Gateway.Authorizer` before delivering to the agent, so
   # tests that exercise the agent-delivery path need a configured owner for
   # whichever remote channel they pretend to come from. The CLI channel
   # path stays auto-authorized as `:local`.

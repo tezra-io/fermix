@@ -3,10 +3,10 @@ defmodule FermixWebWeb.WebhookController do
 
   require Logger
 
+  alias FermixChannels.Channels.Slack
+  alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Dispatcher
-  alias FermixChannels.Idempotency
-  alias FermixChannels.Slack
-  alias FermixChannels.WhatsApp
+  alias FermixChannels.Gateway.Idempotency
   alias FermixCore.Agents.MainAgent
 
   @auth_errors [

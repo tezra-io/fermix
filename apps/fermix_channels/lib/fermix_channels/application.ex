@@ -16,8 +16,8 @@ defmodule FermixChannels.Application do
 
     children =
       [
-        FermixChannels.Commands.Sandbox.Confirmations,
-        FermixChannels.Idempotency
+        FermixChannels.Gateway.Commands.Sandbox.Confirmations,
+        FermixChannels.Gateway.Idempotency
       ]
       |> Kernel.++(
         polling_children(Application.get_env(:fermix_channels, :telegram, []), readiness)
@@ -46,10 +46,10 @@ defmodule FermixChannels.Application do
   def log_missing_ingress_authorization(_readiness_report), do: :ok
 
   @doc false
-  @spec polling_children(keyword(), Readiness.report()) :: [{FermixChannels.Telegram.Poller, []}]
+  @spec polling_children(keyword(), Readiness.report()) :: [{FermixChannels.Channels.Telegram.Poller, []}]
   def polling_children(config, %{status: :ready}) when is_list(config) do
     if enabled?(config) and ingress_authorized?(:telegram) do
-      [{FermixChannels.Telegram.Poller, []}]
+      [{FermixChannels.Channels.Telegram.Poller, []}]
     else
       []
     end
@@ -58,10 +58,10 @@ defmodule FermixChannels.Application do
   def polling_children(config, _readiness_report) when is_list(config), do: []
 
   @doc false
-  @spec gateway_children(keyword(), Readiness.report()) :: [{FermixChannels.Discord.Gateway, []}]
+  @spec gateway_children(keyword(), Readiness.report()) :: [{FermixChannels.Channels.Discord.Gateway, []}]
   def gateway_children(config, %{status: :ready}) when is_list(config) do
     if config[:mode] == :gateway and enabled?(config) and ingress_authorized?(:discord) do
-      [{FermixChannels.Discord.Gateway, []}]
+      [{FermixChannels.Channels.Discord.Gateway, []}]
     else
       []
     end
@@ -71,11 +71,11 @@ defmodule FermixChannels.Application do
 
   @doc false
   @spec subprocess_children(keyword(), Readiness.report()) :: [
-          {FermixChannels.Signal.Listener, []}
+          {FermixChannels.Channels.Signal.Listener, []}
         ]
   def subprocess_children(config, %{status: :ready}) when is_list(config) do
     if config[:mode] == :subprocess and enabled?(config) and ingress_authorized?(:signal) do
-      [{FermixChannels.Signal.Listener, []}]
+      [{FermixChannels.Channels.Signal.Listener, []}]
     else
       []
     end

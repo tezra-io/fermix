@@ -6,10 +6,10 @@ defmodule FermixChannels.CLI do
   can be dispatched through `FermixChannels.Dispatcher` into `MainAgent`.
   """
 
-  @behaviour FermixChannels.Channel
+  @behaviour FermixChannels.Gateway.Channel
 
   alias FermixChannels.Dispatcher
-  alias FermixChannels.Message
+  alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Telemetry
@@ -100,7 +100,7 @@ defmodule FermixChannels.CLI do
 
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
-  @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
+  @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(_chat_id, text, _opts \\ []) when is_binary(text) do
     {_result, duration_us} = Telemetry.timed_us(fn -> IO.puts(text) end)
@@ -110,8 +110,8 @@ defmodule FermixChannels.CLI do
   end
 
   @impl true
-  @spec send_media(String.t(), FermixChannels.Channel.media_part()) :: {:error, :media_unsupported}
-  @spec send_media(String.t(), FermixChannels.Channel.media_part(), FermixChannels.Channel.send_opts()) ::
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) :: {:error, :media_unsupported}
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part(), FermixChannels.Gateway.Channel.send_opts()) ::
           {:error, :media_unsupported}
   def send_media(_chat_id, _media_part, _opts \\ []), do: {:error, :media_unsupported}
 

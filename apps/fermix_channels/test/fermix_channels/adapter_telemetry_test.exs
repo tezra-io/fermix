@@ -1,12 +1,12 @@
 defmodule FermixChannels.AdapterTelemetryTest do
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Channels.Discord
+  alias FermixChannels.Channels.Signal
+  alias FermixChannels.Channels.Slack
+  alias FermixChannels.Channels.Telegram
+  alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.CLI
-  alias FermixChannels.Discord
-  alias FermixChannels.Signal
-  alias FermixChannels.Slack
-  alias FermixChannels.Telegram
-  alias FermixChannels.WhatsApp
 
   defmodule SignalClient do
     def send_message(_account, _recipient, _text, _opts), do: :ok

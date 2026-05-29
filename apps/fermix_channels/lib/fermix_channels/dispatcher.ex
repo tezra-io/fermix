@@ -8,11 +8,11 @@ defmodule FermixChannels.Dispatcher do
 
   require Logger
 
-  alias FermixChannels.Commands
+  alias FermixChannels.Gateway.Authorizer
+  alias FermixChannels.Gateway.Commands
+  alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Source
   alias FermixChannels.Gateway.Transcription
-  alias FermixChannels.Ingress.Authorizer
-  alias FermixChannels.Ingress.Source
-  alias FermixChannels.Message
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Reply
