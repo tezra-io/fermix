@@ -44,7 +44,9 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
       FermixTestSupport.SafeRm.rm_rf!(memory_dir)
 
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path -> FermixTestSupport.SafeRm.rm(path) end)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        FermixTestSupport.SafeRm.rm(path)
+      end)
     end)
 
     %{

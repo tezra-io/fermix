@@ -124,9 +124,14 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
     task = Task.async(fn -> System.cmd(binary, args, stderr_to_stdout: true) end)
 
     case Task.yield(task, timeout_ms) || Task.shutdown(task) do
-      {:ok, {output, 0}} -> {:ok, output}
-      {:ok, {output, code}} -> {:error, {:helper_failed, command, code, String.slice(output, 0, 200)}}
-      nil -> {:error, {:helper_timeout, command, timeout_ms}}
+      {:ok, {output, 0}} ->
+        {:ok, output}
+
+      {:ok, {output, code}} ->
+        {:error, {:helper_failed, command, code, String.slice(output, 0, 200)}}
+
+      nil ->
+        {:error, {:helper_timeout, command, timeout_ms}}
     end
   end
 

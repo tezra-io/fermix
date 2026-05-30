@@ -100,8 +100,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         {:noreply, state}
 
       {true, refs} ->
-        {:noreply,
-         %{state | client_refs: refs, active_clients: max(0, state.active_clients - 1)}}
+        {:noreply, %{state | client_refs: refs, active_clients: max(0, state.active_clients - 1)}}
     end
   end
 

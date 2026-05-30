@@ -78,7 +78,14 @@ defmodule FermixWebWeb.SetupLive do
     reasoning_effort =
       parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort)
 
-    form = %{provider: provider, default_model: default_model, reasoning_effort: reasoning_effort}
+    fast = parse_fast_field(Map.get(params, "fast"), current.fast)
+
+    form = %{
+      provider: provider,
+      default_model: default_model,
+      reasoning_effort: reasoning_effort,
+      fast: fast
+    }
 
     {:noreply,
      socket
@@ -92,6 +99,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:provider, params["provider"])
       |> maybe_put_string(:default_model, params["default_model"])
       |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
+      |> maybe_put_string(:fast, params["fast"])
       |> maybe_put_string(:openai_api_key, params["openai_api_key"])
 
     {:noreply, save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"))}
@@ -402,7 +410,8 @@ defmodule FermixWebWeb.SetupLive do
       provider: provider,
       default_model:
         Keyword.get(provider_block, :default_model) || ModelCatalog.default_model_for(provider),
-      reasoning_effort: Keyword.get(provider_block, :reasoning_effort, :none)
+      reasoning_effort: Keyword.get(provider_block, :reasoning_effort, :none),
+      fast: Keyword.get(provider_block, :fast, false)
     }
   end
 
@@ -804,6 +813,10 @@ defmodule FermixWebWeb.SetupLive do
       :error -> default
     end
   end
+
+  defp parse_fast_field("true", _default), do: true
+  defp parse_fast_field("false", _default), do: false
+  defp parse_fast_field(_field, default), do: default
 
   defp parse_sandbox_mode("strict", _default), do: :strict
   defp parse_sandbox_mode("standard", _default), do: :standard

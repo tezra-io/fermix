@@ -162,6 +162,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
       assert_receive {:telemetry, [:fermix, :provider, :tool_schema], measurements,
                       %{adapter: :chat_completions} = metadata}
+
       assert measurements.duration_us >= 0
       assert measurements.tools_count == 1
       refute Map.has_key?(measurements, :tools_bytes)

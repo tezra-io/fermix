@@ -51,10 +51,11 @@ docs/design/
 
 # Claude Code local worktrees
 /.claude/worktrees/
-
+.claude/
 # Transient benchmark outputs (track only bench/baseline.json once it lands)
 /bench/current.json
 /bench/soak.json
 
 #Logs
 .playwright-mcp/
+

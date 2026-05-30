@@ -55,7 +55,8 @@ defmodule FermixCore.Sandbox.DecisionTelemetry do
     {metadata |> Map.get(:agent, "unknown") |> to_string(), data}
   end
 
-  defp reason_fields({tag, resource}) when tag in [:outside_root, :blocked_root, :protected_path] do
+  defp reason_fields({tag, resource})
+       when tag in [:outside_root, :blocked_root, :protected_path] do
     {tag, resource}
   end
 

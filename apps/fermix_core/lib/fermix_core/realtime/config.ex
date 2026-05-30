@@ -56,6 +56,7 @@ defmodule FermixCore.Realtime.Config do
     reject_removed_key!(config, :max_buffer_chunks)
     reject_removed_key!(config, :idle_timeout_ms)
     reject_removed_key!(config, :max_input_audio_seconds_per_session)
+
     reject_removed_key!(
       config,
       :tool_policy,

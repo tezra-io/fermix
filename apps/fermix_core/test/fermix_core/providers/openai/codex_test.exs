@@ -493,6 +493,21 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
+  describe "chat/3 — fast mode body shape" do
+    test "omits service_tier when fast mode is unset or false" do
+      assert {nil, decoded} = run_chat_capture_body([])
+      refute Map.has_key?(decoded, "service_tier")
+
+      assert {nil, decoded} = run_chat_capture_body(fast: false)
+      refute Map.has_key?(decoded, "service_tier")
+    end
+
+    test "translates fast mode to the Codex priority service tier" do
+      assert {nil, decoded} = run_chat_capture_body(fast: true)
+      assert decoded["service_tier"] == "priority"
+    end
+  end
+
   describe "chat/3 — SSE fixture: single function_call" do
     test "parses one tool call from output_item.done with full arguments inline" do
       sse = """

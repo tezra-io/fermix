@@ -43,4 +43,42 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
       end
     end
   end
+
+  describe "context_length_error?/1" do
+    test "detects the context_length_exceeded error code (decoded map)" do
+      body = %{"error" => %{"code" => "context_length_exceeded", "message" => "too long"}}
+      assert ResponsesShared.context_length_error?(body)
+    end
+
+    test "detects the error code in a raw JSON string body" do
+      body = ~s({"error":{"code":"context_length_exceeded","message":"too long"}})
+      assert ResponsesShared.context_length_error?(body)
+    end
+
+    test "detects context-length wording when no machine code is present" do
+      body = %{"error" => %{"message" => "This model's maximum context length is 400000 tokens."}}
+      assert ResponsesShared.context_length_error?(body)
+    end
+
+    test "is case-insensitive on the message" do
+      body = %{"error" => %{"message" => "Prompt is too long for the CONTEXT WINDOW"}}
+      assert ResponsesShared.context_length_error?(body)
+    end
+
+    test "returns false for unrelated provider errors" do
+      refute ResponsesShared.context_length_error?(%{
+               "error" => %{"code" => "rate_limit_exceeded", "message" => "slow down"}
+             })
+    end
+
+    test "returns false when error is a bare string (not a map)" do
+      refute ResponsesShared.context_length_error?(%{"error" => "boom"})
+    end
+
+    test "returns false for non-error and malformed bodies" do
+      refute ResponsesShared.context_length_error?(%{"output" => []})
+      refute ResponsesShared.context_length_error?("not json")
+      refute ResponsesShared.context_length_error?(nil)
+    end
+  end
 end

@@ -46,7 +46,8 @@ defmodule FermixCore.Setup.SecretMigration do
     if SecretWriter.available?() do
       :ok
     else
-      {:error, "No OS secret writer is available. Set secrets in shell rc, systemd unit, or launchd plist."}
+      {:error,
+       "No OS secret writer is available. Set secrets in shell rc, systemd unit, or launchd plist."}
     end
   end
 

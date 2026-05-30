@@ -18,6 +18,7 @@ defmodule Mix.Tasks.Fermix.Setup do
     provider: :string,
     default_model: :string,
     reasoning_effort: :string,
+    fast: :boolean,
     realtime_enabled: :boolean,
     realtime_api_key: :string,
     realtime_voice: :string,
