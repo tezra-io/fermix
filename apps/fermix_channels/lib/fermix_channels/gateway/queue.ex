@@ -1,13 +1,11 @@
 defmodule FermixChannels.Gateway.Queue do
   @moduledoc """
-  Single-flight turn scheduler for the Main Agent.
+  FIFO turn scheduler for the Main Agent.
 
   Owns conversation identity and turn-task lifecycle for inbound messages. Each
-  conversation runs at most one active turn plus one pending replacement. If a
-  newer same-conversation message arrives while work is in flight, the active
-  task is canceled, the pending slot is replaced with the newest message, and
-  only that newest message starts once the older task exits. Different
-  conversations run independently.
+  conversation runs at most one active turn plus a FIFO pending queue. Newer
+  same-conversation messages wait behind the active turn instead of canceling
+  it. Different conversations run independently.
 
   Conversation identity is `{channel, chat_id, thread_scope}` via
   `FermixCore.Agents.ConversationKey`.
@@ -71,11 +69,7 @@ defmodule FermixChannels.Gateway.Queue do
       turn_runner: Keyword.get(opts, :turn_runner, TurnRunner),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       conversations: %{},
-      task_refs: %{},
-      # Per-conversation generation (the latest accepted request_id), readable by
-      # turn tasks lock-free so the final freshness check never blocks on this
-      # GenServer.
-      generations: :ets.new(:gateway_generations, [:public, :set, read_concurrency: true])
+      task_refs: %{}
     }
 
     {:ok, state}
@@ -91,8 +85,7 @@ defmodule FermixChannels.Gateway.Queue do
 
     state =
       state
-      |> enqueue_latest_message(conversation_key, msg)
-      |> maybe_cancel_active_request(conversation_key)
+      |> enqueue_message(conversation_key, msg)
       |> maybe_start_next_request(conversation_key)
 
     {:noreply, state}
@@ -123,50 +116,43 @@ defmodule FermixChannels.Gateway.Queue do
   # --- Queue internals ---
 
   defp empty_conversation_runtime do
-    %{next_request_id: 0, active: nil, pending: nil}
+    %{next_request_id: 0, active: nil, pending: :queue.new()}
   end
 
-  defp enqueue_latest_message(state, conversation_key, msg) do
+  defp enqueue_message(state, conversation_key, msg) do
     conversation =
       state.conversations
       |> Map.get(conversation_key, empty_conversation_runtime())
       |> Map.update!(:next_request_id, &(&1 + 1))
 
-    pending = %{request_id: conversation.next_request_id, message: msg}
-
-    # Bump the conversation's generation so any in-flight older turn sees itself
-    # superseded (a lock-free read) and suppresses its stale reply + commit.
-    :ets.insert(state.generations, {conversation_key, conversation.next_request_id})
+    pending_request = %{request_id: conversation.next_request_id, message: msg}
+    pending = :queue.in(pending_request, conversation.pending)
 
     put_conversation_runtime(state, conversation_key, %{conversation | pending: pending})
   end
 
-  defp maybe_cancel_active_request(state, conversation_key) do
-    case get_in(state, [:conversations, conversation_key, :active]) do
-      nil ->
-        state
-
-      %{pid: pid, request_id: request_id} ->
-        Logger.info(
-          "Canceling in-flight turn #{request_id} for #{format_conversation_key(conversation_key)}"
-        )
-
-        emit_request_event(:request_cancel, conversation_key, request_id, %{count: 1}, %{})
-
-        case Task.Supervisor.terminate_child(state.task_supervisor, pid) do
-          :ok -> state
-          {:error, :not_found} -> state
-        end
-    end
-  end
-
   defp maybe_start_next_request(state, conversation_key) do
     case Map.get(state.conversations, conversation_key, empty_conversation_runtime()) do
-      %{active: nil, pending: pending_request} = conversation when not is_nil(pending_request) ->
-        start_pending_request(state, conversation_key, conversation, pending_request)
+      %{active: nil, pending: pending} = conversation ->
+        start_next_pending_request(state, conversation_key, conversation, pending)
 
       _conversation ->
         state
+    end
+  end
+
+  defp start_next_pending_request(state, conversation_key, conversation, pending) do
+    case :queue.out(pending) do
+      {{:value, pending_request}, rest} ->
+        start_pending_request(
+          state,
+          conversation_key,
+          %{conversation | pending: rest},
+          pending_request
+        )
+
+      {:empty, _pending} ->
+        put_conversation_runtime(state, conversation_key, conversation)
     end
   end
 
@@ -180,7 +166,6 @@ defmodule FermixChannels.Gateway.Queue do
       turn_task(
         state.main_agent,
         state.turn_runner,
-        state.generations,
         conversation_key,
         request_id,
         msg
@@ -196,16 +181,18 @@ defmodule FermixChannels.Gateway.Queue do
         )
 
         send_error_reply_async(msg, "Sorry, I encountered an error processing your message.")
-        put_conversation_runtime(state, conversation_key, %{conversation | pending: nil})
+
+        state
+        |> put_conversation_runtime(conversation_key, conversation)
+        |> maybe_start_next_request(conversation_key)
     end
   end
 
   # The turn task: checkout the turn-state snapshot, type while the core turn
-  # runs, then — only if the turn is still current — deliver its reply and commit
-  # the assistant history. Checkout runs HERE, in the task (not the queue loop),
-  # so a slow runtime-context build never blocks other conversations; the
-  # freshness check is a lock-free generation read (no call back into the queue).
-  defp turn_task(main_agent, runner, generations, conversation_key, request_id, msg) do
+  # runs, then deliver its reply and commit the assistant history. Checkout runs
+  # HERE, in the task (not the queue loop), so a slow runtime-context build never
+  # blocks other conversations.
+  defp turn_task(main_agent, runner, conversation_key, request_id, msg) do
     typing_fn = Map.get(msg, :typing_fn)
 
     typing_opts = [
@@ -216,7 +203,6 @@ defmodule FermixChannels.Gateway.Queue do
     turn = %{
       main_agent: main_agent,
       runner: runner,
-      generations: generations,
       conversation_key: conversation_key,
       request_id: request_id,
       deliver: Map.fetch!(msg, :reply_fn),
@@ -252,34 +238,32 @@ defmodule FermixChannels.Gateway.Queue do
 
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
     case runner.run(core_msg, turn_state, turn.deliver) do
-      {:ok, response} ->
-        # Deliver and commit the assistant history together, and only if still
-        # current — so a superseded turn neither replies nor pollutes history.
-        if current?(turn) do
-          turn.deliver.({:text, response})
-          runner.commit(core_msg, turn_state, response)
-        end
+      {:ok, response, context_tokens} ->
+        turn.deliver.({:text, response})
+
+        core_msg
+        |> runner.commit(turn_state, response, context_tokens)
+        |> maybe_notify_compacted(turn.deliver)
 
       {:error, reason} ->
-        maybe_deliver(turn, runner.error_reply(reason))
+        turn.deliver.({:text, runner.error_reply(reason)})
     end
   end
 
-  defp maybe_deliver(turn, text) do
-    if current?(turn), do: turn.deliver.({:text, text}), else: :ok
+  # `commit/4` returns `:compacted` when it summarized the history; surface a
+  # one-line notice so the user knows older context was trimmed. Delivery is the
+  # gateway's job, so the notice is sent here rather than from core.
+  defp maybe_notify_compacted(:compacted, deliver) when is_function(deliver, 1) do
+    deliver.(
+      {:text,
+       "🗜️ Trimmed older conversation history to stay within the context window — " <>
+         "long-term memory is kept."}
+    )
+
+    :ok
   end
 
-  # Lock-free freshness check: the turn is current unless a newer message bumped
-  # the conversation's generation. Reads ETS directly — never a GenServer.call
-  # into this queue — so a finished reply is not delayed behind queue work.
-  defp current?(%{generations: generations, conversation_key: conversation_key, request_id: id}) do
-    case :ets.lookup(generations, conversation_key) do
-      [{^conversation_key, latest}] -> latest == id
-      [] -> true
-    end
-  rescue
-    ArgumentError -> true
-  end
+  defp maybe_notify_compacted(_result, _deliver), do: :ok
 
   defp deliver_checkout_error(turn, reason) do
     {text, agent_unavailable?} = checkout_error_reply(reason)
@@ -296,7 +280,7 @@ defmodule FermixChannels.Gateway.Queue do
       )
     end
 
-    maybe_deliver(turn, text)
+    turn.deliver.({:text, text})
   end
 
   defp checkout_error_reply({:checkout_unavailable, _reason}),
@@ -319,8 +303,7 @@ defmodule FermixChannels.Gateway.Queue do
           pid: pid,
           monitor_ref: monitor_ref,
           started_at_us: System.monotonic_time(:microsecond)
-        },
-        pending: nil
+        }
     }
 
     state
@@ -353,9 +336,16 @@ defmodule FermixChannels.Gateway.Queue do
   defp completion_reason(:normal), do: :normal
   defp completion_reason(_other), do: :crashed
 
-  defp put_conversation_runtime(state, conversation_key, %{active: nil, pending: nil}) do
-    :ets.delete(state.generations, conversation_key)
-    update_in(state.conversations, &Map.delete(&1, conversation_key))
+  defp put_conversation_runtime(
+         state,
+         conversation_key,
+         %{active: nil, pending: pending} = conversation
+       ) do
+    if :queue.is_empty(pending) do
+      update_in(state.conversations, &Map.delete(&1, conversation_key))
+    else
+      update_in(state.conversations, &Map.put(&1, conversation_key, conversation))
+    end
   end
 
   defp put_conversation_runtime(state, conversation_key, conversation_runtime) do
@@ -396,13 +386,14 @@ defmodule FermixChannels.Gateway.Queue do
       },
       fn {_key, runtime}, counts ->
         active? = Map.get(runtime, :active) != nil
-        pending? = Map.get(runtime, :pending) != nil
+        pending = Map.get(runtime, :pending, :queue.new())
+        pending_count = :queue.len(pending)
 
         counts
         |> increment_if(:active_conversations, active?)
-        |> increment_if(:pending_conversations, pending?)
+        |> increment_if(:pending_conversations, pending_count > 0)
         |> increment_if(:active_requests, active?)
-        |> increment_if(:pending_requests, pending?)
+        |> Map.update!(:pending_requests, &(&1 + pending_count))
       end
     )
   end

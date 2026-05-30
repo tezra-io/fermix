@@ -29,7 +29,6 @@ defmodule FermixChannels.Bench.RunnerTest do
     scenario = report.scenarios["shared_text_minimal"]
     assert scenario.messages_dispatched == 2
     assert scenario.messages_processed == 2
-    assert scenario.messages_superseded == 0
     assert scenario.wall_time_us > 0
     assert scenario.throughput_messages_per_second > 0
     assert scenario.stages["dispatcher_normalize"].count == 2
@@ -37,22 +36,18 @@ defmodule FermixChannels.Bench.RunnerTest do
     assert scenario.stages["provider_call"].count == 2
   end
 
-  test "surfaces superseded messages in the contention scenario" do
+  test "processes all FIFO messages in the contention scenario" do
     assert {:ok, report} =
              Runner.run(
-               scenarios: ["shared_single_flight_contention"],
+               scenarios: ["shared_fifo_contention"],
                samples: 5,
                warmup: 0,
                output: nil
              )
 
-    scenario = report.scenarios["shared_single_flight_contention"]
+    scenario = report.scenarios["shared_fifo_contention"]
     assert scenario.messages_dispatched == 5
-    assert scenario.messages_processed < scenario.messages_dispatched
-
-    assert scenario.messages_superseded ==
-             scenario.messages_dispatched - scenario.messages_processed
-
+    assert scenario.messages_processed == scenario.messages_dispatched
     assert scenario.stages["dispatcher_normalize"].count == 5
     assert scenario.stages["agent_message"].count == scenario.messages_processed
   end
@@ -69,7 +64,6 @@ defmodule FermixChannels.Bench.RunnerTest do
     scenario = report.scenarios["shared_multi_conv_throughput"]
     assert scenario.messages_dispatched == 101
     assert scenario.messages_processed == 101
-    assert scenario.messages_superseded == 0
     assert scenario.wall_time_us > 0
     assert scenario.throughput_messages_per_second > 0
     assert scenario.stages["agent_message"].count == 101

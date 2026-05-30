@@ -7,7 +7,7 @@ defmodule FermixCore.Agents.ConversationKey do
   that do not provide `thread_ts`; channel adapters put platform thread IDs in
   `thread_ts`.
 
-  Shared by `FermixChannels.Gateway.Queue` (single-flight keying) and
+  Shared by `FermixChannels.Gateway.Queue` (FIFO keying) and
   `FermixCore.Agents.TurnRunner` (history/memory scoping). Core-owned; the
   gateway depends on core and may call it.
   """

@@ -8,28 +8,27 @@ defmodule FermixCore.Agents.TurnRunner do
   USER message, and RETURNS the response — it does not deliver it or persist the
   assistant message. The gateway owns delivery, typing, and the commit.
 
-  History split (so a superseded reply never pollutes future context): `run/3`
-  persists the user message when the turn is accepted; the gateway commits the
-  assistant message via `commit/3` ONLY after it delivers the reply and confirms
-  the turn is still current.
+  History split: `run/3` persists the user message when the turn is accepted;
+  the gateway commits the assistant message via `commit/4` only after it
+  delivers the reply.
 
   `deliver` (the third argument) is the gateway delivery closure. It is exposed
   to mid-turn channel tools (`send_attachment`) via the agent-loop context, so
   every channel send — mid-turn and final — flows through the same gateway
-  delivery path. `commit/3` also runs memory review + auto-compaction (after
+  delivery path. `commit/4` also runs memory review + auto-compaction (after
   delivery, so synchronous compaction stays off the reply path).
 
-  Turn execution is pure of scheduling: the caller owns single-flight,
-  cancellation, and task supervision. `MainAgent` owns the runtime-context
-  cache and hands a built snapshot in via `turn_state`; compaction-failure
-  backoff state lives in `MainAgent` and is read/written through
-  `turn_state.main_agent_server`.
+  Turn execution is pure of scheduling: the caller owns FIFO ordering and task
+  supervision. `MainAgent` owns the runtime-context cache and hands a built
+  snapshot in via `turn_state`; compaction-failure backoff state lives in
+  `MainAgent` and is read/written through `turn_state.main_agent_server`.
   """
 
   require Logger
 
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
@@ -44,24 +43,28 @@ defmodule FermixCore.Agents.TurnRunner do
   @doc """
   Run one agent turn and return its response. Persists the USER message (the
   turn was accepted) but NOT the assistant message — the gateway commits that
-  via `commit/3` only after it confirms the turn is still current, so a
-  superseded reply never pollutes conversation history. The caller (gateway)
-  owns delivery, typing, and the commit. `deliver` is the gateway delivery
+  via `commit/4` only after delivery. The caller (gateway) owns delivery,
+  typing, FIFO ordering, and the commit. `deliver` is the gateway delivery
   closure, exposed to mid-turn channel tools via the agent-loop context.
   """
-  @spec run(map(), map(), Reply.reply_fn()) :: {:ok, String.t()} | {:error, term()}
+  @spec run(map(), map(), Reply.reply_fn()) ::
+          {:ok, String.t(), non_neg_integer()} | {:error, term()}
   def run(msg, turn_state, deliver) when is_function(deliver, 1) do
     run_message_loop(msg, turn_state, deliver)
   end
 
   @doc """
   Commit a delivered turn: persist the assistant message, dispatch a background
-  memory review, and run auto-compaction. The gateway calls this ONLY after the
-  reply was delivered and the turn confirmed current. Auto-compaction is
-  synchronous; running it here (after delivery) keeps it off the reply path.
+  memory review, and run auto-compaction. The gateway calls this only after the
+  reply was delivered. Auto-compaction is synchronous; running it here keeps it
+  off the reply path.
+
+  `context_tokens` is the peak provider-reported prompt-token count from `run/3`.
+  Auto-compaction triggers on that real measure against the model's context
+  window, so the threshold behaves identically across providers and models.
   """
-  @spec commit(map(), map(), String.t()) :: :ok
-  def commit(msg, turn_state, response) do
+  @spec commit(map(), map(), String.t(), non_neg_integer()) :: :ok | :compacted
+  def commit(msg, turn_state, response, context_tokens) do
     conversation_key = ConversationKey.from(msg)
 
     ConversationStore.add_message(
@@ -75,19 +78,45 @@ defmodule FermixCore.Agents.TurnRunner do
     )
 
     maybe_start_memory_review(msg, turn_state)
-    maybe_auto_compact(conversation_key, turn_state, compaction_target(turn_state))
-    :ok
+
+    maybe_auto_compact(
+      conversation_key,
+      turn_state,
+      compaction_target(turn_state),
+      context_tokens
+    )
   end
 
   @doc "Map an agent-loop error reason to the user-facing reply text."
   @spec error_reply(term()) :: String.t()
   def error_reply(reason) do
-    if auth_error?(reason) do
-      "Authentication failed — run `fermix auth login` from the host and try again."
-    else
-      "Sorry, I encountered an error processing your message."
+    cond do
+      context_length_error?(reason) ->
+        "This conversation has grown larger than the model's context window, so I couldn't " <>
+          "process that turn. Send /new to start a fresh session (your long-term memory is kept), " <>
+          "or /compact to summarize this one, then resend."
+
+      auth_error?(reason) ->
+        "Authentication failed — run `fermix auth login` from the host and try again."
+
+      true ->
+        "Sorry, I encountered an error processing your message."
     end
   end
+
+  # The adapters return :context_length_exceeded for OpenAI-family overflow; the
+  # binary fallback catches other providers that only surface a message string.
+  defp context_length_error?(:context_length_exceeded), do: true
+
+  defp context_length_error?(reason) when is_binary(reason) do
+    downcased = String.downcase(reason)
+
+    String.contains?(downcased, "context_length_exceeded") or
+      String.contains?(downcased, "maximum context length") or
+      String.contains?(downcased, "context window")
+  end
+
+  defp context_length_error?(_reason), do: false
 
   defp run_message_loop(msg, state, deliver) do
     start = System.monotonic_time(:millisecond)
@@ -171,7 +200,7 @@ defmodule FermixCore.Agents.TurnRunner do
           "Agent loop completed in #{result.iterations} iterations, #{result.total_tokens} tokens"
         )
 
-        {:ok, result.response}
+        {:ok, result.response, Map.get(result, :context_tokens, 0)}
 
       {:error, reason} ->
         Logger.error("Agent loop failed: #{inspect(reason)}")
@@ -269,7 +298,7 @@ defmodule FermixCore.Agents.TurnRunner do
     Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
   end
 
-  defp maybe_auto_compact(conversation_key, state, compaction_target) do
+  defp maybe_auto_compact(conversation_key, state, compaction_target, context_tokens) do
     config = Application.get_env(:fermix_core, :compaction, [])
 
     cond do
@@ -280,34 +309,67 @@ defmodule FermixCore.Agents.TurnRunner do
         emit_auto_compaction_skipped(conversation_key, :failure_backoff)
 
       true ->
-        maybe_auto_compact_now(conversation_key, state, compaction_target, config)
+        maybe_auto_compact_now(conversation_key, state, compaction_target, config, context_tokens)
     end
   end
 
-  defp maybe_auto_compact_now(conversation_key, state, compaction_target, config) do
-    with {:ok, history} <- conversation_history(conversation_key, state) do
-      {adapter, route_key, adapter_opts} = compaction_target
-      before_tokens = Compactor.estimate_tokens(history)
-      context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
-      threshold = CompactionConfig.threshold(config)
+  # Trigger on the REAL prompt-token count the provider reported for this turn
+  # (peak across loop iterations) — it already includes the system prompt, tool
+  # schemas, memory, and full history, so it is the true "context usage" and is
+  # provider/model-agnostic. A 0 here means the turn made no provider call
+  # (e.g. an all-cached/error path); treat that as "nothing to measure".
+  defp maybe_auto_compact_now(_key, _state, _target, _config, context_tokens)
+       when context_tokens <= 0 do
+    :ok
+  end
 
-      if before_tokens / context_window >= threshold do
-        run_auto_compaction(
-          conversation_key,
-          history,
-          before_tokens,
-          adapter,
-          route_key,
-          adapter_opts,
-          context_window,
-          state
-        )
-      else
-        emit_auto_compaction_skipped(conversation_key, :under_threshold)
-      end
+  defp maybe_auto_compact_now(conversation_key, state, compaction_target, config, context_tokens) do
+    {adapter, route_key, adapter_opts} = compaction_target
+    context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
+    threshold = CompactionConfig.threshold(config)
+
+    if context_tokens / context_window >= threshold do
+      compact_when_over_threshold(
+        conversation_key,
+        state,
+        {adapter, route_key, adapter_opts},
+        context_window,
+        config
+      )
+    else
+      emit_auto_compaction_skipped(conversation_key, :under_threshold)
+    end
+  end
+
+  defp compact_when_over_threshold(
+         conversation_key,
+         state,
+         {adapter, route_key, adapter_opts},
+         context_window,
+         config
+       ) do
+    with {:ok, history} <- conversation_history(conversation_key, state) do
+      run_auto_compaction(
+        conversation_key,
+        history,
+        Compactor.estimate_tokens(history),
+        adapter,
+        route_key,
+        compaction_adapter_opts(adapter_opts, config),
+        context_window,
+        state
+      )
     else
       {:error, reason} -> emit_auto_compaction_skipped(conversation_key, reason)
     end
+  end
+
+  # Summaries don't need the agent's full reasoning effort. Override the
+  # compaction route's effort with the configured compaction effort (default
+  # :medium) so a high-effort agent (e.g. xhigh) doesn't pay xhigh prices for a
+  # mechanical summary. The agent's own turns are unaffected.
+  defp compaction_adapter_opts(adapter_opts, config) do
+    Keyword.put(adapter_opts, :reasoning_effort, CompactionConfig.reasoning_effort(config))
   end
 
   defp conversation_history(conversation_key, state) do
@@ -369,7 +431,12 @@ defmodule FermixCore.Agents.TurnRunner do
           }
         )
 
+        # Compaction is a context-refresh point: drop the cached runtime context
+        # so the next turn rebuilds it (bootstrap + USER.md/MEMORY.md + tools),
+        # picking up any memory the reviewer wrote during this conversation.
+        invalidate_runtime_context(state)
         clear_auto_compaction_failure(state, conversation_key)
+        :compacted
 
       {:ok, %{compacted?: false}} ->
         emit_auto_compaction_skipped(conversation_key, :nothing_to_compact)
@@ -413,6 +480,18 @@ defmodule FermixCore.Agents.TurnRunner do
     GenServer.cast(state.main_agent_server, {:clear_auto_compaction_failure, conversation_key})
     :ok
   end
+
+  # Best-effort: a missing/restarting MainAgent must not crash the commit (which
+  # runs after the reply is already delivered). The next checkout rebuilds the
+  # context regardless, so a failed invalidation only costs a stale-cache turn.
+  defp invalidate_runtime_context(%{main_agent_server: server}) when not is_nil(server) do
+    MainAgent.invalidate_runtime_context(server, :compaction)
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp invalidate_runtime_context(_state), do: :ok
 
   defp emit_auto_compaction_skipped(conversation_key, reason) do
     :telemetry.execute(

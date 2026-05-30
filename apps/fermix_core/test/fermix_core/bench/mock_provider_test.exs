@@ -15,7 +15,9 @@ defmodule FermixCore.Bench.MockProviderTest do
     assert [%{name: "bench_echo", call_id: "bench_call_1"}] = first.tool_calls
 
     assert {:ok, second} =
-             MockProvider.continue(first.provider_state, [%{call_id: "bench_call_1", output: "ok"}],
+             MockProvider.continue(
+               first.provider_state,
+               [%{call_id: "bench_call_1", output: "ok"}],
                bench_script: :tool_once
              )
 

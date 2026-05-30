@@ -16,6 +16,7 @@ defmodule FermixChannels.Bench.Runner do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Telemetry
 
   @default_output "bench/current.json"
@@ -54,7 +55,7 @@ defmodule FermixChannels.Bench.Runner do
     "shared_text_long_history" => %{script: :text, caps: 30, history: 100, samples: 500},
     "shared_text_max_iter" => %{script: :repeat_tool, caps: 5, samples: 200},
     "shared_cold_start" => %{script: :text, caps: 5, samples: 50, cold?: true},
-    "shared_single_flight_contention" => %{
+    "shared_fifo_contention" => %{
       script: :text,
       caps: 5,
       delay_ms: 10,
@@ -76,10 +77,40 @@ defmodule FermixChannels.Bench.Runner do
 
   @spec run(keyword()) :: {:ok, map()} | {:error, term()}
   def run(opts) when is_list(opts) do
-    with {:ok, scenario_names} <- scenario_names(opts),
-         {:ok, scenario_reports} <- run_scenarios(scenario_names, opts) do
+    with {:ok, scenario_names} <- scenario_names(opts) do
+      with_prompt_resource_repo(fn -> run_and_report(scenario_names, opts) end)
+    end
+  end
+
+  defp run_and_report(scenario_names, opts) do
+    with {:ok, scenario_reports} <- run_scenarios(scenario_names, opts) do
       report = build_report(scenario_reports, opts)
       maybe_write_report(report, Keyword.get(opts, :output, @default_output))
+    end
+  end
+
+  # The prompt-compose path (PromptComposer -> BootstrapLoader -> Resource.Registry)
+  # records bootstrap-file revisions against the globally-named
+  # FermixCore.Memory.Repo. `mix fermix.bench` runs `app.config` but never
+  # `app.start`, so that process is absent and a turn crashes whenever bootstrap
+  # files exist on disk. Provide a disabled Repo (every call returns
+  # {:error, :disabled}, which capture treats as a no-op) for the run so prompt
+  # composition never touches SQLite. When the OTP app is already running (e.g.
+  # the runner invoked from the test suite) its Repo is used and left untouched.
+  defp with_prompt_resource_repo(fun) do
+    case Process.whereis(Repo) do
+      nil -> with_temporary_repo(fun)
+      _pid -> fun.()
+    end
+  end
+
+  defp with_temporary_repo(fun) do
+    {:ok, repo} = Repo.start_link(enabled: false)
+
+    try do
+      fun.()
+    after
+      if Process.alive?(repo), do: GenServer.stop(repo)
     end
   end
 
@@ -130,7 +161,6 @@ defmodule FermixChannels.Bench.Runner do
     %{
       messages_dispatched: samples,
       messages_processed: result.processed,
-      messages_superseded: max(samples - result.processed, 0),
       wall_time_us: wall_time_us,
       throughput_messages_per_second: throughput(result.processed, wall_time_us),
       setup: result.setup,

@@ -5,7 +5,8 @@ defmodule FermixCore.Bench.Tools do
 
   @spec echo(map(), map()) :: {:ok, %{success: true, output: String.t()}}
   def echo(args, _context) when is_map(args) do
-    {output, duration_us} = Telemetry.timed_us(fn -> Map.get(args, "text", "bench tool output") end)
+    {output, duration_us} =
+      Telemetry.timed_us(fn -> Map.get(args, "text", "bench tool output") end)
 
     :telemetry.execute(
       [:fermix, :tool, :exec],

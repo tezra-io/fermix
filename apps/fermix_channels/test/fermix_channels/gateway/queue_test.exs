@@ -33,18 +33,20 @@ defmodule FermixChannels.Gateway.QueueTest do
 
       receive do
         {:proceed, :reply} ->
-          {:ok, "reply:" <> msg.content}
+          {:ok, "reply:" <> msg.content, 0}
 
         {:proceed, :crash} ->
           raise "boom"
       after
-        15_000 -> {:ok, "reply:" <> msg.content}
+        15_000 -> {:ok, "reply:" <> msg.content, 0}
       end
     end
 
-    def commit(_msg, turn_state, response) do
+    # Returns :compacted for the "compact_me" message so the queue's
+    # post-compaction user notice can be exercised; :ok otherwise.
+    def commit(msg, turn_state, response, _context_tokens) do
       send(turn_state.test_pid, {:committed, response})
-      :ok
+      if msg.content == "compact_me", do: :compacted, else: :ok
     end
 
     def error_reply(_reason), do: "error reply"
@@ -96,7 +98,7 @@ defmodule FermixChannels.Gateway.QueueTest do
     end
   end
 
-  describe "single-flight scheduling" do
+  describe "FIFO scheduling" do
     test "enqueues and starts a turn through checkout + runner", ctx do
       queue = start_queue(ctx)
 
@@ -105,6 +107,30 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:turn_started, "hello", turn_pid}, 5_000
       send(turn_pid, {:proceed, :reply})
       assert_receive {:reply, "reply:hello"}, 5_000
+    end
+
+    test "sends a compaction notice after the reply when the turn compacted", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, make_msg("compact_me", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "compact_me", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      # Reply first, then the trailing compaction notice (commit ran :compacted).
+      assert_receive {:reply, "reply:compact_me"}, 5_000
+      assert_receive {:reply, notice}, 5_000
+      assert notice =~ "Trimmed older conversation history"
+    end
+
+    test "sends no compaction notice on an ordinary turn", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, make_msg("hello", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:hello"}, 5_000
+      refute_receive {:reply, _notice}, 200
     end
 
     test "reports active counts while a turn runs", ctx do
@@ -123,26 +149,52 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:reply, "reply:hello"}, 5_000
     end
 
-    test "supersedes an in-flight same-conversation turn (latest wins, no stale reply)", ctx do
+    test "queues same-conversation turns FIFO without canceling the active turn", ctx do
       queue = start_queue(ctx)
 
       Queue.enqueue(queue, make_msg("first", "c1", ctx.test_pid))
       assert_receive {:turn_started, "first", first_pid}, 5_000
-      ref = Process.monitor(first_pid)
 
       Queue.enqueue(queue, make_msg("second", "c1", ctx.test_pid))
+      assert Process.alive?(first_pid)
 
-      assert_receive {:DOWN, ^ref, :process, ^first_pid, reason}, 5_000
-      refute reason == :normal
+      status = Queue.status(queue)
+      assert status.active_requests == 1
+      assert status.pending_requests == 1
+
+      send(first_pid, {:proceed, :reply})
+      assert_receive {:reply, "reply:first"}, 5_000
+      assert_receive {:committed, "reply:first"}, 5_000
 
       assert_receive {:turn_started, "second", second_pid}, 5_000
       send(second_pid, {:proceed, :reply})
       assert_receive {:reply, "reply:second"}, 5_000
       assert_receive {:committed, "reply:second"}, 5_000
+    end
 
-      # The superseded turn neither replies nor commits assistant history.
-      refute_receive {:reply, "reply:first"}, 200
-      refute_receive {:committed, "reply:first"}, 200
+    test "preserves FIFO order for multiple queued same-conversation turns", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, make_msg("one", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "one", one_pid}, 5_000
+
+      Queue.enqueue(queue, make_msg("two", "c1", ctx.test_pid))
+      Queue.enqueue(queue, make_msg("three", "c1", ctx.test_pid))
+
+      assert Queue.status(queue).pending_requests == 2
+
+      send(one_pid, {:proceed, :reply})
+      assert_receive {:reply, "reply:one"}, 5_000
+
+      assert_receive {:turn_started, "two", two_pid}, 5_000
+      send(two_pid, {:proceed, :reply})
+      assert_receive {:reply, "reply:two"}, 5_000
+
+      assert_receive {:turn_started, "three", three_pid}, 5_000
+      send(three_pid, {:proceed, :reply})
+      assert_receive {:reply, "reply:three"}, 5_000
+
+      assert eventually(fn -> Queue.status(queue).active_requests == 0 end)
     end
 
     test "runs different conversations independently", ctx do
@@ -245,19 +297,22 @@ defmodule FermixChannels.Gateway.QueueTest do
       attach_telemetry([:fermix, :gateway, :queue, :request_start])
       attach_telemetry([:fermix, :gateway, :queue, :request_complete])
       queue = start_queue(ctx)
+      channel = "queue_test_#{System.unique_integer([:positive])}"
+      msg = make_msg("hello", "c1", ctx.test_pid) |> Map.put(:channel, channel)
 
-      Queue.enqueue(queue, make_msg("hello", "c1", ctx.test_pid))
+      Queue.enqueue(queue, msg)
 
       assert_receive {:telemetry, [:fermix, :gateway, :queue, :request_start], %{count: 1},
-                      %{request_id: 1, channel: "telegram"}},
+                      %{request_id: 1, channel: ^channel}},
                      5_000
 
       assert_receive {:turn_started, "hello", turn_pid}, 5_000
       send(turn_pid, {:proceed, :reply})
       assert_receive {:reply, "reply:hello"}, 5_000
+      assert_receive {:committed, "reply:hello"}, 5_000
 
       assert_receive {:telemetry, [:fermix, :gateway, :queue, :request_complete], measurements,
-                      %{request_id: 1, reason: :normal}},
+                      %{request_id: 1, reason: :normal, channel: ^channel}},
                      5_000
 
       assert measurements.duration_us >= 0

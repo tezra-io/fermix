@@ -191,9 +191,9 @@ defmodule FermixWebWeb.IntegrationTest do
       |> Map.put(:__runtime_context_cache_status, cache_status)
 
     case TurnRunner.run(core_msg, turn_state, deliver) do
-      {:ok, response} ->
+      {:ok, response, context_tokens} ->
         deliver.({:text, response})
-        TurnRunner.commit(core_msg, turn_state, response)
+        TurnRunner.commit(core_msg, turn_state, response, context_tokens)
 
       {:error, reason} ->
         deliver.({:text, TurnRunner.error_reply(reason)})

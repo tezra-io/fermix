@@ -419,9 +419,9 @@ defmodule FermixCore.Agents.MainAgentTest do
       |> Map.put(:__runtime_context_cache_status, cache_status)
 
     case TurnRunner.run(core_msg, turn_state, deliver) do
-      {:ok, response} ->
+      {:ok, response, context_tokens} ->
         deliver.({:text, response})
-        TurnRunner.commit(core_msg, turn_state, response)
+        TurnRunner.commit(core_msg, turn_state, response, context_tokens)
 
       {:error, reason} ->
         deliver.({:text, TurnRunner.error_reply(reason)})
@@ -693,6 +693,10 @@ defmodule FermixCore.Agents.MainAgentTest do
 
   defp request_kind(_decoded), do: :chat
 
+  # prompt_tokens is set well above the auto-compaction trigger (0.1 × the
+  # unknown-model 100k window = 10k) so the post-turn compaction test fires on a
+  # realistic large-context turn. This helper backs `stub_chat_and_summary`,
+  # which only the auto-compaction test uses.
   defp chat_completion_response(content, model) do
     %{
       "model" => model || "custom-small",
@@ -701,7 +705,7 @@ defmodule FermixCore.Agents.MainAgentTest do
           "message" => %{"role" => "assistant", "content" => content}
         }
       ],
-      "usage" => %{"prompt_tokens" => 5, "completion_tokens" => 3, "total_tokens" => 8}
+      "usage" => %{"prompt_tokens" => 50_000, "completion_tokens" => 3, "total_tokens" => 50_003}
     }
   end
 
@@ -789,7 +793,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       chat_id = "auto_chat_#{System.unique_integer([:positive])}"
       long_content = String.duplicate("older turn ", 25_000)
 
-      assert :ok =
+      assert :compacted =
                run_turn(
                  make_message(long_content, chat_id: chat_id),
                  agent_name
@@ -826,15 +830,18 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.1)
 
+      # The chat response reports a prompt-token count above the auto-compaction
+      # trigger (0.1 × the unknown-model 100k window = 10k) so post-turn
+      # compaction fires; the summary response's count is irrelevant to the gate.
       MockProvider.set_responses([
-        mock_response("assistant reply"),
+        mock_response("assistant reply", total_tokens: 50_000),
         mock_response("direct summary")
       ])
 
       chat_id = "direct_auto_chat_#{System.unique_integer([:positive])}"
       long_content = String.duplicate("direct adapter turn ", 25_000)
 
-      assert :ok =
+      assert :compacted =
                run_turn(
                  make_message(long_content, chat_id: chat_id),
                  agent
