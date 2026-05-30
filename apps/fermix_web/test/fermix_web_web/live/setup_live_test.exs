@@ -543,6 +543,48 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(default_model = "gpt-5.5")
       assert contents =~ ~s(reasoning_effort = "high")
     end
+
+    test "submitting persists Codex fast mode as a boolean", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{
+            provider: "openai_codex",
+            default_model: "gpt-5.5",
+            reasoning_effort: "high"
+          }
+        )
+        |> render_change()
+
+      assert html =~ "Fast mode"
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai_codex",
+          default_model: "gpt-5.5",
+          reasoning_effort: "high",
+          fast: "true"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Provider saved."
+
+      providers = Application.get_env(:fermix_core, :providers, [])
+      codex = Keyword.get(providers, :openai_codex, [])
+
+      assert Keyword.get(codex, :fast) == true
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.openai_codex]"
+      assert contents =~ "fast = true"
+    end
   end
 
   describe "Personalization form" do

@@ -26,6 +26,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:provider, provider() | String.t()}
           | {:default_model, String.t()}
           | {:reasoning_effort, reasoning_effort() | String.t()}
+          | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
           | {:extraction_timeout_ms, pos_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
@@ -76,6 +77,7 @@ defmodule FermixCore.Setup.Wizard do
     :provider,
     :default_model,
     :reasoning_effort,
+    :fast,
     :realtime_enabled
   ]
 
@@ -165,6 +167,10 @@ defmodule FermixCore.Setup.Wizard do
     persisted_provider(persisted) in [:openai, :openai_codex]
   end
 
+  defp reconfigure_offered?(%{key: :fast}, persisted) do
+    persisted_provider(persisted) == :openai_codex
+  end
+
   defp reconfigure_offered?(_prompt, _persisted), do: true
 
   defp prompt_specs(%WizardState{} = state) do
@@ -194,6 +200,7 @@ defmodule FermixCore.Setup.Wizard do
     provider_block = provider_config(persisted, prompt_provider)
     model_unset? = provider_unset? or blank?(Keyword.get(provider_block, :default_model))
     effort_unset? = provider_unset? or blank?(Keyword.get(provider_block, :reasoning_effort))
+    fast_unset? = prompt_provider == :openai_codex and not Keyword.has_key?(provider_block, :fast)
     openai_api_key_unset? = openai_api_key_unpersisted?(persisted, persisted_provider)
     realtime_api_key_unset? = canonical_openai_api_key_unpersisted?(persisted)
     default_model = ModelCatalog.default_model_for(prompt_provider)
@@ -205,6 +212,7 @@ defmodule FermixCore.Setup.Wizard do
       provider_unset?: provider_unset?,
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
+      fast_unset?: fast_unset?,
       openai_api_key_unset?: openai_api_key_unset?,
       realtime_api_key_unset?: realtime_api_key_unset?,
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
@@ -241,6 +249,12 @@ defmodule FermixCore.Setup.Wizard do
         required?:
           (context.provider_unset? or context.prompt_provider in [:openai, :openai_codex]) and
             context.effort_unset?
+      },
+      %{
+        key: :fast,
+        label: "Codex fast mode? (yes/no; blank = no)",
+        default: false,
+        required?: context.provider_unset? or context.fast_unset?
       }
     ]
   end
@@ -508,6 +522,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_provider_selection(Keyword.get(answers, :provider))
       |> put_default_model(Keyword.get(answers, :default_model))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
+      |> put_fast(Keyword.get(answers, :fast))
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
@@ -866,6 +881,21 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  defp put_fast(snapshot, nil), do: snapshot
+  defp put_fast(snapshot, ""), do: snapshot
+
+  defp put_fast(snapshot, value) do
+    fast = parse_fast!(value)
+    provider = active_provider(snapshot)
+
+    if provider == :openai_codex do
+      update_active_provider_block(snapshot, :fast, fast)
+    else
+      raise ArgumentError,
+            "fast mode applies to :openai_codex provider only; selected provider is #{inspect(provider)}"
+    end
+  end
+
   defp parse_provider!(value) when is_atom(value) do
     if value in ModelCatalog.providers() do
       value
@@ -893,6 +923,22 @@ defmodule FermixCore.Setup.Wizard do
               "invalid reasoning_effort #{inspect(value)}; " <>
                 "expected one of #{Enum.map_join(ReasoningEffort.levels(), ", ", &Atom.to_string/1)}"
     end
+  end
+
+  defp parse_fast!(value) when is_boolean(value), do: value
+
+  defp parse_fast!(value) when is_binary(value) do
+    normalized = value |> String.trim() |> String.downcase()
+
+    cond do
+      normalized in @realtime_true_values -> true
+      normalized in @realtime_false_values -> false
+      true -> raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
+    end
+  end
+
+  defp parse_fast!(value) do
+    raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
   end
 
   defp active_provider(snapshot) do

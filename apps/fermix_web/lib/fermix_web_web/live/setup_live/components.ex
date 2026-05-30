@@ -244,6 +244,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
         <.provider_secret_field provider_form={@provider_form} report={@report} />
         <.reasoning_effort_field provider_form={@provider_form} />
+        <.codex_fast_field provider_form={@provider_form} />
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save provider" />
       </form>
     </div>
@@ -304,6 +305,32 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp effort_levels(provider) do
     provider |> ReasoningEffort.levels_for() |> Enum.map(&Atom.to_string/1)
+  end
+
+  attr :provider_form, :map, required: true
+
+  defp codex_fast_field(assigns) do
+    ~H"""
+    <label
+      :if={@provider_form.provider == :openai_codex}
+      class="flex max-w-xl items-start gap-3 rounded-field border border-base-300 bg-base-200/40 p-3"
+    >
+      <input type="hidden" name="provider_form[fast]" value="false" />
+      <input
+        type="checkbox"
+        name="provider_form[fast]"
+        value="true"
+        checked={@provider_form.fast == true}
+        class="toggle toggle-primary mt-1"
+      />
+      <span>
+        <span class="block text-sm font-medium">Fast mode</span>
+        <span class="block text-xs text-base-content/60">
+          Use priority processing when Codex supports it. This may consume credits faster.
+        </span>
+      </span>
+    </label>
+    """
   end
 
   defp realtime_pane(assigns) do

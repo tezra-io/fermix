@@ -107,7 +107,9 @@ defmodule FermixCore.Sandbox.CommandCapabilities do
         :ok
 
       {:error, {:duplicate_name, name}} ->
-        Logger.warning("Sandbox command capability #{inspect(name)} already registered; skipping.")
+        Logger.warning(
+          "Sandbox command capability #{inspect(name)} already registered; skipping."
+        )
     end
   end
 

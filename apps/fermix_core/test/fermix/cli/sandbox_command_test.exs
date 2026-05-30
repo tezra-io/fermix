@@ -154,7 +154,8 @@ defmodule Fermix.CLI.SandboxCommandTest do
 
     grant_output =
       capture_io(fn ->
-        assert SandboxCommand.run(["grant", "command", "echo_test", "--", "/bin/echo", "hello"]) == 0
+        assert SandboxCommand.run(["grant", "command", "echo_test", "--", "/bin/echo", "hello"]) ==
+                 0
       end)
 
     assert grant_output =~ "command granted: echo_test"

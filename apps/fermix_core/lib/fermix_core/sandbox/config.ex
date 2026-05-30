@@ -241,7 +241,8 @@ defmodule FermixCore.Sandbox.Config do
     [
       profile: commands.profile,
       presets: commands.presets,
-      explicit: Map.new(commands.explicit, fn {name, spec} -> {name, command_to_keyword(spec)} end)
+      explicit:
+        Map.new(commands.explicit, fn {name, spec} -> {name, command_to_keyword(spec)} end)
     ]
   end
 

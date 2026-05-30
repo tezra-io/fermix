@@ -97,6 +97,7 @@ defmodule FermixCore.Providers.RouteResolver do
       ]
       |> maybe_put(:access_token, Keyword.get(opts, :access_token))
       |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai_codex, opts))
+      |> maybe_put(:fast, resolve_codex_fast(opts))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
@@ -191,5 +192,29 @@ defmodule FermixCore.Providers.RouteResolver do
               "invalid reasoning_effort: #{inspect(value)}; " <>
                 "expected one of #{inspect(ReasoningEffort.levels())}"
     end
+  end
+
+  defp resolve_codex_fast(opts) do
+    value =
+      case Keyword.fetch(opts, :fast) do
+        {:ok, fast} ->
+          fast
+
+        :error ->
+          case Config.provider(:openai_codex) do
+            {:ok, cfg} -> Keyword.get(cfg, :fast)
+            {:error, :not_configured} -> nil
+          end
+      end
+
+    validate_fast!(value)
+    value
+  end
+
+  defp validate_fast!(nil), do: :ok
+  defp validate_fast!(value) when is_boolean(value), do: :ok
+
+  defp validate_fast!(value) do
+    raise ArgumentError, "invalid Codex fast mode: #{inspect(value)}; expected true or false"
   end
 end

@@ -21,7 +21,9 @@ defmodule FermixCore.Sandbox.CommandCapabilitiesTest do
     %{registry: name}
   end
 
-  test "registers explicit command capabilities and passes only declared env", %{registry: registry} do
+  test "registers explicit command capabilities and passes only declared env", %{
+    registry: registry
+  } do
     System.put_env("FERMIX_TEST_SECRET", "visible")
     System.put_env("FERMIX_OTHER_SECRET", "hidden")
 

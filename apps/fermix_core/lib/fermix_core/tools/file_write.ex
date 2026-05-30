@@ -54,7 +54,10 @@ defmodule FermixCore.Tools.FileWrite do
     [
       %{tag: "missing_parameters", description: "path or content is absent"},
       %{tag: "invalid_path", description: "path is blank or contains null bytes"},
-      %{tag: "sandbox_denied", description: "resolved path is outside sandbox roots or protected"},
+      %{
+        tag: "sandbox_denied",
+        description: "resolved path is outside sandbox roots or protected"
+      },
       %{tag: "write_failed", description: "filesystem write failed"}
     ]
   end

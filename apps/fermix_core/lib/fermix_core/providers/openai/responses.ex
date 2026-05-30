@@ -160,8 +160,12 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
-    Logger.error("OpenAI Responses API error: #{status} - #{inspect(body)}")
-    {:error, "OpenAI Responses API error: #{status}"}
+    if ResponsesShared.context_length_error?(body) do
+      {:error, :context_length_exceeded}
+    else
+      Logger.error("OpenAI Responses API error: #{status} - #{inspect(body)}")
+      {:error, "OpenAI Responses API error: #{status}"}
+    end
   end
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do

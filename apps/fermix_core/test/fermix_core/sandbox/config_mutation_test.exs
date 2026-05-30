@@ -51,7 +51,8 @@ defmodule FermixCore.Sandbox.ConfigMutationTest do
     assert {:error, {:unsafe_root, ^etc}} = ConfigMutation.add_allowed_root(config, "/etc")
     canonical_home = PathPolicy.canonical_path(home)
 
-    assert {:error, {:unsafe_root, ^canonical_home}} = ConfigMutation.add_allowed_root(config, home)
+    assert {:error, {:unsafe_root, ^canonical_home}} =
+             ConfigMutation.add_allowed_root(config, home)
 
     canonical_fermix_home = PathPolicy.canonical_path(fermix_home)
 

@@ -56,6 +56,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai_codex))
 
     include = codex_include(reasoning)
+    service_tier = codex_service_tier(Keyword.get(opts, :fast))
     text = text_field(opts)
 
     body =
@@ -69,6 +70,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:include, include)
+      |> maybe_put(:service_tier, service_tier)
       |> maybe_put(:text, text)
 
     turn_state = %{
@@ -79,6 +81,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       instructions: resolved_instructions,
       agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort,
+      fast: Keyword.get(opts, :fast, false) == true,
       request_metrics:
         ResponsesShared.request_metrics(input, resolved_instructions, tools, capabilities)
     }
@@ -107,6 +110,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       codex_reasoning(ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai_codex))
 
     include = codex_include(reasoning)
+    service_tier = codex_service_tier(Keyword.get(opts, :fast))
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ replayable_output_items(output_items) ++ outputs
@@ -122,6 +126,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:include, include)
+      |> maybe_put(:service_tier, service_tier)
       |> maybe_put(:text, text)
 
     turn_state = %{
@@ -132,6 +137,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       instructions: instructions,
       agent: Keyword.get(opts, :agent),
       reasoning_effort: reasoning_effort,
+      fast: Keyword.get(opts, :fast, false) == true,
       request_metrics: ResponsesShared.request_metrics(next_input, instructions, tools, caps)
     }
 
@@ -295,7 +301,11 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
-    log_api_error(status, body)
+    if ResponsesShared.context_length_error?(body) do
+      {:error, :context_length_exceeded}
+    else
+      log_api_error(status, body)
+    end
   end
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
@@ -388,6 +398,15 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       nil -> nil
       format -> %{format: format}
     end
+  end
+
+  # Codex fast mode is a product-facing boolean in Fermix. The Codex/Responses
+  # request expresses it as priority service tier.
+  defp codex_service_tier(true), do: "priority"
+  defp codex_service_tier(value) when value in [false, nil], do: nil
+
+  defp codex_service_tier(value) do
+    raise ArgumentError, "invalid Codex fast mode: #{inspect(value)}; expected true or false"
   end
 
   defp codex_reasoning(nil), do: nil
@@ -535,7 +554,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         model: turn_state.model,
         status: status,
         tokens: tokens,
-        reasoning_effort: Map.get(turn_state, :reasoning_effort)
+        reasoning_effort: Map.get(turn_state, :reasoning_effort),
+        fast: Map.get(turn_state, :fast, false)
       }
       |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
       |> maybe_put(:agent, Map.get(turn_state, :agent))

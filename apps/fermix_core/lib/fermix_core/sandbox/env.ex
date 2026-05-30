@@ -153,13 +153,16 @@ defmodule FermixCore.Sandbox.Env do
     output
     |> trim_one_trailing_newline()
     |> case do
-      "" -> {:error, :empty_env_command_output}
+      "" ->
+        {:error, :empty_env_command_output}
+
       value when is_binary(value) ->
         if String.contains?(value, ["\n", "\r"]),
           do: {:error, :env_command_output_not_single_value},
           else: {:ok, value}
 
-      value -> {:ok, value}
+      value ->
+        {:ok, value}
     end
   end
 

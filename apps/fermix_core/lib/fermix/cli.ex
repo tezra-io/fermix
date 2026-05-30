@@ -87,6 +87,7 @@ defmodule Fermix.CLI do
       fermix setup [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex] [--openai-api-key VALUE]
                    [--provider openai|openai_codex|anthropic]
                    [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
+                   [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]

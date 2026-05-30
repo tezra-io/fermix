@@ -872,6 +872,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :reasoning_effort,
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
+    |> put_if_present(:fast, normalize_bool(lookup(config, "fast", :fast)))
   end
 
   defp normalize_anthropic(nil), do: []
@@ -1032,6 +1033,9 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp migrate_reasoning_effort(value) when value in [:minimal, "minimal"], do: :low
   defp migrate_reasoning_effort(value), do: value
+
+  defp normalize_bool(value) when is_boolean(value), do: value
+  defp normalize_bool(_value), do: nil
 
   defp has_provider_key?(config) when is_map(config) do
     Map.has_key?(config, "provider") or Map.has_key?(config, :provider)

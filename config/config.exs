@@ -44,7 +44,7 @@ config :fermix_core,
       default_temperature: 0.7
     ]
   ],
-  max_conversation_history: 50,
+  max_conversation_history: :infinity,
   context_window_limit: 120_000
 
 config :fermix_core, :memory,

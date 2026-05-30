@@ -107,7 +107,10 @@ defmodule FermixCore.Capabilities.MCP.Config do
     server = Map.get(sections, :server, %{})
     tools = Map.get(sections, :tools, %{})
 
-    reject_removed_server_key!(name, server, "approved",
+    reject_removed_server_key!(
+      name,
+      server,
+      "approved",
       "MCP tools are visible to the agent by default. To hide a specific tool, set " <>
         "`[mcp.servers.#{name}.tools.<tool>] hidden_from_agent = true`."
     )

@@ -294,6 +294,42 @@ defmodule FermixCore.Providers.RouteResolverTest do
       end
     end
 
+    test "Codex resolver reads fast mode from the openai_codex config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [],
+          openai_codex: [fast: true]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
+
+        assert opts[:fast] == true
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test "explicit Codex fast mode overrides the openai_codex config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openai: [],
+          openai_codex: [fast: true]
+        )
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5", fast: false)
+
+        assert opts[:fast] == false
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
     test "Codex resolver does not expose a store override because Codex requires store=false" do
       original_providers = Application.get_env(:fermix_core, :providers, [])
 

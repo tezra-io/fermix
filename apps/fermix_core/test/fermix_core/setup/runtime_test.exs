@@ -715,6 +715,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(agent, :provider) == :openai_codex
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+      assert Keyword.get(codex_block, :fast) == false
     end
 
     test "provided channel flags do not suppress missing provider/model prompts" do
@@ -768,6 +769,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Enum.any?(labels, &String.starts_with?(&1, "Provider"))
       assert Enum.any?(labels, &String.starts_with?(&1, "Default model"))
       assert Enum.any?(labels, &String.starts_with?(&1, "Reasoning effort"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Codex fast mode"))
 
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
       agent = snapshot.fermix_core |> Keyword.get(:agent, [])
@@ -777,6 +779,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(agent, :provider) == :openai_codex
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+      assert Keyword.get(codex_block, :fast) == false
     end
 
     test "blank model and effort answers use the selected provider defaults" do

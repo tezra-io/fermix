@@ -166,6 +166,7 @@ defmodule FermixCore.Sandbox.ConfigMutation do
          updated = Map.put(snapshot, :sandbox, Config.to_keyword(config)),
          :ok <- ConfigStore.save_snapshot(updated) do
       ConfigStore.apply_snapshot(updated)
+
       with :ok <- maybe_write_grant_record(opts) do
         refresh_command_capabilities(config)
       end

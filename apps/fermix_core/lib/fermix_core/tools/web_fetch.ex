@@ -73,7 +73,8 @@ defmodule FermixCore.Tools.WebFetch do
         {:ok, %{url: url, pinned_ip: nil}}
 
       {:ok, ip} ->
-        {:ok, %{url: rewrite_url_with_ip(url, ip), pinned_ip: ip, original_host: original_host(url)}}
+        {:ok,
+         %{url: rewrite_url_with_ip(url, ip), pinned_ip: ip, original_host: original_host(url)}}
 
       {:error, _reason} = err ->
         err
@@ -195,7 +196,8 @@ defmodule FermixCore.Tools.WebFetch do
     base_request_options(context, %{url: nil, pinned_ip: nil, original_host: nil})
   end
 
-  defp maybe_put_host_header(headers, %{original_host: host}) when is_binary(host) and host != "" do
+  defp maybe_put_host_header(headers, %{original_host: host})
+       when is_binary(host) and host != "" do
     [{"host", host} | headers]
   end
 
