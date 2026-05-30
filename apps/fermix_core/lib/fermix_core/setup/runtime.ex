@@ -25,6 +25,7 @@ defmodule FermixCore.Setup.Runtime do
     :provider,
     :default_model,
     :reasoning_effort,
+    :fast,
     :realtime_enabled,
     :realtime_api_key,
     :realtime_voice,
@@ -384,9 +385,17 @@ defmodule FermixCore.Setup.Runtime do
   end
 
   defp collect_answers(report, opts, prompt) do
-    provided = provided_answers(opts)
+    provided = opts |> provided_answers() |> default_codex_fast()
 
     collect_answers(report, opts, prompt, provided, MapSet.new())
+  end
+
+  defp default_codex_fast(answers) do
+    if Keyword.get(answers, :fast) == nil and selected_provider(answers) == :openai_codex do
+      Keyword.put(answers, :fast, false)
+    else
+      answers
+    end
   end
 
   defp collect_answers(report, opts, prompt, answers, seen_keys) do
@@ -447,6 +456,10 @@ defmodule FermixCore.Setup.Runtime do
 
   defp irrelevant_prompt?(%{key: :reasoning_effort}, answers) do
     selected_provider(answers) == :anthropic
+  end
+
+  defp irrelevant_prompt?(%{key: :fast}, answers) do
+    selected_provider(answers) not in [nil, :openai_codex]
   end
 
   defp irrelevant_prompt?(%{key: :realtime_api_key}, answers) do

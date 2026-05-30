@@ -120,6 +120,54 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     end)
   end
 
+  @context_length_markers [
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "too many tokens",
+    "prompt is too long",
+    "reduce the length"
+  ]
+
+  @doc """
+  True if an OpenAI-family error `body` (a decoded map or a JSON string) is a
+  context-length / too-many-tokens error. Shared by the Codex and Responses
+  adapters so a turn that overflows the model's context window surfaces a clear,
+  actionable reason (start a fresh session / compact) instead of a generic API
+  error.
+  """
+  @spec context_length_error?(term()) :: boolean()
+  def context_length_error?(body) do
+    # `error` may be a map (`%{"code" => ..., "message" => ...}`), a bare string
+    # (`%{"error" => "boom"}`), or absent — only the map shape carries a
+    # context-length signal, so other shapes are simply "not a context error".
+    case decode_error_body(body) do
+      %{"error" => %{} = error} ->
+        error["code"] == "context_length_exceeded" or context_length_message?(error["message"])
+
+      _other ->
+        false
+    end
+  end
+
+  defp context_length_message?(message) when is_binary(message) do
+    downcased = String.downcase(message)
+    Enum.any?(@context_length_markers, &String.contains?(downcased, &1))
+  end
+
+  defp context_length_message?(_message), do: false
+
+  defp decode_error_body(body) when is_map(body), do: body
+
+  defp decode_error_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _not_json -> %{}
+    end
+  end
+
+  defp decode_error_body(_body), do: %{}
+
   defp encoded_size(value) do
     value
     |> Jason.encode_to_iodata!()

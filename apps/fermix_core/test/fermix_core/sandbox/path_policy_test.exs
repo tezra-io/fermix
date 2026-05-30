@@ -42,7 +42,8 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
       root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-private")
       config = Config.normalize(mode: :strict, workspace_root: root)
 
-      assert {:error, {:protected_path, _path}} = PathPolicy.allowed_path?("/private/etc/passwd", config)
+      assert {:error, {:protected_path, _path}} =
+               PathPolicy.allowed_path?("/private/etc/passwd", config)
 
       FermixTestSupport.SafeRm.rm_rf!(root)
     end

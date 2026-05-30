@@ -25,7 +25,11 @@ defmodule FermixCore.SandboxTest do
              Sandbox.enforce(:exec, %{operation: :command_capability, working_dir: root}, context)
 
     assert {:deny, {:outside_root, ^canonical_outside}} =
-             Sandbox.enforce(:exec, %{operation: :command_capability, working_dir: outside}, context)
+             Sandbox.enforce(
+               :exec,
+               %{operation: :command_capability, working_dir: outside},
+               context
+             )
 
     FermixTestSupport.SafeRm.rm_rf!(root)
     FermixTestSupport.SafeRm.rm_rf!(outside)

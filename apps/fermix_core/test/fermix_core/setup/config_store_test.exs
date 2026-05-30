@@ -781,7 +781,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             default_model: "gpt-5.5",
             reasoning_effort: :high
           ],
-          openai_codex: [default_model: "gpt-5.5", reasoning_effort: :xhigh, store: true],
+          openai_codex: [
+            default_model: "gpt-5.5",
+            reasoning_effort: :xhigh,
+            fast: true,
+            store: true
+          ],
           anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-7"]
         ],
         agent: [name: "fermix", provider: :openai_codex]
@@ -798,6 +803,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ ~s(reasoning_effort = "high")
     assert contents =~ "[fermix_core.providers.openai_codex]"
     assert contents =~ ~s(reasoning_effort = "xhigh")
+    assert contents =~ "fast = true"
     refute contents =~ "store ="
     assert contents =~ "[fermix_core.providers.anthropic]"
     assert contents =~ ~s(default_model = "claude-opus-4-7")
@@ -812,6 +818,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     openai_codex = Keyword.get(providers, :openai_codex, [])
     assert Keyword.get(openai_codex, :default_model) == "gpt-5.5"
     assert Keyword.get(openai_codex, :reasoning_effort) == :xhigh
+    assert Keyword.get(openai_codex, :fast) == true
     refute Keyword.has_key?(openai_codex, :store)
 
     anthropic = Keyword.get(providers, :anthropic, [])

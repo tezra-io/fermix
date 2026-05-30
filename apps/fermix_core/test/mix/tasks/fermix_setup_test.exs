@@ -214,6 +214,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert Keyword.get(agent, :provider) == :openai_codex
     assert Keyword.get(codex, :default_model) == "gpt-5.5"
     assert Keyword.get(codex, :reasoning_effort) == :high
+    assert Keyword.get(codex, :fast) == false
   end
 
   defp restart_global_memory_repo! do
