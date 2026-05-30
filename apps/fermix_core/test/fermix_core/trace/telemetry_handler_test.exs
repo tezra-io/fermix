@@ -138,6 +138,26 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["direction"] == "inbound"
   end
 
+  test "channel:reply event creates a reply_delivery agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :channel, :reply],
+      %{duration_us: 1200},
+      %{channel: "telegram", reply_type: :text, status: :ok}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "reply_delivery"))
+    assert entry["agent"] == "telegram"
+    assert entry["reply_type"] == "text"
+    assert entry["status"] == "ok"
+    assert entry["duration_us"] == 1200
+  end
+
   test "telemetry data merges measurements and metadata", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :provider, :call],
