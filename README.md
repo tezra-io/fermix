@@ -22,7 +22,7 @@ Fermix is a persistent multi-agent runtime that survives reboots and talks to yo
 ## Quick start
 
 ```bash
-brew install tezra-io/homebrew-tap/fermix
+brew install tezra-io/tap/fermix
 fermix setup
 fermix start
 ```
@@ -39,7 +39,7 @@ fermix: running (pid 12345, version 0.1.0, up 4s)
 ### Homebrew (macOS, Linux)
 
 ```bash
-brew install tezra-io/homebrew-tap/fermix
+brew install tezra-io/tap/fermix
 ```
 
 ### curl | sh
@@ -52,7 +52,20 @@ The installer detects your `(os, arch)`, downloads the matching signed release a
 
 ### Build from source
 
-For contributors and anyone who wants to run against unreleased code. See [Develop](#develop).
+Requires Elixir ≥ 1.19, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.x — Burrito uses it to package the self-contained binary.
+
+```bash
+git clone https://github.com/tezra-io/fermix.git
+cd fermix
+mix deps.get
+# Builds a self-contained binary into burrito_out/. Targets: macos_aarch64,
+# macos_x86_64, linux_aarch64, linux_x86_64 — omit BURRITO_TARGET to build all four.
+BURRITO_TARGET=macos_aarch64 MIX_ENV=prod mix release fermix --overwrite
+install -m 0755 burrito_out/fermix_macos_aarch64 /usr/local/bin/fermix
+fermix setup
+```
+
+To run against unreleased code without packaging a binary, use [`mix fermix.dev`](#develop) instead.
 
 ## Configure
 
@@ -172,7 +185,7 @@ max_estimated_cost_cents_per_session = 100
 persist_transcripts = false
 ```
 
-The companion source lives at `clients/macos/FermixPet` and is built locally:
+The companion is a native macOS app (SwiftUI) — there is no iOS version and no prebuilt download yet, so build it from source (requires the Xcode command-line tools). Source lives at `clients/macos/FermixPet`:
 
 ```bash
 cd clients/macos/FermixPet
