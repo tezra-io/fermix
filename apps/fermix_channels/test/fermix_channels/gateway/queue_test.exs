@@ -42,7 +42,11 @@ defmodule FermixChannels.Gateway.QueueTest do
       end
     end
 
-    def finalize(_msg, _turn_state), do: :ok
+    def commit(_msg, turn_state, response) do
+      send(turn_state.test_pid, {:committed, response})
+      :ok
+    end
+
     def error_reply(_reason), do: "error reply"
   end
 
@@ -134,7 +138,11 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:turn_started, "second", second_pid}, 5_000
       send(second_pid, {:proceed, :reply})
       assert_receive {:reply, "reply:second"}, 5_000
+      assert_receive {:committed, "reply:second"}, 5_000
+
+      # The superseded turn neither replies nor commits assistant history.
       refute_receive {:reply, "reply:first"}, 200
+      refute_receive {:committed, "reply:first"}, 200
     end
 
     test "runs different conversations independently", ctx do
@@ -249,11 +257,10 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:reply, "reply:hello"}, 5_000
 
       assert_receive {:telemetry, [:fermix, :gateway, :queue, :request_complete], measurements,
-                      metadata},
+                      %{request_id: 1, reason: :normal}},
                      5_000
 
       assert measurements.duration_us >= 0
-      assert metadata.reason == :normal
     end
   end
 

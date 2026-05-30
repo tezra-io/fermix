@@ -62,18 +62,6 @@ defmodule FermixChannels.Gateway.Queue do
     GenServer.call(server, :status)
   end
 
-  @doc """
-  Whether a turn's reply may still be delivered: true only if it is the active
-  request for its conversation and no newer message has superseded it. The turn
-  task checks this before delivering, so a superseded turn's reply is rejected
-  before delivery. (Cancellation also kills the task; this guards the
-  post-`run` race.)
-  """
-  @spec deliverable?(GenServer.server(), ConversationKey.t(), pos_integer()) :: boolean()
-  def deliverable?(server, conversation_key, request_id) do
-    GenServer.call(server, {:deliverable?, conversation_key, request_id})
-  end
-
   # --- GenServer Callbacks ---
 
   @impl true
@@ -83,7 +71,11 @@ defmodule FermixChannels.Gateway.Queue do
       turn_runner: Keyword.get(opts, :turn_runner, TurnRunner),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       conversations: %{},
-      task_refs: %{}
+      task_refs: %{},
+      # Per-conversation generation (the latest accepted request_id), readable by
+      # turn tasks lock-free so the final freshness check never blocks on this
+      # GenServer.
+      generations: :ets.new(:gateway_generations, [:public, :set, read_concurrency: true])
     }
 
     {:ok, state}
@@ -109,16 +101,6 @@ defmodule FermixChannels.Gateway.Queue do
   @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_from_state(state), state}
-  end
-
-  def handle_call({:deliverable?, conversation_key, request_id}, _from, state) do
-    deliverable =
-      case Map.get(state.conversations, conversation_key) do
-        %{active: %{request_id: ^request_id}, pending: nil} -> true
-        _conversation -> false
-      end
-
-    {:reply, deliverable, state}
   end
 
   @impl true
@@ -151,6 +133,10 @@ defmodule FermixChannels.Gateway.Queue do
       |> Map.update!(:next_request_id, &(&1 + 1))
 
     pending = %{request_id: conversation.next_request_id, message: msg}
+
+    # Bump the conversation's generation so any in-flight older turn sees itself
+    # superseded (a lock-free read) and suppresses its stale reply + commit.
+    :ets.insert(state.generations, {conversation_key, conversation.next_request_id})
 
     put_conversation_runtime(state, conversation_key, %{conversation | pending: pending})
   end
@@ -191,7 +177,14 @@ defmodule FermixChannels.Gateway.Queue do
          %{request_id: request_id, message: msg}
        ) do
     task =
-      turn_task(state.main_agent, state.turn_runner, self(), conversation_key, request_id, msg)
+      turn_task(
+        state.main_agent,
+        state.turn_runner,
+        state.generations,
+        conversation_key,
+        request_id,
+        msg
+      )
 
     case Task.Supervisor.start_child(state.task_supervisor, task) do
       {:ok, pid} ->
@@ -208,13 +201,11 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   # The turn task: checkout the turn-state snapshot, type while the core turn
-  # runs, deliver its returned reply (rejecting it if a newer message superseded
-  # this turn), then finalize (memory review + auto-compaction). Checkout runs
-  # HERE, in the task — not in the queue loop — so a slow runtime-context build
-  # (cold start or a post-invalidation cache miss) never blocks other
-  # conversations from enqueuing/canceling. Finalize runs after delivery so
-  # compaction never delays the reply, and only on the success path.
-  defp turn_task(main_agent, runner, queue, conversation_key, request_id, msg) do
+  # runs, then — only if the turn is still current — deliver its reply and commit
+  # the assistant history. Checkout runs HERE, in the task (not the queue loop),
+  # so a slow runtime-context build never blocks other conversations; the
+  # freshness check is a lock-free generation read (no call back into the queue).
+  defp turn_task(main_agent, runner, generations, conversation_key, request_id, msg) do
     typing_fn = Map.get(msg, :typing_fn)
 
     typing_opts = [
@@ -225,7 +216,7 @@ defmodule FermixChannels.Gateway.Queue do
     turn = %{
       main_agent: main_agent,
       runner: runner,
-      queue: queue,
+      generations: generations,
       conversation_key: conversation_key,
       request_id: request_id,
       deliver: Map.fetch!(msg, :reply_fn),
@@ -262,8 +253,12 @@ defmodule FermixChannels.Gateway.Queue do
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
     case runner.run(core_msg, turn_state, turn.deliver) do
       {:ok, response} ->
-        maybe_deliver(turn, response)
-        runner.finalize(core_msg, turn_state)
+        # Deliver and commit the assistant history together, and only if still
+        # current — so a superseded turn neither replies nor pollutes history.
+        if current?(turn) do
+          turn.deliver.({:text, response})
+          runner.commit(core_msg, turn_state, response)
+        end
 
       {:error, reason} ->
         maybe_deliver(turn, runner.error_reply(reason))
@@ -271,11 +266,19 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   defp maybe_deliver(turn, text) do
-    if deliverable?(turn.queue, turn.conversation_key, turn.request_id) do
-      turn.deliver.({:text, text})
-    else
-      :ok
+    if current?(turn), do: turn.deliver.({:text, text}), else: :ok
+  end
+
+  # Lock-free freshness check: the turn is current unless a newer message bumped
+  # the conversation's generation. Reads ETS directly — never a GenServer.call
+  # into this queue — so a finished reply is not delayed behind queue work.
+  defp current?(%{generations: generations, conversation_key: conversation_key, request_id: id}) do
+    case :ets.lookup(generations, conversation_key) do
+      [{^conversation_key, latest}] -> latest == id
+      [] -> true
     end
+  rescue
+    ArgumentError -> true
   end
 
   defp deliver_checkout_error(turn, reason) do
@@ -351,6 +354,7 @@ defmodule FermixChannels.Gateway.Queue do
   defp completion_reason(_other), do: :crashed
 
   defp put_conversation_runtime(state, conversation_key, %{active: nil, pending: nil}) do
+    :ets.delete(state.generations, conversation_key)
     update_in(state.conversations, &Map.delete(&1, conversation_key))
   end
 
