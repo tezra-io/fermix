@@ -7,6 +7,7 @@ defmodule Fermix.CLI.DoctorTest do
 
   test "without --full, prints a report and exits with a valid status" do
     test_self = self()
+    ensure_fermix_on_path()
 
     output =
       capture_io(fn ->
@@ -45,5 +46,37 @@ defmodule Fermix.CLI.DoctorTest do
 
     assert status == 1
     assert output =~ "invalid options"
+  end
+
+  # `fermix doctor` resolves the installed binary path; under `mix test` there
+  # is no Burrito wrapper and a clean runner has no `fermix` on PATH, so the
+  # service check would raise. Provide a throwaway executable so the resolver
+  # succeeds on any host. No-op when a real `fermix` is already installed.
+  defp ensure_fermix_on_path do
+    if System.find_executable("fermix") do
+      :ok
+    else
+      bin_dir =
+        Path.join(System.tmp_dir!(), "fermix-doctor-bin-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(bin_dir)
+      fake = Path.join(bin_dir, "fermix")
+      File.write!(fake, "#!/bin/sh\nexit 0\n")
+      File.chmod!(fake, 0o755)
+
+      original_path = System.get_env("PATH")
+      System.put_env("PATH", "#{bin_dir}:#{original_path}")
+
+      on_exit(fn ->
+        case original_path do
+          nil -> System.delete_env("PATH")
+          value -> System.put_env("PATH", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(bin_dir)
+      end)
+
+      :ok
+    end
   end
 end

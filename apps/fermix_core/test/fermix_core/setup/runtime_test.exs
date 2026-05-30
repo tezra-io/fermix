@@ -15,6 +15,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     fermix_home = System.get_env("FERMIX_HOME")
+    openai_api_key = System.get_env("OPENAI_API_KEY")
 
     on_exit(fn ->
       restore(:fermix_core, :providers, providers)
@@ -28,6 +29,11 @@ defmodule FermixCore.Setup.RuntimeTest do
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
         value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      case openai_api_key do
+        nil -> System.delete_env("OPENAI_API_KEY")
+        value -> System.put_env("OPENAI_API_KEY", value)
       end
     end)
 
@@ -244,6 +250,10 @@ defmodule FermixCore.Setup.RuntimeTest do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
+      # The probe reads the openai api_key from provider config. On hosts with
+      # an OS secret writer it round-trips via the keystore, but CI has none —
+      # supply it via the OS-env overlay so the probe runs on every platform.
+      System.put_env("OPENAI_API_KEY", "sk-test")
 
       {puts, collector} = puts_collector()
       probe_plug = fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end
@@ -263,6 +273,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
+      System.put_env("OPENAI_API_KEY", "sk-bad")
 
       {puts, _collector} = puts_collector()
       probe_plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
@@ -282,6 +293,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
+      System.put_env("OPENAI_API_KEY", "sk-test")
 
       {puts, collector} = puts_collector()
       probe_plug = fn conn -> Plug.Conn.send_resp(conn, 503, "service unavailable") end
