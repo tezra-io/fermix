@@ -59,7 +59,7 @@ defmodule FermixCore.Introspection.CapabilitiesTest do
         capability("coding", :skill, :exec, %{
           skill: "coding",
           trust: :trusted,
-          source_path: "/Users/sujshe/.fermix/skills/coding/SKILL.md",
+          source_path: "/Users/example/.fermix/skills/coding/SKILL.md",
           api_key: "secret"
         })
       )
