@@ -53,30 +53,26 @@ defmodule Fermix.CLI.DoctorTest do
   # service check would raise. Provide a throwaway executable so the resolver
   # succeeds on any host. No-op when a real `fermix` is already installed.
   defp ensure_fermix_on_path do
-    if System.find_executable("fermix") do
-      :ok
-    else
-      bin_dir =
-        Path.join(System.tmp_dir!(), "fermix-doctor-bin-#{System.unique_integer([:positive])}")
+    if System.find_executable("fermix"), do: :ok, else: install_fake_fermix()
+  end
 
-      File.mkdir_p!(bin_dir)
-      fake = Path.join(bin_dir, "fermix")
-      File.write!(fake, "#!/bin/sh\nexit 0\n")
-      File.chmod!(fake, 0o755)
+  defp install_fake_fermix do
+    bin_dir =
+      Path.join(System.tmp_dir!(), "fermix-doctor-bin-#{System.unique_integer([:positive])}")
 
-      original_path = System.get_env("PATH")
-      System.put_env("PATH", "#{bin_dir}:#{original_path}")
+    File.mkdir_p!(bin_dir)
+    fake = Path.join(bin_dir, "fermix")
+    File.write!(fake, "#!/bin/sh\nexit 0\n")
+    File.chmod!(fake, 0o755)
 
-      on_exit(fn ->
-        case original_path do
-          nil -> System.delete_env("PATH")
-          value -> System.put_env("PATH", value)
-        end
+    original_path = System.get_env("PATH")
+    System.put_env("PATH", "#{bin_dir}:#{original_path}")
+    on_exit(fn -> restore_path_and_cleanup(original_path, bin_dir) end)
+    :ok
+  end
 
-        FermixTestSupport.SafeRm.rm_rf!(bin_dir)
-      end)
-
-      :ok
-    end
+  defp restore_path_and_cleanup(original_path, bin_dir) do
+    if original_path, do: System.put_env("PATH", original_path), else: System.delete_env("PATH")
+    FermixTestSupport.SafeRm.rm_rf!(bin_dir)
   end
 end
