@@ -34,8 +34,15 @@ defmodule FermixCore.Memory.Extractor do
                owner_id: ctx.owner_id,
                conversation_key: ctx.conversation_key,
                chat_mode: ctx.chat_mode,
+               source_trust: ctx.source_trust,
                repo: ctx.repo,
-               min_confidence: ctx.min_confidence
+               min_confidence: ctx.min_confidence,
+               source_id: ctx.source_id,
+               source_type: ctx.source_type,
+               source_name: ctx.source_name,
+               source_description: ctx.source_description,
+               session_id: ctx.session_id,
+               run_id: ctx.run_id
              ),
            {:ok, persisted} <- persist_admitted(admission.admitted, ctx.memory_store, ctx.repo) do
         maybe_request_rebuild(admission, ctx, persisted)
@@ -73,6 +80,7 @@ defmodule FermixCore.Memory.Extractor do
       owner_id: Keyword.fetch!(opts, :owner_id),
       conversation_key: Keyword.fetch!(opts, :conversation_key),
       chat_mode: Keyword.get(opts, :chat_mode, :direct),
+      source_trust: Keyword.get(opts, :source_trust),
       memory_store: Keyword.get(opts, :memory_store, Store),
       scheduler: Keyword.get(opts, :scheduler, Scheduler),
       repo: Keyword.get(opts, :repo, Config.repo_server(opts)),
@@ -81,7 +89,13 @@ defmodule FermixCore.Memory.Extractor do
       model: Config.extraction_model(opts),
       route_key: Keyword.get(opts, :route_key),
       adapter: Keyword.get(opts, :adapter),
-      adapter_opts: Keyword.get(opts, :adapter_opts, [])
+      adapter_opts: Keyword.get(opts, :adapter_opts, []),
+      source_id: Keyword.get(opts, :source_id),
+      source_type: Keyword.get(opts, :source_type),
+      source_name: Keyword.get(opts, :source_name),
+      source_description: Keyword.get(opts, :source_description),
+      session_id: Keyword.get(opts, :session_id),
+      run_id: Keyword.get(opts, :run_id)
     }
   end
 

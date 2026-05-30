@@ -44,16 +44,19 @@ config :fermix_core,
       default_temperature: 0.7
     ]
   ],
-  max_conversation_history: 50,
+  max_conversation_history: :infinity,
   context_window_limit: 120_000
 
 config :fermix_core, :memory,
   enabled: true,
   extraction_enabled: true,
-  extraction_debounce_seconds: 60,
-  extraction_timeout_ms: 5_000,
+  extraction_timeout_ms: 90_000,
   extraction_context_messages: 12,
   extraction_min_confidence: 0.75,
+  review_interval_hours: 24,
+  review_max_messages: 40,
+  review_input_token_budget: 4_000,
+  review_failure_backoff_ms: 300_000,
   database_path: Path.expand("~/.fermix/memory.db"),
   prompt_base_dir: Path.expand("~/.fermix/memory"),
   prompt_user_token_cap: 800,
@@ -61,7 +64,6 @@ config :fermix_core, :memory,
   compaction_enabled: true,
   compaction_token_budget: 8_000,
   checkpoint_persistence_enabled: true,
-  prompt_files_rebuild_hours: 12,
   scheduler_enabled: true,
   loop_detection_window: 10,
   loop_detection_warn_threshold: 3,
@@ -75,11 +77,11 @@ config :fermix_core, :jobs,
   default_timeout_ms: 1_800_000,
   delivery_timeout_ms: 60_000,
   delivery_channels: %{
-    "telegram" => FermixChannels.Telegram,
-    "slack" => FermixChannels.Slack,
-    "discord" => FermixChannels.Discord,
-    "signal" => FermixChannels.Signal,
-    "whatsapp" => FermixChannels.WhatsApp,
+    "telegram" => FermixChannels.Channels.Telegram,
+    "slack" => FermixChannels.Channels.Slack,
+    "discord" => FermixChannels.Channels.Discord,
+    "signal" => FermixChannels.Channels.Signal,
+    "whatsapp" => FermixChannels.Channels.WhatsApp,
     "cli" => FermixChannels.CLI
   }
 
@@ -93,31 +95,24 @@ config :fermix_core, :transcription,
 
 config :fermix_channels,
   telegram: [
-    enabled: true,
-    allowed_user_ids: []
+    enabled: true
   ],
   whatsapp: [
     enabled: false,
     mode: :webhook,
-    webhook_path: "/webhook/whatsapp",
-    # WhatsApp allowlists sender phone numbers only; it does not use allowed_user_ids.
-    allowed_sender_ids: []
+    webhook_path: "/webhook/whatsapp"
   ],
   discord: [
     enabled: false,
-    mode: :gateway,
-    allowed_user_ids: []
+    mode: :gateway
   ],
   slack: [
     enabled: false,
-    mode: :webhook,
-    allowed_user_ids: []
+    mode: :webhook
   ],
   signal: [
     enabled: false,
-    mode: :subprocess,
-    # Signal allowlists sender phone numbers only; it does not use allowed_user_ids.
-    allowed_sender_ids: []
+    mode: :subprocess
   ]
 
 config :fermix_core, :trace, base_dir: Path.expand("~/.fermix/traces")

@@ -12,8 +12,8 @@ Fermix is an Elixir-native multi-agent platform that runs as a single OS daemon.
 
 - Channels deliver user messages into Fermix.
 - The main agent owns the conversation and calls provider adapters for model turns.
-- The agent loop executes capabilities from one registry: Fermix built-in tools, installed skills, and MCP tools.
-- Skills are sub-agents loaded from `SKILL.md` files. They run with trust and policy filters.
+- The agent loop executes capabilities from one registry: Fermix built-in tools and MCP tools.
+- Skills are instruction packages loaded from `SKILL.md` files. The runtime prompt shows a compact Skill Catalog; use `skill_view` to load full instructions and `skill_run` when a skill should execute as a delegated sub-agent.
 - Memory stores owner-scoped durable facts and source-aware job memories.
 - Scheduled jobs run isolated bounded agent loops and can write job-scoped memory.
 - Prompt bootstrap files provide identity, operating rules, user context, memory context, and generated runtime state.
@@ -28,13 +28,13 @@ Use `tool_help` when exact parameters, examples, or failure modes for one built-
 
 Built-ins ship with the binary and do not need installation. They are always present unless a future built-in explicitly requires setup and is not configured.
 
-Skills live under the Fermix skills directories. Core skills ship under `priv/skills`; local operator skills live under `~/.fermix/skills`; plugin skills live under `~/.fermix/skills/_plugins`. Skills can have their own instructions and allowed-tool boundaries.
+Skills live under the Fermix skills directories. Core skills ship under `priv/skills`; local operator skills live under `~/.fermix/skills`; enabled plugin skills are seeded under `~/.fermix/plugins/<plugin>/skills` and load with guest trust. Skills can have their own instructions and allowed-tool boundaries.
 
 ## What Fermix can do
 
 - Answer through configured provider adapters, including OpenAI, Codex, and Anthropic-compatible routes.
 - Use built-in tools for common operating verbs instead of falling back to shell.
-- Spawn skill sub-agents when a specialized skill is a better fit than direct handling.
+- Use the Skill Catalog to discover specialized instructions, then load them with `skill_view` or delegate execution with `skill_run`.
 - Schedule durable future work with `schedule_job` and manage those jobs with the job tools.
 - Store and recall durable memory with source provenance.
 - Expose status, health, logs, traces, and setup through the CLI and daemon surfaces.

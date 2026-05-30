@@ -5,11 +5,14 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   test "bundled self_knowledge skill loads as a core skill with no tools" do
     local =
-      Path.join(System.tmp_dir!(), "self-knowledge-local-#{System.unique_integer([:positive])}")
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-self-knowledge-local-#{System.unique_integer([:positive])}"
+      )
 
     core = Path.expand("../../../priv/skills", __DIR__)
     File.mkdir_p!(local)
-    on_exit(fn -> File.rm_rf!(local) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(local) end)
 
     registry =
       start_supervised!(
@@ -22,7 +25,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       )
 
     assert {:ok, definition} = SkillRegistry.load(registry, "self_knowledge")
-    assert definition.trust == :core
+    assert definition.trust == :operator
     assert definition.allowed_tools == []
     assert definition.system_prompt =~ "Fermix is"
     assert definition.system_prompt =~ "Built-in tools"

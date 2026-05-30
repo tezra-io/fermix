@@ -3,14 +3,14 @@ defmodule FermixCore.TraceTest do
 
   alias FermixCore.Trace
 
-  @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error]
+  @valid_types [:llm_call, :tool_exec, :agent_event, :channel_msg, :error, :sandbox_event]
 
   setup do
     tmp_dir = Path.join(System.tmp_dir!(), "fermix_trace_#{System.unique_integer([:positive])}")
     name = :"trace_test_#{System.unique_integer([:positive])}"
     start_supervised!({Trace, base_dir: tmp_dir, name: name})
 
-    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_dir) end)
 
     %{dir: tmp_dir, server: name}
   end

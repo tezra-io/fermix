@@ -4,6 +4,9 @@ defmodule FermixCore.Memory.Compactor do
 
   Checkpoint resource revisions are audit history only. M4.6 runtime behavior does not
   read checkpoints from the resource registry or support checkpoint rollback.
+
+  Over-budget compaction requires `route: {route_key, adapter_opts}`. There is no
+  hardcoded provider fallback; orphaned callers without a route fail loudly.
   """
 
   require Logger
@@ -11,7 +14,7 @@ defmodule FermixCore.Memory.Compactor do
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
-  alias FermixCore.Providers.OpenAI
+  alias FermixCore.Providers.Adapter
   alias FermixCore.Resource.Registry
 
   @type message :: map()
@@ -92,12 +95,15 @@ defmodule FermixCore.Memory.Compactor do
   end
 
   defp call_summary_provider(older, prior, budget, opts) do
-    provider = Keyword.get(opts, :provider, OpenAI)
-    model = Keyword.get(opts, :model, OpenAI.default_model())
+    {route_key, adapter_opts} = Keyword.fetch!(opts, :route)
+    adapter = Keyword.get(opts, :adapter) || Adapter.for_route(route_key)
 
-    case provider.chat(summary_prompt(older, prior, budget), model: model, temperature: 0.0) do
+    case adapter.chat(summary_prompt(older, prior, budget), [], adapter_opts) do
       {:ok, %{content: content}} when is_binary(content) ->
-        {:ok, String.trim(content)}
+        case String.trim(content) do
+          "" -> {:error, {:compaction_failed, :empty_summary}}
+          summary -> {:ok, summary}
+        end
 
       {:error, reason} ->
         {:error, {:compaction_failed, reason}}
@@ -125,8 +131,18 @@ defmodule FermixCore.Memory.Compactor do
     %{
       role: "system",
       content:
-        "Summarize older conversation context into one reusable checkpoint. " <>
-          "Preserve decisions, unresolved questions, durable facts, and active context."
+        """
+        Summarize the older conversation into one reusable checkpoint.
+
+        Messages are timestamped and in chronological order; later messages
+        supersede earlier ones. When information is updated, corrected, or a question
+        is later answered, keep only the latest state and drop what it replaced.
+        Never carry a question forward as open if it was resolved later.
+
+        Preserve decisions, durable facts, and context still active as of the most
+        recent messages. State each item once; do not repeat information.
+        """
+        |> String.trim()
     }
   end
 
@@ -322,7 +338,14 @@ defmodule FermixCore.Memory.Compactor do
   defp repo_server(_context), do: {:error, :missing_checkpoint_context}
 
   defp render_message(message) do
-    "[#{role(message)}] #{content(message)}"
+    "[#{render_timestamp(message)}#{role(message)}] #{content(message)}"
+  end
+
+  defp render_timestamp(message) do
+    case Map.get(message, :timestamp) || Map.get(message, "timestamp") do
+      %DateTime{} = timestamp -> "#{Calendar.strftime(timestamp, "%Y-%m-%d %H:%M")} "
+      _missing -> ""
+    end
   end
 
   defp message_text(message) do

@@ -8,10 +8,10 @@ defmodule Fermix.CLI.Doctor do
   - exit `0` when no checks failed (warnings allowed)
   - exit `1` when at least one check failed
 
-  `--full` opts into checks that hit the network — currently the
-  binary-integrity check (fetches `releases.json` and compares
-  sha256 against the manifest entry for the host's target) and the
-  upgrade-availability check.
+  `--full` opts into checks that hit the network — the binary-integrity
+  check (fetches `releases.json` and compares sha256 against the manifest
+  entry for the host's target), the upgrade-availability check, the
+  provider auth probe, and the web-search live probe.
   """
 
   alias Fermix.CLI.Doctor.Checks
@@ -38,7 +38,14 @@ defmodule Fermix.CLI.Doctor do
       Checks.service_unit(),
       Checks.daemon_socket(),
       Checks.recent_log_activity(),
-      Checks.linger()
+      Checks.compaction_config(),
+      Checks.command_owner_config(),
+      Checks.sandbox_config(),
+      Checks.sandbox_trace_suggestions(),
+      Checks.auth_file_permissions(),
+      Checks.plaintext_secrets(),
+      Checks.linger(),
+      Checks.web_search(full?)
     ]
 
     network =

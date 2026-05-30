@@ -2,52 +2,137 @@ defmodule FermixChannelsTest do
   use ExUnit.Case
   doctest FermixChannels
 
+  import ExUnit.CaptureLog
+
+  alias FermixChannels.Channels.Signal
+  alias FermixChannels.Channels.Telegram
+  alias FermixChannels.Gateway.ChannelRegistry
+
+  @ready %{status: :ready, failures: []}
+  @setup_required %{status: :setup_required, failures: [%{component: "channel"}]}
+
   test "greets the world" do
     assert FermixChannels.hello() == :world
   end
 
-  describe "polling channel children" do
-    test "starts Telegram poller when enabled and readiness is complete" do
-      ready_report = %{status: :ready, failures: []}
+  describe "registry-driven transport children" do
+    test "includes the Telegram poller only when enabled, ready, and ingress authorized" do
+      poller = {Telegram.Poller, []}
+      previous = Application.get_env(:fermix_channels, :telegram, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
 
-      setup_required_report = %{
-        status: :setup_required,
-        failures: [%{component: "channel:telegram"}]
-      }
+      Application.put_env(:fermix_channels, :telegram, enabled: true, owner_user_id: "111")
+      assert poller in ChannelRegistry.transport_children(@ready)
+      refute poller in ChannelRegistry.transport_children(@setup_required)
 
-      assert [{FermixChannels.Telegram.Poller, []}] =
-               FermixChannels.Application.polling_children([enabled: true], ready_report)
+      Application.put_env(:fermix_channels, :telegram, enabled: false, owner_user_id: "111")
+      refute poller in ChannelRegistry.transport_children(@ready)
+    end
 
-      assert [] =
-               FermixChannels.Application.polling_children([enabled: true], setup_required_report)
+    test "keeps starting the Telegram poller for legacy webhook-mode configs" do
+      poller = {Telegram.Poller, []}
+      previous = Application.get_env(:fermix_channels, :telegram, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
 
-      assert [] =
-               FermixChannels.Application.polling_children([enabled: false], ready_report)
+      Application.put_env(:fermix_channels, :telegram,
+        enabled: true,
+        mode: :webhook,
+        owner_user_id: "111"
+      )
+
+      assert poller in ChannelRegistry.transport_children(@ready)
+    end
+
+    test "refuses the Telegram poller when the ingress allowlist is empty (F-02)" do
+      poller = {Telegram.Poller, []}
+      previous = Application.get_env(:fermix_channels, :telegram, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
+
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      refute poller in ChannelRegistry.transport_children(@ready)
+    end
+
+    test "includes the Signal listener only in subprocess mode when enabled, ready, and authorized" do
+      listener = {Signal.Listener, []}
+      previous = Application.get_env(:fermix_channels, :signal, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :signal, previous) end)
+
+      Application.put_env(:fermix_channels, :signal,
+        enabled: true,
+        mode: :subprocess,
+        owner_user_id: "+1234"
+      )
+
+      assert listener in ChannelRegistry.transport_children(@ready)
+      refute listener in ChannelRegistry.transport_children(@setup_required)
+
+      # Mode must match the transport.
+      Application.put_env(:fermix_channels, :signal,
+        enabled: true,
+        mode: :webhook,
+        owner_user_id: "+1234"
+      )
+
+      refute listener in ChannelRegistry.transport_children(@ready)
+
+      Application.put_env(:fermix_channels, :signal,
+        enabled: false,
+        mode: :subprocess,
+        owner_user_id: "+1234"
+      )
+
+      refute listener in ChannelRegistry.transport_children(@ready)
+    end
+
+    test "refuses the Signal listener when the ingress allowlist is empty (F-02)" do
+      listener = {Signal.Listener, []}
+      previous = Application.get_env(:fermix_channels, :signal, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :signal, previous) end)
+
+      Application.put_env(:fermix_channels, :signal, enabled: true, mode: :subprocess)
+      refute listener in ChannelRegistry.transport_children(@ready)
     end
   end
 
-  describe "subprocess channel children" do
-    test "starts Signal listener only when subprocess mode is enabled and readiness is complete" do
-      ready_report = %{status: :ready, failures: []}
+  describe "missing-ingress-authorization startup logs" do
+    test "logs enabled ingress channels with no owner or allowlist" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
 
-      setup_required_report = %{
-        status: :setup_required,
-        failures: [%{component: "channel:signal"}]
-      }
+      on_exit(fn ->
+        Application.put_env(:fermix_channels, :telegram, previous_telegram)
+      end)
 
-      config = [mode: :subprocess, enabled: true]
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.log_missing_ingress_authorization(%{
+            status: :ready,
+            failures: []
+          })
+        end)
 
-      assert [{FermixChannels.Signal.Listener, []}] =
-               FermixChannels.Application.subprocess_children(config, ready_report)
+      assert log =~
+               "telegram ingress is enabled but no owner_user_id or allowed_*_ids list is set"
+    end
 
-      assert [] = FermixChannels.Application.subprocess_children(config, setup_required_report)
-      assert [] = FermixChannels.Application.subprocess_children([mode: :webhook], ready_report)
+    test "does not log when a single ingress allowlist entry can act as owner" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, enabled: true, allowed_user_ids: ["111"])
 
-      assert [] =
-               FermixChannels.Application.subprocess_children(
-                 [mode: :subprocess, enabled: false],
-                 ready_report
-               )
+      on_exit(fn ->
+        Application.put_env(:fermix_channels, :telegram, previous_telegram)
+      end)
+
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.log_missing_ingress_authorization(%{
+            status: :ready,
+            failures: []
+          })
+        end)
+
+      refute log =~
+               "telegram ingress is enabled but no owner_user_id or allowed_*_ids list is set"
     end
   end
 end

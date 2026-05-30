@@ -58,24 +58,52 @@ defmodule FermixCore.Tools.WebFetch do
 
   defp do_execute(args, context) do
     with {:ok, url} <- Support.required_string(args, "url"),
-         :ok <- Guard.validate(url, resolver: resolver(context)) do
-      fetch(url, context, 0)
+         {:ok, pinned} <- pin(url, context) do
+      fetch(pinned, context, 0)
     else
       {:error, reason} -> Support.error(format_guard_error(reason))
     end
   end
 
-  defp fetch(_url, _context, redirects) when redirects > @max_redirects do
+  defp pin(url, context) do
+    case Guard.resolve_and_validate(url, resolver: resolver(context)) do
+      :ok ->
+        # IP-literal URL (no DNS to rebind). The Guard already verified
+        # the literal is public; connect to it directly.
+        {:ok, %{url: url, pinned_ip: nil}}
+
+      {:ok, ip} ->
+        {:ok,
+         %{url: rewrite_url_with_ip(url, ip), pinned_ip: ip, original_host: original_host(url)}}
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  defp rewrite_url_with_ip(url, ip) do
+    uri = URI.parse(url)
+    %{uri | host: ip_to_string(ip)} |> URI.to_string()
+  end
+
+  defp original_host(url), do: URI.parse(url).host
+
+  defp ip_to_string({_a, _b, _c, _d} = ip), do: :inet.ntoa(ip) |> to_string()
+
+  defp ip_to_string({_a, _b, _c, _d, _e, _f, _g, _h} = ip),
+    do: "[" <> (ip |> :inet.ntoa() |> to_string()) <> "]"
+
+  defp fetch(_pinned, _context, redirects) when redirects > @max_redirects do
     Support.error("redirect_limit: exceeded #{@max_redirects} redirects")
   end
 
-  defp fetch(url, context, redirects) do
-    case Req.get(url, request_options(context)) do
+  defp fetch(pinned, context, redirects) do
+    case Req.get(pinned.url, request_options(context, pinned)) do
       {:ok, %{status: status} = response} when status in 200..299 ->
         render_response(response)
 
       {:ok, %{status: status} = response} when status in 300..399 ->
-        follow_redirect(url, response, context, redirects)
+        follow_redirect(pinned, response, context, redirects)
 
       {:ok, %{status: status}} ->
         Support.error("network: HTTP #{status}")
@@ -114,38 +142,75 @@ defmodule FermixCore.Tools.WebFetch do
     stream_body({:data, data}, {req, %{response | body: ""}})
   end
 
-  defp follow_redirect(url, response, context, redirects) do
+  defp follow_redirect(pinned, response, context, redirects) do
     case get_header(response.headers, "location") do
       nil ->
         Support.error("network: redirect missing location")
 
       location ->
-        target = url |> URI.merge(location) |> URI.to_string()
+        # Resolve the redirect target against the original (pre-pinning)
+        # host so relative locations land on the correct hostname before
+        # we re-pin the new target's DNS.
+        original_url = original_url(pinned)
+        target = original_url |> URI.merge(location) |> URI.to_string()
 
-        with :ok <- Guard.validate_redirect(target, url, resolver: resolver(context)) do
-          fetch(target, context, redirects + 1)
+        with :ok <- Guard.validate_redirect(target, original_url, resolver: resolver(context)),
+             {:ok, next_pinned} <- pin(target, context) do
+          fetch(next_pinned, context, redirects + 1)
         else
           {:error, reason} -> Support.error(format_guard_error(reason))
         end
     end
   end
 
-  defp request_options(context) do
+  defp original_url(%{original_host: nil, url: url}), do: url
+
+  defp original_url(%{original_host: host, url: url}) do
+    %{URI.parse(url) | host: host} |> URI.to_string()
+  end
+
+  defp original_url(%{url: url}), do: url
+
+  defp request_options(context, pinned) do
     context
-    |> base_request_options()
+    |> base_request_options(pinned)
     |> Keyword.put(:into, &stream_body/2)
   end
 
-  defp base_request_options(context) do
+  defp base_request_options(context, pinned) do
+    headers =
+      [{"user-agent", user_agent()}]
+      |> maybe_put_host_header(pinned)
+
     [
       redirect: false,
       retry: false,
       receive_timeout: 15_000,
-      connect_options: [timeout: 3_000],
-      headers: [{"user-agent", user_agent()}]
+      connect_options: connect_options(pinned),
+      headers: headers
     ]
     |> Keyword.merge(Map.get(context, :req_options, []))
   end
+
+  defp base_request_options(context) do
+    base_request_options(context, %{url: nil, pinned_ip: nil, original_host: nil})
+  end
+
+  defp maybe_put_host_header(headers, %{original_host: host})
+       when is_binary(host) and host != "" do
+    [{"host", host} | headers]
+  end
+
+  defp maybe_put_host_header(headers, _pinned), do: headers
+
+  defp connect_options(%{original_host: host}) when is_binary(host) and host != "" do
+    # Pin SNI to the original hostname so TLS still validates the cert
+    # against the name the user asked for, even though the socket
+    # connects to the validated IP literal.
+    [timeout: 3_000, transport_opts: [server_name_indication: String.to_charlist(host)]]
+  end
+
+  defp connect_options(_pinned), do: [timeout: 3_000]
 
   defp put_trace_metadata(context) do
     Map.put(context, :tool_trace, %{request_headers: redacted_request_headers(context)})

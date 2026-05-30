@@ -36,7 +36,7 @@ defmodule FermixCore.Tools.MemoryRecallTest do
 
     on_exit(fn ->
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -133,6 +133,37 @@ defmodule FermixCore.Tools.MemoryRecallTest do
       assert result.output =~ "key=timezone"
       assert result.output =~ "[history"
       assert result.output =~ "timezone handling"
+    end
+
+    test "excludes archived memory hits", %{context: context, repo: repo} do
+      assert {:ok, memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "owner",
+                   scope_id: "default",
+                   category: "preference",
+                   key: "archived_timezone",
+                   value: "Archived timezone preference"
+                 },
+                 server: repo
+               )
+
+      assert {:ok, _archived} =
+               Repo.archive_memory(
+                 %{id: memory.id, agent_id: "main", owner_id: "default", archived?: false},
+                 "memory_reviewer",
+                 "stale",
+                 DateTime.utc_now(),
+                 server: repo
+               )
+
+      assert {:ok, result} =
+               MemoryRecall.execute(%{"search" => "Archived timezone", "scope" => "all"}, context)
+
+      assert result.success == true
+      assert result.output =~ "No lexical matches"
     end
 
     test "includes job source metadata for scheduled job memory", %{context: context, repo: repo} do

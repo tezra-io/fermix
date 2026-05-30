@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 130 48">
+  <rect width="48" height="48" rx="10" fill="#EA4335"/>
+  <path d="M11 17h26v18H11z" fill="#fff"/>
+  <path d="M11 17l13 10 13-10" fill="none" stroke="#EA4335" stroke-width="4" stroke-linejoin="round"/>
+  <text x="58" y="31" font-family="Arial, sans-serif" font-size="18" fill="#1f2937">Gmail</text>
+</svg>

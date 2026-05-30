@@ -50,7 +50,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     {instructions, input} = ResponsesShared.build_input(messages)
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
     text = text_field(opts)
 
     body =
@@ -67,7 +67,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       tools: tools,
       capabilities: capabilities,
       agent: Keyword.get(opts, :agent),
-      reasoning_effort: reasoning_effort
+      reasoning_effort: reasoning_effort,
+      request_metrics: ResponsesShared.request_metrics(input, instructions, tools, capabilities)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -85,7 +86,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       provider_state
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
-    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort)
+    reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ output_items ++ outputs
@@ -103,7 +104,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       tools: tools,
       capabilities: caps,
       agent: Keyword.get(opts, :agent),
-      reasoning_effort: reasoning_effort
+      reasoning_effort: reasoning_effort,
+      request_metrics: ResponsesShared.request_metrics(next_input, nil, tools, caps)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -158,8 +160,12 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
-    Logger.error("OpenAI Responses API error: #{status} - #{inspect(body)}")
-    {:error, "OpenAI Responses API error: #{status}"}
+    if ResponsesShared.context_length_error?(body) do
+      {:error, :context_length_exceeded}
+    else
+      Logger.error("OpenAI Responses API error: #{status} - #{inspect(body)}")
+      {:error, "OpenAI Responses API error: #{status}"}
+    end
   end
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
@@ -231,6 +237,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         tokens: tokens,
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
+      |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
       |> maybe_put(:agent, Map.get(turn_state, :agent))
     )
   end

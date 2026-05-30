@@ -20,8 +20,8 @@ defmodule FermixCore.Agents.LifecycleTelemetryAcceptanceTest do
 
     on_exit(fn ->
       TelemetryHandler.detach(prefix)
-      File.rm_rf!(trace_dir)
-      File.rm_rf!(journal_dir)
+      FermixTestSupport.SafeRm.rm_rf!(trace_dir)
+      FermixTestSupport.SafeRm.rm_rf!(journal_dir)
     end)
 
     %{journal_dir: journal_dir, trace_dir: trace_dir, server: server}

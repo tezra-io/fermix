@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "name": "gmail",
+  "display_name": "Gmail",
+  "description": "Read mail metadata and optionally draft or send messages.",
+  "category": "productivity",
+  "version": "1.0.0",
+  "default_enabled": false,
+  "interface": {
+    "short_description": "Use Gmail from Fermix",
+    "developer_name": "Fermix",
+    "brand_color": "#EA4335",
+    "icon": "assets/gmail-small.svg",
+    "logo": "assets/gmail.png",
+    "privacy_policy_url": "https://policies.google.com/privacy",
+    "terms_of_service_url": "https://policies.google.com/terms"
+  },
+  "auth": {
+    "type": "oauth2",
+    "provider": "google",
+    "profile_key": "gmail",
+    "account_mode": "single",
+    "scopes": [
+      "openid",
+      "email",
+      "profile",
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.send"
+    ]
+  },
+  "tools": [
+    {
+      "name": "gmail_search_messages",
+      "description": "Search Gmail messages.",
+      "policy_class": "external_api",
+      "read_only": true,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
+    },
+    {
+      "name": "gmail_send_message",
+      "description": "Send an email with Gmail.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.send"]
+    }
+  ],
+  "skills": [
+    {
+      "name": "gmail-plugin",
+      "path": "skills/gmail/SKILL.md"
+    }
+  ],
+  "health_check": {
+    "kind": "local_readiness",
+    "requires_auth": true
+  }
+}

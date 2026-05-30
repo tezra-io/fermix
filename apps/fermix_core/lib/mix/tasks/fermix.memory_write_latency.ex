@@ -1,13 +1,19 @@
 defmodule Mix.Tasks.Fermix.MemoryWriteLatency do
   @moduledoc """
-  Benchmarks synchronous durable ConversationStore message writes.
+  Benchmarks `ConversationStore.add_message/4` synchronous return latency.
+
+  The durable SQLite commit runs asynchronously under a Task.Supervisor since
+  2026-05-02, so the "durable" stats below measure the synchronous return path
+  with the durable store wired up (in-memory append + task enqueue + telemetry).
+  Async commit latency is exposed separately via the `[:fermix, :memory,
+  :message_persist]` telemetry event.
   """
 
   use Mix.Task
 
   alias FermixCore.Memory.ConversationWriteBenchmark
 
-  @shortdoc "Benchmark ConversationStore durable write latency"
+  @shortdoc "Benchmark ConversationStore.add_message/4 sync return latency"
 
   @switches [
     iterations: :integer,

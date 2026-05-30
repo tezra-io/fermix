@@ -28,6 +28,17 @@ defmodule FermixWebWeb.PageControllerTest do
              failed_recent: 0,
              status: :ready,
              error: nil
+           },
+           realtime: %{
+             enabled: true,
+             status: :ready,
+             provider: :openai,
+             model: "gpt-realtime-2",
+             socket_path: "/Users/sujshe/.fermix-dev/realtime.sock",
+             socket_alive: true,
+             active_sessions: 0,
+             active_clients: 1,
+             companion_connected?: true
            }
          },
          agents: %{
@@ -137,6 +148,10 @@ defmodule FermixWebWeb.PageControllerTest do
     assert body =~ "Scheduled jobs"
     assert body =~ "Daily Digest"
     assert body =~ "gpt-5.4-mini"
+    assert body =~ "Realtime voice"
+    assert body =~ "gpt-realtime-2"
+    assert body =~ "Active sessions"
+    assert body =~ "realtime.sock"
     assert body =~ "Open setup"
     assert body =~ ~s(href="/health/ready?pretty=1")
     assert body =~ ~s(href="/health/live?pretty=1")
@@ -169,8 +184,9 @@ defmodule FermixWebWeb.PageControllerTest do
     body = html_response(conn, 200)
 
     assert body =~ "Setup required"
-    assert body =~ "mix fermix.setup"
-    assert body =~ "provider:openai"
+    assert body =~ "Provider"
+    # The Provider tab carries the warning icon when provider config is missing.
+    assert body =~ "text-warning"
   end
 
   test "GET /setup renders ready state when readiness is complete", %{conn: conn} do
@@ -181,11 +197,13 @@ defmodule FermixWebWeb.PageControllerTest do
     conn = get(conn, ~p"/setup")
     body = html_response(conn, 200)
 
-    assert body =~ "Fermix is ready"
-    assert body =~ "configured"
+    assert body =~ "Ready"
+    assert body =~ "badge-success"
   end
 
-  test "web setup routes use cached readiness until BootReport refreshes", %{conn: conn} do
+  test "/ redirect and /health/ready honor BootReport cache; /setup always shows fresh state", %{
+    conn: conn
+  } do
     Application.put_env(:fermix_core, :providers, [])
     Application.delete_env(:fermix_channels, :telegram)
     BootReport.refresh()
@@ -193,15 +211,17 @@ defmodule FermixWebWeb.PageControllerTest do
     Application.put_env(:fermix_core, :providers, openai: [api_key: "test-key"])
     Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
 
+    # Home redirect uses the cached readiness, which still says setup_required.
     home_conn = get(conn, ~p"/")
     assert redirected_to(home_conn) == ~p"/setup"
 
+    # /setup computes a fresh report on mount; the freshly satisfied config
+    # surfaces as a Ready badge even though the BootReport cache is stale.
     setup_conn = home_conn |> recycle() |> get(~p"/setup")
     setup_body = html_response(setup_conn, 200)
+    assert setup_body =~ "Ready"
 
-    assert setup_body =~ "Setup required"
-    assert setup_body =~ "provider:openai"
-
+    # /health/ready stays on the cache.
     ready_conn = setup_conn |> recycle() |> get(~p"/health/ready")
     ready_body = json_response(ready_conn, 503)
 

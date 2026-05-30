@@ -31,10 +31,10 @@ defmodule FermixCore.Memory.PromptFilesTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_config)
-      File.rm_rf!(base_dir)
+      FermixTestSupport.SafeRm.rm_rf!(base_dir)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -228,6 +228,35 @@ defmodule FermixCore.Memory.PromptFilesTest do
 
     assert user_text in [nil, ""]
     assert memory_text in [nil, ""]
+  end
+
+  test "rebuild/2 excludes archived prompt memories", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    memory =
+      insert_memory(repo, %{
+        agent_id: agent_id,
+        owner_id: owner_id,
+        scope_type: "owner",
+        scope_id: owner_id,
+        category: "preference",
+        key: "preferred_editor",
+        value: "helix",
+        promote_target: "user_md"
+      })
+
+    assert {:ok, _archived} =
+             Repo.archive_memory(
+               %{id: memory.id, agent_id: agent_id, owner_id: owner_id, archived?: false},
+               "memory_reviewer",
+               "stale",
+               DateTime.utc_now(),
+               server: repo
+             )
+
+    assert {:ok, %{user: nil, memory: nil}} = PromptFiles.rebuild(agent_id, owner_id)
   end
 
   test "rebuild/2 keeps job run summaries out of prompt files", %{

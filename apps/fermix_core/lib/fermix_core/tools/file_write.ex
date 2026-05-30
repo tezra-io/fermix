@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.FileWrite do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Sandbox
 
   @impl true
   @spec name() :: String.t()
@@ -52,7 +53,11 @@ defmodule FermixCore.Tools.FileWrite do
   def failure_modes do
     [
       %{tag: "missing_parameters", description: "path or content is absent"},
-      %{tag: "invalid_path", description: "path contains traversal or null bytes"},
+      %{tag: "invalid_path", description: "path is blank or contains null bytes"},
+      %{
+        tag: "sandbox_denied",
+        description: "resolved path is outside sandbox roots or protected"
+      },
       %{tag: "write_failed", description: "filesystem write failed"}
     ]
   end
@@ -69,7 +74,7 @@ defmodule FermixCore.Tools.FileWrite do
     start = System.monotonic_time(:millisecond)
     agent = Map.get(context, :agent_name, "unknown")
 
-    result = do_execute(args)
+    result = do_execute(args, context)
 
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
@@ -83,17 +88,18 @@ defmodule FermixCore.Tools.FileWrite do
     result
   end
 
-  defp do_execute(args) do
+  defp do_execute(args, context) do
     with {:ok, path} <- Map.fetch(args, "path"),
          {:ok, content} <- Map.fetch(args, "content"),
          :ok <- validate_path(path),
-         :ok <- maybe_mkdir(Map.get(args, "mkdir", true), path),
-         :ok <- File.write(path, content) do
-      {:ok, Tool.success("Wrote #{byte_size(content)} bytes to #{path}")}
+         {:ok, resolved_path} <- Sandbox.write_path(path, :file_write, context),
+         :ok <- maybe_mkdir(Map.get(args, "mkdir", true), resolved_path),
+         :ok <- File.write(resolved_path, content) do
+      {:ok, Tool.success("Wrote #{byte_size(content)} bytes to #{resolved_path}")}
     else
       :error -> {:ok, Tool.error("Missing required parameters: path and content")}
       {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
-      {:error, reason} -> {:ok, Tool.error("Failed to write file: #{inspect(reason)}")}
+      {:error, reason} -> {:ok, Tool.error(format_error(reason))}
     end
   end
 
@@ -107,23 +113,21 @@ defmodule FermixCore.Tools.FileWrite do
   end
 
   defp validate_path(path) when is_binary(path) and byte_size(path) > 0 do
-    cond do
-      String.contains?(path, "\0") ->
-        {:error, "Path contains null bytes"}
-
-      has_traversal_component?(path) ->
-        {:error, "Path traversal is not allowed"}
-
-      true ->
-        :ok
-    end
+    if String.contains?(path, "\0"), do: {:error, "Path contains null bytes"}, else: :ok
   end
 
   defp validate_path(_), do: {:error, "Path must be a non-empty string"}
 
-  defp has_traversal_component?(path) do
-    path
-    |> Path.split()
-    |> Enum.any?(&(&1 == ".."))
+  defp format_error({:outside_root, path}) do
+    "Sandbox denied file_write outside roots: #{path}. " <>
+      "To allow this directory, run: fermix grant path #{Path.dirname(path)}"
   end
+
+  defp format_error({:protected_path, path}),
+    do: "Sandbox denied protected path: #{path}. Run: fermix sandbox explain"
+
+  defp format_error({:blocked_root, path}),
+    do: "Sandbox denied blocked root: #{path}. Run: fermix sandbox explain"
+
+  defp format_error(reason), do: "Failed to write file: #{inspect(reason)}"
 end

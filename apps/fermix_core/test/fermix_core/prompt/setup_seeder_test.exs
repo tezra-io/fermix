@@ -41,10 +41,12 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
       Application.put_env(:fermix_core, :agent, previous_agent)
-      File.rm_rf!(bootstrap_dir)
-      File.rm_rf!(memory_dir)
+      FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
+      FermixTestSupport.SafeRm.rm_rf!(memory_dir)
 
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path -> File.rm(path) end)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        FermixTestSupport.SafeRm.rm(path)
+      end)
     end)
 
     %{
@@ -57,7 +59,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
   end
 
   describe "seed/2 fresh install" do
-    test "writes all five files, commits seed revisions, and upserts user memories", %{
+    test "writes all prompt files, commits seed revisions, and upserts user memories", %{
       agent_id: agent_id,
       owner_id: owner_id,
       repo: repo
@@ -86,19 +88,29 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
       assert {:ok, results} = SetupSeeder.seed(personalization, repo: repo)
 
-      assert Enum.map(results, & &1.name) == [:identity, :agents, :soul, :user, :memory]
+      assert Enum.map(results, & &1.name) == [
+               :identity,
+               :fermix,
+               :soul,
+               :realtime,
+               :user,
+               :memory
+             ]
+
       assert Enum.all?(results, &(&1.outcome == :seeded))
       assert Enum.all?(results, &is_integer(&1.revision_id))
 
       identity_path = BootstrapPaths.identity_path(agent_id)
-      agents_path = BootstrapPaths.agents_path(agent_id)
+      fermix_path = BootstrapPaths.fermix_path(agent_id)
       soul_path = BootstrapPaths.soul_path(agent_id)
+      realtime_path = BootstrapPaths.realtime_path(agent_id)
       user_path = PromptFiles.user_path(agent_id)
       memory_path = PromptFiles.memory_path(agent_id)
 
       assert File.read!(identity_path) == Defaults.identity_md()
-      assert File.read!(agents_path) == Defaults.agents_md()
+      assert File.read!(fermix_path) == Defaults.fermix_md()
       assert File.read!(soul_path) == Defaults.soul_md()
+      assert File.read!(realtime_path) == Defaults.realtime_md()
 
       user_content = File.read!(user_path)
       assert user_content =~ "name: Sujeeth"
@@ -112,8 +124,9 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
       for {resource_type, expected_content} <- [
             {:identity_md, Defaults.identity_md()},
-            {:agents_md, Defaults.agents_md()},
-            {:soul_md, Defaults.soul_md()}
+            {:fermix_md, Defaults.fermix_md()},
+            {:soul_md, Defaults.soul_md()},
+            {:realtime_md, Defaults.realtime_md()}
           ] do
         assert {:ok, [revision]} =
                  Registry.list_revisions(agent_id, resource_type, "global", repo: repo)
@@ -191,8 +204,9 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert File.read!(BootstrapPaths.identity_path(agent_id)) == "operator-edited identity"
 
       assert_received {:seed, %{name: :identity, outcome: :skipped_exists}}
-      assert_received {:seed, %{name: :agents, outcome: :skipped_exists}}
+      assert_received {:seed, %{name: :fermix, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :soul, outcome: :skipped_exists}}
+      assert_received {:seed, %{name: :realtime, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :user, outcome: :skipped_exists}}
       assert_received {:seed, %{name: :memory, outcome: :skipped_exists}}
     end
@@ -231,7 +245,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
           for path <- [
                 BootstrapPaths.identity_path(agent_id),
-                BootstrapPaths.agents_path(agent_id),
+                BootstrapPaths.fermix_path(agent_id),
                 BootstrapPaths.soul_path(agent_id),
                 PromptFiles.user_path(agent_id),
                 PromptFiles.memory_path(agent_id)

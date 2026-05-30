@@ -5,6 +5,7 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
   alias Fermix.CLI.AgentsCommand
   alias Fermix.CLI.CapabilitiesCommand
+  alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StatusCommand
 
   setup do
@@ -14,7 +15,7 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
     on_exit(fn ->
       restore_env("FERMIX_HOME", previous_home)
-      File.rm_rf!(socket_dir)
+      FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
 
     %{socket_path: Path.join(socket_dir, "daemon.sock")}
@@ -116,6 +117,101 @@ defmodule Fermix.CLI.FailureSurfaceTest do
     refute stderr =~ "unexpected reply"
   end
 
+  test "skills list pretty-prints rows and errors", %{socket_path: socket_path} do
+    task =
+      serve_once(socket_path, %{
+        "status" => "ok",
+        "skills" => %{
+          "count" => 1,
+          "skills" => [
+            %{"name" => "alpha", "trust" => "operator", "description" => "Use alpha."}
+          ],
+          "errors" => ["{:invalid_skill, \"bad\", :missing_frontmatter}"]
+        }
+      })
+
+    test_self = self()
+
+    output =
+      capture_io(fn ->
+        send(test_self, {:exit_status, SkillsCommand.run(["list"])})
+      end)
+
+    assert_receive {:exit_status, 0}
+    Task.await(task, 1_000)
+    assert output =~ "skills: 1"
+    assert output =~ "- alpha [operator] Use alpha."
+    assert output =~ "errors: 1"
+  end
+
+  test "skills view pretty-prints the selected skill body", %{socket_path: socket_path} do
+    task =
+      serve_once(socket_path, %{
+        "status" => "ok",
+        "skill" => %{
+          "name" => "alpha",
+          "description" => "Use alpha.",
+          "trust" => "operator",
+          "source_path" => "/tmp/alpha/SKILL.md",
+          "body" => "Alpha body."
+        }
+      })
+
+    test_self = self()
+
+    output =
+      capture_io(fn ->
+        send(test_self, {:exit_status, SkillsCommand.run(["view", "alpha"])})
+      end)
+
+    assert_receive {:exit_status, 0}
+    Task.await(task, 1_000)
+    assert output =~ "# alpha"
+    assert output =~ "path: /tmp/alpha/SKILL.md"
+    assert output =~ "Alpha body."
+  end
+
+  test "skills reload --json prints reload summary", %{socket_path: socket_path} do
+    task =
+      serve_once(socket_path, %{
+        "status" => "ok",
+        "reload" => %{
+          "count" => 1,
+          "names" => ["alpha"],
+          "added" => ["alpha"],
+          "removed" => [],
+          "changed" => [],
+          "errors" => []
+        }
+      })
+
+    test_self = self()
+
+    output =
+      capture_io(fn ->
+        send(test_self, {:exit_status, SkillsCommand.run(["reload", "--json"])})
+      end)
+
+    assert_receive {:exit_status, 0}
+    Task.await(task, 1_000)
+
+    decoded = Jason.decode!(output)
+    assert decoded["added"] == ["alpha"]
+    assert decoded["count"] == 1
+  end
+
+  test "skills command reports daemon unavailable with exit 3" do
+    test_self = self()
+
+    stderr =
+      capture_io(:stderr, fn ->
+        send(test_self, {:exit_status, SkillsCommand.run(["list", "--json"])})
+      end)
+
+    assert_receive {:exit_status, 3}
+    assert stderr =~ "fermix: not running"
+  end
+
   defp serve_once(socket_path, response) do
     parent = self()
 
@@ -138,19 +234,22 @@ defmodule Fermix.CLI.FailureSurfaceTest do
       :ok = :gen_tcp.send(conn, [Jason.encode!(response), "\n"])
       :gen_tcp.close(conn)
       :gen_tcp.close(listen_socket)
-      File.rm(socket_path)
+      FermixTestSupport.SafeRm.rm(socket_path)
     end)
     |> tap(fn _task -> assert_receive :fake_daemon_ready end)
   end
 
   defp mkdir! do
-    path =
-      Path.join(
-        System.tmp_dir!(),
-        "fermix-failure-surface-#{System.unique_integer([:positive, :monotonic])}"
-      )
+    base = "/tmp/fermix-test-sockets"
 
-    File.mkdir_p!(path)
+    path =
+      base
+      |> Path.join("fermix-fs-#{System.unique_integer([:positive, :monotonic])}")
+      |> Path.expand()
+
+    File.mkdir_p!(base)
+    File.mkdir!(path)
+    FermixTestSupport.SafeRm.mark!(path)
     path
   end
 

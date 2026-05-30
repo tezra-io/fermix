@@ -3,6 +3,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Repo
+  alias FermixCore.Resource.Registry
 
   defmodule ExitingRepo do
     use GenServer
@@ -29,7 +30,7 @@ defmodule FermixCore.Memory.RepoTest do
 
     on_exit(fn ->
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -38,7 +39,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9]} = Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -51,10 +52,44 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9]} = Repo.migration_versions(server: repo)
+  end
+
+  test "fermix_md migration rewrites resource_path so rollback targets FERMIX.md", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    dir = Path.join(System.tmp_dir!(), "fermix-md-rename-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    legacy_path = Path.join(dir, "AGENTS.md")
+    fermix_path = Path.join(dir, "FERMIX.md")
+
+    # Simulate a pre-rename install: an `agents_md` resource registered at the
+    # legacy AGENTS.md path with two revisions, then drop the v8 marker so the
+    # migration re-runs against the legacy rows on the next open.
+    seed_legacy_agents_md(repo, legacy_path)
+    drop_migration_version(db_path, 8)
+
+    assert :ok = Repo.migrate(server: repo)
+
+    selector = %{agent_id: "main", resource_type: "fermix_md", scope_id: "global"}
+    assert {:ok, migrated} = Repo.get_resource(selector, server: repo)
+    assert migrated.resource_path == fermix_path
+
+    # BootstrapRename already moved the file: current content lives at FERMIX.md
+    # and the legacy AGENTS.md is gone.
+    File.write!(fermix_path, "rev-two")
+
+    assert {:ok, rolled_back} = Registry.rollback("main", "fermix_md", "global", 1, repo: repo)
+    assert rolled_back.revision == 3
+
+    assert File.read!(fermix_path) == "rev-one"
+    refute File.exists?(legacy_path)
   end
 
   test "resource migration creates required tables and indexes", %{db_path: db_path, repo: repo} do
@@ -107,6 +142,13 @@ defmodule FermixCore.Memory.RepoTest do
       assert "source_name" in columns
       assert "session_id" in columns
       assert "run_id" in columns
+      assert "archived_at" in columns
+      assert "archived_by" in columns
+      assert "archive_reason" in columns
+
+      assert {:ok, review_state_columns} = sqlite_column_names(conn, "memory_review_state")
+      assert "last_reviewed_message_id" in review_state_columns
+      assert "last_review_failed_at" in review_state_columns
 
       assert {:ok, job_columns} = sqlite_column_names(conn, "scheduled_jobs")
       assert "expires_at" in job_columns
@@ -118,19 +160,19 @@ defmodule FermixCore.Memory.RepoTest do
   test "supports resource registry and revision queries through the repo API", %{repo: repo} do
     resource = %{
       agent_id: "main",
-      resource_type: "agents_md",
+      resource_type: "fermix_md",
       scope_id: "global",
       current_revision: 0,
-      resource_path: "/tmp/AGENTS.md"
+      resource_path: "/tmp/FERMIX.md"
     }
 
     assert {:ok, registered} = Repo.upsert_resource(resource, server: repo)
     assert registered.current_revision == 0
-    assert registered.resource_path == "/tmp/AGENTS.md"
+    assert registered.resource_path == "/tmp/FERMIX.md"
 
     revision = %{
       agent_id: "main",
-      resource_type: "agents_md",
+      resource_type: "fermix_md",
       scope_id: "global",
       revision: 1,
       parent_revision: nil,
@@ -273,6 +315,124 @@ defmodule FermixCore.Memory.RepoTest do
 
     assert :ok = Repo.delete_memory(selector, server: repo)
     assert {:error, :not_found} = Repo.get_memory(selector, server: repo)
+  end
+
+  test "archives and restores memories by exact row id", %{repo: repo} do
+    attrs = %{
+      agent_id: "main",
+      owner_id: "default",
+      scope_type: "owner",
+      scope_id: "default",
+      category: "preference",
+      key: "editor",
+      value: "helix"
+    }
+
+    assert {:ok, memory} = Repo.upsert_memory(attrs, server: repo)
+
+    assert {:ok, archived} =
+             Repo.archive_memory(
+               %{id: memory.id, agent_id: "main", owner_id: "default", archived?: false},
+               "memory_reviewer",
+               "superseded",
+               ~U[2026-05-27 10:00:00Z],
+               server: repo
+             )
+
+    assert archived.id == memory.id
+    assert archived.archived_by == "memory_reviewer"
+    assert archived.archive_reason == "superseded"
+
+    assert {:ok, []} =
+             Repo.get_memories(%{agent_id: "main", owner_id: "default", archived?: false},
+               server: repo
+             )
+
+    assert {:ok, restored} = Repo.restore_memory(memory.id, server: repo)
+    assert restored.archived_at == nil
+    assert restored.archived_by == nil
+  end
+
+  test "tracks review state with success and failure pointer semantics", %{repo: repo} do
+    selector = %{
+      agent_id: "main",
+      owner_id: "default",
+      channel: "telegram",
+      chat_id: "chat-1",
+      thread_scope: "root"
+    }
+
+    assert {:ok, claimed} =
+             Repo.claim_memory_review(selector, ~U[2026-05-27 10:00:00Z], 60_000, server: repo)
+
+    assert DateTime.compare(claimed.last_review_started_at, ~U[2026-05-27 10:00:00Z]) == :eq
+
+    assert {:error, :concurrent_run} =
+             Repo.claim_memory_review(selector, ~U[2026-05-27 10:00:01Z], 60_000, server: repo)
+
+    assert {:ok, failed} =
+             Repo.fail_memory_review(selector, ~U[2026-05-27 10:01:00Z], server: repo)
+
+    assert failed.last_reviewed_message_id == nil
+    assert failed.failure_count == 1
+    assert failed.last_review_status == "failed"
+
+    assert {:ok, _claimed} =
+             Repo.claim_memory_review(selector, ~U[2026-05-27 10:07:00Z], 60_000, server: repo)
+
+    assert {:ok, completed} =
+             Repo.complete_memory_review(selector, :ok, 42, ~U[2026-05-27 10:07:10Z],
+               server: repo
+             )
+
+    assert completed.last_reviewed_message_id == 42
+    assert completed.failure_count == 0
+    assert completed.last_review_failed_at == nil
+  end
+
+  test "fetches new user messages by owner and monotonic id", %{repo: repo} do
+    base = %{
+      agent_id: "main",
+      channel: "telegram",
+      chat_id: "chat-1",
+      thread_scope: "root",
+      sender: "alice",
+      kind: "chat_message",
+      content: "ignored"
+    }
+
+    assert {:ok, first} =
+             Repo.insert_message(Map.merge(base, %{owner_id: "owner-a", role: "user"}),
+               server: repo
+             )
+
+    assert {:ok, _assistant} =
+             Repo.insert_message(
+               Map.merge(base, %{owner_id: "owner-a", role: "assistant", content: "reply"}),
+               server: repo
+             )
+
+    assert {:ok, second} =
+             Repo.insert_message(
+               Map.merge(base, %{owner_id: "owner-a", role: "user", content: "next"}),
+               server: repo
+             )
+
+    assert {:ok, _other_owner} =
+             Repo.insert_message(Map.merge(base, %{owner_id: "owner-b", role: "user"}),
+               server: repo
+             )
+
+    selector = %{
+      agent_id: "main",
+      owner_id: "owner-a",
+      channel: "telegram",
+      chat_id: "chat-1",
+      thread_scope: "root"
+    }
+
+    assert {:ok, [message]} = Repo.get_user_messages_after(selector, first.id, 10, server: repo)
+    assert message.id == second.id
   end
 
   test "persists memory source provenance fields", %{repo: repo} do
@@ -477,6 +637,47 @@ defmodule FermixCore.Memory.RepoTest do
                },
                server: repo
              )
+  end
+
+  defp seed_legacy_agents_md(repo, legacy_path) do
+    base = %{agent_id: "main", resource_type: "agents_md", scope_id: "global"}
+
+    {:ok, _} =
+      Repo.upsert_resource(Map.merge(base, %{current_revision: 0, resource_path: legacy_path}),
+        server: repo
+      )
+
+    Enum.each([{1, "rev-one", nil}, {2, "rev-two", 1}], fn {revision, content, parent} ->
+      {:ok, _} =
+        Repo.insert_revision(
+          Map.merge(base, %{
+            revision: revision,
+            parent_revision: parent,
+            content_hash: sha256_hex(content),
+            content: content,
+            byte_size: byte_size(content),
+            mutation_source: "seed",
+            provenance: %{"trigger" => "seed"}
+          }),
+          server: repo
+        )
+    end)
+
+    {:ok, _} =
+      Repo.upsert_resource(Map.merge(base, %{current_revision: 2, resource_path: legacy_path}),
+        server: repo
+      )
+  end
+
+  defp drop_migration_version(db_path, version) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+    :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 2000;")
+    :ok = Sqlite3.execute(conn, "DELETE FROM schema_migrations WHERE version = #{version};")
+    :ok = Sqlite3.close(conn)
+  end
+
+  defp sha256_hex(content) do
+    :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
   end
 
   defp sqlite_values(conn, sql, params) do

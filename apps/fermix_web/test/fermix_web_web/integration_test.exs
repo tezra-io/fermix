@@ -8,6 +8,7 @@ defmodule FermixWebWeb.IntegrationTest do
   use FermixWebWeb.ConnCase
 
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
@@ -177,6 +178,28 @@ defmodule FermixWebWeb.IntegrationTest do
     {:ok, conversation_store: conversation_store, capability_registry: capability_registry}
   end
 
+  # The turn queue + delivery live in FermixChannels.Gateway; here we drive the
+  # core turn the way the gateway task does — checkout, run (returns the
+  # response), deliver via reply_fn, finalize — to exercise the pipeline.
+  defp run_turn(msg, agent) do
+    {:ok, turn_state, cache_status} = MainAgent.checkout_turn_state(agent, msg)
+    deliver = Map.fetch!(msg, :reply_fn)
+
+    core_msg =
+      msg
+      |> Map.drop([:reply_fn, :typing_fn, :typing_interval_ms, :typing_timeout_ms])
+      |> Map.put(:__runtime_context_cache_status, cache_status)
+
+    case TurnRunner.run(core_msg, turn_state, deliver) do
+      {:ok, response, context_tokens} ->
+        deliver.({:text, response})
+        TurnRunner.commit(core_msg, turn_state, response, context_tokens)
+
+      {:error, reason} ->
+        deliver.({:text, TurnRunner.error_reply(reason)})
+    end
+  end
+
   describe "full pipeline: webhook → agent → response" do
     test "simple message gets agent response", %{
       conversation_store: cs,
@@ -201,10 +224,10 @@ defmodule FermixWebWeb.IntegrationTest do
         sender: "test_user",
         channel: "telegram",
         chat_id: "42",
-        reply_fn: fn response -> send(test_pid, {:reply, response}) end
+        reply_fn: fn response -> send(test_pid, {:reply, reply_payload(response)}) end
       }
 
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "Hello from the integration test!"}, 5_000
 
@@ -245,10 +268,10 @@ defmodule FermixWebWeb.IntegrationTest do
         sender: "test_user",
         channel: "telegram",
         chat_id: "99",
-        reply_fn: fn response -> send(test_pid, {:reply, response}) end
+        reply_fn: fn response -> send(test_pid, {:reply, reply_payload(response)}) end
       }
 
-      MainAgent.handle_message(msg, agent)
+      run_turn(msg, agent)
 
       assert_receive {:reply, "The command output was captured."}, 10_000
 
@@ -276,4 +299,7 @@ defmodule FermixWebWeb.IntegrationTest do
       assert conn.status == 404
     end
   end
+
+  defp reply_payload({:text, text}), do: text
+  defp reply_payload(response), do: response
 end

@@ -15,9 +15,9 @@ defmodule FermixCore.AgentLoop do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Telemetry
 
   @max_iterations 25
 
@@ -27,14 +27,12 @@ defmodule FermixCore.AgentLoop do
           allowed_tools: [String.t()] | nil,
           policy: CapabilityRegistry.policy_spec(),
           trust: CapabilityRegistry.trust(),
+          excluded_categories: [atom()] | nil,
           route_key: Adapter.route_key(),
           adapter_opts: keyword(),
           model: String.t(),
           temperature: float(),
           max_iterations: pos_integer(),
-          compaction_enabled: boolean(),
-          compaction_token_budget: pos_integer(),
-          compaction_persist_checkpoints: boolean(),
           loop_detection_window: pos_integer(),
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
@@ -46,7 +44,8 @@ defmodule FermixCore.AgentLoop do
   @type loop_result :: %{
           response: String.t(),
           iterations: pos_integer(),
-          total_tokens: non_neg_integer()
+          total_tokens: non_neg_integer(),
+          context_tokens: non_neg_integer()
         }
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
@@ -64,16 +63,34 @@ defmodule FermixCore.AgentLoop do
     allowed_tools = Keyword.get(opts, :allowed_tools)
     policy = Keyword.get(opts, :policy)
     trust = Keyword.get(opts, :trust)
+    excluded_categories = Keyword.get(opts, :excluded_categories)
     {adapter, route_key} = resolve_adapter(opts)
+    context = Keyword.get(opts, :context, %{})
 
-    capabilities =
-      opts
-      |> Keyword.get(:capabilities)
-      |> default_capabilities(capability_registry,
-        allowed_tools: allowed_tools,
+    {capabilities, capability_duration_us} =
+      Telemetry.timed_us(fn ->
+        opts
+        |> Keyword.get(:capabilities)
+        |> default_capabilities(capability_registry,
+          allowed_tools: allowed_tools,
+          policy: policy,
+          trust: trust,
+          excluded_categories: excluded_categories
+        )
+      end)
+
+    emit_capability_selection_telemetry(
+      capabilities,
+      capability_duration_us,
+      route_key,
+      context,
+      %{
+        trust: trust,
         policy: policy,
-        trust: trust
-      )
+        allowed_tools: allowed_tools,
+        excluded_categories: excluded_categories
+      }
+    )
 
     %{
       messages: Keyword.fetch!(opts, :messages),
@@ -82,12 +99,13 @@ defmodule FermixCore.AgentLoop do
       allowed_tools: allowed_tools,
       capability_registry: capability_registry,
       adapter: adapter,
-      adapter_opts: build_adapter_opts(opts, route_key, Keyword.get(opts, :context, %{})),
+      route_key: route_key,
+      adapter_opts: build_adapter_opts(opts, route_key, context),
       max_iter: Keyword.get(opts, :max_iterations, @max_iterations),
-      context: Keyword.get(opts, :context, %{}),
+      context: context,
       iteration: 0,
       total_tokens: 0,
-      compaction: compaction_state(opts),
+      context_tokens: 0,
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback)
     }
@@ -117,12 +135,46 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp default_capabilities(nil, registry, opts) do
-    CapabilityRegistry.list(registry, opts)
+    CapabilityRegistry.list_for(registry, opts)
   end
 
   defp default_capabilities(capabilities, _registry, _opts)
        when is_list(capabilities),
        do: capabilities
+
+  defp emit_capability_selection_telemetry(capabilities, duration_us, route_key, context, opts) do
+    :telemetry.execute(
+      [:fermix, :capabilities, :select],
+      %{
+        duration_us: duration_us,
+        count: length(capabilities),
+        description_bytes: capability_description_bytes(capabilities)
+      },
+      %{
+        agent: context_agent(context) || "unknown",
+        provider: route_key.provider,
+        model: route_key.model,
+        trust: opts.trust,
+        policy: opts.policy,
+        allowed_tools_filtered: not is_nil(opts.allowed_tools),
+        excluded_categories: opts.excluded_categories || [],
+        kind_counts: capability_counts(capabilities, & &1.kind),
+        policy_counts: capability_counts(capabilities, & &1.policy_class)
+      }
+    )
+  end
+
+  defp capability_description_bytes(capabilities) do
+    Enum.reduce(capabilities, 0, fn %Capability{description: description}, total ->
+      total + byte_size(description || "")
+    end)
+  end
+
+  defp capability_counts(capabilities, key_fun) do
+    capabilities
+    |> Enum.frequencies_by(key_fun)
+    |> Map.reject(fn {_key, count} -> count == 0 end)
+  end
 
   defp build_adapter_opts(opts, route_key, context) do
     [
@@ -141,9 +193,9 @@ defmodule FermixCore.AgentLoop do
   defp context_agent(_context), do: nil
 
   defp initial_chat(state) do
-    with {:ok, state} <- compact_state_messages(state),
-         start = System.monotonic_time(:millisecond),
-         :ok <- emit_activity(state, :provider_start),
+    start = System.monotonic_time(:millisecond)
+
+    with :ok <- emit_activity(state, :provider_start),
          {:ok, turn} <- state.adapter.chat(state.messages, state.capabilities, state.adapter_opts) do
       emit_activity(state, :provider_response)
       duration_ms = System.monotonic_time(:millisecond) - start
@@ -153,7 +205,8 @@ defmodule FermixCore.AgentLoop do
        %{
          state
          | iteration: state.iteration + 1,
-           total_tokens: state.total_tokens + turn.usage.total_tokens
+           total_tokens: state.total_tokens + turn.usage.total_tokens,
+           context_tokens: peak_context_tokens(state, turn)
        }}
     else
       {:error, reason} ->
@@ -167,7 +220,8 @@ defmodule FermixCore.AgentLoop do
      %{
        response: turn.content,
        iterations: state.iteration,
-       total_tokens: state.total_tokens
+       total_tokens: state.total_tokens,
+       context_tokens: state.context_tokens
      }}
   end
 
@@ -186,11 +240,12 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp run_continuation(turn, state, warning) do
-    tool_results = execute_tool_calls(turn.tool_calls, state)
-
-    case continuation_call(turn.provider_state, tool_results, warning, state) do
-      {:ok, next_turn, state} ->
-        continue_until_terminal(next_turn, state)
+    case execute_tool_calls(turn.tool_calls, state) do
+      {:ok, tool_results} ->
+        case continuation_call(turn.provider_state, tool_results, warning, state) do
+          {:ok, next_turn, state} -> continue_until_terminal(next_turn, state)
+          {:error, reason} -> {:error, reason}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -212,7 +267,8 @@ defmodule FermixCore.AgentLoop do
          %{
            state
            | iteration: state.iteration + 1,
-             total_tokens: state.total_tokens + next_turn.usage.total_tokens
+             total_tokens: state.total_tokens + next_turn.usage.total_tokens,
+             context_tokens: peak_context_tokens(state, next_turn)
          }}
 
       {:error, reason} ->
@@ -222,10 +278,40 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp execute_tool_calls(tool_calls, state) do
-    Enum.map(tool_calls, fn tool_call ->
-      output = run_tool_call(tool_call, state)
-      %{call_id: tool_call.call_id, output: output}
-    end)
+    with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
+      results =
+        Enum.map(tool_calls, fn tool_call ->
+          output = run_tool_call(tool_call, state)
+          %{call_id: tool_call.call_id, output: output}
+        end)
+
+      {:ok, results}
+    end
+  end
+
+  defp enforce_channel_side_effect_bound(tool_calls, state) do
+    count = Enum.count(tool_calls, &channel_side_effect_call?(&1, state))
+
+    if count > 1 do
+      {:error,
+       "Multiple channel side-effect tool calls in one iteration are not allowed; " <>
+         "retry with one channel send per iteration."}
+    else
+      :ok
+    end
+  end
+
+  defp channel_side_effect_call?(%{name: name}, state) when is_binary(name) do
+    capability_allowed?(name, state.allowed_tools) and channel_capability?(name, state)
+  end
+
+  defp channel_side_effect_call?(_tool_call, _state), do: false
+
+  defp channel_capability?(name, state) do
+    case Map.fetch(state.capabilities_by_name, name) do
+      {:ok, %Capability{metadata: metadata}} -> Map.get(metadata, :category) == :channel
+      :error -> false
+    end
   end
 
   defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
@@ -292,26 +378,12 @@ defmodule FermixCore.AgentLoop do
   defp parse_arguments(args) when is_map(args), do: {:ok, args}
   defp parse_arguments(_), do: {:ok, %{}}
 
-  defp compact_state_messages(state) do
-    opts = [
-      enabled: state.compaction.enabled,
-      token_budget: state.compaction.token_budget,
-      persist_checkpoints: state.compaction.persist_checkpoints,
-      cache: state.compaction.cache,
-      provider: FermixCore.Providers.OpenAI,
-      model: Keyword.fetch!(state.adapter_opts, :model),
-      context: state.context
-    ]
-
-    case Compactor.compact(state.messages, opts) do
-      {:ok, result} ->
-        compaction = %{state.compaction | cache: result.cache || state.compaction.cache}
-        {:ok, %{state | messages: result.messages, compaction: compaction}}
-
-      {:error, reason} ->
-        Logger.error("Message compaction failed: #{inspect(reason)}")
-        {:error, reason}
-    end
+  # Peak input size the model saw this turn, in real provider-reported prompt
+  # tokens (max across all loop iterations). The gateway uses this to decide,
+  # at commit time, whether the conversation has crossed the compaction
+  # threshold — a real, provider-agnostic measure rather than a local estimate.
+  defp peak_context_tokens(state, turn) do
+    max(state.context_tokens, Map.get(turn.usage, :prompt_tokens, 0))
   end
 
   defp detect_tool_loop(tool_calls, state) do
@@ -388,22 +460,6 @@ defmodule FermixCore.AgentLoop do
 
   defp loop_kill_message({name, arguments}, threshold) do
     "Repeated tool call loop detected: #{name} with #{arguments} reached #{threshold} repeats"
-  end
-
-  defp compaction_state(opts) do
-    [
-      enabled: Keyword.get(opts, :compaction_enabled, Config.compaction_enabled?(opts)),
-      token_budget:
-        Keyword.get(opts, :compaction_token_budget, Config.compaction_token_budget(opts)),
-      persist_checkpoints:
-        Keyword.get(
-          opts,
-          :compaction_persist_checkpoints,
-          Config.checkpoint_persistence_enabled?(opts)
-        ),
-      cache: nil
-    ]
-    |> Enum.into(%{})
   end
 
   defp loop_detector_state(opts) do

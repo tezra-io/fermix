@@ -64,11 +64,12 @@ It also creates the workspace roots the runtime expects:
 
 - `$FERMIX_HOME/skills`
 - `$FERMIX_HOME/journals`
+- `$FERMIX_HOME/realtime`
 - `$FERMIX_HOME/traces`
 - `$FERMIX_HOME/logs`
 - `$FERMIX_HOME/auth.json` (when `openai_codex` is selected; `0600`)
 
-Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`.
+Regular OpenAI uses `OPENAI_API_KEY`. Codex uses the separate `openai_codex` provider and imports OAuth tokens from the Codex CLI into the provider-scoped token store at `~/.fermix/auth.json`, refreshed by the supervised `TokenManager`. Realtime voice V1 uses the regular OpenAI API key even when the text/chat provider is `openai_codex`.
 
 Runtime precedence is:
 
@@ -110,6 +111,16 @@ chat_id = "8217352118"
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
+| `FERMIX_REALTIME_ENABLED` | No | Enable the local Realtime voice companion mode |
+| `FERMIX_REALTIME_PROVIDER` | No | Realtime provider; only `openai` is supported |
+| `FERMIX_REALTIME_MODEL` | No | Override the OpenAI Realtime model |
+| `FERMIX_REALTIME_VOICE` | No | Override the Realtime voice |
+| `FERMIX_REALTIME_MAX_SESSION_MINUTES` | No | Per-session voice duration cap |
+| `FERMIX_REALTIME_MAX_COST_CENTS` | No | Per-session estimated/reported cost cap |
+| `FERMIX_REALTIME_MAX_ESTIMATED_COST_CENTS_PER_SESSION` | No | Long-form alias for `FERMIX_REALTIME_MAX_COST_CENTS` |
+| `FERMIX_REALTIME_TOOL_POLICY` | No | Voice tool scope, `read_only` or `broad` |
+| `FERMIX_REALTIME_ALLOW_NETWORK_TOOLS` | No | Allow Realtime tool calls that use network access |
+| `FERMIX_REALTIME_PERSIST_TRANSCRIPTS` | No | Persist final voice transcripts as local memory text |
 
 In dev/test these default to empty strings.
 
@@ -133,6 +144,74 @@ fermix service uninstall
 The unit calls `fermix run`, which boots the OTP supervision tree, binds the Phoenix endpoint, and blocks. Logs rotate at `~/.fermix/logs/fermix.log` (10 MB × 10 files by default).
 
 `--user` scope is per-user and requires no sudo; on Linux it enables `loginctl enable-linger` so the service survives logout. `--system` scope binds at boot and requires sudo.
+
+### Local voice companion
+
+Realtime voice is an optional local mode. When enabled, `fermix run` starts a `0600` Unix-domain socket at `~/.fermix/realtime.sock`; the native macOS companion connects to that socket and the daemon owns provider auth, prompt composition, tools, memory, and cost caps.
+
+```bash
+fermix setup --reconfigure --realtime-enabled \
+  --realtime-model gpt-realtime-2 \
+  --realtime-voice marin \
+  --realtime-max-session-minutes 15 \
+  --realtime-max-cost-cents 100
+
+fermix voice status
+```
+
+The setup snapshot writes the Realtime block to `FERMIX_HOME/config.toml`:
+
+```toml
+[fermix_core.realtime]
+enabled = true
+provider = "openai"
+model = "gpt-realtime-2"
+voice = "marin"
+max_session_minutes = 15
+max_estimated_cost_cents_per_session = 100
+persist_transcripts = false
+```
+
+The companion source lives at `clients/macos/FermixPet` and is built locally:
+
+```bash
+cd clients/macos/FermixPet
+swift run FermixPet
+```
+
+For source-only development, skip Burrito and run the full daemon from Mix:
+
+```bash
+FERMIX_HOME=/Users/sujshe/.fermix-dev \
+OPENAI_API_KEY=sk-... \
+FERMIX_REALTIME_ENABLED=true \
+FERMIX_REALTIME_MODEL=gpt-realtime-2 \
+mix fermix.dev
+```
+
+`mix fermix.dev` is the dev mirror of `fermix run`: one BEAM node hosts the daemon control socket, the Realtime voice socket, the Phoenix endpoint, and the channels app. Pass `--no-realtime`, `--no-channels`, or `--no-web` to skip a layer when iterating on one subsystem in isolation.
+
+Then launch the companion against the same home directory:
+
+```bash
+cd clients/macos/FermixPet
+FERMIX_HOME=/Users/sujshe/.fermix-dev swift run FermixPet
+```
+
+V1 opens a local call explicitly from the companion. While the call is open,
+the mic streams continuously and OpenAI server VAD owns turn boundaries; when
+no call is open, audio is not streamed. Fermix does not persist raw audio, and
+transcript persistence defaults to off. If transcript persistence is enabled,
+final spoken user/assistant transcript text is stored locally as `voice_turn`
+memory rows with `source_type = "realtime"` and
+`source_id = "local:<device_id>"`.
+
+Troubleshooting:
+
+- `fermix voice status` shows `daemon: offline`: start Fermix with `fermix start` or `fermix run`.
+- Realtime is `setup_required`: set `OPENAI_API_KEY` or persist an OpenAI API key through setup.
+- The companion cannot use the mic: grant microphone access in macOS Privacy & Security settings.
+- A shared local app is quarantined: remove Gatekeeper quarantine with `xattr -dr com.apple.quarantine FermixPet.app`.
 
 ### Channels
 
@@ -171,6 +250,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix stop [--user\|--system]` | Stop the installed OS service |
 | `fermix restart [--user\|--system]` | Restart the installed OS service |
 | `fermix status` | Print running daemon status via the control socket (exit `3` if not running) |
+| `fermix voice status [--json]` | Show local Realtime voice companion status |
 | `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
 | `fermix logs [-f] [-n LINES]` | Show or follow the daemon log file |
 | `fermix upgrade [--check]` | Self-update from signed releases (cosign-verified, atomic swap) |
@@ -179,6 +259,45 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix help` | Show usage |
 
 `fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails.
+
+## Channel command reference
+
+Plain-text commands work in every channel through the shared dispatcher, and locally through `fermix ask` / `fermix chat`.
+
+| Command | Description |
+|---------|-------------|
+| `/compact` | Summarize the current conversation window now and keep the summary in history |
+| `/new` | Clear the current conversation history only |
+| `/clear` | Alias for `/new` |
+| `/help` | List available commands |
+| `/whoami` | Show the stable channel user id used for command authorization |
+
+Outside the local CLI, mutating commands require a per-channel owner. For a
+single-user channel, `owner_user_id` is enough; it also becomes the default
+ingress allowlist unless you explicitly set `allowed_user_ids` or
+`allowed_sender_ids`:
+
+```toml
+[fermix_channels.telegram]
+owner_user_id = "123456789"
+command_allowlist = ["987654321"]
+```
+
+If `owner_user_id` is absent, Fermix can derive the command owner from a single
+configured ingress allowlist entry. Multiple allowed users still require an
+explicit `owner_user_id` or `command_allowlist`. Use `/whoami` from the target
+account to discover the id, then persist it with `fermix setup --reconfigure` or
+by editing `~/.fermix/config.toml`.
+
+Automatic conversation compaction is controlled by:
+
+```toml
+[fermix_core.compaction]
+enabled = true
+threshold = 0.85
+```
+
+After each agent turn, Fermix estimates the conversation tokens for that conversation key. When usage reaches `threshold * model_context_window`, it summarizes older messages and replaces the stored conversation history with the summary plus recent turns. `/new` only clears the conversation window; long-term memory, resource revisions, and scheduled jobs are preserved.
 
 ## Architecture
 
@@ -189,7 +308,8 @@ fermix/ (umbrella)
 ├── apps/fermix_core/       # Agents, providers, tools, memory, setup, CLI, auth, tracing
 ├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, CLI
 ├── apps/fermix_web/        # Phoenix: setup LiveView, health, webhook ingress
-└── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
+├── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
+└── clients/macos/FermixPet # Native local Realtime voice companion
 ```
 
 One BEAM VM, all `:permanent` under OTP. The data flow is straight-line:
@@ -217,8 +337,9 @@ The current built-in capability set is:
 | `git_write` | Stage, commit, checkout, or pull changes; push is deferred to M10 approval |
 | `web_fetch` | Fetch a public URL and return markdown-light text |
 | `web_search` | Search the public web through the keyless DuckDuckGo HTML backend |
-| `delegate` | Ask another configured model for one bounded answer |
+| `subagents` | Run one or more temporary subagents for delegated work, concurrently up to a cap |
 | `skill_create` | Scaffold a local skill with starter eval cases |
+| `skill_list` | List installed skills available to run via `skill_run` |
 | `model_routing_config` | Read or update local model-routing config |
 | `tool_help` | Return full docs for one registered capability |
 | `memory_store` | Store key-value facts |
@@ -236,7 +357,7 @@ Observability:
 - Structured JSONL traces under `FERMIX_HOME/traces/YYYY-MM-DD/<type>.jsonl`
 - Rotating log file at `FERMIX_HOME/logs/fermix.log`
 - Telemetry events for provider calls, tool execution, channel ingress, and agent lifecycle
-- `/health/ready` reports config paths, provider status, per-channel status, and memory backend status
+- `/health/ready` reports config paths, provider status, per-channel status, memory backend status, and Realtime voice status
 
 ## Develop
 
@@ -253,17 +374,74 @@ mix test --only integration
 
 `mix quality` is the canonical "does everything pass" command. The git pre-commit hook enforces format, compile, credo, and tests.
 
-For dev iteration against the channels and Phoenix endpoint, `mix phx.server` boots the umbrella without going through the CLI dispatcher.
+### Running the daemon in dev
 
-`mix phx.server` does not enable the release daemon control socket. Use the running IEx shell for direct local agent calls, or run the release command path with `fermix run` when testing `fermix ask`, `fermix status`, `fermix health`, and other socket-backed CLI commands.
-
-Local one-shot agent checks:
+`mix fermix.dev` is the single entry point — it boots core, channels, and web in one BEAM node with the daemon control socket and Realtime voice socket enabled, so `fermix ask`, `fermix status`, the macOS companion, and the channel pollers all attach to one process. Use `iex -S mix fermix.dev` when you want an attached shell.
 
 ```bash
-fermix ask "say pong"
-fermix ask --session scenario-web-fetch "validate web_fetch localhost rejection"
-echo "summarize current health" | fermix ask --stdin --json
+# Full stack — Phoenix on :4030, daemon socket, Realtime, all enabled channels
+FERMIX_HOME=~/.fermix-dev \
+OPENAI_API_KEY=sk-... \
+FERMIX_REALTIME_ENABLED=true \
+mix fermix.dev
+
+# Skip a layer when iterating on one subsystem
+mix fermix.dev --no-channels       # no Telegram/WhatsApp/Slack/Discord/Signal
+mix fermix.dev --no-realtime       # no voice socket
+mix fermix.dev --no-web            # no Phoenix endpoint
 ```
+
+The readiness banner prints what actually started:
+
+```
+Fermix dev daemon online
+  Daemon socket:    /Users/you/.fermix-dev/daemon.sock
+  Phoenix endpoint: http://127.0.0.1:4030
+  Realtime socket:  /Users/you/.fermix-dev/realtime.sock
+  Channels:         telegram
+```
+
+If a channel or Realtime is not configured, the banner shows the reason instead of crashing — the daemon still comes up so the rest of the stack is testable.
+
+Running two BEAM nodes against the same `TELEGRAM_BOT_TOKEN` (e.g. an older split workflow with `mix phx.server` next to a separate Realtime daemon) causes the two pollers to race on `getUpdates`. Keep the dev stack on one node — `mix fermix.dev`. The Phoenix port preflight will refuse to start a second instance when port `4030` is already bound.
+
+### Smoke-testing against the running daemon
+
+With `mix fermix.dev` running, exercise the agent path locally over the daemon socket:
+
+```bash
+fermix status                                                  # ping the daemon
+fermix ask "say pong"                                          # one-shot prompt
+fermix ask --session scenario-web-fetch "validate web_fetch localhost rejection"
+echo "summarize current health" | fermix ask --stdin --json    # stdin + JSON output
+curl -s http://127.0.0.1:4030/health/ready | jq .              # Phoenix readiness
+```
+
+For the macOS Realtime companion, point it at the same `FERMIX_HOME`:
+
+```bash
+cd clients/macos/FermixPet
+FERMIX_HOME=~/.fermix-dev swift run FermixPet
+```
+
+### Unit and integration tests
+
+`mix test` and `mix test --only integration` do **not** need a running `mix fermix.dev` — each test boots its own minimal supervision tree and uses a tmp-dir-scoped Memory database independent of `FERMIX_HOME`. Run `mix quality` before pushing; the pre-commit hook enforces the same gates.
+
+### Latency benchmarks
+
+The deterministic benchmark harness uses a mock provider and `Req.Test` channel stubs, so it does not call real LLMs or external channel networks. The default run covers the shared dispatcher → `MainAgent` → `AgentLoop` path; adapter, E2E, idempotency, and soak scenarios are available explicitly by name.
+
+```bash
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --list
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --output=bench/current.json
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --scenarios=shared_text_minimal --samples=1000 --warmup=20 --output=bench/current.json
+FERMIX_HOME=~/.fermix-dev mix fermix.bench --scenarios=telegram_send_short_text,telegram_e2e_text --samples=200 --warmup=10 --output=bench/adapter.json
+FERMIX_HOME=~/.fermix-dev mix fermix.bench.soak --output=bench/soak.json
+mix fermix.bench.diff bench/baseline.json bench/current.json
+```
+
+Relative benchmark paths are resolved from the umbrella root, so the commands above write to the repo-level `bench/` directory even when invoked from a child directory. Use `--compare=bench/baseline.json` with `mix fermix.bench` when you want the run to print the p95 delta table after writing `bench/current.json`.
 
 ## Resource history CLI
 

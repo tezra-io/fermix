@@ -3,14 +3,16 @@ defmodule FermixChannels.CLI do
   Local CLI channel integration.
 
   CLI input is normalized into the same message contract as remote channels and
-  can be dispatched through `FermixChannels.Dispatcher` into `MainAgent`.
+  can be dispatched through `FermixChannels.Dispatcher` into the gateway queue.
   """
 
-  @behaviour FermixChannels.Channel
+  @behaviour FermixChannels.Gateway.Channel
 
-  alias FermixChannels.Dispatcher
-  alias FermixChannels.Message
-  alias FermixCore.Agents.MainAgent
+  alias FermixChannels.Gateway
+  alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Telemetry
 
   @channel "cli"
   @default_timeout_ms 120_000
@@ -20,6 +22,13 @@ defmodule FermixChannels.CLI do
 
   @spec parse_input(String.t(), keyword()) :: {:ok, [Message.t()]} | {:error, :empty_input}
   def parse_input(input, opts \\ []) when is_binary(input) do
+    {result, duration_us} = Telemetry.timed_us(fn -> do_parse_input(input, opts) end)
+    ChannelTelemetry.emit_parse(:cli, result, duration_us)
+    maybe_emit_inbound_message(result, duration_us)
+    result
+  end
+
+  defp do_parse_input(input, opts) do
     content = String.trim(input)
 
     if content == "" do
@@ -36,14 +45,8 @@ defmodule FermixChannels.CLI do
           channel: @channel,
           chat_id: session_id,
           reply_target: session_id,
-          metadata: %{source: :cli}
+          metadata: %{source: :cli, user_id: "cli", chat_type: "private"}
         })
-
-      :telemetry.execute(
-        [:fermix, :channel, :message],
-        %{count: 1},
-        %{channel: :cli, direction: :inbound}
-      )
 
       {:ok, [message]}
     end
@@ -52,10 +55,10 @@ defmodule FermixChannels.CLI do
   @spec dispatch_input(String.t(), keyword()) :: :ok | {:error, :empty_input}
   def dispatch_input(input, opts \\ []) when is_binary(input) do
     with {:ok, messages} <- parse_input(input, opts) do
-      Dispatcher.dispatch(messages,
+      Gateway.ingest(messages,
         channel: __MODULE__,
-        agent: Keyword.get(opts, :agent, MainAgent),
-        agent_server: Keyword.get(opts, :agent_server, MainAgent)
+        agent: Keyword.get(opts, :agent, Queue),
+        agent_server: Keyword.get(opts, :agent_server, Queue)
       )
     end
   end
@@ -72,13 +75,20 @@ defmodule FermixChannels.CLI do
     # transport exists here.
     with {:ok, [message]} <- parse_input(input, opts),
          :ok <-
-           Dispatcher.dispatch([message],
+           Gateway.ingest([message],
              channel: __MODULE__,
-             agent: Keyword.get(opts, :agent, MainAgent),
-             agent_server: Keyword.get(opts, :agent_server, MainAgent),
-             reply_fn: fn text ->
-               send(parent, {ref, {:reply, text}})
-               :ok
+             agent: Keyword.get(opts, :agent, Queue),
+             agent_server: Keyword.get(opts, :agent_server, Queue),
+             reply_fn: fn
+               {:text, text} ->
+                 send(parent, {ref, {:reply, text}})
+                 :ok
+
+               {:media, _media_part} ->
+                 {:error, :media_unsupported}
+
+               other ->
+                 {:error, {:invalid_reply_part, other}}
              end
            ) do
       await_reply(ref, message.chat_id, timeout_ms)
@@ -90,23 +100,34 @@ defmodule FermixChannels.CLI do
 
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
-  @spec send_message(String.t(), String.t(), FermixChannels.Channel.send_opts()) ::
+  @spec send_message(String.t(), String.t(), FermixChannels.Gateway.Channel.send_opts()) ::
           :ok | {:error, term()}
   def send_message(_chat_id, text, _opts \\ []) when is_binary(text) do
-    IO.puts(text)
-
-    :telemetry.execute(
-      [:fermix, :channel, :message],
-      %{count: 1},
-      %{channel: :cli, direction: :outbound}
-    )
+    {_result, duration_us} = Telemetry.timed_us(fn -> IO.puts(text) end)
+    ChannelTelemetry.emit_message(:cli, :outbound, 1, duration_us)
 
     :ok
   end
 
   @impl true
-  def build_reply(%Message{reply_target: reply_target}) do
+  @spec send_media(String.t(), FermixChannels.Gateway.Channel.media_part()) ::
+          {:error, :media_unsupported}
+  @spec send_media(
+          String.t(),
+          FermixChannels.Gateway.Channel.media_part(),
+          FermixChannels.Gateway.Channel.send_opts()
+        ) ::
+          {:error, :media_unsupported}
+  def send_media(_chat_id, _media_part, _opts \\ []), do: {:error, :media_unsupported}
+
+  @impl true
+  def build_text_reply(%Message{reply_target: reply_target}) do
     fn text -> send_message(reply_target, text, []) end
+  end
+
+  @impl true
+  def build_media_reply(%Message{reply_target: reply_target}) do
+    fn media_part -> send_media(reply_target, media_part, []) end
   end
 
   @impl true
@@ -132,4 +153,10 @@ defmodule FermixChannels.CLI do
   defp default_sender do
     System.get_env("USER") || "operator"
   end
+
+  defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do
+    ChannelTelemetry.emit_message(:cli, :inbound, length(messages), duration_us)
+  end
+
+  defp maybe_emit_inbound_message(_result, _duration_us), do: :ok
 end

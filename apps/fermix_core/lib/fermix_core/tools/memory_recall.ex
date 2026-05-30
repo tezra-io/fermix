@@ -197,7 +197,8 @@ defmodule FermixCore.Tools.MemoryRecall do
       agent_id: Map.get(context, :memory_agent_id, Config.agent_id()),
       owner_id: Map.get(context, :memory_owner_id, Config.owner_id()),
       scope_type: "job",
-      scope_id: Map.fetch!(context, :memory_source_id)
+      scope_id: Map.fetch!(context, :memory_source_id),
+      archived?: false
     }
 
     case Repo.search_memories(search,

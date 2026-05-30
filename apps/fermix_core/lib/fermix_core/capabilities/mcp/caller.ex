@@ -2,8 +2,8 @@ defmodule FermixCore.Capabilities.MCP.Caller do
   @moduledoc """
   Behaviour for MCP tool call dispatchers.
 
-  Production uses `FermixCore.Capabilities.MCP.Caller.Hermes`, which
-  delegates to a per-server `Hermes.Client.Base`. Tests can implement
+  Production uses `FermixCore.Capabilities.MCP.Caller.Anubis`, which
+  delegates to a per-server `Anubis.Client`. Tests can implement
   this behaviour to stub out the MCP transport without spawning real
   client processes.
   """
@@ -12,10 +12,10 @@ defmodule FermixCore.Capabilities.MCP.Caller do
               {:ok, term()} | {:error, term()}
 end
 
-defmodule FermixCore.Capabilities.MCP.Caller.Hermes do
+defmodule FermixCore.Capabilities.MCP.Caller.Anubis do
   @moduledoc """
   Production caller that resolves the server name to a registered
-  `Hermes.Client.Base` process via `FermixCore.Capabilities.MCP.Registry`
+  `Anubis.Client` process via `FermixCore.Capabilities.MCP.Registry`
   and forwards the call.
   """
 
@@ -26,7 +26,7 @@ defmodule FermixCore.Capabilities.MCP.Caller.Hermes do
   @impl true
   def call_tool(server, tool, args) when is_binary(server) and is_binary(tool) do
     with {:ok, client} <- McpRegistry.lookup_client(server),
-         {:ok, response} <- Hermes.Client.Base.call_tool(client, tool, args) do
+         {:ok, response} <- Anubis.Client.call_tool(client, tool, args) do
       {:ok, response}
     end
   end

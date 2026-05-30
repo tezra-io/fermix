@@ -8,6 +8,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "coding-skill",
+                 "description" => "Use for coding.",
                  "system_prompt" => "You are helpful."
                })
 
@@ -26,6 +27,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "review-skill",
+                 "description" => "Use for review.",
                  "system_prompt" => "Review code.",
                  "role" => "sub",
                  "capabilities" => "review",
@@ -43,6 +45,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "skill-a",
+                 "description" => "Use skill a.",
                  "system_prompt" => "Do things."
                })
 
@@ -53,6 +56,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "skill-b",
+                 "description" => "Use skill b.",
                  "system_prompt" => "Do things.",
                  "allowed_tools" => nil
                })
@@ -64,6 +68,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "skill-c",
+                 "description" => "Use skill c.",
                  "system_prompt" => "Do things.",
                  "allowed_tools" => []
                })
@@ -75,6 +80,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "skill-d",
+                 "description" => "Use skill d.",
                  "system_prompt" => "Do things.",
                  "allowed_tools" => ["shell", "file_read"]
                })
@@ -86,6 +92,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_allowed_tools, "shell"}} =
                AgentDefinition.new(%{
                  "name" => "skill-e",
+                 "description" => "Use skill e.",
                  "system_prompt" => "Do things.",
                  "allowed_tools" => "shell"
                })
@@ -95,7 +102,11 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
   describe "policy field" do
     test "absent → nil" do
       assert {:ok, definition} =
-               AgentDefinition.new(%{"name" => "p", "system_prompt" => "."})
+               AgentDefinition.new(%{
+                 "name" => "p",
+                 "description" => "Use p.",
+                 "system_prompt" => "."
+               })
 
       assert definition.policy == nil
     end
@@ -104,6 +115,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "policy" => "exec"
                })
@@ -115,6 +127,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, definition} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "policy" => ["read_only", "read_write", "exec", "network"]
                })
@@ -126,6 +139,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_policy_class, "destroy"}} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "policy" => ["read_only", "destroy"]
                })
@@ -135,6 +149,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_policy, 42}} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "policy" => 42
                })
@@ -146,22 +161,29 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_trust, "operator"}} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "trust" => "operator"
                })
     end
 
     test "with_trust/2 stamps a definition with its source classification" do
-      {:ok, definition} = AgentDefinition.new(%{"name" => "p", "system_prompt" => "."})
-      tagged = AgentDefinition.with_trust(definition, :third_party)
-      assert tagged.trust == :third_party
+      {:ok, definition} =
+        AgentDefinition.new(%{"name" => "p", "description" => "Use p.", "system_prompt" => "."})
+
+      tagged = AgentDefinition.with_trust(definition, :guest)
+      assert tagged.trust == :guest
     end
   end
 
   describe "provider field" do
     test "absent → nil" do
       assert {:ok, definition} =
-               AgentDefinition.new(%{"name" => "p", "system_prompt" => "."})
+               AgentDefinition.new(%{
+                 "name" => "p",
+                 "description" => "Use p.",
+                 "system_prompt" => "."
+               })
 
       assert definition.provider == nil
     end
@@ -170,6 +192,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, %{provider: :anthropic}} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "provider" => "anthropic"
                })
@@ -177,6 +200,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:ok, %{provider: :openai_codex}} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "provider" => :openai_codex
                })
@@ -186,6 +210,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_provider, "claude"}} =
                AgentDefinition.new(%{
                  "name" => "p",
+                 "description" => "Use p.",
                  "system_prompt" => ".",
                  "provider" => "claude"
                })
@@ -197,6 +222,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_positive_integer, "0"}} =
                AgentDefinition.new(%{
                  "name" => "bad-skill",
+                 "description" => "Bad.",
                  "system_prompt" => "Nope.",
                  "timeout_seconds" => "0"
                })
@@ -204,6 +230,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_positive_integer, -1}} =
                AgentDefinition.new(%{
                  "name" => "bad-skill",
+                 "description" => "Bad.",
                  "system_prompt" => "Nope.",
                  "max_iterations" => -1
                })
@@ -213,6 +240,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_role, "worker"}} =
                AgentDefinition.new(%{
                  "name" => "bad-skill",
+                 "description" => "Bad.",
                  "system_prompt" => "Nope.",
                  "role" => "worker"
                })
@@ -220,6 +248,7 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
       assert {:error, {:invalid_persistent, :main, false}} =
                AgentDefinition.new(%{
                  "name" => "main",
+                 "description" => "Main.",
                  "system_prompt" => "Main agent.",
                  "role" => :main,
                  "persistent" => false

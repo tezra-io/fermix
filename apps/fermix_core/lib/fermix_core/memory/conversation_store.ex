@@ -20,8 +20,14 @@ defmodule FermixCore.Memory.ConversationStore do
           content: String.t(),
           timestamp: DateTime.t()
         }
+  @type history_snapshot :: %{messages: [message()], version: non_neg_integer()}
 
-  @max_messages_default 50
+  # In-memory history is unbounded by default (`:infinity`); token-based
+  # auto-compaction in `TurnRunner` is the real bound. A DB cache-miss still
+  # reads only the most recent `@repo_backfill_limit` rows so an unbounded
+  # in-memory window never turns into an unbounded SQLite scan.
+  @max_messages_default :infinity
+  @repo_backfill_limit 1_000
   @durable_max_attempts 3
   @durable_retry_initial_ms 100
 
@@ -29,9 +35,26 @@ defmodule FermixCore.Memory.ConversationStore do
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    {max_messages, opts} = Keyword.pop(opts, :max_messages, @max_messages_default)
+    {max_messages, opts} = Keyword.pop(opts, :max_messages, configured_max_messages())
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, {max_messages, opts}, name: name)
+  end
+
+  # `:max_conversation_history` is operator-configurable: `:infinity` (default,
+  # no message-count cap — token compaction is the bound) or a positive integer.
+  defp configured_max_messages do
+    case Application.get_env(:fermix_core, :max_conversation_history, @max_messages_default) do
+      :infinity ->
+        :infinity
+
+      messages when is_integer(messages) and messages > 0 ->
+        messages
+
+      other ->
+        raise ArgumentError,
+              "invalid :max_conversation_history #{inspect(other)}; " <>
+                "expected :infinity or a positive integer"
+    end
   end
 
   @spec add_message(conversation_key(), String.t(), String.t(), keyword()) :: :ok
@@ -61,11 +84,26 @@ defmodule FermixCore.Memory.ConversationStore do
     GenServer.call(server, {:get_history, key, limit})
   end
 
+  @spec get_history_snapshot(conversation_key(), keyword()) :: history_snapshot()
+  def get_history_snapshot({channel, chat_id, _thread_scope} = key, opts \\ [])
+      when is_binary(channel) and is_binary(chat_id) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    limit = Keyword.get(opts, :limit)
+    GenServer.call(server, {:get_history_snapshot, key, limit})
+  end
+
   @spec clear(conversation_key(), keyword()) :: :ok
   def clear({channel, chat_id, _thread_scope} = key, opts \\ [])
       when is_binary(channel) and is_binary(chat_id) do
     server = Keyword.get(opts, :server, __MODULE__)
     GenServer.call(server, {:clear, key})
+  end
+
+  @spec replace_history(conversation_key(), [map()], keyword()) :: :ok | {:error, :stale_history}
+  def replace_history({channel, chat_id, _thread_scope} = key, messages, opts \\ [])
+      when is_binary(channel) and is_binary(chat_id) and is_list(messages) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:replace_history, key, messages, opts})
   end
 
   @spec list_conversations(keyword()) :: [conversation_key()]
@@ -77,11 +115,13 @@ defmodule FermixCore.Memory.ConversationStore do
   # --- GenServer Callbacks ---
 
   @impl true
-  def init({max_messages, opts}) when is_integer(max_messages) and max_messages > 0 do
+  def init({max_messages, opts})
+      when max_messages == :infinity or (is_integer(max_messages) and max_messages > 0) do
     {:ok,
      %{
        conversations: %{},
        clear_versions: %{},
+       history_versions: %{},
        max_messages: max_messages,
        repo: Keyword.get(opts, :repo, Repo),
        agent_id: Config.agent_id(opts),
@@ -117,36 +157,80 @@ defmodule FermixCore.Memory.ConversationStore do
     )
 
     {:reply, :ok, put_in(state, [:conversations, key], updated)}
+    |> bump_history_version(key)
   end
 
   def handle_call({:clear, key}, _from, state) do
-    delete_messages!(state, key)
     next_clear_versions = Map.update(state.clear_versions, key, 1, &(&1 + 1))
+    next_history_versions = bump_history_versions(state.history_versions, key)
+    clear_version = Map.fetch!(next_clear_versions, key)
+    history_version = Map.fetch!(next_history_versions, key)
 
-    {:reply, :ok,
-     %{
-       state
-       | conversations: Map.delete(state.conversations, key),
-         clear_versions: next_clear_versions
-     }}
+    next_state = %{
+      state
+      | conversations: Map.delete(state.conversations, key),
+        clear_versions: next_clear_versions,
+        history_versions: next_history_versions
+    }
+
+    _durable? = enqueue_delete_history(next_state, key, clear_version, history_version)
+    {:reply, :ok, next_state}
+  end
+
+  def handle_call({:replace_history, key, messages, opts}, _from, state) do
+    if stale_history?(state, key, Keyword.get(opts, :expected_version)) do
+      {:reply, {:error, :stale_history}, state}
+    else
+      normalized = Enum.map(messages, &normalize_history_message/1)
+      next_clear_versions = Map.update(state.clear_versions, key, 1, &(&1 + 1))
+      next_history_versions = bump_history_versions(state.history_versions, key)
+      clear_version = Map.fetch!(next_clear_versions, key)
+      history_version = Map.fetch!(next_history_versions, key)
+      cached = cache_window(normalized, state.max_messages)
+
+      next_state = %{
+        state
+        | conversations: Map.put(state.conversations, key, cached),
+          clear_versions: next_clear_versions,
+          history_versions: next_history_versions
+      }
+
+      _durable? =
+        enqueue_replace_history(next_state, key, normalized, opts, clear_version, history_version)
+
+      {:reply, :ok, next_state}
+    end
   end
 
   def handle_call({:clear_version, key}, _from, state) do
     {:reply, Map.get(state.clear_versions, key, 0), state}
   end
 
+  def handle_call({:durable_version, key}, _from, state) do
+    version = {Map.get(state.clear_versions, key, 0), Map.get(state.history_versions, key, 0)}
+    {:reply, version, state}
+  end
+
   def handle_call({:get_history, key, nil}, from, state) do
     handle_call({:get_history, key, state.max_messages}, from, state)
   end
 
-  def handle_call({:get_history, key, limit}, _from, state) when is_integer(limit) do
-    case Map.fetch(state.conversations, key) do
-      {:ok, messages} ->
-        {:reply, history_slice(messages, limit), state}
+  def handle_call({:get_history, key, limit}, _from, state)
+      when is_integer(limit) or limit == :infinity do
+    {messages, next_state} = history_from_state(state, key, limit)
+    {:reply, messages, next_state}
+  end
 
-      :error ->
-        reply_from_repo(state, key, limit)
-    end
+  def handle_call({:get_history_snapshot, key, nil}, from, state) do
+    handle_call({:get_history_snapshot, key, state.max_messages}, from, state)
+  end
+
+  def handle_call({:get_history_snapshot, key, limit}, _from, state)
+      when is_integer(limit) or limit == :infinity do
+    {messages, next_state} = history_from_state(state, key, limit)
+
+    {:reply, %{messages: messages, version: Map.get(next_state.history_versions, key, 0)},
+     next_state}
   end
 
   def handle_call(:list_conversations, _from, state) do
@@ -161,36 +245,80 @@ defmodule FermixCore.Memory.ConversationStore do
     }
   end
 
+  defp normalize_history_message(message) when is_map(message) do
+    role = Map.get(message, :role, Map.get(message, "role"))
+    content = Map.get(message, :content, Map.get(message, "content"))
+
+    unless is_binary(role) and is_binary(content) do
+      raise ArgumentError,
+            "replacement history messages must include binary role and content"
+    end
+
+    %{
+      role: role,
+      content: content,
+      timestamp: normalize_timestamp(Map.get(message, :timestamp, Map.get(message, "timestamp")))
+    }
+  end
+
+  defp normalize_timestamp(%DateTime{} = timestamp), do: timestamp
+  defp normalize_timestamp(_timestamp), do: DateTime.utc_now()
+
   defp append_message(state, key, message) do
     state.conversations
     |> Map.get(key, [])
     |> then(&[message | &1])
-    |> Enum.take(state.max_messages)
+    |> take_limit(state.max_messages)
   end
 
-  defp reply_from_repo(state, key, limit) do
-    repo_limit = max(limit, state.max_messages)
+  defp history_from_state(state, key, limit) do
+    case Map.fetch(state.conversations, key) do
+      {:ok, messages} ->
+        {history_slice(messages, limit), state}
+
+      :error ->
+        history_from_repo(state, key, limit)
+    end
+  end
+
+  defp history_from_repo(state, key, limit) do
+    repo_limit = repo_read_limit(limit, state.max_messages)
 
     case load_messages_from_repo(state, key, repo_limit) do
       {:ok, []} ->
-        {:reply, [], state}
+        {[], state}
 
       {:ok, messages} ->
         cached = cache_window(messages, state.max_messages)
         next_state = put_in(state, [:conversations, key], cached)
-        {:reply, take_recent_chronological(messages, limit), next_state}
+        {take_recent_chronological(messages, limit), next_state}
 
       {:error, :disabled} ->
-        {:reply, [], state}
+        {[], state}
 
       {:error, reason} ->
         raise "conversation repo load failed: #{inspect(reason)}"
     end
   end
 
+  defp stale_history?(_state, _key, nil), do: false
+
+  defp stale_history?(state, key, expected_version) when is_integer(expected_version) do
+    Map.get(state.history_versions, key, 0) != expected_version
+  end
+
+  defp bump_history_version({:reply, reply, state}, key) do
+    {:reply, reply,
+     %{state | history_versions: bump_history_versions(state.history_versions, key)}}
+  end
+
+  defp bump_history_versions(history_versions, key) do
+    Map.update(history_versions, key, 1, &(&1 + 1))
+  end
+
   defp history_slice(messages, limit) do
     messages
-    |> Enum.take(limit)
+    |> take_limit(limit)
     |> Enum.reverse()
   end
 
@@ -212,6 +340,58 @@ defmodule FermixCore.Memory.ConversationStore do
 
         start_persist_task(state.durable_task_supervisor, ctx)
     end
+  end
+
+  defp enqueue_delete_history(state, key, clear_version, history_version) do
+    case configured_repo(state.repo) do
+      nil ->
+        false
+
+      repo ->
+        ctx =
+          history_operation_context(state, key, repo, :delete, [], [],
+            clear_version: clear_version,
+            history_version: history_version
+          )
+
+        start_history_task(state.durable_task_supervisor, ctx)
+    end
+  end
+
+  defp enqueue_replace_history(state, key, messages, opts, clear_version, history_version) do
+    case configured_repo(state.repo) do
+      nil ->
+        false
+
+      repo ->
+        attrs =
+          Enum.map(messages, fn message ->
+            message_attrs(state, key, message.role, message.content, opts, message.timestamp)
+          end)
+
+        ctx =
+          history_operation_context(state, key, repo, :replace, opts, attrs,
+            clear_version: clear_version,
+            history_version: history_version
+          )
+
+        start_history_task(state.durable_task_supervisor, ctx)
+    end
+  end
+
+  defp history_operation_context(state, key, repo, operation, opts, attrs, versions) do
+    %{
+      operation: operation,
+      store: self(),
+      key: key,
+      version:
+        {Keyword.fetch!(versions, :clear_version), Keyword.fetch!(versions, :history_version)},
+      repo: repo,
+      selector: chat_selector(state, key, opts),
+      attrs: attrs,
+      max_attempts: state.durable_max_attempts,
+      retry_initial_ms: state.durable_retry_initial_ms
+    }
   end
 
   defp configured_repo(nil), do: nil
@@ -238,6 +418,20 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
+  defp start_history_task(supervisor, ctx) do
+    case start_child(supervisor, fn -> persist_history_operation(ctx, 1) end) do
+      {:ok, _pid} ->
+        true
+
+      {:error, reason} ->
+        Logger.error(
+          "failed to start conversation durable #{ctx.operation} task for #{ctx.selector.channel}/#{ctx.selector.chat_id}: #{inspect(reason)}"
+        )
+
+        false
+    end
+  end
+
   # `nil` means the caller explicitly opted out of supervision (test wiring,
   # mostly). Anything else is a real supervisor and a missing/dead supervisor
   # should surface as an error — we don't silently degrade to an unsupervised
@@ -254,6 +448,12 @@ defmodule FermixCore.Memory.ConversationStore do
   defp persist_message(ctx, attempt) do
     if current_clear_version(ctx.store, ctx.key) == ctx.version do
       do_persist_message(ctx, attempt)
+    end
+  end
+
+  defp persist_history_operation(ctx, attempt) do
+    if current_durable_version(ctx.store, ctx.key) == ctx.version do
+      do_persist_history_operation(ctx, attempt)
     end
   end
 
@@ -280,10 +480,56 @@ defmodule FermixCore.Memory.ConversationStore do
     :exit, _reason -> :cleared
   end
 
+  defp current_durable_version(store, key) do
+    GenServer.call(store, {:durable_version, key})
+  catch
+    :exit, _reason -> :stale
+  end
+
   defp safe_insert_message(repo, attrs) do
     Repo.insert_message(attrs, server: repo)
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp safe_delete_messages(repo, selector) do
+    Repo.delete_messages(selector, server: repo)
+  catch
+    :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  defp do_persist_history_operation(ctx, attempt) do
+    case safe_history_operation(ctx) do
+      :ok ->
+        :ok
+
+      {:error, :disabled} ->
+        Logger.debug(
+          "conversation durable #{ctx.operation} skipped because repo is disabled for #{ctx.selector.channel}/#{ctx.selector.chat_id}"
+        )
+
+      {:error, reason} ->
+        retry_or_log_history_failure(ctx, attempt, reason)
+    end
+  end
+
+  defp safe_history_operation(%{operation: :delete} = ctx) do
+    safe_delete_messages(ctx.repo, ctx.selector)
+  end
+
+  defp safe_history_operation(%{operation: :replace} = ctx) do
+    with :ok <- safe_delete_messages(ctx.repo, ctx.selector) do
+      insert_replacement_attrs(ctx.repo, ctx.attrs)
+    end
+  end
+
+  defp insert_replacement_attrs(repo, attrs) do
+    Enum.reduce_while(attrs, :ok, fn attrs, :ok ->
+      case safe_insert_message(repo, attrs) do
+        {:ok, _row} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp retry_or_log_persist_failure(ctx, attempt, reason) do
@@ -302,6 +548,26 @@ defmodule FermixCore.Memory.ConversationStore do
     else
       Logger.error(
         "conversation durable write failed after #{attempt} attempts for #{ctx.attrs.channel}/#{ctx.attrs.chat_id}: #{inspect(reason)}"
+      )
+    end
+  end
+
+  defp retry_or_log_history_failure(ctx, attempt, reason) do
+    if attempt < ctx.max_attempts do
+      delay_ms = retry_delay_ms(ctx.retry_initial_ms, attempt)
+
+      Logger.warning(
+        "conversation durable #{ctx.operation} failed; retrying attempt #{attempt + 1}/#{ctx.max_attempts} for #{ctx.selector.channel}/#{ctx.selector.chat_id}: #{inspect(reason)}"
+      )
+
+      if delay_ms > 0 do
+        Process.sleep(delay_ms)
+      end
+
+      persist_history_operation(ctx, attempt + 1)
+    else
+      Logger.error(
+        "conversation durable #{ctx.operation} failed after #{attempt} attempts for #{ctx.selector.channel}/#{ctx.selector.chat_id}: #{inspect(reason)}"
       )
     end
   end
@@ -344,39 +610,42 @@ defmodule FermixCore.Memory.ConversationStore do
     }
   end
 
-  defp delete_messages!(state, key) do
-    case repo_server(state.repo) do
-      nil ->
-        :ok
-
-      repo ->
-        case Repo.delete_messages(
-               %{
-                 agent_id: state.agent_id,
-                 channel: elem(key, 0),
-                 chat_id: elem(key, 1),
-                 thread_scope: elem(key, 2)
-               },
-               server: repo
-             ) do
-          :ok -> :ok
-          {:error, :disabled} -> :ok
-          {:error, reason} -> raise "conversation repo delete failed: #{inspect(reason)}"
-        end
-    end
+  defp chat_selector(state, key, opts) do
+    %{
+      agent_id: Keyword.get(opts, :agent_id, state.agent_id),
+      channel: elem(key, 0),
+      chat_id: elem(key, 1),
+      thread_scope: elem(key, 2),
+      kind: "chat_message"
+    }
   end
 
   defp cache_window(messages, max_messages) do
     messages
     |> Enum.reverse()
-    |> Enum.take(max_messages)
+    |> take_limit(max_messages)
   end
 
   defp take_recent_chronological(messages, limit) do
     messages
     |> Enum.reverse()
-    |> Enum.take(limit)
+    |> take_limit(limit)
     |> Enum.reverse()
+  end
+
+  # `:infinity` keeps the whole list (no message-count cap); an integer caps it.
+  defp take_limit(list, :infinity), do: list
+  defp take_limit(list, n) when is_integer(n), do: Enum.take(list, n)
+
+  # Bound the DB cache-miss read even when in-memory history is unbounded:
+  # take the largest concrete request, falling back to the backfill floor when
+  # every input is `:infinity`. Preserves the prior `max(limit, max_messages)`
+  # behavior whenever both are integers.
+  defp repo_read_limit(limit, max_messages) do
+    case Enum.filter([limit, max_messages], &is_integer/1) do
+      [] -> @repo_backfill_limit
+      integers -> Enum.max(integers)
+    end
   end
 
   defp load_messages_from_repo(state, key, limit) do

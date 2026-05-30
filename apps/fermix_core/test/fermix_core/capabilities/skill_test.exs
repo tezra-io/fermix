@@ -116,6 +116,7 @@ defmodule FermixCore.Capabilities.SkillTest do
     {:ok, definition} =
       AgentDefinition.new(%{
         "name" => name,
+        "description" => "Use #{name}.",
         "system_prompt" => prompt,
         "model" => "mock-model",
         "allowed_tools" => [],
@@ -123,7 +124,7 @@ defmodule FermixCore.Capabilities.SkillTest do
         "timeout_seconds" => 30
       })
 
-    AgentDefinition.with_trust(definition, :local)
+    AgentDefinition.with_trust(definition, :operator)
   end
 
   setup do
@@ -131,14 +132,14 @@ defmodule FermixCore.Capabilities.SkillTest do
     suffix = System.unique_integer([:positive])
     agent_supervisor_name = :"skill_capability_agent_supervisor_#{suffix}"
     task_supervisor_name = :"skill_capability_task_supervisor_#{suffix}"
-    journal_dir = Path.join(System.tmp_dir!(), "skill-capability-journals-#{suffix}")
+    journal_dir = Path.join(System.tmp_dir!(), "fermix-skill-capability-journals-#{suffix}")
 
     {:ok, _} = start_supervised({Task.Supervisor, name: task_supervisor_name})
     {:ok, _} = start_supervised({AgentSupervisor, name: agent_supervisor_name})
 
     on_exit(fn ->
       MockProvider.cleanup()
-      File.rm_rf!(journal_dir)
+      FermixTestSupport.SafeRm.rm_rf!(journal_dir)
     end)
 
     %{
@@ -155,14 +156,14 @@ defmodule FermixCore.Capabilities.SkillTest do
 
       assert %Capability{kind: :skill, policy_class: :exec, name: "alpha"} = cap
       assert cap.metadata.skill == "alpha"
-      assert cap.metadata.trust == :local
+      assert cap.metadata.trust == :operator
       assert {Skill, :invoke, [^definition]} = cap.executor
     end
 
-    test "description is the first paragraph of the system prompt, truncated" do
+    test "description comes from the skill definition" do
       definition = build_definition("beta", "Headline line\n\nDetail paragraph here.")
       cap = Skill.from_definition(definition)
-      assert cap.description == "Headline line"
+      assert cap.description == "Use beta."
     end
   end
 

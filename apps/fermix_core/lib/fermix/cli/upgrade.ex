@@ -66,7 +66,7 @@ defmodule Fermix.CLI.Upgrade do
          {:ok, target} <- Manifest.target_for_host(),
          {:ok, artifact} <- Manifest.select_artifact(release, target),
          {:ok, staged} <- Swapper.stage_artifact(artifact, opts),
-         :ok <- Swapper.verify(staged, opts) do
+         :ok <- Swapper.verify(staged, Keyword.put(opts, :version, manifest.latest)) do
       finalize(staged, artifact, current, manifest.latest, installed_path, opts)
     else
       {:error, _reason} = err ->

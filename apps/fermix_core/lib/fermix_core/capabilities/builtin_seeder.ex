@@ -4,10 +4,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   `kind: :builtin` capabilities.
 
   Listed in the supervision tree between `CapabilityRegistry` and
-  `SkillRegistry` so built-ins land first. SkillRegistry's `sync_capabilities/3`
-  refuses to evict an existing built-in, which combined with the boot order
-  guarantees an operator skill named "shell" can never silently shadow the
-  built-in shell tool.
+  `SkillRegistry` so built-ins land first. Skill discovery refuses names that
+  collide with registered capabilities, which prevents an operator skill named
+  "shell" from silently shadowing the built-in shell tool.
 
   `start_link/1` returns `:ignore` so the supervisor records no child pid —
   the work happens before `start_link` returns.
@@ -29,19 +28,24 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.GitWrite,
     FermixCore.Tools.WebFetch,
     FermixCore.Tools.WebSearch,
-    FermixCore.Tools.Delegate,
     FermixCore.Tools.SkillCreate,
+    FermixCore.Tools.SkillView,
+    FermixCore.Tools.SkillRun,
+    FermixCore.Tools.SkillList,
+    FermixCore.Tools.Subagents,
     FermixCore.Tools.ModelRoutingConfig,
     FermixCore.Tools.ToolHelp,
     FermixCore.Tools.MemoryStore,
     FermixCore.Tools.MemoryRecall,
     FermixCore.Tools.ScheduleJob,
+    FermixCore.Tools.UpdateJob,
     FermixCore.Tools.ListJobs,
     FermixCore.Tools.PauseJob,
     FermixCore.Tools.ResumeJob,
     FermixCore.Tools.RemoveJob,
     FermixCore.Tools.MemorySourcesList,
-    FermixCore.Tools.Browser
+    FermixCore.Tools.Browser,
+    FermixCore.Tools.SendAttachment
   ]
 
   def child_spec(opts) do
@@ -74,6 +78,14 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
     :ignore
   end
+
+  @doc """
+  The built-in tool modules seeded into the capability registry at boot.
+  Exposed for the classification guard test that asserts every built-in has an
+  explicit `policy_class` (see `FermixCore.Capabilities.Builtin`).
+  """
+  @spec builtin_tool_modules() :: [module()]
+  def builtin_tool_modules, do: @builtin_tool_modules
 
   defp builtin_modules(opts) do
     Keyword.get(opts, :tool_modules, @builtin_tool_modules)

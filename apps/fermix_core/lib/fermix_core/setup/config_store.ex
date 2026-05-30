@@ -8,18 +8,43 @@ defmodule FermixCore.Setup.ConfigStore do
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
-  alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
+  alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretWriter
+
+  require Logger
 
   @workspace_dirs [
+    workspace: "workspace",
+    grants: "grants",
     bootstrap: "bootstrap",
     skills: "skills",
+    plugins: "plugins",
     journals: "journals",
+    realtime: "realtime",
     traces: "traces",
     logs: "logs"
   ]
 
+  @dynamic_section_fields %{
+    "auth_profile" => :auth_profile,
+    "client_id" => :client_id,
+    "client_secret" => :client_secret,
+    "client_type" => :client_type,
+    "enabled" => :enabled,
+    "redirect_host" => :redirect_host,
+    "redirect_port" => :redirect_port,
+    "scope_profile" => :scope_profile,
+    "unsupported" => :unsupported
+  }
+
   @type runtime_config :: %{
           fermix_core: keyword(),
+          sandbox: keyword(),
           fermix_channels: keyword(),
           fermix_web: keyword()
         }
@@ -33,9 +58,13 @@ defmodule FermixCore.Setup.ConfigStore do
   def path, do: Path.join(fermix_home(), "config.toml")
 
   @spec workspace_paths() :: %{
+          workspace: String.t(),
+          grants: String.t(),
           bootstrap: String.t(),
           skills: String.t(),
+          plugins: String.t(),
           journals: String.t(),
+          realtime: String.t(),
           traces: String.t(),
           logs: String.t()
         }
@@ -67,8 +96,15 @@ defmodule FermixCore.Setup.ConfigStore do
         personalization: Application.get_env(:fermix_core, :personalization, []),
         agent: Application.get_env(:fermix_core, :agent, []),
         jobs: Application.get_env(:fermix_core, :jobs, []),
-        routing: Application.get_env(:fermix_core, :routing, [])
+        routing: Application.get_env(:fermix_core, :routing, []),
+        compaction: Application.get_env(:fermix_core, :compaction, []),
+        memory: Application.get_env(:fermix_core, :memory, []),
+        realtime: Application.get_env(:fermix_core, :realtime, []),
+        tools: Application.get_env(:fermix_core, :tools, []),
+        plugins: Application.get_env(:fermix_core, :plugins, []),
+        oauth: Application.get_env(:fermix_core, :oauth, %{})
       ],
+      sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
         telegram: Application.get_env(:fermix_channels, :telegram, []),
         whatsapp: Application.get_env(:fermix_channels, :whatsapp, []),
@@ -81,18 +117,29 @@ defmodule FermixCore.Setup.ConfigStore do
     |> persistable_snapshot()
   end
 
-  @spec load_runtime_config() :: {:ok, runtime_config()} | {:error, term()}
-  def load_runtime_config do
+  @spec load_runtime_config(keyword()) :: {:ok, runtime_config()} | {:error, term()}
+  def load_runtime_config(opts \\ []) do
     case File.read(path()) do
-      {:ok, contents} -> {:ok, parse_document(contents)}
+      {:ok, contents} -> {:ok, maybe_resolve_keyring(parse_document(contents), opts)}
       {:error, :enoent} -> {:ok, empty_runtime_config()}
       {:error, reason} -> {:error, reason}
     end
   end
 
+  @spec realtime_configured?() :: boolean()
+  def realtime_configured? do
+    case File.read(path()) do
+      {:ok, contents} -> section_present?(contents, ["fermix_core", "realtime"])
+      {:error, _reason} -> false
+    end
+  end
+
   @spec save_snapshot(runtime_config()) :: :ok | {:error, term()}
   def save_snapshot(snapshot) do
-    persisted = persistable_snapshot(snapshot)
+    persisted =
+      snapshot
+      |> persistable_snapshot()
+      |> preserve_existing_sentinels()
 
     with :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
@@ -103,7 +150,11 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec apply_snapshot(runtime_config()) :: :ok
   def apply_snapshot(snapshot) do
-    persisted = persistable_snapshot(snapshot)
+    persisted =
+      snapshot
+      |> persistable_snapshot()
+      |> resolve_keyring_sentinels(warn_plaintext: false)
+
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
     apply_provider_config(:openai, Keyword.get(providers, :openai, []))
@@ -114,6 +165,13 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
     apply_jobs_config(Keyword.get(persisted.fermix_core, :jobs, []))
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
+    apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
+    apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
+    apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
+    apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
+    apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
+    apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
+    apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
     apply_channel_config(:whatsapp, Keyword.get(persisted.fermix_channels, :whatsapp, []))
@@ -149,11 +207,14 @@ defmodule FermixCore.Setup.ConfigStore do
     case File.read(path()) do
       {:ok, contents} ->
         servers = McpConfig.from_toml(contents)
+        inbound = InboundMcpConfig.from_toml(contents)
         Application.put_env(:fermix_core, :mcp_servers, servers)
+        Application.put_env(:fermix_core, :mcp_inbound, inbound)
         :ok
 
       {:error, :enoent} ->
         Application.put_env(:fermix_core, :mcp_servers, [])
+        Application.put_env(:fermix_core, :mcp_inbound, InboundMcpConfig.default())
         :ok
 
       {:error, reason} ->
@@ -194,8 +255,42 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:routing, [])
-          |> normalize_routing()
+          |> normalize_routing(),
+        compaction:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:compaction, [])
+          |> normalize_compaction(),
+        memory:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:memory, [])
+          |> normalize_memory(),
+        realtime:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:realtime, [])
+          |> normalize_realtime(),
+        tools:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:tools, [])
+          |> normalize_tools(),
+        plugins:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:plugins, [])
+          |> normalize_plugins(),
+        oauth:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:oauth, %{})
+          |> normalize_oauth()
       ],
+      sandbox:
+        snapshot
+        |> Map.get(:sandbox, SandboxConfig.default())
+        |> SandboxConfig.to_keyword(),
       fermix_channels: [
         telegram:
           snapshot
@@ -229,12 +324,15 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec ensure_workspace() :: :ok | {:error, term()}
   def ensure_workspace do
-    Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
-      case File.mkdir_p(path) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    result =
+      Enum.reduce_while(Map.values(workspace_paths()), :ok, fn path, :ok ->
+        case File.mkdir_p(path) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+
+    result
   end
 
   defp empty_runtime_config do
@@ -244,11 +342,111 @@ defmodule FermixCore.Setup.ConfigStore do
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
         agent: [name: "fermix"],
         jobs: [],
-        routing: []
+        routing: [],
+        compaction: [],
+        memory: [],
+        realtime: [],
+        tools: [],
+        plugins: [],
+        oauth: %{}
       ],
+      sandbox: SandboxConfig.default(),
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
       fermix_web: []
     }
+  end
+
+  defp maybe_resolve_keyring(snapshot, opts) do
+    if Keyword.get(opts, :resolve_secrets, true) do
+      resolve_keyring_sentinels(snapshot, warn_plaintext: true)
+    else
+      snapshot
+    end
+  end
+
+  defp preserve_existing_sentinels(snapshot) do
+    case load_runtime_config(resolve_secrets: false) do
+      {:ok, persisted} -> preserve_existing_sentinels(snapshot, persisted)
+      {:error, _reason} -> snapshot
+    end
+  end
+
+  defp preserve_existing_sentinels(snapshot, persisted) do
+    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
+      old_value = get_snapshot_value(persisted, secret.path)
+      new_value = get_snapshot_value(acc, secret.path)
+
+      if old_value == SecretWriter.sentinel() and secret_value?(new_value) do
+        put_snapshot_value(acc, secret.path, SecretWriter.sentinel())
+      else
+        acc
+      end
+    end)
+  end
+
+  defp secret_value?(value) when value in [nil, "", "@keyring"], do: false
+  defp secret_value?(value), do: is_binary(value)
+
+  defp resolve_keyring_sentinels(snapshot, opts) do
+    warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
+
+    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
+      case get_snapshot_value(acc, secret.path) do
+        nil ->
+          acc
+
+        value when is_binary(value) ->
+          resolve_secret_value(acc, secret, value, warn_plaintext?)
+
+        _other ->
+          acc
+      end
+    end)
+  end
+
+  defp resolve_secret_value(snapshot, secret, value, warn_plaintext?) do
+    if value == SecretWriter.sentinel() do
+      put_snapshot_value(snapshot, secret.path, SecretWriter.get!(secret.key))
+    else
+      if warn_plaintext?, do: warn_plaintext_secret(secret)
+      snapshot
+    end
+  end
+
+  defp warn_plaintext_secret(secret) do
+    Logger.warning(
+      "config.toml contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
+    )
+  end
+
+  defp get_snapshot_value(snapshot, [root | rest]) do
+    snapshot
+    |> Map.get(root, [])
+    |> get_keyword_value(rest)
+  end
+
+  defp get_keyword_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
+
+  defp get_keyword_value(keyword, [key | rest]) when is_list(keyword) do
+    keyword
+    |> Keyword.get(key, [])
+    |> get_keyword_value(rest)
+  end
+
+  defp get_keyword_value(_value, _path), do: nil
+
+  defp put_snapshot_value(snapshot, [root | rest], value) do
+    section = Map.get(snapshot, root, [])
+    Map.put(snapshot, root, put_keyword_value(section, rest, value))
+  end
+
+  defp put_keyword_value(keyword, [key], value) when is_list(keyword) do
+    Keyword.put(keyword, key, value)
+  end
+
+  defp put_keyword_value(keyword, [key | rest], value) when is_list(keyword) do
+    nested = Keyword.get(keyword, key, [])
+    Keyword.put(keyword, key, put_keyword_value(nested, rest, value))
   end
 
   defp apply_provider_config(provider, config) do
@@ -290,6 +488,51 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  defp apply_compaction_config(compaction_config) do
+    Application.put_env(:fermix_core, :compaction, compaction_config)
+    :ok
+  end
+
+  # Memory uses merge (not put) so other in-process keys (extraction_enabled,
+  # agent_id, prompt_*_token_cap, loop_detection_*) survive partial TOML edits.
+  defp apply_memory_config(memory_config) do
+    merged =
+      Application.get_env(:fermix_core, :memory, [])
+      |> Keyword.merge(memory_config)
+
+    Application.put_env(:fermix_core, :memory, merged)
+    :ok
+  end
+
+  defp apply_realtime_config(realtime_config) do
+    merged =
+      Application.get_env(:fermix_core, :realtime, [])
+      |> Keyword.merge(realtime_config)
+
+    Application.put_env(:fermix_core, :realtime, merged)
+    :ok
+  end
+
+  defp apply_tools_config(tools_config) do
+    Application.put_env(:fermix_core, :tools, tools_config)
+    :ok
+  end
+
+  defp apply_plugins_config(plugins_config) do
+    Application.put_env(:fermix_core, :plugins, plugins_config)
+    :ok
+  end
+
+  defp apply_oauth_config(oauth_config) do
+    Application.put_env(:fermix_core, :oauth, oauth_config)
+    :ok
+  end
+
+  defp apply_sandbox_config(sandbox_config) do
+    Application.put_env(:fermix_core, :sandbox, SandboxConfig.normalize(sandbox_config))
+    :ok
+  end
+
   defp apply_channel_config(channel, channel_config) do
     merged =
       Application.get_env(:fermix_channels, channel, [])
@@ -306,6 +549,13 @@ defmodule FermixCore.Setup.ConfigStore do
     agent = Keyword.get(fermix_core, :agent, [])
     jobs = Keyword.get(fermix_core, :jobs, [])
     routing = Keyword.get(fermix_core, :routing, [])
+    compaction = Keyword.get(fermix_core, :compaction, [])
+    memory = Keyword.get(fermix_core, :memory, [])
+    realtime = Keyword.get(fermix_core, :realtime, [])
+    tools = Keyword.get(fermix_core, :tools, [])
+    plugins = Keyword.get(fermix_core, :plugins, [])
+    oauth = Keyword.get(fermix_core, :oauth, %{})
+    sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
     [
@@ -332,6 +582,13 @@ defmodule FermixCore.Setup.ConfigStore do
         Keyword.get(jobs, :default_delivery_target, [])
       ),
       render_section(["fermix_core", "routing"], routing),
+      render_section(["fermix_core", "compaction"], compaction),
+      render_section(["fermix_core", "memory"], memory),
+      render_section(["fermix_core", "realtime"], realtime),
+      render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
+      render_plugins(plugins),
+      render_oauth(oauth),
+      render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
       render_section(["fermix_channels", "discord"], Keyword.get(channels, :discord, [])),
@@ -341,6 +598,14 @@ defmodule FermixCore.Setup.ConfigStore do
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
     |> Kernel.<>("\n")
+  end
+
+  defp section_present?(contents, path) do
+    header = "[#{Enum.join(path, ".")}]"
+
+    contents
+    |> String.split("\n")
+    |> Enum.any?(&(String.trim(&1) == header))
   end
 
   defp render_section(_path, []), do: nil
@@ -357,6 +622,91 @@ defmodule FermixCore.Setup.ConfigStore do
     Enum.join([header, body], "\n")
   end
 
+  defp render_plugins([]), do: nil
+
+  defp render_plugins(plugins) when is_list(plugins) do
+    entries = Keyword.get(plugins, :entries, %{})
+
+    [
+      render_section(["fermix_core", "plugins"], Keyword.drop(plugins, [:entries])),
+      render_named_sections(["fermix_core", "plugins"], entries)
+    ]
+    |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+  end
+
+  defp render_oauth(oauth) when oauth in [%{}, []], do: nil
+
+  defp render_oauth(oauth) when is_map(oauth) or is_list(oauth) do
+    render_named_sections(["fermix_core", "oauth"], oauth)
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+  end
+
+  defp render_named_sections(parent, entries) when is_map(entries) do
+    entries
+    |> Enum.sort_by(fn {name, _values} -> name end)
+    |> Enum.map(fn {name, values} -> render_section(parent ++ [name], values) end)
+  end
+
+  defp render_named_sections(parent, entries) when is_list(entries) do
+    entries
+    |> Enum.sort_by(fn {name, _values} -> to_string(name) end)
+    |> Enum.map(fn {name, values} -> render_section(parent ++ [to_string(name)], values) end)
+  end
+
+  defp render_sandbox([]), do: nil
+
+  defp render_sandbox(sandbox) do
+    config = SandboxConfig.normalize(sandbox)
+
+    [
+      render_section(["sandbox"],
+        mode: config.mode,
+        workspace_root: config.workspace_root,
+        allowed_roots: config.allowed_roots,
+        blocked_roots: config.blocked_roots
+      ),
+      render_section(["sandbox", "env"],
+        mode: config.env.mode,
+        allow: config.env.allow,
+        deny: config.env.deny
+      ),
+      render_env_sources(config.env.sources),
+      render_section(["sandbox", "commands"],
+        profile: config.commands.profile,
+        presets: config.commands.presets
+      ),
+      render_command_specs(config.commands.explicit)
+    ]
+    |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join("\n\n")
+  end
+
+  defp render_env_sources(sources) do
+    Enum.map(sources, fn {name, source} ->
+      values =
+        source
+        |> Map.to_list()
+        |> Enum.reject(fn {_key, value} -> value in [nil, []] end)
+
+      render_section(["sandbox", "env", name], values)
+    end)
+  end
+
+  defp render_command_specs(commands) do
+    Enum.map(commands, fn {name, spec} ->
+      values =
+        spec
+        |> Map.to_list()
+        |> Enum.reject(fn {_key, value} -> value in [nil, []] end)
+
+      render_section(["sandbox", "commands", name], values)
+    end)
+  end
+
   defp encode_value(value) when is_binary(value) do
     escaped =
       value
@@ -367,6 +717,7 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp encode_value(value) when is_boolean(value), do: to_string(value)
+  defp encode_value(value) when is_float(value), do: :erlang.float_to_binary(value, [:short])
   defp encode_value(value) when is_integer(value), do: Integer.to_string(value)
   defp encode_value(value) when is_atom(value), do: encode_value(Atom.to_string(value))
 
@@ -417,8 +768,15 @@ defmodule FermixCore.Setup.ConfigStore do
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
         agent: normalize_agent(get_in(document, ["fermix_core", "agent"])),
         jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
-        routing: normalize_routing(get_in(document, ["fermix_core", "routing"]))
+        routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
+        compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
+        memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
+        realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
+        tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
+        plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
+        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"]))
       ],
+      sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
         telegram: normalize_telegram(get_in(document, ["fermix_channels", "telegram"])),
         whatsapp: normalize_whatsapp(get_in(document, ["fermix_channels", "whatsapp"])),
@@ -438,34 +796,51 @@ defmodule FermixCore.Setup.ConfigStore do
     end)
   end
 
+  defp parse_value("true"), do: true
+  defp parse_value("false"), do: false
+
   defp parse_value(value) do
     cond do
-      String.starts_with?(value, "\"") and String.ends_with?(value, "\"") ->
-        value
-        |> String.trim_leading("\"")
-        |> String.trim_trailing("\"")
-        |> String.replace("\\\"", "\"")
-        |> String.replace("\\\\", "\\")
+      wrapped?(value, "\"", "\"") ->
+        parse_quoted_value(value)
 
-      value == "true" ->
-        true
-
-      value == "false" ->
-        false
-
-      String.starts_with?(value, "[") and String.ends_with?(value, "]") ->
-        value
-        |> String.trim_leading("[")
-        |> String.trim_trailing("]")
-        |> String.split(",", trim: true)
-        |> Enum.map(&parse_value(String.trim(&1)))
+      wrapped?(value, "[", "]") ->
+        parse_list_value(value)
 
       Regex.match?(~r/^\d+$/, value) ->
         String.to_integer(value)
 
+      Regex.match?(~r/^-?\d+\.\d+$/, value) ->
+        parse_float_value(value)
+
       true ->
         value
     end
+  end
+
+  defp parse_quoted_value(value) do
+    value
+    |> String.trim_leading("\"")
+    |> String.trim_trailing("\"")
+    |> String.replace("\\\"", "\"")
+    |> String.replace("\\\\", "\\")
+  end
+
+  defp parse_list_value(value) do
+    value
+    |> String.trim_leading("[")
+    |> String.trim_trailing("]")
+    |> String.split(",", trim: true)
+    |> Enum.map(&parse_value(String.trim(&1)))
+  end
+
+  defp parse_float_value(value) do
+    {float, ""} = Float.parse(value)
+    float
+  end
+
+  defp wrapped?(value, left, right) do
+    String.starts_with?(value, left) and String.ends_with?(value, right)
   end
 
   defp normalize_openai(nil), do: []
@@ -497,6 +872,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :reasoning_effort,
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
+    |> put_if_present(:fast, normalize_bool(lookup(config, "fast", :fast)))
   end
 
   defp normalize_anthropic(nil), do: []
@@ -511,23 +887,155 @@ defmodule FermixCore.Setup.ConfigStore do
     )
   end
 
-  # Validates against the canonical enum owned by ResponsesShared.
+  defp normalize_realtime(config) do
+    config
+    |> RealtimeConfig.normalize()
+    |> RealtimeConfig.to_keyword()
+  end
+
+  defp normalize_tools(nil), do: []
+
+  defp normalize_tools(config) when is_map(config) or is_list(config) do
+    []
+    |> put_if_present(
+      :web_search,
+      normalize_web_search_tool(lookup(config, "web_search", :web_search))
+    )
+  end
+
+  defp normalize_tools(_config), do: []
+
+  defp normalize_plugins(nil), do: []
+
+  defp normalize_plugins(config) when is_map(config) or is_list(config) do
+    enabled = normalize_string_list(lookup(config, "enabled", :enabled))
+
+    entries =
+      config
+      |> lookup("entries", :entries)
+      |> normalize_named_sections([])
+      |> Map.merge(normalize_named_sections(config, ["enabled", :enabled, "entries", :entries]))
+
+    []
+    |> put_if_present(:enabled, enabled)
+    |> put_if_present(:entries, entries)
+  end
+
+  defp normalize_plugins(_config), do: []
+
+  defp normalize_oauth(nil), do: %{}
+
+  defp normalize_oauth(config) when is_map(config) or is_list(config),
+    do: normalize_named_sections(config, [])
+
+  defp normalize_oauth(_config), do: %{}
+
+  defp normalize_named_sections(nil, _ignored_keys), do: %{}
+
+  defp normalize_named_sections(config, ignored_keys) when is_map(config) do
+    ignored = MapSet.new(Enum.map(ignored_keys, &to_string/1))
+
+    config
+    |> Enum.reject(fn {key, _value} -> MapSet.member?(ignored, to_string(key)) end)
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.into(%{}, fn {key, value} -> {to_string(key), normalize_named_section(value)} end)
+  end
+
+  defp normalize_named_sections(config, ignored_keys) when is_list(config) do
+    ignored = MapSet.new(ignored_keys)
+
+    config
+    |> Enum.reject(fn {key, _value} -> MapSet.member?(ignored, key) end)
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.into(%{}, fn {key, value} -> {to_string(key), normalize_named_section(value)} end)
+  end
+
+  defp normalize_named_section(values) when is_map(values) do
+    values
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.map(fn {key, value} -> {to_field_atom(key), value} end)
+  end
+
+  defp normalize_named_section(values) when is_list(values) do
+    Enum.map(values, fn {key, value} -> {to_field_atom(key), value} end)
+  end
+
+  defp normalize_named_section(_values), do: []
+
+  defp normalize_string_list(values) when is_list(values) do
+    values
+    |> Enum.map(&normalize_string/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_string_list(_values), do: nil
+
+  defp normalize_web_search_tool(nil), do: []
+
+  defp normalize_web_search_tool(config) when is_map(config) or is_list(config) do
+    []
+    |> put_if_present(:backend, normalize_web_search_backend(lookup(config, "backend", :backend)))
+    |> put_if_present(
+      :tavily_api_key,
+      normalize_string(lookup(config, "tavily_api_key", :tavily_api_key))
+    )
+    |> put_if_present(
+      :exa_api_key,
+      normalize_string(lookup(config, "exa_api_key", :exa_api_key))
+    )
+    |> put_if_present(
+      :parallel_api_key,
+      normalize_string(lookup(config, "parallel_api_key", :parallel_api_key))
+    )
+    |> put_if_present(
+      :brave_api_key,
+      normalize_string(lookup(config, "brave_api_key", :brave_api_key))
+    )
+    |> put_if_present(
+      :perplexity_api_key,
+      normalize_string(lookup(config, "perplexity_api_key", :perplexity_api_key))
+    )
+  end
+
+  defp normalize_web_search_tool(_config), do: []
+
+  defp normalize_web_search_backend(nil), do: nil
+  defp normalize_web_search_backend(:duckduckgo), do: :duckduckgo
+  defp normalize_web_search_backend(:tavily), do: :tavily
+  defp normalize_web_search_backend(:exa), do: :exa
+  defp normalize_web_search_backend(:parallel), do: :parallel
+  defp normalize_web_search_backend(:brave), do: :brave
+  defp normalize_web_search_backend(:perplexity), do: :perplexity
+  defp normalize_web_search_backend("duckduckgo"), do: :duckduckgo
+  defp normalize_web_search_backend("tavily"), do: :tavily
+  defp normalize_web_search_backend("exa"), do: :exa
+  defp normalize_web_search_backend("parallel"), do: :parallel
+  defp normalize_web_search_backend("brave"), do: :brave
+  defp normalize_web_search_backend("perplexity"), do: :perplexity
+  defp normalize_web_search_backend(_value), do: nil
+
+  # Canonical enum + per-provider mapping live in ReasoningEffort.
   # Returns the atom on success, or nil on unknown input — consistent
   # with the rest of this module (normalize_auth_mode, normalize_mode).
   # Hand-edited TOML with an invalid effort silently drops to nil; the
   # wizard never writes an invalid value, and route_resolver still
   # validates at the public boundary, so misconfig surfaces cleanly.
+  # `minimal` (removed from the enum) migrates up to `low` so an upgrade
+  # with a persisted `minimal` keeps working instead of dropping to nil.
   defp normalize_reasoning_effort(nil), do: nil
 
   defp normalize_reasoning_effort(value) do
-    valid = ResponsesShared.valid_reasoning_efforts()
-
-    cond do
-      is_atom(value) and value in valid -> value
-      is_binary(value) -> Enum.find(valid, fn atom -> Atom.to_string(atom) == value end)
-      true -> nil
+    case value |> migrate_reasoning_effort() |> ReasoningEffort.parse() do
+      {:ok, level} -> level
+      :error -> nil
     end
   end
+
+  defp migrate_reasoning_effort(value) when value in [:minimal, "minimal"], do: :low
+  defp migrate_reasoning_effort(value), do: value
+
+  defp normalize_bool(value) when is_boolean(value), do: value
+  defp normalize_bool(_value), do: nil
 
   defp has_provider_key?(config) when is_map(config) do
     Map.has_key?(config, "provider") or Map.has_key?(config, :provider)
@@ -603,10 +1111,6 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_routing(config) do
     []
     |> put_if_present(
-      :delegate_model,
-      normalize_string(lookup(config, "delegate_model", :delegate_model))
-    )
-    |> put_if_present(
       :default_provider,
       normalize_string(lookup(config, "default_provider", :default_provider))
     )
@@ -626,6 +1130,77 @@ defmodule FermixCore.Setup.ConfigStore do
       :review_model,
       normalize_string(lookup(config, "review_model", :review_model))
     )
+  end
+
+  defp normalize_compaction(config), do: CompactionConfig.normalize(config)
+
+  defp normalize_memory(nil), do: []
+
+  defp normalize_memory(config) when is_map(config) or is_list(config) do
+    []
+    |> put_if_present(
+      :extraction_timeout_ms,
+      normalize_extraction_timeout_ms(
+        lookup(config, "extraction_timeout_ms", :extraction_timeout_ms)
+      )
+    )
+    |> put_if_present(
+      :review_interval_hours,
+      normalize_non_negative_integer(
+        lookup(config, "review_interval_hours", :review_interval_hours),
+        :review_interval_hours
+      )
+    )
+    |> put_if_present(
+      :review_max_messages,
+      normalize_positive_memory_integer(
+        lookup(config, "review_max_messages", :review_max_messages),
+        :review_max_messages
+      )
+    )
+    |> put_if_present(
+      :review_input_token_budget,
+      normalize_positive_memory_integer(
+        lookup(config, "review_input_token_budget", :review_input_token_budget),
+        :review_input_token_budget
+      )
+    )
+    |> put_if_present(
+      :review_failure_backoff_ms,
+      normalize_non_negative_integer(
+        lookup(config, "review_failure_backoff_ms", :review_failure_backoff_ms),
+        :review_failure_backoff_ms
+      )
+    )
+  end
+
+  defp normalize_extraction_timeout_ms(nil), do: nil
+
+  defp normalize_extraction_timeout_ms(value) when is_integer(value) and value > 0, do: value
+
+  defp normalize_extraction_timeout_ms(value) do
+    raise ArgumentError,
+          "invalid memory.extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+  end
+
+  defp normalize_positive_memory_integer(nil, _key), do: nil
+
+  defp normalize_positive_memory_integer(value, _key) when is_integer(value) and value > 0,
+    do: value
+
+  defp normalize_positive_memory_integer(value, key) do
+    raise ArgumentError,
+          "invalid memory.#{key} #{inspect(value)}; expected positive integer"
+  end
+
+  defp normalize_non_negative_integer(nil, _key), do: nil
+
+  defp normalize_non_negative_integer(value, _key) when is_integer(value) and value >= 0,
+    do: value
+
+  defp normalize_non_negative_integer(value, key) do
+    raise ArgumentError,
+          "invalid memory.#{key} #{inspect(value)}; expected non-negative integer"
   end
 
   defp normalize_delivery_mode(:none), do: "none"
@@ -670,9 +1245,10 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
-    |> Keyword.put(
+    |> put_command_auth(config)
+    |> put_ids_if_present(
       :allowed_user_ids,
-      normalize_ids(lookup(config, "allowed_user_ids", :allowed_user_ids) || [])
+      lookup(config, "allowed_user_ids", :allowed_user_ids)
     )
   end
 
@@ -695,9 +1271,10 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_string(lookup(config, "verify_token", :verify_token))
     )
     |> put_if_present(:app_secret, normalize_string(lookup(config, "app_secret", :app_secret)))
-    |> Keyword.put(
+    |> put_command_auth(config)
+    |> put_ids_if_present(
       :allowed_sender_ids,
-      normalize_ids(lookup(config, "allowed_sender_ids", :allowed_sender_ids) || [])
+      lookup(config, "allowed_sender_ids", :allowed_sender_ids)
     )
   end
 
@@ -709,9 +1286,10 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(:bot_user_id, normalize_string(lookup(config, "bot_user_id", :bot_user_id)))
-    |> Keyword.put(
+    |> put_command_auth(config)
+    |> put_ids_if_present(
       :allowed_user_ids,
-      normalize_ids(lookup(config, "allowed_user_ids", :allowed_user_ids) || [])
+      lookup(config, "allowed_user_ids", :allowed_user_ids)
     )
   end
 
@@ -726,9 +1304,10 @@ defmodule FermixCore.Setup.ConfigStore do
       :signing_secret,
       normalize_string(lookup(config, "signing_secret", :signing_secret))
     )
-    |> Keyword.put(
+    |> put_command_auth(config)
+    |> put_ids_if_present(
       :allowed_user_ids,
-      normalize_ids(lookup(config, "allowed_user_ids", :allowed_user_ids) || [])
+      lookup(config, "allowed_user_ids", :allowed_user_ids)
     )
   end
 
@@ -740,9 +1319,10 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
     |> put_if_present(:account, normalize_string(lookup(config, "account", :account)))
     |> put_if_present(:cli_path, normalize_string(lookup(config, "cli_path", :cli_path)))
-    |> Keyword.put(
+    |> put_command_auth(config)
+    |> put_ids_if_present(
       :allowed_sender_ids,
-      normalize_ids(lookup(config, "allowed_sender_ids", :allowed_sender_ids) || [])
+      lookup(config, "allowed_sender_ids", :allowed_sender_ids)
     )
   end
 
@@ -770,6 +1350,25 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_ids(ids) when is_list(ids), do: ids
   defp normalize_ids(_ids), do: []
 
+  defp put_command_auth(keyword, config) do
+    keyword
+    |> put_if_present(
+      :owner_user_id,
+      normalize_string(lookup(config, "owner_user_id", :owner_user_id))
+    )
+    |> put_command_allowlist(config)
+  end
+
+  defp put_command_allowlist(keyword, config) do
+    case lookup(config, "command_allowlist", :command_allowlist) do
+      nil -> keyword
+      ids -> Keyword.put(keyword, :command_allowlist, normalize_ids(ids))
+    end
+  end
+
+  defp put_ids_if_present(keyword, _key, nil), do: keyword
+  defp put_ids_if_present(keyword, key, ids), do: Keyword.put(keyword, key, normalize_ids(ids))
+
   defp lookup(config, string_key, atom_key) when is_map(config) do
     Map.get(config, string_key, Map.get(config, atom_key))
   end
@@ -777,6 +1376,9 @@ defmodule FermixCore.Setup.ConfigStore do
   defp lookup(config, _string_key, atom_key) when is_list(config) do
     Keyword.get(config, atom_key)
   end
+
+  defp to_field_atom(key) when is_atom(key), do: key
+  defp to_field_atom(key) when is_binary(key), do: Map.get(@dynamic_section_fields, key, key)
 
   defp put_if_present(keyword, _key, nil), do: keyword
   defp put_if_present(keyword, key, value), do: Keyword.put(keyword, key, value)

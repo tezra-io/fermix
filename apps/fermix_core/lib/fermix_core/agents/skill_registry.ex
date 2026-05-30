@@ -5,19 +5,22 @@ defmodule FermixCore.Agents.SkillRegistry do
   The registry holds an in-memory snapshot of installed skills. Three roots
   feed into one snapshot, each tagged with a trust source on load:
 
-    * `core_dir` (default: `priv/skills` inside the Fermix release) → `:core`
-    * `local_dir` (default: `~/.fermix/skills`) → `:local`
-    * `plugin_dir` (default: `~/.fermix/skills/_plugins`) → `:third_party`
+    * `core_dir` (default: `priv/skills` inside the Fermix release) → `:operator`
+    * `local_dir` (default: `$FERMIX_HOME/skills`, i.e. `~/.fermix/skills`) → `:operator`
+    * `plugin_skill_dirs` (enabled plugin skill roots under `$FERMIX_HOME/plugins`) → `:guest`
 
-  Anything outside the three known roots fails closed to `:third_party`. The
-  `source` is recorded on the loaded `AgentDefinition.trust` field so the
-  sub-agent policy gate has a stable enforcement input.
+  Local and plugin roots resolve through `ConfigStore` so they follow
+  `FERMIX_HOME` (dev daemons, tests) instead of hardcoding the real home.
 
-  When a `capability_registry` is configured, each loaded skill is also
-  registered as a `%Capability{kind: :skill}` so the LLM can invoke skills
-  by name through the unified capability surface. Stale skill capabilities
-  are dropped on every reload so renamed or removed skills disappear in
-  lock-step with the snapshot.
+  Bundled and user-installed skills are operator-trusted (the operator
+  vetted them by installing). Plugin-loaded skills and anything outside
+  the three known roots fail closed to `:guest` (read-only). The
+  `source` is recorded on the loaded `AgentDefinition.trust` field so
+  the sub-agent policy gate has a stable enforcement input.
+
+  Skills are not registered as provider-visible capabilities. The main
+  runtime renders a compact catalog and uses `skill_view` / `skill_run`
+  built-ins for progressive disclosure and delegation.
   """
 
   use GenServer
@@ -25,7 +28,8 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
-  alias FermixCore.Capabilities.Skill
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Setup.ConfigStore
 
   @type skill_snapshot :: %{String.t() => AgentDefinition.t()}
   @type reload_error ::
@@ -48,13 +52,18 @@ defmodule FermixCore.Agents.SkillRegistry do
     GenServer.call(server, :list_detailed)
   end
 
+  @spec snapshot(GenServer.server()) :: {:ok, map()}
+  def snapshot(server \\ __MODULE__) do
+    GenServer.call(server, :snapshot)
+  end
+
   @spec load(GenServer.server(), String.t()) ::
           {:ok, AgentDefinition.t()} | {:error, {:unknown_skill, String.t()}}
   def load(server \\ __MODULE__, skill_name) when is_binary(skill_name) do
     GenServer.call(server, {:load, skill_name})
   end
 
-  @spec reload(GenServer.server()) :: {:ok, [String.t()]} | {:error, reload_error()}
+  @spec reload(GenServer.server()) :: {:ok, map()} | {:error, reload_error()}
   def reload(server \\ __MODULE__) do
     GenServer.call(server, :reload)
   end
@@ -67,25 +76,26 @@ defmodule FermixCore.Agents.SkillRegistry do
     dirs = %{
       core_dir: Keyword.get(opts, :core_dir, default_core_dir()),
       local_dir: local_dir,
-      plugin_dir: Keyword.get(opts, :plugin_dir, default_plugin_dir(local_dir))
+      plugin_skill_dirs:
+        Keyword.get(opts, :plugin_skill_dirs, PluginRegistry.enabled_skill_dirs())
     }
 
     capability_registry = Keyword.get(opts, :capability_registry)
     bundled_dir = Keyword.get(opts, :bundled_dir, default_core_dir())
     maybe_seed_default_skills(local_dir, bundled_dir, opts)
-    {definitions, errors} = discover(dirs)
-    log_discovery_errors(errors)
 
-    if capability_registry do
-      sync_capabilities(capability_registry, %{}, definitions)
-    end
+    cleanup_stale_skill_capabilities(capability_registry)
+    {definitions, errors} = discover(dirs, capability_registry)
+    log_discovery_errors(errors)
 
     {:ok,
      %{
        skills_dir: local_dir,
        dirs: dirs,
        definitions: definitions,
-       capability_registry: capability_registry
+       capability_registry: capability_registry,
+       version: 1,
+       errors: errors
      }}
   end
 
@@ -103,6 +113,10 @@ defmodule FermixCore.Agents.SkillRegistry do
     {:reply, detailed, state}
   end
 
+  def handle_call(:snapshot, _from, state) do
+    {:reply, {:ok, snapshot_from_state(state)}, state}
+  end
+
   def handle_call({:load, skill_name}, _from, state) do
     reply =
       case Map.fetch(state.definitions, skill_name) do
@@ -114,26 +128,26 @@ defmodule FermixCore.Agents.SkillRegistry do
   end
 
   def handle_call(:reload, _from, state) do
-    {definitions, errors} = discover(state.dirs)
+    cleanup_stale_skill_capabilities(state.capability_registry)
+    dirs = refresh_plugin_skill_dirs(state.dirs)
+    {definitions, errors} = discover(dirs, state.capability_registry)
     log_discovery_errors(errors)
 
-    if state.capability_registry do
-      sync_capabilities(state.capability_registry, state.definitions, definitions)
-    end
+    version = state.version + 1
+    summary = reload_summary(state.definitions, definitions, errors, version)
 
-    {:reply, {:ok, snapshot_names(definitions)}, %{state | definitions: definitions}}
+    {:reply, {:ok, summary},
+     %{state | dirs: dirs, definitions: definitions, errors: errors, version: version}}
   end
 
-  defp discover(dirs) do
-    [:core_dir, :local_dir, :plugin_dir]
-    |> Enum.flat_map(fn key ->
-      dir = Map.fetch!(dirs, key)
-      list_skill_paths(dir)
-    end)
+  defp discover(dirs, capability_registry) do
+    dirs
+    |> discovery_dirs()
+    |> Enum.flat_map(fn {_source, dir} -> list_skill_paths(dir) end)
     |> Enum.uniq()
     |> Enum.sort()
     |> Enum.reduce({%{}, []}, fn path, {definitions, errors} ->
-      case load_definition(path, dirs) do
+      case load_definition(path, dirs, capability_registry) do
         {:ok, definition} ->
           {Map.put(definitions, definition.name, definition), errors}
 
@@ -152,7 +166,7 @@ defmodule FermixCore.Agents.SkillRegistry do
 
   defp list_skill_paths(nil), do: []
 
-  defp load_definition(path, dirs) do
+  defp load_definition(path, dirs, capability_registry) do
     with {:ok, contents} <- read_skill_file(path),
          {:ok, attrs, system_prompt} <- split_frontmatter(contents),
          {:ok, definition} <-
@@ -160,7 +174,8 @@ defmodule FermixCore.Agents.SkillRegistry do
              attrs
              |> Map.put("system_prompt", system_prompt)
              |> Map.put("source_path", path)
-           ) do
+           ),
+         :ok <- validate_no_capability_collision(definition, capability_registry) do
       trust = classify_source(path, dirs)
       {:ok, AgentDefinition.with_trust(definition, trust)}
     else
@@ -173,11 +188,29 @@ defmodule FermixCore.Agents.SkillRegistry do
     skill_dir = Path.dirname(skill_path)
 
     cond do
-      under?(skill_dir, dirs.core_dir) -> :core
-      under?(skill_dir, dirs.plugin_dir) -> :third_party
-      under?(skill_dir, dirs.local_dir) -> :local
-      true -> :third_party
+      under?(skill_dir, dirs.core_dir) -> :operator
+      under_any?(skill_dir, Map.get(dirs, :plugin_skill_dirs, [])) -> :guest
+      under?(skill_dir, dirs.local_dir) -> :operator
+      true -> :guest
     end
+  end
+
+  defp discovery_dirs(dirs) do
+    base = [
+      {:core_dir, Map.get(dirs, :core_dir)},
+      {:local_dir, Map.get(dirs, :local_dir)}
+    ]
+
+    plugin_dirs =
+      dirs
+      |> Map.get(:plugin_skill_dirs, [])
+      |> Enum.map(&{:plugin_skill_dir, &1})
+
+    base ++ plugin_dirs
+  end
+
+  defp refresh_plugin_skill_dirs(dirs) do
+    Map.put(dirs, :plugin_skill_dirs, PluginRegistry.enabled_skill_dirs())
   end
 
   defp under?(_path, nil), do: false
@@ -190,57 +223,23 @@ defmodule FermixCore.Agents.SkillRegistry do
       String.starts_with?(expanded_path, expanded_root <> "/")
   end
 
-  defp sync_capabilities(server, previous, current) do
-    previous_names = MapSet.new(Map.keys(previous))
-    current_names = MapSet.new(Map.keys(current))
-
-    Enum.each(MapSet.difference(previous_names, current_names), fn name ->
-      unregister_if_skill(server, name)
-    end)
-
-    Enum.each(current, fn {name, definition} ->
-      register_skill_capability(server, name, definition)
-    end)
+  defp under_any?(path, roots) when is_list(roots) do
+    Enum.any?(roots, &under?(path, &1))
   end
 
-  defp register_skill_capability(server, name, definition) do
+  defp validate_no_capability_collision(_definition, nil), do: :ok
+
+  defp validate_no_capability_collision(%AgentDefinition{name: name}, server) do
     case CapabilityRegistry.find(server, name) do
-      {:ok, %{kind: :builtin}} ->
-        Logger.warning(
-          "Refusing to register skill #{inspect(name)}: a built-in capability " <>
-            "with the same name is already registered. Rename the skill."
-        )
-
-      {:ok, %{kind: :mcp}} ->
-        Logger.warning(
-          "Refusing to register skill #{inspect(name)}: an MCP capability " <>
-            "with the same name is already registered. Rename the skill."
-        )
-
-      {:ok, %{kind: :skill}} ->
-        # Same-kind reload: replace cleanly.
-        :ok = CapabilityRegistry.unregister(server, name)
-        do_register(server, definition)
-
-      :error ->
-        do_register(server, definition)
+      {:ok, %{kind: kind}} -> {:error, {:name_collision, name, kind}}
+      :error -> :ok
     end
   end
 
-  defp do_register(server, definition) do
-    capability = Skill.from_definition(definition)
+  defp cleanup_stale_skill_capabilities(nil), do: :ok
 
-    case CapabilityRegistry.register(server, capability) do
-      :ok -> :ok
-      {:error, {:duplicate_name, _}} -> :ok
-    end
-  end
-
-  defp unregister_if_skill(server, name) do
-    case CapabilityRegistry.find(server, name) do
-      {:ok, %{kind: :skill}} -> CapabilityRegistry.unregister(server, name)
-      _ -> :ok
-    end
+  defp cleanup_stale_skill_capabilities(server) do
+    CapabilityRegistry.unregister_kind(server, :skill)
   end
 
   defp read_skill_file(path) do
@@ -323,6 +322,44 @@ defmodule FermixCore.Agents.SkillRegistry do
     |> Enum.sort()
   end
 
+  defp snapshot_skills(definitions) do
+    definitions
+    |> Map.values()
+    |> Enum.sort_by(& &1.name)
+  end
+
+  defp snapshot_from_state(state) do
+    %{
+      version: state.version,
+      skills: snapshot_skills(state.definitions),
+      errors: state.errors
+    }
+  end
+
+  defp reload_summary(previous, current, errors, version) do
+    previous_names = MapSet.new(Map.keys(previous))
+    current_names = MapSet.new(Map.keys(current))
+
+    added = MapSet.difference(current_names, previous_names)
+    removed = MapSet.difference(previous_names, current_names)
+    shared = MapSet.intersection(previous_names, current_names)
+
+    changed =
+      shared
+      |> Enum.filter(fn name -> Map.fetch!(previous, name) != Map.fetch!(current, name) end)
+      |> Enum.sort()
+
+    %{
+      version: version,
+      skills: snapshot_skills(current),
+      names: snapshot_names(current),
+      added: added |> MapSet.to_list() |> Enum.sort(),
+      removed: removed |> MapSet.to_list() |> Enum.sort(),
+      changed: changed,
+      errors: errors
+    }
+  end
+
   defp skill_name_from_path(path) do
     path
     |> Path.dirname()
@@ -330,11 +367,7 @@ defmodule FermixCore.Agents.SkillRegistry do
   end
 
   defp default_local_dir do
-    Path.join(System.user_home!(), ".fermix/skills")
-  end
-
-  defp default_plugin_dir(local_dir) do
-    Path.join(local_dir, "_plugins")
+    ConfigStore.workspace_paths().skills
   end
 
   defp default_core_dir do

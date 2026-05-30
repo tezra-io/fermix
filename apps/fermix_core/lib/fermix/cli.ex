@@ -16,15 +16,20 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.Doctor
   alias Fermix.CLI.HealthCommand
   alias Fermix.CLI.LogsCommand
+  alias Fermix.CLI.MemoryCommand
+  alias Fermix.CLI.PluginsCommand
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.Run
+  alias Fermix.CLI.SandboxCommand
   alias Fermix.CLI.ServiceCommand
   alias Fermix.CLI.Setup
+  alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StatusCommand
   alias Fermix.CLI.StopCommand
   alias Fermix.CLI.UpgradeCommand
   alias Fermix.CLI.Version
+  alias Fermix.CLI.VoiceCommand
 
   @doc """
   Dispatch entry point.
@@ -51,15 +56,22 @@ defmodule Fermix.CLI do
   defp dispatch("ask", rest), do: ChatCommand.run(rest)
   defp dispatch("chat", rest), do: ChatCommand.run(rest)
   defp dispatch("run", rest), do: Run.run(rest)
+  defp dispatch("sandbox", rest), do: SandboxCommand.run(rest)
+  defp dispatch("grant", rest), do: SandboxCommand.run(["grant" | rest])
+  defp dispatch("revoke", rest), do: SandboxCommand.run(["revoke" | rest])
   defp dispatch("service", rest), do: ServiceCommand.run(rest)
   defp dispatch("start", rest), do: StartCommand.run(rest)
   defp dispatch("stop", rest), do: StopCommand.run(rest)
   defp dispatch("restart", rest), do: RestartCommand.run(rest)
   defp dispatch("status", rest), do: StatusCommand.run(rest)
   defp dispatch("health", rest), do: HealthCommand.run(rest)
+  defp dispatch("voice", rest), do: VoiceCommand.run(rest)
   defp dispatch("agents", rest), do: AgentsCommand.run(rest)
   defp dispatch("capabilities", rest), do: CapabilitiesCommand.run(rest)
+  defp dispatch("skills", rest), do: SkillsCommand.run(rest)
+  defp dispatch("plugins", rest), do: PluginsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
+  defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
   defp dispatch("doctor", rest), do: Doctor.run(rest)
   defp dispatch(unknown, _rest), do: unknown_command(unknown)
@@ -72,9 +84,11 @@ defmodule Fermix.CLI do
     fermix — Elixir-native multi-agent platform
 
     Usage:
-      fermix setup [--print-state] [--reconfigure] [--import-codex] [--openai-api-key VALUE]
+      fermix setup [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex] [--openai-api-key VALUE]
                    [--provider openai|openai_codex|anthropic]
                    [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
+                   [--fast|--no-fast]
+                   [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status
@@ -89,8 +103,13 @@ defmodule Fermix.CLI do
       fermix restart           [--user|--system]   Restart the installed OS service
       fermix status [--full] [--json]             Show daemon and overview status
       fermix health [--json]                      Show daemon-evaluated health
+      fermix voice status [--json]                Show local voice companion status
       fermix agents [--json]                      Show main-agent and worker status
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
+      fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills
+      fermix plugins [list|catalog|enable NAME|disable NAME|auth ...] [--json]
+      fermix memory review --now [--conversation KEY] [--json]
+      fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file
       fermix upgrade [--check]                     Self-update from signed releases
       fermix doctor  [--full]                      Run post-install diagnostics

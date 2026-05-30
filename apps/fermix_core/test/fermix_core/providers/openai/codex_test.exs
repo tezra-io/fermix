@@ -83,6 +83,50 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "chat/3 — request shape" do
+    test "emits provider telemetry with request shape" do
+      test_pid = self()
+      handler_id = "test-codex-request-shape-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      assert {:ok, _turn} =
+               Codex.chat(
+                 [
+                   %{role: "system", content: "be terse"},
+                   %{role: "user", content: "Hi"}
+                 ],
+                 [capability()],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
+      assert measurements.duration_ms >= 0
+      assert metadata.input_items == 1
+      assert metadata.input_bytes > 0
+      assert metadata.instructions_bytes == byte_size("be terse")
+      assert metadata.tools_count == 1
+      assert metadata.tools_bytes > 0
+      assert metadata.capabilities_count == 1
+    end
+
     test "posts SSE-streaming body to Codex URL with bearer token + tools" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -371,7 +415,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
 
     test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
-      for level <- [:minimal, :low, :medium, :high, :xhigh] do
+      for level <- [:low, :medium, :high, :xhigh] do
         assert {nil, decoded} = run_chat_capture_body(reasoning_effort: level)
         assert decoded["reasoning"] == %{"effort" => Atom.to_string(level), "summary" => "auto"}
         assert decoded["include"] == ["reasoning.encrypted_content"]
@@ -446,6 +490,21 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert_receive {:captured_body, decoded}, 500
       assert decoded["reasoning"] == %{"effort" => "high", "summary" => "auto"}
       assert decoded["include"] == ["reasoning.encrypted_content"]
+    end
+  end
+
+  describe "chat/3 — fast mode body shape" do
+    test "omits service_tier when fast mode is unset or false" do
+      assert {nil, decoded} = run_chat_capture_body([])
+      refute Map.has_key?(decoded, "service_tier")
+
+      assert {nil, decoded} = run_chat_capture_body(fast: false)
+      refute Map.has_key?(decoded, "service_tier")
+    end
+
+    test "translates fast mode to the Codex priority service tier" do
+      assert {nil, decoded} = run_chat_capture_body(fast: true)
+      assert decoded["service_tier"] == "priority"
     end
   end
 

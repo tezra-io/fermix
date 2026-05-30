@@ -10,17 +10,25 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Memory.ExtractionDebouncer
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
+  alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
+  alias FermixCore.Prompt.BootstrapRename
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
+  alias FermixCore.Sandbox.CommandCapabilities
+  alias FermixCore.Sandbox.DecisionTelemetry
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
@@ -30,11 +38,14 @@ defmodule FermixCore.Application do
     if BurritoUtil.running_standalone?() do
       cli_dispatch(BurritoArgs.argv())
     else
-      # Dev (mix test, iex -S mix phx.server) or plain release
-      # (`bin/fermix start`). All sibling apps are `:permanent`, so OTP
-      # auto-starts them after this returns; whether the Phoenix endpoint
-      # binds is governed by the existing PHX_SERVER convention in
-      # `config/runtime.exs`.
+      # Dev (mix test, mix fermix.dev, iex -S mix phx.server) or plain
+      # release (`bin/fermix start`). All sibling apps are `:permanent`,
+      # so OTP auto-starts them after this returns; whether the Phoenix
+      # endpoint binds is governed by the existing PHX_SERVER convention
+      # in `config/runtime.exs`. `mix fermix.dev` sets the gating env
+      # flags before calling `Application.ensure_all_started/1`, so the
+      # daemon socket and Realtime supervisor start without going
+      # through `cli_dispatch/1`.
       start_supervision_tree()
     end
   end
@@ -46,6 +57,7 @@ defmodule FermixCore.Application do
   defp cli_dispatch(["run" | _] = argv) do
     enable_endpoint_server()
     enable_daemon_socket()
+    enable_realtime_socket()
 
     with {:ok, pid} <- start_supervision_tree() do
       spawn(fn -> run_cli(argv) end)
@@ -58,6 +70,11 @@ defmodule FermixCore.Application do
   # proceeds to start fermix_channels/fermix_web. Setup never binds a
   # network port.
   defp cli_dispatch(["setup" | _] = argv) do
+    {:ok, _pid} = start_supervision_tree()
+    System.halt(run_cli(argv))
+  end
+
+  defp cli_dispatch(["memory" | _] = argv) do
     {:ok, _pid} = start_supervision_tree()
     System.halt(run_cli(argv))
   end
@@ -78,30 +95,42 @@ defmodule FermixCore.Application do
     Application.put_env(:fermix_core, :daemon_socket_enabled, true)
   end
 
+  defp enable_realtime_socket do
+    Application.put_env(:fermix_core, :realtime_socket_enabled, true)
+  end
+
   defp start_supervision_tree do
+    remember_launch_cwd()
+    :ok = ConfigStore.ensure_workspace()
+    :ok = BootstrapRename.run()
+    :ok = AuthStore.validate_permissions!()
     setup_file_logger()
     Trace.TelemetryHandler.attach()
+    DecisionTelemetry.attach()
 
     children =
       [
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Trace, trace_opts()},
+        TokenSupervisor,
         maybe_token_manager(),
         CapabilityRegistry,
         BuiltinSeeder,
+        {CommandCapabilities, capability_registry: CapabilityRegistry},
+        {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
         ConversationStore,
         Store,
-        ExtractionDebouncer,
         MemoryScheduler,
         BootReport,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
-        maybe_daemon_socket()
+        maybe_daemon_socket(),
+        maybe_realtime_supervisor()
       ]
       |> List.flatten()
 
@@ -137,6 +166,25 @@ defmodule FermixCore.Application do
     else
       []
     end
+  end
+
+  defp maybe_realtime_supervisor do
+    if realtime_socket_enabled?() and realtime_ready?() do
+      [RealtimeSupervisor]
+    else
+      []
+    end
+  end
+
+  defp realtime_socket_enabled? do
+    Application.get_env(:fermix_core, :realtime_socket_enabled, false)
+  end
+
+  defp realtime_ready? do
+    config = RealtimeConfig.current()
+
+    config.enabled? and config.provider == "openai" and
+      match?({:ok, _api_key}, CoreConfig.provider_api_key(:openai))
   end
 
   defp trace_opts do
@@ -176,4 +224,8 @@ defmodule FermixCore.Application do
 
   defp default_trace_dir, do: ConfigStore.workspace_paths().traces
   defp default_log_file, do: Path.join(ConfigStore.workspace_paths().logs, "fermix.log")
+
+  defp remember_launch_cwd do
+    Application.put_env(:fermix_core, :sandbox_launch_cwd, File.cwd!())
+  end
 end

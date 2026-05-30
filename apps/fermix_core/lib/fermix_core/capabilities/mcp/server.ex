@@ -4,9 +4,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   one configured server.
 
   On init it discovers the server's tool list via the configured
-  `Discoverer` (defaults to `Hermes` in production, swappable in tests),
+  `Discoverer` (defaults to `Anubis` in production, swappable in tests),
   builds an `MCP.Capability` for each tool, and registers it with the
-  capability registry. The Hermes client pid is published to
+  capability registry. The Anubis client pid is published to
   `MCP.Registry` so dispatch can resolve `server_name -> client_pid`.
 
   On terminate it unregisters all of its capabilities (matched by
@@ -18,7 +18,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   use GenServer
   require Logger
 
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Capability, as: McpCapability
+  alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
@@ -45,12 +47,12 @@ defmodule FermixCore.Capabilities.MCP.Server do
     state = %{
       server_name: Keyword.fetch!(opts, :server_name),
       client: Keyword.get(opts, :client),
-      discoverer: Keyword.get(opts, :discoverer, FermixCore.Capabilities.MCP.Discoverer.Hermes),
-      caller: Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Hermes),
-      approved?: Keyword.get(opts, :approved?, false),
+      discoverer: Keyword.get(opts, :discoverer, FermixCore.Capabilities.MCP.Discoverer.Anubis),
+      caller: Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Anubis),
       tools_overrides: Keyword.get(opts, :tools_overrides, %{}),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       mcp_registry: Keyword.get(opts, :mcp_registry, McpRegistry),
+      skill_registry: Keyword.get(opts, :skill_registry, SkillRegistry),
       registered_names: [],
       discovery_attempts: 0,
       max_discovery_attempts: Keyword.get(opts, :max_discovery_attempts, 5),
@@ -118,16 +120,33 @@ defmodule FermixCore.Capabilities.MCP.Server do
       {:stop, :normal, state}
     else
       delay = state.retry_base_ms * round(:math.pow(2, attempts - 1))
-
-      Logger.warning(
-        "MCP server #{state.server_name} discovery failed (attempt #{attempts}/" <>
-          "#{state.max_discovery_attempts}); retrying in #{delay}ms: #{inspect(reason)}"
-      )
-
+      log_retry(reason, state.server_name, attempts, state.max_discovery_attempts, delay)
       Process.send_after(self(), :retry_discovery, delay)
       {:noreply, state}
     end
   end
+
+  # `Server capabilities not set` is the expected response while the MCP
+  # client is still racing through `initialize` — log at debug, not warning,
+  # so a noisy `npx`-backed startup doesn't surface as a red flag to the
+  # operator. Real errors (transport closed, unexpected response shape,
+  # tool schema errors) keep the warning level.
+  defp log_retry(reason, server_name, attempts, max_attempts, delay) do
+    message =
+      "MCP server #{server_name} discovery failed (attempt #{attempts}/#{max_attempts}); " <>
+        "retrying in #{delay}ms: #{inspect(reason)}"
+
+    if expected_startup_error?(reason),
+      do: Logger.debug(message),
+      else: Logger.warning(message)
+  end
+
+  defp expected_startup_error?(%Anubis.MCP.Error{reason: :internal_error, data: %{message: msg}})
+       when is_binary(msg) do
+    String.contains?(msg, "Server capabilities not set")
+  end
+
+  defp expected_startup_error?(_reason), do: false
 
   defp maybe_register_client(%{client: nil}), do: :ok
 
@@ -141,7 +160,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
         McpRegistry.register(state.mcp_registry, state.server_name, pid)
 
       nil ->
-        {:error, {:hermes_client_not_started, client}}
+        {:error, {:anubis_client_not_started, client}}
     end
   end
 
@@ -149,25 +168,70 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   defp register_descriptor(descriptor, state) do
     overrides = Map.get(state.tools_overrides, descriptor.name, %{})
+    original = descriptor.name
+    sanitized = Naming.candidate(state.server_name, original)
 
-    capability =
-      McpCapability.from_tool_descriptor(state.server_name, descriptor,
-        caller: state.caller,
-        approved?: state.approved?,
-        tool_overrides: overrides
-      )
+    with :ok <- reject_skill_name_collision(sanitized, state, original) do
+      capability =
+        McpCapability.from_tool_descriptor(state.server_name, descriptor,
+          caller: state.caller,
+          tool_overrides: overrides
+        )
 
-    case CapabilityRegistry.register(state.capability_registry, capability) do
-      :ok ->
-        [capability.name]
+      case CapabilityRegistry.register(state.capability_registry, capability) do
+        :ok ->
+          [capability.name]
 
-      {:error, {:duplicate_name, _}} ->
+        {:error, {:duplicate_name, _}} ->
+          Logger.warning(
+            "MCP duplicate capability name during registration: #{capability.name} " <>
+              "(server=#{state.server_name}, tool=#{descriptor.name})"
+          )
+
+          []
+      end
+    else
+      {:error, {:skill_name_collision, name}} ->
         Logger.warning(
-          "MCP duplicate capability name during registration: #{capability.name} " <>
-            "(server=#{state.server_name}, tool=#{descriptor.name})"
+          "MCP tool #{state.server_name}/#{original} sanitized to #{name}, " <>
+            "which collides with an installed skill. Rename the MCP tool or skill."
         )
 
         []
     end
+  end
+
+  defp reject_skill_name_collision(name, state, _original) do
+    if name in skill_names(state.skill_registry) do
+      {:error, {:skill_name_collision, name}}
+    else
+      :ok
+    end
+  end
+
+  defp skill_names(nil), do: []
+
+  defp skill_names(server) when is_atom(server) do
+    case Process.whereis(server) do
+      nil ->
+        Logger.debug(
+          "MCP skill-name collision check skipped; skill registry #{server} is not running"
+        )
+
+        []
+
+      _pid ->
+        safe_skill_names(server)
+    end
+  end
+
+  defp skill_names(server), do: safe_skill_names(server)
+
+  defp safe_skill_names(server) do
+    SkillRegistry.list(server)
+  catch
+    :exit, reason ->
+      Logger.debug("MCP skill-name collision check failed: #{inspect(reason)}")
+      []
   end
 end

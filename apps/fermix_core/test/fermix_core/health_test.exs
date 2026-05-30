@@ -6,6 +6,7 @@ defmodule FermixCore.HealthTest do
 
   setup do
     providers = Application.get_env(:fermix_core, :providers)
+    realtime = Application.get_env(:fermix_core, :realtime)
     telegram = Application.get_env(:fermix_channels, :telegram)
     whatsapp = Application.get_env(:fermix_channels, :whatsapp)
     discord = Application.get_env(:fermix_channels, :discord)
@@ -15,6 +16,7 @@ defmodule FermixCore.HealthTest do
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
+      restore_env(:fermix_core, :realtime, realtime)
       restore_env(:fermix_channels, :telegram, telegram)
       restore_env(:fermix_channels, :whatsapp, whatsapp)
       restore_env(:fermix_channels, :discord, discord)
@@ -37,6 +39,8 @@ defmodule FermixCore.HealthTest do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]
     )
+
+    Application.put_env(:fermix_core, :realtime, enabled: false)
 
     Application.put_env(:fermix_channels, :telegram,
       enabled: true,
@@ -69,9 +73,13 @@ defmodule FermixCore.HealthTest do
     assert report.config.home == tmp_home
 
     assert report.config.workspace == %{
+             workspace: Path.join(tmp_home, "workspace"),
+             grants: Path.join(tmp_home, "grants"),
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
+             plugins: Path.join(tmp_home, "plugins"),
              journals: Path.join(tmp_home, "journals"),
+             realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),
              logs: Path.join(tmp_home, "logs")
            }
@@ -90,6 +98,46 @@ defmodule FermixCore.HealthTest do
 
     assert report.memory.conversation_store == :ready
     assert report.memory.store == :ready
+
+    assert report.realtime == %{
+             enabled: false,
+             status: :disabled,
+             provider: nil,
+             model: nil,
+             socket_path: nil,
+             socket_alive: nil,
+             active_sessions: 0,
+             active_clients: 0,
+             companion_connected?: false
+           }
+  end
+
+  test "reports realtime degraded when enabled and expected socket process is absent" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-health-#{System.unique_integer([:positive])}")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :realtime,
+      enabled: true,
+      provider: "openai",
+      model: "gpt-realtime-2"
+    )
+
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        },
+        process_resolver: fn _name -> nil end
+      )
+
+    assert report.status == :degraded
+    assert report.realtime.enabled == true
+    assert report.realtime.status == :degraded
+    assert report.realtime.socket_path == Path.join(tmp_home, "realtime.sock")
+    assert report.realtime.socket_alive == false
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

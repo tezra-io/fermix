@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.FileRead do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Sandbox
 
   @impl true
   @spec name() :: String.t()
@@ -68,7 +69,7 @@ defmodule FermixCore.Tools.FileRead do
     start = System.monotonic_time(:millisecond)
     agent = Map.get(context, :agent_name, "unknown")
 
-    result = do_execute(args)
+    result = do_execute(args, context)
 
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
@@ -82,54 +83,65 @@ defmodule FermixCore.Tools.FileRead do
     result
   end
 
-  defp do_execute(args) do
-    with {:ok, path} <- Map.fetch(args, "path") do
-      offset = Map.get(args, "offset", 1)
-      limit = Map.get(args, "limit")
+  defp do_execute(args, context) do
+    with {:ok, path} <- Map.fetch(args, "path"),
+         :ok <- validate_input_path(path),
+         {:ok, resolved} <- Sandbox.read_path(path, :file_read, context) do
+      read_resolved(resolved, args)
+    else
+      :error ->
+        {:ok, Tool.error("Missing required parameter: path")}
 
-      with :ok <- validate_path(path),
-           {:ok, content} <- File.read(path) do
+      {:error, reason} when is_binary(reason) ->
+        {:ok, Tool.error(reason)}
+
+      {:error, reason} ->
+        {:ok, Tool.error(format_sandbox_reason(reason))}
+    end
+  end
+
+  defp read_resolved(path, args) do
+    offset = Map.get(args, "offset", 1)
+    limit = Map.get(args, "limit")
+
+    case File.read(path) do
+      {:ok, content} ->
         lines = String.split(content, "\n")
         sliced = slice_lines(lines, offset, limit)
         {:ok, Tool.success(Enum.join(sliced, "\n"))}
-      else
-        {:error, :enoent} ->
-          {:ok, Tool.error("File not found: #{path}")}
 
-        {:error, :eisdir} ->
-          {:ok, Tool.error("Path is a directory: #{path}")}
+      {:error, :enoent} ->
+        {:ok, Tool.error("File not found: #{path}")}
 
-        {:error, reason} when is_binary(reason) ->
-          {:ok, Tool.error(reason)}
+      {:error, :eisdir} ->
+        {:ok, Tool.error("Path is a directory: #{path}")}
 
-        {:error, reason} ->
-          {:ok, Tool.error("Failed to read file: #{inspect(reason)}")}
-      end
-    else
-      :error -> {:ok, Tool.error("Missing required parameter: path")}
+      {:error, reason} ->
+        {:ok, Tool.error("Failed to read file: #{inspect(reason)}")}
     end
   end
 
-  defp validate_path(path) when is_binary(path) and byte_size(path) > 0 do
-    cond do
-      String.contains?(path, "\0") ->
-        {:error, "Path contains null bytes"}
-
-      has_traversal_component?(path) ->
-        {:error, "Path traversal is not allowed"}
-
-      true ->
-        :ok
-    end
+  defp validate_input_path(path) when is_binary(path) and byte_size(path) > 0 do
+    if String.contains?(path, "\0"),
+      do: {:error, "Path contains null bytes"},
+      else: :ok
   end
 
-  defp validate_path(_), do: {:error, "Path must be a non-empty string"}
+  defp validate_input_path(_), do: {:error, "Path must be a non-empty string"}
 
-  defp has_traversal_component?(path) do
-    path
-    |> Path.split()
-    |> Enum.any?(&(&1 == ".."))
-  end
+  defp format_sandbox_reason({:protected_path, path}),
+    do: "Path is protected by the sandbox: #{path}"
+
+  defp format_sandbox_reason({:outside_root, path}),
+    do: "Path is outside the sandbox roots: #{path}"
+
+  defp format_sandbox_reason({:blocked_root, path}),
+    do: "Path is under a blocked root: #{path}"
+
+  defp format_sandbox_reason({:too_many_symlinks, path}),
+    do: "Path resolved through too many symlinks: #{path}"
+
+  defp format_sandbox_reason(reason), do: "Sandbox denied: #{inspect(reason)}"
 
   defp slice_lines(lines, offset, nil), do: Enum.drop(lines, offset - 1)
   defp slice_lines(lines, offset, limit), do: lines |> Enum.drop(offset - 1) |> Enum.take(limit)
