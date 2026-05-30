@@ -27,6 +27,16 @@
 .env
 *.secret.exs
 
+# Fermix runtime config, secrets & data (written under FERMIX_HOME — never commit)
+config.toml
+auth.json
+.fermix/
+.fermix-dev/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
 # IDE
 .elixir_ls/
 .vscode/
