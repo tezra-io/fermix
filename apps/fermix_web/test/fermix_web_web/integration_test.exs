@@ -193,7 +193,7 @@ defmodule FermixWebWeb.IntegrationTest do
     case TurnRunner.run(core_msg, turn_state, deliver) do
       {:ok, response} ->
         deliver.({:text, response})
-        TurnRunner.finalize(core_msg, turn_state)
+        TurnRunner.commit(core_msg, turn_state, response)
 
       {:error, reason} ->
         deliver.({:text, TurnRunner.error_reply(reason)})

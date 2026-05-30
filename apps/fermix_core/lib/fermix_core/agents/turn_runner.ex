@@ -5,15 +5,19 @@ defmodule FermixCore.Agents.TurnRunner do
   Given a normalized channel message and a `turn_state` snapshot (provider,
   registries, memory config, and the prebuilt runtime context), `run/3` reads
   conversation history, builds the prompt, runs the agent loop, persists the
-  exchange, and RETURNS the response — it does not deliver it. The gateway owns
-  delivery, typing, and post-turn finalization.
+  USER message, and RETURNS the response — it does not deliver it or persist the
+  assistant message. The gateway owns delivery, typing, and the commit.
+
+  History split (so a superseded reply never pollutes future context): `run/3`
+  persists the user message when the turn is accepted; the gateway commits the
+  assistant message via `commit/3` ONLY after it delivers the reply and confirms
+  the turn is still current.
 
   `deliver` (the third argument) is the gateway delivery closure. It is exposed
   to mid-turn channel tools (`send_attachment`) via the agent-loop context, so
   every channel send — mid-turn and final — flows through the same gateway
-  delivery path. `finalize/2` runs memory review + auto-compaction; the gateway
-  calls it after delivering the reply, because compaction is synchronous and
-  must not delay the reply.
+  delivery path. `commit/3` also runs memory review + auto-compaction (after
+  delivery, so synchronous compaction stays off the reply path).
 
   Turn execution is pure of scheduling: the caller owns single-flight,
   cancellation, and task supervision. `MainAgent` owns the runtime-context
@@ -38,10 +42,12 @@ defmodule FermixCore.Agents.TurnRunner do
   @auto_compaction_failure_backoff_ms 60_000
 
   @doc """
-  Run one agent turn and return its response. The caller (gateway) owns
-  delivery, typing, and post-turn finalization (`finalize/2`). `deliver` is the
-  gateway delivery closure, exposed to mid-turn channel tools via the
-  agent-loop context.
+  Run one agent turn and return its response. Persists the USER message (the
+  turn was accepted) but NOT the assistant message — the gateway commits that
+  via `commit/3` only after it confirms the turn is still current, so a
+  superseded reply never pollutes conversation history. The caller (gateway)
+  owns delivery, typing, and the commit. `deliver` is the gateway delivery
+  closure, exposed to mid-turn channel tools via the agent-loop context.
   """
   @spec run(map(), map(), Reply.reply_fn()) :: {:ok, String.t()} | {:error, term()}
   def run(msg, turn_state, deliver) when is_function(deliver, 1) do
@@ -49,14 +55,27 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   @doc """
-  Post-turn finalization (success path only): dispatch background memory review
-  and run auto-compaction. Separated from `run/3` so the gateway can deliver the
-  reply first — compaction is synchronous and must not delay it.
+  Commit a delivered turn: persist the assistant message, dispatch a background
+  memory review, and run auto-compaction. The gateway calls this ONLY after the
+  reply was delivered and the turn confirmed current. Auto-compaction is
+  synchronous; running it here (after delivery) keeps it off the reply path.
   """
-  @spec finalize(map(), map()) :: :ok
-  def finalize(msg, turn_state) do
+  @spec commit(map(), map(), String.t()) :: :ok
+  def commit(msg, turn_state, response) do
+    conversation_key = ConversationKey.from(msg)
+
+    ConversationStore.add_message(
+      conversation_key,
+      "assistant",
+      response,
+      server: turn_state.conversation_store,
+      sender: "main",
+      agent_id: turn_state.memory_agent_id,
+      owner_id: turn_state.memory_owner_id
+    )
+
     maybe_start_memory_review(msg, turn_state)
-    maybe_auto_compact(ConversationKey.from(msg), turn_state, compaction_target(turn_state))
+    maybe_auto_compact(conversation_key, turn_state, compaction_target(turn_state))
     :ok
   end
 
@@ -138,16 +157,6 @@ defmodule FermixCore.Agents.TurnRunner do
           metadata: Map.get(msg, :metadata)
         )
 
-        ConversationStore.add_message(
-          conversation_key,
-          "assistant",
-          result.response,
-          server: state.conversation_store,
-          sender: "main",
-          agent_id: state.memory_agent_id,
-          owner_id: state.memory_owner_id
-        )
-
         :telemetry.execute(
           [:fermix, :agent, :message],
           %{
@@ -221,7 +230,7 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
-  # The compaction route mirrors the loop's adapter/route resolution; finalize/2
+  # The compaction route mirrors the loop's adapter/route resolution; commit/3
   # recomputes it (cheap) so run/3 needn't thread it through its return value.
   defp compaction_target(state) do
     case resolve_loop_adapter(state) do
