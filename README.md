@@ -9,7 +9,7 @@
 
 Elixir-native multi-agent AI platform that runs as a local daemon and reaches you through the chat channels you already use.
 
-![License](https://img.shields.io/badge/license-proprietary-red)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Elixir](https://img.shields.io/badge/elixir-%E2%89%A5%201.17-purple)
 ![Erlang/OTP](https://img.shields.io/badge/otp-%E2%89%A5%2028-red)
 ![Status](https://img.shields.io/badge/status-alpha%20(pre--1.0)-yellow)
@@ -182,7 +182,7 @@ swift run FermixPet
 For source-only development, skip Burrito and run the full daemon from Mix:
 
 ```bash
-FERMIX_HOME=/Users/sujshe/.fermix-dev \
+FERMIX_HOME=$HOME/.fermix-dev \
 OPENAI_API_KEY=sk-... \
 FERMIX_REALTIME_ENABLED=true \
 FERMIX_REALTIME_MODEL=gpt-realtime-2 \
@@ -195,7 +195,7 @@ Then launch the companion against the same home directory:
 
 ```bash
 cd clients/macos/FermixPet
-FERMIX_HOME=/Users/sujshe/.fermix-dev swift run FermixPet
+FERMIX_HOME=$HOME/.fermix-dev swift run FermixPet
 ```
 
 V1 opens a local call explicitly from the companion. While the call is open,
@@ -460,8 +460,7 @@ Use `--scope <conversation-key>` for checkpoint resources. Checkpoint rollback i
 ## Documentation
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release history (Keep a Changelog format, semver)
-- [`docs/ROADMAP.md`](docs/ROADMAP.md) — post-MVP feature roadmap
 
 ## License
 
-Proprietary — Tezra.io. All rights reserved.
+Released under the [MIT License](LICENSE).

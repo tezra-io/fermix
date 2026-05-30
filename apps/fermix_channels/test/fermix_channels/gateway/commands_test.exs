@@ -44,7 +44,7 @@ defmodule FermixChannels.Gateway.CommandsTest do
     end
 
     test "ignores non-command slash text and leading non-command content" do
-      assert {:passthrough, _message} = Commands.parse(message("/Users/sujshe/file.txt"))
+      assert {:passthrough, _message} = Commands.parse(message("/Users/example/file.txt"))
       assert {:passthrough, _message} = Commands.parse(message("what does /etc/hosts do?"))
     end
 
