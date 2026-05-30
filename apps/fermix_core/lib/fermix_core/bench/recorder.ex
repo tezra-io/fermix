@@ -20,6 +20,7 @@ defmodule FermixCore.Bench.Recorder do
     {:ok, _apps} = Application.ensure_all_started(:telemetry)
 
     events = Keyword.fetch!(opts, :events)
+
     table =
       :ets.new(__MODULE__, [
         :duplicate_bag,
@@ -27,6 +28,7 @@ defmodule FermixCore.Bench.Recorder do
         read_concurrency: true,
         write_concurrency: true
       ])
+
     handler_id = "fermix-bench-recorder-#{System.unique_integer([:positive])}"
 
     case attach(handler_id, events, table) do
