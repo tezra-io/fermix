@@ -34,7 +34,7 @@ defmodule FermixWebWeb.PageControllerTest do
              status: :ready,
              provider: :openai,
              model: "gpt-realtime-2",
-             socket_path: "/Users/sujshe/.fermix-dev/realtime.sock",
+             socket_path: "/Users/example/.fermix-dev/realtime.sock",
              socket_alive: true,
              active_sessions: 0,
              active_clients: 1,
@@ -86,7 +86,7 @@ defmodule FermixWebWeb.PageControllerTest do
 
   defmodule BrokenHomeSnapshot do
     def snapshot do
-      {:error, {:badmatch, self(), "/Users/sujshe/.fermix-dev/auth.json"}}
+      {:error, {:badmatch, self(), "/Users/example/.fermix-dev/auth.json"}}
     end
   end
 
@@ -171,7 +171,7 @@ defmodule FermixWebWeb.PageControllerTest do
     assert body =~ "Runtime snapshot unavailable"
     assert body =~ "Runtime introspection is unavailable"
     refute body =~ "badmatch"
-    refute body =~ "/Users/sujshe"
+    refute body =~ "/Users/example"
     refute body =~ "#PID"
   end
 
