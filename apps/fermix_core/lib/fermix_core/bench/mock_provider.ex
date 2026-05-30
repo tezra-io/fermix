@@ -66,9 +66,14 @@ defmodule FermixCore.Bench.MockProvider do
     script = Keyword.get(opts, :bench_script, :text)
 
     case {script, kind, step} do
-      {:tool_once, :chat, 0} -> tool_turn(messages, capabilities, step)
-      {:repeat_tool, _kind, _step} -> tool_turn(messages, capabilities, step)
-      _other -> text_turn(messages, capabilities, step, Keyword.get(opts, :bench_response, "bench final"))
+      {:tool_once, :chat, 0} ->
+        tool_turn(messages, capabilities, step)
+
+      {:repeat_tool, _kind, _step} ->
+        tool_turn(messages, capabilities, step)
+
+      _other ->
+        text_turn(messages, capabilities, step, Keyword.get(opts, :bench_response, "bench final"))
     end
   end
 

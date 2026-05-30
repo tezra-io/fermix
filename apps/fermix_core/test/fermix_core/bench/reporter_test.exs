@@ -15,7 +15,9 @@ defmodule FermixCore.Bench.ReporterTest do
       assert :ok = Reporter.write_json(old, old_path)
       assert :ok = Reporter.write_json(new, new_path)
 
-      assert {:ok, diff} = Reporter.compare_files(old_path, new_path, warn_ratio: 0.2, fail_ratio: 0.5)
+      assert {:ok, diff} =
+               Reporter.compare_files(old_path, new_path, warn_ratio: 0.2, fail_ratio: 0.5)
+
       assert diff.status == :fail
       assert diff.summary == %{measurements: 3, regressions: 1, warnings: 1}
       assert [%{scenario: "shared_text_minimal", stage: "provider_call"} = row] = diff.regressions

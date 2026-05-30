@@ -89,7 +89,7 @@ defmodule Mix.Tasks.Fermix.Bench do
 
   defp scenario_line(name, scenario) do
     "#{name}: dispatched=#{scenario.messages_dispatched} processed=#{scenario.messages_processed} " <>
-      "superseded=#{scenario.messages_superseded} throughput=#{scenario.throughput_messages_per_second}/s"
+      "throughput=#{scenario.throughput_messages_per_second}/s"
   end
 
   defp print_stage_summary(stages) do

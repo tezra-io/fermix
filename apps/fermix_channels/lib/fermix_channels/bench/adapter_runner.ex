@@ -111,7 +111,6 @@ defmodule FermixChannels.Bench.AdapterRunner do
     %{
       messages_dispatched: samples,
       messages_processed: result.processed,
-      messages_superseded: 0,
       wall_time_us: wall_time_us,
       throughput_messages_per_second: throughput(result.processed, wall_time_us),
       setup: result.setup,

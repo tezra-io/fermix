@@ -5,8 +5,8 @@ defmodule FermixCore.Agents.MainAgent do
   Owns the per-agent runtime-context cache (system prompt + capability surface),
   its invalidation, and conversation auto-compaction failure backoff. Channel
   messages no longer arrive here directly — the gateway (`FermixChannels.Gateway.Queue`)
-  owns single-flight scheduling and calls `checkout_turn_state/2` to obtain a
-  built turn-state snapshot, then runs the turn via `FermixCore.Agents.TurnRunner`.
+  owns FIFO scheduling and calls `checkout_turn_state/2` to obtain a built
+  turn-state snapshot, then runs the turn via `FermixCore.Agents.TurnRunner`.
 
   Keeping the cache here (rather than in the gateway) preserves the one-way
   dependency: core builds runtime context from skills, capabilities, and memory;

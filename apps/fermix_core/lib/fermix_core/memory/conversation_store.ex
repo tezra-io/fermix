@@ -22,7 +22,12 @@ defmodule FermixCore.Memory.ConversationStore do
         }
   @type history_snapshot :: %{messages: [message()], version: non_neg_integer()}
 
-  @max_messages_default 50
+  # In-memory history is unbounded by default (`:infinity`); token-based
+  # auto-compaction in `TurnRunner` is the real bound. A DB cache-miss still
+  # reads only the most recent `@repo_backfill_limit` rows so an unbounded
+  # in-memory window never turns into an unbounded SQLite scan.
+  @max_messages_default :infinity
+  @repo_backfill_limit 1_000
   @durable_max_attempts 3
   @durable_retry_initial_ms 100
 
@@ -30,9 +35,26 @@ defmodule FermixCore.Memory.ConversationStore do
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
-    {max_messages, opts} = Keyword.pop(opts, :max_messages, @max_messages_default)
+    {max_messages, opts} = Keyword.pop(opts, :max_messages, configured_max_messages())
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, {max_messages, opts}, name: name)
+  end
+
+  # `:max_conversation_history` is operator-configurable: `:infinity` (default,
+  # no message-count cap — token compaction is the bound) or a positive integer.
+  defp configured_max_messages do
+    case Application.get_env(:fermix_core, :max_conversation_history, @max_messages_default) do
+      :infinity ->
+        :infinity
+
+      messages when is_integer(messages) and messages > 0 ->
+        messages
+
+      other ->
+        raise ArgumentError,
+              "invalid :max_conversation_history #{inspect(other)}; " <>
+                "expected :infinity or a positive integer"
+    end
   end
 
   @spec add_message(conversation_key(), String.t(), String.t(), keyword()) :: :ok
@@ -93,7 +115,8 @@ defmodule FermixCore.Memory.ConversationStore do
   # --- GenServer Callbacks ---
 
   @impl true
-  def init({max_messages, opts}) when is_integer(max_messages) and max_messages > 0 do
+  def init({max_messages, opts})
+      when max_messages == :infinity or (is_integer(max_messages) and max_messages > 0) do
     {:ok,
      %{
        conversations: %{},
@@ -192,7 +215,8 @@ defmodule FermixCore.Memory.ConversationStore do
     handle_call({:get_history, key, state.max_messages}, from, state)
   end
 
-  def handle_call({:get_history, key, limit}, _from, state) when is_integer(limit) do
+  def handle_call({:get_history, key, limit}, _from, state)
+      when is_integer(limit) or limit == :infinity do
     {messages, next_state} = history_from_state(state, key, limit)
     {:reply, messages, next_state}
   end
@@ -201,7 +225,8 @@ defmodule FermixCore.Memory.ConversationStore do
     handle_call({:get_history_snapshot, key, state.max_messages}, from, state)
   end
 
-  def handle_call({:get_history_snapshot, key, limit}, _from, state) when is_integer(limit) do
+  def handle_call({:get_history_snapshot, key, limit}, _from, state)
+      when is_integer(limit) or limit == :infinity do
     {messages, next_state} = history_from_state(state, key, limit)
 
     {:reply, %{messages: messages, version: Map.get(next_state.history_versions, key, 0)},
@@ -243,7 +268,7 @@ defmodule FermixCore.Memory.ConversationStore do
     state.conversations
     |> Map.get(key, [])
     |> then(&[message | &1])
-    |> Enum.take(state.max_messages)
+    |> take_limit(state.max_messages)
   end
 
   defp history_from_state(state, key, limit) do
@@ -257,7 +282,7 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   defp history_from_repo(state, key, limit) do
-    repo_limit = max(limit, state.max_messages)
+    repo_limit = repo_read_limit(limit, state.max_messages)
 
     case load_messages_from_repo(state, key, repo_limit) do
       {:ok, []} ->
@@ -293,7 +318,7 @@ defmodule FermixCore.Memory.ConversationStore do
 
   defp history_slice(messages, limit) do
     messages
-    |> Enum.take(limit)
+    |> take_limit(limit)
     |> Enum.reverse()
   end
 
@@ -598,14 +623,29 @@ defmodule FermixCore.Memory.ConversationStore do
   defp cache_window(messages, max_messages) do
     messages
     |> Enum.reverse()
-    |> Enum.take(max_messages)
+    |> take_limit(max_messages)
   end
 
   defp take_recent_chronological(messages, limit) do
     messages
     |> Enum.reverse()
-    |> Enum.take(limit)
+    |> take_limit(limit)
     |> Enum.reverse()
+  end
+
+  # `:infinity` keeps the whole list (no message-count cap); an integer caps it.
+  defp take_limit(list, :infinity), do: list
+  defp take_limit(list, n) when is_integer(n), do: Enum.take(list, n)
+
+  # Bound the DB cache-miss read even when in-memory history is unbounded:
+  # take the largest concrete request, falling back to the backfill floor when
+  # every input is `:infinity`. Preserves the prior `max(limit, max_messages)`
+  # behavior whenever both are integers.
+  defp repo_read_limit(limit, max_messages) do
+    case Enum.filter([limit, max_messages], &is_integer/1) do
+      [] -> @repo_backfill_limit
+      integers -> Enum.max(integers)
+    end
   end
 
   defp load_messages_from_repo(state, key, limit) do
