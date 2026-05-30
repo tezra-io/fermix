@@ -25,7 +25,7 @@ cd clients/macos/FermixPet
 When testing against a dev daemon:
 
 ```sh
-FERMIX_HOME=/Users/sujshe/.fermix-dev ./script/build_and_run.sh
+FERMIX_HOME=$HOME/.fermix-dev ./script/build_and_run.sh
 ```
 
 Use the script instead of `swift run FermixPet` for normal GUI testing. It

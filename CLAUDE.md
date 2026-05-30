@@ -4,7 +4,7 @@
 Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, Rustler NIFs for crypto/tokenization only.
 
 **Stack:** Elixir, Phoenix, OTP, Rustler, SQLite
-**Predecessor:** RustyClaw (`/Users/sujshe/projects/rustyclaw`) — reference for channels, tools, providers
+**Predecessor:** RustyClaw — reference for channels, tools, providers
 
 ## Behavioral Guidance
 - The approved design is the plan. Implement against it, do not quietly re-design the task mid-flight.
