@@ -3,63 +3,46 @@ defmodule FermixChannels.Application do
 
   use Application
 
+  alias FermixChannels.Gateway.ChannelRegistry
   alias FermixCore.Readiness
+
+  require Logger
 
   @impl true
   def start(_type, _args) do
     readiness = Readiness.report()
+    log_missing_ingress_authorization(readiness)
+
+    # The gateway owns the turn queue; core introspection reads its status
+    # through this runtime-registered provider (no compile-time core→channels
+    # dependency). Registered here so the provider is present iff the queue runs.
+    Application.put_env(:fermix_core, :queue_status_provider, FermixChannels.Gateway.Queue)
 
     children =
-      []
-      |> Kernel.++(
-        polling_children(Application.get_env(:fermix_channels, :telegram, []), readiness)
-      )
-      |> Kernel.++(
-        gateway_children(Application.get_env(:fermix_channels, :discord, []), readiness)
-      )
-      |> Kernel.++(
-        subprocess_children(Application.get_env(:fermix_channels, :signal, []), readiness)
-      )
+      [
+        FermixChannels.Gateway.Queue,
+        FermixChannels.Gateway.Commands.Sandbox.Confirmations,
+        FermixChannels.Gateway.Idempotency
+      ] ++ ChannelRegistry.transport_children(readiness)
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
   end
 
   @doc false
-  @spec polling_children(keyword(), Readiness.report()) :: [{FermixChannels.Telegram.Poller, []}]
-  def polling_children(config, %{status: :ready}) when is_list(config) do
-    if config[:enabled] != false do
-      [{FermixChannels.Telegram.Poller, []}]
-    else
-      []
-    end
+  @spec log_missing_ingress_authorization(Readiness.report()) :: :ok
+  def log_missing_ingress_authorization(%{status: :ready}) do
+    Enum.each(ChannelRegistry.missing_ingress_authorizations(), &log_channel_refusal/1)
+    :ok
   end
 
-  def polling_children(config, _readiness_report) when is_list(config), do: []
+  def log_missing_ingress_authorization(_readiness_report), do: :ok
 
-  @doc false
-  @spec gateway_children(keyword(), Readiness.report()) :: [{FermixChannels.Discord.Gateway, []}]
-  def gateway_children(config, %{status: :ready}) when is_list(config) do
-    if config[:mode] == :gateway and config[:enabled] == true do
-      [{FermixChannels.Discord.Gateway, []}]
-    else
-      []
-    end
+  defp log_channel_refusal(channel) do
+    Logger.error(
+      "#{channel} ingress is enabled but no owner_user_id or allowed_*_ids list is set. " <>
+        "Refusing to start the #{channel} adapter. Run /whoami from that channel and set " <>
+        "fermix_channels.#{channel}.owner_user_id, then restart the daemon."
+    )
   end
-
-  def gateway_children(config, _readiness_report) when is_list(config), do: []
-
-  @doc false
-  @spec subprocess_children(keyword(), Readiness.report()) :: [
-          {FermixChannels.Signal.Listener, []}
-        ]
-  def subprocess_children(config, %{status: :ready}) when is_list(config) do
-    if config[:mode] == :subprocess and config[:enabled] == true do
-      [{FermixChannels.Signal.Listener, []}]
-    else
-      []
-    end
-  end
-
-  def subprocess_children(config, _readiness_report) when is_list(config), do: []
 end

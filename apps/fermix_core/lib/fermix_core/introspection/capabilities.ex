@@ -34,7 +34,7 @@ defmodule FermixCore.Introspection.Capabilities do
   end
 
   defp list_capabilities(registry, kind) do
-    {:ok, Registry.list(registry, kind: kind, include_approval_required?: true)}
+    {:ok, Registry.list(registry, kind: kind, include_hidden?: true)}
   rescue
     error in ArgumentError ->
       {:error, {:capability_registry_unavailable, Exception.message(error)}}
@@ -57,7 +57,7 @@ defmodule FermixCore.Introspection.Capabilities do
       description: capability.description,
       kind: capability.kind,
       policy_class: capability.policy_class,
-      requires_approval?: capability.requires_approval?,
+      hidden_from_agent?: capability.hidden_from_agent?,
       metadata: safe_metadata(capability.kind, capability.metadata)
     }
   end

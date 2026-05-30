@@ -37,6 +37,36 @@ topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
 window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
+let pendingPluginAuthWindow = null
+
+window.addEventListener("click", event => {
+  const trigger = event.target.closest("[data-plugin-auth-trigger='true']")
+  if (!trigger) return
+
+  pendingPluginAuthWindow = window.open("about:blank", "_blank")
+  if (!pendingPluginAuthWindow) return
+
+  pendingPluginAuthWindow.opener = null
+  pendingPluginAuthWindow.document.title = "Opening sign-in"
+  pendingPluginAuthWindow.document.body.innerHTML = "<p>Opening sign-in...</p>"
+})
+
+window.addEventListener("phx:plugin-auth-open", ({detail}) => {
+  const url = detail?.url
+  if (!url) return
+
+  const authWindow = pendingPluginAuthWindow
+  pendingPluginAuthWindow = null
+
+  if (authWindow && !authWindow.closed) {
+    authWindow.location.replace(url)
+    authWindow.focus()
+    return
+  }
+
+  window.open(url, "_blank", "noopener,noreferrer")
+})
+
 // connect if there are any LiveViews on the page
 liveSocket.connect()
 
@@ -80,4 +110,3 @@ if (process.env.NODE_ENV === "development") {
     window.liveReloader = reloader
   })
 }
-

@@ -15,7 +15,7 @@ defmodule FermixCore.Auth.StoreTest do
           "#{System.unique_integer([:positive, :monotonic])}.json"
       )
 
-    ExUnit.Callbacks.on_exit(fn -> File.rm(path) end)
+    ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
     path
   end
 
@@ -158,6 +158,72 @@ defmodule FermixCore.Auth.StoreTest do
 
       tmp_pattern = Path.dirname(path) |> Path.join("#{Path.basename(path)}.tmp.*")
       assert Path.wildcard(tmp_pattern) == []
+    end
+
+    test "refuses to overwrite malformed auth.json; preserves the original at a backup path" do
+      path = tmp_path()
+      File.write!(path, "{ not json ")
+
+      entry = %{
+        auth_mode: "chatgpt",
+        tokens: %{access_token: "at", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil
+      }
+
+      assert {:error, {:malformed_auth_file, ^path, backup, {:invalid_json, _err}}} =
+               Store.write(:openai, entry, path)
+
+      assert is_binary(backup)
+      assert File.exists?(backup)
+      assert File.read!(backup) == "{ not json "
+      assert File.read!(path) == "{ not json "
+      ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm(backup) end)
+    end
+
+    test "refuses to overwrite an auth.json with an unknown shape" do
+      path = tmp_path()
+      File.write!(path, Jason.encode!(%{"unknown" => "shape"}))
+
+      entry = %{
+        auth_mode: "chatgpt",
+        tokens: %{access_token: "at", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil
+      }
+
+      assert {:error, {:malformed_auth_file, ^path, backup, :unknown_shape}} =
+               Store.write(:openai, entry, path)
+
+      assert is_binary(backup)
+      assert File.exists?(backup)
+      ExUnit.Callbacks.on_exit(fn -> FermixTestSupport.SafeRm.rm(backup) end)
+    end
+  end
+
+  describe "validate_permissions/1" do
+    test "passes when auth file is missing" do
+      assert :ok = Store.validate_permissions(tmp_path())
+    end
+
+    test "passes when auth file is 0600" do
+      path = tmp_path()
+      File.write!(path, "{}")
+      File.chmod!(path, 0o600)
+
+      assert :ok = Store.validate_permissions(path)
+    end
+
+    test "rejects widened auth file permissions with chmod guidance" do
+      path = tmp_path()
+      File.write!(path, "{}")
+      File.chmod!(path, 0o644)
+
+      assert {:error, {:insecure_permissions, ^path, 0o644}} = Store.validate_permissions(path)
+
+      assert_raise ArgumentError, ~r/chmod 600/, fn ->
+        Store.validate_permissions!(path)
+      end
     end
   end
 

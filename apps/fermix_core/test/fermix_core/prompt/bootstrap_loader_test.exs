@@ -20,22 +20,22 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_config)
-      File.rm_rf!(base_dir)
+      FermixTestSupport.SafeRm.rm_rf!(base_dir)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
     %{agent_id: "main", base_dir: base_dir, repo: repo_name}
   end
 
-  test "load/1 returns present IDENTITY.md, AGENTS.md, and SOUL.md with metadata", %{
+  test "load/1 returns present IDENTITY.md, FERMIX.md, and SOUL.md with metadata", %{
     agent_id: agent_id
   } do
     File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
     File.write!(BootstrapPaths.identity_path(agent_id), "i am aira")
-    File.write!(BootstrapPaths.agents_path(agent_id), "agent instructions")
+    File.write!(BootstrapPaths.fermix_path(agent_id), "agent instructions")
     File.write!(BootstrapPaths.soul_path(agent_id), "calm voice")
 
     assert {:ok, result} = BootstrapLoader.load(agent_id)
@@ -44,18 +44,18 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     assert result.identity.path == BootstrapPaths.identity_path(agent_id)
     assert result.identity.status == :present
 
-    assert result.agents.content == "agent instructions"
-    assert result.agents.path == BootstrapPaths.agents_path(agent_id)
-    assert result.agents.status == :present
-    assert result.agents.approx_size == byte_size("agent instructions")
-    assert result.agents.approx_tokens == 5
+    assert result.fermix.content == "agent instructions"
+    assert result.fermix.path == BootstrapPaths.fermix_path(agent_id)
+    assert result.fermix.status == :present
+    assert result.fermix.approx_size == byte_size("agent instructions")
+    assert result.fermix.approx_tokens == 5
 
     assert result.soul.content == "calm voice"
     assert result.soul.path == BootstrapPaths.soul_path(agent_id)
     assert result.soul.status == :present
   end
 
-  test "load/1 falls back for missing IDENTITY.md and AGENTS.md, omits missing SOUL.md", %{
+  test "load/1 falls back for missing IDENTITY.md and FERMIX.md, omits missing SOUL.md", %{
     agent_id: agent_id
   } do
     assert {:ok, result} = BootstrapLoader.load(agent_id)
@@ -66,28 +66,28 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     assert result.identity.approx_size > 0
     assert result.identity.approx_tokens > 0
 
-    assert result.agents.content == Defaults.agents_md()
-    assert result.agents.path == BootstrapPaths.agents_path(agent_id)
-    assert result.agents.status == :fallback
-    assert result.agents.approx_size > 0
-    assert result.agents.approx_tokens > 0
+    assert result.fermix.content == Defaults.fermix_md()
+    assert result.fermix.path == BootstrapPaths.fermix_path(agent_id)
+    assert result.fermix.status == :fallback
+    assert result.fermix.approx_size > 0
+    assert result.fermix.approx_tokens > 0
 
     assert result.soul == nil
   end
 
-  test "load/1 treats empty IDENTITY.md, AGENTS.md, and SOUL.md as not present", %{
+  test "load/1 treats empty IDENTITY.md, FERMIX.md, and SOUL.md as not present", %{
     agent_id: agent_id
   } do
     File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
     File.write!(BootstrapPaths.identity_path(agent_id), "")
-    File.write!(BootstrapPaths.agents_path(agent_id), " \n\n")
+    File.write!(BootstrapPaths.fermix_path(agent_id), " \n\n")
     File.write!(BootstrapPaths.soul_path(agent_id), "")
 
     assert {:ok, result} = BootstrapLoader.load(agent_id)
     assert result.identity.content == Defaults.identity_md()
     assert result.identity.status == :fallback
-    assert result.agents.content == Defaults.agents_md()
-    assert result.agents.status == :fallback
+    assert result.fermix.content == Defaults.fermix_md()
+    assert result.fermix.status == :fallback
     assert result.soul == nil
   end
 
@@ -97,7 +97,7 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
   } do
     File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
     File.write!(BootstrapPaths.identity_path(agent_id), "identity body")
-    File.write!(BootstrapPaths.agents_path(agent_id), "agent instructions")
+    File.write!(BootstrapPaths.fermix_path(agent_id), "agent instructions")
     File.write!(BootstrapPaths.soul_path(agent_id), "soul identity")
 
     assert {:ok, _result} = BootstrapLoader.load(agent_id, repo: repo)
@@ -109,9 +109,9 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     assert identity.mutation_source == "imported"
     assert identity.content == "identity body"
 
-    assert {:ok, [agents]} = Registry.list_revisions(agent_id, :agents_md, "global", repo: repo)
-    assert agents.mutation_source == "imported"
-    assert agents.content == "agent instructions"
+    assert {:ok, [fermix]} = Registry.list_revisions(agent_id, :fermix_md, "global", repo: repo)
+    assert fermix.mutation_source == "imported"
+    assert fermix.content == "agent instructions"
 
     assert {:ok, [soul]} = Registry.list_revisions(agent_id, :soul_md, "global", repo: repo)
     assert soul.mutation_source == "imported"
@@ -123,15 +123,15 @@ defmodule FermixCore.Prompt.BootstrapLoaderTest do
     repo: repo
   } do
     File.mkdir_p!(BootstrapPaths.agent_dir(agent_id))
-    File.write!(BootstrapPaths.agents_path(agent_id), "agent instructions")
+    File.write!(BootstrapPaths.fermix_path(agent_id), "agent instructions")
 
     assert {:ok, _result} = BootstrapLoader.load(agent_id, repo: repo)
 
-    File.write!(BootstrapPaths.agents_path(agent_id), "updated agent instructions")
+    File.write!(BootstrapPaths.fermix_path(agent_id), "updated agent instructions")
     assert {:ok, _result} = BootstrapLoader.load(agent_id, repo: repo)
 
     assert {:ok, [latest, imported]} =
-             Registry.list_revisions(agent_id, :agents_md, "global", repo: repo)
+             Registry.list_revisions(agent_id, :fermix_md, "global", repo: repo)
 
     assert latest.mutation_source == "manual_edit"
     assert latest.content == "updated agent instructions"

@@ -78,6 +78,37 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert result.error =~ "too_large"
   end
 
+  test "web_fetch pins the connection to the validated IP (F-04 rebinding)" do
+    test_id = :"web_fetch_pin_#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    Req.Test.stub(test_id, fn conn ->
+      host_header =
+        conn
+        |> Plug.Conn.get_req_header("host")
+        |> List.first()
+
+      send(test_pid, {:web_fetch_request, conn.host, host_header})
+      Plug.Conn.resp(conn, 200, "<h1>ok</h1>")
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        # Validation sees the public IP 93.184.216.34. If Req re-resolved at
+        # connect time it could land on any IP — by pinning the URL to the
+        # validated IP literal here, no such re-resolution can happen.
+        net_resolver: fn "example.com" -> {:ok, [{93, 184, 216, 34}]} end
+      })
+
+    assert {:ok, %{success: true}} =
+             WebFetch.execute(%{"url" => "https://example.com/docs"}, context)
+
+    assert_receive {:web_fetch_request, request_host, host_header}, 1_000
+    assert request_host == "93.184.216.34"
+    assert host_header == "example.com"
+  end
+
   test "web_fetch blocks private redirects before following them" do
     test_id = :"web_fetch_redirect_#{System.unique_integer([:positive])}"
 
@@ -164,6 +195,7 @@ defmodule FermixCore.Tools.WebToolsTest do
     sensitive_headers = [
       {"authorization", "Bearer secret"},
       {"x-api-key", "key-secret"},
+      {"X-Subscription-Token", "brave-secret"},
       {"user-agent", "fermix-test"}
     ]
 
@@ -176,7 +208,8 @@ defmodule FermixCore.Tools.WebToolsTest do
     search_context =
       Map.merge(@context, %{
         req_options: [headers: sensitive_headers, plug: {Req.Test, web_search_id}],
-        net_resolver: public_resolver()
+        net_resolver: public_resolver(),
+        tool_trace: %{request_headers: [%{name: "stale", value: "not-from-backend"}]}
       })
 
     assert {:ok, %{success: true}} =
@@ -188,17 +221,49 @@ defmodule FermixCore.Tools.WebToolsTest do
                     %{tool: "web_fetch", request_headers: fetch_headers}}
 
     assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements,
-                    %{tool: "web_search", request_headers: search_headers}}
+                    %{
+                      tool: "web_search",
+                      backend: search_backend,
+                      request_headers: search_headers,
+                      result_count: search_result_count
+                    }}
 
     assert %{name: "authorization", value: "***REDACTED***"} in fetch_headers
     assert %{name: "x-api-key", value: "***REDACTED***"} in fetch_headers
     assert %{name: "authorization", value: "***REDACTED***"} in search_headers
     assert %{name: "x-api-key", value: "***REDACTED***"} in search_headers
+    assert %{name: "X-Subscription-Token", value: "***REDACTED***"} in search_headers
+    assert search_backend == "duckduckgo"
+    assert is_integer(search_result_count) and search_result_count > 0
     refute inspect(fetch_headers) =~ "secret"
     refute inspect(search_headers) =~ "secret"
+    refute inspect(search_headers) =~ "not-from-backend"
 
     :telemetry.detach(fetch_handler)
     :telemetry.detach(search_handler)
+  end
+
+  test "web_search emits result_count: 0 when DuckDuckGo returns no results" do
+    test_id = :"web_search_empty_#{System.unique_integer([:positive])}"
+    handler = attach_tool_telemetry("web_search")
+
+    Req.Test.stub(test_id, fn conn ->
+      Plug.Conn.resp(conn, 200, "<div class=\"no-results\">No results</div>")
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    assert {:ok, %{success: true, output: "[]"}} =
+             WebSearch.execute(%{"query" => "unlikely"}, context)
+
+    assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements,
+                    %{tool: "web_search", result_count: 0}}
+
+    :telemetry.detach(handler)
   end
 
   defp assert_search_error(body, expected_tag) do

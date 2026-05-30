@@ -21,6 +21,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Telemetry
 
   require Logger
 
@@ -48,19 +49,23 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   end
 
   @impl true
-  def to_provider_tools([]), do: []
-
   def to_provider_tools(capabilities) when is_list(capabilities) do
-    Enum.map(capabilities, fn %Capability{} = cap ->
-      %{
-        type: "function",
-        function: %{
-          name: cap.name,
-          description: cap.description,
-          parameters: cap.parameters
-        }
-      }
-    end)
+    {tools, duration_us} =
+      Telemetry.timed_us(fn ->
+        Enum.map(capabilities, fn %Capability{} = cap ->
+          %{
+            type: "function",
+            function: %{
+              name: cap.name,
+              description: cap.description,
+              parameters: cap.parameters
+            }
+          }
+        end)
+      end)
+
+    emit_tool_schema_telemetry(tools, capabilities, duration_us)
+    tools
   end
 
   @impl true
@@ -205,6 +210,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   defp maybe_put_tools(body, tools) when is_list(tools), do: Map.put(body, :tools, tools)
   defp maybe_put(body, _key, nil), do: body
   defp maybe_put(body, key, value), do: Map.put(body, key, value)
+
+  defp emit_tool_schema_telemetry(tools, capabilities, duration_us) do
+    :telemetry.execute(
+      [:fermix, :provider, :tool_schema],
+      %{
+        duration_us: duration_us,
+        tools_count: length(tools),
+        capabilities_count: length(capabilities)
+      },
+      %{adapter: :chat_completions}
+    )
+  end
 
   defp require_api_key!(opts) do
     case Keyword.get(opts, :api_key) do

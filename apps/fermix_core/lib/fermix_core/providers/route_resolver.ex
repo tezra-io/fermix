@@ -20,7 +20,7 @@ defmodule FermixCore.Providers.RouteResolver do
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.ModelCatalog
-  alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Providers.ReasoningEffort
 
   @default_openai_base_url "https://api.openai.com/v1"
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
@@ -97,6 +97,7 @@ defmodule FermixCore.Providers.RouteResolver do
       ]
       |> maybe_put(:access_token, Keyword.get(opts, :access_token))
       |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai_codex, opts))
+      |> maybe_put(:fast, resolve_codex_fast(opts))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))
 
     {route_key, adapter_opts}
@@ -179,9 +180,41 @@ defmodule FermixCore.Providers.RouteResolver do
   defp validate_reasoning_effort!(nil), do: :ok
 
   defp validate_reasoning_effort!(value) do
-    # maybe_reasoning_field/1 owns the enum. Reuse it as the validator —
-    # one source of truth.
-    _ = ResponsesShared.maybe_reasoning_field(value)
-    :ok
+    # ReasoningEffort owns the canonical enum — reuse it as the validator.
+    # Per-provider supportedness (clamp/reject) is applied at request-build
+    # time in the adapter, not here.
+    case ReasoningEffort.parse(value) do
+      {:ok, _level} ->
+        :ok
+
+      :error ->
+        raise ArgumentError,
+              "invalid reasoning_effort: #{inspect(value)}; " <>
+                "expected one of #{inspect(ReasoningEffort.levels())}"
+    end
+  end
+
+  defp resolve_codex_fast(opts) do
+    value =
+      case Keyword.fetch(opts, :fast) do
+        {:ok, fast} ->
+          fast
+
+        :error ->
+          case Config.provider(:openai_codex) do
+            {:ok, cfg} -> Keyword.get(cfg, :fast)
+            {:error, :not_configured} -> nil
+          end
+      end
+
+    validate_fast!(value)
+    value
+  end
+
+  defp validate_fast!(nil), do: :ok
+  defp validate_fast!(value) when is_boolean(value), do: :ok
+
+  defp validate_fast!(value) do
+    raise ArgumentError, "invalid Codex fast mode: #{inspect(value)}; expected true or false"
   end
 end

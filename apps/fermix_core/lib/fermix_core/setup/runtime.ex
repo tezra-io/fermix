@@ -17,6 +17,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.Wizard
 
   @answer_keys [
@@ -24,16 +25,28 @@ defmodule FermixCore.Setup.Runtime do
     :provider,
     :default_model,
     :reasoning_effort,
+    :fast,
+    :realtime_enabled,
+    :realtime_api_key,
+    :realtime_voice,
+    :realtime_max_session_minutes,
+    :realtime_max_cost_cents,
+    :realtime_persist_transcripts,
     :telegram_bot_token,
+    :telegram_owner_user_id,
     :whatsapp_access_token,
     :whatsapp_phone_number_id,
     :whatsapp_verify_token,
     :whatsapp_app_secret,
+    :whatsapp_owner_user_id,
     :discord_bot_token,
     :discord_bot_user_id,
+    :discord_owner_user_id,
     :slack_bot_token,
     :slack_signing_secret,
-    :signal_account
+    :slack_owner_user_id,
+    :signal_account,
+    :signal_owner_user_id
   ]
 
   @type puts_fun :: (String.t() -> any())
@@ -45,8 +58,12 @@ defmodule FermixCore.Setup.Runtime do
     puts = Keyword.get(io_opts, :puts, &IO.puts/1)
     prompt = Keyword.get(io_opts, :prompt, &default_prompt/1)
 
-    with {:ok, report} <- load_report() do
-      dispatch(report, opts, puts, prompt)
+    if Keyword.get(opts, :migrate_secrets, false) do
+      SecretMigration.run(opts, puts: puts, prompt: prompt)
+    else
+      with {:ok, report} <- load_report() do
+        dispatch(report, opts, puts, prompt)
+      end
     end
   end
 
@@ -368,24 +385,56 @@ defmodule FermixCore.Setup.Runtime do
   end
 
   defp collect_answers(report, opts, prompt) do
-    provided = provided_answers(opts)
+    provided = opts |> provided_answers() |> default_codex_fast()
 
-    Enum.reduce(prompt_plan(report, opts), provided, fn prompt_info, answers ->
-      prompt_info = prompt_for_answers(prompt_info, answers)
-
-      cond do
-        answered?(answers, prompt_info.key) -> answers
-        irrelevant_prompt?(prompt_info, answers) -> answers
-        true -> answers ++ interactive_answer(prompt_info, prompt)
-      end
-    end)
+    collect_answers(report, opts, prompt, provided, MapSet.new())
   end
 
-  defp prompt_plan(report, opts) do
-    if Keyword.get(opts, :reconfigure, false) do
-      Wizard.reconfigure_prompts(report.wizard)
+  defp default_codex_fast(answers) do
+    if Keyword.get(answers, :fast) == nil and selected_provider(answers) == :openai_codex do
+      Keyword.put(answers, :fast, false)
     else
-      Wizard.prompts(report.wizard)
+      answers
+    end
+  end
+
+  defp collect_answers(report, opts, prompt, answers, seen_keys) do
+    {answers, seen_keys, asked?} =
+      Enum.reduce(prompt_plan(report, opts, answers), {answers, seen_keys, false}, fn
+        prompt_info, {answers, seen_keys, false} ->
+          prompt_info = prompt_for_answers(prompt_info, answers)
+
+          cond do
+            MapSet.member?(seen_keys, prompt_info.key) ->
+              {answers, seen_keys, false}
+
+            answered?(answers, prompt_info.key) ->
+              {answers, MapSet.put(seen_keys, prompt_info.key), false}
+
+            irrelevant_prompt?(prompt_info, answers) ->
+              {answers, MapSet.put(seen_keys, prompt_info.key), false}
+
+            true ->
+              {answers ++ interactive_answer(prompt_info, prompt),
+               MapSet.put(seen_keys, prompt_info.key), true}
+          end
+
+        _prompt_info, acc ->
+          acc
+      end)
+
+    if asked? do
+      collect_answers(report, opts, prompt, answers, seen_keys)
+    else
+      answers
+    end
+  end
+
+  defp prompt_plan(report, opts, answers) do
+    if Keyword.get(opts, :reconfigure, false) do
+      Wizard.reconfigure_prompts(report.wizard, answers)
+    else
+      Wizard.prompts(report.wizard, answers)
     end
   end
 
@@ -409,6 +458,24 @@ defmodule FermixCore.Setup.Runtime do
     selected_provider(answers) == :anthropic
   end
 
+  defp irrelevant_prompt?(%{key: :fast}, answers) do
+    selected_provider(answers) not in [nil, :openai_codex]
+  end
+
+  defp irrelevant_prompt?(%{key: :realtime_api_key}, answers) do
+    realtime_enabled_answer(answers) == false or selected_provider(answers) == :openai
+  end
+
+  defp irrelevant_prompt?(%{key: key}, answers)
+       when key in [
+              :realtime_voice,
+              :realtime_max_session_minutes,
+              :realtime_max_cost_cents,
+              :realtime_persist_transcripts
+            ] do
+    realtime_enabled_answer(answers) == false
+  end
+
   defp irrelevant_prompt?(_prompt, _answers), do: false
 
   defp prompt_for_answers(%{key: :default_model} = prompt_info, answers) do
@@ -430,6 +497,14 @@ defmodule FermixCore.Setup.Runtime do
       "openai" -> :openai
       "openai_codex" -> :openai_codex
       "anthropic" -> :anthropic
+      _value -> nil
+    end
+  end
+
+  defp realtime_enabled_answer(answers) do
+    case Keyword.get(answers, :realtime_enabled) do
+      value when value in [true, "true", "TRUE", "1", "yes", "y"] -> true
+      value when value in [false, "false", "FALSE", "0", "no", "n"] -> false
       _value -> nil
     end
   end

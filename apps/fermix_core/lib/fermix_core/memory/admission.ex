@@ -34,7 +34,13 @@ defmodule FermixCore.Memory.Admission do
           key: String.t(),
           value: String.t(),
           confidence: float(),
-          promote_target: String.t()
+          promote_target: String.t(),
+          source_id: String.t() | nil,
+          source_type: String.t() | nil,
+          source_name: String.t() | nil,
+          source_description: String.t() | nil,
+          session_id: String.t() | nil,
+          run_id: String.t() | nil
         }
 
   @type result :: %{
@@ -61,15 +67,27 @@ defmodule FermixCore.Memory.Admission do
     prompt_target(category, scope_type)
   end
 
+  @spec category_allowed?(String.t(), atom() | nil) :: boolean()
+  def category_allowed?(category, source_trust) when is_binary(category) do
+    MapSet.member?(@valid_categories, category) and trust_allows_category?(category, source_trust)
+  end
+
   defp admission_context(opts) do
     %{
       agent_id: Keyword.fetch!(opts, :agent_id),
       owner_id: Keyword.fetch!(opts, :owner_id),
       conversation_key: normalize_conversation_key(Keyword.fetch!(opts, :conversation_key)),
       chat_mode: normalize_chat_mode(Keyword.get(opts, :chat_mode, :direct)),
+      source_trust: Keyword.get(opts, :source_trust),
       existing_memories: Keyword.get(opts, :existing_memories, %{}),
       repo: Keyword.get(opts, :repo, Config.repo_server()),
-      min_confidence: Keyword.get(opts, :min_confidence, Config.extraction_min_confidence())
+      min_confidence: Keyword.get(opts, :min_confidence, Config.extraction_min_confidence()),
+      source_id: Keyword.get(opts, :source_id),
+      source_type: Keyword.get(opts, :source_type),
+      source_name: Keyword.get(opts, :source_name),
+      source_description: Keyword.get(opts, :source_description),
+      session_id: Keyword.get(opts, :session_id),
+      run_id: Keyword.get(opts, :run_id)
     }
   end
 
@@ -89,6 +107,7 @@ defmodule FermixCore.Memory.Admission do
   defp normalize_candidate(candidate, ctx) do
     with {:ok, category} <- fetch_candidate_string(candidate, :category),
          true <- MapSet.member?(@valid_categories, category),
+         true <- trust_allows_category?(category, ctx.source_trust),
          {:ok, key} <- fetch_candidate_string(candidate, :key),
          {:ok, value} <- fetch_candidate_string(candidate, :value),
          confidence when confidence >= ctx.min_confidence <- fetch_confidence(candidate),
@@ -112,6 +131,12 @@ defmodule FermixCore.Memory.Admission do
          value: value,
          confidence: confidence,
          promote_target: promote_target,
+         source_id: ctx.source_id,
+         source_type: ctx.source_type,
+         source_name: ctx.source_name,
+         source_description: ctx.source_description,
+         session_id: ctx.session_id,
+         run_id: ctx.run_id,
          corrective?: category == "correction"
        }}
     else
@@ -187,6 +212,21 @@ defmodule FermixCore.Memory.Admission do
 
   defp resolve_category(category, _existing), do: category
 
+  # Audit F-09: explicit `:guest` callers cannot promote
+  # instruction/correction candidates into durable memory. Those two
+  # categories shape *future* agent behavior via the persisted prompt
+  # files (`memory_md` / `user_md`); accepting them from non-operator
+  # remote prompts is the path the audit called out. `:operator` and
+  # `nil` (admission paths that don't carry trust info, e.g. internal
+  # extractor runs) keep the full category surface — Admission's job
+  # is to restrict an *explicit* low-trust source, not to second-guess
+  # internal callers that never produced an unauthorised source.
+  defp trust_allows_category?(category, :guest)
+       when category in ["instruction", "correction"],
+       do: false
+
+  defp trust_allows_category?(_category, _trust), do: true
+
   defp prompt_target(category, "owner") do
     cond do
       MapSet.member?(@user_promoted_categories, category) -> "user_md"
@@ -250,7 +290,8 @@ defmodule FermixCore.Memory.Admission do
              owner_id: ctx.owner_id,
              scope_type: scope_type,
              scope_id: scope_id,
-             key: key
+             key: key,
+             archived?: false
            },
            server: ctx.repo
          ) do
@@ -271,7 +312,7 @@ defmodule FermixCore.Memory.Admission do
 
   defp prompt_backed_existing_memory(ctx, key) do
     case Repo.get_memories(
-           %{agent_id: ctx.agent_id, owner_id: ctx.owner_id, key: key},
+           %{agent_id: ctx.agent_id, owner_id: ctx.owner_id, key: key, archived?: false},
            server: ctx.repo
          ) do
       {:ok, memories} -> Enum.find(memories, &prompt_backed_memory?/1)

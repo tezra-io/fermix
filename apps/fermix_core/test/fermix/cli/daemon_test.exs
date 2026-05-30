@@ -48,7 +48,7 @@ defmodule Fermix.CLI.DaemonTest do
       restore_app_env(:cli_channel_bridge, previous_bridge)
       restore_app_env(:daemon_test_pid, previous_pid)
       restore_app_env(:daemon_bridge_result, previous_result)
-      File.rm_rf(socket_dir)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
     end)
 
     %{socket_path: socket_path, daemon: daemon}
@@ -77,7 +77,7 @@ defmodule Fermix.CLI.DaemonTest do
   test "no daemon listening returns :not_running" do
     socket_dir = mkdir!()
     socket_path = Path.join(socket_dir, "missing.sock")
-    on_exit(fn -> File.rm_rf(socket_dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(socket_dir) end)
 
     assert {:error, :not_running} =
              Client.status(socket_path: socket_path, timeout: 500)
@@ -106,7 +106,7 @@ defmodule Fermix.CLI.DaemonTest do
     assert {:ok, %{"status" => "ok"}} = Client.status(socket_path: socket_path, timeout: 1_000)
 
     GenServer.stop(daemon, :normal, 1_000)
-    File.rm_rf(socket_dir)
+    FermixTestSupport.SafeRm.rm_rf(socket_dir)
   end
 
   test "second daemon refuses to bind over a live socket", %{socket_path: socket_path} do
@@ -180,6 +180,27 @@ defmodule Fermix.CLI.DaemonTest do
     assert reply["session_id"] == "daemon-test"
     assert_receive {:bridge_call, "hello", opts}
     assert Keyword.get(opts, :session_id) == "daemon-test"
+  end
+
+  test "skills_list returns JSON-safe skill summaries", %{socket_path: socket_path} do
+    assert {:ok, reply} = Client.request("skills_list", socket_path: socket_path, timeout: 1_000)
+
+    assert reply["status"] == "ok"
+    assert is_integer(reply["skills"]["count"])
+    assert is_list(reply["skills"]["skills"])
+  end
+
+  test "skills_view returns the selected skill body", %{socket_path: socket_path} do
+    assert {:ok, reply} =
+             Client.request("skills_view",
+               socket_path: socket_path,
+               timeout: 1_000,
+               params: %{"name" => "self_knowledge"}
+             )
+
+    assert reply["status"] == "ok"
+    assert reply["skill"]["name"] == "self_knowledge"
+    assert is_binary(reply["skill"]["body"])
   end
 
   defp mkdir! do

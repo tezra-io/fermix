@@ -3,8 +3,6 @@ defmodule FermixCore.Tools.FileReadTest do
 
   alias FermixCore.Tools.FileRead
 
-  @context %{agent_name: "test_agent", conversation_key: :test}
-
   setup do
     dir = Path.join(System.tmp_dir!(), "fermix_file_read_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
@@ -12,9 +10,20 @@ defmodule FermixCore.Tools.FileReadTest do
     file = Path.join(dir, "test.txt")
     File.write!(file, "line1\nline2\nline3\nline4\nline5")
 
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
-    %{dir: dir, test_file: file}
+    context = %{
+      agent_name: "test_agent",
+      conversation_key: :test,
+      cwd: dir,
+      sandbox_config: %{
+        mode: :strict,
+        workspace_root: dir,
+        allowed_roots: []
+      }
+    }
+
+    %{dir: dir, test_file: file, context: context}
   end
 
   describe "name/0" do
@@ -47,93 +56,117 @@ defmodule FermixCore.Tools.FileReadTest do
   end
 
   describe "execute/2 - happy path" do
-    test "reads entire file", %{test_file: file} do
-      assert {:ok, result} = FileRead.execute(%{"path" => file}, @context)
+    test "reads entire file", %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file}, context)
       assert result.success == true
       assert result.output == "line1\nline2\nline3\nline4\nline5"
       assert result.error == nil
     end
 
-    test "reads with offset", %{test_file: file} do
-      assert {:ok, result} = FileRead.execute(%{"path" => file, "offset" => 3}, @context)
+    test "reads with offset", %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file, "offset" => 3}, context)
       assert result.success == true
       assert result.output == "line3\nline4\nline5"
     end
 
-    test "reads with limit", %{test_file: file} do
-      assert {:ok, result} = FileRead.execute(%{"path" => file, "limit" => 2}, @context)
+    test "reads with limit", %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file, "limit" => 2}, context)
       assert result.success == true
       assert result.output == "line1\nline2"
     end
 
-    test "reads with offset and limit", %{test_file: file} do
+    test "reads with offset and limit", %{test_file: file, context: context} do
       assert {:ok, result} =
-               FileRead.execute(%{"path" => file, "offset" => 2, "limit" => 2}, @context)
+               FileRead.execute(%{"path" => file, "offset" => 2, "limit" => 2}, context)
 
       assert result.success == true
       assert result.output == "line2\nline3"
     end
 
-    test "reads empty file", %{dir: dir} do
+    test "reads empty file", %{dir: dir, context: context} do
       empty = Path.join(dir, "empty.txt")
       File.write!(empty, "")
 
-      assert {:ok, result} = FileRead.execute(%{"path" => empty}, @context)
+      assert {:ok, result} = FileRead.execute(%{"path" => empty}, context)
       assert result.success == true
       assert result.output == ""
     end
   end
 
   describe "execute/2 - error cases" do
-    test "returns error for nonexistent file", %{dir: dir} do
+    test "returns error for nonexistent file", %{dir: dir, context: context} do
       path = Path.join(dir, "nonexistent.txt")
-      assert {:ok, result} = FileRead.execute(%{"path" => path}, @context)
+      assert {:ok, result} = FileRead.execute(%{"path" => path}, context)
       assert result.success == false
       assert result.error =~ "not found"
     end
 
-    test "returns error for directory path", %{dir: dir} do
-      assert {:ok, result} = FileRead.execute(%{"path" => dir}, @context)
+    test "returns error for directory path", %{dir: dir, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => dir}, context)
       assert result.success == false
       assert result.error =~ "directory"
     end
 
-    test "returns error for empty path" do
-      assert {:ok, result} = FileRead.execute(%{"path" => ""}, @context)
+    test "returns error for empty path", %{context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => ""}, context)
       assert result.success == false
       assert result.error =~ "non-empty"
     end
 
-    test "returns error for path traversal" do
-      assert {:ok, result} = FileRead.execute(%{"path" => "/tmp/../etc/passwd"}, @context)
+    test "rejects absolute path outside sandbox roots", %{context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => "/etc/passwd"}, context)
       assert result.success == false
-      assert result.error =~ "traversal"
+      assert result.error =~ "protected" or result.error =~ "outside the sandbox"
     end
 
-    test "returns error for relative path traversal" do
-      assert {:ok, result} = FileRead.execute(%{"path" => "../../etc/passwd"}, @context)
+    test "rejects relative path that escapes the sandbox", %{context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => "../../etc/passwd"}, context)
       assert result.success == false
-      assert result.error =~ "traversal"
+      assert result.error =~ "protected" or result.error =~ "outside the sandbox"
     end
 
-    test "returns error for null bytes in path" do
-      assert {:ok, result} = FileRead.execute(%{"path" => "/tmp/test\0.txt"}, @context)
+    test "rejects fermix-owned config and auth files", %{context: context} do
+      tmp_home = Path.join(System.tmp_dir!(), "fermix_home_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(tmp_home)
+      auth = Path.join(tmp_home, "auth.json")
+      File.write!(auth, "{}")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+      protected_context =
+        Map.put(context, :sandbox_config, %{
+          mode: :strict,
+          home: System.user_home!(),
+          workspace_root: tmp_home
+        })
+
+      assert {:ok, result} =
+               FileRead.execute(
+                 %{"path" => Path.join(System.user_home!(), ".fermix/auth.json")},
+                 protected_context
+               )
+
+      assert result.success == false
+      assert result.error =~ "protected" or result.error =~ "outside the sandbox"
+    end
+
+    test "returns error for null bytes in path", %{context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => "/tmp/test\0.txt"}, context)
       assert result.success == false
       assert result.error =~ "null bytes"
     end
 
-    test "returns error for missing path parameter" do
-      assert {:ok, result} = FileRead.execute(%{}, @context)
+    test "returns error for missing path parameter", %{context: context} do
+      assert {:ok, result} = FileRead.execute(%{}, context)
       assert result.success == false
       assert result.error =~ "Missing"
     end
   end
 
   describe "telemetry" do
-    test "emits [:fermix, :tool, :exec] on success", %{test_file: file} do
+    test "emits [:fermix, :tool, :exec] on success", %{test_file: file, context: context} do
       handler_id = attach_telemetry()
 
-      FileRead.execute(%{"path" => file}, @context)
+      FileRead.execute(%{"path" => file}, context)
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], measurements, metadata}
       assert is_integer(measurements.duration_ms)
@@ -145,10 +178,10 @@ defmodule FermixCore.Tools.FileReadTest do
       :telemetry.detach(handler_id)
     end
 
-    test "emits [:fermix, :tool, :exec] on failure" do
+    test "emits [:fermix, :tool, :exec] on failure", %{context: context} do
       handler_id = attach_telemetry()
 
-      FileRead.execute(%{"path" => "/nonexistent_file"}, @context)
+      FileRead.execute(%{"path" => "/nonexistent_file"}, context)
 
       assert_receive {:telemetry, [:fermix, :tool, :exec], measurements, metadata}
       assert is_integer(measurements.duration_ms)

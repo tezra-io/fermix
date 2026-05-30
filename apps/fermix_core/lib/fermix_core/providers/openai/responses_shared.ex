@@ -18,72 +18,84 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Telemetry
 
   @type tool_result :: %{required(:call_id) => String.t(), required(:output) => term()}
 
-  @valid_reasoning_efforts ~w(none minimal low medium high xhigh)a
-
   @doc """
-  Returns the list of accepted `reasoning_effort` values (atoms).
+  Builds the OpenAI-family `reasoning` body field for `provider`, or `nil`
+  to indicate "omit".
 
-  Mirrors hermes-agent's `VALID_REASONING_EFFORTS`. `:none` is the
-  "disable reasoning" sentinel — caller-side, that means "omit the
-  reasoning field entirely from the request body". The wizard surfaces
-  the same list to the user.
+  The canonical effort enum and per-provider mapping live in
+  `FermixCore.Providers.ReasoningEffort`; this only wraps the mapped value
+  in the `%{effort: ...}` shape both Responses adapters share. `:none` (and
+  `nil`) omit the field; a level above the provider's ceiling clamps (e.g.
+  `:max` -> `"xhigh"` on OpenAI). Invalid or provider-unsupported values
+  raise — config bugs we refuse to silently round-trip (CLAUDE.md #6, #12).
+  Per-*model* rejection (a model that doesn't accept `xhigh`) stays the
+  API's 400 to decide.
   """
-  @spec valid_reasoning_efforts() :: [atom()]
-  def valid_reasoning_efforts, do: @valid_reasoning_efforts
-
-  @doc """
-  Builds the `reasoning` body field, or `nil` to indicate "omit".
-
-  Returns `nil` for `nil`, `:none`, or `"none"`. Returns
-  `%{effort: "..."}` for the other valid levels. Raises `ArgumentError`
-  on any other value — invalid effort levels are configuration bugs we
-  refuse to silently round-trip (CLAUDE.md #6, #12).
-
-  Per-model rejection (e.g., a model that doesn't accept `xhigh`) is
-  intentionally NOT clamped here (design §4 Q2). The API's 400 is the
-  source of truth.
-  """
-  @spec maybe_reasoning_field(atom() | String.t() | nil) ::
+  @spec maybe_reasoning_field(atom() | String.t() | nil, ReasoningEffort.provider()) ::
           %{required(:effort) => String.t()} | nil
-  def maybe_reasoning_field(nil), do: nil
-  def maybe_reasoning_field(:none), do: nil
-  def maybe_reasoning_field("none"), do: nil
+  def maybe_reasoning_field(nil, _provider), do: nil
 
-  def maybe_reasoning_field(effort) when effort in @valid_reasoning_efforts do
-    %{effort: Atom.to_string(effort)}
-  end
-
-  def maybe_reasoning_field(effort) when is_binary(effort) do
-    case Enum.find(@valid_reasoning_efforts, fn atom -> Atom.to_string(atom) == effort end) do
-      nil -> raise_invalid_effort!(effort)
-      _atom -> %{effort: effort}
+  def maybe_reasoning_field(effort, provider) do
+    case ReasoningEffort.parse(effort) do
+      {:ok, level} -> reasoning_field(level, provider)
+      :error -> raise_invalid_effort!(effort)
     end
   end
 
-  def maybe_reasoning_field(effort), do: raise_invalid_effort!(effort)
+  defp reasoning_field(level, provider) do
+    case ReasoningEffort.to_provider(level, provider) do
+      :omit ->
+        nil
+
+      {:ok, value} ->
+        %{effort: value}
+
+      {:error, {:unsupported, lvl, prov}} ->
+        raise ArgumentError, "reasoning_effort #{lvl} is not supported by #{prov}"
+    end
+  end
 
   defp raise_invalid_effort!(effort) do
     raise ArgumentError,
           "invalid reasoning_effort: #{inspect(effort)}; " <>
-            "expected one of #{inspect(@valid_reasoning_efforts)}"
+            "expected one of #{inspect(ReasoningEffort.levels())}"
   end
 
   @spec to_provider_tools([Capability.t()]) :: [map()]
-  def to_provider_tools([]), do: []
-
   def to_provider_tools(capabilities) when is_list(capabilities) do
-    Enum.map(capabilities, fn %Capability{} = cap ->
-      %{
-        type: "function",
-        name: cap.name,
-        description: cap.description,
-        parameters: cap.parameters,
-        strict: false
-      }
-    end)
+    {tools, duration_us} =
+      Telemetry.timed_us(fn ->
+        Enum.map(capabilities, fn %Capability{} = cap ->
+          %{
+            type: "function",
+            name: cap.name,
+            description: cap.description,
+            parameters: cap.parameters,
+            strict: false
+          }
+        end)
+      end)
+
+    emit_tool_schema_telemetry(tools, capabilities, duration_us)
+    tools
+  end
+
+  @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
+  def request_metrics(input, instructions, tools, capabilities)
+      when is_list(input) and is_list(tools) and is_list(capabilities) do
+    %{
+      input_items: length(input),
+      input_bytes: encoded_size(input),
+      instructions_bytes: string_size(instructions),
+      tools_count: length(tools),
+      tools_bytes: encoded_size(tools),
+      capabilities_count: length(capabilities)
+    }
   end
 
   @spec build_input([map()]) :: {String.t() | nil, [map()]}
@@ -106,6 +118,75 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
       %{type: "function_call_output", call_id: call_id, output: to_string(output)}
     end)
+  end
+
+  @context_length_markers [
+    "context_length_exceeded",
+    "maximum context length",
+    "context window",
+    "too many tokens",
+    "prompt is too long",
+    "reduce the length"
+  ]
+
+  @doc """
+  True if an OpenAI-family error `body` (a decoded map or a JSON string) is a
+  context-length / too-many-tokens error. Shared by the Codex and Responses
+  adapters so a turn that overflows the model's context window surfaces a clear,
+  actionable reason (start a fresh session / compact) instead of a generic API
+  error.
+  """
+  @spec context_length_error?(term()) :: boolean()
+  def context_length_error?(body) do
+    # `error` may be a map (`%{"code" => ..., "message" => ...}`), a bare string
+    # (`%{"error" => "boom"}`), or absent — only the map shape carries a
+    # context-length signal, so other shapes are simply "not a context error".
+    case decode_error_body(body) do
+      %{"error" => %{} = error} ->
+        error["code"] == "context_length_exceeded" or context_length_message?(error["message"])
+
+      _other ->
+        false
+    end
+  end
+
+  defp context_length_message?(message) when is_binary(message) do
+    downcased = String.downcase(message)
+    Enum.any?(@context_length_markers, &String.contains?(downcased, &1))
+  end
+
+  defp context_length_message?(_message), do: false
+
+  defp decode_error_body(body) when is_map(body), do: body
+
+  defp decode_error_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} when is_map(decoded) -> decoded
+      _not_json -> %{}
+    end
+  end
+
+  defp decode_error_body(_body), do: %{}
+
+  defp encoded_size(value) do
+    value
+    |> Jason.encode_to_iodata!()
+    |> IO.iodata_length()
+  end
+
+  defp string_size(value) when is_binary(value), do: byte_size(value)
+  defp string_size(_value), do: 0
+
+  defp emit_tool_schema_telemetry(tools, capabilities, duration_us) do
+    :telemetry.execute(
+      [:fermix, :provider, :tool_schema],
+      %{
+        duration_us: duration_us,
+        tools_count: length(tools),
+        capabilities_count: length(capabilities)
+      },
+      %{adapter: :responses_shared}
+    )
   end
 
   @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()]) ::

@@ -3,27 +3,47 @@ defmodule FermixCore.Tools.Support do
 
   alias FermixCore.Capabilities.Builtin.Tool
 
-  @spec run(String.t(), map(), (-> {:ok, Tool.tool_result()} | {:error, term()})) ::
+  @reserved_metadata_keys [:tool, :agent, :success, :error]
+
+  @type fun_return ::
+          {:ok, Tool.tool_result()}
+          | {:ok, Tool.tool_result(), map()}
+          | {:error, term()}
+
+  @spec run(String.t(), map(), (-> fun_return())) ::
           {:ok, Tool.tool_result()} | {:error, term()}
   def run(tool_name, context, fun)
       when is_binary(tool_name) and is_map(context) and is_function(fun, 0) do
     start = System.monotonic_time(:millisecond)
     agent = Map.get(context, :agent_name, "unknown")
-    result = fun.()
+    {result, extra} = split_trace_extra(fun.())
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
+    # Drop reserved keys from `extra` so a tool cannot inject :tool, :agent,
+    # :success, or :error into telemetry metadata.
     :telemetry.execute(
       [:fermix, :tool, :exec],
       %{duration_ms: duration},
-      telemetry_metadata(tool_name, agent, result, success, context)
+      extra
+      |> Map.drop(@reserved_metadata_keys)
+      |> Map.merge(telemetry_metadata(tool_name, agent, result, success, context))
     )
 
     result
   end
 
+  defp split_trace_extra({:ok, tool_result, extra}) when is_map(extra),
+    do: {{:ok, tool_result}, extra}
+
+  defp split_trace_extra(other), do: {other, %{}}
+
   @spec success_json(term()) :: {:ok, Tool.tool_result()}
   def success_json(value), do: {:ok, Tool.success(Jason.encode!(value))}
+
+  @spec success_json(term(), map()) :: {:ok, Tool.tool_result(), map()}
+  def success_json(value, extra_metadata) when is_map(extra_metadata),
+    do: {:ok, Tool.success(Jason.encode!(value)), extra_metadata}
 
   @spec error(String.t() | term()) :: {:ok, Tool.tool_result()}
   def error(message) when is_binary(message), do: {:ok, Tool.error(message)}

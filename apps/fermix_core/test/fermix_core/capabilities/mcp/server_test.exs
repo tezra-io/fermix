@@ -1,6 +1,7 @@
 defmodule FermixCore.Capabilities.MCP.ServerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
@@ -89,6 +90,48 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
   end
 
   describe "init" do
+    test "rejects sanitized MCP names that collide with installed skills", %{
+      cap_registry: cap_registry,
+      mcp_registry: mcp_registry
+    } do
+      suffix = System.unique_integer([:positive])
+      skills_dir = FermixTestSupport.SafeRm.make_tmp_dir!("mcp-skill-collision-#{suffix}")
+      write_skill(skills_dir, "mcp_github_create_issue")
+
+      skill_registry =
+        start_supervised!(
+          {SkillRegistry,
+           name: :"mcp_collision_skill_registry_#{suffix}",
+           skills_dir: skills_dir,
+           core_dir: nil,
+           seed_defaults: false},
+          id: :"mcp_collision_skill_registry_child_#{suffix}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(skills_dir) end)
+
+      StubDiscoverer.set_tools([
+        %{name: "create_issue", description: "Create issue.", input_schema: %{}}
+      ])
+
+      {:ok, _} =
+        start_supervised(
+          {McpServer,
+           [
+             server_name: "github",
+             discoverer: StubDiscoverer,
+             caller: StubCaller,
+             capability_registry: cap_registry,
+             mcp_registry: mcp_registry,
+             skill_registry: skill_registry,
+             fail_fast?: true
+           ]},
+          id: :"mcp_server_skill_collision_#{suffix}"
+        )
+
+      assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
+    end
+
     test "registers each discovered tool as an MCP capability and exposes approved ones", %{
       cap_registry: cap_registry,
       mcp_registry: mcp_registry
@@ -105,7 +148,6 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
              server_name: "github",
              discoverer: StubDiscoverer,
              caller: StubCaller,
-             approved?: true,
              capability_registry: cap_registry,
              mcp_registry: mcp_registry,
              fail_fast?: true
@@ -122,11 +164,10 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       assert names == ["mcp_github_create_issue", "mcp_github_list_issues"]
 
       [first | _] = CapabilityRegistry.list(cap_registry, kind: :mcp)
-      assert first.metadata.approved? == true
-      refute first.requires_approval?
+      refute first.hidden_from_agent?
     end
 
-    test "unapproved MCP tools are hidden from the default LLM-facing list", %{
+    test "per-tool hidden_from_agent? override hides that tool from the default list", %{
       cap_registry: cap_registry,
       mcp_registry: mcp_registry
     } do
@@ -141,17 +182,17 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
              server_name: "github",
              discoverer: StubDiscoverer,
              caller: StubCaller,
-             approved?: false,
+             tools_overrides: %{"create_issue" => %{hidden_from_agent?: true}},
              capability_registry: cap_registry,
              mcp_registry: mcp_registry,
              fail_fast?: true
            ]},
-          id: :mcp_server_unapproved
+          id: :mcp_server_hidden_override
         )
 
       assert CapabilityRegistry.list(cap_registry) == []
 
-      assert [_only] = CapabilityRegistry.list(cap_registry, include_approval_required?: true)
+      assert [_only] = CapabilityRegistry.list(cap_registry, include_hidden?: true)
     end
 
     test "exits with a tagged reason when discovery fails (fail_fast?: true)", %{
@@ -184,7 +225,6 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
           server_name: "github",
           discoverer: StubDiscoverer,
           caller: StubCaller,
-          approved?: true,
           capability_registry: cap_registry,
           mcp_registry: mcp_registry,
           retry_base_ms: 20,
@@ -206,7 +246,7 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       Process.exit(pid, :shutdown)
     end
 
-    test "tool_overrides win for policy_class and requires_approval?", %{
+    test "tool_overrides win for policy_class and hidden_from_agent?", %{
       cap_registry: cap_registry,
       mcp_registry: mcp_registry
     } do
@@ -221,9 +261,8 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
              server_name: "filesystem",
              discoverer: StubDiscoverer,
              caller: StubCaller,
-             approved?: false,
              tools_overrides: %{
-               "read_file" => %{policy_class: :read_only, requires_approval?: false}
+               "read_file" => %{policy_class: :read_only, hidden_from_agent?: false}
              },
              capability_registry: cap_registry,
              mcp_registry: mcp_registry,
@@ -234,7 +273,7 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       [cap] = CapabilityRegistry.list(cap_registry)
       assert cap.policy_class == :read_only
-      assert cap.requires_approval? == false
+      assert cap.hidden_from_agent? == false
     end
   end
 
@@ -252,7 +291,6 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
           server_name: "github",
           discoverer: StubDiscoverer,
           caller: StubCaller,
-          approved?: true,
           capability_registry: cap_registry,
           mcp_registry: mcp_registry,
           fail_fast?: true
@@ -266,5 +304,22 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
     end
+  end
+
+  defp write_skill(skills_dir, name) do
+    skill_dir = Path.join(skills_dir, name)
+    File.mkdir_p!(skill_dir)
+
+    File.write!(
+      Path.join(skill_dir, "SKILL.md"),
+      """
+      ---
+      name: #{name}
+      description: Use #{name}.
+      allowed_tools: []
+      ---
+      Body.
+      """
+    )
   end
 end

@@ -65,10 +65,20 @@ mix format --check-formatted
 - `docs/MILESTONE_4_9_UNIFIED_CAPABILITIES.md` — M4.9 design (shipped) — `Capability`/`Adapter` behaviours, `CapabilityRegistry`, MCP outbound
 - `docs/MILESTONE_4_10_CODEX_PARITY.md` — M4.10 design (shipped) — Codex tool calls, provider/model/effort persistence, wizard step, doctor auth probe
 - `docs/MILESTONE_4_11_SCHEDULED_AGENTS.md` — M4.11 design (draft) — cron jobs, persistent memory sources, isolated runs
+- `docs/MILESTONE_4_12_INBOUND_MCP.md` — M4.12 design (draft) — Fermix as an MCP server (stdio + streamable HTTP), `[mcp.inbound]` config, policy-gated capability exposure, `fermix mcp serve`
+- `docs/MILESTONE_4_13_ANUBIS_MIGRATION.md` — M4.13 design (shipped) — MCP dependency migration from Hermes to Anubis for outbound and inbound MCP surfaces
+- `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` — M5 design (shipped core) — workspace-rooted sandbox floor, modes (`strict`/`standard`/`open`), command profiles (`bare`/`assistant`/`extended`), hardline blocklist, `fermix grant` UX, env passthrough via `source = "command"` (no Fermix-owned keystore — defers to operator's OS helpers like `security`/`secret-tool`/`pass`/`op`), `SafeRm` test discipline
+- `docs/POST_M5_PLAN.md` — Post-M5 plan (draft) — finishes M5's unshipped halves (wizard secret writer, `auth.json` perms refusal, doctor trace scan, deny-message audit, rename migration error) and unifies MCP env routing through `Sandbox.Env`
 - `docs/MILESTONE_7_ADVANCED_TOOLS.md` — M7 design — keyless built-in tool catalog (file/git/web/delegate/skill_create), capability metadata + dynamic prompt summary, self-knowledge skill
+- `docs/MILESTONE_7_1_CONVERSATION_LIFECYCLE.md` — M7.1 design (draft) — threshold-driven auto-compaction, channel command surface (`/compact`, `/new`, `/clear`, `/help`), per-channel command authorization
+- `docs/MILESTONE_7_PLUS_PLUGGABLE_BACKENDS.md` — M7+ design (draft) — `Capability.Backend` behaviour, `[fermix_core.tools.<name>]` TOML, per-tool API-key wizard surface, `BuiltinSeeder.reseed/1`, `http_request` tool with `allowed_domains`
+- `docs/MILESTONE_9_1_REALTIME_VOICE.md` — M9.1 design (shipped) — native macOS floating voice companion backed by OpenAI Realtime, daemon-owned tools/memory/traces, click-to-talk first, always-listening later
+- `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` — M9.2 design (draft reviewed) — full-duplex cleanup for macOS AEC, Realtime API shape, setup prompts, and removed legacy voice mode knobs
+- `docs/MILESTONE_9_3_PET_ANIMATION.md` — M9.3 design (draft) — pure-SwiftUI animation pass for FermixPet: `TimelineView` sine motion, PNG cache, expression cross-fade, audio-RMS speaking pulse, blink, one-shot event reactions
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
+- **Test cleanup wiped the host (M5-shaped pass, 2026-04).** Codex generated a unit test whose `on_exit` hook called `File.rm_rf!(dir)` on a computed path; an empty interpolation collapsed `dir` to a root path and the host filesystem was wiped during `mix test`. **Rule:** never call `File.rm_rf` / `File.rm_rf!` / `File.rm` / `File.rm!` directly in `test/`. Route through `FermixCore.TestSupport.SafeRm.rm_rf!/1` (lands in M5 Stage 0), which hard-asserts the path is under a tmp prefix with ≥4 segments and no `..`. Sandbox tests must also never call `System.cmd` or `Port.open` — classify dangerous commands as strings via `Sandbox.classify/3`, never execute them. See `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` §11.
 
 ---
 _Every mistake is a rule waiting to be written._

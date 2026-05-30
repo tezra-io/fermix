@@ -12,6 +12,33 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "web_search/1" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "offline reports the active backend and credential state" do
+      Application.put_env(:fermix_core, :tools, web_search: [])
+
+      result = Checks.web_search(false)
+
+      assert result.name == "web search"
+      assert result.status == :ok
+      assert result.detail =~ "duckduckgo"
+    end
+
+    test "warns when a keyed backend has no credential configured" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :tavily])
+
+      result = Checks.web_search(false)
+
+      assert result.status == :warn
+      assert result.detail =~ "tavily"
+    end
+  end
+
   describe "service_unit/0" do
     test "warns when no unit is installed (test environment has none)" do
       result = Checks.service_unit()
@@ -61,7 +88,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :fail
       assert result.detail =~ "sha mismatch"
-      File.rm(tmp)
+      FermixTestSupport.SafeRm.rm(tmp)
     end
 
     test "ok on sha match" do
@@ -80,7 +107,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "matches"
-      File.rm(tmp)
+      FermixTestSupport.SafeRm.rm(tmp)
     end
   end
 
@@ -92,6 +119,212 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "upgrade"
       assert result.status == :warn
       assert result.detail =~ "available"
+    end
+  end
+
+  describe "compaction_config/0" do
+    setup do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_compaction = Application.get_env(:fermix_core, :compaction, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :providers, original_providers)
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :compaction, original_compaction)
+      end)
+
+      :ok
+    end
+
+    test "reports the active route and threshold trigger point" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [default_model: "claude-haiku-4-5"]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.8)
+
+      result = Checks.compaction_config()
+
+      assert result.name == "compaction"
+      assert result.status == :ok
+      assert result.detail =~ "enabled"
+      assert result.detail =~ "anthropic/claude-haiku-4-5"
+      assert result.detail =~ "context window 200000"
+      assert result.detail =~ "compact at 160000"
+    end
+  end
+
+  describe "command_owner_config/0" do
+    setup do
+      original_channels =
+        for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
+          {channel, Application.get_env(:fermix_channels, channel, [])}
+        end
+
+      on_exit(fn ->
+        Enum.each(original_channels, fn {channel, config} ->
+          Application.put_env(:fermix_channels, channel, config)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "warns when an enabled channel has no owner user id" do
+      Application.put_env(:fermix_channels, :telegram, enabled: true)
+      Application.put_env(:fermix_channels, :signal, enabled: true, owner_user_id: "+15550001111")
+
+      result = Checks.command_owner_config()
+
+      assert result.name == "command owners"
+      assert result.status == :warn
+      assert result.detail =~ "telegram"
+      assert result.detail =~ "signal=owner set"
+    end
+  end
+
+  describe "sandbox_config/0" do
+    test "reports current sandbox posture" do
+      result = Checks.sandbox_config()
+
+      assert result.name == "sandbox"
+      assert result.status == :ok
+      assert result.detail =~ "mode"
+    end
+  end
+
+  describe "sandbox_trace_suggestions/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-sandbox-traces")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "suggests parent directory for denied file writes", %{home: home} do
+      target = Path.join([home, "Workspace", "app", "lib", "file.ex"])
+      write_sandbox_event(home, capability: "file_write", resource: target)
+
+      result = Checks.sandbox_trace_suggestions()
+
+      assert result.name == "sandbox traces"
+      assert result.status == :warn
+      assert result.detail =~ "fermix grant path #{Path.dirname(target)}"
+    end
+
+    test "suggests shell cwd itself for denied shell commands", %{home: home} do
+      cwd = Path.join([home, "Workspace", "app"])
+      write_sandbox_event(home, capability: "shell", resource: cwd)
+
+      result = Checks.sandbox_trace_suggestions()
+
+      assert result.status == :warn
+      assert result.detail =~ "fermix grant path #{cwd}"
+      refute result.detail =~ "fermix grant path #{Path.dirname(cwd)};"
+    end
+
+    test "passes when no sandbox trace roadblocks exist" do
+      result = Checks.sandbox_trace_suggestions()
+
+      assert result.name == "sandbox traces"
+      assert result.status == :ok
+    end
+  end
+
+  describe "auth_file_permissions/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-auth")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "passes when auth.json is absent" do
+      result = Checks.auth_file_permissions()
+
+      assert result.name == "auth perms"
+      assert result.status == :ok
+      assert result.detail =~ "no auth.json"
+    end
+
+    test "fails when auth.json is wider than 0600", %{home: home} do
+      path = Path.join(home, "auth.json")
+      File.write!(path, "{}")
+      File.chmod!(path, 0o644)
+
+      result = Checks.auth_file_permissions()
+
+      assert result.name == "auth perms"
+      assert result.status == :fail
+      assert result.detail =~ "0o600"
+      assert result.detail =~ "chmod 600"
+    end
+  end
+
+  describe "plaintext_secrets/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-secrets")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "warns when setup secrets are still plaintext", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "sk-plain"
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :warn
+      assert result.detail =~ "OPENAI_API_KEY"
+      assert result.detail =~ "fermix setup --migrate-secrets"
+    end
+
+    test "passes when no plaintext setup secrets are present", %{home: home} do
+      File.write!(Path.join(home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+      """)
+
+      result = Checks.plaintext_secrets()
+
+      assert result.name == "setup secrets"
+      assert result.status == :ok
     end
   end
 
@@ -221,5 +454,22 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     File.write!(path, content)
     path
+  end
+
+  defp write_sandbox_event(home, fields) do
+    dir = Path.join([home, "traces", Date.utc_today() |> Date.to_iso8601()])
+    File.mkdir_p!(dir)
+
+    row =
+      %{
+        type: "sandbox_event",
+        decision: "deny",
+        reason_tag: "outside_root",
+        resource: Keyword.fetch!(fields, :resource),
+        capability: Keyword.fetch!(fields, :capability)
+      }
+      |> Jason.encode!()
+
+    File.write!(Path.join(dir, "sandbox_event.jsonl"), row <> "\n", [:append])
   end
 end

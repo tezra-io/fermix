@@ -8,6 +8,7 @@ defmodule FermixCore.ReadinessTest do
     providers = Application.get_env(:fermix_core, :providers, [])
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
+    realtime = Application.get_env(:fermix_core, :realtime, [])
     telegram = Application.get_env(:fermix_channels, :telegram, [])
     fermix_home = System.get_env("FERMIX_HOME")
 
@@ -15,6 +16,7 @@ defmodule FermixCore.ReadinessTest do
       Application.put_env(:fermix_core, :providers, providers)
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
+      Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_channels, :telegram, telegram)
 
       case fermix_home do
@@ -78,7 +80,7 @@ defmodule FermixCore.ReadinessTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
@@ -110,7 +112,7 @@ defmodule FermixCore.ReadinessTest do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
-      on_exit(fn -> File.rm_rf!(tmp_home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
       System.put_env("FERMIX_HOME", tmp_home)
 
       Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
@@ -135,6 +137,58 @@ defmodule FermixCore.ReadinessTest do
       report = Readiness.report()
 
       assert Enum.any?(report.failures, &(&1.component == "provider:openai_codex"))
+    end
+
+    test "disabled realtime does not add a readiness failure" do
+      Application.put_env(:fermix_core, :providers, openai: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      refute Enum.any?(report.failures, &(&1.component == "realtime:openai"))
+    end
+
+    test "enabled realtime requires regular OpenAI API key even when chat provider is openai_codex" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, openai: [], openai_codex: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+      Application.put_env(:fermix_core, :realtime, enabled: true, provider: "openai")
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      assert :ok =
+               Store.write(:openai_codex, %{
+                 auth_mode: "chatgpt",
+                 tokens: %{access_token: "codex-at", refresh_token: "codex-rt"},
+                 expires_at: DateTime.utc_now() |> DateTime.add(3600),
+                 last_refresh: nil
+               })
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "realtime:openai" and failure.action =~ "OPENAI_API_KEY"
+             end)
     end
   end
 end

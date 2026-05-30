@@ -37,7 +37,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
 
@@ -52,7 +52,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
           ],
           agent: [name: "fermix"]
         ],
-        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+        fermix_channels: [
+          telegram: [
+            enabled: true,
+            mode: :webhook,
+            bot_token: "bot-token",
+            owner_user_id: "test-owner"
+          ]
+        ],
         fermix_web: []
       })
 
@@ -81,7 +88,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
       restart_global_memory_repo!()
-      File.rm_rf!(tmp_home)
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)
 
     System.put_env("FERMIX_HOME", tmp_home)
@@ -138,7 +145,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
           ],
           agent: [name: "fermix", provider: :openai]
         ],
-        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+        fermix_channels: [
+          telegram: [
+            enabled: true,
+            mode: :webhook,
+            bot_token: "bot-token",
+            owner_user_id: "test-owner"
+          ]
+        ],
         fermix_web: []
       })
 
@@ -150,7 +164,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert_received {:mix_shell, :info, ["status: ready"]}
     assert_received {:mix_shell, :info, ["Prompt files:"]}
     assert File.exists?(BootstrapPaths.identity_path("main"))
-    assert File.exists?(BootstrapPaths.agents_path("main"))
+    assert File.exists?(BootstrapPaths.fermix_path("main"))
     assert File.exists?(BootstrapPaths.soul_path("main"))
   end
 
@@ -158,7 +172,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-setup-task-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> File.rm_rf!(tmp_home) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
     System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :providers,
@@ -186,6 +200,9 @@ defmodule Mix.Tasks.Fermix.SetupTest do
       "high",
       "--telegram-bot-token",
       "bot-token",
+      "--telegram-owner-user-id",
+      "test-owner",
+      "--no-realtime-enabled",
       "--skip-probe"
     ])
 
@@ -197,6 +214,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert Keyword.get(agent, :provider) == :openai_codex
     assert Keyword.get(codex, :default_model) == "gpt-5.5"
     assert Keyword.get(codex, :reasoning_effort) == :high
+    assert Keyword.get(codex, :fast) == false
   end
 
   defp restart_global_memory_repo! do

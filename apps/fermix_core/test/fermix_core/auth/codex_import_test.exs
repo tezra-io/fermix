@@ -60,7 +60,7 @@ defmodule FermixCore.Auth.CodexImportTest do
       data = Jason.decode!(raw)
       assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "fresh_at"
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "returns error and does not persist when refresh fails" do
@@ -77,7 +77,7 @@ defmodule FermixCore.Auth.CodexImportTest do
 
       refute File.exists?(fermix_path)
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "returns no_codex_auth when codex file is missing" do
@@ -91,7 +91,7 @@ defmodule FermixCore.Auth.CodexImportTest do
                  req_options: [plug: &__MODULE__.success_plug/1]
                )
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "returns codex_auth_missing_refresh_token when refresh_token is empty" do
@@ -106,7 +106,7 @@ defmodule FermixCore.Auth.CodexImportTest do
                  req_options: [plug: &__MODULE__.success_plug/1]
                )
 
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
 
@@ -115,7 +115,7 @@ defmodule FermixCore.Auth.CodexImportTest do
       dir = tmp_dir()
       path = write_codex(dir, "rt")
       assert CodexImport.codex_available?(path)
-      File.rm_rf!(dir)
+      FermixTestSupport.SafeRm.rm_rf!(dir)
     end
 
     test "false when codex file is missing" do

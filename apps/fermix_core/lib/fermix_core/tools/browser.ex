@@ -7,10 +7,11 @@ defmodule FermixCore.Tools.Browser do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.CommandRunner
 
   @default_timeout_ms 30_000
   @valid_actions ~w(snapshot navigate click fill screenshot)
-  @hardcoded_path "/Users/sujshe/.npm-global/bin/agent-browser"
+  @env_var "AGENT_BROWSER_PATH"
 
   @impl true
   @spec name() :: String.t()
@@ -153,34 +154,54 @@ defmodule FermixCore.Tools.Browser do
   end
 
   defp find_binary do
-    case System.find_executable("agent-browser") do
+    case override_binary() || System.find_executable("agent-browser") do
       nil ->
-        if File.exists?(@hardcoded_path),
-          do: {:ok, @hardcoded_path},
-          else: {:error, "agent-browser not found. Install with: npm install -g agent-browser"}
+        {:error,
+         "agent-browser not found on PATH. Install with `npm install -g agent-browser` " <>
+           "or set #{@env_var} to an absolute path."}
 
       path ->
         {:ok, path}
     end
   end
 
+  defp override_binary do
+    case System.get_env(@env_var) do
+      nil ->
+        nil
+
+      "" ->
+        nil
+
+      path ->
+        if File.exists?(path),
+          do: path,
+          else:
+            raise(
+              ArgumentError,
+              "#{@env_var}=#{inspect(path)} does not exist; set it to an absolute path to agent-browser or unset it to use PATH."
+            )
+    end
+  end
+
   defp run_action(binary, action, args, timeout) do
     cmd_args = build_args(action, args)
 
-    task =
-      Task.async(fn ->
-        System.cmd(binary, cmd_args, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, timeout) || Task.shutdown(task) do
-      {:ok, {output, 0}} ->
+    case CommandRunner.run(binary, cmd_args, timeout_ms: timeout) do
+      {:ok, %{exit: 0, stdout: output}} ->
         {:ok, Tool.success(output)}
 
-      {:ok, {output, exit_code}} ->
-        {:ok, Tool.error("agent-browser failed (exit code #{exit_code}):\n#{output}")}
+      {:ok, %{exit: code, stdout: output}} ->
+        {:ok, Tool.error("agent-browser failed (exit code #{code}):\n#{output}")}
 
-      nil ->
-        {:ok, Tool.error("agent-browser timed out after #{timeout}ms")}
+      {:error, {:timeout, ms}} ->
+        {:ok, Tool.error("agent-browser timed out after #{ms}ms")}
+
+      {:error, {:executable_not_found, path}} ->
+        {:ok, Tool.error("agent-browser not found at #{path}")}
+
+      {:error, reason} ->
+        {:ok, Tool.error("agent-browser failed: #{inspect(reason)}")}
     end
   end
 

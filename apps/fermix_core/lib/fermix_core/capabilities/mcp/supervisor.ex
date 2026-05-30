@@ -9,11 +9,10 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   by `MCP.Config`) carries `name`, `approved?`, `command`, `args`,
   `env`, and `tools_overrides`.
 
-  Each per-server sub-supervisor contains the Hermes client + transport
-  pair (built by the configured `:hermes_starter`, default
-  `HermesStarter.Default`) plus the `MCP.Server` discovery process. The
-  three are linked under `:one_for_all`, so a transport crash bounces the
-  client and the discovery process together.
+  Each per-server sub-supervisor contains the Anubis client child (built by
+  the configured `:anubis_starter`, default `AnubisStarter.Default`) plus the
+  `MCP.Server` discovery process. The two are linked under `:one_for_all`, so
+  a transport crash bounces the client and the discovery process together.
 
   One bad server isolates inside its own subtree. The other servers keep
   running.
@@ -22,17 +21,19 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   use Supervisor
   require Logger
 
-  alias FermixCore.Capabilities.MCP.HermesStarter
+  alias FermixCore.Capabilities.MCP.AnubisStarter
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Env, as: SandboxEnv
 
   @type opt ::
           {:name, atom()}
           | {:servers, [map()]}
           | {:capability_registry, GenServer.server()}
           | {:mcp_registry, GenServer.server() | nil}
-          | {:hermes_starter, module()}
+          | {:anubis_starter, module()}
 
   @spec start_link([opt()]) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -48,31 +49,33 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
       Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry)
 
     mcp_registry_name = Keyword.get(opts, :mcp_registry, McpRegistry)
-    hermes_starter = Keyword.get(opts, :hermes_starter, HermesStarter.Default)
+    anubis_starter = Keyword.get(opts, :anubis_starter, AnubisStarter.Default)
     servers = Keyword.get(opts, :servers, default_servers())
 
     children =
       [{McpRegistry, name: mcp_registry_name}] ++
         Enum.map(
           servers,
-          &child_spec_for(&1, capability_registry, mcp_registry_name, hermes_starter)
+          &child_spec_for(&1, capability_registry, mcp_registry_name, anubis_starter)
         )
 
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  defp child_spec_for(server, capability_registry, mcp_registry_name, hermes_starter) do
-    %{children: hermes_children, client_name: hermes_client} =
-      hermes_starter.child_specs_for(server)
+  defp child_spec_for(server, capability_registry, mcp_registry_name, anubis_starter) do
+    server = resolve_server_env!(server)
+
+    %{children: anubis_children, client_name: anubis_client} =
+      anubis_starter.child_specs_for(server)
 
     server_spec =
       Supervisor.child_spec(
-        {McpServer, server_opts(server, capability_registry, mcp_registry_name, hermes_client)},
+        {McpServer, server_opts(server, capability_registry, mcp_registry_name, anubis_client)},
         id: {:mcp_server, server.name},
         restart: :permanent
       )
 
-    children = hermes_children ++ [server_spec]
+    children = anubis_children ++ [server_spec]
 
     %{
       id: {:mcp_server_supervisor, server.name},
@@ -84,14 +87,13 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
     }
   end
 
-  defp server_opts(server, capability_registry, mcp_registry_name, hermes_client) do
+  defp server_opts(server, capability_registry, mcp_registry_name, anubis_client) do
     # Explicit `:client` in the server map (test-supplied) wins. Otherwise the
-    # Hermes starter's spawned client name is the production default.
-    client = Map.get(server, :client) || hermes_client
+    # Anubis starter's spawned client name is the production default.
+    client = Map.get(server, :client) || anubis_client
 
     [
       server_name: server.name,
-      approved?: Map.get(server, :approved?, false),
       tools_overrides: Map.get(server, :tools_overrides, %{}),
       capability_registry: capability_registry,
       mcp_registry: mcp_registry_name
@@ -103,6 +105,25 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp resolve_server_env!(server) do
+    pass_env = Map.get(server, :pass_env, [])
+    literal_env = Map.get(server, :env, %{})
+
+    case SandboxEnv.build_command(SandboxConfig.current(), pass_env) do
+      {:ok, sandbox_env} ->
+        effective_env =
+          sandbox_env
+          |> Map.new()
+          |> Map.merge(literal_env)
+
+        Map.put(server, :env, effective_env)
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "MCP server #{server.name} env could not be built: #{SandboxEnv.format_error(reason)}"
+    end
+  end
 
   defp default_servers do
     Application.get_env(:fermix_core, :mcp_servers, [])

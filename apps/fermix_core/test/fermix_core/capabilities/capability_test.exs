@@ -26,12 +26,12 @@ defmodule FermixCore.Capabilities.CapabilityTest do
 
       assert cap.name == "echo"
       assert cap.kind == :builtin
-      assert cap.requires_approval? == false
+      assert cap.hidden_from_agent? == false
       assert cap.policy_class == :read_only
       assert cap.metadata == %{}
     end
 
-    test "honors policy_class, requires_approval?, metadata overrides" do
+    test "honors policy_class, hidden_from_agent?, metadata overrides" do
       cap =
         Capability.new(%{
           name: "shell",
@@ -40,12 +40,12 @@ defmodule FermixCore.Capabilities.CapabilityTest do
           kind: :builtin,
           executor: {FakeExecutor, :no_extra, []},
           policy_class: :exec,
-          requires_approval?: true,
+          hidden_from_agent?: true,
           metadata: %{source: :test}
         })
 
       assert cap.policy_class == :exec
-      assert cap.requires_approval? == true
+      assert cap.hidden_from_agent? == true
       assert cap.metadata == %{source: :test}
     end
 

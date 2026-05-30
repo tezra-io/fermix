@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.ContentSearch do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Sandbox
   alias FermixCore.Tools.Support
 
   @default_max_results 200
@@ -67,15 +68,16 @@ defmodule FermixCore.Tools.ContentSearch do
 
   @impl true
   def execute(args, context) when is_map(args) and is_map(context) do
-    Support.run(name(), context, fn -> do_execute(args) end)
+    Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
-  defp do_execute(args) do
+  defp do_execute(args, context) do
     with {:ok, pattern} <- Support.required_string(args, "pattern"),
          root = Map.get(args, "path", File.cwd!()),
          :ok <- Support.validate_path(root),
+         {:ok, resolved_root} <- Sandbox.read_path(root, :content_search, context),
          {:ok, matcher} <- matcher(pattern, Support.optional_bool(args, "regex", false)) do
-      search(root, matcher, search_opts(args))
+      search(resolved_root, matcher, search_opts(args), context)
     else
       {:error, reason} -> Support.error(reason)
     end
@@ -100,9 +102,10 @@ defmodule FermixCore.Tools.ContentSearch do
     end
   end
 
-  defp search(root, matcher, opts) do
+  defp search(root, matcher, opts, context) do
     root
     |> candidate_files()
+    |> Enum.filter(&sandbox_allows?(&1, context))
     |> collect_matches(matcher, opts, [])
     |> case do
       {:ok, matches, truncated?} ->
@@ -110,6 +113,13 @@ defmodule FermixCore.Tools.ContentSearch do
 
       {:error, reason} ->
         Support.error(reason)
+    end
+  end
+
+  defp sandbox_allows?(path, context) do
+    case Sandbox.read_path(path, :content_search, context) do
+      {:ok, _resolved} -> true
+      {:error, _reason} -> false
     end
   end
 

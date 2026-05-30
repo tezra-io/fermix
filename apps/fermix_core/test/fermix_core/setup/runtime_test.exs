@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     memory = Application.get_env(:fermix_core, :memory, [])
+    realtime = Application.get_env(:fermix_core, :realtime, [])
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -21,6 +22,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :memory, memory)
+      Application.put_env(:fermix_core, :realtime, realtime)
       restart_global_memory_repo!()
 
       case fermix_home do
@@ -65,6 +67,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     # using openai_codex). Tests that want to assert codex routing must
     # override this explicitly.
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+    Application.put_env(:fermix_core, :realtime, enabled: false)
 
     Application.put_env(
       :fermix_core,
@@ -221,7 +224,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   describe "finalize probe wiring" do
     test "skip_probe: true bypasses the probe entirely" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, collector} = puts_collector()
@@ -239,7 +242,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "probe pass emits an auth-probe line and returns :ok" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, collector} = puts_collector()
@@ -258,7 +261,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "probe auth_scope_mismatch (401) fails the run with a clear error message" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, _collector} = puts_collector()
@@ -277,7 +280,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "probe transient 5xx is inconclusive — run returns :ok with a warning line" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, collector} = puts_collector()
@@ -297,7 +300,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "openai_codex probe uses Fermix auth store without TokenManager" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "runtime_store_at")
@@ -329,7 +332,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "selecting openai_codex starts native OAuth when Fermix has no token" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = Path.join(home, "auth.json")
@@ -372,7 +375,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "openai_codex refresh errors do not auto-launch OAuth" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = Path.join(home, "auth.json")
@@ -426,7 +429,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "rejected openai_codex token triggers native OAuth and retries the probe" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "stale_at")
@@ -472,7 +475,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "OAuth recovery reloads a running TokenManager so the retry probe sees fresh tokens" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "stale_at")
@@ -524,7 +527,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "rejected openai_codex token asks before starting OAuth recovery" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       auth_path = write_fermix_codex_auth(home, "stale_at")
@@ -559,7 +562,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   describe "--import-codex" do
     test "imports tokens, persists to fermix store, and selects openai_codex" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       prepare(home)
       codex_path = write_codex_auth(home)
@@ -595,7 +598,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "explicit --import-codex re-runs when openai_codex is already selected" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       prepare(home)
 
@@ -635,7 +638,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "surfaces an error when refresh fails" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 
       prepare(home)
       codex_path = write_codex_auth(home)
@@ -665,18 +668,28 @@ defmodule FermixCore.Setup.RuntimeTest do
       opts = [
         provider: "openai_codex",
         default_model: "gpt-5.5",
-        reasoning_effort: "high"
+        reasoning_effort: "high",
+        realtime_enabled: true,
+        realtime_voice: "marin",
+        realtime_max_session_minutes: 20,
+        realtime_max_cost_cents: 35,
+        realtime_persist_transcripts: true
       ]
 
       assert answers = Runtime.provided_answers(opts)
       assert Keyword.get(answers, :provider) == "openai_codex"
       assert Keyword.get(answers, :default_model) == "gpt-5.5"
       assert Keyword.get(answers, :reasoning_effort) == "high"
+      assert Keyword.get(answers, :realtime_enabled) == true
+      assert Keyword.get(answers, :realtime_voice) == "marin"
+      assert Keyword.get(answers, :realtime_max_session_minutes) == 20
+      assert Keyword.get(answers, :realtime_max_cost_cents) == 35
+      assert Keyword.get(answers, :realtime_persist_transcripts) == true
     end
 
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       {puts, _collector} = puts_collector()
@@ -702,11 +715,12 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(agent, :provider) == :openai_codex
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+      assert Keyword.get(codex_block, :fast) == false
     end
 
     test "provided channel flags do not suppress missing provider/model prompts" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -755,6 +769,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Enum.any?(labels, &String.starts_with?(&1, "Provider"))
       assert Enum.any?(labels, &String.starts_with?(&1, "Default model"))
       assert Enum.any?(labels, &String.starts_with?(&1, "Reasoning effort"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Codex fast mode"))
 
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
       agent = snapshot.fermix_core |> Keyword.get(:agent, [])
@@ -764,11 +779,12 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(agent, :provider) == :openai_codex
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+      assert Keyword.get(codex_block, :fast) == false
     end
 
     test "blank model and effort answers use the selected provider defaults" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -817,7 +833,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     test "--reconfigure prompts provider model and effort even when setup is ready" do
       home = tmp_home()
-      on_exit(fn -> File.rm_rf!(home) end)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
       :ok =
@@ -881,6 +897,133 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(agent, :provider) == :openai_codex
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+    end
+
+    test "--reconfigure skips detailed realtime prompts when voice companion stays disabled" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      :ok =
+        ConfigStore.save_snapshot(%{
+          fermix_core: [
+            providers: [
+              openai: [
+                api_key: "sk-test",
+                default_model: "gpt-5.4",
+                reasoning_effort: :medium
+              ]
+            ],
+            personalization: [
+              user_name: "Op",
+              timezone: "UTC",
+              communication_style: "concise and direct"
+            ],
+            agent: [name: "fermix", provider: :openai],
+            realtime: [enabled: false]
+          ],
+          fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+          fermix_web: []
+        })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", default_model: "gpt-5.4", reasoning_effort: :medium]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      {:ok, prompt_log} = Agent.start_link(fn -> [] end)
+
+      prompt = fn label ->
+        Agent.update(prompt_log, &[label | &1])
+
+        cond do
+          String.starts_with?(label, "Enable local voice companion") -> "no"
+          String.starts_with?(label, "Provider") -> "openai"
+          String.starts_with?(label, "Default model") -> "gpt-5.4"
+          String.starts_with?(label, "Reasoning effort") -> "medium"
+          true -> ""
+        end
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run([reconfigure: true, skip_probe: true], puts: puts, prompt: prompt)
+
+      labels = Agent.get(prompt_log, &Enum.reverse/1)
+
+      assert Enum.any?(labels, &String.starts_with?(&1, "Enable local voice companion"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Realtime model"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Realtime voice"))
+    end
+
+    test "--reconfigure asks basic realtime prompts after voice companion is enabled" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      :ok =
+        ConfigStore.save_snapshot(%{
+          fermix_core: [
+            providers: [
+              openai: [
+                api_key: "sk-test",
+                default_model: "gpt-5.4",
+                reasoning_effort: :medium
+              ]
+            ],
+            personalization: [
+              user_name: "Op",
+              timezone: "UTC",
+              communication_style: "concise and direct"
+            ],
+            agent: [name: "fermix", provider: :openai],
+            realtime: [enabled: false]
+          ],
+          fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+          fermix_web: []
+        })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test", default_model: "gpt-5.4", reasoning_effort: :medium]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      {:ok, prompt_log} = Agent.start_link(fn -> [] end)
+
+      prompt = fn label ->
+        Agent.update(prompt_log, &[label | &1])
+
+        cond do
+          String.starts_with?(label, "Enable local voice companion") -> "yes"
+          String.starts_with?(label, "Provider") -> "openai"
+          String.starts_with?(label, "Default model") -> "gpt-5.4"
+          String.starts_with?(label, "Reasoning effort") -> "medium"
+          true -> ""
+        end
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run([reconfigure: true, skip_probe: true], puts: puts, prompt: prompt)
+
+      labels = Agent.get(prompt_log, &Enum.reverse/1)
+
+      assert Enum.any?(labels, &String.starts_with?(&1, "Enable local voice companion"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Realtime voice"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Realtime max session minutes"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Realtime max estimated cost cents"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Realtime tool policy"))
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      realtime = snapshot.fermix_core |> Keyword.get(:realtime, [])
+      assert Keyword.get(realtime, :enabled) == true
+      assert Keyword.get(realtime, :voice) == "marin"
     end
   end
 end

@@ -21,9 +21,9 @@ defmodule FermixCore.Prompt.Defaults do
     content
   end
 
-  @spec agents_md() :: String.t()
-  def agents_md do
-    {:ok, content} = TemplateRenderer.render(:agents, %{})
+  @spec fermix_md() :: String.t()
+  def fermix_md do
+    {:ok, content} = TemplateRenderer.render(:fermix, %{})
     content
   end
 
@@ -48,6 +48,12 @@ defmodule FermixCore.Prompt.Defaults do
   @spec memory_md() :: String.t()
   def memory_md do
     {:ok, content} = TemplateRenderer.render(:memory, %{})
+    content
+  end
+
+  @spec realtime_md() :: String.t()
+  def realtime_md do
+    {:ok, content} = TemplateRenderer.render(:realtime, %{})
     content
   end
 

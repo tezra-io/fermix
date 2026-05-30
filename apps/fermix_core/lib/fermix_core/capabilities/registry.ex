@@ -9,8 +9,9 @@ defmodule FermixCore.Capabilities.Registry do
   GenServer.
 
   Built-ins are mirrored at boot through `FermixCore.Capabilities.Builtin.from_tool_module/1`.
-  Skills and MCP server tools register themselves through their own
-  supervisors as they come up.
+  MCP server tools register through their own supervisors as they come up.
+  Skills live in `FermixCore.Agents.SkillRegistry` and are exposed through
+  the generated skill catalog plus `skill_view` / `skill_run`.
   """
 
   use GenServer
@@ -22,26 +23,42 @@ defmodule FermixCore.Capabilities.Registry do
           | [Capability.policy_class()]
           | [allow: [Capability.policy_class()], deny: [Capability.policy_class()]]
 
-  @type trust :: nil | :core | :local | :third_party
+  @type trust :: nil | :operator | :guest
 
   @type filter ::
           [
             allowed_tools: [String.t()] | nil,
             policy: policy_spec(),
+            policy_classes: [Capability.policy_class()] | nil,
             trust: trust(),
             kind: Capability.kind() | :all,
-            include_approval_required?: boolean()
+            excluded_categories: [atom()] | nil,
+            excluded_names: [String.t()] | nil,
+            include_hidden?: boolean()
           ]
 
-  # Default policies per trust source. See design §4.6.3.
-  # `:core` and `nil` (unscoped, e.g. main agent) are unfiltered.
-  @third_party_default_policy [
+  # Default policies per trust level. Single-owner model:
+  #
+  #   :operator — the human owner (and the system-internal callers that
+  #               inherit from the operator's session: voice, CLI,
+  #               scheduled jobs, bundled/user-installed skills). Full
+  #               capability surface.
+  #
+  #   :guest    — non-operator humans (currently dormant until
+  #               multi-user/group-chat lands) and plugin-loaded skills
+  #               whose code the operator did not vet. Read-only only.
+  #
+  #   nil       — trust not set on this call path. Treated as `:guest`
+  #               (least privilege). This is the forgiving safe default:
+  #               a forgotten trust degrades the surface rather than
+  #               silently granting full access.
+  @operator_default_policy [
+    allow: [:read_only, :read_write, :exec, :network, :external_api],
+    deny: []
+  ]
+  @guest_default_policy [
     allow: [:read_only],
     deny: [:read_write, :exec, :network, :external_api]
-  ]
-  @local_default_policy [
-    allow: [:read_only, :read_write, :exec, :network],
-    deny: [:external_api]
   ]
 
   # --- Client API ---
@@ -97,6 +114,22 @@ defmodule FermixCore.Capabilities.Registry do
   end
 
   @doc """
+  Return the agent-visible capability catalog with coarse visibility filters.
+
+  This is a semantic wrapper over `list/2` for agent runtimes that declare
+  exclusions by capability category instead of maintaining per-tool allowlists.
+  """
+  @spec list_for(filter()) :: [Capability.t()]
+  def list_for(opts \\ []) when is_list(opts) do
+    list(__MODULE__, opts)
+  end
+
+  @spec list_for(GenServer.server(), filter()) :: [Capability.t()]
+  def list_for(server, opts) when is_list(opts) do
+    list(server, opts)
+  end
+
+  @doc """
   Refresh the capabilities for `kind`. Stage 1 is a no-op stub for `:builtin`
   (built-ins are pinned at app boot). Skill/MCP refresh handlers land in
   their respective stages.
@@ -129,8 +162,14 @@ defmodule FermixCore.Capabilities.Registry do
   end
 
   def handle_call({:unregister, name}, _from, state) do
-    :ets.delete(state.table, name)
-    {:reply, :ok, state}
+    case :ets.lookup(state.table, name) do
+      [] ->
+        {:reply, :ok, state}
+
+      [{^name, _existing}] ->
+        :ets.delete(state.table, name)
+        {:reply, :ok, state}
+    end
   end
 
   def handle_call({:unregister_kind, kind, opts}, _from, state) do
@@ -138,11 +177,7 @@ defmodule FermixCore.Capabilities.Registry do
 
     state.table
     |> :ets.tab2list()
-    |> Enum.each(fn {name, %Capability{} = cap} ->
-      if cap.kind == kind and metadata_matches?(cap.metadata, metadata_match) do
-        :ets.delete(state.table, name)
-      end
-    end)
+    |> Enum.each(fn entry -> maybe_unregister(entry, state, kind, metadata_match) end)
 
     {:reply, :ok, state}
   end
@@ -154,6 +189,14 @@ defmodule FermixCore.Capabilities.Registry do
   end
 
   def handle_call(:table_name, _from, state), do: {:reply, state.table, state}
+
+  defp maybe_unregister({_name, %Capability{} = cap}, state, kind, metadata_match) do
+    if cap.kind == kind and metadata_matches?(cap.metadata, metadata_match) do
+      :ets.delete(state.table, cap.name)
+    end
+  end
+
+  defp maybe_unregister(_entry, _state, _kind, _metadata_match), do: :ok
 
   # --- Helpers ---
 
@@ -173,29 +216,67 @@ defmodule FermixCore.Capabilities.Registry do
   defp table_name(name) when is_atom(name), do: :"#{name}.Table"
 
   defp apply_filters(capabilities, opts) do
-    policy = resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
+    policy = effective_policy(opts)
 
     capabilities
     |> apply_kind(Keyword.get(opts, :kind, :all))
     |> apply_policy(policy)
     |> apply_allowlist(Keyword.get(opts, :allowed_tools))
-    |> apply_approval_filter(Keyword.get(opts, :include_approval_required?, false))
+    |> apply_name_exclusion(Keyword.get(opts, :excluded_names))
+    |> apply_category_exclusion(Keyword.get(opts, :excluded_categories, []))
+    |> apply_hidden_filter(Keyword.get(opts, :include_hidden?, false))
+  end
+
+  # Trust/policy filtering is only applied when the caller explicitly
+  # asks for it. A `list/2` call with no `:trust`, `:policy`, or
+  # `:policy_classes` opt is treated as the storage primitive — return
+  # everything registered. The "missing = least privilege" safety
+  # default applies to call sites that DO ask for trust filtering but
+  # pass `trust: nil` (see `resolve_policy/2`); it does not retroactively
+  # filter callers that never asked for a trust gate at all.
+  defp effective_policy(opts) do
+    cond do
+      Keyword.has_key?(opts, :policy_classes) ->
+        Keyword.get(opts, :policy_classes)
+
+      Keyword.has_key?(opts, :trust) or Keyword.has_key?(opts, :policy) ->
+        resolve_policy(Keyword.get(opts, :trust), Keyword.get(opts, :policy))
+
+      true ->
+        nil
+    end
   end
 
   @doc """
   Resolve the effective policy filter from `(trust, policy)`.
 
-  An explicit `policy` always wins. When the skill leaves `policy` unset,
-  fall back to the default for the trust level: `:third_party` is read-only,
-  `:local` is broad-but-not-external. `:core` and `nil` (main agent) are
-  unfiltered.
+  An explicit `policy` (non-empty list) always wins. When `policy` is
+  unset or empty, fall back to the default for the trust level:
+  `:operator` is unfiltered (full surface), `:guest` is read-only.
+  `nil` is treated as `:guest` so any call path that forgot to set
+  trust fails safe rather than silently granting the full surface.
   """
   @spec resolve_policy(trust(), policy_spec()) :: policy_spec()
   def resolve_policy(_trust, policy) when is_list(policy) and policy != [], do: policy
-  def resolve_policy(:third_party, _policy), do: @third_party_default_policy
-  def resolve_policy(:local, _policy), do: @local_default_policy
-  def resolve_policy(:core, _policy), do: nil
-  def resolve_policy(nil, _policy), do: nil
+  def resolve_policy(:operator, _policy), do: @operator_default_policy
+  def resolve_policy(:guest, _policy), do: @guest_default_policy
+  def resolve_policy(nil, _policy), do: @guest_default_policy
+
+  @doc """
+  Return the concrete policy-class list a `trust` is granted by default,
+  before any explicit policy narrowing: `:operator` gets the full surface,
+  `:guest`/`nil` get read-only.
+
+  This flattens the `[allow: ..., deny: ...]` default spec into the effective
+  class set. Callers that need a trust's baseline classes — e.g. the `subagents`
+  tool computing "parent classes minus `:read_write`" — should use this rather
+  than reaching into the policy-spec shape.
+  """
+  @spec default_policy_classes(trust()) :: [Capability.policy_class()]
+  def default_policy_classes(trust) do
+    {allow, deny} = normalize_policy(resolve_policy(trust, nil))
+    allow -- deny
+  end
 
   defp apply_kind(capabilities, :all), do: capabilities
 
@@ -247,9 +328,28 @@ defmodule FermixCore.Capabilities.Registry do
     Enum.filter(capabilities, &MapSet.member?(name_set, &1.name))
   end
 
-  defp apply_approval_filter(capabilities, true), do: capabilities
+  defp apply_name_exclusion(capabilities, nil), do: capabilities
+  defp apply_name_exclusion(capabilities, []), do: capabilities
 
-  defp apply_approval_filter(capabilities, false) do
-    Enum.reject(capabilities, & &1.requires_approval?)
+  defp apply_name_exclusion(capabilities, names) when is_list(names) do
+    name_set = MapSet.new(names)
+    Enum.reject(capabilities, &MapSet.member?(name_set, &1.name))
+  end
+
+  defp apply_category_exclusion(capabilities, nil), do: capabilities
+  defp apply_category_exclusion(capabilities, []), do: capabilities
+
+  defp apply_category_exclusion(capabilities, categories) when is_list(categories) do
+    category_set = MapSet.new(categories)
+
+    Enum.reject(capabilities, fn %Capability{metadata: metadata} ->
+      Map.get(metadata, :category) in category_set
+    end)
+  end
+
+  defp apply_hidden_filter(capabilities, true), do: capabilities
+
+  defp apply_hidden_filter(capabilities, false) do
+    Enum.reject(capabilities, & &1.hidden_from_agent?)
   end
 end

@@ -288,7 +288,7 @@ defmodule FermixCore.Memory.ExtractorTest do
 
     on_exit(fn ->
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -442,10 +442,10 @@ defmodule FermixCore.Memory.ExtractorTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_memory_config)
-      File.rm_rf!(prompt_dir)
+      FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -583,10 +583,10 @@ defmodule FermixCore.Memory.ExtractorTest do
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :memory, previous_memory_config)
-      File.rm_rf!(prompt_dir)
+      FermixTestSupport.SafeRm.rm_rf!(prompt_dir)
 
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 

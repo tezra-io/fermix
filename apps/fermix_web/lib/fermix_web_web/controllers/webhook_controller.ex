@@ -3,10 +3,11 @@ defmodule FermixWebWeb.WebhookController do
 
   require Logger
 
-  alias FermixChannels.Dispatcher
-  alias FermixChannels.Slack
-  alias FermixChannels.WhatsApp
-  alias FermixCore.Agents.MainAgent
+  alias FermixChannels.Channels.Slack
+  alias FermixChannels.Channels.WhatsApp
+  alias FermixChannels.Gateway
+  alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.Queue
 
   @auth_errors [
     :invalid_signature,
@@ -34,20 +35,8 @@ defmodule FermixWebWeb.WebhookController do
   @spec whatsapp(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def whatsapp(conn, params) do
     with :ok <- WhatsApp.verify_webhook(conn),
-         {:ok, messages} <- WhatsApp.parse_webhook(params),
-         :ok <-
-           Dispatcher.dispatch(messages,
-             channel: WhatsApp,
-             agent: MainAgent,
-             agent_server: MainAgent
-           ) do
-      :telemetry.execute(
-        [:fermix, :channel, :webhook],
-        %{count: length(messages)},
-        %{channel: :whatsapp}
-      )
-
-      json(conn, %{ok: true})
+         {:ok, messages} <- WhatsApp.parse_webhook(params) do
+      ack_after_handoff(conn, :whatsapp, messages, WhatsApp)
     else
       {:error, reason} ->
         webhook_error_response(conn, "WhatsApp webhook", reason)
@@ -109,23 +98,88 @@ defmodule FermixWebWeb.WebhookController do
   end
 
   defp dispatch_slack_webhook(conn, params) do
-    with {:ok, messages} <- Slack.parse_webhook(params),
-         :ok <-
-           Dispatcher.dispatch(messages,
-             channel: Slack,
-             agent: MainAgent,
-             agent_server: MainAgent
-           ) do
-      :telemetry.execute(
-        [:fermix, :channel, :webhook],
-        %{count: length(messages)},
-        %{channel: :slack}
-      )
+    case Slack.parse_webhook(params) do
+      {:ok, messages} ->
+        ack_after_handoff(conn, :slack, messages, Slack)
 
-      json(conn, %{ok: true})
-    else
       {:error, reason} ->
         webhook_error_response(conn, "Slack webhook", reason)
+    end
+  end
+
+  defp ack_after_handoff(conn, channel_key, messages, channel_module) do
+    fresh = filter_fresh(messages, channel_key)
+
+    case dispatch_async(fresh,
+           channel: channel_module,
+           agent: Queue,
+           agent_server: Queue
+         ) do
+      :ok ->
+        :telemetry.execute(
+          [:fermix, :channel, :webhook],
+          %{count: length(fresh), duplicates: length(messages) - length(fresh)},
+          %{channel: channel_key}
+        )
+
+        json(conn, %{ok: true})
+
+      {:error, reason} ->
+        # Audit F-06 follow-up: if start_child failed, the idempotency
+        # records have already been recorded for these messages. Roll
+        # them back so the provider's retry re-runs through the fresh
+        # path instead of being silently absorbed as duplicates.
+        Enum.each(fresh, &Idempotency.forget(channel_key, &1.id))
+
+        Logger.error(
+          "#{channel_key} webhook handoff failed; idempotency rolled back: #{inspect(reason)}"
+        )
+
+        conn
+        |> put_status(503)
+        |> json(%{error: "Webhook handoff unavailable"})
+    end
+  end
+
+  defp filter_fresh(messages, channel) do
+    Enum.filter(messages, fn message ->
+      case Idempotency.check_and_record(channel, message.id) do
+        :fresh ->
+          true
+
+        :duplicate ->
+          Logger.info(
+            "#{channel} webhook dropped duplicate message #{inspect(message.id)} (idempotency)"
+          )
+
+          false
+      end
+    end)
+  end
+
+  defp dispatch_async([], _opts), do: :ok
+
+  defp dispatch_async(messages, opts) do
+    work = fn -> run_dispatch(messages, opts) end
+
+    case Task.Supervisor.start_child(FermixCore.TaskSupervisor, work) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      :ignore -> :ok
+      {:error, _reason} = err -> err
+    end
+  end
+
+  defp run_dispatch(messages, opts) do
+    case Gateway.ingest(messages, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "Async webhook dispatch failed for #{inspect(Keyword.get(opts, :channel))}: " <>
+            inspect(reason)
+        )
     end
   end
 

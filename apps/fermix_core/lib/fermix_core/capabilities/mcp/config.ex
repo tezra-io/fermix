@@ -3,26 +3,29 @@ defmodule FermixCore.Capabilities.MCP.Config do
   Parser for the `[mcp.servers.<name>]` blocks in `~/.fermix/config.toml`.
 
   Returns one config map per configured server with `command`, `args`,
-  `env`, `approved?`, and `tools_overrides` already typed. `$env:KEY`
-  references in env values are resolved against `System.get_env/1` so
-  secrets stay out of the TOML file.
+  `env`, `pass_env`, `approved?`, and `tools_overrides` already typed.
+  Secret passthrough is declared with `pass_env` and resolved later by
+  `FermixCore.Sandbox.Env`.
 
   This parser is a small purpose-built TOML reader scoped to the MCP
   block. It supports:
 
     * section headers with two or three dot-separated parts
       (`[mcp.servers.github]`, `[mcp.servers.github.tools.read_file]`)
-    * scalar key/value pairs (`command = "npx"`, `approved = true`)
+    * scalar key/value pairs (`command = "npx"`)
     * inline arrays (`args = ["-y", "..."]`)
     * inline tables (`env = { KEY = "..." }`)
 
   Unknown section blocks under `[mcp.*]` raise loud — silent drops would
   hide misconfiguration.
+
+  MCP tools are visible to the agent by default. To hide a specific tool
+  from the LLM, set `[mcp.servers.X.tools.Y] hidden_from_agent = true`.
   """
 
   @type tool_override :: %{
           optional(:policy_class) => atom(),
-          optional(:requires_approval?) => boolean()
+          optional(:hidden_from_agent?) => boolean()
         }
 
   @type server_config :: %{
@@ -30,7 +33,7 @@ defmodule FermixCore.Capabilities.MCP.Config do
           command: String.t() | nil,
           args: [String.t()],
           env: %{String.t() => String.t()},
-          approved?: boolean(),
+          pass_env: [String.t()],
           tools_overrides: %{String.t() => tool_override()}
         }
 
@@ -70,6 +73,8 @@ defmodule FermixCore.Capabilities.MCP.Config do
   defp classify_section(["mcp", "servers", server, "tools", tool]),
     do: {:tool, server, tool}
 
+  defp classify_section(["mcp", "inbound" | _]), do: nil
+
   defp classify_section(["mcp" | _] = parts) do
     raise ArgumentError,
           "Unknown MCP section header: [#{Enum.join(parts, ".")}]"
@@ -102,14 +107,33 @@ defmodule FermixCore.Capabilities.MCP.Config do
     server = Map.get(sections, :server, %{})
     tools = Map.get(sections, :tools, %{})
 
+    reject_removed_server_key!(
+      name,
+      server,
+      "approved",
+      "MCP tools are visible to the agent by default. To hide a specific tool, set " <>
+        "`[mcp.servers.#{name}.tools.<tool>] hidden_from_agent = true`."
+    )
+
+    env = server |> Map.get("env", %{}) |> validate_env(name)
+    pass_env = server |> Map.get("pass_env", []) |> ensure_list_of_strings(:pass_env, name)
+    validate_env_conflicts!(name, env, pass_env)
+
     %{
       name: name,
       command: Map.get(server, "command"),
       args: server |> Map.get("args", []) |> ensure_list_of_strings(:args, name),
-      env: server |> Map.get("env", %{}) |> resolve_env() |> validate_env(name),
-      approved?: server |> Map.get("approved", false) |> validate_bool(:approved, name),
+      env: env,
+      pass_env: pass_env,
       tools_overrides: parse_tools_overrides(tools, name)
     }
+  end
+
+  defp reject_removed_server_key!(server_name, server, key, hint) do
+    if Map.has_key?(server, key) do
+      raise ArgumentError,
+            "[mcp.servers.#{server_name}] #{key} was removed; #{hint}"
+    end
   end
 
   defp parse_tools_overrides(tools, server_name) do
@@ -120,12 +144,18 @@ defmodule FermixCore.Capabilities.MCP.Config do
           {"policy_class", value}, acc ->
             Map.put(acc, :policy_class, validate_policy(value, tool_name, server_name))
 
-          {"requires_approval", value}, acc ->
+          {"hidden_from_agent", value}, acc ->
             Map.put(
               acc,
-              :requires_approval?,
-              validate_bool(value, :requires_approval, "#{server_name}/#{tool_name}")
+              :hidden_from_agent?,
+              validate_bool(value, :hidden_from_agent, "#{server_name}/#{tool_name}")
             )
+
+          {"requires_approval", _value}, _acc ->
+            raise ArgumentError,
+                  "[mcp.servers.#{server_name}.tools.#{tool_name}] requires_approval was " <>
+                    "renamed; use `hidden_from_agent = true` (semantics are identical — " <>
+                    "the flag hides the tool from the agent; there is no approval prompt)."
 
           _other, acc ->
             acc
@@ -167,25 +197,35 @@ defmodule FermixCore.Capabilities.MCP.Config do
           "#{key} for [mcp.servers.#{name}] must be an array, got: #{inspect(other)}"
   end
 
-  defp validate_env(env, _name) when is_map(env), do: env
+  defp validate_env(env, name) when is_map(env) do
+    Enum.into(env, %{}, fn {key, value} -> {to_string(key), validate_env_value(value, name)} end)
+  end
 
   defp validate_env(other, name) do
     raise ArgumentError,
           "env for [mcp.servers.#{name}] must be an inline table, got: #{inspect(other)}"
   end
 
-  defp resolve_env(env) when is_map(env) do
-    Enum.into(env, %{}, fn {key, value} -> {to_string(key), resolve_env_value(value)} end)
+  defp validate_env_value("$env:" <> ref, name) when is_binary(ref) do
+    raise ArgumentError,
+          "MCP env value '$env:#{ref}' for [mcp.servers.#{name}] uses the removed $env: shorthand. " <>
+            "Declare #{ref} in [sandbox.env] and reference it via pass_env = [\"#{ref}\"]."
   end
 
-  defp resolve_env(other), do: other
+  defp validate_env_value(value, _name) when is_binary(value), do: value
+  defp validate_env_value(value, _name), do: to_string(value)
 
-  defp resolve_env_value("$env:" <> ref) when is_binary(ref) do
-    System.get_env(ref) || ""
+  defp validate_env_conflicts!(name, env, pass_env) do
+    duplicates = MapSet.intersection(MapSet.new(Map.keys(env)), MapSet.new(pass_env))
+
+    if MapSet.size(duplicates) > 0 do
+      duplicate_names = duplicates |> MapSet.to_list() |> Enum.sort() |> Enum.join(", ")
+
+      raise ArgumentError,
+            "[mcp.servers.#{name}] declares #{duplicate_names} in both env and pass_env. " <>
+              "Pick one declaration shape per env name."
+    end
   end
-
-  defp resolve_env_value(value) when is_binary(value), do: value
-  defp resolve_env_value(value), do: to_string(value)
 
   defp parse_scalar(value) do
     trimmed = String.trim(value)

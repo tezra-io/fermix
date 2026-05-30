@@ -18,10 +18,38 @@ defmodule FermixCore.Setup.Doctor do
 
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Tools.WebSearch
 
   @type provider :: :openai | :openai_codex | :anthropic
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
+  @type compaction_report :: %{
+          enabled: boolean(),
+          threshold: float(),
+          provider: provider(),
+          model: String.t(),
+          context_window: pos_integer(),
+          compact_at_tokens: non_neg_integer(),
+          catalog: [model_window()]
+        }
+  @type command_owner_report :: %{
+          channel: atom(),
+          enabled: boolean(),
+          owner_user_id: String.t() | nil,
+          command_allowlist: [String.t()]
+        }
+  @type web_search_report :: %{
+          :backend => atom(),
+          :credential_present? => boolean(),
+          optional(:probe_result) => atom(),
+          optional(:result_count) => non_neg_integer()
+        }
+  @type model_window :: %{
+          provider: provider(),
+          model: String.t(),
+          context_window: pos_integer()
+        }
   @type probe_error ::
           {:misconfigured, reason :: String.t()}
           | {:auth_scope_mismatch, surface :: String.t(), hint :: String.t()}
@@ -31,6 +59,8 @@ defmodule FermixCore.Setup.Doctor do
   @openai_default_url "https://api.openai.com/v1/responses"
   @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
+  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
+  @web_search_probe_query "fermix web search health check"
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])
@@ -47,6 +77,91 @@ defmodule FermixCore.Setup.Doctor do
   def probe_active(opts \\ []) do
     provider = active_provider()
     probe_provider(provider, opts)
+  end
+
+  @spec compaction_report() :: compaction_report()
+  def compaction_report do
+    config = Application.get_env(:fermix_core, :compaction, []) |> CompactionConfig.normalize()
+    provider = active_provider()
+    config_for_provider = provider_config(provider)
+    model = effective_model(config_for_provider, provider)
+    context_window = ModelCatalog.context_window_for(provider, model)
+    threshold = CompactionConfig.threshold(config)
+
+    %{
+      enabled: CompactionConfig.enabled?(config),
+      threshold: threshold,
+      provider: provider,
+      model: model,
+      context_window: context_window,
+      compact_at_tokens: trunc(threshold * context_window),
+      catalog: catalog_windows()
+    }
+  end
+
+  @spec command_owner_report() :: [command_owner_report()]
+  def command_owner_report do
+    Enum.map(@command_channels, fn channel ->
+      config = Application.get_env(:fermix_channels, channel, [])
+
+      %{
+        channel: channel,
+        enabled: Keyword.get(config, :enabled, false) == true,
+        owner_user_id: FermixCore.Config.channel_command_owner_user_id(channel),
+        command_allowlist: FermixCore.Config.channel_command_allowlist(channel)
+      }
+    end)
+  end
+
+  @doc """
+  Reports the active `web_search` backend and whether its credential is present.
+
+  Offline by default (no network). With `full: true` and a configured
+  credential, runs a one-result live probe through the backend and adds
+  `:probe_result` / `:result_count`. Inject `req_options`/`net_resolver`
+  to stub the probe in tests.
+  """
+  @spec web_search_report(keyword()) :: web_search_report()
+  def web_search_report(opts \\ []) do
+    full? = Keyword.get(opts, :full, false)
+    config = WebSearch.config()
+    {backend, module} = WebSearch.active_backend(config)
+    present? = module.configured?(config)
+    base = %{backend: backend, credential_present?: present?}
+
+    if full? and present? do
+      Map.merge(base, web_search_probe(module, config, opts))
+    else
+      base
+    end
+  end
+
+  defp web_search_probe(module, config, opts) do
+    probe_opts = Keyword.put(config, :context, web_search_probe_context(opts))
+
+    case module.search(@web_search_probe_query, probe_opts) do
+      {:ok, results, _trace} -> %{probe_result: :ok, result_count: length(results)}
+      {:error, reason, _trace} -> %{probe_result: web_search_probe_tag(reason), result_count: 0}
+    end
+  end
+
+  defp web_search_probe_context(opts) do
+    Enum.reduce([:req_options, :net_resolver], %{}, fn key, acc ->
+      case Keyword.get(opts, key) do
+        nil -> acc
+        value -> Map.put(acc, key, value)
+      end
+    end)
+  end
+
+  defp web_search_probe_tag(reason) do
+    cond do
+      String.starts_with?(reason, "auth_failed") -> :auth_failed
+      String.starts_with?(reason, "rate_limited") -> :rate_limited
+      String.starts_with?(reason, "provider_error") -> :provider_error
+      String.starts_with?(reason, "parser_changed") -> :parser_changed
+      true -> :network
+    end
   end
 
   @spec active_provider() :: provider()
@@ -230,6 +345,13 @@ defmodule FermixCore.Setup.Doctor do
 
   defp effective_model(config, provider) do
     Keyword.get(config, :default_model) || ModelCatalog.default_model_for(provider)
+  end
+
+  defp catalog_windows do
+    for provider <- ModelCatalog.providers(),
+        {model, _label, context_window} <- ModelCatalog.models_for(provider) do
+      %{provider: provider, model: model, context_window: context_window}
+    end
   end
 
   defp base_url(config, _provider, default) do

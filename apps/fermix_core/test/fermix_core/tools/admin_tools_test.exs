@@ -1,26 +1,13 @@
 defmodule FermixCore.Tools.AdminToolsTest do
-  use ExUnit.Case, async: true
+  # async: false — setup mutates System env (FERMIX_HOME) and one test mutates
+  # Application env (:fermix_core, :routing). Running async would race other
+  # tests reading those globals.
+  use ExUnit.Case, async: false
 
-  alias FermixCore.Tools.Delegate
   alias FermixCore.Tools.ModelRoutingConfig
   alias FermixCore.Tools.SkillCreate
 
   @context %{agent_name: "test_agent", conversation_key: :test}
-
-  defmodule DelegateAdapter do
-    def chat(messages, capabilities, opts) do
-      send(self(), {:delegate_seen, messages, capabilities, opts})
-
-      {:ok,
-       %{
-         content: "delegated answer",
-         tool_calls: [],
-         provider_state: nil,
-         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
-         model: Keyword.fetch!(opts, :model)
-       }}
-    end
-  end
 
   setup do
     home =
@@ -34,22 +21,10 @@ defmodule FermixCore.Tools.AdminToolsTest do
         do: System.put_env("FERMIX_HOME", previous_home),
         else: System.delete_env("FERMIX_HOME")
 
-      File.rm_rf!(home)
+      FermixTestSupport.SafeRm.rm_rf!(home)
     end)
 
     %{home: home}
-  end
-
-  test "delegate performs a single model call without nested capabilities" do
-    context = Map.merge(@context, %{delegate_adapter: DelegateAdapter})
-
-    assert {:ok, result} =
-             Delegate.execute(%{"model" => "gpt-test", "prompt" => "Summarize this."}, context)
-
-    assert result.success == true
-    assert result.output == "delegated answer"
-    assert_received {:delegate_seen, [%{role: "user", content: "Summarize this."}], [], opts}
-    assert Keyword.fetch!(opts, :model) == "gpt-test"
   end
 
   test "skill_create scaffolds SKILL.md and eval cases under FERMIX_HOME", %{home: home} do
@@ -74,10 +49,23 @@ defmodule FermixCore.Tools.AdminToolsTest do
     assert duplicate.error =~ "already exists"
   end
 
+  test "skill_create rejects names beyond the registry limit" do
+    long_name = String.duplicate("a", 65)
+
+    assert {:ok, result} =
+             SkillCreate.execute(
+               %{"name" => long_name, "description" => "Use for long-name tests."},
+               @context
+             )
+
+    assert result.success == false
+    assert result.error =~ "max 64 chars"
+  end
+
   test "model_routing_config reads and updates the routing TOML section" do
     assert {:ok, set_result} =
              ModelRoutingConfig.execute(
-               %{"action" => "set", "key" => "delegate_model", "value" => "gpt-5.4-mini"},
+               %{"action" => "set", "key" => "coding_model", "value" => "gpt-5.4-mini"},
                @context
              )
 
@@ -87,7 +75,7 @@ defmodule FermixCore.Tools.AdminToolsTest do
              ModelRoutingConfig.execute(%{"action" => "read"}, @context)
 
     assert read_result.success == true
-    assert Jason.decode!(read_result.output)["delegate_model"] == "gpt-5.4-mini"
+    assert Jason.decode!(read_result.output)["coding_model"] == "gpt-5.4-mini"
   end
 
   test "model_routing_config read normalizes config load failures", %{home: home} do

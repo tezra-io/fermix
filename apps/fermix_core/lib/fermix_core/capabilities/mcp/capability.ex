@@ -4,11 +4,12 @@ defmodule FermixCore.Capabilities.MCP.Capability do
   `%Capability{kind: :mcp}`. The capability's executor closes over
   `{server_name, original_tool_name}` and dispatches through the
   `:caller` module so tests can swap in a stub instead of going through
-  a live `Hermes.Client`.
+  a live `Anubis.Client`.
 
-  Default policy class is `:external_api` and `requires_approval?: true`.
-  Stage 5 only ships the metadata; the registry is the place where
-  approval gates the LLM exposure (see `Capabilities.Registry.list/2`).
+  Default policy class is `:external_api`. MCP tools are visible to the
+  agent by default (`hidden_from_agent?: false`); operators can hide
+  individual tools by setting `[mcp.servers.X.tools.Y] hidden_from_agent
+  = true` in the TOML, which is wired through `tool_overrides`.
   """
 
   alias FermixCore.Capabilities.Builtin.Tool
@@ -25,7 +26,7 @@ defmodule FermixCore.Capabilities.MCP.Capability do
 
   @doc """
   Build a `%Capability{}` for an MCP tool. The descriptor uses the keys
-  returned by `Hermes.Client.list_tools/2` (`:name`, `:description`,
+  returned by `Anubis.Client.list_tools/2` (`:name`, `:description`,
   `:input_schema`).
   """
   @spec from_tool_descriptor(String.t(), tool_descriptor(), keyword()) :: Capability.t()
@@ -35,11 +36,10 @@ defmodule FermixCore.Capabilities.MCP.Capability do
     sanitized_candidate = Naming.candidate(server, original)
     sanitized = Naming.register(server, original, sanitized_candidate)
 
-    caller = Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Hermes)
-    approved? = Keyword.get(opts, :approved?, false)
+    caller = Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Anubis)
     overrides = Keyword.get(opts, :tool_overrides, %{})
     policy_class = Map.get(overrides, :policy_class, :external_api)
-    requires_approval? = Map.get(overrides, :requires_approval?, not approved?)
+    hidden_from_agent? = Map.get(overrides, :hidden_from_agent?, false)
 
     Capability.new(%{
       name: sanitized,
@@ -48,12 +48,11 @@ defmodule FermixCore.Capabilities.MCP.Capability do
       kind: :mcp,
       executor: {__MODULE__, :invoke, [server, original, caller]},
       policy_class: policy_class,
-      requires_approval?: requires_approval?,
+      hidden_from_agent?: hidden_from_agent?,
       metadata: %{
         mcp_server: server,
         original_name: original,
-        sanitized_name: sanitized,
-        approved?: approved?
+        sanitized_name: sanitized
       }
     })
   end

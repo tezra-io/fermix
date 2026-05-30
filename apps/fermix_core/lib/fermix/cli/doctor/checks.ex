@@ -12,11 +12,18 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
+  alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
+  alias FermixCore.Setup.SecretMigration
 
   @type status :: :ok | :warn | :fail
   @type result :: %{name: String.t(), status: status(), detail: String.t()}
+
+  @sandbox_trace_days 7
+  @sandbox_trace_limit 20
 
   @spec readiness() :: result()
   def readiness do
@@ -148,6 +155,207 @@ defmodule Fermix.CLI.Doctor.Checks do
 
       {:error, {:network, reason}} ->
         warn("auth probe", "network error: #{inspect(reason)}")
+    end
+  end
+
+  @spec compaction_config() :: result()
+  def compaction_config do
+    report = ProviderProbe.compaction_report()
+
+    state =
+      if report.enabled do
+        "enabled"
+      else
+        "disabled"
+      end
+
+    ok(
+      "compaction",
+      "#{state}, threshold #{format_threshold(report.threshold)}, route #{report.provider}/#{report.model}, " <>
+        "context window #{report.context_window}, compact at #{report.compact_at_tokens} tokens; " <>
+        "catalog #{length(report.catalog)} model windows"
+    )
+  rescue
+    error in ArgumentError -> fail("compaction", Exception.message(error))
+  end
+
+  @spec web_search(boolean()) :: result()
+  def web_search(full? \\ false) do
+    [full: full?]
+    |> ProviderProbe.web_search_report()
+    |> format_web_search()
+  end
+
+  defp format_web_search(%{credential_present?: false} = report) do
+    warn("web search", "backend #{report.backend} selected but no credential configured")
+  end
+
+  defp format_web_search(%{probe_result: :ok, result_count: count} = report) do
+    ok("web search", "backend #{report.backend}, live probe ok (#{count} result(s))")
+  end
+
+  defp format_web_search(%{probe_result: tag} = report) do
+    warn("web search", "backend #{report.backend}, live probe #{tag}")
+  end
+
+  defp format_web_search(report) do
+    ok("web search", "backend #{report.backend} configured")
+  end
+
+  @spec command_owner_config() :: result()
+  def command_owner_config do
+    report = ProviderProbe.command_owner_report()
+
+    missing =
+      report
+      |> Enum.filter(&(&1.enabled and is_nil(&1.owner_user_id)))
+      |> Enum.map(& &1.channel)
+
+    detail = Enum.map_join(report, ", ", &format_command_owner/1)
+
+    case missing do
+      [] ->
+        ok("command owners", detail)
+
+      channels ->
+        warn(
+          "command owners",
+          "missing command owner for enabled channels: #{Enum.join(channels, ", ")}; #{detail}"
+        )
+    end
+  end
+
+  @spec sandbox_config() :: result()
+  def sandbox_config do
+    config = SandboxConfig.current()
+    roots = SandboxMode.effective_roots(config)
+
+    ok(
+      "sandbox",
+      "mode #{config.mode}, roots #{length(roots)}, env #{length(config.env.allow)}, " <>
+        "presets #{length(config.commands.presets)}"
+    )
+  rescue
+    error in ArgumentError -> fail("sandbox", Exception.message(error))
+  end
+
+  @spec sandbox_trace_suggestions() :: result()
+  def sandbox_trace_suggestions do
+    suggestions =
+      ConfigStore.workspace_paths().traces
+      |> recent_sandbox_events()
+      |> Enum.flat_map(&grant_suggestion/1)
+      |> Enum.uniq()
+
+    case suggestions do
+      [] -> ok("sandbox traces", "no recent sandbox roadblocks")
+      targets -> warn("sandbox traces", format_grant_suggestions(targets))
+    end
+  end
+
+  @spec auth_file_permissions() :: result()
+  def auth_file_permissions do
+    path = AuthStore.path()
+
+    case AuthStore.validate_permissions(path) do
+      :ok ->
+        auth_ok_result(path)
+
+      {:error, {:insecure_permissions, ^path, mode}} ->
+        fail("auth perms", AuthStore.permissions_message(path, mode))
+
+      {:error, reason} ->
+        fail("auth perms", "stat #{path}: #{inspect(reason)}")
+    end
+  end
+
+  @spec plaintext_secrets() :: result()
+  def plaintext_secrets do
+    with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false) do
+      case SecretMigration.plaintext_secrets(snapshot) do
+        [] ->
+          ok("setup secrets", "no plaintext setup secrets in config.toml")
+
+        secrets ->
+          names = Enum.map_join(secrets, ", ", & &1.env)
+
+          warn(
+            "setup secrets",
+            "plaintext setup secrets found: #{names}; run `fermix setup --migrate-secrets`"
+          )
+      end
+    else
+      {:error, reason} ->
+        fail("setup secrets", "could not inspect config.toml: #{inspect(reason)}")
+    end
+  end
+
+  defp recent_sandbox_events(trace_dir) do
+    trace_dir
+    |> recent_sandbox_trace_files()
+    |> Enum.flat_map(&read_jsonl_file/1)
+  end
+
+  defp recent_sandbox_trace_files(trace_dir) do
+    today = Date.utc_today()
+
+    0..(@sandbox_trace_days - 1)
+    |> Enum.map(fn days_ago ->
+      date = today |> Date.add(-days_ago) |> Date.to_iso8601()
+      Path.join([trace_dir, date, "sandbox_event.jsonl"])
+    end)
+    |> Enum.filter(&File.exists?/1)
+  end
+
+  defp read_jsonl_file(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        contents
+        |> String.split("\n", trim: true)
+        |> Enum.flat_map(&decode_jsonl_line/1)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp decode_jsonl_line(line) do
+    case Jason.decode(line) do
+      {:ok, row} when is_map(row) -> [row]
+      _other -> []
+    end
+  end
+
+  defp grant_suggestion(%{
+         "decision" => "deny",
+         "reason_tag" => tag,
+         "resource" => resource,
+         "capability" => capability
+       })
+       when tag in ["outside_root", "blocked_root"] and is_binary(resource) do
+    grant_target(capability, resource)
+  end
+
+  defp grant_suggestion(_row), do: []
+
+  defp grant_target("shell", path), do: [path]
+  defp grant_target("git_write", path), do: [path]
+  defp grant_target("file_write", path), do: [Path.dirname(path)]
+  defp grant_target("file_edit", path), do: [Path.dirname(path)]
+  defp grant_target(_capability, _path), do: []
+
+  defp format_grant_suggestions(targets) do
+    shown = Enum.take(targets, @sandbox_trace_limit)
+    remaining = length(targets) - length(shown)
+
+    commands =
+      shown
+      |> Enum.map_join("; ", &"fermix grant path #{&1}")
+
+    if remaining > 0 do
+      "recent sandbox roadblocks: #{commands}; +#{remaining} more"
+    else
+      "recent sandbox roadblocks: #{commands}"
     end
   end
 
@@ -283,6 +491,34 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp format_uptime(other), do: inspect(other)
+
+  defp format_threshold(value) when is_float(value) do
+    :erlang.float_to_binary(value, [:short])
+  end
+
+  defp format_command_owner(%{
+         channel: channel,
+         enabled: enabled,
+         owner_user_id: owner_user_id,
+         command_allowlist: allowlist
+       }) do
+    owner_state =
+      if is_nil(owner_user_id) do
+        "owner missing"
+      else
+        "owner set"
+      end
+
+    "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
+  end
+
+  defp auth_ok_result(path) do
+    if File.exists?(path) do
+      ok("auth perms", "auth.json is 0600 at #{path}")
+    else
+      ok("auth perms", "no auth.json present")
+    end
+  end
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}
   defp warn(name, detail), do: %{name: name, status: :warn, detail: detail}

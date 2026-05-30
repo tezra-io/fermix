@@ -1,0 +1,97 @@
+defmodule FermixCore.Providers.ReasoningEffort do
+  @moduledoc """
+  Fermix-canonical reasoning effort levels and per-provider mapping.
+
+  One vocabulary of effort levels; each provider's API supports a subset.
+  The level name *is* the provider's wire value. Transforms, treating the
+  levels as an ordered scale: `:none` -> omit the field (providers that
+  support it); a level *above* a provider's ceiling clamps to that ceiling
+  (so `:max` on OpenAI -> `"xhigh"`, its highest); a level *below* a
+  provider's floor (e.g. `:none` on Anthropic) is rejected as unsupported.
+  Per-*model* support (e.g. Anthropic `xhigh` is Opus-4.7-only, `max` is
+  4.6+) is intentionally NOT enforced here; the provider API's 400 is the
+  source of truth, matching the prior OpenAI design.
+
+  Replaces the OpenAI-owned list in `OpenAI.ResponsesShared`: the canonical
+  set lives here (provider-neutral) and each provider maps through
+  `to_provider/2`, so we keep one vocabulary rather than a copy per provider.
+  """
+
+  @type level :: :none | :low | :medium | :high | :xhigh | :max
+  @type provider :: :openai | :openai_codex | :anthropic
+  @type mapping :: :omit | {:ok, String.t()} | {:error, {:unsupported, atom(), atom()}}
+
+  @levels [:none, :low, :medium, :high, :xhigh, :max]
+
+  # Per-provider API vocabularies (not per-model). `anthropic`'s subset is
+  # encoded for the upcoming adapter slice and is consumed by `to_provider/2`,
+  # but no setup surface offers it yet — the wizard (normal + reconfigure) and
+  # web UI gate effort selection to OpenAI/Codex until the Anthropic adapter
+  # sends `output_config.effort`. xAI/Groq are reference-only, absent until wired.
+  @provider_levels %{
+    openai: [:none, :low, :medium, :high, :xhigh],
+    openai_codex: [:none, :low, :medium, :high, :xhigh],
+    anthropic: [:low, :medium, :high, :xhigh, :max]
+  }
+
+  @spec levels() :: [level()]
+  def levels, do: @levels
+
+  @spec valid?(term()) :: boolean()
+  def valid?(level) when is_atom(level), do: level in @levels
+  def valid?(_level), do: false
+
+  @doc """
+  Casts an atom or case-insensitive string to a canonical level. Returns
+  `:error` for removed (`minimal`), CLI-only (`auto`), or unknown values.
+  """
+  @spec parse(term()) :: {:ok, level()} | :error
+  def parse(level) when level in @levels, do: {:ok, level}
+
+  def parse(value) when is_binary(value) do
+    normalized = value |> String.trim() |> String.downcase()
+
+    Enum.find_value(@levels, :error, fn level ->
+      if Atom.to_string(level) == normalized, do: {:ok, level}
+    end)
+  end
+
+  def parse(_value), do: :error
+
+  @spec levels_for(atom()) :: [level()]
+  def levels_for(provider) when is_atom(provider), do: Map.get(@provider_levels, provider, [])
+
+  @spec supported?(atom(), atom()) :: boolean()
+  def supported?(level, provider) when is_atom(level) and is_atom(provider) do
+    level in levels_for(provider)
+  end
+
+  @doc """
+  Maps a canonical level to a provider's wire value.
+
+    * `:omit` — send no reasoning/effort field (`:none` on a provider that supports it).
+    * `{:ok, "xhigh"}` — send this effort string. A level above the provider's
+      ceiling clamps to the ceiling (e.g. `:max` on OpenAI -> `"xhigh"`).
+    * `{:error, {:unsupported, level, provider}}` — the level is below the
+      provider's floor (e.g. `:none` on Anthropic) or is not a canonical level.
+  """
+  @spec to_provider(atom(), atom()) :: mapping()
+  def to_provider(level, provider) when is_atom(level) and is_atom(provider) do
+    supported = levels_for(provider)
+
+    cond do
+      not valid?(level) -> unsupported(level, provider)
+      supported == [] -> unsupported(level, provider)
+      level == :none and :none in supported -> :omit
+      level in supported -> {:ok, Atom.to_string(level)}
+      above_ceiling?(level, supported) -> {:ok, Atom.to_string(List.last(supported))}
+      true -> unsupported(level, provider)
+    end
+  end
+
+  defp above_ceiling?(level, supported), do: rank(level) > rank(List.last(supported))
+
+  defp rank(level), do: Enum.find_index(@levels, &(&1 == level))
+
+  defp unsupported(level, provider), do: {:error, {:unsupported, level, provider}}
+end

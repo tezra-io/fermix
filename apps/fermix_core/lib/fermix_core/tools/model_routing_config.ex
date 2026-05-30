@@ -9,7 +9,6 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
   alias FermixCore.Tools.Support
 
   @allowed_keys %{
-    "delegate_model" => :delegate_model,
     "default_provider" => :default_provider,
     "default_model" => :default_model,
     "coding_model" => :coding_model,
@@ -44,8 +43,8 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
     [
       %{args: %{"action" => "read"}, note: "inspect current routing"},
       %{
-        args: %{"action" => "set", "key" => "delegate_model", "value" => "gpt-5.4-mini"},
-        note: "set delegate model"
+        args: %{"action" => "set", "key" => "coding_model", "value" => "gpt-5.4-mini"},
+        note: "set the coding model"
       }
     ]
   end

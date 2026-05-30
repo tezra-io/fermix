@@ -26,6 +26,7 @@ defmodule FermixCore.Introspection.Overview do
          memory: memory_summary(health),
          jobs: jobs_summary(opts),
          agents: agent_summary(agents),
+         realtime: realtime_summary(health),
          capabilities: Map.get(capabilities, :counts, empty_capability_counts()),
          paths: path_summary(health)
        }}
@@ -208,4 +209,21 @@ defmodule FermixCore.Introspection.Overview do
 
   defp empty_capability_counts, do: %{builtin: 0, skill: 0, mcp: 0, total: 0}
   defp unknown_daemon, do: %{status: :unknown, pid: nil, uptime_ms: nil}
+
+  # Health.report/1 always returns a fully-shaped `:realtime` map; this is
+  # a defensive fallback for the rare case where someone injects a partial
+  # health report in tests.
+  defp realtime_summary(health) do
+    Map.get(health, :realtime, %{
+      enabled: false,
+      status: :unknown,
+      provider: nil,
+      model: nil,
+      socket_path: nil,
+      socket_alive: nil,
+      active_sessions: 0,
+      active_clients: 0,
+      companion_connected?: false
+    })
+  end
 end

@@ -4,13 +4,12 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
   alias FermixCore.Capabilities.MCP.Config
 
   describe "from_toml/1" do
-    test "parses a single MCP server with command, args, env, and approved" do
+    test "parses a single MCP server with command, args, and env" do
       toml = """
       [mcp.servers.github]
       command = "npx"
       args = ["-y", "@modelcontextprotocol/server-github"]
       env = { GITHUB_TOKEN = "ghp_static" }
-      approved = true
       """
 
       assert [config] = Config.from_toml(toml)
@@ -18,35 +17,42 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       assert config.command == "npx"
       assert config.args == ["-y", "@modelcontextprotocol/server-github"]
       assert config.env == %{"GITHUB_TOKEN" => "ghp_static"}
-      assert config.approved? == true
+      assert config.pass_env == []
       assert config.tools_overrides == %{}
     end
 
-    test "$env: prefix resolves against the real environment at parse time" do
-      System.put_env("FERMIX_MCP_TEST_TOKEN", "from-env")
-
+    test "parses pass_env for Sandbox.Env-backed passthrough" do
       toml = """
       [mcp.servers.github]
       command = "npx"
-      env = { GITHUB_TOKEN = "$env:FERMIX_MCP_TEST_TOKEN" }
+      pass_env = ["GITHUB_TOKEN"]
       """
 
       assert [config] = Config.from_toml(toml)
-      assert config.env == %{"GITHUB_TOKEN" => "from-env"}
-    after
-      System.delete_env("FERMIX_MCP_TEST_TOKEN")
+      assert config.pass_env == ["GITHUB_TOKEN"]
     end
 
-    test "missing $env: variable resolves to empty string, not crash" do
-      System.delete_env("FERMIX_MCP_TEST_MISSING")
-
+    test "raises on removed $env shorthand" do
       toml = """
       [mcp.servers.github]
-      env = { GITHUB_TOKEN = "$env:FERMIX_MCP_TEST_MISSING" }
+      env = { GITHUB_TOKEN = "$env:GITHUB_TOKEN" }
       """
 
-      assert [config] = Config.from_toml(toml)
-      assert config.env == %{"GITHUB_TOKEN" => ""}
+      assert_raise ArgumentError, ~r/removed \$env: shorthand/, fn ->
+        Config.from_toml(toml)
+      end
+    end
+
+    test "raises when pass_env and literal env declare the same name" do
+      toml = """
+      [mcp.servers.github]
+      env = { GITHUB_TOKEN = "literal" }
+      pass_env = ["GITHUB_TOKEN"]
+      """
+
+      assert_raise ArgumentError, ~r/GITHUB_TOKEN/, fn ->
+        Config.from_toml(toml)
+      end
     end
 
     test "parses multiple servers, sorted by name" do
@@ -65,18 +71,43 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       toml = """
       [mcp.servers.filesystem]
       command = "npx"
-      approved = true
 
       [mcp.servers.filesystem.tools.read_file]
       policy_class = "read_only"
-      requires_approval = false
+      hidden_from_agent = true
       """
 
       assert [config] = Config.from_toml(toml)
 
       assert config.tools_overrides == %{
-               "read_file" => %{policy_class: :read_only, requires_approval?: false}
+               "read_file" => %{policy_class: :read_only, hidden_from_agent?: true}
              }
+    end
+
+    test "raises when a server block carries the removed `approved` key" do
+      toml = """
+      [mcp.servers.filesystem]
+      command = "npx"
+      approved = true
+      """
+
+      assert_raise ArgumentError, ~r/approved was removed/, fn ->
+        Config.from_toml(toml)
+      end
+    end
+
+    test "raises when a per-tool block uses the renamed `requires_approval` key" do
+      toml = """
+      [mcp.servers.filesystem]
+      command = "npx"
+
+      [mcp.servers.filesystem.tools.read_file]
+      requires_approval = true
+      """
+
+      assert_raise ArgumentError, ~r/requires_approval was renamed/, fn ->
+        Config.from_toml(toml)
+      end
     end
 
     test "raises on an unknown [mcp.*] section header" do
@@ -88,6 +119,21 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       assert_raise ArgumentError, ~r/Unknown MCP section header/, fn ->
         Config.from_toml(toml)
       end
+    end
+
+    test "ignores inbound MCP sections owned by FermixCore.MCP.Inbound.Config" do
+      toml = """
+      [mcp.inbound]
+      enabled = true
+
+      [mcp.inbound.http]
+      auth_token = "$env:FERMIX_TOKEN"
+
+      [mcp.inbound.tools.shell]
+      exposed = true
+      """
+
+      assert Config.from_toml(toml) == []
     end
 
     test "raises on an invalid policy_class string" do

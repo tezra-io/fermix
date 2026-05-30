@@ -46,7 +46,7 @@ defmodule FermixCore.Auth.CodexTokenTest do
 
   test "reads a usable token from the Fermix auth store" do
     dir = tmp_dir()
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
     path =
       write_auth_file(dir, %{
@@ -60,7 +60,7 @@ defmodule FermixCore.Auth.CodexTokenTest do
 
   test "refreshes and persists a token that is within the refresh window" do
     dir = tmp_dir()
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
     path =
       write_auth_file(dir, %{
@@ -83,7 +83,7 @@ defmodule FermixCore.Auth.CodexTokenTest do
 
   test "returns a visible error when an expired token has no refresh token" do
     dir = tmp_dir()
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
     path =
       write_auth_file(dir, %{
@@ -97,7 +97,7 @@ defmodule FermixCore.Auth.CodexTokenTest do
 
   test "returns a visible error when the auth store is missing" do
     dir = tmp_dir()
-    on_exit(fn -> File.rm_rf!(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
 
     assert {:error, :no_auth_file} =
              CodexToken.get_token(fermix_auth_path: Path.join(dir, "missing-auth.json"))

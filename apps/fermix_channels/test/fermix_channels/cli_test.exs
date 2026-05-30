@@ -4,7 +4,7 @@ defmodule FermixChannels.CLITest do
   import ExUnit.CaptureIO
 
   alias FermixChannels.CLI
-  alias FermixChannels.Message
+  alias FermixChannels.Gateway.Message
 
   defmodule TestAgent do
     def handle_message(message, test_pid) do
@@ -16,7 +16,7 @@ defmodule FermixChannels.CLITest do
   defmodule ReplyAgent do
     def handle_message(message, test_pid) do
       send(test_pid, {:sync_agent_message, message})
-      message.reply_fn.("reply: #{message.content}")
+      message.reply_fn.({:text, "reply: #{message.content}"})
       :ok
     end
   end
@@ -35,7 +35,7 @@ defmodule FermixChannels.CLITest do
       assert message.channel == "cli"
       assert message.chat_id == "cli"
       assert message.reply_target == "cli"
-      assert message.metadata == %{source: :cli}
+      assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
     end
 
     test "accepts a custom session id" do
@@ -46,7 +46,7 @@ defmodule FermixChannels.CLITest do
       assert message.channel == "cli"
       assert message.chat_id == "scenario-1"
       assert message.reply_target == "scenario-1"
-      assert message.metadata == %{source: :cli}
+      assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
     end
 
     test "rejects blank input" do
@@ -107,7 +107,7 @@ defmodule FermixChannels.CLITest do
       assert message.sender == "operator"
       assert message.channel == "cli"
       assert message.chat_id == "scenario-1"
-      assert message.metadata == %{source: :cli}
+      assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
     end
 
     test "returns parser and timeout errors" do
@@ -141,7 +141,7 @@ defmodule FermixChannels.CLITest do
     end
   end
 
-  describe "build_reply/1" do
+  describe "build_text_reply/1" do
     test "builds a reply function backed by CLI send_message/3" do
       message =
         Message.new!(%{
@@ -153,11 +153,30 @@ defmodule FermixChannels.CLITest do
           reply_target: "cli"
         })
 
-      reply = CLI.build_reply(message)
+      reply = CLI.build_text_reply(message)
 
       assert capture_io(fn ->
                assert :ok = reply.("hello back")
              end) == "hello back\n"
+    end
+  end
+
+  describe "build_media_reply/1" do
+    test "reports media as unsupported for terminal output" do
+      message =
+        Message.new!(%{
+          id: "cli-1",
+          content: "hello",
+          sender: "operator",
+          channel: "cli",
+          chat_id: "cli",
+          reply_target: "cli"
+        })
+
+      reply = CLI.build_media_reply(message)
+
+      assert {:error, :media_unsupported} =
+               reply.(%{kind: :document, path: "/tmp/report.txt", filename: "report.txt"})
     end
   end
 

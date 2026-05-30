@@ -22,7 +22,7 @@ defmodule FermixCore.Capabilities.RegistryTest do
       kind: Keyword.get(opts, :kind, :builtin),
       executor: {FakeMod, :execute, []},
       policy_class: Keyword.get(opts, :policy_class, :read_only),
-      requires_approval?: Keyword.get(opts, :requires_approval?, false),
+      hidden_from_agent?: Keyword.get(opts, :hidden_from_agent?, false),
       metadata: Keyword.get(opts, :metadata, %{})
     })
   end
@@ -133,25 +133,20 @@ defmodule FermixCore.Capabilities.RegistryTest do
       :ok
     end
 
-    test "trust: :third_party defaults to read-only and denies the rest", %{registry: reg} do
-      names = reg |> Registry.list(trust: :third_party) |> Enum.map(& &1.name)
+    test "trust: :guest defaults to read-only and denies the rest", %{registry: reg} do
+      names = reg |> Registry.list(trust: :guest) |> Enum.map(& &1.name)
       assert names == ["ro"]
     end
 
-    test "trust: :local allows read/write/exec/network but denies external_api", %{registry: reg} do
-      names = reg |> Registry.list(trust: :local) |> Enum.map(& &1.name)
-      assert names == ["ex", "net", "ro", "rw"]
-    end
-
-    test "trust: :core allows everything", %{registry: reg} do
-      names = reg |> Registry.list(trust: :core) |> Enum.map(& &1.name)
+    test "trust: :operator allows the full surface incl. external_api", %{registry: reg} do
+      names = reg |> Registry.list(trust: :operator) |> Enum.map(& &1.name)
       assert names == ["api", "ex", "net", "ro", "rw"]
     end
 
     test "explicit policy overrides trust default", %{registry: reg} do
       names =
         reg
-        |> Registry.list(trust: :third_party, policy: [:read_only, :exec])
+        |> Registry.list(trust: :guest, policy: [:read_only, :exec])
         |> Enum.map(& &1.name)
 
       assert names == ["ex", "ro"]
@@ -162,9 +157,32 @@ defmodule FermixCore.Capabilities.RegistryTest do
       assert names == ["ex"]
     end
 
-    test "no trust + no policy = main-agent style: no filtering", %{registry: reg} do
+    test "no trust + no policy returns everything (storage primitive)", %{registry: reg} do
       names = reg |> Registry.list() |> Enum.map(& &1.name)
       assert names == ["api", "ex", "net", "ro", "rw"]
+    end
+
+    test "explicit trust: nil defaults to least privilege (read-only)", %{registry: reg} do
+      names = reg |> Registry.list(trust: nil) |> Enum.map(& &1.name)
+      assert names == ["ro"]
+    end
+  end
+
+  describe "default_policy_classes/1" do
+    test "operator gets the full class surface" do
+      assert Enum.sort(Registry.default_policy_classes(:operator)) ==
+               Enum.sort([:read_only, :read_write, :exec, :network, :external_api])
+    end
+
+    test "guest and nil collapse to read-only" do
+      assert Registry.default_policy_classes(:guest) == [:read_only]
+      assert Registry.default_policy_classes(nil) == [:read_only]
+    end
+
+    test "operator minus :read_write is the subagent worker surface" do
+      classes = Registry.default_policy_classes(:operator) -- [:read_write]
+      assert Enum.sort(classes) == Enum.sort([:read_only, :exec, :network, :external_api])
+      refute :read_write in classes
     end
   end
 
@@ -180,20 +198,102 @@ defmodule FermixCore.Capabilities.RegistryTest do
     end
   end
 
-  describe "list/2 with :include_approval_required?" do
-    test "default false hides capabilities with requires_approval?: true", %{registry: reg} do
+  describe "list_for/2 with visibility filters" do
+    test "removes capabilities whose metadata category is excluded", %{registry: reg} do
+      :ok = Registry.register(reg, cap("read", metadata: %{category: :file}))
+      :ok = Registry.register(reg, cap("reply", metadata: %{category: :channel}))
+      :ok = Registry.register(reg, cap("search", metadata: %{category: :web}))
+
+      names =
+        reg
+        |> Registry.list_for(excluded_categories: [:channel])
+        |> Enum.map(& &1.name)
+
+      assert names == ["read", "search"]
+    end
+
+    test "nil and empty category exclusions preserve existing behavior", %{registry: reg} do
+      :ok = Registry.register(reg, cap("plain"))
+      :ok = Registry.register(reg, cap("reply", metadata: %{category: :channel}))
+
+      assert ["plain", "reply"] =
+               reg
+               |> Registry.list_for(excluded_categories: nil)
+               |> Enum.map(& &1.name)
+
+      assert ["plain", "reply"] =
+               reg
+               |> Registry.list_for(excluded_categories: [])
+               |> Enum.map(& &1.name)
+    end
+
+    test "capabilities without a category survive category filtering", %{registry: reg} do
+      :ok = Registry.register(reg, cap("plain"))
+      :ok = Registry.register(reg, cap("reply", metadata: %{category: :channel}))
+
+      names =
+        reg
+        |> Registry.list_for(excluded_categories: [:channel])
+        |> Enum.map(& &1.name)
+
+      assert names == ["plain"]
+    end
+
+    test "composes category exclusion with allowlist and policy filters", %{registry: reg} do
+      :ok = Registry.register(reg, cap("allowed", metadata: %{category: :file}))
+
+      :ok =
+        Registry.register(
+          reg,
+          cap("channel", metadata: %{category: :channel}, policy_class: :read_only)
+        )
+
+      :ok =
+        Registry.register(
+          reg,
+          cap("write", metadata: %{category: :file}, policy_class: :read_write)
+        )
+
+      names =
+        reg
+        |> Registry.list_for(
+          allowed_tools: ["allowed", "channel", "write"],
+          excluded_categories: [:channel],
+          policy: [allow: [:read_only]]
+        )
+        |> Enum.map(& &1.name)
+
+      assert names == ["allowed"]
+    end
+
+    test "composes excluded names and policy class filters", %{registry: reg} do
+      :ok = Registry.register(reg, cap("read", policy_class: :read_only))
+      :ok = Registry.register(reg, cap("write", policy_class: :read_write))
+      :ok = Registry.register(reg, cap("exec", policy_class: :exec))
+
+      names =
+        reg
+        |> Registry.list_for(policy_classes: [:read_only, :read_write], excluded_names: ["read"])
+        |> Enum.map(& &1.name)
+
+      assert names == ["write"]
+    end
+  end
+
+  describe "list/2 with :include_hidden?" do
+    test "default false hides capabilities with hidden_from_agent?: true", %{registry: reg} do
       :ok = Registry.register(reg, cap("ok"))
-      :ok = Registry.register(reg, cap("gated", requires_approval?: true))
+      :ok = Registry.register(reg, cap("gated", hidden_from_agent?: true))
 
       assert ["ok"] = reg |> Registry.list() |> Enum.map(& &1.name)
     end
 
     test "true returns approval-gated capabilities", %{registry: reg} do
-      :ok = Registry.register(reg, cap("gated", requires_approval?: true))
+      :ok = Registry.register(reg, cap("gated", hidden_from_agent?: true))
 
       assert ["gated"] =
                reg
-               |> Registry.list(include_approval_required?: true)
+               |> Registry.list(include_hidden?: true)
                |> Enum.map(& &1.name)
     end
   end

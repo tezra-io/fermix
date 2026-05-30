@@ -5,28 +5,6 @@ defmodule FermixCore.Memory.CompactorTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Resource.Registry
 
-  defmodule SummaryProvider do
-    @behaviour FermixCore.Providers.Provider
-
-    @impl true
-    def chat(messages, opts) do
-      calls = Process.get(:summary_provider_calls, [])
-      Process.put(:summary_provider_calls, calls ++ [{messages, opts}])
-
-      content = Process.get(:summary_provider_content, "summary #{length(calls) + 1}")
-
-      {:ok,
-       %{
-         content: content,
-         tool_calls: [],
-         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}
-       }}
-    end
-
-    @impl true
-    def models, do: {:ok, ["summary-model"]}
-  end
-
   defmodule FailingRepo do
     use GenServer
 
@@ -47,16 +25,51 @@ defmodule FermixCore.Memory.CompactorTest do
     end
   end
 
+  defmodule RecordingAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(messages, capabilities, opts) do
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:recording_adapter_chat, messages, capabilities, opts}
+      )
+
+      {:ok,
+       %{
+         content: "direct adapter summary",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: Keyword.fetch!(opts, :model)
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :not_used}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-compactor-#{unique}.db")
     repo_name = :"compactor_repo_#{unique}"
 
     start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path})
-    Process.put(:summary_provider_calls, [])
 
     on_exit(fn ->
-      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &File.rm/1)
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
     %{repo: repo_name}
@@ -71,17 +84,16 @@ defmodule FermixCore.Memory.CompactorTest do
     assert {:ok, result} =
              Compactor.compact(messages,
                enabled: true,
-               token_budget: 10_000,
-               provider: SummaryProvider,
-               model: "summary-model"
+               token_budget: 10_000
              )
 
     assert result.messages == messages
     assert result.cache == nil
-    assert Process.get(:summary_provider_calls) == []
   end
 
   test "summarizes older history while preserving leading system messages", %{repo: repo} do
+    stub_summaries(["summary 1"])
+
     messages = [
       %{role: "system", content: "base prompt must stay verbatim"},
       %{role: "user", content: String.duplicate("old user ", 80)},
@@ -93,8 +105,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 80,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo)
              )
 
@@ -130,7 +141,7 @@ defmodule FermixCore.Memory.CompactorTest do
   end
 
   test "does not create duplicate checkpoint revisions for unchanged summaries", %{repo: repo} do
-    Process.put(:summary_provider_content, "stable checkpoint")
+    stub_summaries(["stable checkpoint", "stable checkpoint"])
 
     messages = compactable_messages()
 
@@ -138,8 +149,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo)
              )
 
@@ -147,8 +157,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo)
              )
 
@@ -161,25 +170,21 @@ defmodule FermixCore.Memory.CompactorTest do
   end
 
   test "keeps checkpoint revision histories isolated by conversation scope", %{repo: repo} do
-    Process.put(:summary_provider_content, "chat 1 summary")
+    stub_summaries(["chat 1 summary", "chat 2 summary"])
 
     assert {:ok, %{compacted?: true}} =
              Compactor.compact(compactable_messages(),
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo, chat_id: "chat-1")
              )
 
-    Process.put(:summary_provider_content, "chat 2 summary")
-
     assert {:ok, %{compacted?: true}} =
              Compactor.compact(compactable_messages(),
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo, chat_id: "chat-2")
              )
 
@@ -195,6 +200,8 @@ defmodule FermixCore.Memory.CompactorTest do
   end
 
   test "preserves composed prompt system messages verbatim during compaction", %{repo: repo} do
+    stub_summaries(["summary 1"])
+
     composed_system_messages = [
       %{role: "system", content: "SOUL bootstrap"},
       %{role: "system", content: "AGENTS bootstrap"},
@@ -215,8 +222,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 80,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo)
              )
 
@@ -228,6 +234,7 @@ defmodule FermixCore.Memory.CompactorTest do
   end
 
   test "continues with in-memory summary when checkpoint persistence fails" do
+    stub_summaries(["summary 1"])
     repo = start_supervised!(FailingRepo)
 
     messages = [
@@ -240,8 +247,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo)
              )
 
@@ -251,6 +257,8 @@ defmodule FermixCore.Memory.CompactorTest do
   end
 
   test "does not duplicate injected checkpoint summaries on later compactions" do
+    stub_summaries(["summary 1"])
+
     messages = [
       %{role: "system", content: "base prompt"},
       %{role: "user", content: String.duplicate("older turn ", 80)},
@@ -261,8 +269,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                persist_checkpoints: false
              )
 
@@ -273,8 +280,7 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(second_messages,
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                persist_checkpoints: false,
                cache: first.cache
              )
@@ -286,10 +292,13 @@ defmodule FermixCore.Memory.CompactorTest do
       end)
 
     assert checkpoint_count == 1
-    assert Process.get(:summary_provider_calls) |> length() == 1
+    assert_received {:summary_request, _body}
+    refute_receive {:summary_request, _body}, 100
   end
 
   test "uses persisted checkpoint as prior summary on later compactions", %{repo: repo} do
+    stub_summaries(["summary 1"])
+
     {:ok, _checkpoint} =
       Repo.insert_message(
         %{
@@ -316,15 +325,82 @@ defmodule FermixCore.Memory.CompactorTest do
              Compactor.compact(messages,
                enabled: true,
                token_budget: 60,
-               provider: SummaryProvider,
-               model: "summary-model",
+               route: route(),
                context: context(repo)
              )
 
-    [{summary_messages, _opts}] = Process.get(:summary_provider_calls)
-    rendered_prompt = Enum.map_join(summary_messages, "\n", & &1.content)
+    assert_received {:summary_request, body}
+    assert body =~ "previous checkpoint"
+  end
 
-    assert rendered_prompt =~ "previous checkpoint"
+  test "instructs the summarizer to supersede stale info, dedup, and timestamp older turns",
+       %{repo: repo} do
+    stub_summaries(["summary 1"])
+
+    messages = [
+      %{role: "system", content: "base prompt"},
+      %{
+        role: "user",
+        content: String.duplicate("older turn ", 80),
+        timestamp: ~U[2026-05-20 09:00:00Z]
+      },
+      %{role: "user", content: "new turn"}
+    ]
+
+    assert {:ok, %{compacted?: true}} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 60,
+               route: route(),
+               context: context(repo)
+             )
+
+    assert_received {:summary_request, body}
+    # Time-aware supersession + dedup instructions reach the summarizer.
+    assert body =~ "supersede"
+    assert body =~ "do not repeat information"
+    # Older turns are rendered with their timestamp so recency is legible.
+    assert body =~ "2026-05-20 09:00"
+  end
+
+  test "routes summaries through Adapter.chat/3 with empty capabilities" do
+    stub_summaries(["routed summary"])
+
+    assert {:ok, %{compacted?: true, cache: %{summary: "routed summary"}}} =
+             Compactor.compact(compactable_messages(),
+               enabled: true,
+               token_budget: 60,
+               route: route(),
+               persist_checkpoints: false
+             )
+
+    assert_received {:summary_request, body}
+    decoded = Jason.decode!(body)
+
+    assert decoded["model"] == "gpt-5.4-mini"
+    assert decoded["tools"] in [nil, []]
+  end
+
+  test "can compact through an explicitly provided adapter without mutating adapter options" do
+    route_key = %{
+      provider: :mock,
+      model: "mock-model",
+      auth_mode: :api_key,
+      base_url: "mock://"
+    }
+
+    assert {:ok, %{compacted?: true, cache: %{summary: "direct adapter summary"}}} =
+             Compactor.compact(compactable_messages(),
+               enabled: true,
+               token_budget: 60,
+               adapter: RecordingAdapter,
+               route: {route_key, [model: "mock-model", test_pid: self()]},
+               persist_checkpoints: false
+             )
+
+    assert_received {:recording_adapter_chat, _messages, [], opts}
+    assert Keyword.fetch!(opts, :model) == "mock-model"
+    refute Keyword.has_key?(opts, :temperature)
   end
 
   defp compactable_messages do
@@ -334,6 +410,56 @@ defmodule FermixCore.Memory.CompactorTest do
       %{role: "assistant", content: String.duplicate("older response ", 80)},
       %{role: "user", content: "new turn"}
     ]
+  end
+
+  defp stub_summaries(summaries) do
+    {:ok, agent} = Agent.start_link(fn -> summaries end)
+    test_pid = self()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:summary_request, body})
+
+      summary =
+        Agent.get_and_update(agent, fn
+          [next | rest] -> {next, rest}
+          [] -> {"summary", []}
+        end)
+
+      Req.Test.json(conn, summary_response_body(summary))
+    end)
+  end
+
+  defp summary_response_body(summary) do
+    %{
+      "model" => "gpt-5.4-mini",
+      "output" => [
+        %{
+          "type" => "message",
+          "id" => "msg_summary",
+          "content" => [%{"type" => "output_text", "text" => summary}]
+        }
+      ],
+      "usage" => %{"input_tokens" => 9, "output_tokens" => 3}
+    }
+  end
+
+  defp route do
+    route_key = %{
+      provider: :openai,
+      model: "gpt-5.4-mini",
+      auth_mode: :api_key,
+      base_url: "https://api.openai.com/v1"
+    }
+
+    adapter_opts = [
+      api_key: "sk-test",
+      model: route_key.model,
+      base_url: route_key.base_url,
+      req_options: [plug: {Req.Test, __MODULE__}]
+    ]
+
+    {route_key, adapter_opts}
   end
 
   defp context(repo, opts \\ []) do

@@ -129,6 +129,58 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
   end
 
   describe "chat/3 — request shape and response handling" do
+    test "emits provider telemetry with request shape" do
+      test_pid = self()
+      handler_id = "test-responses-request-shape-#{System.unique_integer()}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [[:fermix, :provider, :call], [:fermix, :provider, :tool_schema]],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               Responses.chat(
+                 [
+                   %{role: "system", content: "You are helpful"},
+                   %{role: "user", content: "Hi"}
+                 ],
+                 [capability()],
+                 api_key: "sk-test",
+                 model: "gpt-5.4-mini",
+                 base_url: "https://api.openai.com/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
+                      %{adapter: :responses} = metadata}
+
+      assert measurements.duration_ms >= 0
+      assert metadata.input_items == 1
+      assert metadata.input_bytes > 0
+      assert metadata.instructions_bytes == byte_size("You are helpful")
+      assert metadata.tools_count == 1
+      assert metadata.tools_bytes > 0
+      assert metadata.capabilities_count == 1
+
+      assert_receive {:telemetry, [:fermix, :provider, :tool_schema], tool_measurements,
+                      %{adapter: :responses_shared} = tool_metadata}
+
+      assert tool_measurements.duration_us >= 0
+      assert tool_measurements.tools_count == 1
+      refute Map.has_key?(tool_measurements, :tools_bytes)
+      assert tool_metadata.adapter == :responses_shared
+    end
+
     test "posts item-list input with separate instructions and parses the response" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -273,11 +325,16 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       refute Map.has_key?(decoded, "reasoning")
     end
 
-    test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
-      for level <- [:minimal, :low, :medium, :high, :xhigh] do
+    test "sends reasoning: %{effort: <level>} for each supported non-:none level" do
+      for level <- [:low, :medium, :high, :xhigh] do
         decoded = capture_body(reasoning_effort: level)
         assert decoded["reasoning"] == %{"effort" => Atom.to_string(level)}
       end
+    end
+
+    test "clamps :max to the OpenAI ceiling (xhigh)" do
+      decoded = capture_body(reasoning_effort: :max)
+      assert decoded["reasoning"] == %{"effort" => "xhigh"}
     end
 
     test "sends strict text.format schema when supplied" do

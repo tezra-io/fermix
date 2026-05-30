@@ -14,7 +14,7 @@ defmodule FermixCore.Resource.RegistryTest do
 
     on_exit(fn ->
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
-        File.rm(path)
+        FermixTestSupport.SafeRm.rm(path)
       end)
     end)
 
@@ -23,18 +23,18 @@ defmodule FermixCore.Resource.RegistryTest do
 
   test "registers a resource and commits revision one", %{repo: repo} do
     assert {:ok, resource} =
-             Registry.ensure_registered("main", "agents_md", "global",
-               resource_path: "/tmp/AGENTS.md",
+             Registry.ensure_registered("main", "fermix_md", "global",
+               resource_path: "/tmp/FERMIX.md",
                repo: repo
              )
 
     assert resource.current_revision == 0
 
     assert {:ok, %Revision{} = revision} =
-             Registry.commit("main", "agents_md", "global", "hello",
+             Registry.commit("main", "fermix_md", "global", "hello",
                mutation_source: :seed,
                provenance: %{"trigger" => "seed", "description" => "initial"},
-               resource_path: "/tmp/AGENTS.md",
+               resource_path: "/tmp/FERMIX.md",
                repo: repo
              )
 
@@ -45,10 +45,10 @@ defmodule FermixCore.Resource.RegistryTest do
     assert revision.byte_size == 5
     assert %DateTime{} = revision.created_at
 
-    assert {:ok, 1} = Registry.current_revision("main", "agents_md", "global", repo: repo)
+    assert {:ok, 1} = Registry.current_revision("main", "fermix_md", "global", repo: repo)
 
     assert {:ok, revision.content_hash} ==
-             Registry.current_hash("main", "agents_md", "global", repo: repo)
+             Registry.current_hash("main", "fermix_md", "global", repo: repo)
   end
 
   test "identical content is unchanged and does not create duplicate revisions", %{repo: repo} do
@@ -76,7 +76,7 @@ defmodule FermixCore.Resource.RegistryTest do
       1..8
       |> Task.async_stream(
         fn _index ->
-          Registry.commit("main", "agents_md", "global", "same",
+          Registry.commit("main", "fermix_md", "global", "same",
             mutation_source: :manual_edit,
             provenance: %{"trigger" => "manual_edit"},
             repo: repo
@@ -93,10 +93,10 @@ defmodule FermixCore.Resource.RegistryTest do
     assert created_count == 1
     assert unchanged_count == 7
 
-    selector = %{agent_id: "main", resource_type: "agents_md", scope_id: "global"}
+    selector = %{agent_id: "main", resource_type: "fermix_md", scope_id: "global"}
 
     assert {:ok, 1} = Repo.revision_count(selector, server: repo)
-    assert {:ok, [revision]} = Registry.list_revisions("main", "agents_md", "global", repo: repo)
+    assert {:ok, [revision]} = Registry.list_revisions("main", "fermix_md", "global", repo: repo)
     assert revision.content == "same"
     assert revision.revision == 1
   end
@@ -149,7 +149,7 @@ defmodule FermixCore.Resource.RegistryTest do
 
   test "lists registered resources for an agent", %{repo: repo} do
     assert {:ok, _revision} =
-             Registry.commit("main", "agents_md", "global", "agents",
+             Registry.commit("main", "fermix_md", "global", "agents",
                mutation_source: :seed,
                provenance: %{"trigger" => "seed"},
                repo: repo
@@ -165,8 +165,8 @@ defmodule FermixCore.Resource.RegistryTest do
     assert {:ok, resources} = Registry.list_resources("main", repo: repo)
 
     assert Enum.map(resources, &{&1.resource_type, &1.scope_id, &1.current_revision}) == [
-             {"agents_md", "global", 1},
-             {"checkpoint", "telegram:chat-1:root", 1}
+             {"checkpoint", "telegram:chat-1:root", 1},
+             {"fermix_md", "global", 1}
            ]
   end
 
@@ -240,7 +240,7 @@ defmodule FermixCore.Resource.RegistryTest do
     File.write!(path, "current")
 
     assert {:ok, _first} =
-             Registry.commit("main", "agents_md", "global", "first",
+             Registry.commit("main", "fermix_md", "global", "first",
                mutation_source: :imported,
                provenance: %{"trigger" => "imported"},
                resource_path: path,
@@ -248,7 +248,7 @@ defmodule FermixCore.Resource.RegistryTest do
              )
 
     assert {:ok, second} =
-             Registry.commit("main", "agents_md", "global", "second",
+             Registry.commit("main", "fermix_md", "global", "second",
                mutation_source: :manual_edit,
                provenance: %{"trigger" => "manual_edit"},
                resource_path: path,
@@ -256,10 +256,10 @@ defmodule FermixCore.Resource.RegistryTest do
              )
 
     assert {:ok, :already_at_target} =
-             Registry.rollback("main", "agents_md", "global", 2, repo: repo)
+             Registry.rollback("main", "fermix_md", "global", 2, repo: repo)
 
     assert {:ok, [^second, first]} =
-             Registry.list_revisions("main", "agents_md", "global", repo: repo)
+             Registry.list_revisions("main", "fermix_md", "global", repo: repo)
 
     assert first.revision == 1
     assert File.read!(path) == "current"
@@ -307,7 +307,7 @@ defmodule FermixCore.Resource.RegistryTest do
              Registry.ensure_registered("main", "unknown", "global", repo: repo)
 
     assert {:error, {:unsupported_mutation_source, "unknown"}} =
-             Registry.commit("main", "agents_md", "global", "body",
+             Registry.commit("main", "fermix_md", "global", "body",
                mutation_source: :unknown,
                repo: repo
              )
@@ -318,7 +318,7 @@ defmodule FermixCore.Resource.RegistryTest do
     dir = Path.join(System.tmp_dir!(), "#{name}-#{unique}")
     File.mkdir_p!(dir)
 
-    on_exit(fn -> File.rm_rf(dir) end)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
     Path.join(dir, "RESOURCE.md")
   end
