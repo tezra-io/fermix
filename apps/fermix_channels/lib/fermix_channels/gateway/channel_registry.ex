@@ -150,16 +150,22 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   defp startable?(%{config_key: key, transport: transport, child: child})
        when not is_nil(child) do
     config = channel_config(key)
-    enabled?(config) and mode_ok?(config, transport) and ingress_authorized?(key)
+    enabled?(config) and mode_ok?(key, config, transport) and ingress_authorized?(key)
   end
 
   defp channel_config(key), do: Application.get_env(:fermix_channels, key, [])
 
   defp enabled?(config), do: Keyword.get(config, :enabled, false) == true
 
-  # Telegram has no `:mode` in config (polling is implicit); Discord/Signal must
-  # match their transport. An unset mode is accepted as "this transport".
-  defp mode_ok?(config, transport), do: Keyword.get(config, :mode) in [nil, transport]
+  # Telegram is polling-only now, but older setup persisted `mode: :webhook`.
+  # Keep that value from suppressing the only Telegram transport.
+  defp mode_ok?(:telegram, config, :polling) do
+    Keyword.get(config, :mode) in [nil, :polling, :webhook]
+  end
+
+  # Discord/Signal must match their transport. An unset mode is accepted as
+  # "this transport" for hand-written minimal configs.
+  defp mode_ok?(_key, config, transport), do: Keyword.get(config, :mode) in [nil, transport]
 
   defp ingress_authorized?(key), do: Config.channel_ingress_user_ids(key) != []
 end
