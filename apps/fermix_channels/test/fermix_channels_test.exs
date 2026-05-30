@@ -29,6 +29,20 @@ defmodule FermixChannelsTest do
       refute poller in ChannelRegistry.transport_children(@ready)
     end
 
+    test "keeps starting the Telegram poller for legacy webhook-mode configs" do
+      poller = {Telegram.Poller, []}
+      previous = Application.get_env(:fermix_channels, :telegram, [])
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
+
+      Application.put_env(:fermix_channels, :telegram,
+        enabled: true,
+        mode: :webhook,
+        owner_user_id: "111"
+      )
+
+      assert poller in ChannelRegistry.transport_children(@ready)
+    end
+
     test "refuses the Telegram poller when the ingress allowlist is empty (F-02)" do
       poller = {Telegram.Poller, []}
       previous = Application.get_env(:fermix_channels, :telegram, [])
