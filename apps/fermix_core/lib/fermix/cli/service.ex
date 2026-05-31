@@ -150,9 +150,27 @@ defmodule Fermix.CLI.Service do
   # the wrapper binary itself — the one launchd or systemd should
   # invoke — and Burrito exposes that via `__BURRITO_BIN_PATH`.
   defp fermix_path(opts) do
-    Keyword.get(opts, :fermix_path) || burrito_bin_path() ||
-      System.find_executable("fermix") ||
-      raise ArgumentError, "fermix binary not on PATH; pass :fermix_path explicitly"
+    resolved =
+      Keyword.get(opts, :fermix_path) || burrito_bin_path() ||
+        System.find_executable("fermix") ||
+        raise(ArgumentError, "fermix binary not on PATH; pass :fermix_path explicitly")
+
+    stable_path(resolved)
+  end
+
+  # A Homebrew install resolves to a versioned Cellar path
+  # (e.g. /opt/homebrew/Cellar/fermix/0.1.0/bin/fermix). Pin the service unit to
+  # the stable `<prefix>/bin/<name>` symlink so `brew upgrade` does not strand the
+  # unit on a removed version; non-Cellar paths pass through unchanged.
+  defp stable_path(path) do
+    case Regex.run(~r{^(.*)/Cellar/[^/]+/[^/]+/bin/([^/]+)$}, path) do
+      [_full, prefix, name] ->
+        symlink = Path.join([prefix, "bin", name])
+        if File.exists?(symlink), do: symlink, else: path
+
+      _no_match ->
+        path
+    end
   end
 
   defp burrito_bin_path do
