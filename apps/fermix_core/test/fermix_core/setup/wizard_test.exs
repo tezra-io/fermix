@@ -1046,6 +1046,39 @@ defmodule FermixCore.Setup.WizardTest do
       assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
     end
 
+    test "writes anthropic api key to the anthropic provider block" do
+      tmp_home =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-wizard-anthropic-key-#{System.unique_integer([:positive])}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      start_memory_repo!()
+
+      assert {:ok, _report} =
+               Wizard.report().wizard
+               |> Wizard.save_answers(
+                 provider: "anthropic",
+                 default_model: "claude-sonnet-4-6",
+                 anthropic_api_key: "sk-ant-from-wizard"
+               )
+
+      providers = Application.get_env(:fermix_core, :providers, [])
+      anthropic = Keyword.get(providers, :anthropic, [])
+
+      assert Keyword.get(anthropic, :api_key) == "sk-ant-from-wizard"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.anthropic]"
+      assert contents =~ ~s(api_key = "@keyring")
+    end
+
     test "accepts provider as atom" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-atom-#{System.unique_integer([:positive])}")

@@ -3,7 +3,10 @@ defmodule FermixWebWeb.SetupLive do
 
   alias Fermix.CLI.Service
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
@@ -15,6 +18,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
   alias FermixWebWeb.SetupLive.Components
@@ -39,7 +43,15 @@ defmodule FermixWebWeb.SetupLive do
   @default_plugin_auth_url_timeout_ms 300_000
 
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
+    if AccessToken.session_authorized?(setup_authorization(session)) do
+      mount_authorized(socket)
+    else
+      {:ok, redirect(socket, to: ~p"/")}
+    end
+  end
+
+  defp mount_authorized(socket) do
     report = Wizard.report()
 
     socket =
@@ -49,11 +61,17 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
       |> assign(:restarting, false)
+      |> assign(:codex_auth_tasks, %{})
+      |> assign(:codex_auth_url, nil)
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign_report(report)
 
     {:ok, socket}
+  end
+
+  defp setup_authorization(session) do
+    session["setup_authorized"] || session[:setup_authorized]
   end
 
   @impl true
@@ -101,8 +119,17 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
       |> maybe_put_string(:fast, params["fast"])
       |> maybe_put_string(:openai_api_key, params["openai_api_key"])
+      |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
 
     {:noreply, save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("codex_login", _params, socket) do
+    if codex_auth_running?(socket.assigns.codex_auth_tasks) do
+      {:noreply, flash_info(socket, "ChatGPT sign-in is already open.")}
+    else
+      {:noreply, start_codex_auth(socket)}
+    end
   end
 
   def handle_event("save_realtime", %{"realtime_form" => params} = root, socket) do
@@ -265,6 +292,20 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   @impl true
+  def handle_info({:codex_auth_url, url}, socket) do
+    Process.send_after(self(), {:clear_codex_auth_url, url}, plugin_auth_url_timeout_ms())
+
+    {:noreply,
+     socket
+     |> assign(:codex_auth_url, url)
+     |> flash_info("Opening ChatGPT sign-in.")
+     |> push_event("codex-auth-open", %{url: url})}
+  end
+
+  def handle_info({:clear_codex_auth_url, url}, socket) do
+    {:noreply, maybe_clear_codex_auth_url(socket, url)}
+  end
+
   def handle_info({:plugin_auth_url, name, url}, socket) do
     auth_url = %{name: name, display_name: plugin_display_name(name), url: url}
     Process.send_after(self(), {:clear_plugin_auth_url, name, url}, plugin_auth_url_timeout_ms())
@@ -281,21 +322,11 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_info({ref, result}, socket) when is_reference(ref) do
-    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
-      {nil, _tasks} ->
-        {:noreply, socket}
-
-      {task, tasks} ->
-        Process.demonitor(ref, [:flush])
-        {:noreply, finish_plugin_auth(socket, task, tasks, result)}
-    end
+    {:noreply, finish_auth_task(socket, ref, result)}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
-    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
-      {nil, _tasks} -> {:noreply, socket}
-      {task, tasks} -> {:noreply, fail_plugin_auth(socket, task, tasks, reason)}
-    end
+    {:noreply, fail_auth_task(socket, ref, reason)}
   end
 
   def handle_info(:perform_restart, socket) do
@@ -315,6 +346,9 @@ defmodule FermixWebWeb.SetupLive do
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
+      codex_auth={@codex_auth}
+      codex_auth_running?={codex_auth_running?(@codex_auth_tasks)}
+      codex_auth_url={@codex_auth_url}
       provider_form={@provider_form}
       provider_models={@provider_models}
       plugin_auth_url={@plugin_auth_url}
@@ -340,6 +374,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:tabs, @tabs)
     |> assign(:provider_form, build_provider_form(snapshot))
     |> assign(:provider_models, models_for_safe(current_provider(snapshot)))
+    |> assign(:codex_auth, codex_auth_summary())
     |> assign(:realtime_form, build_realtime_form(snapshot))
     |> assign(:channels_form, build_channels_form(snapshot))
     |> assign(:search_form, build_search_form(snapshot))
@@ -773,6 +808,158 @@ defmodule FermixWebWeb.SetupLive do
     case PluginRegistry.find(name) do
       {:ok, plugin} -> plugin.display_name
       _other -> name
+    end
+  end
+
+  defp start_codex_auth(socket) do
+    parent = self()
+
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
+        run_codex_login(parent)
+      end)
+
+    tasks = Map.put(socket.assigns.codex_auth_tasks, task.ref, %{display_name: "ChatGPT"})
+
+    socket
+    |> assign(:codex_auth_tasks, tasks)
+    |> assign(:codex_auth_url, nil)
+    |> flash_info("Opening ChatGPT sign-in.")
+  end
+
+  defp run_codex_login(parent) do
+    result =
+      codex_login_runner().(
+        oauth_opener: codex_auth_opener(parent),
+        puts: fn _message -> :ok end
+      )
+
+    with {:ok, entry} <- result,
+         :ok <- reload_codex_token_manager() do
+      {:ok, entry}
+    end
+  end
+
+  defp codex_login_runner do
+    Application.get_env(:fermix_web, :codex_login_runner, &CodexLogin.login/1)
+  end
+
+  defp codex_auth_opener(parent) do
+    fn url ->
+      send(parent, {:codex_auth_url, url})
+      :ok
+    end
+  end
+
+  defp finish_auth_task(socket, ref, result) do
+    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
+      {nil, _tasks} -> finish_codex_auth_task(socket, ref, result)
+      {task, tasks} -> finish_known_plugin_auth(socket, ref, task, tasks, result)
+    end
+  end
+
+  defp finish_known_plugin_auth(socket, ref, task, tasks, result) do
+    Process.demonitor(ref, [:flush])
+    finish_plugin_auth(socket, task, tasks, result)
+  end
+
+  defp finish_codex_auth_task(socket, ref, result) do
+    case Map.pop(socket.assigns.codex_auth_tasks, ref) do
+      {nil, _tasks} -> socket
+      {task, tasks} -> finish_known_codex_auth(socket, ref, task, tasks, result)
+    end
+  end
+
+  defp finish_known_codex_auth(socket, ref, task, tasks, result) do
+    Process.demonitor(ref, [:flush])
+    finish_codex_auth(socket, task, tasks, result)
+  end
+
+  defp fail_auth_task(socket, ref, reason) do
+    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
+      {nil, _tasks} -> fail_codex_auth_task(socket, ref, reason)
+      {task, tasks} -> fail_plugin_auth(socket, task, tasks, reason)
+    end
+  end
+
+  defp fail_codex_auth_task(socket, ref, reason) do
+    case Map.pop(socket.assigns.codex_auth_tasks, ref) do
+      {nil, _tasks} -> socket
+      {task, tasks} -> fail_codex_auth(socket, task, tasks, reason)
+    end
+  end
+
+  defp finish_codex_auth(socket, task, tasks, {:ok, _entry}) do
+    socket
+    |> assign(:codex_auth_tasks, tasks)
+    |> assign(:codex_auth_url, nil)
+    |> refresh_report_preserving_provider_form("#{task.display_name} OAuth connected.")
+  end
+
+  defp finish_codex_auth(socket, task, tasks, {:error, reason}) do
+    fail_codex_auth(socket, task, tasks, reason)
+  end
+
+  defp fail_codex_auth(socket, task, tasks, reason) do
+    socket
+    |> assign(:codex_auth_tasks, tasks)
+    |> assign(:codex_auth_url, nil)
+    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+  end
+
+  defp refresh_report_preserving_provider_form(socket, message) do
+    provider_form = socket.assigns.provider_form
+
+    socket
+    |> refresh_report(message)
+    |> assign(:provider_form, provider_form)
+    |> assign(:provider_models, models_for_safe(provider_form.provider))
+  end
+
+  defp codex_auth_running?(tasks), do: map_size(tasks) > 0
+
+  defp maybe_clear_codex_auth_url(socket, url) do
+    if socket.assigns.codex_auth_url == url do
+      assign(socket, :codex_auth_url, nil)
+    else
+      socket
+    end
+  end
+
+  defp codex_auth_summary do
+    case Store.read(:openai_codex) do
+      {:ok, entry} -> %{connected?: true, account: codex_account_label(entry), error: nil}
+      {:error, reason} -> %{connected?: false, account: nil, error: codex_auth_error(reason)}
+    end
+  rescue
+    error in ArgumentError ->
+      %{connected?: false, account: nil, error: Exception.message(error)}
+  end
+
+  defp codex_auth_error(:no_auth_file), do: nil
+  defp codex_auth_error({:provider_missing, _provider}), do: nil
+  defp codex_auth_error(reason), do: Redaction.format(reason)
+
+  defp codex_account_label(%{account: %{email: email}}) when is_binary(email) and email != "",
+    do: email
+
+  defp codex_account_label(%{account: %{display_name: name}})
+       when is_binary(name) and name != "",
+       do: name
+
+  defp codex_account_label(_entry), do: nil
+
+  defp reload_codex_token_manager do
+    case Process.whereis(TokenManager) do
+      nil -> :ok
+      _pid -> reload_running_codex_token_manager()
+    end
+  end
+
+  defp reload_running_codex_token_manager do
+    case TokenManager.reload(TokenManager) do
+      {:ok, _token} -> :ok
+      {:error, reason} -> {:error, {:token_manager_reload_failed, reason}}
     end
   end
 

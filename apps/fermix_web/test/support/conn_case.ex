@@ -17,6 +17,8 @@ defmodule FermixWebWeb.ConnCase do
 
   use ExUnit.CaseTemplate
 
+  alias FermixCore.Setup.AccessToken
+
   using do
     quote do
       # The default endpoint for testing
@@ -33,5 +35,10 @@ defmodule FermixWebWeb.ConnCase do
 
   setup _tags do
     {:ok, conn: Phoenix.ConnTest.build_conn()}
+  end
+
+  def authorize_setup(conn) do
+    {:ok, fingerprint} = AccessToken.setup_fingerprint()
+    Plug.Test.init_test_session(conn, setup_authorized: fingerprint)
   end
 end

@@ -692,6 +692,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     test "extracts provider/default_model/reasoning_effort opts as answers" do
       opts = [
         provider: "openai_codex",
+        anthropic_api_key: "sk-ant-test",
         default_model: "gpt-5.5",
         reasoning_effort: "high",
         realtime_enabled: true,
@@ -703,6 +704,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert answers = Runtime.provided_answers(opts)
       assert Keyword.get(answers, :provider) == "openai_codex"
+      assert Keyword.get(answers, :anthropic_api_key) == "sk-ant-test"
       assert Keyword.get(answers, :default_model) == "gpt-5.5"
       assert Keyword.get(answers, :reasoning_effort) == "high"
       assert Keyword.get(answers, :realtime_enabled) == true

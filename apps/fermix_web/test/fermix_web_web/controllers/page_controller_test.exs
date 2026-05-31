@@ -90,12 +90,15 @@ defmodule FermixWebWeb.PageControllerTest do
     end
   end
 
-  setup do
+  setup %{conn: conn} do
     provider_config = Application.get_env(:fermix_core, :providers)
     telegram_config = Application.get_env(:fermix_channels, :telegram)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
     home_snapshot = Application.get_env(:fermix_web, :home_snapshot)
+    fermix_home = System.get_env("FERMIX_HOME")
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("page-controller")
+    System.put_env("FERMIX_HOME", tmp_home)
 
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
@@ -111,10 +114,17 @@ defmodule FermixWebWeb.PageControllerTest do
       Application.put_env(:fermix_core, :personalization, personalization)
       Application.put_env(:fermix_core, :agent, agent)
       restore_env(:fermix_web, :home_snapshot, home_snapshot)
+
+      case fermix_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
       BootReport.refresh()
     end)
 
-    :ok
+    %{conn: authorize_setup(conn)}
   end
 
   test "GET / redirects to /setup when readiness is incomplete", %{conn: conn} do

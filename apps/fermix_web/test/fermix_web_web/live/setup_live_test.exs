@@ -8,7 +8,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Setup.ConfigStore
 
-  setup do
+  setup %{conn: conn} do
     providers = Application.fetch_env(:fermix_core, :providers)
     personalization = Application.get_env(:fermix_core, :personalization, [])
     agent = Application.get_env(:fermix_core, :agent, [])
@@ -18,6 +18,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
     plugin_auth_url_timeout_ms = Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms)
+    codex_login_runner = Application.get_env(:fermix_web, :codex_login_runner)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -27,6 +28,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     # Force readiness to :setup_required so commit_snapshot/1 skips
     # prompt-file seeding; these tests do not exercise the memory repo.
     Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.delete_env(:fermix_channels, :telegram)
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :tools, [])
@@ -34,6 +36,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_core, :oauth, %{})
     Application.delete_env(:fermix_web, :plugin_auth_runner)
     Application.delete_env(:fermix_web, :plugin_auth_url_timeout_ms)
+    Application.delete_env(:fermix_web, :codex_login_runner)
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -45,6 +48,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
       restore_env(:fermix_web, :plugin_auth_url_timeout_ms, plugin_auth_url_timeout_ms)
+      restore_env(:fermix_web, :codex_login_runner, codex_login_runner)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -54,7 +58,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)
 
-    %{tmp_home: tmp_home}
+    %{conn: authorize_setup(conn), tmp_home: tmp_home}
   end
 
   describe "/setup shell" do
@@ -511,6 +515,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> render_change()
 
       assert html =~ "claude-sonnet-4-6"
+      assert html =~ ~s(name="provider_form[anthropic_api_key]")
       refute html =~ "gpt-5.5</option>"
     end
 
@@ -542,6 +547,45 @@ defmodule FermixWebWeb.SetupLiveTest do
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(default_model = "gpt-5.5")
       assert contents =~ ~s(reasoning_effort = "high")
+    end
+
+    test "submitting persists Anthropic model and api key", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "anthropic",
+          default_model: "gpt-5.5",
+          reasoning_effort: "none"
+        }
+      )
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "anthropic",
+          default_model: "claude-sonnet-4-6",
+          anthropic_api_key: "sk-ant-from-live-test"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Provider saved."
+
+      providers = Application.get_env(:fermix_core, :providers, [])
+      anthropic = Keyword.get(providers, :anthropic, [])
+
+      assert Keyword.get(anthropic, :default_model) == "claude-sonnet-4-6"
+      assert Keyword.get(anthropic, :api_key) == "sk-ant-from-live-test"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.anthropic]"
+      assert contents =~ ~s(api_key = "@keyring")
     end
 
     test "submitting persists Codex fast mode as a boolean", %{
@@ -584,6 +628,63 @@ defmodule FermixWebWeb.SetupLiveTest do
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ "[fermix_core.providers.openai_codex]"
       assert contents =~ "fast = true"
+    end
+
+    test "selecting Codex offers ChatGPT OAuth login", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{
+            provider: "openai_codex",
+            default_model: "gpt-5.5",
+            reasoning_effort: "high"
+          }
+        )
+        |> render_change()
+
+      assert html =~ "Sign in with ChatGPT"
+      assert html =~ ~s(phx-click="codex_login")
+      assert html =~ ~s(data-auth-trigger="true")
+    end
+
+    test "Codex OAuth login persists through the secure auth store", %{conn: conn} do
+      parent = self()
+
+      Application.put_env(:fermix_web, :codex_login_runner, fn opts ->
+        Keyword.fetch!(opts, :oauth_opener).("https://auth.openai.test/codex")
+        entry = codex_auth_entry()
+        :ok = Store.write(:openai_codex, entry)
+        send(parent, {:codex_login_started, Keyword.keys(opts)})
+        {:ok, entry}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai_codex",
+          default_model: "gpt-5.5",
+          reasoning_effort: "high"
+        }
+      )
+      |> render_change()
+
+      html = view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
+      assert html =~ "Opening ChatGPT sign-in"
+      assert_receive {:codex_login_started, keys}
+      assert :oauth_opener in keys
+
+      html = render(view)
+      assert html =~ "ChatGPT OAuth connected."
+      assert html =~ "Connected"
+      refute html =~ "https://auth.openai.test/codex"
+
+      assert {:ok, entry} = Store.read(:openai_codex)
+      assert entry.auth_mode == "chatgpt"
+      assert entry.tokens.access_token == "codex_access_token"
     end
   end
 
@@ -683,6 +784,16 @@ defmodule FermixWebWeb.SetupLiveTest do
       last_refresh: nil,
       status: "ready"
     })
+  end
+
+  defp codex_auth_entry do
+    %{
+      auth_mode: "chatgpt",
+      tokens: %{access_token: "codex_access_token", refresh_token: "codex_refresh_token"},
+      expires_at: DateTime.utc_now() |> DateTime.add(3600),
+      last_refresh: DateTime.utc_now(),
+      status: "ready"
+    }
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)
