@@ -24,8 +24,9 @@ Fermix is a persistent multi-agent runtime that survives reboots and talks to yo
 ```bash
 brew install tezra-io/tap/fermix
 fermix setup
-fermix start
 ```
+
+`fermix setup` installs and starts the background service, then opens your browser to finish configuration. On a headless host it runs a terminal wizard instead (`--cli` to force it); pass `--no-service` to configure without installing the service.
 
 Confirm the daemon is up:
 
