@@ -21,9 +21,10 @@ defmodule Fermix.CLI.Setup.WebLauncher do
          {:ok, launch} <- mint_launch(opts),
          {:ok, port} <- setup_port(opts),
          url <- setup_url(port, launch.token),
+         :ok <- announce_url(url, port, opts, puts),
          :ok <- wait_or_warn(opts, url, puts) do
       maybe_open(url, opts, puts)
-      print_handoff(url, port, opts, puts)
+      print_handoff(opts, puts)
       :ok
     else
       {:error, reason} when is_binary(reason) -> {:error, reason}
@@ -114,16 +115,34 @@ defmodule Fermix.CLI.Setup.WebLauncher do
     end
   end
 
+  defp announce_url(url, port, opts, puts) do
+    puts.("Open Fermix setup in your browser:")
+    puts.("  #{url}")
+
+    if Keyword.get(opts, :ssh_hint, false) do
+      puts.("  (over SSH: ssh -L #{port}:127.0.0.1:#{port} user@host, then open the URL)")
+    end
+
+    puts.("Waiting for the daemon to come up...")
+    :ok
+  end
+
   defp maybe_open(url, opts, puts) do
     if Keyword.get(opts, :no_browser, false) do
+      puts.("Browser launch skipped (--no-browser); open the URL above.")
       :ok
     else
       case open_url(opts).(url) do
         :ok ->
+          puts.("Opening your browser...")
           :ok
 
         {:error, reason} ->
-          puts.("Could not open a browser automatically: #{inspect(reason)}")
+          puts.(
+            "Could not open a browser automatically (#{inspect(reason)}); open this URL manually:"
+          )
+
+          puts.("  #{url}")
           :ok
       end
     end
@@ -131,14 +150,8 @@ defmodule Fermix.CLI.Setup.WebLauncher do
 
   defp open_url(opts), do: Keyword.get(opts, :opener, &Browser.open/1)
 
-  defp print_handoff(url, port, opts, puts) do
+  defp print_handoff(opts, puts) do
     puts.("Fermix is running (#{Keyword.fetch!(opts, :scope)} service).")
-    puts.("Finish setup in your browser: #{url}")
-
-    if Keyword.get(opts, :ssh_hint, false) do
-      puts.("For SSH access, run: ssh -L #{port}:127.0.0.1:#{port} user@host")
-    end
-
     puts.("Use `fermix status` to check the daemon, or `fermix stop` to stop it.")
   end
 
