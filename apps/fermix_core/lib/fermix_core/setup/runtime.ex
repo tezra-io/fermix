@@ -22,6 +22,7 @@ defmodule FermixCore.Setup.Runtime do
 
   @answer_keys [
     :openai_api_key,
+    :anthropic_api_key,
     :provider,
     :default_model,
     :reasoning_effort,
@@ -452,6 +453,10 @@ defmodule FermixCore.Setup.Runtime do
 
   defp irrelevant_prompt?(%{key: :openai_api_key}, answers) do
     selected_provider(answers) in [:openai_codex, :anthropic]
+  end
+
+  defp irrelevant_prompt?(%{key: :anthropic_api_key}, answers) do
+    selected_provider(answers) in [:openai, :openai_codex]
   end
 
   defp irrelevant_prompt?(%{key: :reasoning_effort}, answers) do
