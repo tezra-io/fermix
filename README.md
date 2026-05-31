@@ -181,11 +181,11 @@ max_estimated_cost_cents_per_session = 100
 persist_transcripts = false
 ```
 
-The companion is a native macOS app (SwiftUI) — there is no iOS version and no prebuilt download yet, so build it from source (requires the Xcode command-line tools). Source lives at `clients/macos/FermixPet`:
+The companion is a native macOS app (SwiftUI, macOS 13+) — there is no iOS version and no prebuilt download yet, so build it from source (requires Xcode or its command-line tools). Source and full instructions live at [`clients/macos/FermixPet`](clients/macos/FermixPet/README.md). Use the build script (not `swift run`) — it stages a proper `.app` bundle so Dock, Quit, and microphone permissions work:
 
 ```bash
 cd clients/macos/FermixPet
-swift run FermixPet
+./script/build_and_run.sh
 ```
 
 For source-only development, skip Burrito and run the full daemon from Mix:
@@ -204,7 +204,7 @@ Then launch the companion against the same home directory:
 
 ```bash
 cd clients/macos/FermixPet
-FERMIX_HOME=$HOME/.fermix-dev swift run FermixPet
+FERMIX_HOME=$HOME/.fermix-dev ./script/build_and_run.sh
 ```
 
 V1 opens a local call explicitly from the companion. While the call is open,
@@ -219,7 +219,7 @@ Troubleshooting:
 
 - `fermix voice status` shows `daemon: offline`: start Fermix with `fermix start` or `fermix run`.
 - Realtime is `setup_required`: set `OPENAI_API_KEY` or persist an OpenAI API key through setup.
-- The companion cannot use the mic: grant microphone access in macOS Privacy & Security settings.
+- The companion cannot use the mic: grant microphone access in macOS Privacy & Security settings, or reset the prompt with `tccutil reset Microphone io.tezra.FermixPet`.
 - A shared local app is quarantined: remove Gatekeeper quarantine with `xattr -dr com.apple.quarantine FermixPet.app`.
 
 ### Channels
