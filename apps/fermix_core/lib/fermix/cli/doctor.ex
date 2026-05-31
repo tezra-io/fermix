@@ -11,7 +11,7 @@ defmodule Fermix.CLI.Doctor do
   `--full` opts into checks that hit the network — the binary-integrity
   check (fetches `releases.json` and compares sha256 against the manifest
   entry for the host's target), the upgrade-availability check, the
-  provider auth probe, and the web-search live probe.
+  provider auth probe, channel health probes, and the web-search live probe.
   """
 
   alias Fermix.CLI.Doctor.Checks
@@ -50,7 +50,12 @@ defmodule Fermix.CLI.Doctor do
 
     network =
       if full?,
-        do: [Checks.binary_integrity(), Checks.upgrade_available?(), Checks.auth_probe()],
+        do: [
+          Checks.binary_integrity(),
+          Checks.upgrade_available?(),
+          Checks.auth_probe(),
+          Checks.channel_health()
+        ],
         else: []
 
     Enum.reject(base ++ network, &is_nil/1)

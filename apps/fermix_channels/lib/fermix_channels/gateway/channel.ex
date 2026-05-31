@@ -20,6 +20,9 @@ defmodule FermixChannels.Gateway.Channel do
 
   @type media_part :: Reply.media_part()
   @type reply_fn :: Reply.reply_fn()
+  @type health_result ::
+          {:ok, %{required(:detail) => String.t(), optional(:latency_ms) => non_neg_integer()}}
+          | {:error, term()}
 
   @doc """
   Parse a webhook payload into messages.
@@ -66,5 +69,8 @@ defmodule FermixChannels.Gateway.Channel do
   @doc "Start typing indicator (optional)"
   @callback start_typing(String.t()) :: :ok
 
-  @optional_callbacks [start_typing: 1, download_attachment: 2]
+  @doc "Probe configured channel credentials and runtime prerequisites."
+  @callback health_check(keyword()) :: health_result()
+
+  @optional_callbacks [start_typing: 1, download_attachment: 2, health_check: 1]
 end

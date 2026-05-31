@@ -171,6 +171,33 @@ defmodule FermixChannels.Channels.SignalTest do
     end
   end
 
+  describe "health_check/1" do
+    test "returns ok when account and signal-cli are configured" do
+      resolver = fn "signal-cli" -> "/usr/local/bin/signal-cli" end
+
+      assert {:ok, %{detail: "Signal account +15550001111 configured", latency_ms: ms}} =
+               Signal.health_check(executable_resolver: resolver)
+
+      assert is_integer(ms)
+    end
+
+    test "classifies missing account as misconfigured" do
+      Application.put_env(:fermix_channels, :signal, enabled: true)
+
+      assert {:error, {:misconfigured, "signal account is not configured"}} =
+               Signal.health_check(
+                 executable_resolver: fn _path -> "/usr/local/bin/signal-cli" end
+               )
+    end
+
+    test "classifies missing signal-cli as misconfigured" do
+      resolver = fn "signal-cli" -> nil end
+
+      assert {:error, {:misconfigured, "signal-cli executable not found at signal-cli"}} =
+               Signal.health_check(executable_resolver: resolver)
+    end
+  end
+
   describe "send_message/3" do
     test "rejects missing signal account configuration" do
       Application.put_env(:fermix_channels, :signal, enabled: true)

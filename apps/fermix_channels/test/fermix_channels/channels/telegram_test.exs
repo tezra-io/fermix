@@ -487,6 +487,41 @@ defmodule FermixChannels.Channels.TelegramTest do
     end
   end
 
+  describe "health_check/1" do
+    test "returns ok when getMe authenticates the bot" do
+      stub_telegram(self(), 200, %{"ok" => true, "result" => %{"username" => "fermix_bot"}})
+
+      assert {:ok, %{detail: "bot @fermix_bot authenticated", latency_ms: ms}} =
+               Telegram.health_check()
+
+      assert is_integer(ms)
+      assert_received {:telegram_request, "/bottest-bot-token/getMe", %{}}
+    end
+
+    test "classifies auth failures" do
+      stub_telegram(self(), 401, %{"description" => "Unauthorized"})
+
+      assert {:error, {:auth_failed, "Telegram API HTTP 401: Unauthorized"}} =
+               Telegram.health_check()
+    end
+
+    test "classifies server errors" do
+      stub_telegram(self(), 500, %{"description" => "upstream failed"})
+
+      assert {:error, {:server_error, 500, %{"description" => "upstream failed"}}} =
+               Telegram.health_check()
+    end
+
+    test "classifies network failures" do
+      Req.Test.stub(:telegram, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
+               Telegram.health_check()
+    end
+  end
+
   # -- telemetry --
 
   describe "telemetry" do

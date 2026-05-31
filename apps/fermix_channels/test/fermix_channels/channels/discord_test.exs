@@ -322,6 +322,60 @@ defmodule FermixChannels.Channels.DiscordTest do
     end
   end
 
+  describe "health_check/1" do
+    test "returns ok when the bot identity matches config" do
+      Req.Test.stub(:discord, fn conn ->
+        assert conn.request_path == "/api/v10/users/@me"
+        Req.Test.json(conn, %{"id" => "999"})
+      end)
+
+      assert {:ok, %{detail: "Discord bot 999 authenticated", latency_ms: ms}} =
+               Discord.health_check()
+
+      assert is_integer(ms)
+    end
+
+    test "classifies bot id mismatches as misconfigured" do
+      Req.Test.stub(:discord, fn conn ->
+        Req.Test.json(conn, %{"id" => "000"})
+      end)
+
+      assert {:error, {:misconfigured, "discord bot_user_id 999 does not match 000"}} =
+               Discord.health_check()
+    end
+
+    test "classifies auth failures" do
+      Req.Test.stub(:discord, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(401, Jason.encode!(%{"message" => "Unauthorized"}))
+      end)
+
+      assert {:error, {:auth_failed, "Discord API HTTP 401: Unauthorized"}} =
+               Discord.health_check()
+    end
+
+    test "classifies server errors" do
+      Req.Test.stub(:discord, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(500, Jason.encode!(%{"message" => "server error"}))
+      end)
+
+      assert {:error, {:server_error, 500, %{"message" => "server error"}}} =
+               Discord.health_check()
+    end
+
+    test "classifies network failures" do
+      Req.Test.stub(:discord, fn conn ->
+        Req.Test.transport_error(conn, :closed)
+      end)
+
+      assert {:error, {:network, %Req.TransportError{reason: :closed}}} =
+               Discord.health_check()
+    end
+  end
+
   defp dm_event(content) do
     %{
       "t" => "MESSAGE_CREATE",

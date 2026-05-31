@@ -4,11 +4,26 @@ defmodule FermixCore.Setup.DoctorTest do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
 
+  defmodule HealthyChannel do
+    def health_check(opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:channel_health_checked, :healthy})
+      {:ok, %{detail: "healthy channel ok", latency_ms: 3}}
+    end
+  end
+
+  defmodule DisabledChannel do
+    def health_check(opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:channel_health_checked, :disabled})
+      {:ok, %{detail: "disabled channel ok", latency_ms: 3}}
+    end
+  end
+
   setup do
     original_providers = Application.get_env(:fermix_core, :providers, [])
     original_agent = Application.get_env(:fermix_core, :agent, [])
     original_compaction = Application.get_env(:fermix_core, :compaction, [])
     original_tools = Application.get_env(:fermix_core, :tools, [])
+    original_registry = Application.get_env(:fermix_channels, :channel_registry)
 
     original_channels =
       for channel <- [:telegram, :whatsapp, :discord, :slack, :signal], into: %{} do
@@ -20,6 +35,9 @@ defmodule FermixCore.Setup.DoctorTest do
       Application.put_env(:fermix_core, :agent, original_agent)
       Application.put_env(:fermix_core, :compaction, original_compaction)
       Application.put_env(:fermix_core, :tools, original_tools)
+      restore_env(:fermix_channels, :channel_registry, original_registry)
+      Application.delete_env(:fermix_channels, :healthy_channel)
+      Application.delete_env(:fermix_channels, :disabled_channel)
 
       Enum.each(original_channels, fn {channel, config} ->
         Application.put_env(:fermix_channels, channel, config)
@@ -267,8 +285,9 @@ defmodule FermixCore.Setup.DoctorTest do
 
       auth_path = write_codex_auth(dir, "manager-bearer-xyz")
       put_provider(:openai_codex, default_model: "gpt-5.5")
+      manager = :"doctor_token_manager_#{System.unique_integer([:positive])}"
 
-      start_supervised!({TokenManager, [fermix_auth_path: auth_path]}, id: :doctor_token_manager)
+      start_supervised!({TokenManager, [name: manager, fermix_auth_path: auth_path]}, id: manager)
       FermixTestSupport.SafeRm.rm!(auth_path)
 
       plug = fn conn ->
@@ -278,7 +297,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:ok, %{provider: :openai_codex, model: "gpt-5.5"}} =
                Doctor.probe_provider(:openai_codex,
-                 fermix_auth_path: auth_path,
+                 token_manager: manager,
                  req_options: [plug: plug]
                )
     end
@@ -371,6 +390,44 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  describe "probe_channels/1" do
+    test "probes enabled registry channels and skips disabled channels" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "healthy",
+          config_key: :healthy_channel,
+          adapter: HealthyChannel,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        },
+        %{
+          name: "disabled",
+          config_key: :disabled_channel,
+          adapter: DisabledChannel,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        }
+      ])
+
+      Application.put_env(:fermix_channels, :healthy_channel, enabled: true)
+      Application.put_env(:fermix_channels, :disabled_channel, enabled: false)
+
+      assert [
+               %{
+                 channel: :healthy_channel,
+                 name: "healthy",
+                 status: :ok,
+                 detail: "healthy channel ok"
+               }
+             ] = Doctor.probe_channels(test_pid: self())
+
+      assert_received {:channel_health_checked, :healthy}
+      refute_received {:channel_health_checked, :disabled}
+    end
+  end
+
   describe "network errors" do
     test "returns network error tuple on transport failure" do
       put_provider(:openai, api_key: "sk-test")
@@ -381,6 +438,23 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
                Doctor.probe_provider(:openai, req_options: [adapter: adapter])
+    end
+
+    test "provider probes cap inherited request timeouts" do
+      put_provider(:openai, api_key: "sk-test")
+      test_pid = self()
+
+      adapter = fn req ->
+        send(test_pid, {:probe_timeout, req.options[:receive_timeout]})
+        {req, %Req.Response{status: 200, body: %{}}}
+      end
+
+      assert {:ok, %{provider: :openai}} =
+               Doctor.probe_provider(:openai,
+                 req_options: [adapter: adapter, receive_timeout: 60_000]
+               )
+
+      assert_received {:probe_timeout, 5_000}
     end
   end
 
@@ -543,4 +617,7 @@ defmodule FermixCore.Setup.DoctorTest do
       "html.duckduckgo.com" -> {:ok, [{52, 149, 246, 39}]}
     end
   end
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end

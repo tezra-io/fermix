@@ -330,6 +330,48 @@ defmodule FermixChannels.Channels.SlackTest do
     end
   end
 
+  describe "health_check/1" do
+    test "returns ok when auth.test accepts the bot token" do
+      Req.Test.stub(:slack, fn conn ->
+        assert conn.request_path == "/api/auth.test"
+        Req.Test.json(conn, %{"ok" => true, "team" => "Tezra"})
+      end)
+
+      assert {:ok, %{detail: "Slack Tezra authenticated", latency_ms: ms}} =
+               Slack.health_check()
+
+      assert is_integer(ms)
+    end
+
+    test "classifies Slack auth.test failures" do
+      Req.Test.stub(:slack, fn conn ->
+        Req.Test.json(conn, %{"ok" => false, "error" => "invalid_auth"})
+      end)
+
+      assert {:error, {:auth_failed, "Slack auth.test failed: invalid_auth"}} =
+               Slack.health_check()
+    end
+
+    test "classifies server errors" do
+      Req.Test.stub(:slack, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(500, Jason.encode!(%{"error" => "server_error"}))
+      end)
+
+      assert {:error, {:server_error, 500, %{"error" => "server_error"}}} =
+               Slack.health_check()
+    end
+
+    test "classifies network failures" do
+      Req.Test.stub(:slack, fn conn ->
+        Req.Test.transport_error(conn, :timeout)
+      end)
+
+      assert {:error, {:network, %Req.TransportError{reason: :timeout}}} = Slack.health_check()
+    end
+  end
+
   defp dm_payload(text) do
     %{
       "type" => "event_callback",
