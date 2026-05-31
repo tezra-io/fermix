@@ -103,9 +103,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <aside class="lg:sticky lg:top-6">
       <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
         <div class="flex items-center gap-3 px-1">
-          <div class="grid size-9 shrink-0 place-items-center rounded-field bg-primary font-bold text-primary-content">
-            F
-          </div>
+          <img src={~p"/images/logo.svg"} width="36" height="36" alt="Fermix" class="size-9 shrink-0" />
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold leading-tight">Fermix setup</p>
             <p class="truncate text-xs text-base-content/55">Guided onboarding</p>
