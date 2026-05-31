@@ -20,6 +20,7 @@ defmodule FermixChannels.Channels.Discord do
   alias FermixCore.Telemetry
 
   @api_base "https://discord.com/api/v10"
+  @health_timeout_ms 5_000
   @max_message_length 2_000
   @max_media_bytes 10 * 1_024 * 1_024
 
@@ -111,6 +112,24 @@ defmodule FermixChannels.Channels.Discord do
     case configured_gateway_url(opts) do
       url when is_binary(url) and url != "" -> {:ok, gateway_websocket_url(url)}
       _other -> fetch_gateway_url(opts)
+    end
+  end
+
+  @impl true
+  @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
+  def health_check(opts \\ []) do
+    start = System.monotonic_time(:millisecond)
+
+    with {:ok, token} <- bot_token(),
+         {:ok, expected_id} <- bot_user_id() do
+      Req.new(url: "#{@api_base}/users/@me", method: :get)
+      |> Req.Request.put_header("authorization", "Bot #{token}")
+      |> Req.merge(health_req_options(opts))
+      |> HttpClient.request("Discord health")
+      |> classify_health_response(expected_id, start)
+    else
+      {:error, :not_configured} ->
+        {:error, {:misconfigured, "discord bot_token or bot_user_id is not configured"}}
     end
   end
 
@@ -304,6 +323,38 @@ defmodule FermixChannels.Channels.Discord do
 
   defp bot_user_id, do: fetch_config_value(:bot_user_id)
 
+  defp classify_health_response(
+         {:ok, %{status: 200, body: %{"id" => expected_id}}},
+         expected_id,
+         start
+       ) do
+    {:ok, %{detail: "Discord bot #{expected_id} authenticated", latency_ms: elapsed_ms(start)}}
+  end
+
+  defp classify_health_response(
+         {:ok, %{status: 200, body: %{"id" => actual_id}}},
+         expected_id,
+         _start
+       ) do
+    {:error, {:misconfigured, "discord bot_user_id #{expected_id} does not match #{actual_id}"}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _expected_id, _start)
+       when status in [401, 403] do
+    {:error, {:auth_failed, "Discord API HTTP #{status}: #{api_description(body)}"}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _expected_id, _start) do
+    {:error, {:server_error, status, body}}
+  end
+
+  defp classify_health_response({:error, reason}, _expected_id, _start) do
+    {:error, {:network, reason}}
+  end
+
+  defp api_description(%{"message" => message}) when is_binary(message), do: message
+  defp api_description(_body), do: "request rejected"
+
   defp configured_gateway_url(opts) do
     Keyword.get(opts, :gateway_url) || config_value(:gateway_url)
   end
@@ -368,6 +419,20 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
+  defp health_req_options(opts) do
+    opts
+    |> req_options()
+    |> Keyword.put(:receive_timeout, health_timeout_ms(opts))
+    |> Keyword.put(:retry, false)
+  end
+
+  defp health_timeout_ms(opts) do
+    case Keyword.get(opts, :timeout_ms, @health_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 -> timeout_ms
+      _other -> @health_timeout_ms
+    end
+  end
+
   defp handle_send_response({:ok, %{status: status}}, duration_us) when status in [200, 201] do
     ChannelTelemetry.emit_message(:discord, :outbound, 1, duration_us)
     :ok
@@ -398,4 +463,5 @@ defmodule FermixChannels.Channels.Discord do
 
   defp present?(value) when is_binary(value), do: value != ""
   defp present?(_value), do: false
+  defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end

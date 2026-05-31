@@ -13,6 +13,7 @@
 /apps/fermix_web/priv/static/cache_manifest.json
 /apps/fermix_web/priv/static/**/*.gz
 /apps/fermix_web/priv/static/favicon-*.ico
+/apps/fermix_web/priv/static/favicon-*.png
 /apps/fermix_web/priv/static/robots-*.txt
 /apps/fermix_web/priv/static/images/*-*.svg
 

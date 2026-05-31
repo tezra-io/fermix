@@ -158,6 +158,12 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @spec channel_health(keyword()) :: result()
+  def channel_health(opts \\ []) do
+    ProviderProbe.probe_channels(opts)
+    |> format_channel_health()
+  end
+
   @spec compaction_config() :: result()
   def compaction_config do
     report = ProviderProbe.compaction_report()
@@ -201,6 +207,20 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp format_web_search(report) do
     ok("web search", "backend #{report.backend} configured")
   end
+
+  defp format_channel_health([]), do: ok("channel health", "no enabled channels configured")
+
+  defp format_channel_health(probes) do
+    detail = Enum.map_join(probes, "; ", &format_channel_probe/1)
+
+    cond do
+      Enum.any?(probes, &(&1.status == :error)) -> fail("channel health", detail)
+      Enum.any?(probes, &(&1.status == :warn)) -> warn("channel health", detail)
+      true -> ok("channel health", detail)
+    end
+  end
+
+  defp format_channel_probe(probe), do: "#{probe.name}=#{probe.status} (#{probe.detail})"
 
   @spec command_owner_config() :: result()
   def command_owner_config do

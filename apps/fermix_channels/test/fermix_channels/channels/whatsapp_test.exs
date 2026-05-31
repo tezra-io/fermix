@@ -479,6 +479,65 @@ defmodule FermixChannels.Channels.WhatsAppTest do
     end
   end
 
+  describe "health_check/1" do
+    test "returns ok when the phone number id matches config" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        assert conn.request_path == "/v19.0/123456789"
+
+        Req.Test.json(conn, %{
+          "id" => "123456789",
+          "verified_name" => "Fermix"
+        })
+      end)
+
+      assert {:ok, %{detail: "WhatsApp Fermix authenticated", latency_ms: ms}} =
+               WhatsApp.health_check()
+
+      assert is_integer(ms)
+    end
+
+    test "classifies phone number id mismatches as misconfigured" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        Req.Test.json(conn, %{"id" => "000000000"})
+      end)
+
+      assert {:error,
+              {:misconfigured, "whatsapp phone_number_id 123456789 does not match 000000000"}} =
+               WhatsApp.health_check()
+    end
+
+    test "classifies auth failures" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(401, Jason.encode!(%{"error" => %{"message" => "bad token"}}))
+      end)
+
+      assert {:error, {:auth_failed, "WhatsApp API HTTP 401: bad token"}} =
+               WhatsApp.health_check()
+    end
+
+    test "classifies server errors" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(500, Jason.encode!(%{"error" => %{"message" => "server error"}}))
+      end)
+
+      assert {:error, {:server_error, 500, %{"error" => %{"message" => "server error"}}}} =
+               WhatsApp.health_check()
+    end
+
+    test "classifies network failures" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        Req.Test.transport_error(conn, :nxdomain)
+      end)
+
+      assert {:error, {:network, %Req.TransportError{reason: :nxdomain}}} =
+               WhatsApp.health_check()
+    end
+  end
+
   describe "verify_challenge/1" do
     test "returns the challenge for a valid verify token" do
       assert {:ok, "challenge-value"} =

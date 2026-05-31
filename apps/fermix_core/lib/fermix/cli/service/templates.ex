@@ -9,6 +9,11 @@ defmodule Fermix.CLI.Service.Templates do
   with no extra environment beyond `FERMIX_HOME` (when present).
   """
 
+  # The BEAM opens many file descriptors (sockets, .beam modules, the SQLite
+  # DB, channel pollers). macOS launchd defaults to 256 and systemd to ~1024 —
+  # both far too low; raise the limit so the daemon never hits :emfile.
+  @max_open_files 65_536
+
   @spec render_darwin_plist(map()) :: String.t()
   def render_darwin_plist(%{
         label: label,
@@ -28,6 +33,14 @@ defmodule Fermix.CLI.Service.Templates do
       <key>EnvironmentVariables</key>
       <dict>
         <key>FERMIX_HOME</key><string>#{fermix_home}</string>
+      </dict>
+      <key>SoftResourceLimits</key>
+      <dict>
+        <key>NumberOfFiles</key><integer>#{@max_open_files}</integer>
+      </dict>
+      <key>HardResourceLimits</key>
+      <dict>
+        <key>NumberOfFiles</key><integer>#{@max_open_files}</integer>
       </dict>
       <key>ProgramArguments</key>
       <array>
@@ -62,6 +75,7 @@ defmodule Fermix.CLI.Service.Templates do
     ExecStart=#{fermix_path} run
     Restart=on-failure
     RestartSec=5
+    LimitNOFILE=#{@max_open_files}
     StandardOutput=append:#{log_path}
     StandardError=append:#{log_path}
 

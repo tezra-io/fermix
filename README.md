@@ -26,7 +26,7 @@ brew install tezra-io/tap/fermix
 fermix setup
 ```
 
-`fermix setup` installs and starts the background service, then opens your browser to finish configuration. On a headless host it runs a terminal wizard instead (`--cli` to force it); pass `--no-service` to configure without installing the service.
+`fermix setup` installs and starts the background service, then prints the setup URL and opens `http://127.0.0.1:4030/setup` in your browser to finish configuration. On a headless host it runs a terminal wizard instead (`--cli` forces it); `--no-service` configures without installing the service, and `--no-browser` prints the URL instead of opening one.
 
 Confirm the daemon is up:
 
@@ -43,26 +43,20 @@ fermix: running (pid 12345, version 0.1.0, up 4s)
 brew install tezra-io/tap/fermix
 ```
 
-### curl | sh
-
-```bash
-curl -fsSL https://fermix.sh/install | sh
-```
-
-The installer detects your `(os, arch)`, downloads the matching signed release artifact, and drops `fermix` on `PATH`. Supported targets: `macos_aarch64`, `macos_x86_64`, `linux_aarch64`, `linux_x86_64`.
-
 ### Build from source
 
-Requires Elixir ≥ 1.19, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.x — Burrito uses it to package the self-contained binary.
+Requires Elixir ≥ 1.19, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
 
 ```bash
 git clone https://github.com/tezra-io/fermix.git
 cd fermix
 mix deps.get
-# Builds a self-contained binary into burrito_out/. Targets: macos_aarch64,
-# macos_x86_64, linux_aarch64, linux_x86_64 — omit BURRITO_TARGET to build all four.
+# Compile + digest the web assets, then package a self-contained binary into
+# burrito_out/. Targets: macos_aarch64, macos_x86_64, linux_aarch64,
+# linux_x86_64 — omit BURRITO_TARGET to build all four.
+MIX_ENV=prod mix assets.deploy
 BURRITO_TARGET=macos_aarch64 MIX_ENV=prod mix release fermix --overwrite
-install -m 0755 burrito_out/fermix_macos_aarch64 /usr/local/bin/fermix
+sudo install -m 0755 burrito_out/fermix_macos_aarch64 /usr/local/bin/fermix
 fermix setup
 ```
 
@@ -70,7 +64,7 @@ To run against unreleased code without packaging a binary, use [`mix fermix.dev`
 
 ## Configure
 
-`fermix setup` is the single entry point for first-run configuration. It is interactive when required and accepts non-interactive flags (`--openai-api-key`, `--telegram-bot-token`, …) for scripted installs. Once setup is complete, no-arg reruns stay idempotent and only seed missing prompt files; use `fermix setup --reconfigure` to force the provider/model/effort prompts again. It writes a typed snapshot to:
+`fermix setup` is the single entry point for first-run configuration. By default it installs the service and opens the browser setup at `http://127.0.0.1:4030/setup`; on a headless host — or with `--cli` — it runs a terminal wizard. It also accepts non-interactive flags (`--openai-api-key`, `--telegram-bot-token`, …) for scripted installs. Once setup is complete, no-arg reruns stay idempotent and only seed missing prompt files; use `fermix setup --reconfigure` to force the provider/model/effort prompts again. It writes a typed snapshot to:
 
 - `FERMIX_HOME/config.toml` (default `FERMIX_HOME` is `~/.fermix`)
 
@@ -125,6 +119,7 @@ chat_id = "8217352118"
 | `FERMIX_HOME` | No | Override the persisted config and workspace root |
 | `FERMIX_TRACE_DIR` | No | Override the trace output directory |
 | `FERMIX_LOG_FILE` | No | Override the log file path |
+| `FERMIX_HTTP_BIND` | No | Web endpoint bind address; defaults to `127.0.0.1` (loopback). `0.0.0.0` serves on the network but also exposes the setup/reconfig surface — gate it behind a trusted network |
 | `FERMIX_REALTIME_ENABLED` | No | Enable the local Realtime voice companion mode |
 | `FERMIX_REALTIME_PROVIDER` | No | Realtime provider; only `openai` is supported |
 | `FERMIX_REALTIME_MODEL` | No | Override the OpenAI Realtime model |
@@ -256,7 +251,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 
 | Command | Description |
 |---------|-------------|
-| `fermix setup [--reconfigure]` | Run the interactive (or flag-driven) configuration wizard |
+| `fermix setup [--reconfigure]` | Install + start the service and open the browser setup (or a terminal wizard with `--cli`) |
 | `fermix run` | Start the daemon in the foreground (used by service units) |
 | `fermix service install [--user\|--system]` | Write and enable the OS service unit |
 | `fermix service uninstall [--user\|--system]` | Remove the OS service unit |
