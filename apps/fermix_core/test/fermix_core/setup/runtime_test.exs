@@ -15,6 +15,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     fermix_home = System.get_env("FERMIX_HOME")
+    openai_api_key = System.get_env("OPENAI_API_KEY")
 
     on_exit(fn ->
       restore(:fermix_core, :providers, providers)
@@ -28,6 +29,11 @@ defmodule FermixCore.Setup.RuntimeTest do
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
         value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      case openai_api_key do
+        nil -> System.delete_env("OPENAI_API_KEY")
+        value -> System.put_env("OPENAI_API_KEY", value)
       end
     end)
 
@@ -57,7 +63,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     }
   end
 
-  defp prepare(home) do
+  defp prepare(home, opts \\ []) do
     System.put_env("FERMIX_HOME", home)
     File.mkdir_p!(home)
 
@@ -87,7 +93,21 @@ defmodule FermixCore.Setup.RuntimeTest do
     )
 
     restart_global_memory_repo!()
-    :ok = ConfigStore.save_snapshot(baseline_snapshot())
+
+    :ok =
+      ConfigStore.save_snapshot(
+        snapshot_with_openai_key(baseline_snapshot(), Keyword.get(opts, :openai_api_key))
+      )
+  end
+
+  # Persist the openai api_key as a plaintext config literal. On hosts with an
+  # OS secret writer the wizard relocates it to the keychain; CI has none, so
+  # without this the probe sees an unconfigured provider and skips it.
+  defp snapshot_with_openai_key(snapshot, nil), do: snapshot
+
+  defp snapshot_with_openai_key(snapshot, key) do
+    core = Keyword.put(snapshot.fermix_core, :providers, openai: [api_key: key])
+    %{snapshot | fermix_core: core}
   end
 
   defp restart_global_memory_repo! do
@@ -243,7 +263,10 @@ defmodule FermixCore.Setup.RuntimeTest do
     test "probe pass emits an auth-probe line and returns :ok" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
+      # Persist the key as a config literal so the probe's provider lookup works
+      # on CI (no OS secret writer); export it too for the readiness gate.
+      prepare(home, openai_api_key: "sk-test")
+      System.put_env("OPENAI_API_KEY", "sk-test")
 
       {puts, collector} = puts_collector()
       probe_plug = fn conn -> Plug.Conn.send_resp(conn, 200, "{}") end
@@ -262,7 +285,8 @@ defmodule FermixCore.Setup.RuntimeTest do
     test "probe auth_scope_mismatch (401) fails the run with a clear error message" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
+      prepare(home, openai_api_key: "sk-bad")
+      System.put_env("OPENAI_API_KEY", "sk-bad")
 
       {puts, _collector} = puts_collector()
       probe_plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
@@ -281,7 +305,8 @@ defmodule FermixCore.Setup.RuntimeTest do
     test "probe transient 5xx is inconclusive — run returns :ok with a warning line" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
+      prepare(home, openai_api_key: "sk-test")
+      System.put_env("OPENAI_API_KEY", "sk-test")
 
       {puts, collector} = puts_collector()
       probe_plug = fn conn -> Plug.Conn.send_resp(conn, 503, "service unavailable") end
@@ -667,6 +692,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     test "extracts provider/default_model/reasoning_effort opts as answers" do
       opts = [
         provider: "openai_codex",
+        anthropic_api_key: "sk-ant-test",
         default_model: "gpt-5.5",
         reasoning_effort: "high",
         realtime_enabled: true,
@@ -678,6 +704,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       assert answers = Runtime.provided_answers(opts)
       assert Keyword.get(answers, :provider) == "openai_codex"
+      assert Keyword.get(answers, :anthropic_api_key) == "sk-ant-test"
       assert Keyword.get(answers, :default_model) == "gpt-5.5"
       assert Keyword.get(answers, :reasoning_effort) == "high"
       assert Keyword.get(answers, :realtime_enabled) == true

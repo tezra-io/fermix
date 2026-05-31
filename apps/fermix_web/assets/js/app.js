@@ -37,26 +37,22 @@ topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
 window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
-let pendingPluginAuthWindow = null
+let pendingAuthWindow = null
 
-window.addEventListener("click", event => {
-  const trigger = event.target.closest("[data-plugin-auth-trigger='true']")
-  if (!trigger) return
+const openAuthPlaceholder = () => {
+  pendingAuthWindow = window.open("about:blank", "_blank")
+  if (!pendingAuthWindow) return
 
-  pendingPluginAuthWindow = window.open("about:blank", "_blank")
-  if (!pendingPluginAuthWindow) return
+  pendingAuthWindow.opener = null
+  pendingAuthWindow.document.title = "Opening sign-in"
+  pendingAuthWindow.document.body.innerHTML = "<p>Opening sign-in...</p>"
+}
 
-  pendingPluginAuthWindow.opener = null
-  pendingPluginAuthWindow.document.title = "Opening sign-in"
-  pendingPluginAuthWindow.document.body.innerHTML = "<p>Opening sign-in...</p>"
-})
-
-window.addEventListener("phx:plugin-auth-open", ({detail}) => {
-  const url = detail?.url
+const openAuthUrl = url => {
   if (!url) return
 
-  const authWindow = pendingPluginAuthWindow
-  pendingPluginAuthWindow = null
+  const authWindow = pendingAuthWindow
+  pendingAuthWindow = null
 
   if (authWindow && !authWindow.closed) {
     authWindow.location.replace(url)
@@ -65,6 +61,21 @@ window.addEventListener("phx:plugin-auth-open", ({detail}) => {
   }
 
   window.open(url, "_blank", "noopener,noreferrer")
+}
+
+window.addEventListener("click", event => {
+  const trigger = event.target.closest("[data-auth-trigger='true'], [data-plugin-auth-trigger='true']")
+  if (!trigger) return
+
+  openAuthPlaceholder()
+})
+
+window.addEventListener("phx:plugin-auth-open", ({detail}) => {
+  openAuthUrl(detail?.url)
+})
+
+window.addEventListener("phx:codex-auth-open", ({detail}) => {
+  openAuthUrl(detail?.url)
 })
 
 // connect if there are any LiveViews on the page

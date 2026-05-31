@@ -18,6 +18,12 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :anthropic_api_key,
+      env: "ANTHROPIC_API_KEY",
+      path: [:fermix_core, :providers, :anthropic, :api_key],
+      sandbox_env: true
+    },
+    %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :tavily_api_key],

@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 13 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 14 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -75,9 +75,11 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     contents = File.read!(ConfigStore.path())
 
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
+    assert contents =~ ~s([sandbox.env.ANTHROPIC_API_KEY])
     assert contents =~ ~s(source = "command")
     assert contents =~ ~s(command = "/usr/bin/security")
     assert contents =~ ~r/allow = \[[^\]]*"OPENAI_API_KEY"/
+    assert contents =~ ~r/allow = \[[^\]]*"ANTHROPIC_API_KEY"/
 
     refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
     refute contents =~ ~s([sandbox.env.SLACK_BOT_TOKEN])
@@ -115,6 +117,9 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_core.providers.openai]
     api_key = "sk-old"
 
+    [fermix_core.providers.anthropic]
+    api_key = "sk-ant-old"
+
     [fermix_core.tools.web_search]
     tavily_api_key = "tavily-old"
     exa_api_key = "exa-old"
@@ -143,6 +148,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
   defp secret_values do
     %{
       openai_api_key: "sk-old",
+      anthropic_api_key: "sk-ant-old",
       tavily_api_key: "tavily-old",
       exa_api_key: "exa-old",
       parallel_api_key: "parallel-old",

@@ -15,6 +15,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :active_tab, :string, required: true
   attr :channels_form, :map, required: true
+  attr :codex_auth, :map, required: true
+  attr :codex_auth_running?, :boolean, required: true
+  attr :codex_auth_url, :string, default: nil
   attr :doctor_result, :any, required: true
   attr :memory_form, :map, required: true
   attr :personalization_form, :map, required: true
@@ -65,6 +68,9 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.active_pane
               active_tab={@active_tab}
               channels_form={@channels_form}
+              codex_auth={@codex_auth}
+              codex_auth_running?={@codex_auth_running?}
+              codex_auth_url={@codex_auth_url}
               doctor_result={@doctor_result}
               memory_form={@memory_form}
               personalization_form={@personalization_form}
@@ -175,6 +181,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :active_tab, :string, required: true
   attr :channels_form, :map, required: true
+  attr :codex_auth, :map, required: true
+  attr :codex_auth_running?, :boolean, required: true
+  attr :codex_auth_url, :string, default: nil
   attr :doctor_result, :any, required: true
   attr :memory_form, :map, required: true
   attr :personalization_form, :map, required: true
@@ -210,61 +219,93 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Choose the reasoning backend and default model. Secrets stay out of the browser after save."
       />
 
-      <form phx-submit="save_provider" phx-change="provider_changed" class="mt-6 space-y-5">
-        <div class="grid gap-4 lg:grid-cols-2">
-          <label class="form-control w-full">
-            <span class="label pb-1 text-sm font-medium">Provider</span>
-            <select name="provider_form[provider]" class="select select-bordered w-full bg-base-100">
-              <option
-                :for={provider <- ModelCatalog.providers()}
-                value={Atom.to_string(provider)}
-                selected={provider == @provider_form.provider}
-              >
-                {Atom.to_string(provider)}
-              </option>
-            </select>
-          </label>
+      <form phx-submit="save_provider" phx-change="provider_changed" class="mt-6">
+        <div class={provider_grid_class(@provider_form.provider)}>
+          <section class="min-w-0 space-y-5">
+            <div class="grid gap-4 lg:grid-cols-2">
+              <label class="form-control w-full">
+                <span class="label pb-1 text-sm font-medium">Provider</span>
+                <select
+                  name="provider_form[provider]"
+                  class="select select-bordered w-full bg-base-100"
+                >
+                  <option
+                    :for={provider <- ModelCatalog.providers()}
+                    value={Atom.to_string(provider)}
+                    selected={provider == @provider_form.provider}
+                  >
+                    {Atom.to_string(provider)}
+                  </option>
+                </select>
+              </label>
 
-          <label class="form-control w-full">
-            <span class="label pb-1 text-sm font-medium">Default model</span>
-            <select
-              name="provider_form[default_model]"
-              class="select select-bordered w-full bg-base-100"
-            >
-              <option
-                :for={{id, label, ctx} <- @provider_models}
-                value={id}
-                selected={id == @provider_form.default_model}
-              >
-                {label} ({id} - {format_context(ctx)})
-              </option>
-            </select>
-          </label>
+              <label class="form-control w-full">
+                <span class="label pb-1 text-sm font-medium">Default model</span>
+                <select
+                  name="provider_form[default_model]"
+                  class="select select-bordered w-full bg-base-100"
+                >
+                  <option
+                    :for={{id, label, ctx} <- @provider_models}
+                    value={id}
+                    selected={id == @provider_form.default_model}
+                  >
+                    {label} ({id} - {format_context(ctx)})
+                  </option>
+                </select>
+              </label>
+            </div>
+
+            <div :if={provider_connection?(@provider_form.provider)} class="space-y-3">
+              <h3 class="text-sm font-semibold">Connection</h3>
+              <.provider_secret_field provider_form={@provider_form} report={@report} />
+              <.codex_auth_field
+                provider_form={@provider_form}
+                codex_auth={@codex_auth}
+                codex_auth_running?={@codex_auth_running?}
+                codex_auth_url={@codex_auth_url}
+              />
+            </div>
+          </section>
+
+          <.provider_behavior_panel provider_form={@provider_form} />
         </div>
 
-        <.provider_secret_field provider_form={@provider_form} report={@report} />
-        <.reasoning_effort_field provider_form={@provider_form} />
-        <.codex_fast_field provider_form={@provider_form} />
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save provider" />
       </form>
     </div>
     """
   end
 
+  defp provider_grid_class(provider) do
+    [
+      "grid gap-5",
+      provider_behavior?(provider) && "xl:grid-cols-[minmax(0,1fr)_22rem] xl:items-start"
+    ]
+  end
+
+  defp provider_connection?(provider), do: provider in [:openai, :openai_codex, :anthropic]
+  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex]
+
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
 
   defp provider_secret_field(assigns) do
+    assigns =
+      assigns
+      |> assign(:secret_label, provider_secret_label(assigns.provider_form.provider))
+      |> assign(:secret_name, provider_secret_name(assigns.provider_form.provider))
+
     ~H"""
     <label
-      :if={@provider_form.provider == :openai}
-      class="form-control w-full max-w-xl"
+      :if={@secret_name}
+      class="form-control w-full"
     >
-      <span class="label pb-1 text-sm font-medium">OpenAI API key</span>
+      <span class="label pb-1 text-sm font-medium">{@secret_label}</span>
       <input
         type="password"
-        name="provider_form[openai_api_key]"
-        placeholder={secret_placeholder(api_key_set?(@report))}
+        name={@secret_name}
+        placeholder={secret_placeholder(api_key_set?(@report, @provider_form.provider))}
         class="input input-bordered w-full bg-base-100 font-mono"
         value=""
       />
@@ -275,19 +316,123 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  defp provider_secret_label(:openai), do: "OpenAI API key"
+  defp provider_secret_label(:anthropic), do: "Anthropic API key"
+  defp provider_secret_label(_provider), do: nil
+
+  defp provider_secret_name(:openai), do: "provider_form[openai_api_key]"
+  defp provider_secret_name(:anthropic), do: "provider_form[anthropic_api_key]"
+  defp provider_secret_name(_provider), do: nil
+
+  attr :provider_form, :map, required: true
+  attr :codex_auth, :map, required: true
+  attr :codex_auth_running?, :boolean, required: true
+  attr :codex_auth_url, :string, default: nil
+
+  defp codex_auth_field(assigns) do
+    ~H"""
+    <section
+      :if={@provider_form.provider == :openai_codex}
+      data-codex-auth-panel="true"
+      class="rounded-field border border-base-300 bg-base-200/40 p-3"
+    >
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="text-sm font-medium">ChatGPT OAuth</p>
+          <p class="mt-1 text-xs leading-5 text-base-content/60">
+            Codex uses browser login and stores credentials in the Fermix auth store.
+          </p>
+        </div>
+        <span class={codex_auth_badge_class(@codex_auth, @codex_auth_running?)}>
+          {codex_auth_badge_label(@codex_auth, @codex_auth_running?)}
+        </span>
+      </div>
+
+      <p :if={@codex_auth.account} class="mt-2 truncate text-xs text-base-content/55">
+        Account: {@codex_auth.account}
+      </p>
+
+      <p :if={@codex_auth.error} class="mt-2 text-xs text-error">
+        Auth store error: {@codex_auth.error}
+      </p>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="btn btn-outline btn-sm"
+          phx-click="codex_login"
+          data-auth-trigger="true"
+          disabled={@codex_auth_running?}
+        >
+          <.icon name="hero-key" class="size-4" />
+          {codex_auth_button_label(@codex_auth, @codex_auth_running?)}
+        </button>
+      </div>
+
+      <div
+        :if={@codex_auth_url}
+        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
+      >
+        <span>If the ChatGPT tab did not open, use the fallback link.</span>
+        <a
+          class="link link-primary font-medium"
+          href={@codex_auth_url}
+          target="_blank"
+          rel="noreferrer"
+        >
+          Open sign-in
+        </a>
+      </div>
+    </section>
+    """
+  end
+
+  defp codex_auth_badge_class(_auth, true), do: "badge badge-warning badge-sm"
+  defp codex_auth_badge_class(%{connected?: true}, false), do: "badge badge-success badge-sm"
+  defp codex_auth_badge_class(_auth, false), do: "badge badge-warning badge-sm"
+
+  defp codex_auth_badge_label(_auth, true), do: "Waiting"
+  defp codex_auth_badge_label(%{connected?: true}, false), do: "Connected"
+  defp codex_auth_badge_label(_auth, false), do: "Needs auth"
+
+  defp codex_auth_button_label(_auth, true), do: "Waiting for login"
+  defp codex_auth_button_label(%{connected?: true}, false), do: "Reconnect ChatGPT"
+  defp codex_auth_button_label(_auth, false), do: "Sign in with ChatGPT"
+
+  attr :provider_form, :map, required: true
+
+  defp provider_behavior_panel(assigns) do
+    ~H"""
+    <section
+      :if={provider_behavior?(@provider_form.provider)}
+      class="rounded-field border border-base-300 bg-base-200/40 p-4"
+    >
+      <div class="flex items-center justify-between gap-3">
+        <h3 class="text-sm font-semibold">Model behavior</h3>
+        <span class="badge badge-ghost badge-sm">{Atom.to_string(@provider_form.provider)}</span>
+      </div>
+
+      <div class="mt-4 space-y-4">
+        <.reasoning_effort_field provider_form={@provider_form} />
+        <.codex_fast_field provider_form={@provider_form} />
+      </div>
+    </section>
+    """
+  end
+
   attr :provider_form, :map, required: true
 
   defp reasoning_effort_field(assigns) do
     ~H"""
     <fieldset
       :if={@provider_form.provider in [:openai, :openai_codex]}
-      class="form-control rounded-field border border-base-300 bg-base-200/40 p-3"
+      class="form-control"
     >
       <legend class="label pb-1 text-sm font-medium">Reasoning effort</legend>
-      <div class="flex flex-wrap gap-3">
+      <div class="mt-1 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2">
         <label
           :for={effort <- effort_levels(@provider_form.provider)}
-          class="label cursor-pointer gap-2 rounded-field px-2 py-1 hover:bg-base-100"
+          class="flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-2.5 py-2 hover:border-primary/50"
         >
           <input
             type="radio"
@@ -313,7 +458,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <label
       :if={@provider_form.provider == :openai_codex}
-      class="flex max-w-xl items-start gap-3 rounded-field border border-base-300 bg-base-200/40 p-3"
+      class="flex items-start gap-3 rounded-field border border-base-300 bg-base-100 p-3"
     >
       <input type="hidden" name="provider_form[fast]" value="false" />
       <input
@@ -1457,11 +1602,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp secret_placeholder(true), do: "configured - leave blank to keep"
   defp secret_placeholder(false), do: "paste secret"
 
-  defp api_key_set?(report) do
+  defp api_key_set?(report, provider) do
     report.wizard.config_snapshot
     |> Map.get(:fermix_core, [])
     |> Keyword.get(:providers, [])
-    |> Keyword.get(:openai, [])
+    |> Keyword.get(provider, [])
     |> Keyword.get(:api_key)
     |> present?()
   end

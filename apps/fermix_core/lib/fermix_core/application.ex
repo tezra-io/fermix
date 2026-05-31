@@ -7,6 +7,7 @@ defmodule FermixCore.Application do
   alias Burrito.Util, as: BurritoUtil
   alias Burrito.Util.Args, as: BurritoArgs
   alias Fermix.CLI.Daemon
+  alias Fermix.CLI.Setup
   alias FermixCore.Agents.AgentSupervisor
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
@@ -65,12 +66,14 @@ defmodule FermixCore.Application do
     end
   end
 
-  # `setup`: build the supervision tree (needed for `Memory.Repo` during
-  # `SetupSeeder`), run the wizard synchronously, then halt before OTP
-  # proceeds to start fermix_channels/fermix_web. Setup never binds a
-  # network port.
+  # `setup`: the service-first web path avoids the local tree and starts
+  # the real daemon instead. Terminal setup still builds the tree needed
+  # for `SetupSeeder`, then halts before sibling OTP apps start.
   defp cli_dispatch(["setup" | _] = argv) do
-    {:ok, _pid} = start_supervision_tree()
+    if Setup.supervision_required?(tl(argv)) do
+      {:ok, _pid} = start_supervision_tree()
+    end
+
     System.halt(run_cli(argv))
   end
 
