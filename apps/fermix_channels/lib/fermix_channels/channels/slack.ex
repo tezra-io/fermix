@@ -19,6 +19,7 @@ defmodule FermixChannels.Channels.Slack do
   alias FermixCore.Telemetry
 
   @api_base "https://slack.com/api"
+  @health_timeout_ms 5_000
   @max_message_length 40_000
   @max_signature_age_seconds 300
   @max_media_bytes 100 * 1_024 * 1_024
@@ -118,6 +119,23 @@ defmodule FermixChannels.Channels.Slack do
     end
   end
 
+  @impl true
+  @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
+  def health_check(opts \\ []) do
+    start = System.monotonic_time(:millisecond)
+
+    with {:ok, token} <- bot_token() do
+      Req.new(url: "#{@api_base}/auth.test", method: :post)
+      |> Req.Request.put_header("authorization", "Bearer #{token}")
+      |> Req.merge(health_req_options(opts))
+      |> HttpClient.request("Slack health")
+      |> classify_health_response(start)
+    else
+      {:error, :not_configured} ->
+        {:error, {:misconfigured, "slack bot_token is not configured"}}
+    end
+  end
+
   @doc false
   @spec url_verification_challenge(map()) ::
           {:ok, String.t()} | :ignore | {:error, :invalid_webhook_payload}
@@ -130,6 +148,29 @@ defmodule FermixChannels.Channels.Slack do
     do: {:error, :invalid_webhook_payload}
 
   def url_verification_challenge(_payload), do: :ignore
+
+  defp classify_health_response({:ok, %{status: 200, body: %{"ok" => true} = body}}, start) do
+    team = Map.get(body, "team") || Map.get(body, "team_id") || "workspace"
+    {:ok, %{detail: "Slack #{team} authenticated", latency_ms: elapsed_ms(start)}}
+  end
+
+  defp classify_health_response({:ok, %{status: 200, body: %{"error" => error}}}, _start) do
+    {:error, {:auth_failed, "Slack auth.test failed: #{error}"}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _start)
+       when status in [401, 403] do
+    {:error, {:auth_failed, "Slack API HTTP #{status}: #{api_description(body)}"}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _start) do
+    {:error, {:server_error, status, body}}
+  end
+
+  defp classify_health_response({:error, reason}, _start), do: {:error, {:network, reason}}
+
+  defp api_description(%{"error" => error}) when is_binary(error), do: error
+  defp api_description(_body), do: "request rejected"
 
   defp parse_event(event, payload) do
     if process_event?(event) do
@@ -376,6 +417,20 @@ defmodule FermixChannels.Channels.Slack do
     end
   end
 
+  defp health_req_options(opts) do
+    opts
+    |> req_options()
+    |> Keyword.put(:receive_timeout, health_timeout_ms(opts))
+    |> Keyword.put(:retry, false)
+  end
+
+  defp health_timeout_ms(opts) do
+    case Keyword.get(opts, :timeout_ms, @health_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 -> timeout_ms
+      _other -> @health_timeout_ms
+    end
+  end
+
   defp handle_send_response({:ok, %{status: 200, body: %{"ok" => true}}}, duration_us) do
     ChannelTelemetry.emit_message(:slack, :outbound, 1, duration_us)
     :ok
@@ -456,4 +511,5 @@ defmodule FermixChannels.Channels.Slack do
 
   defp present?(value) when is_binary(value), do: value != ""
   defp present?(_value), do: false
+  defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end

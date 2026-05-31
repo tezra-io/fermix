@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
   attr :doctor_result, :any, required: true
+  attr :doctor_probe_running?, :boolean, default: false
   attr :memory_form, :map, required: true
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
@@ -27,6 +28,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_summary, :map, required: true
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
+  attr :restart_pending?, :boolean, default: false
   attr :sandbox_form, :map, required: true
   attr :search_form, :map, required: true
   attr :restarting, :boolean, default: false
@@ -72,6 +74,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               codex_auth_running?={@codex_auth_running?}
               codex_auth_url={@codex_auth_url}
               doctor_result={@doctor_result}
+              doctor_probe_running?={@doctor_probe_running?}
               memory_form={@memory_form}
               personalization_form={@personalization_form}
               provider_form={@provider_form}
@@ -80,6 +83,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               plugin_summary={@plugin_summary}
               realtime_form={@realtime_form}
               report={@report}
+              restart_pending?={@restart_pending?}
               sandbox_form={@sandbox_form}
               search_form={@search_form}
               skill_summary={@skill_summary}
@@ -103,9 +107,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <aside class="lg:sticky lg:top-6">
       <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
         <div class="flex items-center gap-3 px-1">
-          <div class="grid size-9 shrink-0 place-items-center rounded-field bg-primary font-bold text-primary-content">
-            F
-          </div>
+          <img src={~p"/images/logo.svg"} width="36" height="36" alt="Fermix" class="size-9 shrink-0" />
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold leading-tight">Fermix setup</p>
             <p class="truncate text-xs text-base-content/55">Guided onboarding</p>
@@ -185,6 +187,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
   attr :doctor_result, :any, required: true
+  attr :doctor_probe_running?, :boolean, default: false
   attr :memory_form, :map, required: true
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
@@ -193,6 +196,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_summary, :map, required: true
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
+  attr :restart_pending?, :boolean, default: false
   attr :sandbox_form, :map, required: true
   attr :search_form, :map, required: true
   attr :skill_summary, :map, required: true
@@ -834,7 +838,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Readiness doctor"
-        subtitle="Review remaining setup gaps and run a live provider probe when you are ready."
+        subtitle="Review remaining setup gaps and run live provider and channel probes when you are ready."
       />
       <div class="mt-6 space-y-4">
         <.validation_list report={@report} />
@@ -847,11 +851,22 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-arrow-left" class="size-4" /> Back
         </button>
         <div class="flex flex-wrap items-center gap-2">
-          <button type="button" class="btn btn-ghost btn-sm" phx-click="run_doctor">
-            <.icon name="hero-play" class="size-4" /> Run probe
+          <button
+            type="button"
+            class="btn btn-ghost btn-sm"
+            phx-click="run_doctor"
+            disabled={@doctor_probe_running?}
+          >
+            <span
+              :if={@doctor_probe_running?}
+              class="loading loading-spinner loading-xs"
+              aria-hidden="true"
+            />
+            <.icon :if={!@doctor_probe_running?} name="hero-play" class="size-4" />
+            {if @doctor_probe_running?, do: "Running...", else: "Run probe"}
           </button>
           <button
-            :if={@report.restart_required?}
+            :if={@report.restart_required? || @restart_pending?}
             type="button"
             class="btn btn-primary btn-sm"
             phx-click="apply_restart"
@@ -1290,6 +1305,14 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <.icon name={flash_icon(@flash.kind)} class="size-4 shrink-0" />
       <span>{@flash.message}</span>
+      <button
+        :if={Map.get(@flash, :restart_required?, false)}
+        type="button"
+        class="btn btn-primary btn-xs ml-auto"
+        phx-click="apply_restart"
+      >
+        <.icon name="hero-arrow-path" class="size-3.5" /> Apply &amp; restart
+      </button>
     </div>
     """
   end
@@ -1395,18 +1418,54 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :result, :any, required: true
 
   defp doctor_result(assigns) do
+    assigns =
+      assigns
+      |> assign(:provider_result, provider_probe_result(assigns.result))
+      |> assign(:channel_results, channel_probe_results(assigns.result))
+
     ~H"""
     <section class="rounded-box border border-base-300 p-4">
       <h3 class="font-semibold">Provider probe</h3>
-      <p :if={is_nil(@result)} class="mt-2 text-sm text-base-content/70">
+      <p :if={is_nil(@provider_result)} class="mt-2 text-sm text-base-content/70">
         The probe has not run in this session.
       </p>
-      <p :if={match?({:ok, _}, @result)} class="mt-2 text-sm text-success">
-        {doctor_success(@result)}
+      <p
+        :if={@provider_result == :running}
+        class="mt-2 flex items-center gap-2 text-sm text-base-content/70"
+      >
+        <span class="loading loading-spinner loading-xs" aria-hidden="true" />
+        Provider probe is running.
       </p>
-      <p :if={match?({:error, _}, @result)} class="mt-2 text-sm text-error">
-        {doctor_error(@result)}
+      <p :if={match?({:ok, _}, @provider_result)} class="mt-2 text-sm text-success">
+        {doctor_success(@provider_result)}
       </p>
+      <p :if={match?({:error, _}, @provider_result)} class="mt-2 text-sm text-error">
+        {doctor_error(@provider_result)}
+      </p>
+
+      <div class="mt-4 border-t border-base-300 pt-4">
+        <h3 class="font-semibold">Channel probes</h3>
+        <p :if={is_nil(@channel_results)} class="mt-2 text-sm text-base-content/70">
+          Channel probes run with the provider probe.
+        </p>
+        <p :if={@channel_results == []} class="mt-2 text-sm text-base-content/70">
+          No enabled channels are configured.
+        </p>
+        <ul :if={is_list(@channel_results) && @channel_results != []} class="mt-3 space-y-2">
+          <li
+            :for={probe <- @channel_results}
+            class="flex items-start justify-between gap-3 text-sm"
+          >
+            <div class="min-w-0">
+              <p class="font-medium">{probe.name}</p>
+              <p class={["mt-0.5", channel_probe_text_class(probe.status)]}>{probe.detail}</p>
+            </div>
+            <span class={channel_probe_badge_class(probe.status)}>
+              {channel_probe_label(probe.status)}
+            </span>
+          </li>
+        </ul>
+      </div>
     </section>
     """
   end
@@ -1599,7 +1658,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp format_policy(policy), do: policy |> Atom.to_string() |> String.replace("_", " ")
-  defp secret_placeholder(true), do: "configured - leave blank to keep"
+  defp secret_placeholder(true), do: "stored - leave blank to keep or paste to replace"
   defp secret_placeholder(false), do: "paste secret"
 
   defp api_key_set?(report, provider) do
@@ -1616,6 +1675,32 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(value) when is_list(value), do: value != []
   defp present?(_), do: true
+
+  defp provider_probe_result(nil), do: nil
+  defp provider_probe_result(%{provider: result}), do: result
+  defp provider_probe_result(result), do: result
+
+  defp channel_probe_results(nil), do: nil
+  defp channel_probe_results(%{channels: channels}) when is_list(channels), do: channels
+  defp channel_probe_results(_result), do: nil
+
+  defp channel_probe_text_class(:ok), do: "text-success"
+  defp channel_probe_text_class(:warn), do: "text-warning"
+  defp channel_probe_text_class(:error), do: "text-error"
+  defp channel_probe_text_class(:running), do: "text-base-content/70"
+  defp channel_probe_text_class(_status), do: "text-base-content/70"
+
+  defp channel_probe_badge_class(:ok), do: "badge badge-success badge-sm"
+  defp channel_probe_badge_class(:warn), do: "badge badge-warning badge-sm"
+  defp channel_probe_badge_class(:error), do: "badge badge-error badge-sm"
+  defp channel_probe_badge_class(:running), do: "badge badge-info badge-sm"
+  defp channel_probe_badge_class(_status), do: "badge badge-ghost badge-sm"
+
+  defp channel_probe_label(:ok), do: "OK"
+  defp channel_probe_label(:warn), do: "Warn"
+  defp channel_probe_label(:error), do: "Error"
+  defp channel_probe_label(:running), do: "Running"
+  defp channel_probe_label(status), do: status |> Atom.to_string() |> String.replace("_", " ")
 
   defp doctor_success({:ok, result}) do
     "#{result.provider} #{result.model} responded in #{result.latency_ms} ms."

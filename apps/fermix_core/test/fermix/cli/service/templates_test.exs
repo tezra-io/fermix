@@ -20,6 +20,7 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert plist =~ "<key>FERMIX_HOME</key><string>/Users/dev/.fermix</string>"
       assert plist =~ "<string>/usr/local/bin/fermix</string>"
       assert plist =~ "<string>run</string>"
+      assert plist =~ "<key>NumberOfFiles</key><integer>65536</integer>"
 
       assert plist =~
                "<key>StandardOutPath</key><string>/Users/dev/.fermix/logs/fermix.log</string>"
@@ -46,6 +47,7 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert unit =~ "ExecStart=/usr/local/bin/fermix run"
       assert unit =~ "Restart=on-failure"
       assert unit =~ "RestartSec=5"
+      assert unit =~ "LimitNOFILE=65536"
       assert unit =~ "StandardOutput=append:/home/dev/.fermix/logs/fermix.log"
       assert unit =~ "WantedBy=default.target"
     end

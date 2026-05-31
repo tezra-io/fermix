@@ -469,13 +469,26 @@ merged_signal = Keyword.merge(existing_signal, signal_overrides)
 config :fermix_channels, signal: merged_signal
 
 if config_env() == :prod do
-  # The secret key base signs Phoenix session cookies. For a single-user
-  # local install, an ephemeral per-boot secret is fine (sessions expire on
-  # restart, which is acceptable). Operators who want stable sessions across
-  # restarts can set SECRET_KEY_BASE explicitly.
+  # The secret key base signs Phoenix session cookies. The daemon restarts
+  # itself (service KeepAlive, and the setup UI's restart button), so the key
+  # MUST stay stable across restarts — a per-boot key invalidates the in-flight
+  # setup session cookie and locks the browser out with a 403. Persist it under
+  # FERMIX_HOME (this ships in the release, so brew installs get it too);
+  # operators may override with SECRET_KEY_BASE.
   secret_key_base =
-    System.get_env("SECRET_KEY_BASE") ||
-      :crypto.strong_rand_bytes(48) |> Base.encode64()
+    cond do
+      env = System.get_env("SECRET_KEY_BASE") ->
+        env
+
+      Code.ensure_loaded?(FermixCore.Setup.SecretKeyBase) ->
+        secret_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+        FermixCore.Setup.SecretKeyBase.read_or_create!(secret_home)
+
+      true ->
+        # Build-time tooling evaluates runtime.exs without the app loaded; this
+        # ephemeral key is never used to sign a served session.
+        Base.encode64(:crypto.strong_rand_bytes(48))
+    end
 
   host = System.get_env("PHX_HOST") || "localhost"
 
@@ -499,6 +512,10 @@ if config_env() == :prod do
   config :fermix_web, FermixWebWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [ip: http_bind],
+    # The daemon serves its web UI on loopback; allow both loopback origins
+    # (and the configured PHX_HOST) so the LiveView socket isn't rejected when
+    # the browser uses 127.0.0.1 instead of localhost.
+    check_origin: ["//localhost", "//127.0.0.1", "//#{host}"],
     secret_key_base: secret_key_base
 
   # ## SSL Support

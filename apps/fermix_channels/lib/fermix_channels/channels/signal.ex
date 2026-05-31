@@ -109,6 +109,23 @@ defmodule FermixChannels.Channels.Signal do
   @impl true
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
 
+  @impl true
+  @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
+  def health_check(opts \\ []) do
+    start = System.monotonic_time(:millisecond)
+
+    with {:ok, account} <- account(),
+         {:ok, _path} <- resolved_cli_path(opts) do
+      {:ok, %{detail: "Signal account #{account} configured", latency_ms: elapsed_ms(start)}}
+    else
+      {:error, :not_configured} ->
+        {:error, {:misconfigured, "signal account is not configured"}}
+
+      {:error, {:missing_executable, path}} ->
+        {:error, {:misconfigured, "signal-cli executable not found at #{path}"}}
+    end
+  end
+
   defp build_receive_message(entry, opts) do
     envelope = Map.get(entry, "envelope", %{})
     data_message = Map.get(envelope, "dataMessage", %{})
@@ -297,6 +314,25 @@ defmodule FermixChannels.Channels.Signal do
     end
   end
 
+  defp resolved_cli_path(opts) do
+    resolver = Keyword.get(opts, :executable_resolver, &System.find_executable/1)
+    path = Keyword.get(opts, :cli_path) || cli_path()
+
+    cond do
+      Path.type(path) == :absolute and File.exists?(path) ->
+        {:ok, path}
+
+      Path.type(path) == :absolute ->
+        {:error, {:missing_executable, path}}
+
+      resolved = resolver.(path) ->
+        {:ok, resolved}
+
+      true ->
+        {:error, {:missing_executable, path}}
+    end
+  end
+
   defp config_value(key) do
     case FermixCore.Config.channel(:signal) do
       {:ok, config} -> Keyword.get(config, key)
@@ -317,6 +353,7 @@ defmodule FermixChannels.Channels.Signal do
 
   defp put_if_present(keyword, _key, nil), do: keyword
   defp put_if_present(keyword, key, value), do: Keyword.put(keyword, key, value)
+  defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end
 
 defmodule FermixChannels.Channels.Signal.CLI do
