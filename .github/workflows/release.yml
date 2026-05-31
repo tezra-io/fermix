@@ -107,3 +107,26 @@ jobs:
           files: |
             burrito_out/fermix_*
             burrito_out/releases.json
+
+      - name: Bump Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set - skipping Homebrew tap bump"
+            exit 0
+          fi
+          tap_dir="$(mktemp -d)"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/tezra-io/homebrew-tap.git" "$tap_dir"
+          RELEASES_JSON="$PWD/burrito_out/releases.json" FORMULA="$tap_dir/Formula/fermix.rb" scripts/homebrew/bump.sh
+          git -C "$tap_dir" config user.name "github-actions[bot]"
+          git -C "$tap_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$tap_dir" add Formula/fermix.rb
+          if git -C "$tap_dir" diff --cached --quiet; then
+            echo "tap formula already current; nothing to push"
+            exit 0
+          fi
+          git -C "$tap_dir" commit -m "fermix ${VERSION#v}"
+          git -C "$tap_dir" push
