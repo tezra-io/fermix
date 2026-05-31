@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
     plugin_auth_url_timeout_ms = Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms)
     codex_login_runner = Application.get_env(:fermix_web, :codex_login_runner)
+    doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -37,6 +38,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :plugin_auth_runner)
     Application.delete_env(:fermix_web, :plugin_auth_url_timeout_ms)
     Application.delete_env(:fermix_web, :codex_login_runner)
+    Application.delete_env(:fermix_web, :doctor_probe_opts)
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -49,6 +51,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
       restore_env(:fermix_web, :plugin_auth_url_timeout_ms, plugin_auth_url_timeout_ms)
       restore_env(:fermix_web, :codex_login_runner, codex_login_runner)
+      restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -482,6 +485,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_submit()
 
       assert render(view) =~ "Realtime saved."
+      assert render(view) =~ "Apply &amp; restart"
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :enabled) == true
@@ -537,6 +541,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_submit()
 
       assert render(view) =~ "Provider saved."
+      assert render(view) =~ "Apply &amp; restart"
 
       providers = Application.get_env(:fermix_core, :providers, [])
       openai = Keyword.get(providers, :openai, [])
@@ -722,6 +727,43 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  describe "doctor probes" do
+    test "run probe returns immediately while provider and channel probes finish async", %{
+      conn: conn
+    } do
+      Req.Test.set_req_test_to_shared()
+      stub_setup_doctor_probe()
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-live-test", default_model: "gpt-5.5"]
+      )
+
+      Application.put_env(:fermix_channels, :telegram,
+        enabled: true,
+        bot_token: "telegram-token",
+        owner_user_id: "111",
+        allowed_user_ids: ["111"],
+        req_options: [plug: {Req.Test, :setup_doctor_probe}]
+      )
+
+      Application.put_env(:fermix_web, :doctor_probe_opts,
+        req_options: [plug: {Req.Test, :setup_doctor_probe}]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      html = view |> element("button", "Run probe") |> render_click()
+
+      assert html =~ "Provider probe is running."
+      assert html =~ "Probe running"
+
+      html = render_until(view, "bot @fermix_test authenticated")
+      assert html =~ "openai gpt-5.5 responded"
+      assert html =~ "bot @fermix_test authenticated"
+    end
+  end
+
   describe "restart" do
     test "Doctor step offers Apply & restart; in dev it reports no supervised service", %{
       conn: conn
@@ -733,6 +775,45 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       html = view |> element("button", "Apply & restart") |> render_click()
       assert html =~ "Nothing to restart from here"
+    end
+
+    test "saving channels keeps an inline restart action visible", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"channels\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]",
+          channels_form: %{
+            telegram_bot_token: "bot-token",
+            telegram_owner_user_id: "111"
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+      assert html =~ "Apply &amp; restart"
+      assert html =~ ~s(phx-click="apply_restart")
+    end
+
+    test "saving sandbox settings keeps an inline restart action visible", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"sandbox\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_sandbox\"]",
+          sandbox_form: %{
+            mode: "standard",
+            profile: "assistant",
+            env_allow: "FERMIX_ALLOWED"
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Sandbox saved."
+      assert html =~ "Apply &amp; restart"
+      assert html =~ ~s(phx-click="apply_restart")
     end
   end
 
@@ -794,6 +875,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       last_refresh: DateTime.utc_now(),
       status: "ready"
     }
+  end
+
+  defp stub_setup_doctor_probe do
+    Req.Test.stub(:setup_doctor_probe, fn conn ->
+      Process.sleep(100)
+
+      case conn.request_path do
+        "/v1/responses" ->
+          Req.Test.json(conn, %{"id" => "resp_live_test"})
+
+        "/bottelegram-token/getMe" ->
+          Req.Test.json(conn, %{"ok" => true, "result" => %{"username" => "fermix_test"}})
+
+        _other ->
+          Plug.Conn.send_resp(conn, 404, "{}")
+      end
+    end)
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)

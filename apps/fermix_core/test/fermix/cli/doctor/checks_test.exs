@@ -3,6 +3,14 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   alias Fermix.CLI.Doctor.Checks
 
+  defmodule HealthyChannel do
+    def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
+  end
+
+  defmodule BrokenChannel do
+    def health_check(_opts), do: {:error, {:auth_failed, "bad credential"}}
+  end
+
   describe "workspace_layout/0" do
     test "ok when FERMIX_HOME directories exist" do
       result = Checks.workspace_layout()
@@ -36,6 +44,54 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "tavily"
+    end
+  end
+
+  describe "channel_health/1" do
+    setup do
+      original_registry = Application.get_env(:fermix_channels, :channel_registry)
+      healthy = Application.get_env(:fermix_channels, :doctor_healthy_channel)
+      broken = Application.get_env(:fermix_channels, :doctor_broken_channel)
+
+      on_exit(fn ->
+        restore_env(:fermix_channels, :channel_registry, original_registry)
+        restore_env(:fermix_channels, :doctor_healthy_channel, healthy)
+        restore_env(:fermix_channels, :doctor_broken_channel, broken)
+      end)
+
+      :ok
+    end
+
+    test "fails when an enabled channel health probe fails" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "healthy",
+          config_key: :doctor_healthy_channel,
+          adapter: HealthyChannel,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        },
+        %{
+          name: "broken",
+          config_key: :doctor_broken_channel,
+          adapter: BrokenChannel,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        }
+      ])
+
+      Application.put_env(:fermix_channels, :doctor_healthy_channel, enabled: true)
+      Application.put_env(:fermix_channels, :doctor_broken_channel, enabled: true)
+
+      result = Checks.channel_health()
+
+      assert result.name == "channel health"
+      assert result.status == :fail
+      assert result.detail =~ "healthy=ok"
+      assert result.detail =~ "broken=error"
+      assert result.detail =~ "auth failed: bad credential"
     end
   end
 
@@ -472,4 +528,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
     File.write!(Path.join(dir, "sandbox_event.jsonl"), row <> "\n", [:append])
   end
+
+  defp restore_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_env(app, key, value), do: Application.put_env(app, key, value)
 end

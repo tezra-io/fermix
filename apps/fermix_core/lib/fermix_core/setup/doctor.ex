@@ -17,6 +17,7 @@ defmodule FermixCore.Setup.Doctor do
   """
 
   alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
@@ -24,6 +25,17 @@ defmodule FermixCore.Setup.Doctor do
 
   @type provider :: :openai | :openai_codex | :anthropic
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
+  @type channel_probe :: %{
+          required(:channel) => atom(),
+          required(:name) => String.t(),
+          required(:status) => :ok | :warn | :error,
+          required(:detail) => String.t(),
+          optional(:latency_ms) => non_neg_integer()
+        }
+  @type readiness_probe :: %{
+          provider: {:ok, probe_ok()} | {:error, probe_error()},
+          channels: [channel_probe()]
+        }
   @type compaction_report :: %{
           enabled: boolean(),
           threshold: float(),
@@ -61,6 +73,7 @@ defmodule FermixCore.Setup.Doctor do
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
   @web_search_probe_query "fermix web search health check"
+  @default_probe_timeout_ms 5_000
 
   @spec probe_provider(provider(), keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
   def probe_provider(provider, opts \\ [])
@@ -77,6 +90,26 @@ defmodule FermixCore.Setup.Doctor do
   def probe_active(opts \\ []) do
     provider = active_provider()
     probe_provider(provider, opts)
+  end
+
+  @spec probe_readiness(keyword()) :: readiness_probe()
+  def probe_readiness(opts \\ []) do
+    %{
+      provider: probe_active(opts),
+      channels: probe_channels(opts)
+    }
+  end
+
+  @spec probe_channels(keyword()) :: [channel_probe()]
+  def probe_channels(opts \\ []) do
+    channel_probe_specs()
+    |> Enum.map(&probe_channel(&1, opts))
+  end
+
+  @spec channel_probe_specs() :: [map()]
+  def channel_probe_specs do
+    channel_registry()
+    |> Enum.filter(&enabled_probe_channel?/1)
   end
 
   @spec compaction_report() :: compaction_report()
@@ -163,6 +196,75 @@ defmodule FermixCore.Setup.Doctor do
       true -> :network
     end
   end
+
+  defp channel_registry do
+    registry = FermixChannels.Gateway.ChannelRegistry
+
+    if Code.ensure_loaded?(registry) do
+      apply(registry, :channels, [])
+    else
+      []
+    end
+  end
+
+  defp enabled_probe_channel?(%{config_key: nil}), do: false
+
+  defp enabled_probe_channel?(%{config_key: key} = channel) when is_atom(key) do
+    case FermixCore.Config.channel(key) do
+      {:ok, config} -> Keyword.get(config, :enabled, channel_default_enabled(channel)) == true
+      {:error, :not_configured} -> false
+    end
+  end
+
+  defp channel_default_enabled(%{config_key: :telegram}), do: true
+  defp channel_default_enabled(_channel), do: false
+
+  @spec probe_channel(map(), keyword()) :: channel_probe()
+  def probe_channel(%{adapter: adapter, config_key: key, name: name}, opts)
+      when is_atom(adapter) and is_atom(key) and is_binary(name) and is_list(opts) do
+    base = %{channel: key, name: name}
+
+    if function_exported?(adapter, :health_check, 1) do
+      adapter
+      |> apply(:health_check, [opts])
+      |> normalize_channel_probe(base)
+    else
+      Map.merge(base, %{
+        status: :warn,
+        detail: "#{name} is enabled but has no live health probe"
+      })
+    end
+  end
+
+  def probe_channel(channel, _opts) do
+    raise ArgumentError, "invalid channel probe spec: #{inspect(channel)}"
+  end
+
+  defp normalize_channel_probe({:ok, %{detail: detail} = result}, base) do
+    base
+    |> Map.merge(%{status: :ok, detail: detail})
+    |> maybe_put_latency(result)
+  end
+
+  defp normalize_channel_probe({:ok, detail}, base) when is_binary(detail) do
+    Map.merge(base, %{status: :ok, detail: detail})
+  end
+
+  defp normalize_channel_probe({:error, reason}, base) do
+    Map.merge(base, %{status: :error, detail: channel_error_detail(reason)})
+  end
+
+  defp maybe_put_latency(probe, %{latency_ms: ms}) when is_integer(ms) and ms >= 0 do
+    Map.put(probe, :latency_ms, ms)
+  end
+
+  defp maybe_put_latency(probe, _result), do: probe
+
+  defp channel_error_detail({:misconfigured, detail}), do: detail
+  defp channel_error_detail({:auth_failed, detail}), do: "auth failed: #{detail}"
+  defp channel_error_detail({:server_error, status, _body}), do: "HTTP #{status}"
+  defp channel_error_detail({:network, reason}), do: "network error: #{Redaction.format(reason)}"
+  defp channel_error_detail(reason), do: Redaction.format(reason)
 
   @spec active_provider() :: provider()
   def active_provider do
@@ -284,13 +386,26 @@ defmodule FermixCore.Setup.Doctor do
   defp anthropic_api_key(value), do: {:ok, value}
 
   defp do_post(provider, url, body, headers, model, surface, opts) do
-    req_options = Keyword.get(opts, :req_options, [])
     start = System.monotonic_time(:millisecond)
 
     Req.new(url: url, method: :post, json: body, headers: headers, retry: false)
-    |> Req.merge(req_options)
+    |> Req.merge(probe_req_options(opts))
     |> Req.request()
     |> classify(provider, model, surface, start)
+  end
+
+  defp probe_req_options(opts) do
+    opts
+    |> Keyword.get(:req_options, [])
+    |> Keyword.put(:receive_timeout, probe_timeout_ms(opts))
+    |> Keyword.put(:retry, false)
+  end
+
+  defp probe_timeout_ms(opts) do
+    case Keyword.get(opts, :timeout_ms, @default_probe_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 -> timeout_ms
+      other -> raise ArgumentError, "invalid probe timeout: #{inspect(other)}"
+    end
   end
 
   defp classify({:ok, %Req.Response{status: status}}, provider, model, _surface, start)
@@ -359,9 +474,18 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp require_codex_token(opts) do
-    case Process.whereis(TokenManager) do
-      nil -> CodexToken.get_token(opts)
-      _pid -> TokenManager.get_token(TokenManager)
+    cond do
+      manager = Keyword.get(opts, :token_manager) ->
+        TokenManager.get_token(manager)
+
+      Keyword.has_key?(opts, :fermix_auth_path) ->
+        CodexToken.get_token(opts)
+
+      Process.whereis(TokenManager) ->
+        TokenManager.get_token(TokenManager)
+
+      true ->
+        CodexToken.get_token(opts)
     end
     |> classify_token()
   end

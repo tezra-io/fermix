@@ -41,6 +41,39 @@ defmodule FermixWebWeb.SetupLive do
   ]
 
   @default_plugin_auth_url_timeout_ms 300_000
+  @provider_restart_keys [
+    :provider,
+    :default_model,
+    :reasoning_effort,
+    :fast,
+    :openai_api_key,
+    :anthropic_api_key
+  ]
+  @realtime_restart_keys [
+    :realtime_enabled,
+    :realtime_api_key,
+    :realtime_voice,
+    :realtime_max_session_minutes,
+    :realtime_max_cost_cents,
+    :realtime_persist_transcripts
+  ]
+  @channel_restart_keys [
+    :telegram_bot_token,
+    :telegram_owner_user_id,
+    :whatsapp_access_token,
+    :whatsapp_phone_number_id,
+    :whatsapp_verify_token,
+    :whatsapp_app_secret,
+    :whatsapp_owner_user_id,
+    :discord_bot_token,
+    :discord_bot_user_id,
+    :discord_owner_user_id,
+    :slack_bot_token,
+    :slack_signing_secret,
+    :slack_owner_user_id,
+    :signal_account,
+    :signal_owner_user_id
+  ]
 
   @impl true
   def mount(_params, session, socket) do
@@ -60,7 +93,10 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:active_tab, next_action_tab(report))
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
+      |> assign(:doctor_probe_pending, MapSet.new())
+      |> assign(:doctor_probe_running?, false)
       |> assign(:restarting, false)
+      |> assign(:restart_pending?, false)
       |> assign(:codex_auth_tasks, %{})
       |> assign(:codex_auth_url, nil)
       |> assign(:plugin_auth_tasks, %{})
@@ -121,7 +157,10 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:openai_api_key, params["openai_api_key"])
       |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
 
-    {:noreply, save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"))}
+    {:noreply,
+     save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
   end
 
   def handle_event("codex_login", _params, socket) do
@@ -142,7 +181,10 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:realtime_max_cost_cents, params["max_cost_cents"])
       |> maybe_put_string(:realtime_persist_transcripts, params["persist_transcripts"])
 
-    {:noreply, save_answers(socket, answers, "Realtime saved.", Map.get(root, "__nav"))}
+    {:noreply,
+     save_answers(socket, answers, "Realtime saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
   end
 
   def handle_event("save_channels", %{"channels_form" => params} = root, socket) do
@@ -164,7 +206,10 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
 
-    {:noreply, save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"))}
+    {:noreply,
+     save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
   end
 
   def handle_event("search_changed", %{"search_form" => params}, socket) do
@@ -260,7 +305,11 @@ defmodule FermixWebWeb.SetupLive do
     env_allow = parse_env_allow(Map.get(params, "env_allow", ""))
 
     result = Wizard.set_sandbox_overrides(mode, profile, env_allow)
-    {:noreply, save_result(result, socket, "Sandbox saved.", Map.get(root, "__nav"))}
+
+    {:noreply,
+     save_result(result, socket, "Sandbox saved.", Map.get(root, "__nav"),
+       restart_required?: true
+     )}
   end
 
   def handle_event("save_personalization", %{"personalization_form" => params} = root, socket) do
@@ -274,7 +323,11 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("run_doctor", _params, socket) do
-    {:noreply, assign(socket, :doctor_result, Doctor.probe_active())}
+    if socket.assigns.doctor_probe_running? do
+      {:noreply, socket}
+    else
+      {:noreply, start_doctor_probe(socket)}
+    end
   end
 
   def handle_event("apply_restart", _params, socket) do
@@ -338,6 +391,25 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   @impl true
+  def handle_async(:doctor_provider_probe, {:ok, result}, socket) do
+    {:noreply, finish_doctor_provider_probe(socket, result)}
+  end
+
+  def handle_async(:doctor_provider_probe, {:exit, reason}, socket) do
+    result = {:error, {:network, reason}}
+    {:noreply, finish_doctor_provider_probe(socket, result)}
+  end
+
+  def handle_async({:doctor_channel_probe, channel}, {:ok, result}, socket) do
+    {:noreply, finish_doctor_channel_probe(socket, channel, result)}
+  end
+
+  def handle_async({:doctor_channel_probe, channel}, {:exit, reason}, socket) do
+    result = failed_channel_probe(socket, channel, reason)
+    {:noreply, finish_doctor_channel_probe(socket, channel, result)}
+  end
+
+  @impl true
   def render(assigns) do
     ~H"""
     <Components.page
@@ -349,12 +421,14 @@ defmodule FermixWebWeb.SetupLive do
       codex_auth={@codex_auth}
       codex_auth_running?={codex_auth_running?(@codex_auth_tasks)}
       codex_auth_url={@codex_auth_url}
+      doctor_probe_running?={@doctor_probe_running?}
       provider_form={@provider_form}
       provider_models={@provider_models}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
       realtime_form={@realtime_form}
       report={@report}
+      restart_pending?={@restart_pending?}
       restarting={@restarting}
       sandbox_form={@sandbox_form}
       search_form={@search_form}
@@ -386,20 +460,23 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:plugin_summary, plugin_summary(snapshot))
   end
 
-  defp save_answers(socket, answers, message, nav) do
+  defp save_answers(socket, answers, message, nav, opts \\ []) do
     socket.assigns.report.wizard
     |> Wizard.save_answers(answers)
-    |> save_result(socket, message, nav)
+    |> save_result(socket, message, nav, opts)
   end
 
-  defp save_result({:ok, report}, socket, message, nav) do
+  defp save_result({:ok, report}, socket, message, nav, opts) do
+    restart_required? = Keyword.get(opts, :restart_required?, false)
+
     socket
     |> assign_report(report)
-    |> flash_info(message)
+    |> assign(:restart_pending?, socket.assigns.restart_pending? or restart_required?)
+    |> flash_info(message, restart_required?: restart_required?)
     |> maybe_advance(nav)
   end
 
-  defp save_result({:error, reason}, socket, _message, _nav) do
+  defp save_result({:error, reason}, socket, _message, _nav, _opts) do
     flash_error(socket, "Save failed: #{format_config_error(reason)}")
   end
 
@@ -425,11 +502,111 @@ defmodule FermixWebWeb.SetupLive do
     |> flash_info(message)
   end
 
-  defp flash_info(socket, message),
-    do: assign(socket, :saved_flash, %{kind: :info, message: message})
+  defp flash_info(socket, message, opts \\ []) do
+    assign(socket, :saved_flash, %{
+      kind: :info,
+      message: message,
+      restart_required?: Keyword.get(opts, :restart_required?, false)
+    })
+  end
 
   defp flash_error(socket, message),
     do: assign(socket, :saved_flash, %{kind: :error, message: message})
+
+  defp runtime_restart_answers?(answers) do
+    restart_keys = @provider_restart_keys ++ @realtime_restart_keys ++ @channel_restart_keys
+    Enum.any?(answers, fn {key, _value} -> key in restart_keys end)
+  end
+
+  defp start_doctor_probe(socket) do
+    opts = doctor_probe_opts()
+    channels = Doctor.channel_probe_specs()
+    pending = doctor_probe_pending(channels)
+
+    socket
+    |> assign(:doctor_result, running_doctor_result(channels))
+    |> assign(:doctor_probe_pending, pending)
+    |> assign(:doctor_probe_running?, true)
+    |> start_async(:doctor_provider_probe, fn -> Doctor.probe_active(opts) end)
+    |> start_channel_probes(channels, opts)
+  end
+
+  defp doctor_probe_opts do
+    Application.get_env(:fermix_web, :doctor_probe_opts, [])
+  end
+
+  defp doctor_probe_pending(channels) do
+    channel_keys = Enum.map(channels, &{:channel, &1.config_key})
+    MapSet.new([:provider | channel_keys])
+  end
+
+  defp running_doctor_result(channels) do
+    %{
+      provider: :running,
+      channels: Enum.map(channels, &running_channel_probe/1)
+    }
+  end
+
+  defp running_channel_probe(%{config_key: key, name: name}) do
+    %{channel: key, name: name, status: :running, detail: "Probe running..."}
+  end
+
+  defp start_channel_probes(socket, channels, opts) do
+    Enum.reduce(channels, socket, fn channel, acc ->
+      name = {:doctor_channel_probe, channel.config_key}
+      start_async(acc, name, fn -> Doctor.probe_channel(channel, opts) end)
+    end)
+  end
+
+  defp finish_doctor_provider_probe(socket, result) do
+    socket
+    |> put_doctor_provider_result(result)
+    |> mark_doctor_probe_done(:provider)
+  end
+
+  defp finish_doctor_channel_probe(socket, channel, result) do
+    socket
+    |> put_doctor_channel_result(channel, result)
+    |> mark_doctor_probe_done({:channel, channel})
+  end
+
+  defp put_doctor_provider_result(socket, result) do
+    doctor_result = socket.assigns.doctor_result || %{provider: nil, channels: nil}
+    assign(socket, :doctor_result, Map.put(doctor_result, :provider, result))
+  end
+
+  defp put_doctor_channel_result(socket, channel, result) do
+    doctor_result = socket.assigns.doctor_result || %{provider: nil, channels: []}
+    channels = Enum.map(doctor_result.channels || [], &replace_channel_probe(&1, channel, result))
+    assign(socket, :doctor_result, Map.put(doctor_result, :channels, channels))
+  end
+
+  defp replace_channel_probe(%{channel: channel}, channel, result), do: result
+  defp replace_channel_probe(probe, _channel, _result), do: probe
+
+  defp mark_doctor_probe_done(socket, key) do
+    pending = MapSet.delete(socket.assigns.doctor_probe_pending, key)
+
+    socket
+    |> assign(:doctor_probe_pending, pending)
+    |> assign(:doctor_probe_running?, MapSet.size(pending) > 0)
+  end
+
+  defp failed_channel_probe(socket, channel, reason) do
+    %{
+      channel: channel,
+      name: channel_probe_name(socket, channel),
+      status: :error,
+      detail: "probe failed: #{Redaction.format(reason)}"
+    }
+  end
+
+  defp channel_probe_name(socket, channel) do
+    socket.assigns.doctor_result
+    |> Map.get(:channels, [])
+    |> Enum.find(%{name: Atom.to_string(channel)}, &(&1.channel == channel))
+    |> Map.fetch!(:name)
+  end
 
   defp maybe_advance(socket, "next") do
     assign(socket, :active_tab, next_tab(socket.assigns.active_tab))

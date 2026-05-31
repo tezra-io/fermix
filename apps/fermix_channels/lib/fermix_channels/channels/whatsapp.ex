@@ -20,6 +20,7 @@ defmodule FermixChannels.Channels.WhatsApp do
 
   @graph_api_base "https://graph.facebook.com"
   @default_graph_version "v19.0"
+  @health_timeout_ms 5_000
   # Free-form Cloud API text messages. Templates and interactive message
   # fields have separate platform limits and should stay adapter-local.
   @max_text_length 4_096
@@ -287,6 +288,60 @@ defmodule FermixChannels.Channels.WhatsApp do
        }}
     end
   end
+
+  @impl true
+  @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
+  def health_check(opts \\ []) do
+    start = System.monotonic_time(:millisecond)
+
+    with {:ok, config} <- send_config(opts) do
+      url =
+        "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}" <>
+          "?fields=id,display_phone_number,verified_name"
+
+      Req.new(url: url, method: :get, auth: {:bearer, config.access_token})
+      |> Req.merge(health_req_options(opts))
+      |> HttpClient.request("WhatsApp health")
+      |> classify_health_response(config.phone_number_id, start)
+    else
+      {:error, :not_configured} ->
+        {:error, {:misconfigured, "whatsapp access_token or phone_number_id is not configured"}}
+    end
+  end
+
+  defp classify_health_response(
+         {:ok, %{status: 200, body: %{"id" => expected_id} = body}},
+         expected_id,
+         start
+       ) do
+    name = Map.get(body, "verified_name") || Map.get(body, "display_phone_number") || expected_id
+    {:ok, %{detail: "WhatsApp #{name} authenticated", latency_ms: elapsed_ms(start)}}
+  end
+
+  defp classify_health_response(
+         {:ok, %{status: 200, body: %{"id" => actual_id}}},
+         expected_id,
+         _start
+       ) do
+    {:error,
+     {:misconfigured, "whatsapp phone_number_id #{expected_id} does not match #{actual_id}"}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _expected_id, _start)
+       when status in [400, 401, 403, 404] do
+    {:error, {:auth_failed, "WhatsApp API HTTP #{status}: #{api_description(body)}"}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _expected_id, _start) do
+    {:error, {:server_error, status, body}}
+  end
+
+  defp classify_health_response({:error, reason}, _expected_id, _start) do
+    {:error, {:network, reason}}
+  end
+
+  defp api_description(%{"error" => %{"message" => message}}) when is_binary(message), do: message
+  defp api_description(_body), do: "request rejected"
 
   defp validate_outbound_media(%{kind: kind, path: path} = media_part) when is_binary(path) do
     with cap when is_integer(cap) <- Map.get(@outbound_caps, kind),
@@ -582,6 +637,20 @@ defmodule FermixChannels.Channels.WhatsApp do
     end
   end
 
+  defp health_req_options(opts) do
+    opts
+    |> req_options()
+    |> Keyword.put(:receive_timeout, health_timeout_ms(opts))
+    |> Keyword.put(:retry, false)
+  end
+
+  defp health_timeout_ms(opts) do
+    case Keyword.get(opts, :timeout_ms, @health_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 -> timeout_ms
+      _other -> @health_timeout_ms
+    end
+  end
+
   defp handle_send_response({:ok, %{status: status}}, duration_us) when status in [200, 201] do
     ChannelTelemetry.emit_message(:whatsapp, :outbound, 1, duration_us)
     :ok
@@ -636,4 +705,5 @@ defmodule FermixChannels.Channels.WhatsApp do
   end
 
   defp secure_compare(_left, _right), do: false
+  defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end

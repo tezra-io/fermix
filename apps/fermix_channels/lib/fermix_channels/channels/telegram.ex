@@ -19,6 +19,7 @@ defmodule FermixChannels.Channels.Telegram do
   alias FermixCore.Telemetry
 
   @bot_api_base "https://api.telegram.org"
+  @health_timeout_ms 5_000
   @max_message_length 4096
   @bullet_markdown_pattern ~r/^(\s*)[-*]\s+/u
   @heading_markdown_pattern ~r/^([ ]{0,3})\#{1,6}[ \t]+(.+?)(?:[ \t]+\#+[ \t]*)?$/u
@@ -137,6 +138,22 @@ defmodule FermixChannels.Channels.Telegram do
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
 
   @impl true
+  @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
+  def health_check(opts \\ []) do
+    start = System.monotonic_time(:millisecond)
+
+    with {:ok, token} <- get_bot_token() do
+      Req.new(url: "#{@bot_api_base}/bot#{token}/getMe", method: :post, json: %{})
+      |> Req.merge(health_req_options(opts))
+      |> HttpClient.request("Telegram health")
+      |> classify_health_response(start)
+    else
+      {:error, :not_configured} ->
+        {:error, {:misconfigured, "telegram bot_token is not configured"}}
+    end
+  end
+
+  @impl true
   @spec start_typing(String.t()) :: :ok | {:error, term()}
   def start_typing(chat_id, opts \\ []) do
     with {:ok, token} <- get_bot_token() do
@@ -153,6 +170,32 @@ defmodule FermixChannels.Channels.Telegram do
   end
 
   # -- Internals --
+
+  defp classify_health_response(
+         {:ok, %{status: 200, body: %{"ok" => true, "result" => result}}},
+         start
+       ) do
+    username = Map.get(result, "username")
+    detail = if present?(username), do: "bot @#{username} authenticated", else: "Bot API ok"
+    {:ok, %{detail: detail, latency_ms: elapsed_ms(start)}}
+  end
+
+  defp classify_health_response({:ok, %{status: status, body: body}}, _start) do
+    {:error, telegram_health_error(status, body)}
+  end
+
+  defp classify_health_response({:error, reason}, _start), do: {:error, {:network, reason}}
+
+  defp telegram_health_error(status, body) when status in [401, 403, 404] do
+    {:auth_failed, "Telegram API HTTP #{status}: #{api_description(body)}"}
+  end
+
+  defp telegram_health_error(status, body), do: {:server_error, status, body}
+
+  defp api_description(%{"description" => description}) when is_binary(description),
+    do: description
+
+  defp api_description(_body), do: "request rejected"
 
   defp post_send_message(chat_id, text, opts) do
     with {:ok, token} <- get_bot_token() do
@@ -611,4 +654,22 @@ defmodule FermixChannels.Channels.Telegram do
         end
     end
   end
+
+  defp health_req_options(opts) do
+    opts
+    |> req_options()
+    |> Keyword.put(:receive_timeout, health_timeout_ms(opts))
+    |> Keyword.put(:retry, false)
+  end
+
+  defp health_timeout_ms(opts) do
+    case Keyword.get(opts, :timeout_ms, @health_timeout_ms) do
+      timeout_ms when is_integer(timeout_ms) and timeout_ms > 0 -> timeout_ms
+      _other -> @health_timeout_ms
+    end
+  end
+
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present?(_value), do: false
+  defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end
