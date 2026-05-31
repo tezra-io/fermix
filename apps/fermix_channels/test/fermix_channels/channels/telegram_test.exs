@@ -505,6 +505,15 @@ defmodule FermixChannels.Channels.TelegramTest do
                Telegram.health_check()
     end
 
+    test "explains Telegram 404 as an invalid bot token" do
+      stub_telegram(self(), 404, %{"description" => "Not Found"})
+
+      assert {:error,
+              {:auth_failed,
+               "invalid bot token (Telegram API HTTP 404: Not Found); paste the BotFather token without a bot prefix"}} =
+               Telegram.health_check()
+    end
+
     test "classifies server errors" do
       stub_telegram(self(), 500, %{"description" => "upstream failed"})
 
