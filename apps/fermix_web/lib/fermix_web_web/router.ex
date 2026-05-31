@@ -10,6 +10,10 @@ defmodule FermixWebWeb.Router do
     plug :put_secure_browser_headers
   end
 
+  pipeline :setup_auth do
+    plug FermixWebWeb.SetupAuth
+  end
+
   pipeline :api do
     plug :accepts, ["json"]
   end
@@ -18,6 +22,11 @@ defmodule FermixWebWeb.Router do
     pipe_through :browser
 
     live "/", HomeLive
+  end
+
+  scope "/", FermixWebWeb do
+    pipe_through [:browser, :setup_auth]
+
     live "/setup", SetupLive
   end
 
