@@ -677,7 +677,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert_receive {:codex_login_started, keys}
       assert :oauth_opener in keys
 
-      html = render(view)
+      html = render_until(view, "ChatGPT OAuth connected.")
       assert html =~ "ChatGPT OAuth connected."
       assert html =~ "Connected"
       refute html =~ "https://auth.openai.test/codex"
@@ -800,4 +800,22 @@ defmodule FermixWebWeb.SetupLiveTest do
   defp restore_env(app, key, {:ok, value}), do: Application.put_env(app, key, value)
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp render_until(view, expected, attempts \\ 20)
+
+  defp render_until(view, expected, attempts) when attempts > 0 do
+    html = render(view)
+
+    if html =~ expected do
+      html
+    else
+      Process.sleep(25)
+      render_until(view, expected, attempts - 1)
+    end
+  end
+
+  defp render_until(view, expected, 0) do
+    render(view)
+    flunk("expected rendered LiveView to include #{inspect(expected)}")
+  end
 end
