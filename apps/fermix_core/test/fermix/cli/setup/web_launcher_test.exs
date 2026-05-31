@@ -122,7 +122,8 @@ defmodule Fermix.CLI.Setup.WebLauncherTest do
       end)
 
     assert output =~ "Could not open a browser automatically"
-    assert output =~ "Finish setup in your browser"
+    assert output =~ "open this URL manually"
+    assert output =~ "http://127.0.0.1:4030/setup?t="
   end
 
   test "prints an SSH tunnel hint for forced web setup on a headless host" do
