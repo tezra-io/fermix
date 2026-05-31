@@ -124,6 +124,23 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Not configured"
     end
 
+    test "channels pane does not treat unresolved keyring markers as stored secrets", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_channels, :telegram,
+        enabled: true,
+        bot_token: "@keyring",
+        owner_user_id: "111"
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"channels\"]") |> render_click()
+
+      assert html =~ ~s(name="channels_form[telegram_bot_token]")
+      assert html =~ ~s(placeholder="paste secret")
+      refute html =~ "stored - leave blank to keep"
+    end
+
     test "plugins pane renders bundled plugin cards", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 

@@ -1658,7 +1658,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp format_policy(policy), do: policy |> Atom.to_string() |> String.replace("_", " ")
-  defp secret_placeholder(true), do: "configured - leave blank to keep"
+  defp secret_placeholder(true), do: "stored - leave blank to keep or paste to replace"
   defp secret_placeholder(false), do: "paste secret"
 
   defp api_key_set?(report, provider) do

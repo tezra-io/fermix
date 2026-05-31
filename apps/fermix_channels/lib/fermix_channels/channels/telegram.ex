@@ -186,7 +186,13 @@ defmodule FermixChannels.Channels.Telegram do
 
   defp classify_health_response({:error, reason}, _start), do: {:error, {:network, reason}}
 
-  defp telegram_health_error(status, body) when status in [401, 403, 404] do
+  defp telegram_health_error(404, body) do
+    {:auth_failed,
+     "invalid bot token (Telegram API HTTP 404: #{api_description(body)}); " <>
+       "paste the BotFather token without a bot prefix"}
+  end
+
+  defp telegram_health_error(status, body) when status in [401, 403] do
     {:auth_failed, "Telegram API HTTP #{status}: #{api_description(body)}"}
   end
 

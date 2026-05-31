@@ -1253,6 +1253,7 @@ defmodule FermixWebWeb.SetupLive do
 
   defp present?(nil), do: false
   defp present?(""), do: false
+  defp present?("@keyring"), do: false
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(value) when is_list(value), do: value != []
   defp present?(_), do: true
