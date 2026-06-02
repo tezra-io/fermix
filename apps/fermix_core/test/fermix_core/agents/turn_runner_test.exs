@@ -1,7 +1,9 @@
 defmodule FermixCore.Agents.TurnRunnerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
 
   defmodule NoopReviewer do
@@ -57,6 +59,81 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     @impl true
     def to_provider_tools(_capabilities), do: []
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule LoopingAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts), do: next_turn(opts)
+
+    @impl true
+    def continue(_provider_state, _tool_results, opts), do: next_turn(opts)
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp next_turn(opts) do
+      step = Process.get(:looping_adapter_step, 0) + 1
+      Process.put(:looping_adapter_step, step)
+
+      terminal_step = Keyword.fetch!(opts, :terminal_step)
+
+      if step >= terminal_step do
+        turn("finished at #{step}", [], step)
+      else
+        tool_call = %{
+          id: "call_#{step}",
+          call_id: "call_#{step}",
+          name: "missing_tool",
+          arguments: Jason.encode!(%{"step" => step})
+        }
+
+        turn("", [tool_call], step)
+      end
+    end
+
+    defp turn(content, tool_calls, step) do
+      {:ok,
+       %{
+         content: content,
+         tool_calls: tool_calls,
+         provider_state: %{step: step},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+  end
+
+  defmodule FailingAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts), do: {:error, "adapter failed"}
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
 
     @impl true
     def parse_tool_calls(_response), do: []
@@ -143,6 +220,76 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  describe "run/3" do
+    test "main interactive turns have enough iterations for deeper investigations" do
+      Process.put(:looping_adapter_step, 0)
+
+      registry_name = :"turn_runner_capability_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_conversation_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "deep_turn",
+        sender: "user",
+        content: "investigate a complex failure",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter_opts: [model: "mock-model", terminal_step: 100],
+          capability_registry: registry_name,
+          conversation_store: store
+        )
+
+      assert {:ok, "finished at 100", _context_tokens} =
+               TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+      assert Process.get(:looping_adapter_step) == 100
+    end
+
+    test "persists the accepted user message when the agent loop fails" do
+      registry_name = :"turn_runner_failure_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_failure_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "failed_turn",
+        sender: "user",
+        content: "keep this failed request",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter: FailingAdapter,
+          adapter_opts: [model: "mock-model"],
+          capability_registry: registry_name,
+          conversation_store: store
+        )
+
+      assert {:error, "adapter failed"} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+      history = ConversationStore.get_history({"telegram", "failed_turn", :root}, server: store)
+      assert Enum.map(history, & &1.role) == ["user"]
+      assert List.first(history).content == "keep this failed request"
+    end
+  end
+
   describe "error_reply/1" do
     test "maps a context-length overflow to an actionable /new or /compact message" do
       reply = TurnRunner.error_reply(:context_length_exceeded)
@@ -163,11 +310,65 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
     end
 
+    test "maps max iteration exhaustion to an actionable step-limit message" do
+      reply = TurnRunner.error_reply("Maximum iterations (50) reached")
+
+      assert reply =~ "step limit"
+      assert reply =~ "narrow"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
     test "falls back to the generic message for unrelated errors" do
       reply = TurnRunner.error_reply("some unexpected failure")
 
       assert reply =~ "Sorry"
       refute reply =~ "/new"
     end
+  end
+
+  defp runtime_context do
+    operator_profile = runtime_profile(:operator)
+    guest_profile = runtime_profile(:guest)
+
+    %RuntimeContext{
+      agent_id: "main",
+      built_at_ms: 0,
+      base_messages: [%{role: "system", content: "base prompt"}],
+      base_accounting: [],
+      available_skills: [],
+      operator_profile: operator_profile,
+      guest_profile: guest_profile
+    }
+  end
+
+  defp runtime_profile(trust) do
+    %{
+      trust: trust,
+      capabilities: [],
+      runtime_message: %{role: "system", content: "runtime contract"},
+      runtime_accounting: %{part: :runtime}
+    }
+  end
+
+  defp turn_state(overrides) do
+    base = %{
+      adapter: LoopingAdapter,
+      adapter_opts: [model: "mock-model", terminal_step: 30],
+      provider: nil,
+      adapter_overrides: [],
+      capability_registry: Keyword.fetch!(overrides, :capability_registry),
+      conversation_store: Keyword.fetch!(overrides, :conversation_store),
+      runtime_context: runtime_context(),
+      memory_agent_id: "main",
+      memory_owner_id: "default",
+      skill_registry: nil,
+      agent_supervisor: nil,
+      task_supervisor: self(),
+      journal_base_dir: nil,
+      memory_store: nil,
+      memory_repo: nil
+    }
+
+    Enum.reduce(overrides, base, fn {key, value}, acc -> Map.put(acc, key, value) end)
   end
 end

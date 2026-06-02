@@ -28,6 +28,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Memory.CompactionConfig
@@ -39,7 +40,6 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Telemetry
 
   @auto_compaction_failure_backoff_ms 60_000
-
   @doc """
   Run one agent turn and return its response. Persists the USER message (the
   turn was accepted) but NOT the assistant message — the gateway commits that
@@ -99,6 +99,10 @@ defmodule FermixCore.Agents.TurnRunner do
       auth_error?(reason) ->
         "Authentication failed — run `fermix auth login` from the host and try again."
 
+      max_iterations_error?(reason) ->
+        "I hit the investigation step limit before finishing that request. " <>
+          "Try narrowing the ask, or rerun it as a deeper investigation after increasing limits."
+
       true ->
         "Sorry, I encountered an error processing your message."
     end
@@ -117,6 +121,12 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp context_length_error?(_reason), do: false
+
+  defp max_iterations_error?(reason) when is_binary(reason) do
+    String.contains?(reason, "Maximum iterations")
+  end
+
+  defp max_iterations_error?(_reason), do: false
 
   defp run_message_loop(msg, state, deliver) do
     start = System.monotonic_time(:millisecond)
@@ -170,21 +180,11 @@ defmodule FermixCore.Agents.TurnRunner do
       end)
 
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
+    persist_user_message(conversation_key, msg, state)
 
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
-
-        ConversationStore.add_message(
-          conversation_key,
-          "user",
-          msg.content,
-          server: state.conversation_store,
-          sender: msg.sender,
-          agent_id: state.memory_agent_id,
-          owner_id: state.memory_owner_id,
-          metadata: Map.get(msg, :metadata)
-        )
 
         :telemetry.execute(
           [:fermix, :agent, :message],
@@ -234,6 +234,19 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp auth_error?(_other), do: false
 
+  defp persist_user_message(conversation_key, msg, state) do
+    ConversationStore.add_message(
+      conversation_key,
+      "user",
+      msg.content,
+      server: state.conversation_store,
+      sender: msg.sender,
+      agent_id: state.memory_agent_id,
+      owner_id: state.memory_owner_id,
+      metadata: Map.get(msg, :metadata)
+    )
+  end
+
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   defp build_loop_runtime(state, messages, context, opts) do
@@ -241,7 +254,8 @@ defmodule FermixCore.Agents.TurnRunner do
       [
         messages: messages,
         context: context,
-        capability_registry: state.capability_registry
+        capability_registry: state.capability_registry,
+        max_iterations: IterationLimits.interactive()
       ]
       |> maybe_put_trust(Keyword.get(opts, :source_trust))
       |> maybe_put_capabilities(Keyword.get(opts, :capabilities))

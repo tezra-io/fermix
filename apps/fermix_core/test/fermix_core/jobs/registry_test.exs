@@ -67,6 +67,20 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert source.metadata == %{"job_id" => job.id}
   end
 
+  test "scheduled jobs default to the current investigation step cap", %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Deep Digest",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Investigate the project state deeply."
+               },
+               repo: repo
+             )
+
+    assert job.max_iterations == 100
+  end
+
   test "pauses, resumes, and removes a job", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(

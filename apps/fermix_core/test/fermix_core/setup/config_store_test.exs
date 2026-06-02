@@ -65,6 +65,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              plugins: Path.join(tmp_home, "plugins"),
+             browser: Path.join(tmp_home, "browser"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),

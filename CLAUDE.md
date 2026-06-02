@@ -20,6 +20,7 @@ Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, R
 - Implement the smallest change that satisfies the design.
 - Run the relevant repo commands below before calling the work done. Default expectation: typecheck or build, tests, and lint.
 - For docs, config, or scaffolding changes, run the relevant checks and say what is not applicable.
+- When a change adds, removes, or materially alters a feature, capability, tool, channel, provider, config surface, or CLI verb, update the `self_knowledge` skill (`apps/fermix_core/priv/skills/self_knowledge/SKILL.md`) in the same change. It is Fermix's runtime self-reference for explaining and fixing itself, and goes stale silently otherwise.
 - Never mark work done without proof.
 
 ## Code Rules (Non-Negotiable)

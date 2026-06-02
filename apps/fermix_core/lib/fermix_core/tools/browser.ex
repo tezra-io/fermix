@@ -1,17 +1,11 @@
 defmodule FermixCore.Tools.Browser do
   @moduledoc """
-  Browser automation via the `agent-browser` CLI.
-  Supports snapshot, navigate, click, fill, and screenshot actions.
+  Native browser automation through Fermix's supervised browser runtime.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
-  alias FermixCore.CommandRunner
-
-  @default_timeout_ms 30_000
-  @valid_actions ~w(snapshot navigate click fill screenshot)
-  @env_var "AGENT_BROWSER_PATH"
 
   @impl true
   @spec name() :: String.t()
@@ -20,8 +14,7 @@ defmodule FermixCore.Tools.Browser do
   @impl true
   @spec description() :: String.t()
   def description do
-    "Control a browser via agent-browser CLI. " <>
-      "Supports snapshot, navigate, click, fill, and screenshot actions."
+    "Control a supervised local browser for navigation, snapshots, tabs, screenshots, and actions."
   end
 
   @impl true
@@ -33,23 +26,115 @@ defmodule FermixCore.Tools.Browser do
       properties: %{
         action: %{
           type: "string",
-          description: "Browser action: snapshot, navigate, click, fill, screenshot"
+          enum: FermixCore.Browser.actions(),
+          description: "Browser action to run."
+        },
+        profile: %{
+          type: "string",
+          description: "Browser profile name. Defaults to the configured browser profile."
         },
         url: %{
           type: "string",
-          description: "URL to navigate to (required for navigate action)"
+          description: "URL for open or navigate actions."
+        },
+        path: %{
+          type: "string",
+          description: "Workspace-confined file path for upload actions."
+        },
+        target: %{
+          type: "string",
+          description: "Stable tab target id returned by browser results."
+        },
+        selector: %{
+          type: "string",
+          description: "Reserved selector field for future scoped reads."
+        },
+        kind: %{
+          type: "string",
+          description: "Action kind for action=act."
         },
         ref: %{
           type: "string",
-          description: "Element ref from snapshot (required for click, fill actions)"
+          description: "Element ref from the latest snapshot."
         },
         text: %{
           type: "string",
-          description: "Text to fill (required for fill action)"
+          description: "Text for typing, filling, waiting, or dialog prompt input."
+        },
+        field: %{
+          type: "string",
+          description: "Field name for get/storage actions."
+        },
+        value: %{
+          type: "string",
+          description: "Value for storage writes."
+        },
+        decision: %{
+          type: "string",
+          enum: ["accept", "dismiss"],
+          description: "Dialog decision for action=dialog."
+        },
+        x: %{
+          type: "number",
+          description: "X coordinate for coordinate actions."
+        },
+        y: %{
+          type: "number",
+          description: "Y coordinate for coordinate actions."
+        },
+        button: %{
+          type: "string",
+          description: "Mouse button name for pointer actions."
+        },
+        key: %{
+          type: "string",
+          description: "Keyboard key for press actions."
+        },
+        wait_until: %{
+          type: "string",
+          description: "Wait target such as text, url, element, or load."
+        },
+        full_page: %{
+          type: "boolean",
+          description: "For screenshot: capture the full page."
+        },
+        format: %{
+          type: "string",
+          enum: ["png", "jpeg"],
+          description: "Screenshot image format."
+        },
+        quality: %{
+          type: "integer",
+          description: "JPEG screenshot quality from 1 to 100."
+        },
+        width: %{
+          type: "integer",
+          description: "Reserved viewport width field."
+        },
+        height: %{
+          type: "integer",
+          description: "Reserved viewport height field."
+        },
+        interactive: %{
+          type: "boolean",
+          description:
+            "For snapshot: include only interactive and important content. Defaults true."
+        },
+        compact: %{
+          type: "boolean",
+          description: "For snapshot: remove empty structural nodes. Defaults true."
+        },
+        depth: %{
+          type: "integer",
+          description: "For snapshot: maximum accessibility tree depth. Defaults 5."
+        },
+        include_urls: %{
+          type: "boolean",
+          description: "For snapshot: include link URLs when available. Defaults false."
         },
         timeout_ms: %{
           type: "integer",
-          description: "Timeout in milliseconds (default: 30000)"
+          description: "Timeout in milliseconds."
         }
       }
     }
@@ -57,7 +142,7 @@ defmodule FermixCore.Tools.Browser do
 
   @impl true
   def when_to_use do
-    "Control an already configured browser for navigation, snapshots, clicks, form fills, or screenshots."
+    "Open, inspect, and operate pages that require a JavaScript-capable browser."
   end
 
   @impl true
@@ -70,8 +155,9 @@ defmodule FermixCore.Tools.Browser do
     [
       %{tag: "invalid_action", description: "action is not one of the supported browser verbs"},
       %{tag: "missing_action_arg", description: "the selected action is missing a required arg"},
-      %{tag: "binary_missing", description: "agent-browser is not installed or not on PATH"},
-      %{tag: "timeout", description: "agent-browser exceeded timeout_ms"}
+      %{tag: "chrome_missing", description: "Chrome or Chromium is not installed or configured"},
+      %{tag: "navigation_blocked", description: "browser URL policy blocked the navigation"},
+      %{tag: "browser_busy", description: "all browser profile slots are active"}
     ]
   end
 
@@ -87,130 +173,42 @@ defmodule FermixCore.Tools.Browser do
     start = System.monotonic_time(:millisecond)
     agent = Map.get(context, :agent_name, "unknown")
 
-    result = do_execute(args)
+    result = do_execute(args, context)
 
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
+    # Record the action (and act-kind) so per-verb latency is visible in
+    # tool_exec traces — the handler passes all metadata through.
     :telemetry.execute(
       [:fermix, :tool, :exec],
       %{duration_ms: duration},
-      %{tool: "browser", agent: agent, success: success}
+      %{
+        tool: "browser",
+        action: Map.get(args, "action"),
+        kind: Map.get(args, "kind"),
+        agent: agent,
+        success: success
+      }
     )
 
     result
   end
 
-  defp do_execute(args) do
-    with {:ok, action} <- fetch_action(args),
-         :ok <- validate_action(action),
-         :ok <- validate_action_args(action, args),
-         {:ok, binary} <- find_binary() do
-      timeout = Map.get(args, "timeout_ms", @default_timeout_ms)
-      run_action(binary, action, args, timeout)
-    else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+  defp do_execute(args, context) do
+    case FermixCore.Browser.execute(args, context) do
+      {:ok, output} -> {:ok, Tool.success(output)}
+      {:error, error} -> {:ok, Tool.error(error_text(error))}
     end
   end
 
-  defp fetch_action(args) do
-    case Map.fetch(args, "action") do
-      {:ok, action} -> {:ok, action}
-      :error -> {:error, "Missing required parameter: action"}
-    end
+  # Surface the structured error (code + details) to the agent, not just the
+  # message — details like Chrome's stderr on a launch failure or the blocked
+  # URL on a policy denial are what make a failure actionable.
+  defp error_text(%{code: code, message: message, details: details})
+       when is_map(details) and map_size(details) > 0 do
+    "#{message} (#{code}): #{Jason.encode!(details)}"
   end
 
-  defp validate_action(action) when action in @valid_actions, do: :ok
-
-  defp validate_action(action) do
-    {:error, "Invalid action: #{action}. Must be one of: #{Enum.join(@valid_actions, ", ")}"}
-  end
-
-  defp validate_action_args("navigate", args) do
-    if is_binary(Map.get(args, "url")) and byte_size(Map.get(args, "url", "")) > 0,
-      do: :ok,
-      else: {:error, "Missing required parameter: url (required for navigate action)"}
-  end
-
-  defp validate_action_args("click", args) do
-    if is_binary(Map.get(args, "ref")) and byte_size(Map.get(args, "ref", "")) > 0,
-      do: :ok,
-      else: {:error, "Missing required parameter: ref (required for click action)"}
-  end
-
-  defp validate_action_args("fill", args) do
-    with :ok <- require_param(args, "ref", "fill"),
-         :ok <- require_param(args, "text", "fill") do
-      :ok
-    end
-  end
-
-  defp validate_action_args(_action, _args), do: :ok
-
-  defp require_param(args, key, action) do
-    if is_binary(Map.get(args, key)) and byte_size(Map.get(args, key, "")) > 0,
-      do: :ok,
-      else: {:error, "Missing required parameter: #{key} (required for #{action} action)"}
-  end
-
-  defp find_binary do
-    case override_binary() || System.find_executable("agent-browser") do
-      nil ->
-        {:error,
-         "agent-browser not found on PATH. Install with `npm install -g agent-browser` " <>
-           "or set #{@env_var} to an absolute path."}
-
-      path ->
-        {:ok, path}
-    end
-  end
-
-  defp override_binary do
-    case System.get_env(@env_var) do
-      nil ->
-        nil
-
-      "" ->
-        nil
-
-      path ->
-        if File.exists?(path),
-          do: path,
-          else:
-            raise(
-              ArgumentError,
-              "#{@env_var}=#{inspect(path)} does not exist; set it to an absolute path to agent-browser or unset it to use PATH."
-            )
-    end
-  end
-
-  defp run_action(binary, action, args, timeout) do
-    cmd_args = build_args(action, args)
-
-    case CommandRunner.run(binary, cmd_args, timeout_ms: timeout) do
-      {:ok, %{exit: 0, stdout: output}} ->
-        {:ok, Tool.success(output)}
-
-      {:ok, %{exit: code, stdout: output}} ->
-        {:ok, Tool.error("agent-browser failed (exit code #{code}):\n#{output}")}
-
-      {:error, {:timeout, ms}} ->
-        {:ok, Tool.error("agent-browser timed out after #{ms}ms")}
-
-      {:error, {:executable_not_found, path}} ->
-        {:ok, Tool.error("agent-browser not found at #{path}")}
-
-      {:error, reason} ->
-        {:ok, Tool.error("agent-browser failed: #{inspect(reason)}")}
-    end
-  end
-
-  defp build_args("snapshot", _args), do: ["snapshot", "--json"]
-  defp build_args("navigate", args), do: ["open", Map.fetch!(args, "url")]
-  defp build_args("click", args), do: ["click", "@#{Map.fetch!(args, "ref")}"]
-
-  defp build_args("fill", args),
-    do: ["fill", "@#{Map.fetch!(args, "ref")}", Map.fetch!(args, "text")]
-
-  defp build_args("screenshot", _args), do: ["screenshot", "--json"]
+  defp error_text(%{code: code, message: message}), do: "#{message} (#{code})"
 end

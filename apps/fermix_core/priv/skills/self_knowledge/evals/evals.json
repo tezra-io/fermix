@@ -6,7 +6,7 @@
       "prompt": "What is Fermix?",
       "expectations": [
         "invokes skill self_knowledge",
-        "explains Fermix as an Elixir-native multi-agent platform"
+        "explains Fermix as an Elixir-native agent platform that runs as one OS daemon"
       ]
     },
     {
@@ -14,7 +14,23 @@
       "prompt": "What is the difference between a Fermix built-in tool and a skill?",
       "expectations": [
         "invokes skill self_knowledge",
-        "distinguishes built-ins shipped with the binary from skills under skills directories"
+        "distinguishes keyless built-ins seeded into the capability registry from SKILL.md instruction packages loaded via skill_view/skill_run"
+      ]
+    },
+    {
+      "name": "change_model_or_provider",
+      "prompt": "How do I change which model or provider Fermix uses?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "points to config.toml [fermix_core.agent] provider and [fermix_core.providers.<name>], and notes the change applies on restart"
+      ]
+    },
+    {
+      "name": "what_can_tools_touch",
+      "prompt": "What can Fermix's tools read and write on my machine?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "explains the sandbox gates file/exec built-ins with modes (strict/standard/open) and always-denied protected paths"
       ]
     }
   ]
