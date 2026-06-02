@@ -203,6 +203,40 @@ defmodule Fermix.CLI.DaemonTest do
     assert is_binary(reply["skill"]["body"])
   end
 
+  test "request reassembles a reply larger than the socket line buffer" do
+    # `{:packet, :line}` truncates a line past the inet driver buffer (9216
+    # bytes), so a single recv would cut a large reply mid-stream. The client
+    # must accumulate until the trailing newline. 300 KB is far past any buffer.
+    dir = mkdir!()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+    socket_path = Path.join(dir, "big.sock")
+    big_value = String.duplicate("x", 300_000)
+    payload = Jason.encode!(%{"status" => "ok", "body" => big_value})
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [
+        :binary,
+        {:packet, :line},
+        {:active, false},
+        {:ifaddr, {:local, to_charlist(socket_path)}}
+      ])
+
+    on_exit(fn -> :gen_tcp.close(listener) end)
+
+    # Linked to the test pid, so it dies with the test on any failure path.
+    Task.async(fn ->
+      {:ok, conn} = :gen_tcp.accept(listener, 2_000)
+      {:ok, _request} = :gen_tcp.recv(conn, 0, 2_000)
+      :ok = :gen_tcp.send(conn, [payload, "\n"])
+      :gen_tcp.recv(conn, 0, 2_000)
+      :gen_tcp.close(conn)
+    end)
+
+    assert {:ok, reply} = Client.request("big", socket_path: socket_path, timeout: 2_000)
+    assert reply["status"] == "ok"
+    assert reply["body"] == big_value
+  end
+
   defp mkdir! do
     path =
       Path.join(
