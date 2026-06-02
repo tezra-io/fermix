@@ -36,6 +36,10 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+config :phoenix,
+  filter_parameters:
+    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token)
+
 config :fermix_core,
   providers: [
     openai: [

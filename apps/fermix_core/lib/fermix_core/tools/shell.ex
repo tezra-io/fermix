@@ -10,6 +10,9 @@ defmodule FermixCore.Tools.Shell do
   alias FermixCore.Sandbox
 
   @default_timeout_ms 30_000
+  @command_trace_max_bytes 300
+  @error_trace_max_bytes 500
+  @secret_assignment ~r/((?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|\S+)/i
 
   @impl true
   @spec name() :: String.t()
@@ -79,7 +82,7 @@ defmodule FermixCore.Tools.Shell do
     start = System.monotonic_time(:millisecond)
     agent = Map.get(context, :agent_name, "unknown")
 
-    result = do_execute(args, context)
+    {result, trace_metadata} = do_execute(args, context)
 
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
@@ -87,7 +90,9 @@ defmodule FermixCore.Tools.Shell do
     :telemetry.execute(
       [:fermix, :tool, :exec],
       %{duration_ms: duration},
-      %{tool: "shell", agent: agent, success: success}
+      trace_metadata
+      |> Map.merge(%{tool: "shell", agent: agent, success: success})
+      |> maybe_put_error_summary(result)
     )
 
     result
@@ -98,14 +103,30 @@ defmodule FermixCore.Tools.Shell do
       working_dir = Map.get(args, "working_dir")
       timeout = Map.get(args, "timeout_ms", @default_timeout_ms)
 
+      trace = %{
+        command: trace_text(command, @command_trace_max_bytes),
+        requested_working_dir: working_dir
+      }
+
       with :ok <- validate_command(command),
            {:ok, plan} <- Sandbox.shell_plan(command, working_dir, context) do
-        run_command(command, plan.working_dir, timeout, plan.env)
+        {result, run_trace} = run_command(command, plan.working_dir, timeout, plan.env)
+
+        {
+          result,
+          trace
+          |> Map.put(:working_dir, plan.working_dir)
+          |> Map.put(:timeout_ms, timeout)
+          |> Map.merge(run_trace)
+        }
       else
-        {:error, reason} -> {:ok, Tool.error(format_error(reason))}
+        {:error, reason} ->
+          {{:ok, Tool.error(format_error(reason))},
+           Map.put(trace, :failure, sandbox_failure_tag(reason))}
       end
     else
-      :error -> {:ok, Tool.error("Missing required parameter: command")}
+      :error ->
+        {{:ok, Tool.error("Missing required parameter: command")}, %{failure: "missing_command"}}
     end
   end
 
@@ -118,19 +139,19 @@ defmodule FermixCore.Tools.Shell do
            timeout_ms: timeout
          ) do
       {:ok, %{exit: 0, stdout: output}} ->
-        {:ok, Tool.success(output)}
+        {{:ok, Tool.success(output)}, %{exit_code: 0}}
 
       {:ok, %{exit: code, stdout: output}} ->
-        {:ok, Tool.error("Command failed (exit code #{code}):\n#{output}")}
+        {{:ok, Tool.error("Command failed (exit code #{code}):\n#{output}")},
+         %{exit_code: code, failure: "exit_nonzero"}}
 
       {:error, {:timeout, ms}} ->
-        {:ok, Tool.error("Command timed out after #{ms}ms")}
+        {{:ok, Tool.error("Command timed out after #{ms}ms")},
+         %{failure: "timeout", timeout_ms: ms}}
 
       {:error, {:executable_not_found, path}} ->
-        {:ok, Tool.error("Shell executable missing: #{path}")}
-
-      {:error, reason} ->
-        {:ok, Tool.error("Shell command failed: #{inspect(reason)}")}
+        {{:ok, Tool.error("Shell executable missing: #{path}")},
+         %{failure: "executable_not_found"}}
     end
   end
 
@@ -163,4 +184,30 @@ defmodule FermixCore.Tools.Shell do
 
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: "Sandbox denied shell command: #{inspect(reason)}"
+
+  defp maybe_put_error_summary(metadata, {:ok, %{success: false, error: error}})
+       when is_binary(error) do
+    Map.put(metadata, :error_summary, trace_text(error, @error_trace_max_bytes))
+  end
+
+  defp maybe_put_error_summary(metadata, _result), do: metadata
+
+  defp trace_text(value, max_bytes) when is_binary(value) do
+    value
+    |> redact_secrets()
+    |> String.slice(0, max_bytes)
+  end
+
+  defp trace_text(value, max_bytes), do: value |> inspect() |> trace_text(max_bytes)
+
+  defp redact_secrets(text) do
+    Regex.replace(@secret_assignment, text, fn _match, prefix, _secret ->
+      prefix <> "[REDACTED]"
+    end)
+  end
+
+  defp sandbox_failure_tag({tag, _detail}) when is_atom(tag), do: Atom.to_string(tag)
+  defp sandbox_failure_tag({tag, _detail, _extra}) when is_atom(tag), do: Atom.to_string(tag)
+  defp sandbox_failure_tag(reason) when is_binary(reason), do: "validation"
+  defp sandbox_failure_tag(_reason), do: "sandbox_denied"
 end

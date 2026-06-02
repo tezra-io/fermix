@@ -138,6 +138,12 @@ defmodule FermixCore.Tools.SubagentsTest do
 
   defp text_turn(content), do: %{content: content, tool_calls: []}
 
+  defp tool_turns(count) do
+    for step <- 1..count do
+      call_turn("c#{step}", "missing_tool", %{"step" => step})
+    end
+  end
+
   defp call_turn(call_id, name, args),
     do: %{content: "", tool_calls: [tool_call(call_id, name, args)]}
 
@@ -268,6 +274,18 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert worker["iterations"] == 1
       assert result["summary"]["requested"] == 1
       assert result["summary"]["completed"] == 1
+    end
+
+    test "temporary workers have enough iterations for deeper delegated work", ctx do
+      MockAdapter.set_turns(tool_turns(99) ++ [text_turn("finished at 100")])
+
+      tasks = [%{"id" => "deep", "task" => "Investigate a complex issue."}]
+      result = Subagents.execute(%{"tasks" => tasks}, context(ctx)) |> decode_output()
+
+      assert [worker] = result["results"]
+      assert worker["status"] == "completed"
+      assert worker["iterations"] == 100
+      assert worker["output"] == "finished at 100"
     end
 
     test "partial timeout: a slow worker times out while a fast one completes", ctx do

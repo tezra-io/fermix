@@ -3,6 +3,7 @@ defmodule FermixCore.Jobs.Registry do
   Durable registry for scheduled job definitions and their memory sources.
   """
 
+  alias FermixCore.Agents.IterationLimits
   alias FermixCore.Jobs.Schedule
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Memory.Repo
@@ -224,7 +225,8 @@ defmodule FermixCore.Jobs.Registry do
          session_mode: optional_string(attrs, :session_mode, "isolated"),
          provider: optional_string(attrs, :provider, nil),
          model: optional_string(attrs, :model, nil),
-         max_iterations: optional_integer(attrs, :max_iterations, 25),
+         max_iterations:
+           optional_integer(attrs, :max_iterations, IterationLimits.scheduled_job_default()),
          timeout_seconds: optional_integer(attrs, :timeout_seconds, nil),
          inactivity_timeout_seconds: optional_integer(attrs, :inactivity_timeout_seconds, nil),
          capability_policy: list_of_strings(attrs, :capability_policy, []),

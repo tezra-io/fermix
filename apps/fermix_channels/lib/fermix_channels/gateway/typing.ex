@@ -99,6 +99,7 @@ defmodule FermixChannels.Gateway.Typing do
         :ok
     after
       100 ->
+        Process.unlink(pid)
         Process.exit(pid, :kill)
 
         receive do

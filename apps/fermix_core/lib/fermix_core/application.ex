@@ -117,6 +117,7 @@ defmodule FermixCore.Application do
         {Trace, trace_opts()},
         TokenSupervisor,
         maybe_token_manager(),
+        FermixCore.Browser.Supervisor,
         CapabilityRegistry,
         BuiltinSeeder,
         {CommandCapabilities, capability_registry: CapabilityRegistry},

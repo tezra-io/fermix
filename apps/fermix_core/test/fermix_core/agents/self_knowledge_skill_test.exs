@@ -28,6 +28,6 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert definition.trust == :operator
     assert definition.allowed_tools == []
     assert definition.system_prompt =~ "Fermix is"
-    assert definition.system_prompt =~ "Built-in tools"
+    assert definition.system_prompt =~ "Built-in capabilities"
   end
 end

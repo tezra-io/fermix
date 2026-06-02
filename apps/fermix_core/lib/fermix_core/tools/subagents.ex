@@ -21,6 +21,7 @@ defmodule FermixCore.Tools.Subagents do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.AgentSupervisor
+  alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.WorkerRun
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Tools.Support
@@ -29,7 +30,6 @@ defmodule FermixCore.Tools.Subagents do
   @hard_max_concurrency 8
   @default_timeout_seconds 300
   @hard_timeout_seconds 900
-  @default_max_iterations 8
   @max_tasks 8
   @max_result_bytes 60_000
 
@@ -232,7 +232,7 @@ defmodule FermixCore.Tools.Subagents do
       allowed_tools: nil,
       policy: policy,
       trust: trust,
-      max_iterations: @default_max_iterations,
+      max_iterations: IterationLimits.subagent(),
       timeout_seconds: timeout_seconds,
       parent: "main",
       delegates_to: []
