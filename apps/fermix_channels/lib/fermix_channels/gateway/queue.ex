@@ -162,8 +162,9 @@ defmodule FermixChannels.Gateway.Queue do
          conversation,
          %{request_id: request_id, message: msg}
        ) do
-    task =
+    fun =
       turn_task(
+        self(),
         state.main_agent,
         state.turn_runner,
         conversation_key,
@@ -171,9 +172,15 @@ defmodule FermixChannels.Gateway.Queue do
         msg
       )
 
-    case Task.Supervisor.start_child(state.task_supervisor, task) do
+    case Task.Supervisor.start_child(state.task_supervisor, fun) do
       {:ok, pid} ->
-        mark_request_started(state, conversation_key, conversation, request_id, pid)
+        # Monitor the task BEFORE releasing it (the `{self(), :run}` signal),
+        # so a near-instant turn can never exit before we monitor it — which
+        # would deliver a spurious `{:DOWN, _, _, _, :noproc}` and mislabel an
+        # ordinary turn as crashed. See `await_run_signal/1`.
+        state = mark_request_started(state, conversation_key, conversation, request_id, pid)
+        send(pid, {self(), :run})
+        state
 
       {:error, reason} ->
         Logger.error(
@@ -192,7 +199,7 @@ defmodule FermixChannels.Gateway.Queue do
   # runs, then deliver its reply and commit the assistant history. Checkout runs
   # HERE, in the task (not the queue loop), so a slow runtime-context build never
   # blocks other conversations.
-  defp turn_task(main_agent, runner, conversation_key, request_id, msg) do
+  defp turn_task(owner, main_agent, runner, conversation_key, request_id, msg) do
     typing_fn = Map.get(msg, :typing_fn)
 
     typing_opts = [
@@ -209,7 +216,25 @@ defmodule FermixChannels.Gateway.Queue do
       msg: msg
     }
 
-    fn -> Typing.with_indicator(typing_fn, typing_opts, fn -> checkout_and_run(turn) end) end
+    fn ->
+      await_run_signal(owner)
+      Typing.with_indicator(typing_fn, typing_opts, fn -> checkout_and_run(turn) end)
+    end
+  end
+
+  # Block until the queue (owner) has registered its monitor and released us
+  # with `{owner, :run}`. Monitoring the owner makes the handshake total: if it
+  # dies before releasing us, the `:DOWN` arrives instead and we exit cleanly —
+  # so the signal can never be lost and the task can never leak. This is the
+  # same race-free pattern `Task.async/2` uses, with no timeout and no window
+  # in which an instant turn could finish unmonitored.
+  defp await_run_signal(owner) do
+    owner_ref = Process.monitor(owner)
+
+    receive do
+      {^owner, :run} -> Process.demonitor(owner_ref, [:flush])
+      {:DOWN, ^owner_ref, :process, ^owner, _reason} -> exit(:normal)
+    end
   end
 
   defp checkout_and_run(%{main_agent: main_agent, msg: msg} = turn) do
