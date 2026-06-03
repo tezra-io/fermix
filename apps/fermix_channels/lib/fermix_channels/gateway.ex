@@ -114,6 +114,11 @@ defmodule FermixChannels.Gateway do
         {:error, _reason} = error ->
           error
 
+        # A command (e.g. /ultra) handled parsing/auth but wants the agent to run
+        # a turn on a modified message (prefix stripped, run_profile tagged).
+        {:enqueue, agent_message} ->
+          deliver_to_agent(agent_message, authorization, agent, agent_server, reply_fn, typing_fn)
+
         :passthrough ->
           deliver_to_agent(reply_message, authorization, agent, agent_server, reply_fn, typing_fn)
       end

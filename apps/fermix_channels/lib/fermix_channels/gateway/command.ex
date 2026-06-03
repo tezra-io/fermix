@@ -15,5 +15,5 @@ defmodule FermixChannels.Gateway.Command do
               Message.t(),
               reply_fn :: Reply.reply_fn(),
               context :: map()
-            ) :: :ok | {:error, term()}
+            ) :: :ok | {:error, term()} | {:enqueue, Message.t()}
 end

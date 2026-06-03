@@ -1,0 +1,53 @@
+defmodule FermixChannels.Gateway.Commands.Stop do
+  @moduledoc false
+
+  @behaviour FermixChannels.Gateway.Command
+
+  alias FermixChannels.Gateway.Commands.Authorization
+  alias FermixChannels.Gateway.Stopper
+
+  @impl true
+  def name, do: "stop"
+
+  @impl true
+  def aliases, do: []
+
+  @impl true
+  def description, do: "Stop all running Fermix work and clear queued messages."
+
+  @impl true
+  def authorize(message, metadata, context),
+    do: Authorization.owner_only(message, metadata, context)
+
+  # Handled in the ingress path before the queue, so `/stop` runs immediately
+  # instead of waiting behind the work it is trying to stop.
+  @impl true
+  def execute(_message, reply_fn, context) do
+    reply_fn.({:text, reply(Stopper.stop_all(stopper_opts(context)))})
+    :ok
+  end
+
+  # Stop the queue THIS ingress is using. The active queue is `:agent_server`
+  # (the CLI/bench paths isolate their own via `ingest(agent_server: ...)`);
+  # fall back to the registered servers only when none are in context.
+  defp stopper_opts(context) do
+    []
+    |> put_server(:queue, Map.get(context, :agent_server))
+    |> put_server(:work_registry, Map.get(context, :work_registry))
+  end
+
+  defp put_server(opts, _key, nil), do: opts
+  defp put_server(opts, key, server), do: Keyword.put(opts, key, server)
+
+  defp reply(%{active_turns: 0, queued_messages: 0, background_tasks: 0}),
+    do: "No active Fermix execution to stop."
+
+  defp reply(%{active_turns: turns, queued_messages: messages, background_tasks: tasks}) do
+    "Stopped Fermix execution — cancelled #{count(turns, "active turn")}, " <>
+      "cleared #{count(messages, "queued message")}, and stopped " <>
+      "#{count(tasks, "background task")}. Scheduled jobs and voice are not affected by /stop."
+  end
+
+  defp count(1, noun), do: "1 #{noun}"
+  defp count(n, noun), do: "#{n} #{noun}s"
+end

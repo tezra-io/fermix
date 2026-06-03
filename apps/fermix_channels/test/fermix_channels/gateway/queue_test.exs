@@ -275,6 +275,45 @@ defmodule FermixChannels.Gateway.QueueTest do
     end
   end
 
+  describe "stop_all" do
+    test "terminates active turns, clears pending, returns counts, suppresses delivery", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, make_msg("first", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "first", first_pid}, 5_000
+      # "second" on the same conversation stays pending behind the active turn.
+      Queue.enqueue(queue, make_msg("second", "c1", ctx.test_pid))
+      # "other" on a different conversation runs concurrently.
+      Queue.enqueue(queue, make_msg("other", "c2", ctx.test_pid))
+      assert_receive {:turn_started, "other", other_pid}, 5_000
+
+      assert eventually(fn -> Queue.status(queue).pending_requests == 1 end)
+
+      ref1 = Process.monitor(first_pid)
+      ref2 = Process.monitor(other_pid)
+
+      counts = Queue.stop_all(queue)
+      assert counts.active_stopped == 2
+      assert counts.pending_cleared == 1
+
+      assert_receive {:DOWN, ^ref1, :process, ^first_pid, _reason}, 5_000
+      assert_receive {:DOWN, ^ref2, :process, ^other_pid, _reason}, 5_000
+
+      # Neither stopped turn delivers a reply, and the cleared pending never starts.
+      refute_receive {:reply, _text}, 300
+      refute_receive {:turn_started, "second", _pid}, 300
+
+      status = Queue.status(queue)
+      assert status.active_requests == 0
+      assert status.pending_requests == 0
+    end
+
+    test "returns zero counts when nothing is running", ctx do
+      queue = start_queue(ctx)
+      assert Queue.stop_all(queue) == %{active_stopped: 0, pending_cleared: 0}
+    end
+  end
+
   describe "telemetry" do
     test "emits enqueue telemetry with depth and mailbox latency", ctx do
       attach_telemetry([:fermix, :gateway, :queue, :enqueue])
