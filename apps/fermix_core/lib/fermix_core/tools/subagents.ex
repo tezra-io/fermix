@@ -251,6 +251,12 @@ defmodule FermixCore.Tools.Subagents do
 
   defp base_spawn_opts(context) do
     [
+      # Runs in the coordinator (the inline tool call on the turn task), so
+      # `self()` is the coordinator process. Parenting workers to it lets
+      # `AgentServer`'s parent-down monitor reap them when the coordinator is
+      # cancelled (e.g. `/stop` terminating the turn) — otherwise the workers,
+      # spawned nolink under the task supervisor, would outlive the stopped turn.
+      parent: self(),
       parent_name: Map.get(context, :agent_name, "main"),
       parent_session: Map.get(context, :session_id),
       provider: Map.get(context, :provider, FermixCore.Providers.OpenAI),

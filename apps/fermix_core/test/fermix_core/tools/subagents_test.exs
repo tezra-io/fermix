@@ -189,6 +189,55 @@ defmodule FermixCore.Tools.SubagentsTest do
 
   defp decode_output({:ok, %{success: true, output: json}}), do: Jason.decode!(json)
 
+  defp agent_children(supervisor) do
+    supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.map(fn {_id, pid, _type, _modules} -> pid end)
+    |> Enum.filter(&is_pid/1)
+  end
+
+  defp eventually(fun), do: eventually(fun, 100)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(20)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  describe "coordinator cancellation" do
+    test "killing the coordinator reaps its in-flight subagent workers", ctx do
+      MockAdapter.set_turns([])
+      test_pid = self()
+
+      coordinator =
+        spawn(fn ->
+          Subagents.execute(
+            %{"tasks" => [%{"id" => "slow", "task" => "SLOWWORKER hang for a while"}]},
+            context(ctx)
+          )
+
+          send(test_pid, :coordinator_finished)
+        end)
+
+      # The worker AgentServer spawns, then blocks ~6.5s in its first chat call.
+      assert eventually(fn -> agent_children(ctx.agent_supervisor) != [] end)
+      [worker_pid] = agent_children(ctx.agent_supervisor)
+      worker_ref = Process.monitor(worker_pid)
+
+      # Cancel the coordinator the way `/stop` terminates a turn task.
+      Process.exit(coordinator, :kill)
+
+      # The worker's parent-down monitor stops it well before its sleep ends.
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker_pid, _reason}, 2_000
+      assert eventually(fn -> agent_children(ctx.agent_supervisor) == [] end)
+      refute_received :coordinator_finished
+    end
+  end
+
   describe "validation (rejected before spawn)" do
     test "missing tasks", ctx do
       assert {:ok, %{success: false, error: error}} = Subagents.execute(%{}, context(ctx))

@@ -60,6 +60,22 @@ defmodule FermixChannels.Gateway.Queue do
     GenServer.call(server, :status)
   end
 
+  @doc """
+  Emergency stop: terminate every active turn and clear every pending FIFO
+  queue across all conversations. Returns `%{active_stopped, pending_cleared}`.
+
+  Stale-delivery suppression is the active turn's identity (its task pid): a
+  stopped turn's pid is no longer the conversation's active pid, so its
+  freshness check (run before delivering/committing) fails and it neither
+  delivers a reply nor commits. This is the single freshness authority a future
+  superseding turn would also invalidate — no separate "stopped" flag.
+  """
+  @spec stop_all(GenServer.server()) ::
+          %{active_stopped: non_neg_integer(), pending_cleared: non_neg_integer()}
+  def stop_all(server \\ __MODULE__) do
+    GenServer.call(server, :stop_all)
+  end
+
   # --- GenServer Callbacks ---
 
   @impl true
@@ -94,6 +110,24 @@ defmodule FermixChannels.Gateway.Queue do
   @impl true
   def handle_call(:status, _from, state) do
     {:reply, status_from_state(state), state}
+  end
+
+  def handle_call(:stop_all, _from, state) do
+    {state, counts} = stop_all_conversations(state)
+    {:reply, counts, state}
+  end
+
+  # Freshness authority: a turn is fresh iff its task pid is still the active
+  # pid for its conversation. After `stop_all` (or a future superseding turn)
+  # the conversation is gone or holds a different pid, so the check fails.
+  def handle_call({:fresh?, conversation_key, pid}, _from, state) do
+    fresh? =
+      case Map.get(state.conversations, conversation_key) do
+        %{active: %{pid: ^pid}} -> true
+        _conversation -> false
+      end
+
+    {:reply, fresh?, state}
   end
 
   @impl true
@@ -208,6 +242,7 @@ defmodule FermixChannels.Gateway.Queue do
     ]
 
     turn = %{
+      owner: owner,
       main_agent: main_agent,
       runner: runner,
       conversation_key: conversation_key,
@@ -264,15 +299,29 @@ defmodule FermixChannels.Gateway.Queue do
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
     case runner.run(core_msg, turn_state, turn.deliver) do
       {:ok, response, context_tokens} ->
-        turn.deliver.({:text, response})
+        # A turn stopped by `/stop` mid-run must neither deliver nor commit.
+        if fresh?(turn) do
+          turn.deliver.({:text, response})
 
-        core_msg
-        |> runner.commit(turn_state, response, context_tokens)
-        |> maybe_notify_compacted(turn.deliver)
+          core_msg
+          |> runner.commit(turn_state, response, context_tokens)
+          |> maybe_notify_compacted(turn.deliver)
+        else
+          :stopped
+        end
 
       {:error, reason} ->
-        turn.deliver.({:text, runner.error_reply(reason)})
+        if fresh?(turn), do: turn.deliver.({:text, runner.error_reply(reason)}), else: :stopped
     end
+  end
+
+  # Is this turn still the conversation's active turn? Asked once, before final
+  # delivery/commit. A dead queue (or a `/stop` that cleared this turn) means
+  # not fresh — suppress.
+  defp fresh?(%{owner: owner, conversation_key: conversation_key}) do
+    GenServer.call(owner, {:fresh?, conversation_key, self()})
+  catch
+    :exit, _reason -> false
   end
 
   # `commit/4` returns `:compacted` when it summarized the history; surface a
@@ -380,6 +429,42 @@ defmodule FermixChannels.Gateway.Queue do
   defp send_error_reply_async(msg, text) do
     spawn(fn -> msg.reply_fn.({:text, text}) end)
     :ok
+  end
+
+  # Terminate every active turn task and drop all conversation runtime. Pending
+  # DOWNs from the killed tasks become no-ops (task_refs cleared); a stopped
+  # turn's freshness check fails because its conversation no longer holds its
+  # pid, so it cannot deliver or commit after this returns.
+  #
+  # Subagent workers parented to a killed coordinator are reaped via AgentServer's
+  # parent-down monitor — prompt and eventual, but NOT synchronous: this returns
+  # once the coordinator tasks are dead, not once every child AgentServer has
+  # processed its parent :DOWN. A strict "all spawned workers gone before the ack"
+  # guarantee (a synchronous AgentSupervisor.terminate_for/1 sweep) is deferred to
+  # the /ultra phase (§17.5), where fan-out makes it worth the plumbing.
+  defp stop_all_conversations(state) do
+    counts =
+      Enum.reduce(state.conversations, %{active_stopped: 0, pending_cleared: 0}, fn
+        {_key, runtime}, counts ->
+          terminate_active(state.task_supervisor, runtime)
+          tally_stopped(runtime, counts)
+      end)
+
+    {%{state | conversations: %{}, task_refs: %{}}, counts}
+  end
+
+  defp terminate_active(task_supervisor, %{active: %{pid: pid}}) when is_pid(pid) do
+    Task.Supervisor.terminate_child(task_supervisor, pid)
+  end
+
+  defp terminate_active(_task_supervisor, _runtime), do: :ok
+
+  defp tally_stopped(runtime, counts) do
+    pending_count = :queue.len(Map.get(runtime, :pending, :queue.new()))
+
+    counts
+    |> increment_if(:active_stopped, Map.get(runtime, :active) != nil)
+    |> Map.update!(:pending_cleared, &(&1 + pending_count))
   end
 
   defp format_conversation_key({channel, chat_id, :root}), do: "#{channel}/#{chat_id}"
