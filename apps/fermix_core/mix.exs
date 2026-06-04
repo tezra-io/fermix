@@ -37,6 +37,26 @@ defmodule FermixCore.MixProject do
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
       {:websockex, "~> 0.4"}
-    ]
+    ] ++ opik_dep()
+  end
+
+  # Dev-only, opt-in observability exporter. It lives in the SIBLING `fermix-plugins`
+  # repo, so its `path:` resolves only on a dev machine that has that repo checked
+  # out — an unconditional dep would break every standalone/CI/public build.
+  #
+  # ONE switch: `FERMIX_OPIK_ENABLED`. Export it (e.g. in your dev shell) and rebuild
+  # → the plugin is bundled here, and at boot the plugin attaches itself (it reads
+  # the SAME env in `FermixOpik.enabled?`). Unset (the default) → not bundled, so
+  # default builds stay clean. The truthy set mirrors the plugin's so build (bundle)
+  # and runtime (attach) never disagree.
+  #
+  # Future: pull plugins from the plugins repo at setup time instead of a local path.
+  # See docs/TELEMETRY_CONTRACT.md and projects/fermix-plugins.
+  defp opik_dep do
+    if System.get_env("FERMIX_OPIK_ENABLED") in ["1", "true", "TRUE", "yes", "y"] do
+      [{:fermix_opik, path: "../../../fermix-plugins/apps/fermix_opik"}]
+    else
+      []
+    end
   end
 end
