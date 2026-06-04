@@ -125,6 +125,15 @@ defmodule FermixCore.Tools.MemoryRecallTest do
         server: history
       )
 
+      # `add_message` replies before a detached task persists the row to
+      # SQLite, so wait (bounded) until the history hit is queryable.
+      assert eventually(fn ->
+               {:ok, probe} =
+                 MemoryRecall.execute(%{"search" => "timezone", "source" => "all"}, context)
+
+               probe.output =~ "[history"
+             end)
+
       assert {:ok, result} =
                MemoryRecall.execute(%{"search" => "timezone", "source" => "all"}, context)
 
@@ -382,5 +391,17 @@ defmodule FermixCore.Tools.MemoryRecallTest do
     )
 
     handler_id
+  end
+
+  defp eventually(fun), do: eventually(fun, 100)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(20)
+      eventually(fun, attempts - 1)
+    end
   end
 end
