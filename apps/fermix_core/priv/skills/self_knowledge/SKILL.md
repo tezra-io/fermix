@@ -72,7 +72,7 @@ OpenAI Realtime voice companion is local and off by default (`[fermix_core.realt
 - `FERMIX_HOME` default `~/.fermix`: `config.toml`, `auth.json`, `memory.db`, `daemon.sock`, `bootstrap/`, `skills/`, `plugins/`, `traces/`, `logs/`, `grants/`, `browser/`.
 - Prompt files from setup: `bootstrap/main/{IDENTITY,FERMIX,SOUL,REALTIME}.md`, `memory/main/{USER,MEMORY}.md`; default agent id `main`.
 - Config sections: `[fermix_core.agent]`, `[fermix_core.providers.<name>]`, `[fermix_core.tools.web_search]`, `[fermix_core.jobs|memory|realtime|plugins|routing]`, `[fermix_core.oauth.google]`, `[sandbox]`, `[mcp.servers.<name>]`, `[channels.<name>]`.
-- Secrets: plaintext config, `@keyring`, or env vars. `fermix setup --migrate-secrets` moves plaintext to keychain. Codex login: `fermix auth login`.
+- Secrets: plaintext config, `@keyring`, or env vars. Saving config auto-stores plaintext secrets to the OS keyring as `@keyring` when a writer is available (macOS `security`; account `fermix`, service `fermix:<ENV>`); without a writer, unchanged plaintext is kept (with a warning) and only new secrets fail. `fermix setup --migrate-secrets` migrates in place. Codex login: `fermix auth login`.
 - Service: launchd/systemd, user default or `--system`; control with `fermix start|stop|restart`. Inspect with `fermix status|health|doctor|logs -f|capabilities`; restart for config changes.
 
 ## Observability

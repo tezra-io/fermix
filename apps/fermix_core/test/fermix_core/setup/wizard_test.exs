@@ -20,9 +20,17 @@ defmodule FermixCore.Setup.WizardTest do
     realtime = Application.get_env(:fermix_core, :realtime, [])
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     fermix_home = System.get_env("FERMIX_HOME")
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-wizard")
 
+    System.put_env("FERMIX_HOME", tmp_home)
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    Application.put_env(:fermix_channels, :whatsapp, [])
+    Application.put_env(:fermix_channels, :discord, [])
+    Application.put_env(:fermix_channels, :slack, [])
+    Application.put_env(:fermix_channels, :signal, [])
 
     Application.put_env(:fermix_core, :personalization,
       user_name: "Test User",
@@ -49,6 +57,8 @@ defmodule FermixCore.Setup.WizardTest do
         nil -> System.delete_env("FERMIX_HOME")
         value -> System.put_env("FERMIX_HOME", value)
       end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)
 
     :ok
@@ -269,6 +279,10 @@ defmodule FermixCore.Setup.WizardTest do
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s(source = "command")
     assert contents =~ ~s(command = "/usr/bin/security")
+
+    assert contents =~
+             ~s(args = ["find-generic-password", "-a", "fermix", "-s", "fermix:OPENAI_API_KEY", "-w"])
+
     refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
   end
 
@@ -1257,7 +1271,7 @@ defmodule FermixCore.Setup.WizardTest do
       assert contents =~ ~s(mode = "open")
     end
 
-    test "preserves API key that is already persisted in TOML", %{tmp_home: tmp_home} do
+    test "moves already persisted API key to keyring on save", %{tmp_home: tmp_home} do
       File.write!(Path.join(tmp_home, "config.toml"), """
       [fermix_core.providers.openai]
       auth_mode = "api_key"
@@ -1270,8 +1284,12 @@ defmodule FermixCore.Setup.WizardTest do
       {:ok, _report} = Wizard.set_sandbox_overrides(:strict, nil, nil)
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "sk-already-on-disk"
+      assert contents =~ ~s(api_key = "@keyring")
+      refute contents =~ "sk-already-on-disk"
       assert contents =~ ~s(mode = "strict")
+
+      assert {:ok, "sk-already-on-disk"} =
+               FermixTestSupport.SecretWriterStub.get(:openai_api_key)
     end
   end
 
