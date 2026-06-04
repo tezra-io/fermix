@@ -13,8 +13,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
-  alias FermixCore.Setup.SecretPaths
-  alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Setup.SecretStore
 
   require Logger
 
@@ -136,14 +135,10 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  @spec save_snapshot(runtime_config()) :: :ok | {:error, term()}
-  def save_snapshot(snapshot) do
-    persisted =
-      snapshot
-      |> persistable_snapshot()
-      |> preserve_existing_sentinels()
-
-    with :ok <- File.mkdir_p(fermix_home()),
+  @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
+  def save_snapshot(snapshot, opts \\ []) do
+    with {:ok, persisted} <- persisted_snapshot(snapshot, opts),
+         :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
          :ok <- File.write(path(), dump_snapshot(persisted)) do
       :ok
@@ -155,7 +150,7 @@ defmodule FermixCore.Setup.ConfigStore do
     persisted =
       snapshot
       |> persistable_snapshot()
-      |> resolve_keyring_sentinels(warn_plaintext: false)
+      |> SecretStore.resolve_sentinels(warn_plaintext: false)
 
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
@@ -360,95 +355,27 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp maybe_resolve_keyring(snapshot, opts) do
     if Keyword.get(opts, :resolve_secrets, true) do
-      resolve_keyring_sentinels(snapshot, warn_plaintext: true)
+      SecretStore.resolve_sentinels(snapshot, warn_plaintext: true)
     else
       snapshot
     end
   end
 
-  defp preserve_existing_sentinels(snapshot) do
+  defp persisted_snapshot(snapshot, opts) do
+    persistable = persistable_snapshot(snapshot)
+
+    if Keyword.get(opts, :secure_secrets, true) do
+      SecretStore.secure_snapshot(persistable, previous: existing_persisted_snapshot())
+    else
+      {:ok, persistable}
+    end
+  end
+
+  defp existing_persisted_snapshot do
     case load_runtime_config(resolve_secrets: false) do
-      {:ok, persisted} -> preserve_existing_sentinels(snapshot, persisted)
-      {:error, _reason} -> snapshot
+      {:ok, persisted} -> persisted
+      {:error, _reason} -> nil
     end
-  end
-
-  defp preserve_existing_sentinels(snapshot, persisted) do
-    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
-      old_value = get_snapshot_value(persisted, secret.path)
-      new_value = get_snapshot_value(acc, secret.path)
-
-      if old_value == SecretWriter.sentinel() and secret_value?(new_value) do
-        put_snapshot_value(acc, secret.path, SecretWriter.sentinel())
-      else
-        acc
-      end
-    end)
-  end
-
-  defp secret_value?(value) when value in [nil, "", "@keyring"], do: false
-  defp secret_value?(value), do: is_binary(value)
-
-  defp resolve_keyring_sentinels(snapshot, opts) do
-    warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
-
-    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
-      case get_snapshot_value(acc, secret.path) do
-        nil ->
-          acc
-
-        value when is_binary(value) ->
-          resolve_secret_value(acc, secret, value, warn_plaintext?)
-
-        _other ->
-          acc
-      end
-    end)
-  end
-
-  defp resolve_secret_value(snapshot, secret, value, warn_plaintext?) do
-    if value == SecretWriter.sentinel() do
-      put_snapshot_value(snapshot, secret.path, SecretWriter.get!(secret.key))
-    else
-      if warn_plaintext?, do: warn_plaintext_secret(secret)
-      snapshot
-    end
-  end
-
-  defp warn_plaintext_secret(secret) do
-    Logger.warning(
-      "config.toml contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
-    )
-  end
-
-  defp get_snapshot_value(snapshot, [root | rest]) do
-    snapshot
-    |> Map.get(root, [])
-    |> get_keyword_value(rest)
-  end
-
-  defp get_keyword_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
-
-  defp get_keyword_value(keyword, [key | rest]) when is_list(keyword) do
-    keyword
-    |> Keyword.get(key, [])
-    |> get_keyword_value(rest)
-  end
-
-  defp get_keyword_value(_value, _path), do: nil
-
-  defp put_snapshot_value(snapshot, [root | rest], value) do
-    section = Map.get(snapshot, root, [])
-    Map.put(snapshot, root, put_keyword_value(section, rest, value))
-  end
-
-  defp put_keyword_value(keyword, [key], value) when is_list(keyword) do
-    Keyword.put(keyword, key, value)
-  end
-
-  defp put_keyword_value(keyword, [key | rest], value) when is_list(keyword) do
-    nested = Keyword.get(keyword, key, [])
-    Keyword.put(keyword, key, put_keyword_value(nested, rest, value))
   end
 
   defp apply_provider_config(provider, config) do

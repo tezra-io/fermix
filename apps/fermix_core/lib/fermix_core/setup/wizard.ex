@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
 
@@ -618,34 +619,22 @@ defmodule FermixCore.Setup.Wizard do
     SecretPaths.sandbox_env_eligible()
     |> Enum.reduce(snapshot, fn secret, acc ->
       if SecretWriter.available?() and answered?(answers, secret.key) do
-        add_sandbox_env_source(acc, secret.env)
+        add_sandbox_env_source(acc, secret)
       else
         acc
       end
     end)
   end
 
-  defp add_sandbox_env_source(snapshot, env_name) do
+  defp add_sandbox_env_source(snapshot, secret) do
     sandbox = SandboxConfig.normalize(Map.get(snapshot, :sandbox))
+    env_name = secret.env
 
     allow = add_if_missing(sandbox.env.allow, env_name)
-    sources = Map.put_new(sandbox.env.sources, env_name, security_keychain_source(env_name))
+    sources = Map.put_new(sandbox.env.sources, env_name, SecretWriter.command_source(secret.key))
 
     updated_env = %{sandbox.env | allow: allow, sources: sources}
     Map.put(snapshot, :sandbox, %{sandbox | env: updated_env})
-  end
-
-  defp security_keychain_source(env_name) do
-    %{
-      source: :command,
-      command: "/usr/bin/security",
-      args: ["find-generic-password", "-a", current_user(), "-s", env_name, "-w"],
-      timeout_ms: 3000
-    }
-  end
-
-  defp current_user do
-    System.get_env("USER") || Path.basename(System.user_home!())
   end
 
   defp add_if_missing(list, item) when is_list(list) do
@@ -660,11 +649,11 @@ defmodule FermixCore.Setup.Wizard do
         answered?(answers, answer_key) ->
           acc
 
-        not blank?(get_snapshot_value(persisted, path)) ->
+        not blank?(SecretStore.get_snapshot_value(persisted, path)) ->
           acc
 
         true ->
-          delete_snapshot_value(acc, path)
+          SecretStore.delete_snapshot_value(acc, path)
       end
     end)
   end
@@ -786,8 +775,17 @@ defmodule FermixCore.Setup.Wizard do
   defp persisted_snapshot do
     case ConfigStore.load_runtime_config() do
       {:ok, snapshot} -> ConfigStore.persistable_snapshot(snapshot)
-      {:error, _reason} -> ConfigStore.persistable_snapshot(%{})
+      {:error, _reason} -> ConfigStore.persistable_snapshot(empty_snapshot())
     end
+  end
+
+  defp empty_snapshot do
+    %{
+      fermix_core: [],
+      sandbox: SandboxConfig.to_keyword(SandboxConfig.default()),
+      fermix_channels: [],
+      fermix_web: []
+    }
   end
 
   defp channel_field_unpersisted?(persisted, channel, field, default_enabled?) do
@@ -803,35 +801,6 @@ defmodule FermixCore.Setup.Wizard do
   defp blank?(nil), do: true
   defp blank?(""), do: true
   defp blank?(_), do: false
-
-  defp get_snapshot_value(%{} = snapshot, [key | rest]) do
-    snapshot
-    |> Map.get(key, [])
-    |> get_snapshot_value(rest)
-  end
-
-  defp get_snapshot_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
-
-  defp get_snapshot_value(keyword, [key | rest]) when is_list(keyword) do
-    keyword
-    |> Keyword.get(key, [])
-    |> get_snapshot_value(rest)
-  end
-
-  defp get_snapshot_value(_value, _path), do: nil
-
-  defp delete_snapshot_value(%{} = snapshot, [key | rest]) do
-    Map.update(snapshot, key, [], &delete_snapshot_value(&1, rest))
-  end
-
-  defp delete_snapshot_value(keyword, [key]) when is_list(keyword),
-    do: Keyword.delete(keyword, key)
-
-  defp delete_snapshot_value(keyword, [key | rest]) when is_list(keyword) do
-    Keyword.update(keyword, key, [], &delete_snapshot_value(&1, rest))
-  end
-
-  defp delete_snapshot_value(value, _path), do: value
 
   defp restart_required?(snapshot) do
     case ConfigStore.load_runtime_config() do

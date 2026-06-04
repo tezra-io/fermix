@@ -35,10 +35,19 @@ defmodule FermixCore.Setup.SecretWriter do
   @spec available?(keyword()) :: boolean()
   def available?(opts \\ []), do: impl(opts).available?(opts)
 
+  @spec command_source(secret_key()) :: map()
+  def command_source(key) when is_atom(key), do: __MODULE__.MacOS.command_source(key)
+
   @spec format_error(secret_key(), term()) :: String.t()
   def format_error(key, reason) when is_atom(key) do
     secret = SecretPaths.fetch!(key)
     "#{secret.env} could not be resolved from @keyring: #{format_reason(reason)}"
+  end
+
+  @spec format_store_error(secret_key(), term()) :: String.t()
+  def format_store_error(key, reason) when is_atom(key) do
+    secret = SecretPaths.fetch!(key)
+    "#{secret.env} could not be stored in the OS keyring: #{format_reason(reason)}"
   end
 
   defp impl(opts) do
@@ -90,6 +99,16 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
         value -> {:ok, value}
       end
     end
+  end
+
+  @spec command_source(atom()) :: map()
+  def command_source(key) when is_atom(key) do
+    %{
+      source: :command,
+      command: security_binary() || "/usr/bin/security",
+      args: get_args(key),
+      timeout_ms: @default_timeout_ms
+    }
   end
 
   defp put_args(key, value) do

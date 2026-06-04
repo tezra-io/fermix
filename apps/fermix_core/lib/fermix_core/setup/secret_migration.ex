@@ -5,7 +5,7 @@ defmodule FermixCore.Setup.SecretMigration do
 
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
-  alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
 
   @type io_opts :: [puts: (String.t() -> any()), prompt: (String.t() -> String.t())]
@@ -16,7 +16,7 @@ defmodule FermixCore.Setup.SecretMigration do
     prompt = Keyword.get(io_opts, :prompt, &default_prompt/1)
 
     with {:ok, snapshot} <- ConfigStore.load_runtime_config(resolve_secrets: false),
-         secrets <- plaintext_secrets(snapshot),
+         secrets <- SecretStore.plaintext_secrets(snapshot),
          :ok <- ensure_writer_available(secrets),
          :ok <- maybe_migrate(snapshot, secrets, puts, prompt) do
       :ok
@@ -27,18 +27,8 @@ defmodule FermixCore.Setup.SecretMigration do
   end
 
   @spec plaintext_secrets(ConfigStore.runtime_config()) :: [map()]
-  def plaintext_secrets(snapshot) when is_map(snapshot) do
-    SecretPaths.all()
-    |> Enum.flat_map(fn secret ->
-      case get_snapshot_value(snapshot, secret.path) do
-        value when is_binary(value) and value not in ["", "@keyring"] ->
-          [Map.put(secret, :value, value)]
-
-        _other ->
-          []
-      end
-    end)
-  end
+  def plaintext_secrets(snapshot) when is_map(snapshot),
+    do: SecretStore.plaintext_secrets(snapshot)
 
   defp ensure_writer_available([]), do: :ok
 
@@ -73,7 +63,7 @@ defmodule FermixCore.Setup.SecretMigration do
   end
 
   defp save_migrated_snapshot(snapshot, migrated, puts) do
-    case ConfigStore.save_snapshot(snapshot) do
+    case ConfigStore.save_snapshot(snapshot, secure_secrets: false) do
       :ok ->
         puts.("Migrated #{length(migrated)} secret(s) to keyring.")
         :ok
@@ -91,7 +81,7 @@ defmodule FermixCore.Setup.SecretMigration do
 
           updated =
             snapshot
-            |> put_snapshot_value(secret.path, SecretWriter.sentinel())
+            |> SecretStore.put_snapshot_value(secret.path, SecretWriter.sentinel())
             |> maybe_add_sandbox_env_source(secret)
 
           {:cont, {:ok, updated, [secret.key | migrated]}}
@@ -114,28 +104,14 @@ defmodule FermixCore.Setup.SecretMigration do
           do: sandbox.env.allow,
           else: sandbox.env.allow ++ [secret.env]
 
-      sources = Map.put_new(sandbox.env.sources, secret.env, security_keychain_source(secret.env))
+      sources =
+        Map.put_new(sandbox.env.sources, secret.env, SecretWriter.command_source(secret.key))
+
       updated_env = %{sandbox.env | allow: allow, sources: sources}
       Map.put(snapshot, :sandbox, %{sandbox | env: updated_env})
     else
       snapshot
     end
-  end
-
-  defp security_keychain_source(env_name) do
-    %{
-      source: :command,
-      command: "/usr/bin/security",
-      args: [
-        "find-generic-password",
-        "-a",
-        System.get_env("USER") || Path.basename(System.user_home!()),
-        "-s",
-        env_name,
-        "-w"
-      ],
-      timeout_ms: 3000
-    }
   end
 
   defp backup_config do
@@ -163,36 +139,11 @@ defmodule FermixCore.Setup.SecretMigration do
 
   defp default_prompt(label) do
     IO.write(label)
-    IO.gets("") || ""
-  end
 
-  defp get_snapshot_value(snapshot, [root | rest]) do
-    snapshot
-    |> Map.get(root, [])
-    |> get_keyword_value(rest)
-  end
-
-  defp get_keyword_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
-
-  defp get_keyword_value(keyword, [key | rest]) when is_list(keyword) do
-    keyword
-    |> Keyword.get(key, [])
-    |> get_keyword_value(rest)
-  end
-
-  defp get_keyword_value(_value, _path), do: nil
-
-  defp put_snapshot_value(snapshot, [root | rest], value) do
-    section = Map.get(snapshot, root, [])
-    Map.put(snapshot, root, put_keyword_value(section, rest, value))
-  end
-
-  defp put_keyword_value(keyword, [key], value) when is_list(keyword) do
-    Keyword.put(keyword, key, value)
-  end
-
-  defp put_keyword_value(keyword, [key | rest], value) when is_list(keyword) do
-    nested = Keyword.get(keyword, key, [])
-    Keyword.put(keyword, key, put_keyword_value(nested, rest, value))
+    case IO.gets("") do
+      :eof -> ""
+      {:error, _reason} -> ""
+      value -> value
+    end
   end
 end

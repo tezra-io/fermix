@@ -11,12 +11,21 @@ defmodule FermixCore.Plugins.ConfigTest do
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("plugin-config")
     old_home = System.get_env("FERMIX_HOME")
+    providers = Application.get_env(:fermix_core, :providers, [])
+    tools = Application.get_env(:fermix_core, :tools, [])
+    telegram = Application.get_env(:fermix_channels, :telegram, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     oauth = Application.get_env(:fermix_core, :oauth, %{})
+    secret_writer = Application.get_env(:fermix_core, :secret_writer)
 
     System.put_env("FERMIX_HOME", home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :tools, [])
+    Application.put_env(:fermix_channels, :telegram, [])
     Application.put_env(:fermix_core, :plugins, [])
     Application.put_env(:fermix_core, :oauth, %{})
+    FermixTestSupport.SecretWriterStub.reset()
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     TokenSupervisor.stop_profile("google_calendar:primary")
 
     on_exit(fn ->
@@ -27,8 +36,13 @@ defmodule FermixCore.Plugins.ConfigTest do
         value -> System.put_env("FERMIX_HOME", value)
       end
 
+      Application.put_env(:fermix_core, :providers, providers)
+      Application.put_env(:fermix_core, :tools, tools)
+      Application.put_env(:fermix_channels, :telegram, telegram)
       Application.put_env(:fermix_core, :plugins, plugins)
       Application.put_env(:fermix_core, :oauth, oauth)
+      restore_secret_writer(secret_writer)
+      FermixTestSupport.SecretWriterStub.reset()
       FermixTestSupport.SafeRm.rm_rf!(home)
     end)
 
@@ -86,7 +100,7 @@ defmodule FermixCore.Plugins.ConfigTest do
     assert Registry.lookup(TokenRegistry, "google_calendar:primary") == []
   end
 
-  test "stores google oauth client config without auth tokens" do
+  test "stores google oauth client config without auth tokens", %{home: home} do
     assert {:ok, _snapshot} =
              Config.set_oauth_provider("google",
                client_id: "123.apps.googleusercontent.com",
@@ -100,6 +114,13 @@ defmodule FermixCore.Plugins.ConfigTest do
     assert Keyword.get(google, :client_secret) == "desktop-secret"
     assert Keyword.get(google, :redirect_port) == 1455
     refute File.exists?(Store.path())
+
+    contents = File.read!(Path.join(home, "config.toml"))
+    assert contents =~ ~s(client_secret = "@keyring")
+    refute contents =~ "desktop-secret"
+
+    assert {:ok, "desktop-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:google_oauth_client_secret)
   end
 
   test "rejects non-desktop google oauth client config" do
@@ -130,4 +151,7 @@ defmodule FermixCore.Plugins.ConfigTest do
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     assert Keyword.get(loaded.fermix_core, :plugins) == []
   end
+
+  defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
+  defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 end

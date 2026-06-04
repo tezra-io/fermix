@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 14 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 15 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -78,6 +78,10 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     assert contents =~ ~s([sandbox.env.ANTHROPIC_API_KEY])
     assert contents =~ ~s(source = "command")
     assert contents =~ ~s(command = "/usr/bin/security")
+
+    assert contents =~
+             ~s(args = ["find-generic-password", "-a", "fermix", "-s", "fermix:OPENAI_API_KEY", "-w"])
+
     assert contents =~ ~r/allow = \[[^\]]*"OPENAI_API_KEY"/
     assert contents =~ ~r/allow = \[[^\]]*"ANTHROPIC_API_KEY"/
 
@@ -127,6 +131,11 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     brave_api_key = "brave-old"
     perplexity_api_key = "perplexity-old"
 
+    [fermix_core.oauth.google]
+    client_type = "desktop_public_pkce"
+    client_id = "123.apps.googleusercontent.com"
+    client_secret = "google-oauth-old"
+
     [fermix_channels.telegram]
     bot_token = "telegram-old"
 
@@ -154,6 +163,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       parallel_api_key: "parallel-old",
       brave_api_key: "brave-old",
       perplexity_api_key: "perplexity-old",
+      google_oauth_client_secret: "google-oauth-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",

@@ -214,7 +214,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ "[fermix_core.plugins.removed_plugin]"
     assert contents =~ "unsupported = true"
     assert contents =~ "[fermix_core.oauth.google]"
-    assert contents =~ ~s(client_secret = "desktop-secret")
+    assert contents =~ ~s(client_secret = "@keyring")
+    refute contents =~ "desktop-secret"
+
+    assert {:ok, "desktop-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:google_oauth_client_secret)
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
     plugins = Keyword.get(loaded.fermix_core, :plugins, [])
@@ -228,8 +232,13 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     google = Map.get(oauth, "google", [])
     assert Keyword.get(google, :client_type) == "desktop_public_pkce"
     assert Keyword.get(google, :client_id) == "123.apps.googleusercontent.com"
-    assert Keyword.get(google, :client_secret) == "desktop-secret"
+    assert Keyword.get(google, :client_secret) == "@keyring"
     assert Keyword.get(google, :redirect_port) == 1455
+
+    assert {:ok, resolved} = ConfigStore.load_runtime_config()
+    resolved_oauth = Keyword.get(resolved.fermix_core, :oauth, %{})
+    resolved_google = Map.get(resolved_oauth, "google", [])
+    assert Keyword.get(resolved_google, :client_secret) == "desktop-secret"
   end
 
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do
