@@ -13,7 +13,7 @@ defmodule FermixCore.Tools.GitToolsTest do
   setup do
     dir = Path.join(System.tmp_dir!(), "fermix-git-#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
-    System.cmd("git", ["init"], cd: dir)
+    System.cmd("git", ["init", "--initial-branch=main"], cd: dir)
     System.cmd("git", ["config", "user.email", "test@example.com"], cd: dir)
     System.cmd("git", ["config", "user.name", "Test User"], cd: dir)
     File.write!(Path.join(dir, "README.md"), "# Test\n")
@@ -45,7 +45,7 @@ defmodule FermixCore.Tools.GitToolsTest do
 
   test "git_read denies a repo outside sandbox roots", %{context: context} do
     outside = FermixTestSupport.SafeRm.make_tmp_dir!("git-read-outside")
-    System.cmd("git", ["init"], cd: outside)
+    System.cmd("git", ["init", "--initial-branch=main"], cd: outside)
 
     assert {:ok, result} =
              GitRead.execute(
@@ -90,7 +90,7 @@ defmodule FermixCore.Tools.GitToolsTest do
 
   test "git_write denies repo outside sandbox roots", %{context: context} do
     outside = FermixTestSupport.SafeRm.make_tmp_dir!("git-outside")
-    System.cmd("git", ["init"], cd: outside)
+    System.cmd("git", ["init", "--initial-branch=main"], cd: outside)
 
     assert {:ok, result} =
              GitWrite.execute(%{"repo" => outside, "command" => "add", "args" => ["."]}, context)
