@@ -8,6 +8,7 @@ defmodule FermixCore.Tools.Shell do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @default_timeout_ms 30_000
   @command_trace_max_bytes 300
@@ -22,7 +23,8 @@ defmodule FermixCore.Tools.Shell do
   @spec description() :: String.t()
   def description do
     "Execute a shell command and return its output. " <>
-      "Use for file operations, git commands, system queries, etc."
+      "Use for file operations, git commands, and system queries. " <>
+      "Do NOT scrape JavaScript-rendered web pages — curl/urllib/requests return empty or partial markup; use the browser tool."
   end
 
   @impl true
@@ -50,7 +52,7 @@ defmodule FermixCore.Tools.Shell do
 
   @impl true
   def when_to_use do
-    "Run a shell command only when no narrower Fermix built-in capability owns the verb."
+    "A shell command when no narrower built-in owns the verb — never to scrape JS web pages (use browser)."
   end
 
   @impl true
@@ -80,19 +82,14 @@ defmodule FermixCore.Tools.Shell do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    agent = Map.get(context, :agent_name, "unknown")
-
     {result, trace_metadata} = do_execute(args, context)
-
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
-      trace_metadata
-      |> Map.merge(%{tool: "shell", agent: agent, success: success})
-      |> maybe_put_error_summary(result)
+    ToolTelemetry.exec("shell", context, success, duration,
+      metadata: maybe_put_error_summary(trace_metadata, result),
+      input: args,
+      result: result
     )
 
     result

@@ -195,11 +195,11 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request("skills_view",
                socket_path: socket_path,
                timeout: 1_000,
-               params: %{"name" => "self_knowledge"}
+               params: %{"name" => "self-knowledge"}
              )
 
     assert reply["status"] == "ok"
-    assert reply["skill"]["name"] == "self_knowledge"
+    assert reply["skill"]["name"] == "self-knowledge"
     assert is_binary(reply["skill"]["body"])
   end
 

@@ -2,6 +2,7 @@ defmodule FermixCore.Tools.Support do
   @moduledoc false
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @reserved_metadata_keys [:tool, :agent, :success, :error]
 
@@ -15,20 +16,20 @@ defmodule FermixCore.Tools.Support do
   def run(tool_name, context, fun)
       when is_binary(tool_name) and is_map(context) and is_function(fun, 0) do
     start = System.monotonic_time(:millisecond)
-    agent = Map.get(context, :agent_name, "unknown")
     {result, extra} = split_trace_extra(fun.())
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
     # Drop reserved keys from `extra` so a tool cannot inject :tool, :agent,
-    # :success, or :error into telemetry metadata.
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
+    # :success, or :error into telemetry metadata. ToolTelemetry adds the agent
+    # name and correlation ids (session_id/parent_session) from `context`.
+    metadata =
       extra
       |> Map.drop(@reserved_metadata_keys)
-      |> Map.merge(telemetry_metadata(tool_name, agent, result, success, context))
-    )
+      |> Map.merge(tool_trace_metadata(context))
+      |> maybe_put_error(result)
+
+    ToolTelemetry.exec(tool_name, context, success, duration, metadata: metadata, result: result)
 
     result
   end
@@ -106,13 +107,6 @@ defmodule FermixCore.Tools.Support do
     path
     |> Path.split()
     |> Enum.any?(&(&1 == ".."))
-  end
-
-  defp telemetry_metadata(tool_name, agent, result, success, context) do
-    context
-    |> tool_trace_metadata()
-    |> Map.merge(%{tool: tool_name, agent: agent, success: success})
-    |> maybe_put_error(result)
   end
 
   defp tool_trace_metadata(%{tool_trace: metadata}) when is_map(metadata), do: metadata

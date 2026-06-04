@@ -114,6 +114,7 @@ defmodule FermixCore.Application do
     children =
       [
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
+        {Finch, name: FermixCore.Finch, pools: finch_pools()},
         {Trace, trace_opts()},
         TokenSupervisor,
         maybe_token_manager(),
@@ -141,6 +142,32 @@ defmodule FermixCore.Application do
     opts = [strategy: :rest_for_one, name: FermixCore.Supervisor]
 
     Supervisor.start_link(children, opts)
+  end
+
+  # Shared outbound HTTP pool for `FermixCore.Net.HttpClient`. Finch's
+  # default `conn_max_idle_time` is `:infinity`, so a long-lived daemon
+  # reuses keep-alive sockets that cloud LBs silently RST'd while the host
+  # slept or sat idle — the next request then fails with a `:closed`
+  # transport error before any byte arrives. Capping idle age means
+  # checkout discards stale connections and handshakes fresh ones (a few
+  # hundred ms of TLS, noise next to an LLM call). chatgpt.com keeps the
+  # Codex adapter's 5s connect timeout, moved here because Req forbids
+  # combining `:finch` with `:connect_options`.
+  @http_conn_max_idle_ms 15_000
+
+  # Public (@doc false) because Finch has no API to read pool config back,
+  # so tests pin these literals here — a regression to the :infinity
+  # default would otherwise be invisible to the suite.
+  @doc false
+  @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
+  def finch_pools do
+    %{
+      :default => [conn_max_idle_time: @http_conn_max_idle_ms],
+      "https://chatgpt.com" => [
+        conn_max_idle_time: @http_conn_max_idle_ms,
+        conn_opts: [transport_opts: [timeout: 5_000]]
+      ]
+    }
   end
 
   defp run_cli(argv) do

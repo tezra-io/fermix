@@ -289,6 +289,23 @@ config :fermix_core,
          base_dir: System.get_env("FERMIX_TRACE_DIR") || workspace_paths.traces
        )
 
+existing_telemetry = Application.get_env(:fermix_core, :telemetry, [])
+
+# Content capture (prompt/response/tool bodies in traces). One knob for the
+# common case: exporting to Opik turns content ON by default — if you're
+# observing, you want to see everything. FERMIX_TRACE_CONTENT is the explicit
+# override (e.g. "=0" for Opik-without-bodies, or "=1" for content in the local
+# JSONL with no Opik).
+capture_content =
+  case env_bool.("FERMIX_TRACE_CONTENT") do
+    :__unset__ -> env_bool.("FERMIX_OPIK_ENABLED") == true
+    explicit -> explicit
+  end
+
+config :fermix_core,
+       :telemetry,
+       Keyword.put(existing_telemetry, :capture_content, capture_content)
+
 config :fermix_core,
        :log,
        Keyword.merge(existing_log,

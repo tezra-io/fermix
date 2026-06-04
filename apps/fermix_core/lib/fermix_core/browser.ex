@@ -70,9 +70,13 @@ defmodule FermixCore.Browser do
 
   defp validate_args(_action, _args), do: :ok
 
-  defp validate_act_args(kind, args) when kind in ["click", "fill", "type"] do
+  defp validate_act_args(kind, args) when kind in ["click", "hover", "submit"] do
+    require_string(args, "ref", kind)
+  end
+
+  defp validate_act_args(kind, args) when kind in ["fill", "type"] do
     with :ok <- require_string(args, "ref", kind) do
-      if kind == "click", do: :ok, else: require_string(args, "text", kind)
+      require_string(args, "text", kind)
     end
   end
 
@@ -83,7 +87,7 @@ defmodule FermixCore.Browser do
   end
 
   defp validate_act_args(kind, _args)
-       when kind in ["press", "hover", "wait", "get"],
+       when kind in ["press", "wait", "get"],
        do: :ok
 
   defp validate_act_args(kind, _args),

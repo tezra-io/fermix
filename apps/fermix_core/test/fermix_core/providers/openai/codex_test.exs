@@ -864,7 +864,43 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "chat/3 — transport errors" do
-    test ":closed becomes an actionable operator-readable message" do
+    test "emits transport error telemetry with the closed-stream reason" do
+      test_pid = self()
+      handler_id = "test-codex-transport-error-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.transport_error(conn, :closed)
+      end)
+
+      {:error, _message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
+      assert measurements.duration_ms >= 0
+      assert metadata.status == :error
+      assert metadata.error_kind == :transport
+      assert metadata.transport_error_reason == :closed
+      assert metadata.transport_stage == :before_response
+      assert metadata.error =~ "before any response data"
+    end
+
+    test ":closed before any data is classified as a stale-connection error, not mid-response" do
       Req.Test.stub(__MODULE__, fn conn ->
         Req.Test.transport_error(conn, :closed)
       end)
@@ -878,11 +914,12 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
 
       assert is_binary(message)
-      assert message =~ "closed by peer"
-      assert message =~ "reasoning_effort"
+      assert message =~ "before any response data"
+      refute message =~ "mid-response"
+      refute message =~ "reasoning_effort"
     end
 
-    test ":timeout becomes an actionable operator-readable message" do
+    test ":timeout becomes an actionable operator-readable message without an effort steer" do
       Req.Test.stub(__MODULE__, fn conn ->
         Req.Test.transport_error(conn, :timeout)
       end)
@@ -898,6 +935,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert is_binary(message)
       assert message =~ "no data for"
       assert message =~ "receive_timeout"
+      refute message =~ "Lower reasoning_effort"
     end
 
     test ":closed retries once and succeeds on the second attempt (stale-pool recovery)" do
@@ -953,7 +991,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, test_id}]
         )
 
-      assert message =~ "closed by peer"
+      assert message =~ "before any response data"
       assert_received {:codex_attempt, 1}
       assert_received {:codex_attempt, 2}
       refute_received {:codex_attempt, 3}
@@ -980,6 +1018,128 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       assert_received {:codex_attempt, 1}
       refute_received {:codex_attempt, 2}
+    end
+
+    test ":closed after response data has streamed is classified mid-stream" do
+      test_pid = self()
+      handler_id = "test-codex-mid-stream-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # Req.Test.transport_error/2 raises before any chunk reaches the
+      # :into callback, so it can only ever produce :before_response. To
+      # exercise the chunk-counting classifier end-to-end, drive the SSE
+      # :into callback directly, then surface the transport error.
+      adapter = fn req ->
+        {:cont, _acc} = req.into.({:data, "data: {}\n\n"}, {req, Req.Response.new(status: 200)})
+        {req, %Req.TransportError{reason: :closed}}
+      end
+
+      {:error, message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: adapter]
+        )
+
+      assert message =~ "mid-response"
+      refute message =~ "before any response data"
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], metadata}
+      assert metadata.transport_stage == :mid_stream
+    end
+  end
+
+  describe "receive_timeout_for/1" do
+    test "xhigh reasoning widens the between-chunk window to 120s" do
+      assert Codex.receive_timeout_for(%{reasoning: %{effort: "xhigh", summary: "auto"}}) ==
+               120_000
+    end
+
+    test "all other efforts keep the 60s default" do
+      assert Codex.receive_timeout_for(%{reasoning: %{effort: "high", summary: "auto"}}) ==
+               60_000
+
+      assert Codex.receive_timeout_for(%{reasoning: %{effort: "medium"}}) == 60_000
+      assert Codex.receive_timeout_for(%{model: "gpt-5"}) == 60_000
+    end
+
+    test "xhigh reasoning wires the 120s window into the actual request" do
+      test_pid = self()
+
+      adapter = fn req ->
+        send(test_pid, {:codex_receive_timeout, req.options[:receive_timeout]})
+        {req, %Req.TransportError{reason: :timeout}}
+      end
+
+      {:error, _message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          reasoning_effort: "xhigh",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: adapter]
+        )
+
+      assert_received {:codex_receive_timeout, 120_000}
+    end
+
+    test "an explicit req_options receive_timeout overrides the per-effort default" do
+      test_pid = self()
+
+      adapter = fn req ->
+        send(test_pid, {:codex_receive_timeout, req.options[:receive_timeout]})
+        {req, %Req.TransportError{reason: :timeout}}
+      end
+
+      {:error, _message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          reasoning_effort: "xhigh",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: adapter, receive_timeout: 1_234]
+        )
+
+      assert_received {:codex_receive_timeout, 1_234}
+    end
+  end
+
+  describe "transport_error_message/2" do
+    test ":closed before any response data points at the connection, not the model" do
+      message = Codex.transport_error_message(:closed, :before_response)
+
+      assert message =~ "before any response data"
+      refute message =~ "reasoning_effort"
+    end
+
+    test ":closed mid-stream stays a genuine mid-response error" do
+      message = Codex.transport_error_message(:closed, :mid_stream)
+
+      assert message =~ "mid-response"
+      refute message =~ "reasoning_effort"
+    end
+
+    test ":timeout describes stream starvation and the per-effort window" do
+      message = Codex.transport_error_message(:timeout, :mid_stream)
+
+      assert message =~ "no data for"
+      assert message =~ "receive_timeout"
+      refute message =~ "Lower reasoning_effort"
+    end
+
+    test "unknown reasons fall through to an inspect message" do
+      assert Codex.transport_error_message(:ehostunreach, :before_response) =~ ":ehostunreach"
     end
   end
 

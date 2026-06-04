@@ -238,6 +238,25 @@ defmodule FermixCore.Tools.SubagentsTest do
     end
   end
 
+  describe "ultra mode caps" do
+    test "subagent_mode: :ultra raises breadth + concurrency above the regular max", ctx do
+      MockAdapter.set_turns([])
+      # 6 tasks at concurrency 6 — both would be rejected in regular mode (max 4),
+      # but the /ultra context lifts the caps (max_subtasks 50, fanout conc 12).
+      tasks = for n <- 1..6, do: %{"id" => "t#{n}", "task" => "do #{n}"}
+
+      result =
+        Subagents.execute(
+          %{"tasks" => tasks, "max_concurrency" => 6},
+          context(ctx, %{subagent_mode: :ultra})
+        )
+
+      summary = decode_output(result)["summary"]
+      assert summary["requested"] == 6
+      assert summary["completed"] == 6
+    end
+  end
+
   describe "validation (rejected before spawn)" do
     test "missing tasks", ctx do
       assert {:ok, %{success: false, error: error}} = Subagents.execute(%{}, context(ctx))
@@ -251,13 +270,13 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert error =~ "non-empty"
     end
 
-    test "too many tasks", ctx do
+    test "too many tasks (regular cap reduced to 4)", ctx do
       tasks = for n <- 1..9, do: %{"id" => "t#{n}", "task" => "do #{n}"}
 
       assert {:ok, %{success: false, error: error}} =
                Subagents.execute(%{"tasks" => tasks}, context(ctx))
 
-      assert error =~ "Too many tasks"
+      assert error =~ "Too many tasks: 9 (max 4)"
     end
 
     test "duplicate ids", ctx do

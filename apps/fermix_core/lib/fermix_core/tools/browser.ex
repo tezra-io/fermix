@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.Browser do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @impl true
   @spec name() :: String.t()
@@ -14,7 +15,7 @@ defmodule FermixCore.Tools.Browser do
   @impl true
   @spec description() :: String.t()
   def description do
-    "Control a supervised local browser for navigation, snapshots, tabs, screenshots, and actions."
+    "Control a supervised local browser (navigate, snapshot, fill/click/submit forms, tabs, screenshots). USE FOR JavaScript/dynamic/interactive pages and live data (flight prices, dashboards, logins); do NOT use for a static fact (use web_search) or one readable page (use web_fetch)."
   end
 
   @impl true
@@ -51,7 +52,10 @@ defmodule FermixCore.Tools.Browser do
         },
         kind: %{
           type: "string",
-          description: "Action kind for action=act."
+          description:
+            "Action kind for action=act: click | fill (REPLACE the field value) | " <>
+              "type (APPEND text) | submit (find & click the form's primary submit/search " <>
+              "button) | press (a key via key=…) | hover | get | wait | click_coords."
         },
         ref: %{
           type: "string",
@@ -142,7 +146,7 @@ defmodule FermixCore.Tools.Browser do
 
   @impl true
   def when_to_use do
-    "Open, inspect, and operate pages that require a JavaScript-capable browser."
+    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — not static text (use web_search/web_fetch)."
   end
 
   @impl true
@@ -171,25 +175,16 @@ defmodule FermixCore.Tools.Browser do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    agent = Map.get(context, :agent_name, "unknown")
-
     result = do_execute(args, context)
-
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
     # Record the action (and act-kind) so per-verb latency is visible in
     # tool_exec traces — the handler passes all metadata through.
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
-      %{
-        tool: "browser",
-        action: Map.get(args, "action"),
-        kind: Map.get(args, "kind"),
-        agent: agent,
-        success: success
-      }
+    ToolTelemetry.exec("browser", context, success, duration,
+      metadata: %{action: Map.get(args, "action"), kind: Map.get(args, "kind")},
+      input: args,
+      result: result
     )
 
     result

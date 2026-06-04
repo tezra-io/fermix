@@ -6,6 +6,8 @@ defmodule FermixCore.Providers.OpenAI do
   @behaviour FermixCore.Providers.Provider
 
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
 
@@ -76,7 +78,7 @@ defmodule FermixCore.Providers.OpenAI do
       |> handle_completions_response()
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms, Keyword.get(opts, :agent))
+    emit_telemetry(result, model, duration_ms, opts)
     result
   end
 
@@ -86,12 +88,12 @@ defmodule FermixCore.Providers.OpenAI do
 
   defp handle_completions_response({:ok, %Req.Response{status: status, body: body}}) do
     Logger.error("OpenAI API error: #{status} - #{inspect(body)}")
-    {:error, "OpenAI API error: #{status}"}
+    {:error, ProviderError.api(:openai, :chat_completions, status, body)}
   end
 
   defp handle_completions_response({:error, %Req.TransportError{reason: reason}}) do
     Logger.error("OpenAI request failed: #{inspect(reason)}")
-    {:error, reason}
+    {:error, ProviderError.transport(:openai, :chat_completions, reason)}
   end
 
   defp handle_completions_response({:error, reason}) do
@@ -175,22 +177,29 @@ defmodule FermixCore.Providers.OpenAI do
     end
   end
 
-  defp emit_telemetry(result, model, duration_ms, agent) do
-    {status, tokens} =
-      case result do
-        {:ok, resp} ->
-          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens}}
-
-        {:error, _} ->
-          {:error, %{}}
-      end
+  defp emit_telemetry(result, model, duration_ms, opts) do
+    {status, tokens, output, tool_calls, error_metadata} = telemetry_result(result)
 
     metadata =
       %{provider: :openai, model: model, status: status, tokens: tokens, reasoning_effort: nil}
-      |> maybe_add_field(:agent, agent)
+      |> Map.merge(error_metadata)
+      |> maybe_add_field(:agent, Keyword.get(opts, :agent))
 
-    :telemetry.execute([:fermix, :provider, :call], %{duration_ms: duration_ms}, metadata)
+    ProviderTelemetry.emit_call(metadata, duration_ms,
+      session_id: Keyword.get(opts, :session_id),
+      parent_session: Keyword.get(opts, :parent_session),
+      output: output,
+      tool_calls: tool_calls
+    )
   end
+
+  defp telemetry_result({:ok, resp}) do
+    {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens},
+     Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
+  end
+
+  defp telemetry_result({:error, reason}),
+    do: {:error, %{}, nil, nil, ProviderError.telemetry_metadata(reason)}
 
   defp api_key do
     case FermixCore.Config.provider_api_key(:openai) do

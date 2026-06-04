@@ -11,10 +11,8 @@ defmodule FermixChannels.Gateway.Commands.Registry do
     FermixChannels.Gateway.Commands.Sandbox,
     FermixChannels.Gateway.Commands.Stop,
     FermixChannels.Gateway.Commands.Background,
-    FermixChannels.Gateway.Commands.Tasks
-    # `Commands.Ultra` is intentionally NOT registered yet: until `TurnRunner`
-    # routes `run_profile: :ultra` into `UltraOrchestrator`, registering it would
-    # advertise `/ultra` in `/help` and run it as a normal turn (the tag ignored).
+    FermixChannels.Gateway.Commands.Tasks,
+    FermixChannels.Gateway.Commands.Ultra
   ]
 
   @spec list() :: [module()]

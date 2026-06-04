@@ -5,9 +5,9 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   The schema-translation surface (`to_provider_tools/1`,
   `parse_tool_calls/1`, `parse_response/1`) is implemented against the
   documented Anthropic Messages format so the rest of `AgentLoop` can be
-  routed here without surprises. `chat/3` and `continue/3` return
-  `{:error, :not_implemented}` until token storage and the OAuth flow
-  land in a follow-on milestone — see M5 plan.
+  routed here without surprises. `chat/3` and `continue/3` return a
+  structured `:not_implemented` provider error until token storage and the
+  OAuth flow land in a follow-on milestone — see M5 plan.
 
   Anthropic-specific shape notes:
 
@@ -22,15 +22,20 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       `"end_turn"` means the response is terminal.
   """
 
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Providers.Error, as: ProviderError
+
   @behaviour FermixCore.Providers.Adapter
 
-  alias FermixCore.Capabilities.Capability
+  @impl true
+  def chat(_messages, _capabilities, _opts) do
+    {:error, ProviderError.not_implemented(:anthropic, :messages)}
+  end
 
   @impl true
-  def chat(_messages, _capabilities, _opts), do: {:error, :not_implemented}
-
-  @impl true
-  def continue(_provider_state, _tool_results, _opts), do: {:error, :not_implemented}
+  def continue(_provider_state, _tool_results, _opts) do
+    {:error, ProviderError.not_implemented(:anthropic, :messages)}
+  end
 
   @impl true
   def to_provider_tools([]), do: []

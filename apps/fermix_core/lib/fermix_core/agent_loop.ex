@@ -183,6 +183,8 @@ defmodule FermixCore.AgentLoop do
       temperature: Keyword.get(opts, :temperature, 0.7)
     ]
     |> maybe_put_adapter_opt(:agent, context_agent(context))
+    |> maybe_put_adapter_opt(:session_id, Map.get(context, :session_id))
+    |> maybe_put_adapter_opt(:parent_session, Map.get(context, :parent_session))
     |> Keyword.merge(Keyword.get(opts, :adapter_opts, []))
   end
 

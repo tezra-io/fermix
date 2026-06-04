@@ -61,6 +61,7 @@ defmodule FermixCore.Browser.ProfileServer do
       registry: Keyword.get(opts, :registry),
       key: Keyword.get(opts, :key),
       launcher: Keyword.get(opts, :launcher, ChromeLauncher),
+      conn_mod: Keyword.get(opts, :connection, Connection),
       now_fn: Keyword.get(opts, :now_fn, fn -> System.monotonic_time(:millisecond) end),
       runtime: nil,
       targets: %{},
@@ -290,7 +291,7 @@ defmodule FermixCore.Browser.ProfileServer do
   # chain's local state would otherwise be discarded with Chrome still alive,
   # orphaning the process and leaking the CDP port.
   defp finish_runtime(runtime, state) do
-    case connect(runtime.ws_url, state.config) do
+    case connect(runtime.ws_url, state.config, state.conn_mod) do
       {:ok, connection} ->
         ready = %{state | runtime: Map.put(runtime, :connection, connection)}
 
@@ -320,13 +321,13 @@ defmodule FermixCore.Browser.ProfileServer do
   # the spawned Chrome via the launcher (a no-op for attach-only profiles whose
   # os_pid/port_ref are nil, so a user's own Chrome is never killed).
   defp teardown_runtime(runtime, state) do
-    close_connection(runtime)
+    close_connection(runtime, state.conn_mod)
     state.launcher.stop(runtime, state.config)
     :ok
   end
 
-  defp connect(url, config) do
-    case Connection.start_link(url, owner: self(), keepalive_ms: config.cdp_keepalive_ms) do
+  defp connect(url, config, conn_mod) do
+    case conn_mod.start_link(url, owner: self(), keepalive_ms: config.cdp_keepalive_ms) do
       {:ok, pid} ->
         {:ok, pid}
 
@@ -655,7 +656,7 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp handle_act(%{"kind" => kind, "ref" => ref} = args, state)
-       when kind in ["click", "fill", "type", "hover"] do
+       when kind in ["click", "fill", "type", "hover", "submit"] do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
          {:ok, box} <- ref_box(tab, ref, state),
@@ -690,7 +691,8 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp run_ref_action("click", _args, tab, box, state) do
     with :ok <- mouse_click(state, tab.session_id, box.x, box.y) do
-      {:ok, %{"ok" => true, "target" => tab.id, "action" => "click"}}
+      result = %{"ok" => true, "target" => tab.id, "action" => "click"}
+      {:ok, Map.merge(result, url_receipt(state, tab))}
     end
   end
 
@@ -700,11 +702,142 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp run_ref_action(kind, args, tab, box, state) when kind in ["fill", "type"] do
+  # `fill` REPLACES the field: click it, clear the value on the resolved node
+  # (set `.value=""` / `.textContent=""` and fire input+change so framework-
+  # controlled inputs update), then insert the text. This is the fix for the
+  # `Rome` -> `RomeAmsterdam` append bug — the old keystroke select-all used
+  # `modifiers: 6` (Ctrl+Shift, not Ctrl) and never cleared.
+  defp run_ref_action("fill", args, tab, box, state) do
     with :ok <- mouse_click(state, tab.session_id, box.x, box.y),
-         :ok <- maybe_select_all(kind, state, tab.session_id),
+         {:ok, ref_data} <- ref_data(tab, args["ref"], state),
+         :ok <- clear_field(state, tab.session_id, ref_data.backend_node_id),
          {:ok, _} <- command(state, "Input.insertText", %{text: args["text"]}, tab.session_id) do
-      {:ok, %{"ok" => true, "target" => tab.id, "action" => kind}}
+      result = %{"ok" => true, "target" => tab.id, "action" => "fill"}
+      {:ok, Map.merge(result, value_receipt(state, tab, ref_data))}
+    end
+  end
+
+  # `type` APPENDS at the cursor (use only to add to existing content, e.g. to
+  # trigger typeahead/autocomplete on a field that already holds a value).
+  defp run_ref_action("type", args, tab, box, state) do
+    with :ok <- mouse_click(state, tab.session_id, box.x, box.y),
+         {:ok, ref_data} <- ref_data(tab, args["ref"], state),
+         {:ok, _} <- command(state, "Input.insertText", %{text: args["text"]}, tab.session_id) do
+      result = %{"ok" => true, "target" => tab.id, "action" => "type"}
+      {:ok, Map.merge(result, value_receipt(state, tab, ref_data))}
+    end
+  end
+
+  # `submit` completes a form: find the form owning the ref and click its primary
+  # control (Search / Go / Submit), so a filled-but-unsubmitted form can't be
+  # mistaken for a finished task. Returns the clicked label + the resulting url.
+  defp run_ref_action("submit", args, tab, _box, state) do
+    with {:ok, ref_data} <- ref_data(tab, args["ref"], state),
+         {:ok, label} <- click_primary_submit(state, tab.session_id, ref_data.backend_node_id) do
+      result = %{"ok" => true, "target" => tab.id, "action" => "submit", "submitted" => label}
+      {:ok, Map.merge(result, url_receipt(state, tab))}
+    end
+  end
+
+  @clear_field_js """
+  function() {
+    if (this.isContentEditable) { this.textContent = ''; }
+    else { this.value = ''; }
+    this.dispatchEvent(new Event('input', { bubbles: true }));
+    this.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  """
+
+  defp clear_field(state, session_id, backend_node_id) do
+    with {:ok, %{"object" => %{"objectId" => object_id}}} <-
+           command(state, "DOM.resolveNode", %{backendNodeId: backend_node_id}, session_id),
+         {:ok, _} <-
+           command(
+             state,
+             "Runtime.callFunctionOn",
+             %{objectId: object_id, functionDeclaration: @clear_field_js, returnByValue: true},
+             session_id
+           ) do
+      :ok
+    end
+  end
+
+  @read_value_js """
+  function() {
+    if (this.isContentEditable) { return this.textContent; }
+    return this.value;
+  }
+  """
+
+  # Best-effort post-action receipts so the agent verifies a result without a
+  # blind re-snapshot. Reads target the EXACT node (not document.activeElement,
+  # which a page can steal). A read failure is logged (never swallowed) and the
+  # field is simply omitted from the receipt.
+  defp value_receipt(state, tab, ref_data) do
+    receipt(%{}, "value", node_value(state, tab.session_id, ref_data.backend_node_id))
+  end
+
+  defp url_receipt(state, tab) do
+    receipt(%{}, "url", url_value(state, tab))
+  end
+
+  defp node_value(state, session_id, backend_node_id) do
+    with {:ok, %{"object" => %{"objectId" => object_id}}} <-
+           command(state, "DOM.resolveNode", %{backendNodeId: backend_node_id}, session_id),
+         {:ok, result} <-
+           command(
+             state,
+             "Runtime.callFunctionOn",
+             %{objectId: object_id, functionDeclaration: @read_value_js, returnByValue: true},
+             session_id
+           ) do
+      {:ok, runtime_value(result)}
+    end
+  end
+
+  defp url_value(state, tab) do
+    case evaluate(tab, "location.href", state) do
+      {:ok, result} -> {:ok, runtime_value(result)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp receipt(map, _key, {:ok, nil}), do: map
+  defp receipt(map, key, {:ok, value}), do: Map.put(map, key, value)
+
+  defp receipt(map, key, {:error, reason}) do
+    Logger.warning("browser act receipt read failed for #{key}: #{inspect(reason)}")
+    map
+  end
+
+  @submit_js """
+  function() {
+    const form = this.form || this.closest('form') || document.forms[0];
+    if (!form) { return null; }
+    const sels = ['button[type="submit"]', 'input[type="submit"]', "[role='search'] button", 'button:not([type])', 'button'];
+    for (const sel of sels) {
+      const btn = form.querySelector(sel);
+      if (btn) { btn.click(); return ((btn.innerText || btn.value || sel) + '').trim().slice(0, 80); }
+    }
+    if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
+    return 'form.submit()';
+  }
+  """
+
+  defp click_primary_submit(state, session_id, backend_node_id) do
+    with {:ok, %{"object" => %{"objectId" => object_id}}} <-
+           command(state, "DOM.resolveNode", %{backendNodeId: backend_node_id}, session_id),
+         {:ok, result} <-
+           command(
+             state,
+             "Runtime.callFunctionOn",
+             %{objectId: object_id, functionDeclaration: @submit_js, returnByValue: true},
+             session_id
+           ) do
+      case runtime_value(result) do
+        nil -> {:error, Error.new("no_submit_control", "No form or submit control found for ref")}
+        label -> {:ok, label}
+      end
     end
   end
 
@@ -851,11 +984,27 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp refresh_targets(state) do
     with {:ok, %{"targetInfos" => infos}} <- command(state, "Target.getTargets", %{}) do
-      targets = infos |> Enum.filter(&track_target?/1) |> Map.new(&target_entry/1)
-      active = state.active_target || first_target_id(targets)
+      targets = infos |> selectable_targets() |> Map.new(&target_entry/1)
+      active = active_target(state.active_target, targets)
       {:ok, %{state | targets: targets, active_target: active}}
     end
   end
+
+  defp selectable_targets(infos) do
+    infos = Enum.filter(infos, &track_target?/1)
+    concrete = Enum.reject(infos, &about_blank_target?/1)
+
+    case concrete do
+      [] -> infos
+      targets -> targets
+    end
+  end
+
+  defp active_target(current, targets) when is_binary(current) do
+    if Map.has_key?(targets, current), do: current, else: first_target_id(targets)
+  end
+
+  defp active_target(_current, targets), do: first_target_id(targets)
 
   defp resolve_tab(nil, %{targets: targets, active_target: nil} = state)
        when map_size(targets) == 1 do
@@ -894,11 +1043,14 @@ defmodule FermixCore.Browser.ProfileServer do
   defp enable_page(tab, state) do
     command(state, "Page.enable", %{}, tab.session_id)
     command(state, "Runtime.enable", %{}, tab.session_id)
+    # DOM domain is required for DOM.resolveNode (used to clear/replace a field
+    # value and to read post-action receipts off the targeted node).
+    command(state, "DOM.enable", %{}, tab.session_id)
     :ok
   end
 
   defp command(state, method, params, session_id \\ nil, timeout_ms \\ nil) do
-    Connection.command(
+    state.conn_mod.command(
       state.runtime.connection,
       method,
       params,
@@ -929,10 +1081,19 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp track_target?(%{"type" => type, "url" => url}) when type in @page_types do
-    not String.starts_with?(url || "", ["chrome://", "chrome-extension://", "devtools://"])
+    # Drop browser-internal pages from the agent's tab set. `about:blank` is not
+    # internal: it is Chrome's startup page and an explicitly allowed URL. Stray
+    # blank popups are filtered in selectable_targets/1 when a concrete page also
+    # exists.
+    not String.starts_with?(
+      url || "",
+      ["chrome://", "chrome-extension://", "devtools://"]
+    )
   end
 
   defp track_target?(_info), do: false
+
+  defp about_blank_target?(%{"url" => url}), do: String.trim(url || "") == "about:blank"
 
   defp target_entry(info) do
     id = tab_id(info["targetId"])
@@ -1070,26 +1231,6 @@ defmodule FermixCore.Browser.ProfileServer do
   defp text_for_type(_key, "keyUp"), do: ""
   defp text_for_type(key, _type), do: key
 
-  defp maybe_select_all("fill", state, session_id) do
-    command(
-      state,
-      "Input.dispatchKeyEvent",
-      %{type: "rawKeyDown", key: "a", windowsVirtualKeyCode: 65, modifiers: 6},
-      session_id
-    )
-
-    command(
-      state,
-      "Input.dispatchKeyEvent",
-      %{type: "keyUp", key: "a", windowsVirtualKeyCode: 65, modifiers: 6},
-      session_id
-    )
-
-    :ok
-  end
-
-  defp maybe_select_all(_kind, _state, _session_id), do: :ok
-
   defp evaluate(tab, expression, state) do
     params = %{expression: expression, returnByValue: true}
     command(state, "Runtime.evaluate", params, tab.session_id)
@@ -1192,13 +1333,13 @@ defmodule FermixCore.Browser.ProfileServer do
   defp stop_runtime(%{runtime: nil} = state), do: state
 
   defp stop_runtime(state) do
-    close_connection(state.runtime)
+    close_connection(state.runtime, state.conn_mod)
     state.launcher.stop(state.runtime, state.config)
     %{state | runtime: nil, targets: %{}, active_target: nil, ref_maps: %{}}
   end
 
-  defp close_connection(%{connection: pid}) when is_pid(pid), do: Connection.close(pid)
-  defp close_connection(_runtime), do: :ok
+  defp close_connection(%{connection: pid}, conn_mod) when is_pid(pid), do: conn_mod.close(pid)
+  defp close_connection(_runtime, _conn_mod), do: :ok
 
   defp crash_entry(status, state) do
     entry = %{"type" => "browser_exit", "status" => status}

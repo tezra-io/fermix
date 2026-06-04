@@ -34,6 +34,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
 
@@ -80,6 +81,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       capabilities: capabilities,
       instructions: resolved_instructions,
       agent: Keyword.get(opts, :agent),
+      session_id: Keyword.get(opts, :session_id),
+      parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
       fast: Keyword.get(opts, :fast, false) == true,
       request_metrics:
@@ -136,6 +139,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       capabilities: caps,
       instructions: instructions,
       agent: Keyword.get(opts, :agent),
+      session_id: Keyword.get(opts, :session_id),
+      parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
       fast: Keyword.get(opts, :fast, false) == true,
       request_metrics: ResponsesShared.request_metrics(next_input, instructions, tools, caps)
@@ -172,13 +177,14 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   defp post(url, body, auth, req_options, turn_state) do
     start = System.monotonic_time(:millisecond)
 
-    result =
+    wire_result =
       request_once(url, body, auth.token, req_options)
       |> maybe_refresh_and_retry(url, body, auth, req_options)
-      |> handle_response(turn_state)
+
+    result = handle_response(wire_result, turn_state)
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, turn_state, duration_ms)
+    emit_telemetry(result, wire_result, turn_state, duration_ms)
     result
   end
 
@@ -189,21 +195,49 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   # Codex is still reasoning, surfacing as a `:closed` transport error.
   # The HttpClient wrapper retries once on stale-pool transport errors
   # (`:closed`, `:econnrefused`) so the first request after macOS sleep
-  # recovers transparently.
+  # recovers transparently. The connect timeout lives on the shared
+  # `FermixCore.Finch` chatgpt.com pool (Req forbids combining `:finch`
+  # with `:connect_options`).
+  #
+  # `chunks_seen` counts body chunks across both HttpClient attempts so
+  # transport errors can be classified: zero chunks means the connection
+  # died before Codex sent anything (stale pool / network blip), not
+  # mid-response.
   defp request_once(url, body, token, req_options) do
+    chunks_seen = :counters.new(1, [])
+
     Req.new(
       url: url,
       method: :post,
       json: body,
       headers: build_headers(token),
-      receive_timeout: 60_000,
-      connect_options: [timeout: 5_000],
-      into: &collect_sse/2
+      receive_timeout: receive_timeout_for(body),
+      into: fn chunk, acc ->
+        :counters.add(chunks_seen, 1, 1)
+        collect_sse(chunk, acc)
+      end
     )
     |> Req.merge(req_options)
     |> HttpClient.request("Codex")
     |> finalize_streamed_body()
+    |> tag_transport_errors(chunks_seen)
   end
+
+  # Between-chunk SSE window. xhigh reasoning can legitimately stay silent
+  # for >60s while the model thinks (concurrent Codex streams compound it),
+  # so it gets a wider window. An explicit req_options receive_timeout still
+  # wins — `Req.merge/2` applies it after this default.
+  @doc false
+  @spec receive_timeout_for(map()) :: pos_integer()
+  def receive_timeout_for(%{reasoning: %{effort: "xhigh"}}), do: 120_000
+  def receive_timeout_for(body) when is_map(body), do: 60_000
+
+  defp tag_transport_errors({:error, %Req.TransportError{} = error}, chunks_seen) do
+    stage = if :counters.get(chunks_seen, 1) > 0, do: :mid_stream, else: :before_response
+    {:error, error, stage}
+  end
+
+  defp tag_transport_errors(result, _chunks_seen), do: result
 
   defp collect_sse({:data, chunk}, {req, response}) when is_binary(chunk) do
     if response.status in 200..299 do
@@ -308,9 +342,9 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     end
   end
 
-  defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
-    Logger.error("Codex transport error: #{inspect(reason)}")
-    {:error, transport_error_message(reason)}
+  defp handle_response({:error, %Req.TransportError{reason: reason}, stage}, _turn_state) do
+    Logger.error("Codex transport error: #{inspect(reason)} (#{stage})")
+    {:error, transport_error_message(reason, stage)}
   end
 
   defp handle_response({:error, reason}, _turn_state) do
@@ -318,23 +352,33 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     {:error, reason}
   end
 
-  defp transport_error_message(:closed) do
-    "Codex stream closed by peer mid-response. Retry; if it persists, lower " <>
-      "reasoning_effort or check ChatGPT account status."
+  @doc false
+  @spec transport_error_message(atom() | tuple(), :before_response | :mid_stream) :: String.t()
+  def transport_error_message(:closed, :before_response) do
+    "Codex connection closed before any response data arrived — a stale pooled " <>
+      "connection or network blip, not a model or account problem. Fermix " <>
+      "retried once on a fresh connection; retry the request, and check " <>
+      "network/ChatGPT status if it persists."
   end
 
-  defp transport_error_message(:timeout) do
-    "Codex stream had no data for the configured receive_timeout. Lower " <>
-      "reasoning_effort, raise [fermix_core.memory] extraction_timeout_ms " <>
-      "(for extraction calls), or pass req_options: [receive_timeout: ms] " <>
-      "to extend the between-chunk window."
+  def transport_error_message(:closed, :mid_stream) do
+    "Codex stream closed by peer mid-response. Retry; if it persists, check " <>
+      "ChatGPT account status or network stability."
   end
 
-  defp transport_error_message(:econnrefused) do
+  def transport_error_message(:timeout, _stage) do
+    "Codex stream had no data for the configured receive_timeout (between-chunk " <>
+      "window; 120s at xhigh reasoning, 60s otherwise). Likely provider-side " <>
+      "stream starvation — e.g. several concurrent Codex streams — or a network " <>
+      "stall. Pass req_options: [receive_timeout: ms] to widen the window for a " <>
+      "specific call."
+  end
+
+  def transport_error_message(:econnrefused, _stage) do
     "Codex endpoint refused the connection (chatgpt.com unreachable from this host)."
   end
 
-  defp transport_error_message(reason), do: "Codex transport error: #{inspect(reason)}"
+  def transport_error_message(reason, _stage), do: "Codex transport error: #{inspect(reason)}"
 
   defp parse_body_to_map(body) when is_binary(body), do: SSEParser.parse(body)
   defp parse_body_to_map(body) when is_map(body), do: body
@@ -535,19 +579,18 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     {:error, "Codex API error: #{status}"}
   end
 
-  defp emit_telemetry(result, turn_state, duration_ms) do
-    {status, tokens} =
+  defp emit_telemetry(result, wire_result, turn_state, duration_ms) do
+    {status, tokens, output, tool_calls, error_metadata} =
       case result do
         {:ok, resp} ->
-          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens}}
+          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens},
+           Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
 
-        {:error, _} ->
-          {:error, %{}}
+        {:error, reason} ->
+          {:error, %{}, nil, nil, error_metadata(reason, wire_result)}
       end
 
-    :telemetry.execute(
-      [:fermix, :provider, :call],
-      %{duration_ms: duration_ms},
+    metadata =
       %{
         provider: :openai_codex,
         adapter: :codex,
@@ -558,7 +601,33 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         fast: Map.get(turn_state, :fast, false)
       }
       |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
+      |> Map.merge(error_metadata)
       |> maybe_put(:agent, Map.get(turn_state, :agent))
+
+    ProviderTelemetry.emit_call(metadata, duration_ms,
+      session_id: Map.get(turn_state, :session_id),
+      parent_session: Map.get(turn_state, :parent_session),
+      output: output,
+      tool_calls: tool_calls
     )
   end
+
+  defp error_metadata(:context_length_exceeded, _wire_result) do
+    %{error_kind: :context_length, error: "context_length_exceeded"}
+  end
+
+  defp error_metadata(reason, {:error, %Req.TransportError{reason: transport_reason}, stage}) do
+    %{
+      error_kind: :transport,
+      transport_error_reason: transport_reason,
+      transport_stage: stage,
+      error: error_text(reason)
+    }
+  end
+
+  defp error_metadata(reason, _wire_result),
+    do: %{error_kind: :provider, error: error_text(reason)}
+
+  defp error_text(reason) when is_binary(reason), do: reason
+  defp error_text(reason), do: inspect(reason)
 end

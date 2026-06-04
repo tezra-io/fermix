@@ -21,6 +21,7 @@ Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, R
 - Run the relevant repo commands below before calling the work done. Default expectation: typecheck or build, tests, and lint.
 - For docs, config, or scaffolding changes, run the relevant checks and say what is not applicable.
 - When a change adds, removes, or materially alters a feature, capability, tool, channel, provider, config surface, or CLI verb, update the `self_knowledge` skill (`apps/fermix_core/priv/skills/self_knowledge/SKILL.md`) in the same change. It is Fermix's runtime self-reference for explaining and fixing itself, and goes stale silently otherwise.
+- When adding/altering a **tool, provider, or run-type**, route its telemetry through the shared emitters so it stays correlatable (and Opik-traceable) — tool events via `FermixCore.Tools.Telemetry.exec/5`, provider calls via `FermixCore.Providers.Telemetry.emit_call/3`; **never** hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`. A new run-type needs a unique `session_id` (+ `parent_session` if spawned) and lifecycle bookend events; a genuinely new event name/run-kind also needs a `fermix_opik` plugin update (`projects/fermix-plugins`). See `docs/TELEMETRY_CONTRACT.md`.
 - Never mark work done without proof.
 
 ## Code Rules (Non-Negotiable)
@@ -54,6 +55,7 @@ mix format --check-formatted
 ```
 
 ## Docs
+- `docs/TELEMETRY_CONTRACT.md` — Telemetry/observability contract — how new tools/providers/run-types stay correlatable + Opik-traceable (shared emitters, `session_id`/`parent_session`, content gating, the cross-repo `fermix_opik` rule)
 - `docs/PROJECT_PLAN.md` — Full plan with phases
 - `docs/PHASE1_TASKS.md` — 16 tasks with implementation code
 - `docs/ROADMAP.md` — Post-MVP feature roadmap (M2-M9)

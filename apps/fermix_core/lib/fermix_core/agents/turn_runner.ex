@@ -31,13 +31,18 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
+  alias FermixCore.Agents.UltraOrchestrator
+  alias FermixCore.Agents.UltraStages
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Reply
   alias FermixCore.Telemetry
+  alias FermixCore.Tools.Subagents
 
   @auto_compaction_failure_backoff_ms 60_000
   @doc """
@@ -103,6 +108,14 @@ defmodule FermixCore.Agents.TurnRunner do
         "I hit the investigation step limit before finishing that request. " <>
           "Try narrowing the ask, or rerun it as a deeper investigation after increasing limits."
 
+      codex_transport_closed_error?(reason) ->
+        "The Codex provider closed the response stream before returning an answer. " <>
+          "This is not a confirmed context-window error. Send /compact or /new, then resend; " <>
+          "if it persists, lower reasoning_effort or check ChatGPT account status."
+
+      reply = provider_error_reply(reason) ->
+        reply
+
       true ->
         "Sorry, I encountered an error processing your message."
     end
@@ -128,6 +141,14 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp max_iterations_error?(_reason), do: false
 
+  defp codex_transport_closed_error?(reason) when is_binary(reason) do
+    reason
+    |> String.downcase()
+    |> String.contains?("codex stream closed by peer")
+  end
+
+  defp codex_transport_closed_error?(_reason), do: false
+
   defp run_message_loop(msg, state, deliver) do
     start = System.monotonic_time(:millisecond)
     conversation_key = ConversationKey.from(msg)
@@ -143,9 +164,14 @@ defmodule FermixCore.Agents.TurnRunner do
         ConversationStore.get_history(conversation_key, server: state.conversation_store)
       end)
 
+    user_message = %{role: "user", content: msg.content}
+
+    {history, preflight_compaction} =
+      maybe_preflight_auto_compact(conversation_key, state, profile, history, user_message)
+
+    maybe_notify_preflight_compacted(preflight_compaction, deliver)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
 
-    user_message = %{role: "user", content: msg.content}
     messages = RuntimeContext.messages_for(ctx, profile, history, user_message)
     accounting = RuntimeContext.accounting_for(ctx, profile)
     emit_prompt_context_telemetry(state.memory_agent_id, messages, accounting, cache_status)
@@ -182,6 +208,19 @@ defmodule FermixCore.Agents.TurnRunner do
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
     persist_user_message(conversation_key, msg, state)
 
+    # `/ultra` runs the fixed-topology orchestrator instead of one agent loop
+    # (§17.11); the neutral `run_profile` tag rides on the message metadata.
+    case run_profile(msg) do
+      :ultra -> run_ultra(msg, state, context, deliver, start)
+      _normal -> run_normal(loop_opts, context, msg, start)
+    end
+  end
+
+  defp run_profile(msg) do
+    (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
+  end
+
+  defp run_normal(loop_opts, context, msg, start) do
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
@@ -193,7 +232,7 @@ defmodule FermixCore.Agents.TurnRunner do
             total_tokens: result.total_tokens,
             duration_ms: duration_ms
           },
-          %{channel: msg.channel, chat_id: msg.chat_id, sender: msg.sender}
+          turn_message_metadata(context, msg, result)
         )
 
         Logger.info(
@@ -208,10 +247,172 @@ defmodule FermixCore.Agents.TurnRunner do
         :telemetry.execute(
           [:fermix, :agent, :message_error],
           %{count: 1},
-          %{channel: msg.channel, chat_id: msg.chat_id, reason: reason}
+          %{
+            channel: msg.channel,
+            chat_id: msg.chat_id,
+            reason: reason,
+            session_id: context.session_id,
+            agent: context.agent_name
+          }
         )
 
         {:error, reason}
+    end
+  end
+
+  # --- /ultra fixed-topology orchestrator (§17.11) ---
+
+  defp run_ultra(msg, state, context, deliver, start) do
+    deps = %{
+      decompose: fn prompt -> ultra_decompose(state, prompt) end,
+      fanout: fn subtasks -> ultra_fanout(subtasks, context) end,
+      verify: fn finding -> ultra_verify(state, finding) end,
+      synthesize: fn prompt, verified -> ultra_synthesize(state, prompt, verified) end,
+      verify_concurrency: ultra_cfg(:verify_max_concurrency, 4),
+      deliver: deliver
+    }
+
+    case ultra_orchestrator().run(msg.content, deps) do
+      {:ok, response} ->
+        duration_ms = System.monotonic_time(:millisecond) - start
+        result = %{response: response, iterations: 0, total_tokens: 0}
+
+        # The /ultra turn must still emit the turn-level event or it vanishes from
+        # turn-level traces even though its workers are visible (handoff note).
+        :telemetry.execute(
+          [:fermix, :agent, :message],
+          %{iterations: 0, total_tokens: 0, duration_ms: duration_ms},
+          turn_message_metadata(context, msg, result)
+        )
+
+        Logger.info("Ultra orchestrator turn completed (#{byte_size(response)} bytes)")
+        {:ok, response, 0}
+
+      {:error, reason} ->
+        # A decompose/synthesize provider/auth failure: surface it so the gateway
+        # maps it via error_reply/1 instead of delivering a blank turn.
+        Logger.warning("Ultra orchestrator turn failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp ultra_orchestrator do
+    Application.get_env(:fermix_core, :ultra_orchestrator, UltraOrchestrator)
+  end
+
+  defp ultra_decompose(state, prompt) do
+    max_subtasks = ultra_max_subtasks()
+
+    case ultra_stage_call(state, UltraStages.decompose_system(max_subtasks), prompt) do
+      {:ok, content} -> UltraStages.parse_decomposition(content, prompt, max_subtasks)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # /ultra fan-out breadth (number of parallel probes), read from config so it is
+  # tunable without recompiling. Fail loud on a bad value rather than silently
+  # capping wrong. Depth per probe is the separate :iteration_limits subagent cap.
+  defp ultra_max_subtasks, do: ultra_cfg(:max_subtasks, 50)
+
+  # /ultra system-side knobs (the :ultra config block), read at use — restart to
+  # apply. Validated positive int so a bad config value fails loud rather than
+  # silently mis-sizing the run. Depth per probe lives in the subagents path.
+  defp ultra_cfg(key, default) when is_atom(key) and is_integer(default) do
+    value = :fermix_core |> Application.get_env(:ultra, []) |> Keyword.get(key, default)
+
+    if is_integer(value) and value > 0 do
+      value
+    else
+      raise ArgumentError, "invalid ultra.#{key} #{inspect(value)}; expected a positive integer"
+    end
+  end
+
+  defp ultra_verify(state, %{output: output}) do
+    case ultra_stage_call(state, UltraStages.verify_system(), output) do
+      {:ok, content} -> UltraStages.verified?(content)
+      # A verify provider failure drops only that finding (unverified ⇒ excluded);
+      # a total outage still surfaces through the synthesize stage's error.
+      {:error, _reason} -> false
+    end
+  end
+
+  defp ultra_synthesize(state, prompt, verified) do
+    ultra_stage_call(
+      state,
+      UltraStages.synthesize_system(),
+      UltraStages.synthesize_user(
+        prompt,
+        verified,
+        ultra_cfg(:synthesis_max_finding_bytes, 2_000)
+      )
+    )
+  end
+
+  # Reuse the subagents path for the parallel fan-out: isolation, bounded
+  # concurrency, per-worker timeout, and parent-down reaping for /stop all come
+  # for free (the fan-out runs inside the coordinator turn, so workers parent to
+  # it). NOTE (§17.13, deferred): these workers still inherit the :memory read
+  # tools — excluding the :memory category for /ultra workers is follow-up hardening.
+  defp ultra_fanout(subtasks, context) do
+    args = %{
+      "tasks" => Enum.map(subtasks, fn t -> %{"id" => t.id, "task" => t.task} end),
+      "max_concurrency" => ultra_cfg(:fanout_max_concurrency, 12)
+    }
+
+    # Tag the fan-out so Subagents resolves the wider /ultra caps (breadth, byte
+    # budget) and the reduced /ultra worker depth, instead of the regular ones.
+    ultra_context = Map.put(context, :subagent_mode, :ultra)
+
+    case Subagents.execute(args, ultra_context) do
+      {:ok, %{success: true, output: json}} -> UltraStages.parse_findings(json)
+      _other -> []
+    end
+  end
+
+  # One-shot LLM call for a pipeline stage (mirrors Compactor): resolve the route,
+  # call adapter.chat with no tools. Returns {:ok, content} | {:error, reason} so a
+  # provider/auth/route failure propagates to the caller instead of collapsing to an
+  # empty success that would deliver a blank /ultra turn.
+  defp ultra_stage_call(state, system_prompt, user_content) do
+    messages = [
+      %{role: "system", content: system_prompt},
+      %{role: "user", content: user_content}
+    ]
+
+    {adapter, adapter_opts} = ultra_stage_adapter(state)
+
+    case adapter.chat(messages, [], adapter_opts) do
+      {:ok, %{content: content}} when is_binary(content) -> {:ok, content}
+      {:error, reason} -> {:error, reason}
+      other -> {:error, {:unexpected_stage_response, other}}
+    end
+  end
+
+  defp ultra_stage_adapter(state) do
+    case resolve_loop_adapter(state) do
+      {:adapter, mod, opts} -> {mod, opts}
+      {:route, key, opts} -> {Adapter.for_route(key), opts}
+    end
+  end
+
+  defp turn_message_metadata(context, msg, result) do
+    %{
+      channel: msg.channel,
+      chat_id: msg.chat_id,
+      sender: msg.sender,
+      session_id: context.session_id,
+      agent: context.agent_name
+    }
+    |> maybe_put_turn_content(msg, result)
+  end
+
+  defp maybe_put_turn_content(metadata, msg, result) do
+    if Telemetry.capture_content?() do
+      metadata
+      |> Map.put(:input, Telemetry.preview(Map.get(msg, :content)))
+      |> Map.put(:output, Telemetry.preview(Map.get(result, :response)))
+    else
+      metadata
     end
   end
 
@@ -223,6 +424,8 @@ defmodule FermixCore.Agents.TurnRunner do
   defp auth_error?({:auth_invalidated, _body}), do: true
   defp auth_error?({:refresh_failed, _reason}), do: true
   defp auth_error?({:provider_error, status, _body}) when status in [401, 403], do: true
+  defp auth_error?({:provider_error, %{kind: :auth}}), do: true
+  defp auth_error?({:provider_error, %{status: status}}) when status in [401, 403], do: true
   defp auth_error?(%{status: status}) when status in [401, 403], do: true
 
   defp auth_error?(reason) when is_binary(reason) do
@@ -233,6 +436,58 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp auth_error?(_other), do: false
+
+  defp provider_error_reply({:provider_error, %{kind: :rate_limit} = error}) do
+    "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
+  end
+
+  defp provider_error_reply({:provider_error, %{kind: :quota} = error}) do
+    "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
+      "billing, or model access, then retry."
+  end
+
+  defp provider_error_reply({:provider_error, %{kind: :provider_unavailable} = error}) do
+    "#{provider_label(error)} is unavailable or overloaded right now. Retry later, or switch providers."
+  end
+
+  defp provider_error_reply({:provider_error, %{kind: :timeout} = error}) do
+    "#{provider_label(error)} timed out before returning a response. Retry, or lower the request size."
+  end
+
+  defp provider_error_reply({:provider_error, %{kind: :not_implemented} = error}) do
+    "#{provider_label(error)} provider calls are not implemented yet. Switch providers in setup."
+  end
+
+  defp provider_error_reply({:provider_error, %{status: status} = error}) do
+    "#{provider_label(error)} returned HTTP #{status}. #{provider_message(error)}"
+  end
+
+  defp provider_error_reply({:provider_transport_error, %{kind: :timeout} = error}) do
+    "#{provider_label(error)} provider request hit a network timeout. Retry, or check network/provider status."
+  end
+
+  defp provider_error_reply({:provider_transport_error, %{kind: :transport_closed} = error}) do
+    "#{provider_label(error)} provider closed the connection before returning a response. Retry, " <>
+      "or reduce request size/effort if it persists."
+  end
+
+  defp provider_error_reply({:provider_transport_error, error}) when is_map(error) do
+    "#{provider_label(error)} provider transport failed: #{inspect(Map.get(error, :reason))}."
+  end
+
+  defp provider_error_reply(_reason), do: nil
+
+  defp provider_label(error) when is_map(error) do
+    error
+    |> Map.get(:provider, :provider)
+    |> ProviderError.provider_label()
+  end
+
+  defp provider_message(%{message: message}) when is_binary(message) and message != "" do
+    message
+  end
+
+  defp provider_message(_error), do: "Check provider logs and retry."
 
   defp persist_user_message(conversation_key, msg, state) do
     ConversationStore.add_message(
@@ -311,6 +566,107 @@ defmodule FermixCore.Agents.TurnRunner do
   defp adapter_capable?(mod) when is_atom(mod) do
     Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
   end
+
+  defp maybe_preflight_auto_compact(conversation_key, state, profile, history, user_message) do
+    config = Application.get_env(:fermix_core, :compaction, [])
+
+    cond do
+      not CompactionConfig.enabled?(config) ->
+        {history, :ok}
+
+      auto_compaction_in_backoff?(conversation_key, state) ->
+        emit_auto_compaction_skipped(conversation_key, :failure_backoff)
+        {history, :ok}
+
+      true ->
+        preflight_auto_compact_now(
+          conversation_key,
+          state,
+          profile,
+          history,
+          user_message,
+          config
+        )
+    end
+  end
+
+  defp preflight_auto_compact_now(conversation_key, state, profile, history, user_message, config) do
+    {adapter, route_key, adapter_opts} = compaction_target(state)
+    context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
+    threshold = CompactionConfig.threshold(config)
+    prompt_tokens = preflight_prompt_tokens(state.runtime_context, profile, history, user_message)
+
+    if prompt_tokens / context_window >= threshold do
+      compact_preflight_history(
+        conversation_key,
+        history,
+        state,
+        {adapter, route_key, adapter_opts},
+        context_window,
+        config
+      )
+    else
+      emit_auto_compaction_skipped(conversation_key, :under_threshold)
+      {history, :ok}
+    end
+  end
+
+  defp preflight_prompt_tokens(ctx, profile, history, user_message) do
+    ctx
+    |> RuntimeContext.messages_for(profile, history, user_message)
+    |> Compactor.estimate_tokens()
+  end
+
+  defp compact_preflight_history(
+         conversation_key,
+         history,
+         state,
+         {adapter, route_key, adapter_opts},
+         context_window,
+         config
+       ) do
+    result =
+      run_auto_compaction(
+        conversation_key,
+        history,
+        Compactor.estimate_tokens(history),
+        adapter,
+        route_key,
+        compaction_adapter_opts(adapter_opts, config),
+        context_window,
+        state
+      )
+
+    case result do
+      :compacted -> reload_compacted_history(conversation_key, state, history)
+      _other -> {history, :ok}
+    end
+  end
+
+  defp reload_compacted_history(conversation_key, state, fallback_history) do
+    case conversation_history(conversation_key, state) do
+      {:ok, history} ->
+        {history, :compacted}
+
+      {:error, reason} ->
+        emit_auto_compaction_skipped(conversation_key, reason)
+        {fallback_history, :ok}
+    end
+  end
+
+  defp maybe_notify_preflight_compacted(:compacted, deliver) when is_function(deliver, 1) do
+    case deliver.(
+           {:text, "Trimmed older conversation history to stay within the context window."}
+         ) do
+      {:error, reason} ->
+        Logger.error("preflight compaction notice delivery failed: #{inspect(reason)}")
+
+      _delivered ->
+        :ok
+    end
+  end
+
+  defp maybe_notify_preflight_compacted(_status, _deliver), do: :ok
 
   defp maybe_auto_compact(conversation_key, state, compaction_target, context_tokens) do
     config = Application.get_env(:fermix_core, :compaction, [])
@@ -472,7 +828,7 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp auto_compaction_in_backoff?(conversation_key, state) do
-    case Map.get(state.compaction_failures, conversation_key) do
+    case state |> Map.get(:compaction_failures, %{}) |> Map.get(conversation_key) do
       failed_at when is_integer(failed_at) ->
         monotonic_ms() - failed_at < @auto_compaction_failure_backoff_ms
 
@@ -480,6 +836,11 @@ defmodule FermixCore.Agents.TurnRunner do
         false
     end
   end
+
+  defp record_auto_compaction_failure(%{main_agent_server: nil}, _conversation_key), do: :ok
+
+  defp record_auto_compaction_failure(state, _conversation_key)
+       when not is_map_key(state, :main_agent_server), do: :ok
 
   defp record_auto_compaction_failure(state, conversation_key) do
     GenServer.call(
@@ -489,6 +850,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
     :ok
   end
+
+  defp clear_auto_compaction_failure(%{main_agent_server: nil}, _conversation_key), do: :ok
+
+  defp clear_auto_compaction_failure(state, _conversation_key)
+       when not is_map_key(state, :main_agent_server), do: :ok
 
   defp clear_auto_compaction_failure(state, conversation_key) do
     GenServer.cast(state.main_agent_server, {:clear_auto_compaction_failure, conversation_key})

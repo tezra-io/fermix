@@ -8,6 +8,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Registry
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @calendar_base "https://www.googleapis.com/calendar/v3"
   @drive_base "https://www.googleapis.com/drive/v3"
@@ -347,16 +348,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp emit_telemetry({:ok, result}, context, plugin_name, tool_name, start) do
     duration = System.monotonic_time(:millisecond) - start
+    success = Map.get(result, :success) == true
 
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
-      %{
-        tool: tool_name || plugin_name,
-        agent: Map.get(context, :agent_name, "unknown"),
-        success: Map.get(result, :success) == true,
-        plugin: plugin_name
-      }
+    ToolTelemetry.exec(tool_name || plugin_name, context, success, duration,
+      metadata: %{plugin: plugin_name},
+      result: {:ok, result}
     )
   end
 end
