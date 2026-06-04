@@ -243,6 +243,11 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       assert [%{name: "mcp_github_create_issue"}] =
                CapabilityRegistry.list(cap_registry, kind: :mcp)
 
+      # The server is linked (start_link); unlink before the kill or the
+      # :shutdown exit signal propagates back and kills the test process —
+      # a race that only loses when end-of-test work (e.g. capture_log
+      # teardown) keeps the test alive long enough for the signal to land.
+      Process.unlink(pid)
       Process.exit(pid, :shutdown)
     end
 
