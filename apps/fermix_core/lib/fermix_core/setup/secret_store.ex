@@ -138,19 +138,29 @@ defmodule FermixCore.Setup.SecretStore do
     end
   end
 
-  # Disk already says @keyring. Most saves arrive here with the RESOLVED
-  # runtime value (every loaded snapshot carries it), so a matching value
-  # keeps the sentinel without touching the keyring. A differing value is a
-  # rotation — write it through, or the new secret would be silently dropped
-  # in favor of the stale stored one.
+  # Disk already says @keyring. Most saves arrive here with the RESOLVED runtime
+  # value (every loaded snapshot carries it), so compare it against what's stored:
+  #
+  #   {:ok, ^value} → unchanged; keep the sentinel, no write.
+  #   {:ok, _other} → genuine rotation; write the new value through, or it would be
+  #                   silently dropped in favor of the stale stored one.
+  #   {:error, _}   → keychain unreadable (locked / timeout / unavailable). Do NOT
+  #                   escalate to a write: the on-disk value is already the @keyring
+  #                   sentinel, so preserve it rather than failing this otherwise-
+  #                   unrelated save (e.g. a routing-config or sandbox-grant commit).
+  #                   A real rotation is re-detected on the next save once the
+  #                   keychain is reachable. Only a positively-confirmed different
+  #                   stored value triggers a write.
   defp keep_or_rotate(snapshot, secret, value) do
     case SecretWriter.get(secret.key) do
-      {:ok, ^value} ->
-        {:ok, put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())}
-
-      _stale_or_missing ->
-        write_secret(snapshot, secret, value)
+      {:ok, ^value} -> {:ok, keep_sentinel(snapshot, secret)}
+      {:ok, _other} -> write_secret(snapshot, secret, value)
+      {:error, _reason} -> {:ok, keep_sentinel(snapshot, secret)}
     end
+  end
+
+  defp keep_sentinel(snapshot, secret) do
+    put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())
   end
 
   defp write_secret(snapshot, secret, value) do
