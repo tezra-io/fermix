@@ -10,12 +10,25 @@ defmodule FermixCore.Trace.TelemetryHandler do
   """
 
   alias FermixCore.Agents.LifecycleTelemetry
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Trace
 
   @core_events [
     %{event: [:fermix, :provider, :call], trace_type: :llm_call, agent_field: :agent},
     %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent},
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
+    %{
+      event: [:fermix, :agent, :message],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "turn_complete"
+    },
+    %{
+      event: [:fermix, :agent, :message_error],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "turn_error"
+    },
     %{
       event: [:fermix, :agent, :prompt_context],
       trace_type: :agent_event,
@@ -96,7 +109,10 @@ defmodule FermixCore.Trace.TelemetryHandler do
   end
 
   defp event_definitions do
-    @core_events ++ @mcp_inbound_events ++ LifecycleTelemetry.trace_event_definitions()
+    @core_events ++
+      @mcp_inbound_events ++
+      LifecycleTelemetry.trace_event_definitions() ++
+      JobTelemetry.trace_event_definitions()
   end
 
   defp event_config(event) do

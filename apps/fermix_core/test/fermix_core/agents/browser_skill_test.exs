@@ -24,10 +24,11 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
         id: :"browser_guidance_skill_child_#{System.unique_integer([:positive])}"
       )
 
-    assert {:ok, definition} = SkillRegistry.load(registry, "browser_guidance")
+    assert {:ok, definition} = SkillRegistry.load(registry, "browser-guidance")
     assert definition.trust == :operator
     assert definition.allowed_tools == ["browser"]
-    assert definition.system_prompt =~ "Use the built-in `browser` tool"
-    assert definition.system_prompt =~ "Do not pass a headless setting"
+    assert definition.system_prompt =~ "Use `browser`"
+    assert definition.system_prompt =~ "Use the default profile"
+    assert definition.system_prompt =~ "not proof that async navigation"
   end
 end

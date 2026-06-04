@@ -145,6 +145,54 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     def supports_streaming?, do: false
   end
 
+  defmodule PreflightAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(messages, _capabilities, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      text = Enum.map_join(messages, "\n", &Map.get(&1, :content, ""))
+
+      if String.contains?(text, "Older messages:") do
+        send(test_pid, {:preflight_summary_call, text})
+        turn("preflight summary", 12)
+      else
+        send(test_pid, {:preflight_main_call, text})
+        turn("assistant after preflight", 20)
+      end
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp turn(content, prompt_tokens) do
+      {:ok,
+       %{
+         content: content,
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{
+           prompt_tokens: prompt_tokens,
+           completion_tokens: 1,
+           total_tokens: prompt_tokens + 1
+         },
+         model: "mock-model"
+       }}
+    end
+  end
+
   setup do
     compaction = Application.get_env(:fermix_core, :compaction, [])
 
@@ -288,6 +336,63 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert Enum.map(history, & &1.role) == ["user"]
       assert List.first(history).content == "keep this failed request"
     end
+
+    test "auto-compacts oversized history before the main provider call" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.1,
+        reasoning_effort: :medium
+      )
+
+      registry_name = :"turn_runner_preflight_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_preflight_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "preflight_compaction"
+      conversation_key = {"telegram", chat_id, :root}
+      old_content = String.duplicate("old context ", 25_000)
+
+      ConversationStore.add_message(conversation_key, "user", old_content, server: store)
+      ConversationStore.add_message(conversation_key, "assistant", "old answer", server: store)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "latest question",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter: PreflightAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        )
+
+      deliver = fn {:text, text} -> send(self(), {:reply, text}) end
+
+      assert {:ok, "assistant after preflight", _context_tokens} =
+               TurnRunner.run(msg, turn_state, deliver)
+
+      assert_receive {:preflight_summary_call, summary_text}, 5_000
+      assert summary_text =~ old_content
+
+      assert_receive {:reply, notice}, 5_000
+      assert notice =~ "Trimmed older conversation history"
+
+      assert_receive {:preflight_main_call, main_text}, 5_000
+      assert main_text =~ "preflight summary"
+      assert main_text =~ "latest question"
+      refute main_text =~ old_content
+    end
   end
 
   describe "error_reply/1" do
@@ -310,11 +415,92 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
     end
 
+    test "maps provider rate limits to an actionable retry message" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :openai,
+             adapter: :responses,
+             status: 429,
+             kind: :rate_limit,
+             message: "Too many requests"
+           }}
+        )
+
+      assert reply =~ "OpenAI"
+      assert reply =~ "rate-limited"
+      assert reply =~ "retry"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "maps provider outages to an actionable provider message" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :openai,
+             adapter: :responses,
+             status: 503,
+             kind: :provider_unavailable,
+             message: "service overloaded"
+           }}
+        )
+
+      assert reply =~ "OpenAI"
+      assert reply =~ "unavailable"
+      assert String.downcase(reply) =~ "retry"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "maps provider transport errors to an actionable network message" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_transport_error,
+           %{provider: :openai, adapter: :responses, reason: :timeout, kind: :timeout}}
+        )
+
+      assert reply =~ "OpenAI"
+      assert reply =~ "timeout"
+      assert reply =~ "provider"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "maps scaffolded provider errors to an actionable provider message" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :anthropic,
+             adapter: :messages,
+             kind: :not_implemented,
+             message: "Anthropic provider is selectable but runtime calls are not implemented yet"
+           }}
+        )
+
+      assert reply =~ "Anthropic"
+      assert reply =~ "not implemented"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
     test "maps max iteration exhaustion to an actionable step-limit message" do
       reply = TurnRunner.error_reply("Maximum iterations (50) reached")
 
       assert reply =~ "step limit"
       assert reply =~ "narrow"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "maps Codex stream closure to an actionable provider message" do
+      reply =
+        TurnRunner.error_reply(
+          "Codex stream closed by peer mid-response. Retry; if it persists, lower reasoning_effort or check ChatGPT account status."
+        )
+
+      assert reply =~ "Codex"
+      assert reply =~ "closed"
+      assert reply =~ "/compact"
+      assert reply =~ "reasoning_effort"
       refute reply == "Sorry, I encountered an error processing your message."
     end
 

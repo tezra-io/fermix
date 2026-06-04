@@ -135,9 +135,16 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
   end
 
   describe "chat/3 and continue/3" do
-    test "both return :not_implemented cleanly" do
-      assert {:error, :not_implemented} = Messages.chat([], [], [])
-      assert {:error, :not_implemented} = Messages.continue(%{}, [], [])
+    test "both return structured provider errors while Anthropic runtime calls are scaffolded" do
+      assert {:error, {:provider_error, chat_error}} = Messages.chat([], [], [])
+      assert chat_error.provider == :anthropic
+      assert chat_error.adapter == :messages
+      assert chat_error.kind == :not_implemented
+
+      assert {:error, {:provider_error, continue_error}} = Messages.continue(%{}, [], [])
+      assert continue_error.provider == :anthropic
+      assert continue_error.adapter == :messages
+      assert continue_error.kind == :not_implemented
     end
   end
 end

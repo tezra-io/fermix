@@ -31,6 +31,9 @@ defmodule FermixCore.MixProject do
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
       {:plug, "~> 1.15", only: :test},
+      # Explicit because FermixCore.Application supervises the shared
+      # FermixCore.Finch pool directly (req would only pull it transitively).
+      {:finch, "~> 0.21"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
       {:websockex, "~> 0.4"}

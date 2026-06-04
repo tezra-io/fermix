@@ -94,6 +94,12 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ "Invalid act kind"
     end
 
+    test "recognizes submit as a ref-based act kind" do
+      assert {:ok, result} = Browser.execute(%{"action" => "act", "kind" => "submit"}, @context)
+      assert result.success == false
+      assert result.error =~ "submit requires ref"
+    end
+
     test "surfaces the structured error code and details to the agent" do
       # A blocked scheme is rejected by URL policy before any Chrome launch, so
       # this stays hermetic while exercising the code + details surfacing.

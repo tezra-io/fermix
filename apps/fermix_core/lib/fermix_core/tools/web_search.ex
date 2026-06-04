@@ -29,7 +29,9 @@ defmodule FermixCore.Tools.WebSearch do
   def name, do: "web_search"
 
   @impl true
-  def description, do: "Search the web using the configured backend."
+  def description,
+    do:
+      "Search the public web by query when you have no known URL. USE FOR static facts (hours, prices, schedules, addresses, lookups); do NOT use for JavaScript/dynamic/interactive pages or live data (use browser), and do not rerun it on dynamic content that returns empty."
 
   @impl true
   def parameters do
@@ -41,7 +43,9 @@ defmodule FermixCore.Tools.WebSearch do
   end
 
   @impl true
-  def when_to_use, do: "Search the current public web by query when no known URL is available."
+  def when_to_use,
+    do:
+      "A static fact with no known URL (hours, prices, schedules, lookups) — not JS/dynamic pages (use browser)."
 
   @impl true
   def examples, do: [%{args: %{"query" => "latest Elixir release"}, note: "search public web"}]

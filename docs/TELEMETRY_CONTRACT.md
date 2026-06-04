@@ -1,0 +1,108 @@
+# Telemetry Contract — keeping new code observable (and Opik-traceable)
+
+Fermix's telemetry is a **standardized, correlatable contract**, not ad-hoc
+logging. Every LLM/tool call is stamped with the `session_id` of the run that
+issued it, runs are bracketed by lifecycle events, and the JSONL trace stream is
+structured. That contract is what lets a turn — including the subagents it
+delegates to and the tools they call — be reassembled into one trace (greppable
+on its own, or rendered by the optional `fermix_opik` exporter in
+`projects/fermix-plugins`).
+
+**The rule:** new code must *join* this contract, not invent a parallel one.
+Concretely — never hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`;
+route through the shared emitters below, which add correlation + content gating
+in one place ("single owner of shape"). Get this right and **new tools/providers
+appear in Opik automatically, with zero plugin changes.**
+
+---
+
+## Adding a built-in tool
+
+Emit via the single tool emitter — do **not** write your own `:telemetry.execute`:
+
+```elixir
+alias FermixCore.Tools.Telemetry, as: ToolTelemetry
+
+ToolTelemetry.exec(tool_name, context, success, duration_ms,
+  metadata: %{plugin: ..., action: ...},   # optional tool-specific fields
+  input: args,                              # gated content (the call's input)
+  result: result                            # gated content (output/error derived from it)
+)
+```
+
+It pulls `agent` + `session_id`/`parent_session` from `context` and gates
+`input`/`output` behind content capture. Simpler tools can wrap their work in
+`FermixCore.Tools.Support.run/3`, which routes through the same emitter.
+Plugin/MCP tools already flow through `Plugins.ToolExecutor`, which uses it too —
+just make sure the call `context` is threaded.
+
+## Adding a provider / adapter
+
+Emit the LLM call via the single provider emitter, and pass the correlation ids
+(which `AgentLoop.build_adapter_opts/3` already puts into `adapter_opts`):
+
+```elixir
+alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+
+ProviderTelemetry.emit_call(
+  %{provider: :openai, model: model, status: status, tokens: %{prompt: p, completion: c}, agent: agent},
+  duration_ms,
+  session_id: Keyword.get(opts, :session_id),
+  parent_session: Keyword.get(opts, :parent_session),
+  output: response_content,                 # gated content
+  tool_calls: response_tool_calls           # gated content
+)
+```
+
+For **Opik auto-cost** to work the span must carry `type: llm` (the Mapper sets
+this), a recognized short `provider` token, a bare `model` id, and integer
+`usage`. If you add a **new provider**, add its atom → short-token mapping in the
+plugin's `FermixOpik.Mapper.provider_string/1` (e.g. `:openai_codex → "openai"`),
+or Opik can't price it.
+
+## Adding a new "run kind" (something that drives the agent loop)
+
+A subagent or scheduled job is a *run*. New run kinds (anything that calls
+`AgentLoop.run/1` in its own context) must:
+
+1. give the loop `context` a **unique `session_id`** (e.g. `"main-<n>"`,
+   `"cron_<job>_<ts>"`), and a **`parent_session`** if it was spawned by another
+   run (that's what nests it under its parent in the trace);
+2. emit **lifecycle bookend events** — start / complete / error — carrying that
+   `session_id`. Model them on `FermixCore.Jobs.Telemetry` (jobs) or
+   `FermixCore.Agents.LifecycleTelemetry` (subagents/skills). Without an opener
+   the trace can't be stamped with the run's metadata; without a closer it only
+   ships via the exporter's TTL sweep.
+3. route those events into the JSONL trace stream via
+   `FermixCore.Trace.TelemetryHandler` (`event_definitions/0`).
+
+## Content (prompts / responses / tool IO)
+
+Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and
+bound them with `FermixCore.Telemetry.preview/1`. Enabling the Opik exporter
+(`FERMIX_OPIK_ENABLED=1`) defaults content capture **on** (resolved in
+`config/runtime.exs`); `FERMIX_TRACE_CONTENT` is the explicit override. Off
+otherwise — bloat + privacy; bodies are only needed for eval/observing.
+
+---
+
+## When does the `fermix_opik` plugin also need a change?
+
+The plugin is a **separate repo** (`projects/fermix-plugins`). The dividing line:
+
+| You added… | Plugin change needed? |
+|---|---|
+| A tool that uses `Tools.Telemetry.exec` | **No** — it reuses `[:fermix, :tool, :exec]`, already handled |
+| A provider that uses `Providers.Telemetry.emit_call` | **No** (but add a new provider's `provider_string/1` mapping for cost) |
+| A genuinely **new event name** you want in Opik | **Yes** — add it to `FermixOpik.Reporter`'s `@events` **and** handle it in `FermixOpik.Aggregation.apply_event/5` |
+| A new **run kind** (new lifecycle events) | **Yes** — same as above, plus decide root-vs-nested via `parent_session` |
+
+If the plugin doesn't subscribe to an event, that event is simply invisible to
+Opik — the live JSONL is unaffected.
+
+## Verify (same discipline as everywhere)
+
+- Write the telemetry assertion **red first, then green** — prove the event
+  actually carries `session_id`/the fields you expect before trusting it.
+- New plugin handling: extend `aggregation_test.exs` (one trace, correct
+  nesting) and keep `fermix-plugins` green (`mix check`).

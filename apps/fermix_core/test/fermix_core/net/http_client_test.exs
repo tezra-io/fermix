@@ -119,4 +119,24 @@ defmodule FermixCore.Net.HttpClientTest do
     assert_received {:attempt, 1}
     refute_received {:attempt, 2}
   end
+
+  test "the shared FermixCore.Finch pool is supervised and running" do
+    # The idle-age-capped pool (conn_max_idle_time) is what prevents the
+    # daemon from reusing keep-alive sockets that a cloud LB RST'd while
+    # the host slept — without it, the first request after idle surfaces
+    # as a :closed transport error.
+    assert pid = Process.whereis(FermixCore.Finch)
+    assert Process.alive?(pid)
+  end
+
+  test "the shared pool caps idle connection age (the stale-socket fix)" do
+    # Finch exposes no API to read pool config back, so pin the spec
+    # literals — Finch's default conn_max_idle_time is :infinity, which is
+    # the exact bug this pool exists to fix.
+    pools = FermixCore.Application.finch_pools()
+
+    assert pools[:default][:conn_max_idle_time] == 15_000
+    assert pools["https://chatgpt.com"][:conn_max_idle_time] == 15_000
+    assert pools["https://chatgpt.com"][:conn_opts] == [transport_opts: [timeout: 5_000]]
+  end
 end

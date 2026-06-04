@@ -21,6 +21,8 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
   alias FermixCore.Telemetry
 
   require Logger
@@ -91,7 +93,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     temperature = Keyword.get(opts, :temperature, @default_temperature)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     response_format = Keyword.get(opts, :response_format)
-    agent = Keyword.get(opts, :agent)
+    correlation = Keyword.take(opts, [:agent, :session_id, :parent_session])
     {req_options, _opts} = Keyword.pop(opts, :req_options, [])
 
     body =
@@ -99,10 +101,19 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       |> maybe_put_tools(to_provider_tools(capabilities))
       |> maybe_put(:response_format, response_format)
 
-    post(base_url, api_key, body, req_options, model, messages, capabilities, agent)
+    post(base_url, api_key, body, req_options, model, messages, capabilities, correlation)
   end
 
-  defp post(base_url, api_key, body, req_options, model, prior_messages, capabilities, agent) do
+  defp post(
+         base_url,
+         api_key,
+         body,
+         req_options,
+         model,
+         prior_messages,
+         capabilities,
+         correlation
+       ) do
     start = System.monotonic_time(:millisecond)
 
     result =
@@ -117,7 +128,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       |> handle_response(model, prior_messages, capabilities)
 
     duration_ms = System.monotonic_time(:millisecond) - start
-    emit_telemetry(result, model, duration_ms, agent)
+    emit_telemetry(result, model, duration_ms, correlation)
     result
   end
 
@@ -139,12 +150,12 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _model, _prior, _caps) do
     Logger.error("OpenAI Chat Completions error: #{status} - #{inspect(body)}")
-    {:error, "OpenAI API error: #{status}"}
+    {:error, ProviderError.api(:openai, :chat_completions, status, body)}
   end
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _model, _prior, _caps) do
     Logger.error("OpenAI Chat Completions transport error: #{inspect(reason)}")
-    {:error, reason}
+    {:error, ProviderError.transport(:openai, :chat_completions, reason)}
   end
 
   defp handle_response({:error, reason}, _model, _prior, _caps) do
@@ -230,19 +241,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     end
   end
 
-  defp emit_telemetry(result, model, duration_ms, agent) do
-    {status, tokens} =
+  defp emit_telemetry(result, model, duration_ms, correlation) do
+    {status, tokens, output, tool_calls, error_metadata} =
       case result do
         {:ok, resp} ->
-          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens}}
+          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens},
+           Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
 
-        {:error, _} ->
-          {:error, %{}}
+        {:error, reason} ->
+          {:error, %{}, nil, nil, ProviderError.telemetry_metadata(reason)}
       end
 
-    :telemetry.execute(
-      [:fermix, :provider, :call],
-      %{duration_ms: duration_ms},
+    metadata =
       %{
         provider: :openai,
         adapter: :chat_completions,
@@ -251,7 +261,14 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
         tokens: tokens,
         reasoning_effort: nil
       }
-      |> maybe_put(:agent, agent)
+      |> Map.merge(error_metadata)
+      |> maybe_put(:agent, Keyword.get(correlation, :agent))
+
+    ProviderTelemetry.emit_call(metadata, duration_ms,
+      session_id: Keyword.get(correlation, :session_id),
+      parent_session: Keyword.get(correlation, :parent_session),
+      output: output,
+      tool_calls: tool_calls
     )
   end
 end

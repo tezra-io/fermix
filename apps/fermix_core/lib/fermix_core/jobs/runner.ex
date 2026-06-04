@@ -13,6 +13,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Delivery
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Providers.RouteResolver
@@ -145,6 +146,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
+    JobTelemetry.run_start(state.job, run, loop_input)
     run
   end
 
@@ -167,6 +169,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
+    JobTelemetry.run_complete(state.job, run, result)
     run
   end
 
@@ -229,6 +232,7 @@ defmodule FermixCore.Jobs.Runner do
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
     failed_state = %{state | run: run}
+    JobTelemetry.run_error(state.job, run, status, error)
     finalize_failed_job(failed_state, status, error)
     finalize_delivery(failed_state, failure_delivery_text(state, status, error))
   end
