@@ -316,8 +316,13 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
-      assert metadata.agent == "main"
+      # Pattern-filter on agent: the handler is attached to the global event,
+      # so concurrently-running async tests emit provider calls (without
+      # :agent) that would otherwise be received here first.
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements,
+                      %{agent: "main"} = metadata}
+
+      assert metadata.adapter == :responses
     end
   end
 
