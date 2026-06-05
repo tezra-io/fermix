@@ -415,6 +415,115 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
     end
 
+    test "maps API-key provider auth failures to a check-your-key hint" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :anthropic,
+             adapter: :messages,
+             status: 401,
+             kind: :auth,
+             message: "invalid x-api-key"
+           }}
+        )
+
+      assert reply =~ "Anthropic"
+      assert reply =~ "API key"
+      refute reply =~ "fermix auth login"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "maps Anthropic OAuth auth failures to a subscription reconnect hint" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :anthropic,
+             adapter: :messages,
+             status: 401,
+             kind: :auth,
+             auth_mode: :oauth,
+             message: "OAuth token expired"
+           }}
+        )
+
+      assert reply =~ "Claude subscription"
+      assert reply =~ "fermix auth login --provider anthropic"
+      refute reply =~ "API key"
+    end
+
+    test "maps xAI API-key auth failures to a check-your-key hint" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :xai,
+             adapter: :responses,
+             status: 401,
+             kind: :auth,
+             auth_mode: :api_key,
+             message: "invalid api key"
+           }}
+        )
+
+      assert reply =~ "xAI"
+      assert reply =~ "API key"
+      refute reply =~ "fermix auth login"
+    end
+
+    test "maps xAI OAuth 403 to an entitlement message, not a re-login hint" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :xai,
+             adapter: :responses,
+             status: 403,
+             kind: :auth,
+             auth_mode: :oauth,
+             message: "no api access"
+           }}
+        )
+
+      assert reply =~ "access denied"
+      assert reply =~ "API key"
+      refute reply =~ "fermix auth login"
+    end
+
+    test "maps xAI OAuth 401 to a reconnect hint" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :xai,
+             adapter: :responses,
+             status: 401,
+             kind: :auth,
+             auth_mode: :oauth,
+             message: "expired"
+           }}
+        )
+
+      assert reply =~ "fermix auth login --provider xai"
+    end
+
+    test "keeps the re-login hint for Codex OAuth auth failures" do
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{
+             provider: :openai_codex,
+             adapter: :codex,
+             status: 401,
+             kind: :auth,
+             message: "token expired"
+           }}
+        )
+
+      assert reply =~ "fermix auth login"
+    end
+
     test "maps provider rate limits to an actionable retry message" do
       reply =
         TurnRunner.error_reply(

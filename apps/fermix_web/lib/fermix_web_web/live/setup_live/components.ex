@@ -269,6 +269,17 @@ defmodule FermixWebWeb.SetupLive.Components do
                 codex_auth_running?={@codex_auth_running?}
                 codex_auth_url={@codex_auth_url}
               />
+              <p
+                :if={@provider_form.provider in [:anthropic, :xai]}
+                class="text-xs text-base-content/60"
+              >
+                Prefer a subscription over an API key? Connect OAuth from the host:
+                <code class="font-mono">
+                  fermix auth login --provider {Atom.to_string(@provider_form.provider)}
+                </code>
+                then set <code class="font-mono">auth_mode = "oauth"</code>
+                for this provider.
+              </p>
             </div>
           </section>
 
@@ -288,8 +299,10 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
-  defp provider_connection?(provider), do: provider in [:openai, :openai_codex, :anthropic]
-  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex]
+  defp provider_connection?(provider),
+    do: provider in [:openai, :openai_codex, :anthropic, :xai]
+
+  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex, :xai]
 
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
@@ -322,10 +335,12 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp provider_secret_label(:openai), do: "OpenAI API key"
   defp provider_secret_label(:anthropic), do: "Anthropic API key"
+  defp provider_secret_label(:xai), do: "xAI API key"
   defp provider_secret_label(_provider), do: nil
 
   defp provider_secret_name(:openai), do: "provider_form[openai_api_key]"
   defp provider_secret_name(:anthropic), do: "provider_form[anthropic_api_key]"
+  defp provider_secret_name(:xai), do: "provider_form[xai_api_key]"
   defp provider_secret_name(_provider), do: nil
 
   attr :provider_form, :map, required: true
@@ -429,7 +444,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp reasoning_effort_field(assigns) do
     ~H"""
     <fieldset
-      :if={@provider_form.provider in [:openai, :openai_codex]}
+      :if={@provider_form.provider in [:openai, :openai_codex, :xai]}
       class="form-control"
     >
       <legend class="label pb-1 text-sm font-medium">Reasoning effort</legend>

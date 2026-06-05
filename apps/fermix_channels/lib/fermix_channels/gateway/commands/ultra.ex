@@ -13,17 +13,19 @@ defmodule FermixChannels.Gateway.Commands.Ultra do
 
   @impl true
   def description,
-    do: "Run a complex task with the high-effort orchestrator. Usage: /ultra <prompt>"
+    do: "Run a complex task in exhaustive mode (wide fan-out). Usage: /ultra <prompt>"
 
   @impl true
   def authorize(message, metadata, context),
     do: Authorization.owner_only(message, metadata, context)
 
   # `/ultra` is not handled inline: it runs as a normal foreground turn tagged
-  # with `run_profile: :ultra`, which core routes into the fixed-topology
-  # orchestrator (§17.11). Returning `{:enqueue, tagged_message}` is the third
-  # dispatch outcome — the gateway enqueues the already-prefix-stripped message
-  # with the neutral profile tag (in metadata, so no Message struct change).
+  # with `run_profile: :ultra`. Core (TurnRunner) consumes that tag to run the
+  # ordinary agent loop in exhaustive mode — wide `subagents` fan-out + an
+  # exhaustive-mode prompt addendum — not a separate orchestrator. Returning
+  # `{:enqueue, tagged_message}` is the third dispatch outcome — the gateway
+  # enqueues the already-prefix-stripped message with the profile tag in
+  # metadata (no Message struct change).
   @impl true
   def execute(message, reply_fn, _context) do
     case String.trim(message.content) do

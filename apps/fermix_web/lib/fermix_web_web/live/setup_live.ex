@@ -47,7 +47,8 @@ defmodule FermixWebWeb.SetupLive do
     :reasoning_effort,
     :fast,
     :openai_api_key,
-    :anthropic_api_key
+    :anthropic_api_key,
+    :xai_api_key
   ]
   @realtime_restart_keys [
     :realtime_enabled,
@@ -156,6 +157,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:fast, params["fast"])
       |> maybe_put_string(:openai_api_key, params["openai_api_key"])
       |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
+      |> maybe_put_string(:xai_api_key, params["xai_api_key"])
 
     {:noreply,
      save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"),
@@ -1158,17 +1160,20 @@ defmodule FermixWebWeb.SetupLive do
 
   defp normalize_provider(nil), do: :openai
 
-  defp normalize_provider(provider) when provider in [:openai, :openai_codex, :anthropic],
-    do: provider
+  defp normalize_provider(provider)
+       when provider in [:openai, :openai_codex, :anthropic, :xai],
+       do: provider
 
   defp normalize_provider("openai"), do: :openai
   defp normalize_provider("openai_codex"), do: :openai_codex
   defp normalize_provider("anthropic"), do: :anthropic
+  defp normalize_provider("xai"), do: :xai
   defp normalize_provider(_provider), do: :openai
 
   defp parse_provider_field("openai", _default), do: :openai
   defp parse_provider_field("openai_codex", _default), do: :openai_codex
   defp parse_provider_field("anthropic", _default), do: :anthropic
+  defp parse_provider_field("xai", _default), do: :xai
   defp parse_provider_field(_, default), do: default
 
   defp parse_effort_field(field, default) do
@@ -1234,7 +1239,7 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(provider, [])
   end
 
-  defp models_for_safe(provider) when provider in [:openai, :openai_codex, :anthropic] do
+  defp models_for_safe(provider) when provider in [:openai, :openai_codex, :anthropic, :xai] do
     ModelCatalog.models_for(provider)
   end
 

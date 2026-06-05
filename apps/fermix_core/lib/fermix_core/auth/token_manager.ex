@@ -169,9 +169,19 @@ defmodule FermixCore.Auth.TokenManager do
 
       # Permanent failure — token chain is dead; stop retrying. The user
       # must rotate credentials (`fermix auth login`) and restart the
-      # daemon. The error was already logged by do_refresh/1.
-      {:error, :auth_invalidated, state} ->
+      # daemon. The error was already logged by do_refresh/1. Matching on
+      # the invalidated flag covers every permanent reason (:auth_invalidated
+      # for Codex, :reauthorization_required for the OAuth profiles) —
+      # rescheduling here would hammer a dead token endpoint every 30s.
+      {:error, _reason, %{invalidated: true} = state} ->
         {:noreply, state}
+
+      # Tier/entitlement denial (xAI 403): tokens stay valid and are NOT
+      # quarantined (§6.5), but scheduled retries can never succeed — stop
+      # the timer; on-demand get_token/refresh still work.
+      {:error, :xai_oauth_tier_denied, state} ->
+        Logger.warning("TokenManager: xAI tier denied — scheduled refresh stopped")
+        {:noreply, %{state | refresh_timer: nil}}
 
       {:error, reason, state} ->
         Logger.error("TokenManager: refresh failed — #{Redaction.format(reason)}")
@@ -213,13 +223,15 @@ defmodule FermixCore.Auth.TokenManager do
     end
   end
 
-  defp apply_entry(state, %{tokens: tokens, expires_at: expires_at}) do
+  defp apply_entry(state, %{tokens: tokens, expires_at: expires_at} = entry) do
     %{
       state
       | access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at: expires_at,
-        entry: Map.merge(state.entry || %{}, %{tokens: tokens, expires_at: expires_at})
+        # Keep the whole entry — refresh dispatch keys on :provider
+        # (anthropic/google), which a tokens-only merge silently dropped.
+        entry: Map.merge(state.entry || %{}, entry)
     }
   end
 
@@ -263,6 +275,42 @@ defmodule FermixCore.Auth.TokenManager do
 
   defp refresh_entry("openai_codex", entry, path, req_options) do
     CodexToken.refresh_entry(entry, path, req_options)
+  end
+
+  defp refresh_entry(
+         auth_profile,
+         %{provider: "anthropic", tokens: %{refresh_token: refresh_token}} = entry,
+         path,
+         req_options
+       )
+       when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, tokens} <-
+           RefreshClient.refresh(OAuthProvider.anthropic(), refresh_token, req_options),
+         refreshed <- apply_tokens(entry, tokens),
+         :ok <- Store.write(auth_profile, refreshed, path) do
+      {:ok, refreshed}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp refresh_entry(
+         auth_profile,
+         %{provider: "xai", tokens: %{refresh_token: refresh_token}} = entry,
+         path,
+         req_options
+       )
+       when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, tokens} <- RefreshClient.refresh(OAuthProvider.xai(), refresh_token, req_options),
+         refreshed <- apply_tokens(entry, tokens),
+         :ok <- Store.write(auth_profile, refreshed, path) do
+      {:ok, refreshed}
+    else
+      # 403 is tier/entitlement denial, not a stale token — surface it
+      # without tripping the central permanent-failure quarantine (§6.5).
+      {:error, {:permanent, 403, _body}} -> {:error, :xai_oauth_tier_denied}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp refresh_entry(

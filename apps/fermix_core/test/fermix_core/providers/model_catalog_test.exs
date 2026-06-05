@@ -4,8 +4,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   alias FermixCore.Providers.ModelCatalog
 
   describe "providers/0" do
-    test "lists the three M4.10 providers" do
-      assert ModelCatalog.providers() == [:openai, :openai_codex, :anthropic]
+    test "lists the four providers" do
+      assert ModelCatalog.providers() == [:openai, :openai_codex, :anthropic, :xai]
     end
   end
 
@@ -45,8 +45,11 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
+      # Anthropic windows are the no-beta defaults; 1M needs the context-1m
+      # beta header the adapter deliberately does not send (design doc §8).
+      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 200_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
+      assert ModelCatalog.context_window_for(:xai, "grok-4.3") == 1_000_000
     end
 
     test "returns a safe default and emits telemetry for unknown models" do
@@ -87,6 +90,19 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
       assert_receive {:telemetry, [:fermix, :model_catalog, :unknown_model], %{count: 1},
                       %{provider: :mock, model: "mock-model"}}
+    end
+  end
+
+  describe "max_output_tokens_for/2" do
+    test "returns cataloged output ceilings for Anthropic models" do
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-4-6") == 64_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-4-7") == 128_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-haiku-4-5") == 64_000
+    end
+
+    test "returns the conservative default for unknown models and providers" do
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-custom") == 8_192
+      assert ModelCatalog.max_output_tokens_for(:openai, "gpt-5.5") == 8_192
     end
   end
 

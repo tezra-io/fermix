@@ -24,6 +24,12 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :xai_api_key,
+      env: "XAI_API_KEY",
+      path: [:fermix_core, :providers, :xai, :api_key],
+      sandbox_env: true
+    },
+    %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :tavily_api_key],

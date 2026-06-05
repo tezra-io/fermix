@@ -108,6 +108,184 @@ defmodule FermixCore.ReadinessTest do
       refute Enum.any?(report.failures, &(&1.component == "provider:openai_codex"))
     end
 
+    test "anthropic oauth readiness requires a stored anthropic_oauth profile" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, anthropic: [auth_mode: "oauth"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:anthropic" and
+                 failure.action =~ "fermix auth login --provider anthropic"
+             end)
+
+      assert :ok =
+               Store.write("anthropic_oauth", %{
+                 auth_mode: "setup_token",
+                 provider: "anthropic",
+                 tokens: %{access_token: "sub-at", refresh_token: nil},
+                 expires_at: nil,
+                 last_refresh: nil
+               })
+
+      report = Readiness.report()
+      refute Enum.any?(report.failures, &(&1.component == "provider:anthropic"))
+    end
+
+    test "anthropic invalid auth_mode is reported, not treated as api-key-ready" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      # A typo'd auth_mode with an api_key present must NOT report ready —
+      # RouteResolver.parse_auth_mode!/2 raises on it at the first turn.
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [auth_mode: "oauthh", api_key: "sk-ant-x"]
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:anthropic" and failure.action =~ "Invalid auth_mode"
+             end)
+    end
+
+    test "xai invalid auth_mode is reported, not treated as api-key-ready" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, xai: [auth_mode: "oauthh", api_key: "xai-x"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :xai)
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:xai" and failure.action =~ "Invalid auth_mode"
+             end)
+    end
+
+    test "xai oauth readiness requires a stored xai_oauth profile" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :providers, xai: [auth_mode: "oauth"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :xai)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:xai" and
+                 failure.action =~ "fermix auth login --provider xai"
+             end)
+
+      assert :ok =
+               Store.write("xai_oauth", %{
+                 auth_mode: "oauth_pkce",
+                 provider: "xai",
+                 tokens: %{access_token: "xai-at", refresh_token: "xai-rt"},
+                 expires_at: nil,
+                 last_refresh: nil
+               })
+
+      report = Readiness.report()
+      refute Enum.any?(report.failures, &(&1.component == "provider:xai"))
+
+      # A quarantined profile is NOT ready, even with a token present.
+      assert :ok =
+               Store.write("xai_oauth", %{
+                 auth_mode: "oauth_pkce",
+                 provider: "xai",
+                 tokens: %{access_token: "xai-at", refresh_token: "xai-rt"},
+                 expires_at: nil,
+                 last_refresh: nil,
+                 status: "reauthorization_required"
+               })
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:xai" and
+                 failure.action =~ "fermix auth login --provider xai"
+             end)
+    end
+
+    test "xai readiness keys on the api key" do
+      Application.put_env(:fermix_core, :providers, xai: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :xai)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:xai" and failure.action =~ "XAI_API_KEY"
+             end)
+
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-key"])
+      report = Readiness.report()
+      refute Enum.any?(report.failures, &(&1.component == "provider:xai"))
+    end
+
+    test "anthropic api_key mode still keys readiness on the api key" do
+      Application.put_env(:fermix_core, :providers, anthropic: [])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:anthropic" and
+                 failure.action =~ "ANTHROPIC_API_KEY"
+             end)
+    end
+
     test "openai provider auth does not satisfy openai_codex readiness" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")

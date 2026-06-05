@@ -25,6 +25,7 @@ defmodule FermixCore.Setup.Wizard do
   @type answer ::
           {:openai_api_key, String.t()}
           | {:anthropic_api_key, String.t()}
+          | {:xai_api_key, String.t()}
           | {:provider, provider() | String.t()}
           | {:default_model, String.t()}
           | {:reasoning_effort, reasoning_effort() | String.t()}
@@ -162,11 +163,11 @@ defmodule FermixCore.Setup.Wizard do
     |> Enum.map(&Map.put(&1, :required?, true))
   end
 
-  # reasoning_effort is only wired for OpenAI/Codex (`put_reasoning_effort/2`
-  # rejects other providers and the Anthropic adapter doesn't send it yet), so
-  # don't offer it on reconfigure for a provider that can't persist or use it.
+  # reasoning_effort is wired for OpenAI/Codex/xAI; the Anthropic adapter
+  # doesn't send it (design doc §9), so don't offer it on reconfigure for a
+  # provider that can't persist or use it.
   defp reconfigure_offered?(%{key: :reasoning_effort}, persisted) do
-    persisted_provider(persisted) in [:openai, :openai_codex]
+    persisted_provider(persisted) in [:openai, :openai_codex, :xai]
   end
 
   defp reconfigure_offered?(%{key: :fast}, persisted) do
@@ -205,6 +206,7 @@ defmodule FermixCore.Setup.Wizard do
     fast_unset? = prompt_provider == :openai_codex and not Keyword.has_key?(provider_block, :fast)
     openai_api_key_unset? = openai_api_key_unpersisted?(persisted, persisted_provider)
     anthropic_api_key_unset? = anthropic_api_key_unpersisted?(persisted, persisted_provider)
+    xai_api_key_unset? = xai_api_key_unpersisted?(persisted, persisted_provider)
     realtime_api_key_unset? = canonical_openai_api_key_unpersisted?(persisted)
     default_model = ModelCatalog.default_model_for(prompt_provider)
 
@@ -218,6 +220,7 @@ defmodule FermixCore.Setup.Wizard do
       fast_unset?: fast_unset?,
       openai_api_key_unset?: openai_api_key_unset?,
       anthropic_api_key_unset?: anthropic_api_key_unset?,
+      xai_api_key_unset?: xai_api_key_unset?,
       realtime_api_key_unset?: realtime_api_key_unset?,
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
       default_model: default_model
@@ -233,20 +236,27 @@ defmodule FermixCore.Setup.Wizard do
         default: context.prompt_provider,
         required?: context.provider_unset?
       },
-      %{
-        key: :openai_api_key,
-        label: "OpenAI API key",
-        required?:
-          context.provider_unset? or missing_component?(context.state, "provider:openai") or
-            context.openai_api_key_unset?
-      },
-      %{
-        key: :anthropic_api_key,
-        label: "Anthropic API key",
-        required?:
-          context.provider_unset? or missing_component?(context.state, "provider:anthropic") or
-            context.anthropic_api_key_unset?
-      },
+      provider_key_prompt(
+        context,
+        :openai_api_key,
+        "OpenAI API key",
+        "provider:openai",
+        context.openai_api_key_unset?
+      ),
+      provider_key_prompt(
+        context,
+        :anthropic_api_key,
+        "Anthropic API key",
+        "provider:anthropic",
+        context.anthropic_api_key_unset?
+      ),
+      provider_key_prompt(
+        context,
+        :xai_api_key,
+        "xAI API key (or connect OAuth later: fermix auth login --provider xai)",
+        "provider:xai",
+        context.xai_api_key_unset?
+      ),
       %{
         key: :default_model,
         label: "Default model (blank = #{context.default_model})",
@@ -259,7 +269,8 @@ defmodule FermixCore.Setup.Wizard do
           "Reasoning effort (#{Enum.map_join(ReasoningEffort.levels_for(context.prompt_provider), "/", &Atom.to_string/1)}; blank = high)",
         default: :high,
         required?:
-          (context.provider_unset? or context.prompt_provider in [:openai, :openai_codex]) and
+          (context.provider_unset? or
+             context.prompt_provider in [:openai, :openai_codex, :xai]) and
             context.effort_unset?
       },
       %{
@@ -269,6 +280,14 @@ defmodule FermixCore.Setup.Wizard do
         required?: context.provider_unset? or context.fast_unset?
       }
     ]
+  end
+
+  defp provider_key_prompt(context, key, label, component, unset?) do
+    %{
+      key: key,
+      label: label,
+      required?: context.provider_unset? or missing_component?(context.state, component) or unset?
+    }
   end
 
   defp channel_prompts(%{persisted: persisted}) do
@@ -531,6 +550,7 @@ defmodule FermixCore.Setup.Wizard do
       |> drop_unanswered_env_only_secrets(answers)
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
       |> put_anthropic_api_key(Keyword.get(answers, :anthropic_api_key))
+      |> put_xai_api_key(Keyword.get(answers, :xai_api_key))
       |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_provider_selection(Keyword.get(answers, :provider))
       |> put_default_model(Keyword.get(answers, :default_model))
@@ -711,10 +731,9 @@ defmodule FermixCore.Setup.Wizard do
     |> Keyword.get(:provider)
   end
 
-  defp valid_provider(provider) when provider in [:openai, :openai_codex, :anthropic],
-    do: provider
-
-  defp valid_provider(_provider), do: nil
+  defp valid_provider(provider) do
+    if provider in ModelCatalog.providers(), do: provider, else: nil
+  end
 
   defp provider_config(snapshot, provider) do
     snapshot
@@ -740,6 +759,15 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp anthropic_api_key_unpersisted?(_persisted, _provider), do: false
+
+  defp xai_api_key_unpersisted?(persisted, :xai) do
+    persisted
+    |> provider_config(:xai)
+    |> Keyword.get(:api_key)
+    |> blank?()
+  end
+
+  defp xai_api_key_unpersisted?(_persisted, _provider), do: false
 
   defp canonical_openai_api_key_unpersisted?(persisted) do
     persisted
@@ -839,6 +867,33 @@ defmodule FermixCore.Setup.Wizard do
     if is_nil(sentinel), do: snapshot, else: put_anthropic_secret(snapshot, sentinel)
   end
 
+  defp put_xai_api_key(snapshot, nil), do: snapshot
+  defp put_xai_api_key(snapshot, ""), do: snapshot
+
+  defp put_xai_api_key(snapshot, api_key) do
+    sentinel = secret_snapshot_value(:xai_api_key, api_key)
+    if is_nil(sentinel), do: snapshot, else: put_provider_secret(snapshot, :xai, sentinel)
+  end
+
+  defp put_provider_secret(snapshot, provider, sentinel) do
+    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
+
+    block =
+      providers
+      |> Keyword.get(provider, [])
+      |> Keyword.put(:api_key, sentinel)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(
+        Map.get(snapshot, :fermix_core, []),
+        :providers,
+        Keyword.put(providers, provider, block)
+      )
+    )
+  end
+
   defp put_anthropic_secret(snapshot, sentinel) do
     providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
 
@@ -882,11 +937,11 @@ defmodule FermixCore.Setup.Wizard do
     effort = parse_reasoning_effort!(value)
     provider = active_provider(snapshot)
 
-    if provider in [:openai, :openai_codex] do
+    if provider in [:openai, :openai_codex, :xai] do
       update_active_provider_block(snapshot, :reasoning_effort, effort)
     else
       raise ArgumentError,
-            "reasoning_effort applies to :openai or :openai_codex providers only; selected provider is #{inspect(provider)}"
+            "reasoning_effort applies to :openai, :openai_codex, or :xai providers only; selected provider is #{inspect(provider)}"
     end
   end
 

@@ -186,6 +186,256 @@ defmodule FermixCore.Auth.TokenManagerTest do
     end
   end
 
+  describe "anthropic_oauth refresh" do
+    defp write_anthropic_auth(dir) do
+      write_auth_file(dir, "fermix_auth.json", %{
+        "version" => 2,
+        "providers" => %{
+          "anthropic_oauth" => %{
+            "auth_mode" => "claude_code_import",
+            "provider" => "anthropic",
+            "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+            "expires_at" => future_iso8601(3600)
+          }
+        }
+      })
+    end
+
+    test "refreshes via the Anthropic token endpoint and persists the entry" do
+      dir = tmp_dir()
+      fermix_path = write_anthropic_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "anthropic_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:ok, "new_at"} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      data = Jason.decode!(raw)
+      entry = data["providers"]["anthropic_oauth"]
+      assert entry["tokens"]["access_token"] == "new_at"
+      assert entry["tokens"]["refresh_token"] == "new_rt"
+      assert entry["provider"] == "anthropic"
+      assert entry["status"] == "ready"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "permanent refresh failure marks the profile reauthorization_required" do
+      dir = tmp_dir()
+      fermix_path = write_anthropic_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "anthropic_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_400_plug/1]
+        )
+
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      data = Jason.decode!(raw)
+      assert data["providers"]["anthropic_oauth"]["status"] == "reauthorization_required"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    def permanent_400_plug(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        400,
+        Jason.encode!(%{"error" => "invalid_grant"})
+      )
+    end
+  end
+
+  describe "xai_oauth refresh" do
+    defp write_xai_auth(dir) do
+      write_auth_file(dir, "fermix_auth.json", %{
+        "version" => 2,
+        "providers" => %{
+          "xai_oauth" => %{
+            "auth_mode" => "oauth_pkce",
+            "provider" => "xai",
+            "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+            "expires_at" => future_iso8601(3600)
+          }
+        }
+      })
+    end
+
+    test "refreshes via the xAI token endpoint and persists the entry" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:ok, "new_at"} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      entry = Jason.decode!(raw)["providers"]["xai_oauth"]
+      assert entry["tokens"]["access_token"] == "new_at"
+      assert entry["provider"] == "xai"
+      assert entry["status"] == "ready"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "403 surfaces tier denial without quarantining the profile" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.tier_denied_403_plug/1]
+        )
+
+      assert {:error, :xai_oauth_tier_denied} = TokenManager.refresh(name)
+
+      # Tokens kept, no reauthorization_required status (design doc §6.5).
+      assert {:ok, raw} = File.read(fermix_path)
+      entry = Jason.decode!(raw)["providers"]["xai_oauth"]
+      assert entry["tokens"]["refresh_token"] == "old_rt"
+      refute entry["status"] == "reauthorization_required"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "400 invalid_grant quarantines the profile" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_400_plug/1]
+        )
+
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      assert Jason.decode!(raw)["providers"]["xai_oauth"]["status"] == "reauthorization_required"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    def tier_denied_403_plug(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(403, Jason.encode!(%{"error" => "plan does not include API access"}))
+    end
+
+    def jwt_refresh_plug(conn) do
+      header = Base.url_encode64(~s({"alg":"none"}), padding: false)
+
+      payload =
+        %{"exp" => System.os_time(:second) + 3600}
+        |> Jason.encode!()
+        |> Base.url_encode64(padding: false)
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        200,
+        Jason.encode!(%{
+          "access_token" => "#{header}.#{payload}.sig",
+          "refresh_token" => "new_rt"
+        })
+      )
+    end
+
+    test "a refresh response without expires_in derives expiry from the JWT exp claim" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.jwt_refresh_plug/1]
+        )
+
+      assert {:ok, _token} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      entry = Jason.decode!(raw)["providers"]["xai_oauth"]
+      # Without the JWT fallback this would be nil and scheduled refresh
+      # would silently stop (design doc §6.4).
+      assert is_binary(entry["expires_at"])
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "a scheduled refresh hitting tier denial stops the timer instead of looping" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.tier_denied_403_plug/1]
+        )
+
+      pid = Process.whereis(name)
+      send(pid, :refresh)
+
+      # The manager must survive and must NOT re-arm the retry timer —
+      # a 403 entitlement denial can never be fixed by retrying (§6.5).
+      :ok = wait_until(fn -> :sys.get_state(pid).refresh_timer == nil end)
+      assert Process.alive?(pid)
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "a scheduled refresh hitting a permanent failure stops instead of looping" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_400_plug/1]
+        )
+
+      pid = Process.whereis(name)
+      send(pid, :refresh)
+
+      :ok = wait_until(fn -> :sys.get_state(pid).invalidated end)
+      assert :sys.get_state(pid).refresh_timer == nil
+      assert Process.alive?(pid)
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    defp wait_until(fun, attempts \\ 50)
+    defp wait_until(_fun, 0), do: {:error, :timeout}
+
+    defp wait_until(fun, attempts) do
+      if fun.() do
+        :ok
+      else
+        Process.sleep(10)
+        wait_until(fun, attempts - 1)
+      end
+    end
+  end
+
   describe "permanent refresh failures" do
     def permanent_401_plug(conn) do
       conn

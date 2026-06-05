@@ -1,6 +1,7 @@
 defmodule FermixCore.Setup.DoctorTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
 
@@ -250,6 +251,152 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:anthropic)
       assert message =~ "anthropic"
+    end
+
+    test "oauth mode probes with bearer auth and Claude Code identity headers" do
+      put_provider(:anthropic, auth_mode: "oauth", default_model: "claude-sonnet-4-6")
+
+      plug = fn conn ->
+        assert ["Bearer sub-tok"] = Plug.Conn.get_req_header(conn, "authorization")
+        assert [] = Plug.Conn.get_req_header(conn, "x-api-key")
+        assert [beta] = Plug.Conn.get_req_header(conn, "anthropic-beta")
+        assert beta =~ "oauth-2025-04-20"
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :anthropic, model: "claude-sonnet-4-6"}} =
+               Doctor.probe_provider(:anthropic,
+                 access_token: "sub-tok",
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "oauth mode reads the bearer from the auth store when no token is supplied" do
+      dir = tmp_dir()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      auth_path = Path.join(dir, "auth.json")
+
+      :ok =
+        Store.write(
+          "anthropic_oauth",
+          %{
+            auth_mode: "setup_token",
+            provider: "anthropic",
+            tokens: %{access_token: "stored-sub-tok", refresh_token: nil},
+            expires_at: nil,
+            last_refresh: nil
+          },
+          auth_path
+        )
+
+      put_provider(:anthropic, auth_mode: "oauth")
+
+      plug = fn conn ->
+        assert ["Bearer stored-sub-tok"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :anthropic}} =
+               Doctor.probe_provider(:anthropic,
+                 fermix_auth_path: auth_path,
+                 req_options: [plug: plug]
+               )
+    end
+
+    test "oauth mode without stored credentials is misconfigured" do
+      dir = tmp_dir()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      put_provider(:anthropic, auth_mode: "oauth")
+
+      assert {:error, {:misconfigured, message}} =
+               Doctor.probe_provider(:anthropic,
+                 fermix_auth_path: Path.join(dir, "missing.json")
+               )
+
+      assert message =~ "anthropic"
+    end
+  end
+
+  describe "probe_provider/2 — :xai" do
+    test "sends bearer auth to the responses endpoint" do
+      put_provider(:xai, api_key: "xai-key", default_model: "grok-4.3")
+
+      plug = fn conn ->
+        assert ["Bearer xai-key"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :xai, model: "grok-4.3"}} =
+               Doctor.probe_provider(:xai, req_options: [plug: plug])
+    end
+
+    test "probes a configured root base_url at the /responses endpoint (matches the adapter)" do
+      put_provider(:xai, api_key: "xai-key", base_url: "https://xai-proxy.example/v1")
+
+      plug = fn conn ->
+        # The runtime adapter treats base_url as a root and appends
+        # /responses; the probe must hit the same URL, not the root.
+        assert conn.host == "xai-proxy.example"
+        assert conn.request_path == "/v1/responses"
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :xai}} =
+               Doctor.probe_provider(:xai, req_options: [plug: plug])
+    end
+
+    test "returns auth_scope_mismatch on 401 with an xai-specific hint" do
+      put_provider(:xai, api_key: "xai-bad")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
+
+      assert {:error, {:auth_scope_mismatch, surface, hint}} =
+               Doctor.probe_provider(:xai, req_options: [plug: plug])
+
+      assert surface =~ "api.x.ai"
+      assert hint =~ "xAI"
+    end
+
+    test "returns misconfigured when api_key missing" do
+      Application.put_env(:fermix_core, :providers, xai: [])
+
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:xai)
+      assert message =~ "xai"
+    end
+
+    test "oauth mode probes with the stored subscription bearer" do
+      put_provider(:xai, auth_mode: "oauth", default_model: "grok-4.3")
+
+      plug = fn conn ->
+        assert ["Bearer sub-tok"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :xai, model: "grok-4.3"}} =
+               Doctor.probe_provider(:xai, access_token: "sub-tok", req_options: [plug: plug])
+    end
+
+    test "oauth 401 maps to the subscription reconnect hint" do
+      put_provider(:xai, auth_mode: "oauth")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end
+
+      assert {:error, {:auth_scope_mismatch, surface, hint}} =
+               Doctor.probe_provider(:xai, access_token: "sub-tok", req_options: [plug: plug])
+
+      assert surface =~ "Grok subscription"
+      assert hint =~ "fermix auth login --provider xai"
+    end
+
+    test "oauth mode without stored credentials is misconfigured" do
+      dir = tmp_dir()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      put_provider(:xai, auth_mode: "oauth")
+
+      assert {:error, {:misconfigured, message}} =
+               Doctor.probe_provider(:xai, fermix_auth_path: Path.join(dir, "missing.json"))
+
+      assert message =~ "xai"
     end
   end
 

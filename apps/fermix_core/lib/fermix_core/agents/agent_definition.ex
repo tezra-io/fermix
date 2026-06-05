@@ -73,7 +73,7 @@ defmodule FermixCore.Agents.AgentDefinition do
 
   @absent_sentinel :__absent__
   @valid_policy_strings ~w(read_only read_write exec network external_api)
-  @valid_provider_strings ~w(openai openai_codex anthropic openrouter together groq)
+  @valid_provider_strings ~w(openai openai_codex anthropic xai openrouter together groq)
 
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_map(attrs) do

@@ -98,10 +98,11 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   defp sub_agent_orchestration do
     """
-    ## Sub-Agent Orchestration
-    - Use `subagents` when a request has independent substantial parts and delegation is likely to improve speed, coverage, or quality. You may use it even if the user did not explicitly ask for subagents.
+    ## Delegate Wide, Think at the Center
+    - When a task splits into independent parts, delegate. Use `subagents` to spawn a separate worker for each narrow part and run them in parallel — never hand one worker a multi-part job. You may delegate even if the user did not ask for subagents.
+    - Prefer more narrow workers over fewer broad ones: one worker = one question, one source, one angle. If a part is still broad, split it further before delegating. Width is cheap; a worker handed too much overshoots.
     - Describe each task as a goal. Do not name which tools a subagent should use — it selects its own from a controlled surface (read, web, MCP/plugins, skills, sandbox-bounded shell; no direct writes).
-    - Keep fanout modest. Do not delegate trivial work, tightly-coupled reasoning, or work where coordination overhead exceeds the benefit.
+    - Workers gather; you reason. Judgment, comparison, and synthesis stay with you — pull the workers' findings into one answer; don't push your thinking down into a worker. Don't delegate tightly-coupled reasoning or trivial work where coordination overhead exceeds the benefit.
     - Do not claim work ran in parallel unless `subagents` ran multiple workers concurrently. Synthesize the returned results yourself and state any important gaps or failures.
     """
     |> String.trim()

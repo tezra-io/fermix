@@ -53,6 +53,23 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
   defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 
+  test "current_snapshot carries all four provider blocks" do
+    original = Application.get_env(:fermix_core, :providers, [])
+
+    try do
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-key"])
+
+      providers = ConfigStore.current_snapshot().fermix_core[:providers]
+
+      assert Keyword.has_key?(providers, :openai)
+      assert Keyword.has_key?(providers, :openai_codex)
+      assert Keyword.has_key?(providers, :anthropic)
+      assert providers[:xai] == [api_key: "xai-key"]
+    after
+      Application.put_env(:fermix_core, :providers, original)
+    end
+  end
+
   test "workspace_paths follow FERMIX_HOME and match the persisted runtime layout" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -834,6 +851,40 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     anthropic = Keyword.get(providers, :anthropic, [])
     assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
     assert Keyword.get(anthropic, :api_key) == "sk-ant"
+  end
+
+  test "save/load round-trips auth_mode = :oauth for xai and anthropic" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          anthropic: [auth_mode: :oauth, default_model: "claude-opus-4-7"],
+          xai: [auth_mode: :oauth, default_model: "grok-4.3"]
+        ],
+        agent: [name: "fermix", provider: :xai]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    # OAuth mode must survive serialization (the snapshot is normalized on save).
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(auth_mode = "oauth")
+
+    # ...and survive parsing back, so RouteResolver/doctor use the OAuth profile
+    # instead of silently demanding an API key.
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert providers |> Keyword.get(:anthropic, []) |> Keyword.get(:auth_mode) == :oauth
+    assert providers |> Keyword.get(:xai, []) |> Keyword.get(:auth_mode) == :oauth
   end
 
   test "load_runtime_config migrates a persisted reasoning_effort = \"minimal\" to :low" do

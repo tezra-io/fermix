@@ -77,6 +77,7 @@ defmodule FermixCore.AgentLoop do
           trust: trust,
           excluded_categories: excluded_categories
         )
+        |> refresh_dynamic_schemas(context)
       end)
 
     emit_capability_selection_telemetry(
@@ -110,6 +111,28 @@ defmodule FermixCore.AgentLoop do
       activity_callback: Keyword.get(opts, :activity_callback)
     }
   end
+
+  # A tool whose backing module exports `dynamic_parameters/1` gets its
+  # LLM-visible schema regenerated from the live turn context (the arity-0
+  # schema baked at registration is context-blind). This is how `/ultra`
+  # advertises the wider `subagents` caps so the model can request wide fan-out
+  # through the tool. The hook name is deliberately distinct from `parameters/1`
+  # so it can't collide with a tool module that exports `parameters/1` for some
+  # other purpose (the plugin `ToolExecutor` exports a name→schema lookup).
+  defp refresh_dynamic_schemas(capabilities, context) when is_list(capabilities) do
+    Enum.map(capabilities, &refresh_schema(&1, context))
+  end
+
+  defp refresh_schema(%Capability{executor: {mod, _fun, _args}} = capability, context)
+       when is_atom(mod) do
+    if function_exported?(mod, :dynamic_parameters, 1) do
+      %{capability | parameters: mod.dynamic_parameters(context)}
+    else
+      capability
+    end
+  end
+
+  defp refresh_schema(capability, _context), do: capability
 
   defp index_by_name(capabilities) do
     Map.new(capabilities, fn %Capability{name: name} = capability -> {name, capability} end)

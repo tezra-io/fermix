@@ -29,11 +29,11 @@ defmodule FermixCore.Tools.Subagents do
   # Regular-mode caps (fallback defaults; the live values come from the
   # :subagents config block). /ultra raises these via context.subagent_mode ==
   # :ultra reading the :ultra config block — see the *_cap/1 resolvers below.
-  @default_max_concurrency 2
-  @hard_max_concurrency 4
+  @default_max_concurrency 4
+  @hard_max_concurrency 8
   @default_timeout_seconds 300
   @hard_timeout_seconds 900
-  @max_tasks 4
+  @max_tasks 10
   @max_result_bytes 60_000
 
   # Context keys stripped before a worker runs: channel-reply targeting and the
@@ -49,7 +49,11 @@ defmodule FermixCore.Tools.Subagents do
     :memory_agent_id,
     :memory_owner_id,
     :memory_store,
-    :memory_repo
+    :memory_repo,
+    # Main-turn-only marker — a worker can never call `subagents` (depth guard),
+    # so it must not inherit the ultra mode and advertise the wide (unreachable)
+    # fan-out schema in its own prompt.
+    :subagent_mode
   ]
 
   @impl true
@@ -63,8 +67,20 @@ defmodule FermixCore.Tools.Subagents do
       "not tools; the caller must synthesize the returned results."
   end
 
+  # The arity-0 callback (baked into the Capability at registration) advertises
+  # the *regular* caps. `dynamic_parameters/1` is the context-aware schema the
+  # agent loop refreshes per-turn (`AgentLoop` calls it for any tool whose
+  # backing module exports `dynamic_parameters/1`), so an `/ultra` turn
+  # advertises the wider ultra caps (50 tasks / 12 concurrency) and the model
+  # can request wide fan-out through the tool. The hook is a *distinct* name
+  # (not `parameters/1`) so it can never collide with a tool module that
+  # happens to export `parameters/1` for another purpose (e.g. the plugin
+  # `ToolExecutor`'s name→schema lookup).
   @impl true
-  def parameters do
+  def parameters, do: dynamic_parameters(%{})
+
+  @spec dynamic_parameters(map()) :: map()
+  def dynamic_parameters(context) when is_map(context) do
     %{
       type: "object",
       required: ["tasks"],
@@ -72,7 +88,7 @@ defmodule FermixCore.Tools.Subagents do
         tasks: %{
           type: "array",
           minItems: 1,
-          maxItems: max_tasks_cap(%{}),
+          maxItems: max_tasks_cap(context),
           description: "Independent subagent assignments.",
           items: %{
             type: "object",
@@ -92,9 +108,9 @@ defmodule FermixCore.Tools.Subagents do
         max_concurrency: %{
           type: "integer",
           minimum: 1,
-          maximum: hard_max_concurrency_cap(%{}),
+          maximum: hard_max_concurrency_cap(context),
           description:
-            "Max concurrently running subagents. Defaults to #{default_max_concurrency_cap(%{})}."
+            "Max concurrently running subagents. Defaults to #{default_max_concurrency_cap(context)}."
         },
         timeout_seconds: %{
           type: "integer",
@@ -280,14 +296,20 @@ defmodule FermixCore.Tools.Subagents do
 
   defp worker_system_prompt do
     """
-    You are a temporary Fermix subagent invoked by the main agent.
+    You are a temporary Fermix subagent invoked by the main agent. You are one of many
+    parallel workers; you handle one narrow slice, not the whole problem.
 
-    You do not talk to the user directly. Complete only the assigned task and
-    return your findings to the parent agent.
+    You do not talk to the user directly. Complete only the assigned task and return your
+    findings to the parent agent.
 
-    Return: concise findings; the sources or evidence you used; important
-    uncertainty; any failures or missing information; and follow-up work the
-    parent should consider.
+    Work efficiently: gather just enough evidence to answer your one task well, then stop and
+    return. Use as few tool calls as you can — the moment you can answer, you are done. Do not
+    broaden the task, chase tangents, collect extra confirmation, or compare across topics;
+    breadth and synthesis are the main agent's job, not yours. If the task is impossible or a
+    source fails, say so briefly and return — do not keep retrying variations.
+
+    Return: concise findings; the sources or evidence you used; important uncertainty; any
+    failures or missing information; and follow-up work the parent should consider.
     """
     |> String.trim()
   end
@@ -487,6 +509,11 @@ defmodule FermixCore.Tools.Subagents do
 
   defp hard_max_concurrency_cap(_context),
     do: sub_cfg(:hard_max_concurrency, @hard_max_concurrency)
+
+  # Ultra omitting max_concurrency defaults to the ultra fan-out concurrency,
+  # not the regular 2 — otherwise a wide ultra fan-out runs nearly serial.
+  defp default_max_concurrency_cap(%{subagent_mode: :ultra}),
+    do: ultra_cfg(:fanout_max_concurrency, 12)
 
   defp default_max_concurrency_cap(_context),
     do: sub_cfg(:default_max_concurrency, @default_max_concurrency)
