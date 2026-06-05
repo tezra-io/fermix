@@ -374,7 +374,12 @@ defmodule FermixCore.Sandbox.Config do
   defp put_if_present(keyword, _key, []), do: keyword
   defp put_if_present(keyword, key, value), do: Keyword.put(keyword, key, value)
 
+  # Mirrors ConfigStore.fermix_home/0: a blank "" is truthy, so a bare
+  # `|| default` would leave home as "" and make workspace_root cwd-relative.
   defp fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    case System.get_env("FERMIX_HOME") do
+      home when is_binary(home) and home != "" -> home
+      _ -> Path.join(System.user_home!(), ".fermix")
+    end
   end
 end

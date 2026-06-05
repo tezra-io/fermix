@@ -90,6 +90,23 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            }
   end
 
+  test "an empty FERMIX_HOME is treated as unset, not a cwd-relative path" do
+    # An empty string is truthy in Elixir, so `get_env() || default` did NOT
+    # fall back — fermix_home/0 returned "" and workspace paths became
+    # cwd-relative (e.g. "skills"), so booting from the repo root seeded the
+    # bundled skills into ./skills instead of ~/.fermix/skills.
+    System.put_env("FERMIX_HOME", "")
+
+    default_home = Path.join(System.user_home!(), ".fermix")
+
+    assert ConfigStore.fermix_home() == default_home
+    refute ConfigStore.fermix_home() == ""
+
+    skills = ConfigStore.workspace_paths().skills
+    assert skills == Path.join(default_home, "skills")
+    assert Path.type(skills) == :absolute
+  end
+
   test "memory_paths follow FERMIX_HOME and match the runtime memory layout" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

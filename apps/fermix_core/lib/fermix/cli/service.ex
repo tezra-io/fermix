@@ -20,6 +20,7 @@ defmodule Fermix.CLI.Service do
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
+  alias FermixCore.Setup.ConfigStore
 
   @label "io.tezra.fermix"
   @linux_unit "fermix.service"
@@ -188,9 +189,9 @@ defmodule Fermix.CLI.Service do
     Keyword.get(opts, :log_path, Path.join(default_fermix_home(), "logs/fermix.log"))
   end
 
-  defp default_fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-  end
+  # Delegate to the canonical resolver (which treats a blank FERMIX_HOME as
+  # unset) rather than re-deriving it here.
+  defp default_fermix_home, do: ConfigStore.fermix_home()
 
   defp detect_os(opts) do
     Keyword.get(opts, :os) ||

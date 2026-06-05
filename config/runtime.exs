@@ -46,7 +46,14 @@ workspace_paths =
        function_exported?(FermixCore.Setup.ConfigStore, :workspace_paths, 0) do
     FermixCore.Setup.ConfigStore.workspace_paths()
   else
-    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    # Mirror ConfigStore.fermix_home/0: a blank FERMIX_HOME ("") is truthy, so
+    # `|| default` would not fall back and workspace paths would go cwd-relative
+    # (e.g. ./skills). Treat blank as unset.
+    fermix_home =
+      case System.get_env("FERMIX_HOME") do
+        home when is_binary(home) and home != "" -> home
+        _ -> Path.join(System.user_home!(), ".fermix")
+      end
 
     %{
       bootstrap: Path.join(fermix_home, "bootstrap"),
