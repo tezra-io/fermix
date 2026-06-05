@@ -32,6 +32,17 @@ defmodule FermixCore.Sandbox.ConfigTest do
     assert config.commands.profile == :bare
   end
 
+  test "an empty FERMIX_HOME falls back to the default home, not a cwd-relative path" do
+    System.put_env("FERMIX_HOME", "")
+
+    config = Config.default()
+
+    default_home = Path.join(System.user_home!(), ".fermix")
+    assert config.home == default_home
+    assert config.workspace_root == Path.join(default_home, "workspace")
+    assert Path.type(config.workspace_root) == :absolute
+  end
+
   test "normalizes top-level sandbox config from maps and keywords" do
     config =
       Config.normalize(%{

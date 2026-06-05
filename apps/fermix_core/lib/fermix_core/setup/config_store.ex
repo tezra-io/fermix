@@ -51,7 +51,13 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec fermix_home() :: String.t()
   def fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    # An empty string is truthy, so a bare `|| default` would NOT fall back —
+    # it would leave fermix_home as "" and make every workspace path
+    # cwd-relative (e.g. ./skills). Treat blank as unset.
+    case System.get_env("FERMIX_HOME") do
+      home when is_binary(home) and home != "" -> home
+      _ -> Path.join(System.user_home!(), ".fermix")
+    end
   end
 
   @spec path() :: String.t()
