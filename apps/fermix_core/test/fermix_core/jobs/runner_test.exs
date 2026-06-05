@@ -644,4 +644,17 @@ defmodule FermixCore.Jobs.RunnerTest do
   def execute_test_capability(args, _context) do
     {:ok, %{success: true, output: "echo #{inspect(args)}"}}
   end
+
+  describe "provider_atom/1" do
+    test "maps catalog provider strings, passes atoms, rejects unknowns" do
+      assert Runner.provider_atom(nil) == nil
+      assert Runner.provider_atom("xai") == :xai
+      assert Runner.provider_atom("anthropic") == :anthropic
+      assert Runner.provider_atom(:openai_codex) == :openai_codex
+
+      assert_raise ArgumentError, ~r/unsupported scheduled job provider/, fn ->
+        Runner.provider_atom("gemini")
+      end
+    end
+  end
 end

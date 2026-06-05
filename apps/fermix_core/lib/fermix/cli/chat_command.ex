@@ -100,7 +100,7 @@ defmodule Fermix.CLI.ChatCommand do
     if Keyword.get(opts, :json, false) do
       IO.puts(Jason.encode!(error_envelope(reason, extra)))
     else
-      IO.puts(:stderr, "fermix: #{reason}")
+      IO.puts(:stderr, "fermix: #{reason_to_string(reason)}")
     end
 
     1
@@ -139,9 +139,13 @@ defmodule Fermix.CLI.ChatCommand do
   end
 
   defp error_envelope(reason, extra) do
-    %{"status" => "error", "error" => to_string(reason)}
+    %{"status" => "error", "error" => reason_to_string(reason)}
     |> maybe_put("session_id", Map.get(extra, "session_id"))
   end
+
+  defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_to_string(reason) when is_binary(reason), do: reason
+  defp reason_to_string(reason), do: inspect(reason)
 
   defp default_timeout_ms do
     cli_channel_bridge().default_timeout_ms()

@@ -54,7 +54,11 @@ defmodule FermixCore.MixProject do
   # See docs/TELEMETRY_CONTRACT.md and projects/fermix-plugins.
   defp opik_dep do
     if System.get_env("FERMIX_OPIK_ENABLED") in ["1", "true", "TRUE", "yes", "y"] do
-      [{:fermix_opik, path: "../../../fermix-plugins/apps/fermix_opik"}]
+      # `only: [:dev, :prod]` — never bundle the exporter into the TEST build, so
+      # `mix test` cannot ship test-fixture traces (bench/channel/job tests) to a
+      # live Opik project even when FERMIX_OPIK_ENABLED is exported globally
+      # (e.g. from ~/.zshrc). The daemon still exports in :dev / :prod.
+      [{:fermix_opik, path: "../../../fermix-plugins/apps/fermix_opik", only: [:dev, :prod]}]
     else
       []
     end
