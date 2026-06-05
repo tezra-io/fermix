@@ -16,8 +16,14 @@ defmodule FermixCore.Browser.ConfigTest do
     assert config.default_profile == "fermix"
     assert config.max_live_profiles > 0
     assert config.idle_profile_ttl_ms > 0
+    assert config.cdp_port_range == 18_900..18_999
     assert Map.fetch!(config.profiles, "fermix").headless == :auto
     assert Map.fetch!(config.profiles, "fermix_headless").headless == true
+  end
+
+  test "test config pins smoke CDP ports away from agent ports" do
+    assert {:ok, config} = Config.current()
+    assert config.cdp_port_range == 19_100..19_199
   end
 
   test "rejects invalid max_live_profiles" do

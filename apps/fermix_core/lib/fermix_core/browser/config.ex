@@ -76,7 +76,7 @@ defmodule FermixCore.Browser.Config do
   alias FermixCore.Browser.Error
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
-  @default_port_range 18_800..18_999
+  @default_port_range 18_900..18_999
   @default_profiles %{
     "fermix" => %{mode: :managed, headless: :auto, cdp_port: :auto},
     "fermix_visible" => %{mode: :managed, headless: false, cdp_port: :auto},

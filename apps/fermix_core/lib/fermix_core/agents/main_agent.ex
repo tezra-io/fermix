@@ -407,6 +407,7 @@ defmodule FermixCore.Agents.MainAgent do
   defp provider_name(FermixCore.Providers.OpenAI.ChatCompletions), do: :openai
   defp provider_name(FermixCore.Providers.OpenAI.Codex), do: :openai_codex
   defp provider_name(FermixCore.Providers.Anthropic.Messages), do: :anthropic
+  defp provider_name(FermixCore.Providers.XAI.Responses), do: :xai
 
   defp provider_name(provider) when is_atom(provider) do
     case Atom.to_string(provider) do

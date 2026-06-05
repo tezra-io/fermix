@@ -9,6 +9,8 @@ config :logger, level: :warning
 
 config :fermix_core, :log, enabled: false
 
+config :fermix_core, :browser, cdp_port_range: 19_100..19_199
+
 config :fermix_core, :memory,
   enabled: false,
   extraction_enabled: false,

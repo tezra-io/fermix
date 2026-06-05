@@ -16,6 +16,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Setup.ConfigStore
 
@@ -524,16 +525,19 @@ defmodule FermixCore.Jobs.Runner do
     |> maybe_put(:model, job.model)
   end
 
-  defp provider_atom(nil), do: nil
-  defp provider_atom("openai"), do: :openai
-  defp provider_atom("openai_codex"), do: :openai_codex
-  defp provider_atom("anthropic"), do: :anthropic
+  # Public for tests — provider-string parsing is a known regression site
+  # (provider design doc §13: "jobs raise on unknown provider strings").
+  # Derived from the catalog so new providers don't need a clause here.
+  @doc false
+  @spec provider_atom(String.t() | atom() | nil) :: atom() | nil
+  def provider_atom(nil), do: nil
 
-  defp provider_atom(other) when is_binary(other) do
-    raise ArgumentError, "unsupported scheduled job provider #{inspect(other)}"
+  def provider_atom(provider) when is_binary(provider) do
+    Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == provider)) ||
+      raise ArgumentError, "unsupported scheduled job provider #{inspect(provider)}"
   end
 
-  defp provider_atom(other) when is_atom(other), do: other
+  def provider_atom(other) when is_atom(other), do: other
 
   defp capability_policy([]), do: @default_capability_policy
   defp capability_policy(nil), do: @default_capability_policy

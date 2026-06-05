@@ -91,6 +91,57 @@ defmodule FermixCore.Memory.CompactorTest do
     assert result.cache == nil
   end
 
+  test "compaction summarizes through the real Anthropic adapter with no tools", %{repo: repo} do
+    # §2.1 invariant test 2: memory/compaction paths call the selected
+    # adapter with `capabilities: []` — the Anthropic adapter must omit
+    # the tools field rather than send an empty list.
+    Req.Test.stub(__MODULE__, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      decoded = Jason.decode!(body)
+
+      refute Map.has_key?(decoded, "tools")
+      assert decoded["max_tokens"] == 8192
+
+      Req.Test.json(conn, %{
+        "model" => "claude-sonnet-4-6",
+        "stop_reason" => "end_turn",
+        "content" => [%{"type" => "text", "text" => "anthropic summary"}],
+        "usage" => %{"input_tokens" => 5, "output_tokens" => 3}
+      })
+    end)
+
+    route_key = %{
+      provider: :anthropic,
+      model: "claude-sonnet-4-6",
+      auth_mode: :api_key,
+      base_url: "https://api.anthropic.com/v1"
+    }
+
+    adapter_opts = [
+      api_key: "sk-ant-test",
+      model: "claude-sonnet-4-6",
+      base_url: "https://api.anthropic.com/v1",
+      req_options: [plug: {Req.Test, __MODULE__}]
+    ]
+
+    messages = [
+      %{role: "system", content: "base prompt"},
+      %{role: "user", content: String.duplicate("old user ", 80)},
+      %{role: "assistant", content: String.duplicate("old assistant ", 80)},
+      %{role: "user", content: "latest question"}
+    ]
+
+    assert {:ok, result} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 80,
+               route: {route_key, adapter_opts},
+               context: context(repo)
+             )
+
+    assert result.cache.summary == "anthropic summary"
+  end
+
   test "summarizes older history while preserving leading system messages", %{repo: repo} do
     stub_summaries(["summary 1"])
 
