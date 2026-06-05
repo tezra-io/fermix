@@ -18,12 +18,14 @@ defmodule FermixCore.Setup.Doctor do
 
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Tools.WebSearch
 
-  @type provider :: :openai | :openai_codex | :anthropic
+  @type provider :: :openai | :openai_codex | :anthropic | :xai
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
   @type channel_probe :: %{
           required(:channel) => atom(),
@@ -71,6 +73,11 @@ defmodule FermixCore.Setup.Doctor do
   @openai_default_url "https://api.openai.com/v1/responses"
   @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
+  # xAI base_url is a ROOT (the adapter appends /responses); the probe must
+  # do the same so a configured/overlaid root base_url hits the same URL the
+  # runtime does. Codex/OpenAI/Anthropic keep full default URLs because their
+  # blocks don't persist a base_url through setup.
+  @xai_default_base_url "https://api.x.ai/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
   @web_search_probe_query "fermix web search health check"
   @default_probe_timeout_ms 5_000
@@ -80,6 +87,7 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:openai, opts), do: probe_openai(opts)
   def probe_provider(:openai_codex, opts), do: probe_codex(opts)
   def probe_provider(:anthropic, opts), do: probe_anthropic(opts)
+  def probe_provider(:xai, opts), do: probe_xai(opts)
 
   def probe_provider(other, _opts) do
     raise ArgumentError,
@@ -272,13 +280,13 @@ defmodule FermixCore.Setup.Doctor do
       nil ->
         :openai
 
-      provider when provider in [:openai, :openai_codex, :anthropic] ->
+      provider when provider in [:openai, :openai_codex, :anthropic, :xai] ->
         provider
 
       other ->
         raise ArgumentError,
               "unknown provider #{inspect(other)} in :fermix_core, :agent, :provider; " <>
-                "expected one of :openai, :openai_codex, :anthropic"
+                "expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &inspect/1)}"
     end
   end
 
@@ -351,32 +359,168 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
+  defp probe_xai(opts) do
+    config = provider_config(:xai)
+
+    case Keyword.get(config, :auth_mode, :api_key) do
+      mode when mode in [:api_key, "api_key"] ->
+        probe_xai_bearer(config, xai_bearer(config), "api.x.ai API key", opts)
+
+      mode when mode in [:oauth, "oauth"] ->
+        probe_xai_bearer(
+          config,
+          require_oauth_token("xai_oauth", "xai", opts),
+          "Grok subscription OAuth",
+          opts
+        )
+
+      other ->
+        {:error, {:misconfigured, "xai auth_mode #{inspect(other)} is not api_key|oauth"}}
+    end
+  end
+
+  defp probe_xai_bearer(_config, {:error, _} = err, _surface, _opts), do: err
+
+  defp probe_xai_bearer(config, {:ok, bearer}, surface, opts) do
+    url = "#{base_url(config, :xai, @xai_default_base_url)}/responses"
+    model = effective_model(config, :xai)
+
+    body = %{
+      model: model,
+      input: [
+        %{type: "message", role: "user", content: [%{type: "input_text", text: "."}]}
+      ],
+      max_output_tokens: 1,
+      store: false
+    }
+
+    headers = [
+      {"authorization", "Bearer #{bearer}"},
+      {"content-type", "application/json"}
+    ]
+
+    do_post(:xai, url, body, headers, model, surface, opts)
+  end
+
+  defp xai_bearer(config) do
+    case Keyword.get(config, :api_key) do
+      value when value in [nil, ""] ->
+        {:error, {:misconfigured, "xai provider has no api_key configured"}}
+
+      value ->
+        {:ok, value}
+    end
+  end
+
   defp probe_anthropic(opts) do
     config = provider_config(:anthropic)
-    api_key = Keyword.get(config, :api_key)
 
-    case anthropic_api_key(api_key) do
+    case Keyword.get(config, :auth_mode, :api_key) do
+      mode when mode in [:api_key, "api_key"] ->
+        probe_anthropic_api_key(config, opts)
+
+      mode when mode in [:oauth, "oauth"] ->
+        probe_anthropic_oauth(config, opts)
+
+      other ->
+        {:error, {:misconfigured, "anthropic auth_mode #{inspect(other)} is not api_key|oauth"}}
+    end
+  end
+
+  defp probe_anthropic_api_key(config, opts) do
+    case anthropic_api_key(Keyword.get(config, :api_key)) do
       {:error, _} = err ->
         err
 
       {:ok, key} ->
-        url = base_url(config, :anthropic, @anthropic_default_url)
-        model = effective_model(config, :anthropic)
+        headers = [{"x-api-key", key} | anthropic_base_headers()]
+        post_anthropic_probe(config, %{}, headers, "api.anthropic.com API key", opts)
+    end
+  end
 
-        body = %{
-          model: model,
-          max_tokens: 1,
-          messages: [%{role: "user", content: "."}]
-        }
+  # Mirrors the adapter's Claude Code emulation (beta/UA/x-app headers plus
+  # the identity system block) so a green probe means the subscription
+  # route the runtime actually uses works — not a lookalike.
+  defp probe_anthropic_oauth(config, opts) do
+    case require_anthropic_oauth_token(opts) do
+      {:error, _} = err ->
+        err
 
+      {:ok, token} ->
         headers = [
-          {"x-api-key", key},
-          {"anthropic-version", "2023-06-01"},
-          {"content-type", "application/json"}
+          {"authorization", "Bearer #{token}"},
+          {"anthropic-beta", "claude-code-20250219,oauth-2025-04-20"},
+          {"user-agent", "claude-cli/2.1.74 (external, cli)"},
+          {"x-app", "cli"}
+          | anthropic_base_headers()
         ]
 
-        do_post(:anthropic, url, body, headers, model, "api.anthropic.com API key", opts)
+        body_extra = %{
+          system: [
+            %{type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude."}
+          ]
+        }
+
+        post_anthropic_probe(config, body_extra, headers, "claude.ai subscription OAuth", opts)
     end
+  end
+
+  defp post_anthropic_probe(config, body_extra, headers, surface, opts) do
+    url = base_url(config, :anthropic, @anthropic_default_url)
+    model = effective_model(config, :anthropic)
+
+    body =
+      Map.merge(
+        %{model: model, max_tokens: 1, messages: [%{role: "user", content: "."}]},
+        body_extra
+      )
+
+    do_post(:anthropic, url, body, headers, model, surface, opts)
+  end
+
+  defp require_anthropic_oauth_token(opts),
+    do: require_oauth_token("anthropic_oauth", "anthropic", opts)
+
+  defp require_oauth_token(profile, label, opts) do
+    cond do
+      token = Keyword.get(opts, :access_token) ->
+        {:ok, token}
+
+      Keyword.has_key?(opts, :fermix_auth_path) ->
+        read_oauth_entry(profile, label, Keyword.fetch!(opts, :fermix_auth_path))
+
+      true ->
+        case TokenSupervisor.get_token(profile) do
+          {:ok, token} ->
+            {:ok, token}
+
+          {:error, reason} ->
+            {:error,
+             {:misconfigured, "#{label} oauth credentials unavailable: #{inspect(reason)}"}}
+        end
+    end
+  rescue
+    # Store.read raises on a malformed entry (e.g. empty access_token);
+    # the doctor reports it instead of crashing (Readiness does the same).
+    e in ArgumentError ->
+      {:error, {:misconfigured, "#{label} oauth entry malformed: #{Exception.message(e)}"}}
+  end
+
+  defp read_oauth_entry(profile, label, path) do
+    case Store.read(profile, path) do
+      {:ok, %{tokens: %{access_token: token}}} when is_binary(token) and token != "" ->
+        {:ok, token}
+
+      {:ok, _entry} ->
+        {:error, {:misconfigured, "#{label} oauth entry has no access token"}}
+
+      {:error, reason} ->
+        {:error, {:misconfigured, "#{label} oauth credentials unavailable: #{inspect(reason)}"}}
+    end
+  end
+
+  defp anthropic_base_headers do
+    [{"anthropic-version", "2023-06-01"}, {"content-type", "application/json"}]
   end
 
   defp anthropic_api_key(value) when value in [nil, ""] do
@@ -446,8 +590,18 @@ defmodule FermixCore.Setup.Doctor do
       String.contains?(surface, "Codex") ->
         "Codex OAuth token rejected — re-import via `fermix setup --import-codex`"
 
+      String.contains?(surface, "Grok subscription") ->
+        "xAI subscription token rejected — reconnect via `fermix auth login --provider xai` " <>
+          "(a 403 can mean the Grok plan lacks API access)"
+
+      String.contains?(surface, "subscription") ->
+        "Claude subscription token rejected — reconnect via `fermix auth login --provider anthropic`"
+
       String.contains?(surface, "anthropic") ->
         "Anthropic API key rejected — verify it in the Anthropic console"
+
+      String.contains?(surface, "api.x.ai") ->
+        "xAI API key rejected — verify it in the xAI console"
 
       true ->
         "auth rejected"

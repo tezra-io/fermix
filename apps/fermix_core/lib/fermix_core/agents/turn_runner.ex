@@ -31,18 +31,14 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
-  alias FermixCore.Agents.UltraOrchestrator
-  alias FermixCore.Agents.UltraStages
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
-  alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Reply
   alias FermixCore.Telemetry
-  alias FermixCore.Tools.Subagents
 
   @auto_compaction_failure_backoff_ms 60_000
   @doc """
@@ -102,7 +98,7 @@ defmodule FermixCore.Agents.TurnRunner do
           "or /compact to summarize this one, then resend."
 
       auth_error?(reason) ->
-        "Authentication failed — run `fermix auth login` from the host and try again."
+        auth_reply(reason)
 
       max_iterations_error?(reason) ->
         "I hit the investigation step limit before finishing that request. " <>
@@ -197,6 +193,15 @@ defmodule FermixCore.Agents.TurnRunner do
       channel: msg.channel
     }
 
+    # `/ultra` is now a run-mode of the normal turn (not a separate
+    # orchestrator): the tag unlocks the wider `subagents` caps via
+    # `subagent_mode: :ultra` in context (which the loop reads when refreshing
+    # the tool schema and the tool reads at execution) and prepends an
+    # exhaustive-mode addendum to the system prompt. Everything then flows
+    # through the ordinary loop — so its workers nest under the parent trace
+    # exactly like regular `subagents` (the orphan-trace bug is dissolved).
+    {messages, context} = apply_run_profile(run_profile(msg), messages, context)
+
     {loop_opts, loop_runtime_duration_us} =
       Telemetry.timed_us(fn ->
         build_loop_runtime(state, messages, context,
@@ -208,16 +213,44 @@ defmodule FermixCore.Agents.TurnRunner do
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
     persist_user_message(conversation_key, msg, state)
 
-    # `/ultra` runs the fixed-topology orchestrator instead of one agent loop
-    # (§17.11); the neutral `run_profile` tag rides on the message metadata.
-    case run_profile(msg) do
-      :ultra -> run_ultra(msg, state, context, deliver, start)
-      _normal -> run_normal(loop_opts, context, msg, start)
-    end
+    run_normal(loop_opts, context, msg, start)
   end
 
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
+  end
+
+  defp apply_run_profile(:ultra, messages, context) do
+    {inject_ultra_addendum(messages), Map.put(context, :subagent_mode, :ultra)}
+  end
+
+  defp apply_run_profile(_normal, messages, context), do: {messages, context}
+
+  # Insert the ultra-mode addendum as the last leading system message — after
+  # the composed system prompt, before history. Keeps system messages leading
+  # (the Anthropic adapter requires it) and places the mode instruction where
+  # the model reads it last.
+  defp inject_ultra_addendum(messages) do
+    {system_run, rest} = Enum.split_while(messages, &(&1.role == "system"))
+    system_run ++ [%{role: "system", content: ultra_addendum()}] ++ rest
+  end
+
+  # Folds the old decompose/verify/synthesize stage prompts into one freeform
+  # instruction (§6). No parser — the model drives fan-out through `subagents`.
+  defp ultra_addendum do
+    """
+    ## Exhaustive mode (/ultra)
+    This request was sent with /ultra — a deep, high-effort task where breadth and rigor
+    matter more than speed.
+    - Decompose it broadly and fan out WIDE with the `subagents` tool: many narrow, parallel
+      probes, each gathering one specific piece of evidence. Prefer more probes over fewer —
+      one probe = one question / one source / one angle.
+    - Don't answer from a single pass when the question has many facets; gather first.
+    - Before relying on a finding, check it is well-supported; drop weak or unsupported ones.
+    - Then synthesize everything into one thorough, well-organized answer, and note any gaps
+      the probes could not cover.
+    """
+    |> String.trim()
   end
 
   defp run_normal(loop_opts, context, msg, start) do
@@ -257,141 +290,6 @@ defmodule FermixCore.Agents.TurnRunner do
         )
 
         {:error, reason}
-    end
-  end
-
-  # --- /ultra fixed-topology orchestrator (§17.11) ---
-
-  defp run_ultra(msg, state, context, deliver, start) do
-    deps = %{
-      decompose: fn prompt -> ultra_decompose(state, prompt) end,
-      fanout: fn subtasks -> ultra_fanout(subtasks, context) end,
-      verify: fn finding -> ultra_verify(state, finding) end,
-      synthesize: fn prompt, verified -> ultra_synthesize(state, prompt, verified) end,
-      verify_concurrency: ultra_cfg(:verify_max_concurrency, 4),
-      deliver: deliver
-    }
-
-    case ultra_orchestrator().run(msg.content, deps) do
-      {:ok, response} ->
-        duration_ms = System.monotonic_time(:millisecond) - start
-        result = %{response: response, iterations: 0, total_tokens: 0}
-
-        # The /ultra turn must still emit the turn-level event or it vanishes from
-        # turn-level traces even though its workers are visible (handoff note).
-        :telemetry.execute(
-          [:fermix, :agent, :message],
-          %{iterations: 0, total_tokens: 0, duration_ms: duration_ms},
-          turn_message_metadata(context, msg, result)
-        )
-
-        Logger.info("Ultra orchestrator turn completed (#{byte_size(response)} bytes)")
-        {:ok, response, 0}
-
-      {:error, reason} ->
-        # A decompose/synthesize provider/auth failure: surface it so the gateway
-        # maps it via error_reply/1 instead of delivering a blank turn.
-        Logger.warning("Ultra orchestrator turn failed: #{inspect(reason)}")
-        {:error, reason}
-    end
-  end
-
-  defp ultra_orchestrator do
-    Application.get_env(:fermix_core, :ultra_orchestrator, UltraOrchestrator)
-  end
-
-  defp ultra_decompose(state, prompt) do
-    max_subtasks = ultra_max_subtasks()
-
-    case ultra_stage_call(state, UltraStages.decompose_system(max_subtasks), prompt) do
-      {:ok, content} -> UltraStages.parse_decomposition(content, prompt, max_subtasks)
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  # /ultra fan-out breadth (number of parallel probes), read from config so it is
-  # tunable without recompiling. Fail loud on a bad value rather than silently
-  # capping wrong. Depth per probe is the separate :iteration_limits subagent cap.
-  defp ultra_max_subtasks, do: ultra_cfg(:max_subtasks, 50)
-
-  # /ultra system-side knobs (the :ultra config block), read at use — restart to
-  # apply. Validated positive int so a bad config value fails loud rather than
-  # silently mis-sizing the run. Depth per probe lives in the subagents path.
-  defp ultra_cfg(key, default) when is_atom(key) and is_integer(default) do
-    value = :fermix_core |> Application.get_env(:ultra, []) |> Keyword.get(key, default)
-
-    if is_integer(value) and value > 0 do
-      value
-    else
-      raise ArgumentError, "invalid ultra.#{key} #{inspect(value)}; expected a positive integer"
-    end
-  end
-
-  defp ultra_verify(state, %{output: output}) do
-    case ultra_stage_call(state, UltraStages.verify_system(), output) do
-      {:ok, content} -> UltraStages.verified?(content)
-      # A verify provider failure drops only that finding (unverified ⇒ excluded);
-      # a total outage still surfaces through the synthesize stage's error.
-      {:error, _reason} -> false
-    end
-  end
-
-  defp ultra_synthesize(state, prompt, verified) do
-    ultra_stage_call(
-      state,
-      UltraStages.synthesize_system(),
-      UltraStages.synthesize_user(
-        prompt,
-        verified,
-        ultra_cfg(:synthesis_max_finding_bytes, 2_000)
-      )
-    )
-  end
-
-  # Reuse the subagents path for the parallel fan-out: isolation, bounded
-  # concurrency, per-worker timeout, and parent-down reaping for /stop all come
-  # for free (the fan-out runs inside the coordinator turn, so workers parent to
-  # it). NOTE (§17.13, deferred): these workers still inherit the :memory read
-  # tools — excluding the :memory category for /ultra workers is follow-up hardening.
-  defp ultra_fanout(subtasks, context) do
-    args = %{
-      "tasks" => Enum.map(subtasks, fn t -> %{"id" => t.id, "task" => t.task} end),
-      "max_concurrency" => ultra_cfg(:fanout_max_concurrency, 12)
-    }
-
-    # Tag the fan-out so Subagents resolves the wider /ultra caps (breadth, byte
-    # budget) and the reduced /ultra worker depth, instead of the regular ones.
-    ultra_context = Map.put(context, :subagent_mode, :ultra)
-
-    case Subagents.execute(args, ultra_context) do
-      {:ok, %{success: true, output: json}} -> UltraStages.parse_findings(json)
-      _other -> []
-    end
-  end
-
-  # One-shot LLM call for a pipeline stage (mirrors Compactor): resolve the route,
-  # call adapter.chat with no tools. Returns {:ok, content} | {:error, reason} so a
-  # provider/auth/route failure propagates to the caller instead of collapsing to an
-  # empty success that would deliver a blank /ultra turn.
-  defp ultra_stage_call(state, system_prompt, user_content) do
-    messages = [
-      %{role: "system", content: system_prompt},
-      %{role: "user", content: user_content}
-    ]
-
-    {adapter, adapter_opts} = ultra_stage_adapter(state)
-
-    case adapter.chat(messages, [], adapter_opts) do
-      {:ok, %{content: content}} when is_binary(content) -> {:ok, content}
-      {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_stage_response, other}}
-    end
-  end
-
-  defp ultra_stage_adapter(state) do
-    case resolve_loop_adapter(state) do
-      {:adapter, mod, opts} -> {mod, opts}
-      {:route, key, opts} -> {Adapter.for_route(key), opts}
     end
   end
 
@@ -436,6 +334,36 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp auth_error?(_other), do: false
+
+  # The hint keys on how the route authenticates: subscription OAuth gets a
+  # reconnect verb, API-key modes get key advice, and Codex-shaped reasons
+  # (token errors, refresh failures, bare strings) keep `fermix auth login`.
+  defp auth_reply({:provider_error, %{provider: :anthropic, auth_mode: :oauth}}) do
+    "Claude subscription authentication failed — reconnect with " <>
+      "`fermix auth login --provider anthropic` and retry."
+  end
+
+  # xAI 403 in OAuth mode is tier/entitlement denial, not a stale token —
+  # re-login won't fix it (design doc §6.5).
+  defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth, status: 403}}) do
+    "xAI subscription access denied — the Grok plan may not include API access. " <>
+      "Switch to an API key in `fermix setup`, or check the plan tier."
+  end
+
+  defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth}}) do
+    "xAI subscription authentication failed — reconnect with " <>
+      "`fermix auth login --provider xai` and retry."
+  end
+
+  defp auth_reply({:provider_error, %{provider: provider}})
+       when provider in [:openai, :anthropic, :xai] do
+    label = ProviderError.provider_label(provider)
+    "#{label} authentication failed — check the #{label} API key in `fermix setup` and retry."
+  end
+
+  defp auth_reply(_reason) do
+    "Authentication failed — run `fermix auth login` from the host and try again."
+  end
 
   defp provider_error_reply({:provider_error, %{kind: :rate_limit} = error}) do
     "#{provider_label(error)} rate-limited this request. Wait briefly and retry."

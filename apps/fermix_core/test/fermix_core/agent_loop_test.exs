@@ -6,6 +6,7 @@ defmodule FermixCore.AgentLoopTest do
   alias FermixCore.AgentLoop
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
   # -- Mock adapter --
@@ -274,6 +275,73 @@ defmodule FermixCore.AgentLoopTest do
       [{_state, [tool_result], _opts}] = mock_continues()
       assert tool_result.call_id == "call_1"
       assert tool_result.output == "Echo: hi"
+    end
+  end
+
+  # -- Context-aware tool schema (ultra fan-out width) --
+
+  describe "run/1 refreshes context-aware tool schemas" do
+    test "an ultra context widens the subagents schema the model sees", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{agent_name: "test", conversation_key: :test, subagent_mode: :ultra}
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.name == "subagents"
+      assert cap.parameters.properties.tasks.maxItems == 50
+      assert cap.parameters.properties.max_concurrency.maximum == 12
+    end
+
+    test "a normal context leaves the regular subagents schema", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [subagents_cap])
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.parameters.properties.tasks.maxItems == 10
+    end
+
+    test "does NOT clobber a tool whose executor module exports parameters/1 (plugin guard)",
+         %{registry: registry} do
+      set_mock_responses([turn("done")])
+
+      # Plugin tools are registered with executor {Plugins.ToolExecutor, :execute,
+      # [name, tool]}; ToolExecutor exports a name→schema `parameters/1` lookup —
+      # NOT a context hook. The refresh must key off `dynamic_parameters/1`, which
+      # ToolExecutor does not export, so this schema must survive untouched.
+      real_schema = %{
+        "type" => "object",
+        "required" => ["to", "subject", "body"],
+        "properties" => %{"to" => %{"type" => "string"}}
+      }
+
+      plugin_cap =
+        Capability.new(%{
+          name: "gmail_send_message",
+          description: "Send mail.",
+          parameters: real_schema,
+          kind: :builtin,
+          policy_class: :external_api,
+          executor: {FermixCore.Plugins.ToolExecutor, :execute, ["gmail_send_message", %{}]}
+        })
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [plugin_cap],
+                 context: %{agent_name: "test", conversation_key: :test, subagent_mode: :ultra}
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.parameters == real_schema
+      assert cap.parameters["required"] == ["to", "subject", "body"]
     end
   end
 
@@ -614,6 +682,146 @@ defmodule FermixCore.AgentLoopTest do
       assert_raise KeyError, fn ->
         AgentLoop.run(adapter: MockAdapter, adapter_opts: [model: "mock"])
       end
+    end
+  end
+
+  # -- Provider-switching integration (design doc §2.1): the loop drives the
+  # real provider adapters end-to-end over their wire shapes, with the
+  # route_key/adapter_opts contract every caller uses. --
+
+  describe "run/1 routed through the real Anthropic adapter (integration)" do
+    test "drives a two-round tool loop over the Anthropic wire shape", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        has_tool_result? =
+          Enum.any?(decoded["messages"], fn message ->
+            is_list(message["content"]) and
+              Enum.any?(message["content"], &(&1["type"] == "tool_result"))
+          end)
+
+        response =
+          if has_tool_result? do
+            %{
+              "model" => "claude-sonnet-4-6",
+              "stop_reason" => "end_turn",
+              "content" => [%{"type" => "text", "text" => "echoed and done"}],
+              "usage" => %{"input_tokens" => 9, "output_tokens" => 4}
+            }
+          else
+            %{
+              "model" => "claude-sonnet-4-6",
+              "stop_reason" => "tool_use",
+              "content" => [
+                %{
+                  "type" => "tool_use",
+                  "id" => "toolu_1",
+                  "name" => "echo",
+                  "input" => %{"text" => "hi"}
+                }
+              ],
+              "usage" => %{"input_tokens" => 7, "output_tokens" => 5}
+            }
+          end
+
+        Req.Test.json(conn, response)
+      end)
+
+      route_key = %{
+        provider: :anthropic,
+        model: "claude-sonnet-4-6",
+        auth_mode: :api_key,
+        base_url: "https://api.anthropic.com/v1"
+      }
+
+      assert {:ok, result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "echo hi"}],
+                 route_key: route_key,
+                 adapter_opts: [
+                   api_key: "sk-ant-test",
+                   model: "claude-sonnet-4-6",
+                   base_url: "https://api.anthropic.com/v1",
+                   req_options: [plug: {Req.Test, __MODULE__}]
+                 ],
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert result.response == "echoed and done"
+      assert result.iterations == 2
+    end
+  end
+
+  describe "run/1 routed through the real xAI adapter (integration)" do
+    test "drives a two-round tool loop over the Responses wire shape", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        has_output? =
+          Enum.any?(decoded["input"], &(&1["type"] == "function_call_output"))
+
+        response =
+          if has_output? do
+            %{
+              "model" => "grok-4.3",
+              "output" => [
+                %{
+                  "type" => "message",
+                  "id" => "msg_2",
+                  "content" => [%{"type" => "output_text", "text" => "echoed and done"}]
+                }
+              ],
+              "usage" => %{"input_tokens" => 9, "output_tokens" => 4}
+            }
+          else
+            %{
+              "model" => "grok-4.3",
+              "output" => [
+                %{
+                  "type" => "function_call",
+                  "id" => "fc_1",
+                  "call_id" => "call_1",
+                  "name" => "echo",
+                  "arguments" => Jason.encode!(%{"text" => "hi"})
+                }
+              ],
+              "usage" => %{"input_tokens" => 7, "output_tokens" => 5}
+            }
+          end
+
+        Req.Test.json(conn, response)
+      end)
+
+      route_key = %{
+        provider: :xai,
+        model: "grok-4.3",
+        auth_mode: :api_key,
+        base_url: "https://api.x.ai/v1"
+      }
+
+      assert {:ok, result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "echo hi"}],
+                 route_key: route_key,
+                 adapter_opts: [
+                   api_key: "xai-test",
+                   model: "grok-4.3",
+                   base_url: "https://api.x.ai/v1",
+                   req_options: [plug: {Req.Test, __MODULE__}]
+                 ],
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert result.response == "echoed and done"
+      assert result.iterations == 2
     end
   end
 end

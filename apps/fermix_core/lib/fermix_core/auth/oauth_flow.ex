@@ -19,6 +19,7 @@ defmodule FermixCore.Auth.OAuthFlow do
   """
 
   alias FermixCore.Auth.Browser
+  alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
 
@@ -215,6 +216,7 @@ defmodule FermixCore.Auth.OAuthFlow do
         "code_verifier" => code_verifier
       }
       |> maybe_put_param("client_secret", provider.client_secret)
+      |> maybe_echo_code_challenge(provider, code_verifier)
       |> URI.encode_query()
 
     request =
@@ -499,14 +501,29 @@ defmodule FermixCore.Auth.OAuthFlow do
     :crypto.strong_rand_bytes(byte_len) |> Base.url_encode64(padding: false)
   end
 
+  # Some token endpoints (xAI) re-validate PKCE and require the challenge
+  # echoed alongside the verifier at exchange time (design doc §6.4).
+  defp maybe_echo_code_challenge(params, %OAuthProvider{echo_code_challenge?: true}, verifier) do
+    challenge = :sha256 |> :crypto.hash(verifier) |> Base.url_encode64(padding: false)
+
+    params
+    |> Map.put("code_challenge", challenge)
+    |> Map.put("code_challenge_method", "S256")
+  end
+
+  defp maybe_echo_code_challenge(params, _provider, _verifier), do: params
+
   defp parse_token_response(%{"access_token" => access} = body) when is_binary(access) do
     expires_at =
       case body["expires_in"] do
         secs when is_integer(secs) and secs > 0 ->
           DateTime.add(DateTime.utc_now(), secs, :second)
 
+        # xAI omits expires_in; its access tokens are JWTs — derive the
+        # expiry from the exp claim so TokenManager can schedule refresh
+        # (design doc §6.4).
         _ ->
-          nil
+          JwtClaims.expires_at(access)
       end
 
     {:ok,

@@ -567,6 +567,12 @@ defmodule FermixCore.Setup.RuntimeTest do
                    default_model: "gpt-5.5",
                    reasoning_effort: "high",
                    fermix_auth_path: auth_path,
+                   # Isolate the codex-import probe so it never stats the host's
+                   # real ~/.codex/auth.json (provider:openai is unconfigured here,
+                   # so maybe_import_codex would otherwise reach the host fallback).
+                   # The prompt "n" already declines the import, so the outcome is
+                   # unchanged — this just keeps the test strictly host-independent.
+                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
                    oauth_opener: fn url ->
                      send(self(), {:oauth_opened, url})
                      :ok
@@ -714,6 +720,13 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :realtime_persist_transcripts) == true
     end
 
+    test "keeps the xai_api_key flag as an answer" do
+      answers = Runtime.provided_answers(provider: "xai", xai_api_key: "xai-key")
+
+      assert Keyword.get(answers, :provider) == "xai"
+      assert Keyword.get(answers, :xai_api_key) == "xai-key"
+    end
+
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
@@ -743,6 +756,79 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
       assert Keyword.get(codex_block, :fast) == false
+    end
+
+    test "non-interactive xai run persists the api key, provider, model, and effort" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "xai",
+                   xai_api_key: "xai-key",
+                   default_model: "grok-4.3",
+                   reasoning_effort: "high",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      agent = snapshot.fermix_core |> Keyword.get(:agent, [])
+      xai_block = snapshot.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
+
+      assert Keyword.get(agent, :provider) == :xai
+      assert Keyword.get(xai_block, :api_key) == "xai-key"
+      assert Keyword.get(xai_block, :default_model) == "grok-4.3"
+      assert Keyword.get(xai_block, :reasoning_effort) == :high
+    end
+
+    test "explicitly selecting a non-codex provider suppresses the Codex import even with a Codex auth file present" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      # A real, importable Codex auth file: codex_available?/1 returns true, so the
+      # only thing standing between this xai run and a live token import is the
+      # selected-provider guard under test.
+      codex_path = write_codex_auth(home)
+      test_pid = self()
+
+      # If the import ever fires, run_codex_import -> RefreshClient.refresh hits
+      # this plug. An xai run must never reach it: a non-codex provider selection
+      # suppresses the import outright.
+      refresh_spy = fn conn ->
+        send(test_pid, :codex_refresh_called)
+        __MODULE__.success_plug(conn)
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "xai",
+                   xai_api_key: "xai-key",
+                   default_model: "grok-4.3",
+                   reasoning_effort: "high",
+                   skip_probe: true,
+                   codex_auth_path: codex_path,
+                   req_options: [plug: refresh_spy]
+                 ],
+                 puts: puts,
+                 # Blank answers: the import prompt would default to YES pre-fix.
+                 prompt: fn _ -> "" end
+               )
+
+      refute_received :codex_refresh_called
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      assert snapshot.fermix_core |> Keyword.get(:agent, []) |> Keyword.get(:provider) == :xai
     end
 
     test "provided channel flags do not suppress missing provider/model prompts" do

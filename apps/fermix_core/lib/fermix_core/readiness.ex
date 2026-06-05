@@ -75,8 +75,50 @@ defmodule FermixCore.Readiness do
       :openai -> openai_failure()
       :openai_codex -> openai_codex_failure()
       :anthropic -> anthropic_failure()
+      :xai -> xai_failure()
       _other -> openai_failure()
     end
+  end
+
+  defp xai_failure do
+    case Config.provider(:xai) do
+      {:ok, config} when is_list(config) -> xai_config_failure(config)
+      _ -> xai_api_key_action()
+    end
+  end
+
+  defp xai_config_failure(config) do
+    case Keyword.get(config, :auth_mode) do
+      mode when mode in [:oauth, "oauth"] ->
+        if oauth_profile_configured?("xai_oauth"), do: nil, else: xai_oauth_action()
+
+      mode when mode in [nil, :api_key, "api_key"] ->
+        if present?(Keyword.get(config, :api_key)), do: nil, else: xai_api_key_action()
+
+      other ->
+        invalid_auth_mode_action("provider:xai", other)
+    end
+  end
+
+  defp xai_api_key_action do
+    %{component: "provider:xai", action: "Set XAI_API_KEY."}
+  end
+
+  defp xai_oauth_action do
+    %{
+      component: "provider:xai",
+      action: "Connect xAI Grok: `fermix auth login --provider xai`."
+    }
+  end
+
+  # An unrecognized auth_mode (e.g. a typo) must NOT report ready just because an
+  # api_key happens to be set — RouteResolver.parse_auth_mode!/2 raises on it at
+  # the first turn, so surface it as a setup failure instead.
+  defp invalid_auth_mode_action(component, mode) do
+    %{
+      component: component,
+      action: "Invalid auth_mode #{inspect(mode)} — set it to \"api_key\" or \"oauth\"."
+    }
   end
 
   defp active_provider do
@@ -117,22 +159,51 @@ defmodule FermixCore.Readiness do
 
   defp anthropic_failure do
     case Config.provider(:anthropic) do
-      {:ok, config} when is_list(config) ->
-        if present?(Keyword.get(config, :api_key)) do
-          nil
-        else
-          %{
-            component: "provider:anthropic",
-            action: "Set ANTHROPIC_API_KEY."
-          }
-        end
-
-      _ ->
-        %{
-          component: "provider:anthropic",
-          action: "Set ANTHROPIC_API_KEY."
-        }
+      {:ok, config} when is_list(config) -> anthropic_config_failure(config)
+      _ -> anthropic_api_key_action()
     end
+  end
+
+  defp anthropic_config_failure(config) do
+    case Keyword.get(config, :auth_mode) do
+      mode when mode in [:oauth, "oauth"] ->
+        if oauth_profile_configured?("anthropic_oauth"), do: nil, else: anthropic_oauth_action()
+
+      mode when mode in [nil, :api_key, "api_key"] ->
+        if present?(Keyword.get(config, :api_key)), do: nil, else: anthropic_api_key_action()
+
+      other ->
+        invalid_auth_mode_action("provider:anthropic", other)
+    end
+  end
+
+  defp anthropic_api_key_action do
+    %{component: "provider:anthropic", action: "Set ANTHROPIC_API_KEY."}
+  end
+
+  defp anthropic_oauth_action do
+    %{
+      component: "provider:anthropic",
+      action: "Connect the Claude subscription: `fermix auth login --provider anthropic`."
+    }
+  end
+
+  defp oauth_profile_configured?(profile) do
+    case Store.read(profile) do
+      {:ok, entry} ->
+        present?(entry.tokens.access_token) and
+          Map.get(entry, :status) != "reauthorization_required"
+
+      {:error, _reason} ->
+        false
+    end
+  rescue
+    e in ArgumentError ->
+      Logger.warning(
+        "Readiness: Auth.Store.read(#{profile}) raised — auth.json may be malformed: #{Exception.message(e)}"
+      )
+
+      false
   end
 
   defp telegram_failure do

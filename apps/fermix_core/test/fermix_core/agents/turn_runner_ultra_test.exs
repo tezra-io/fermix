@@ -1,23 +1,33 @@
 defmodule FermixCore.Agents.TurnRunnerUltraTest do
   @moduledoc """
-  The routing seam for `/ultra` (§17.11): a message tagged `run_profile: :ultra`
-  must reach `UltraOrchestrator` (injectable) instead of the normal agent loop,
-  return the `{:ok, response, 0}` three-tuple the queue expects, and be handed a
-  complete deps map plus a live arity-1 `deliver`. An untagged message must still
-  take the normal loop path unchanged.
+  `/ultra` is now a run-mode of the normal turn (Option B, design
+  ADAPTIVE_EFFORT_AND_DELEGATION §6): a message tagged `run_profile: :ultra`
+  runs the ordinary agent loop with `subagent_mode: :ultra` in context and an
+  exhaustive-mode addendum prepended to the system prompt — NOT a separate
+  orchestrator. An untagged message takes the same loop without either.
   """
   use ExUnit.Case, async: false
 
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Tools.Subagents
 
-  defmodule LoopingAdapter do
+  # Captures the messages AND capabilities it is handed so the test can assert
+  # both the ultra addendum injection and that the ultra context reached the
+  # loop's tool-schema refresh (the model sees the wide subagents caps).
+  defmodule CapturingAdapter do
     @behaviour FermixCore.Providers.Adapter
 
     @impl true
-    def chat(_messages, _capabilities, _opts) do
+    def chat(messages, capabilities, _opts) do
+      send(
+        Application.fetch_env!(:fermix_core, :ultra_test_pid),
+        {:chat, messages, capabilities}
+      )
+
       {:ok,
        %{
          content: "normal-loop-answer",
@@ -44,38 +54,23 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
     def supports_streaming?, do: false
   end
 
-  # Injected stand-in for UltraOrchestrator: records the prompt + deps it was
-  # handed (so the test can prove the wiring is complete), exercises `deliver`,
-  # then returns the orchestrator's `{:ok, response}` contract.
-  defmodule CapturingOrchestrator do
-    def run(prompt, deps) do
-      pid = Application.fetch_env!(:fermix_core, :ultra_test_pid)
-      deps.deliver.({:text, "stub-progress"})
-      send(pid, {:ultra_invoked, prompt, Map.keys(deps)})
-      {:ok, "ultra-orchestrator-answer"}
-    end
-  end
-
   setup do
-    prior = Application.get_env(:fermix_core, :ultra_orchestrator)
     prior_pid = Application.get_env(:fermix_core, :ultra_test_pid)
+    Application.put_env(:fermix_core, :ultra_test_pid, self())
 
     on_exit(fn ->
-      restore(:ultra_orchestrator, prior)
-      restore(:ultra_test_pid, prior_pid)
+      case prior_pid do
+        nil -> Application.delete_env(:fermix_core, :ultra_test_pid)
+        value -> Application.put_env(:fermix_core, :ultra_test_pid, value)
+      end
     end)
 
     :ok
   end
 
   describe "run/3 with run_profile: :ultra" do
-    test "routes into the orchestrator and returns the {:ok, response, 0} three-tuple" do
-      Application.put_env(:fermix_core, :ultra_orchestrator, CapturingOrchestrator)
-      Application.put_env(:fermix_core, :ultra_test_pid, self())
-
+    test "runs the normal loop and prepends the exhaustive-mode addendum as a leading system message" do
       turn_state = build_turn_state()
-      test_pid = self()
-      deliver = fn part -> send(test_pid, {:delivered, part}) end
 
       msg = %{
         channel: "telegram",
@@ -86,22 +81,45 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
         metadata: %{run_profile: :ultra}
       }
 
-      assert {:ok, "ultra-orchestrator-answer", 0} = TurnRunner.run(msg, turn_state, deliver)
+      assert {:ok, "normal-loop-answer", _} = TurnRunner.run(msg, turn_state, fn _ -> :ok end)
 
-      # The orchestrator saw the raw prompt and a deps map with every stage wired,
-      # plus the verify-stage concurrency knob the wide /ultra fan-out needs.
-      assert_receive {:ultra_invoked, "plan a complex trip", deps_keys}, 5_000
+      assert_receive {:chat, messages, _capabilities}, 5_000
 
-      assert Enum.sort(deps_keys) ==
-               [:decompose, :deliver, :fanout, :synthesize, :verify, :verify_concurrency]
+      # System messages still lead (Anthropic adapter requires it); the addendum
+      # is the LAST leading system message, before the user turn.
+      {system_run, rest} = Enum.split_while(messages, &(&1.role == "system"))
+      assert List.last(system_run).content =~ "Exhaustive mode (/ultra)"
+      assert List.last(system_run).content =~ "fan out WIDE with the `subagents` tool"
+      assert [%{role: "user", content: "plan a complex trip"}] = rest
+    end
 
-      # `deliver` is a live arity-1 reply_fn the orchestrator can narrate through.
-      assert_receive {:delivered, {:text, "stub-progress"}}, 5_000
+    test "carries subagent_mode: :ultra into the loop, widening the subagents tool schema" do
+      turn_state = build_turn_state()
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "ultra_schema",
+        sender: "user",
+        content: "research this exhaustively",
+        source_trust: :operator,
+        metadata: %{run_profile: :ultra}
+      }
+
+      assert {:ok, "normal-loop-answer", _} = TurnRunner.run(msg, turn_state, fn _ -> :ok end)
+
+      assert_receive {:chat, _messages, capabilities}, 5_000
+
+      subagents = Enum.find(capabilities, &(&1.name == "subagents"))
+      assert subagents, "expected the subagents capability in the operator profile"
+      # Ultra widens the advertised caps (§4 / §6): 50 tasks, concurrency 12.
+      assert subagents.parameters.properties.tasks.maxItems == 50
+      assert subagents.parameters.properties.max_concurrency.maximum == 12
+      assert subagents.parameters.properties.max_concurrency.description =~ "Defaults to 12"
     end
   end
 
   describe "run/3 without an ultra tag" do
-    test "takes the normal agent-loop path unchanged" do
+    test "takes the normal loop with no addendum" do
       turn_state = build_turn_state()
 
       msg = %{
@@ -112,8 +130,15 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
         source_trust: :operator
       }
 
-      assert {:ok, "normal-loop-answer", _context_tokens} =
-               TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+      assert {:ok, "normal-loop-answer", _} = TurnRunner.run(msg, turn_state, fn _ -> :ok end)
+
+      assert_receive {:chat, messages, capabilities}, 5_000
+      refute Enum.any?(messages, &(&1.content =~ "Exhaustive mode"))
+
+      # Without the ultra tag the subagents schema keeps the regular caps (§4).
+      subagents = Enum.find(capabilities, &(&1.name == "subagents"))
+      assert subagents.parameters.properties.tasks.maxItems == 10
+      assert subagents.parameters.properties.max_concurrency.maximum == 8
     end
   end
 
@@ -127,7 +152,7 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
       start_supervised!({ConversationStore, name: store_name, max_messages: :infinity, repo: nil})
 
     %{
-      adapter: LoopingAdapter,
+      adapter: CapturingAdapter,
       adapter_opts: [model: "mock-model"],
       provider: nil,
       adapter_overrides: [],
@@ -160,12 +185,14 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
   defp runtime_profile(trust) do
     %{
       trust: trust,
-      capabilities: [],
+      capabilities: capabilities_for(trust),
       runtime_message: %{role: "system", content: "runtime contract"},
       runtime_accounting: %{part: :runtime}
     }
   end
 
-  defp restore(key, nil), do: Application.delete_env(:fermix_core, key)
-  defp restore(key, value), do: Application.put_env(:fermix_core, key, value)
+  # Only the operator profile carries the `subagents` capability — the schema
+  # the loop refreshes per-turn is what the ultra-widening test asserts against.
+  defp capabilities_for(:operator), do: [BuiltinCapability.from_tool_module(Subagents)]
+  defp capabilities_for(_trust), do: []
 end

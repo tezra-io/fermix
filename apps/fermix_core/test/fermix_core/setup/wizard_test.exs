@@ -201,6 +201,34 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(memory, :extraction_timeout_ms) == 120_000
   end
 
+  test "save_answers persists xai provider, model, and reasoning effort" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-xai")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "xai",
+               xai_api_key: "xai-key",
+               default_model: "grok-4.3",
+               reasoning_effort: "high"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    agent = Keyword.get(persisted.fermix_core, :agent, [])
+    xai = persisted.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
+
+    assert Keyword.get(agent, :provider) == :xai
+    assert Keyword.get(xai, :api_key) == "xai-key"
+    assert Keyword.get(xai, :default_model) == "grok-4.3"
+    assert Keyword.get(xai, :reasoning_effort) == :high
+  end
+
   test "save_answers writes all setup secrets through SecretWriter" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-secrets")
 
@@ -565,6 +593,35 @@ defmodule FermixCore.Setup.WizardTest do
 
     assert prompt.default == :openai_codex
     assert prompt.label =~ "blank = openai_codex"
+  end
+
+  test "provider prompt can default to configured xai provider before TOML persists it" do
+    tmp_home =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-wizard-provider-xai-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    :ok =
+      ConfigStore.save_snapshot(%{
+        fermix_core: [
+          providers: [xai: [default_model: "grok-4.3", reasoning_effort: :high]],
+          agent: [name: "fermix"],
+          personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
+        ],
+        fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]]
+      })
+
+    Application.put_env(:fermix_core, :agent, name: "fermix", provider: :xai)
+
+    prompt = Wizard.report().wizard |> Wizard.prompts() |> Enum.find(&(&1.key == :provider))
+
+    assert prompt.default == :xai
+    assert prompt.label =~ "blank = xai"
   end
 
   test "prompts omit provider/model/effort once provider settings are persisted to TOML" do

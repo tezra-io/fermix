@@ -15,6 +15,7 @@ defmodule Fermix.CLI.Setup do
   @switches [
     openai_api_key: :string,
     anthropic_api_key: :string,
+    xai_api_key: :string,
     provider: :string,
     default_model: :string,
     reasoning_effort: :string,

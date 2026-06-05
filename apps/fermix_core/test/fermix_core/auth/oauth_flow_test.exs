@@ -2,6 +2,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Auth.OAuthFlow
+  alias FermixCore.Auth.OAuthProvider
 
   describe "generate_pkce/0" do
     test "produces verifier, challenge, and state" do
@@ -127,6 +128,66 @@ defmodule FermixCore.Auth.OAuthFlowTest do
 
       assert {:error, :invalid_token_response} =
                OAuthFlow.exchange_code("c", "v", plug: plug)
+    end
+
+    test "echoes the code challenge for providers that re-validate PKCE at exchange" do
+      provider = OAuthProvider.xai()
+
+      expected_challenge =
+        :sha256 |> :crypto.hash("the-verifier") |> Base.url_encode64(padding: false)
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        assert params["code_verifier"] == "the-verifier"
+        assert params["code_challenge"] == expected_challenge
+        assert params["code_challenge_method"] == "S256"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "AT", "expires_in" => 60})
+        )
+      end
+
+      assert {:ok, _tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:56121/callback",
+                 plug: plug
+               )
+    end
+
+    test "providers without the echo flag never send the challenge at exchange" do
+      provider = OAuthProvider.google(client_id: "cid")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        refute Map.has_key?(params, "code_challenge")
+        refute Map.has_key?(params, "code_challenge_method")
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "AT", "expires_in" => 60})
+        )
+      end
+
+      assert {:ok, _tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:1455/auth/callback",
+                 plug: plug
+               )
     end
   end
 

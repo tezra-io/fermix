@@ -58,6 +58,125 @@ defmodule Fermix.CLI.AuthCommandTest do
     end
   end
 
+  describe "auth --provider anthropic" do
+    test "login --setup-token stores under the anthropic_oauth profile", %{dir: dir} do
+      status =
+        capture_out_status(fn ->
+          AuthCommand.run(["login", "--provider", "anthropic", "--setup-token", "sk-ant-oat01"])
+        end)
+
+      assert status == 0
+
+      {:ok, entry} = Store.read("anthropic_oauth", Path.join(dir, "auth.json"))
+      assert entry.auth_mode == "setup_token"
+      assert entry.provider == "anthropic"
+      assert entry.tokens.access_token == "sk-ant-oat01"
+
+      # Never under an api-key-shaped profile (billing-flip guard, §12 #5).
+      assert {:error, {:provider_missing, _}} =
+               Store.read("anthropic", Path.join(dir, "auth.json"))
+    end
+
+    test "login --setup-token wins over CLAUDE_CODE_OAUTH_TOKEN in the environment", %{dir: dir} do
+      prior = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+
+      on_exit(fn ->
+        case prior do
+          nil -> System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+          value -> System.put_env("CLAUDE_CODE_OAUTH_TOKEN", value)
+        end
+      end)
+
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run([
+                   "login",
+                   "--provider",
+                   "anthropic",
+                   "--setup-token",
+                   "flag-token"
+                 ])
+               end)
+
+      {:ok, entry} = Store.read("anthropic_oauth", Path.join(dir, "auth.json"))
+      assert entry.tokens.access_token == "flag-token"
+    end
+
+    test "login without any token source errors with guidance" do
+      prior = System.get_env("CLAUDE_CODE_OAUTH_TOKEN")
+      System.delete_env("CLAUDE_CODE_OAUTH_TOKEN")
+
+      on_exit(fn ->
+        if prior, do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", prior)
+      end)
+
+      output = capture_err(fn -> AuthCommand.run(["login", "--provider", "anthropic"]) end)
+      assert output =~ "--setup-token"
+      assert output =~ "CLAUDE_CODE_OAUTH_TOKEN"
+    end
+
+    test "status and logout target the anthropic_oauth profile", %{dir: dir} do
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run([
+                   "login",
+                   "--provider",
+                   "anthropic",
+                   "--setup-token",
+                   "sk-ant-x"
+                 ])
+               end)
+
+      status_output =
+        capture_out(fn -> AuthCommand.run(["status", "--provider", "anthropic"]) end)
+
+      assert status_output =~ "provider: anthropic_oauth"
+      assert status_output =~ "auth_mode: setup_token"
+
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run(["logout", "--provider", "anthropic"])
+               end)
+
+      assert {:error, {:provider_missing, _}} =
+               Store.read("anthropic_oauth", Path.join(dir, "auth.json"))
+    end
+
+    test "rejects an unknown provider" do
+      output =
+        capture_err(fn -> AuthCommand.run(["login", "--provider", "gemini"]) end)
+
+      assert output =~ "unknown login provider"
+    end
+  end
+
+  describe "auth --provider xai" do
+    test "status and logout target the xai_oauth profile", %{dir: dir} do
+      path = Path.join(dir, "auth.json")
+
+      :ok =
+        Store.write(
+          "xai_oauth",
+          %{
+            auth_mode: "oauth_pkce",
+            provider: "xai",
+            tokens: %{access_token: "xai-at", refresh_token: "xai-rt"},
+            expires_at: nil,
+            last_refresh: nil
+          },
+          path
+        )
+
+      status_output = capture_out(fn -> AuthCommand.run(["status", "--provider", "xai"]) end)
+      assert status_output =~ "provider: xai_oauth"
+      assert status_output =~ "auth_mode: oauth_pkce"
+
+      assert 0 == capture_out_status(fn -> AuthCommand.run(["logout", "--provider", "xai"]) end)
+      assert {:error, {:provider_missing, _}} = Store.read("xai_oauth", path)
+    end
+  end
+
   describe "auth (no args)" do
     test "prints usage and returns 2" do
       assert 2 == capture_err_status(fn -> AuthCommand.run([]) end)

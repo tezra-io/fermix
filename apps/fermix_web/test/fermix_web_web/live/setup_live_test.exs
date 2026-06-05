@@ -610,6 +610,68 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(api_key = "@keyring")
     end
 
+    test "phx-change to xAI swaps in xAI models and the xAI api-key field", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{
+            provider: "xai",
+            default_model: "gpt-5.5",
+            reasoning_effort: "none"
+          }
+        )
+        |> render_change()
+
+      # The form actually switches to xAI (not falling back to OpenAI): xAI
+      # models replace OpenAI models, and the xAI secret field renders.
+      assert html =~ "grok-4.3"
+      assert html =~ ~s(name="provider_form[xai_api_key]")
+      refute html =~ "gpt-5.5</option>"
+      # xAI supports reasoning effort (like the CLI wizard), so the field shows.
+      assert html =~ "Reasoning effort"
+    end
+
+    test "submitting persists xAI model, reasoning effort, and api key", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{provider: "xai", default_model: "gpt-5.5", reasoning_effort: "none"}
+      )
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "xai",
+          default_model: "grok-4.3",
+          reasoning_effort: "high",
+          xai_api_key: "xai-from-live-test"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Provider saved."
+
+      providers = Application.get_env(:fermix_core, :providers, [])
+      xai = Keyword.get(providers, :xai, [])
+
+      assert Keyword.get(xai, :default_model) == "grok-4.3"
+      assert Keyword.get(xai, :reasoning_effort) == :high
+      assert Keyword.get(xai, :api_key) == "xai-from-live-test"
+
+      agent = Application.get_env(:fermix_core, :agent, [])
+      assert Keyword.get(agent, :provider) == :xai
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.xai]"
+    end
+
     test "submitting persists Codex fast mode as a boolean", %{
       conn: conn,
       tmp_home: tmp_home

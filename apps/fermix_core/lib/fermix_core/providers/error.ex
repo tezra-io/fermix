@@ -96,6 +96,7 @@ defmodule FermixCore.Providers.Error do
   def provider_label(:openai), do: "OpenAI"
   def provider_label(:openai_codex), do: "Codex"
   def provider_label(:anthropic), do: "Anthropic"
+  def provider_label(:xai), do: "xAI"
   def provider_label(provider), do: provider |> to_string() |> String.replace("_", " ")
 
   defp api_kind(status, code, message) do
@@ -103,6 +104,7 @@ defmodule FermixCore.Providers.Error do
 
     cond do
       auth_status?(status) -> :auth
+      status == 402 -> :quota
       quota_error?(text) -> :quota
       status == 429 -> :rate_limit
       status == 408 -> :timeout

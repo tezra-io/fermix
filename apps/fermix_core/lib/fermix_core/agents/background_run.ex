@@ -1,9 +1,13 @@
 defmodule FermixCore.Agents.BackgroundRun do
   @moduledoc """
-  Neutral core runner for detached `/background` (and a backgrounded `/ultra`)
-  work. The gateway hands it a neutral request — no `reply_fn`, no channel
-  context — and gets back a neutral result it can deliver. It has no dependency
-  on `FermixChannels`.
+  Neutral core runner for detached `/background` work. The gateway hands it a
+  neutral request — no `reply_fn`, no channel context — and gets back a neutral
+  result it can deliver. It has no dependency on `FermixChannels`.
+
+  Backgrounded `/ultra` is **out of scope**: `work_scoped_message/3` builds the
+  message with empty `metadata`, so a `run_profile: :ultra` tag never reaches
+  `TurnRunner` here — a backgrounded run is always a normal turn. Threading the
+  ultra mode through the detached path is a separate follow-up.
 
   It runs as a main-agent-equivalent coordinator: it checks out the turn-state
   snapshot from the one cache owner (`MainAgent.checkout_turn_state/2`, never a

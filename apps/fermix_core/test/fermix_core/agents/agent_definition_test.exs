@@ -204,6 +204,14 @@ defmodule FermixCore.Agents.AgentDefinitionTest do
                  "system_prompt" => ".",
                  "provider" => :openai_codex
                })
+
+      assert {:ok, %{provider: :xai}} =
+               AgentDefinition.new(%{
+                 "name" => "p",
+                 "description" => "Use p.",
+                 "system_prompt" => ".",
+                 "provider" => "xai"
+               })
     end
 
     test "unknown provider rejected loud" do

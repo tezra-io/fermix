@@ -75,26 +75,26 @@ config :fermix_core, :memory,
   owner_id: "default",
   agent_id: "main"
 
-# Regular `subagents` tool caps (LLM-facing, advertised in its schema). Kept
-# deliberately small — the tool's prompt rarely fans wide. /ultra does NOT use
-# these; it raises them via the :ultra block below by tagging its fan-out context
-# `subagent_mode: :ultra`. System-side knobs, not a config.toml surface.
+# Regular `subagents` tool caps (LLM-facing, advertised in its schema). Biased
+# toward "delegate wide" — more, narrower workers beats a few fat ones (worker
+# brevity lowers actual depth/time, not these ceilings). Kept below the :ultra
+# block so the ultra > regular ordering holds. /ultra raises them via the :ultra
+# block by tagging its context `subagent_mode: :ultra`. System-side knobs.
 config :fermix_core, :subagents,
-  max_tasks: 4,
-  hard_max_concurrency: 4,
-  default_max_concurrency: 2,
+  max_tasks: 10,
+  hard_max_concurrency: 8,
+  default_max_concurrency: 4,
   max_result_bytes: 60_000
 
-# /ultra orchestrator. Breadth ≫ regular (many narrow probes), depth < regular
-# (probes are narrow, so fewer iterations each). The fanout_* keys are what the
-# /ultra path raises the subagents caps to. System-side knobs, not config.toml.
+# /ultra exhaustive mode. Breadth ≫ regular (many narrow probes), depth <
+# regular (probes are narrow, so fewer iterations each). The fanout_* keys are
+# what the /ultra run-mode raises the subagents caps to via `subagent_mode:
+# :ultra`. System-side knobs, not a config.toml surface.
 config :fermix_core, :ultra,
   max_subtasks: 50,
   fanout_max_concurrency: 12,
   fanout_max_result_bytes: 300_000,
-  fanout_worker_iterations: 40,
-  verify_max_concurrency: 4,
-  synthesis_max_finding_bytes: 2_000
+  fanout_worker_iterations: 40
 
 # Per-agent loop depth caps (previously implicit IterationLimits @defaults; made
 # explicit + tunable). This is DEPTH (how long one agent loops); the knobs above

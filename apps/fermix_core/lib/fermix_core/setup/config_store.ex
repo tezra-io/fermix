@@ -92,7 +92,8 @@ defmodule FermixCore.Setup.ConfigStore do
         providers: [
           openai: Keyword.get(providers, :openai, []),
           openai_codex: Keyword.get(providers, :openai_codex, []),
-          anthropic: Keyword.get(providers, :anthropic, [])
+          anthropic: Keyword.get(providers, :anthropic, []),
+          xai: Keyword.get(providers, :xai, [])
         ],
         personalization: Application.get_env(:fermix_core, :personalization, []),
         agent: Application.get_env(:fermix_core, :agent, []),
@@ -157,6 +158,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_provider_config(:openai, Keyword.get(providers, :openai, []))
     apply_provider_config(:openai_codex, Keyword.get(providers, :openai_codex, []))
     apply_provider_config(:anthropic, Keyword.get(providers, :anthropic, []))
+    apply_provider_config(:xai, Keyword.get(providers, :xai, []))
 
     apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
@@ -231,7 +233,8 @@ defmodule FermixCore.Setup.ConfigStore do
         providers: [
           openai: providers |> Keyword.get(:openai, []) |> normalize_openai(),
           openai_codex: providers |> Keyword.get(:openai_codex, []) |> normalize_openai_codex(),
-          anthropic: providers |> Keyword.get(:anthropic, []) |> normalize_anthropic()
+          anthropic: providers |> Keyword.get(:anthropic, []) |> normalize_anthropic(),
+          xai: providers |> Keyword.get(:xai, []) |> normalize_xai()
         ],
         personalization:
           snapshot
@@ -335,7 +338,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp empty_runtime_config do
     %{
       fermix_core: [
-        providers: [openai: [], openai_codex: [], anthropic: []],
+        providers: [openai: [], openai_codex: [], anthropic: [], xai: []],
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
         agent: [name: "fermix"],
         jobs: [],
@@ -503,6 +506,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(
         ["fermix_core", "providers", "anthropic"],
         Keyword.get(providers, :anthropic, [])
+      ),
+      render_section(
+        ["fermix_core", "providers", "xai"],
+        Keyword.get(providers, :xai, [])
       ),
       render_section(["fermix_core", "personalization"], personalization),
       render_section(["fermix_core", "jobs"], Keyword.drop(jobs, [:default_delivery_target])),
@@ -691,7 +698,8 @@ defmodule FermixCore.Setup.ConfigStore do
           openai_codex:
             normalize_openai_codex(get_in(document, ["fermix_core", "providers", "openai_codex"])),
           anthropic:
-            normalize_anthropic(get_in(document, ["fermix_core", "providers", "anthropic"]))
+            normalize_anthropic(get_in(document, ["fermix_core", "providers", "anthropic"])),
+          xai: normalize_xai(get_in(document, ["fermix_core", "providers", "xai"]))
         ],
         personalization:
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
@@ -813,6 +821,23 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :default_model,
       normalize_string(lookup(config, "default_model", :default_model))
+    )
+  end
+
+  defp normalize_xai(nil), do: []
+
+  defp normalize_xai(config) do
+    []
+    |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
+    |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
+    |> put_if_present(:base_url, normalize_string(lookup(config, "base_url", :base_url)))
+    |> put_if_present(
+      :default_model,
+      normalize_string(lookup(config, "default_model", :default_model))
+    )
+    |> put_if_present(
+      :reasoning_effort,
+      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
   end
 
@@ -994,9 +1019,11 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_provider(:openai), do: :openai
   defp normalize_provider(:openai_codex), do: :openai_codex
   defp normalize_provider(:anthropic), do: :anthropic
+  defp normalize_provider(:xai), do: :xai
   defp normalize_provider("openai"), do: :openai
   defp normalize_provider("openai_codex"), do: :openai_codex
   defp normalize_provider("anthropic"), do: :anthropic
+  defp normalize_provider("xai"), do: :xai
   defp normalize_provider(_), do: nil
 
   defp normalize_personalization(nil), do: []
@@ -1257,6 +1284,8 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_auth_mode(:api_key), do: :api_key
   defp normalize_auth_mode("api_key"), do: :api_key
+  defp normalize_auth_mode(:oauth), do: :oauth
+  defp normalize_auth_mode("oauth"), do: :oauth
   defp normalize_auth_mode(_value), do: nil
 
   defp normalize_mode(:polling), do: :polling

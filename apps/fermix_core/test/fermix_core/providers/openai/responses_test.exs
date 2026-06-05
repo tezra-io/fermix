@@ -162,7 +162,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
                )
 
       assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
-                      %{adapter: :responses} = metadata}
+                      %{provider: :openai, adapter: :responses} = metadata}
 
       assert measurements.duration_ms >= 0
       assert metadata.input_items == 1
@@ -281,7 +281,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
         )
 
       assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
-                      %{adapter: :responses, error_status: 503} = metadata}
+                      %{provider: :openai, adapter: :responses, error_status: 503} = metadata}
 
       assert measurements.duration_ms >= 0
       assert metadata.status == :error

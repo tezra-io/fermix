@@ -94,6 +94,9 @@ defmodule FermixCore.Providers.Adapter do
   def for_route(%{provider: :anthropic}),
     do: FermixCore.Providers.Anthropic.Messages
 
+  def for_route(%{provider: :xai}),
+    do: FermixCore.Providers.XAI.Responses
+
   def for_route(%{provider: provider})
       when provider in [:openrouter, :together, :groq],
       do: FermixCore.Providers.OpenAI.ChatCompletions
