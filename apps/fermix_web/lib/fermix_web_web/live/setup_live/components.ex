@@ -18,6 +18,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
+  attr :xai_auth, :map, required: true
+  attr :xai_auth_running?, :boolean, required: true
+  attr :xai_auth_url, :string, default: nil
+  attr :anthropic_auth, :map, required: true
+  attr :anthropic_import_available?, :boolean, default: false
   attr :doctor_result, :any, required: true
   attr :doctor_probe_running?, :boolean, default: false
   attr :memory_form, :map, required: true
@@ -73,6 +78,11 @@ defmodule FermixWebWeb.SetupLive.Components do
               codex_auth={@codex_auth}
               codex_auth_running?={@codex_auth_running?}
               codex_auth_url={@codex_auth_url}
+              xai_auth={@xai_auth}
+              xai_auth_running?={@xai_auth_running?}
+              xai_auth_url={@xai_auth_url}
+              anthropic_auth={@anthropic_auth}
+              anthropic_import_available?={@anthropic_import_available?}
               doctor_result={@doctor_result}
               doctor_probe_running?={@doctor_probe_running?}
               memory_form={@memory_form}
@@ -186,6 +196,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :codex_auth, :map, required: true
   attr :codex_auth_running?, :boolean, required: true
   attr :codex_auth_url, :string, default: nil
+  attr :xai_auth, :map, required: true
+  attr :xai_auth_running?, :boolean, required: true
+  attr :xai_auth_url, :string, default: nil
+  attr :anthropic_auth, :map, required: true
+  attr :anthropic_import_available?, :boolean, default: false
   attr :doctor_result, :any, required: true
   attr :doctor_probe_running?, :boolean, default: false
   attr :memory_form, :map, required: true
@@ -262,23 +277,40 @@ defmodule FermixWebWeb.SetupLive.Components do
 
             <div :if={provider_connection?(@provider_form.provider)} class="space-y-3">
               <h3 class="text-sm font-semibold">Connection</h3>
-              <.provider_secret_field provider_form={@provider_form} report={@report} />
+              <.auth_mode_field
+                :if={@provider_form.provider in [:anthropic, :xai]}
+                provider_form={@provider_form}
+              />
+              <.provider_secret_field
+                :if={api_key_mode?(@provider_form)}
+                provider_form={@provider_form}
+                report={@report}
+              />
               <.codex_auth_field
                 provider_form={@provider_form}
                 codex_auth={@codex_auth}
                 codex_auth_running?={@codex_auth_running?}
                 codex_auth_url={@codex_auth_url}
               />
+              <.xai_auth_field
+                :if={@provider_form.provider == :xai and @provider_form.auth_mode == :oauth}
+                xai_auth={@xai_auth}
+                xai_auth_running?={@xai_auth_running?}
+                xai_auth_url={@xai_auth_url}
+              />
+              <.anthropic_auth_field
+                :if={@provider_form.provider == :anthropic and @provider_form.auth_mode == :oauth}
+                anthropic_auth={@anthropic_auth}
+                anthropic_import_available?={@anthropic_import_available?}
+              />
               <p
-                :if={@provider_form.provider in [:anthropic, :xai]}
+                :if={
+                  @provider_form.provider in [:anthropic, :xai] and @provider_form.auth_mode == :oauth
+                }
                 class="text-xs text-base-content/60"
               >
-                Prefer a subscription over an API key? Connect OAuth from the host:
-                <code class="font-mono">
-                  fermix auth login --provider {Atom.to_string(@provider_form.provider)}
-                </code>
-                then set <code class="font-mono">auth_mode = "oauth"</code>
-                for this provider.
+                A saved API key is kept while OAuth is selected; the route switches back if you
+                pick API key again. Changing this needs a daemon restart.
               </p>
             </div>
           </section>
@@ -292,6 +324,13 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  defp api_key_mode?(%{provider: :openai}), do: true
+
+  defp api_key_mode?(%{provider: provider, auth_mode: mode}),
+    do: provider in [:anthropic, :xai] and mode == :api_key
+
+  defp api_key_mode?(_form), do: false
+
   defp provider_grid_class(provider) do
     [
       "grid gap-5",
@@ -302,7 +341,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp provider_connection?(provider),
     do: provider in [:openai, :openai_codex, :anthropic, :xai]
 
-  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex, :xai]
+  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex, :anthropic, :xai]
 
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
@@ -420,6 +459,140 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   attr :provider_form, :map, required: true
 
+  defp auth_mode_field(assigns) do
+    ~H"""
+    <fieldset class="form-control">
+      <legend class="label pb-1 text-sm font-medium">Authentication</legend>
+      <div class="flex flex-wrap gap-4">
+        <label class="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="provider_form[auth_mode]"
+            value="api_key"
+            checked={@provider_form.auth_mode == :api_key}
+            class="radio radio-sm"
+          />
+          <span>API key</span>
+        </label>
+        <label class="flex items-center gap-2 text-sm">
+          <input
+            type="radio"
+            name="provider_form[auth_mode]"
+            value="oauth"
+            checked={@provider_form.auth_mode == :oauth}
+            class="radio radio-sm"
+          />
+          <span>Subscription (OAuth)</span>
+        </label>
+      </div>
+    </fieldset>
+    """
+  end
+
+  attr :xai_auth, :map, required: true
+  attr :xai_auth_running?, :boolean, required: true
+  attr :xai_auth_url, :string, default: nil
+
+  defp xai_auth_field(assigns) do
+    ~H"""
+    <section
+      data-xai-auth-panel="true"
+      class="rounded-field border border-base-300 bg-base-200/40 p-3"
+    >
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="text-sm font-medium">Grok OAuth</p>
+          <p class="mt-1 text-xs leading-5 text-base-content/60">
+            Grok uses browser login and stores credentials in the Fermix auth store.
+          </p>
+        </div>
+        <span class={codex_auth_badge_class(@xai_auth, @xai_auth_running?)}>
+          {codex_auth_badge_label(@xai_auth, @xai_auth_running?)}
+        </span>
+      </div>
+
+      <p :if={@xai_auth.error} class="mt-2 text-xs text-error">
+        Auth store error: {@xai_auth.error}
+      </p>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          class="btn btn-outline btn-sm"
+          phx-click="xai_login"
+          data-auth-trigger="true"
+          disabled={@xai_auth_running?}
+        >
+          <.icon name="hero-key" class="size-4" />
+          {xai_auth_button_label(@xai_auth, @xai_auth_running?)}
+        </button>
+      </div>
+
+      <div
+        :if={@xai_auth_url}
+        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
+      >
+        <span>If the Grok tab did not open, use the fallback link.</span>
+        <a class="link link-primary font-medium" href={@xai_auth_url} target="_blank" rel="noreferrer">
+          Open sign-in
+        </a>
+      </div>
+    </section>
+    """
+  end
+
+  defp xai_auth_button_label(_auth, true), do: "Waiting for login"
+  defp xai_auth_button_label(%{connected?: true}, false), do: "Reconnect Grok"
+  defp xai_auth_button_label(_auth, false), do: "Sign in with Grok"
+
+  attr :anthropic_auth, :map, required: true
+  attr :anthropic_import_available?, :boolean, default: false
+
+  defp anthropic_auth_field(assigns) do
+    ~H"""
+    <section
+      data-anthropic-auth-panel="true"
+      class="rounded-field border border-base-300 bg-base-200/40 p-3"
+    >
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p class="text-sm font-medium">Anthropic subscription (OAuth)</p>
+          <p class="mt-1 text-xs leading-5 text-base-content/60">
+            No in-app browser login: paste a <code class="font-mono">claude setup-token</code>
+            (run it in Claude Code) and click <em>Save provider</em>, or import an existing
+            Claude Code login.
+          </p>
+        </div>
+        <span class={codex_auth_badge_class(@anthropic_auth, false)}>
+          {codex_auth_badge_label(@anthropic_auth, false)}
+        </span>
+      </div>
+
+      <p :if={@anthropic_auth.error} class="mt-2 text-xs text-error">
+        Auth store error: {@anthropic_auth.error}
+      </p>
+
+      <label class="form-control mt-3 w-full">
+        <span class="label pb-1 text-xs font-medium">Setup token</span>
+        <input
+          type="password"
+          name="provider_form[anthropic_setup_token]"
+          placeholder="claude setup-token output (leave blank to keep)"
+          class="input input-bordered input-sm w-full bg-base-100 font-mono"
+        />
+      </label>
+
+      <div :if={@anthropic_import_available?} class="mt-2">
+        <button type="button" class="btn btn-ghost btn-sm" phx-click="anthropic_import">
+          Import Claude Code login
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  attr :provider_form, :map, required: true
+
   defp provider_behavior_panel(assigns) do
     ~H"""
     <section
@@ -444,7 +617,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp reasoning_effort_field(assigns) do
     ~H"""
     <fieldset
-      :if={@provider_form.provider in [:openai, :openai_codex, :xai]}
+      :if={@provider_form.provider in [:openai, :openai_codex, :anthropic, :xai]}
       class="form-control"
     >
       <legend class="label pb-1 text-sm font-medium">Reasoning effort</legend>

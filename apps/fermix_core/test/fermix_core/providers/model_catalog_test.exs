@@ -5,7 +5,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "providers/0" do
     test "lists the four providers" do
-      assert ModelCatalog.providers() == [:openai, :openai_codex, :anthropic, :xai]
+      assert ModelCatalog.providers() == [:openai_codex, :openai, :anthropic, :xai]
     end
   end
 
@@ -42,14 +42,17 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "context_window_for/2" do
     test "returns cataloged context windows for known models" do
+      # OpenAI direct API serves the full window; Codex (OAuth) caps the same model at 400k.
       assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
-      # Anthropic windows are the no-beta defaults; 1M needs the context-1m
-      # beta header the adapter deliberately does not send (design doc §8).
-      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 200_000
+      # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
+      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
+      assert ModelCatalog.context_window_for(:anthropic, "claude-opus-4-7") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
+      # xAI: Grok 4.3 = 1M, Grok 4.20 = 256k.
       assert ModelCatalog.context_window_for(:xai, "grok-4.3") == 1_000_000
+      assert ModelCatalog.context_window_for(:xai, "grok-4.20-0309-reasoning") == 256_000
     end
 
     test "returns a safe default and emits telemetry for unknown models" do

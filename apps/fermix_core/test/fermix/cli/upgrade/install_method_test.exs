@@ -40,14 +40,8 @@ defmodule Fermix.CLI.Upgrade.InstallMethodTest do
   end
 
   test "errors when fermix is not on PATH and no path is supplied" do
-    refute_assert_or_pass = fn ->
-      case InstallMethod.detect(nil) do
-        {:error, :fermix_not_on_path} -> :ok
-        {:unmanaged, _} -> :ok
-        other -> flunk("unexpected result: #{inspect(other)}")
-      end
-    end
-
-    refute_assert_or_pass.()
+    # Inject a self-path resolver that reports "not on PATH" so the result is
+    # deterministic regardless of whether the host has fermix installed.
+    assert {:error, :fermix_not_on_path} = InstallMethod.detect(nil, fn -> nil end)
   end
 end

@@ -3,10 +3,12 @@ defmodule FermixWebWeb.SetupLive do
 
   alias Fermix.CLI.Service
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.XAILogin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
@@ -48,7 +50,9 @@ defmodule FermixWebWeb.SetupLive do
     :fast,
     :openai_api_key,
     :anthropic_api_key,
-    :xai_api_key
+    :xai_api_key,
+    :anthropic_auth_mode,
+    :xai_auth_mode
   ]
   @realtime_restart_keys [
     :realtime_enabled,
@@ -100,6 +104,8 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:restart_pending?, false)
       |> assign(:codex_auth_tasks, %{})
       |> assign(:codex_auth_url, nil)
+      |> assign(:xai_auth_tasks, %{})
+      |> assign(:xai_auth_url, nil)
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign_report(report)
@@ -134,12 +140,14 @@ defmodule FermixWebWeb.SetupLive do
       parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort)
 
     fast = parse_fast_field(Map.get(params, "fast"), current.fast)
+    auth_mode = parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode)
 
     form = %{
       provider: provider,
       default_model: default_model,
       reasoning_effort: reasoning_effort,
-      fast: fast
+      fast: fast,
+      auth_mode: auth_mode
     }
 
     {:noreply,
@@ -149,20 +157,27 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("save_provider", %{"provider_form" => params} = root, socket) do
-    answers =
-      []
-      |> maybe_put_string(:provider, params["provider"])
-      |> maybe_put_string(:default_model, params["default_model"])
-      |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
-      |> maybe_put_string(:fast, params["fast"])
-      |> maybe_put_string(:openai_api_key, params["openai_api_key"])
-      |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
-      |> maybe_put_string(:xai_api_key, params["xai_api_key"])
+    case maybe_store_anthropic_setup_token(params) do
+      :ok ->
+        answers =
+          []
+          |> maybe_put_string(:provider, params["provider"])
+          |> maybe_put_string(:default_model, params["default_model"])
+          |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
+          |> maybe_put_string(:fast, params["fast"])
+          |> maybe_put_string(:openai_api_key, params["openai_api_key"])
+          |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
+          |> maybe_put_string(:xai_api_key, params["xai_api_key"])
+          |> put_auth_mode_answer(params["provider"], params["auth_mode"])
 
-    {:noreply,
-     save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"),
-       restart_required?: runtime_restart_answers?(answers)
-     )}
+        {:noreply,
+         save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"),
+           restart_required?: runtime_restart_answers?(answers)
+         )}
+
+      {:error, reason} ->
+        {:noreply, flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")}
+    end
   end
 
   def handle_event("codex_login", _params, socket) do
@@ -170,6 +185,22 @@ defmodule FermixWebWeb.SetupLive do
       {:noreply, flash_info(socket, "ChatGPT sign-in is already open.")}
     else
       {:noreply, start_codex_auth(socket)}
+    end
+  end
+
+  def handle_event("xai_login", _params, socket) do
+    if xai_auth_running?(socket.assigns.xai_auth_tasks) do
+      {:noreply, flash_info(socket, "Grok sign-in is already open.")}
+    else
+      {:noreply, start_xai_auth(socket)}
+    end
+  end
+
+  def handle_event("anthropic_import", _params, socket) do
+    if anthropic_login_impl().claude_code_available?() do
+      {:noreply, connect_anthropic(socket, fn -> anthropic_login_impl().import_claude_code() end)}
+    else
+      {:noreply, flash_error(socket, "No Claude Code login found to import.")}
     end
   end
 
@@ -361,6 +392,20 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, maybe_clear_codex_auth_url(socket, url)}
   end
 
+  def handle_info({:xai_auth_url, url}, socket) do
+    Process.send_after(self(), {:clear_xai_auth_url, url}, plugin_auth_url_timeout_ms())
+
+    {:noreply,
+     socket
+     |> assign(:xai_auth_url, url)
+     |> flash_info("Opening Grok sign-in.")
+     |> push_event("xai-auth-open", %{url: url})}
+  end
+
+  def handle_info({:clear_xai_auth_url, url}, socket) do
+    {:noreply, maybe_clear_xai_auth_url(socket, url)}
+  end
+
   def handle_info({:plugin_auth_url, name, url}, socket) do
     auth_url = %{name: name, display_name: plugin_display_name(name), url: url}
     Process.send_after(self(), {:clear_plugin_auth_url, name, url}, plugin_auth_url_timeout_ms())
@@ -423,6 +468,11 @@ defmodule FermixWebWeb.SetupLive do
       codex_auth={@codex_auth}
       codex_auth_running?={codex_auth_running?(@codex_auth_tasks)}
       codex_auth_url={@codex_auth_url}
+      xai_auth={@xai_auth}
+      xai_auth_running?={xai_auth_running?(@xai_auth_tasks)}
+      xai_auth_url={@xai_auth_url}
+      anthropic_auth={@anthropic_auth}
+      anthropic_import_available?={@anthropic_import_available?}
       doctor_probe_running?={@doctor_probe_running?}
       provider_form={@provider_form}
       provider_models={@provider_models}
@@ -451,6 +501,9 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:provider_form, build_provider_form(snapshot))
     |> assign(:provider_models, models_for_safe(current_provider(snapshot)))
     |> assign(:codex_auth, codex_auth_summary())
+    |> assign(:xai_auth, xai_auth_summary())
+    |> assign(:anthropic_auth, anthropic_auth_summary())
+    |> assign(:anthropic_import_available?, anthropic_import_available?(snapshot))
     |> assign(:realtime_form, build_realtime_form(snapshot))
     |> assign(:channels_form, build_channels_form(snapshot))
     |> assign(:search_form, build_search_form(snapshot))
@@ -624,10 +677,16 @@ defmodule FermixWebWeb.SetupLive do
       provider: provider,
       default_model:
         Keyword.get(provider_block, :default_model) || ModelCatalog.default_model_for(provider),
-      reasoning_effort: Keyword.get(provider_block, :reasoning_effort, :none),
-      fast: Keyword.get(provider_block, :fast, false)
+      reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
+      fast: Keyword.get(provider_block, :fast, false),
+      auth_mode: Keyword.get(provider_block, :auth_mode, :api_key)
     }
   end
+
+  # Anthropic has no `:none` (its floor is `:low`); its API default is high, so
+  # the form pre-selects high. Other providers default to :none (omit the field).
+  defp default_effort(:anthropic), do: :high
+  defp default_effort(_provider), do: :none
 
   defp build_realtime_form(snapshot) do
     config = snapshot |> get_fermix_core(:realtime) |> RealtimeConfig.normalize()
@@ -1033,9 +1092,16 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp finish_auth_task(socket, ref, result) do
-    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
-      {nil, _tasks} -> finish_codex_auth_task(socket, ref, result)
-      {task, tasks} -> finish_known_plugin_auth(socket, ref, task, tasks, result)
+    cond do
+      Map.has_key?(socket.assigns.plugin_auth_tasks, ref) ->
+        {task, tasks} = Map.pop(socket.assigns.plugin_auth_tasks, ref)
+        finish_known_plugin_auth(socket, ref, task, tasks, result)
+
+      Map.has_key?(socket.assigns.xai_auth_tasks, ref) ->
+        finish_xai_auth_task(socket, ref, result)
+
+      true ->
+        finish_codex_auth_task(socket, ref, result)
     end
   end
 
@@ -1057,9 +1123,16 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp fail_auth_task(socket, ref, reason) do
-    case Map.pop(socket.assigns.plugin_auth_tasks, ref) do
-      {nil, _tasks} -> fail_codex_auth_task(socket, ref, reason)
-      {task, tasks} -> fail_plugin_auth(socket, task, tasks, reason)
+    cond do
+      Map.has_key?(socket.assigns.plugin_auth_tasks, ref) ->
+        {task, tasks} = Map.pop(socket.assigns.plugin_auth_tasks, ref)
+        fail_plugin_auth(socket, task, tasks, reason)
+
+      Map.has_key?(socket.assigns.xai_auth_tasks, ref) ->
+        fail_xai_auth_task(socket, ref, reason)
+
+      true ->
+        fail_codex_auth_task(socket, ref, reason)
     end
   end
 
@@ -1143,6 +1216,170 @@ defmodule FermixWebWeb.SetupLive do
       {:error, reason} -> {:error, {:token_manager_reload_failed, reason}}
     end
   end
+
+  # --- xAI (Grok) loopback OAuth — mirrors the Codex flow -------------------
+
+  defp start_xai_auth(socket) do
+    parent = self()
+
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn -> run_xai_login(parent) end)
+
+    tasks = Map.put(socket.assigns.xai_auth_tasks, task.ref, %{display_name: "Grok"})
+
+    socket
+    |> assign(:xai_auth_tasks, tasks)
+    |> assign(:xai_auth_url, nil)
+    |> flash_info("Opening Grok sign-in.")
+  end
+
+  # Connecting also switches the config route to OAuth — a stored token is inert
+  # until [providers.xai].auth_mode = oauth. Both land before we report success.
+  defp run_xai_login(parent) do
+    with {:ok, entry} <-
+           xai_login_runner().(opener: xai_auth_opener(parent), puts: fn _msg -> :ok end),
+         {:ok, _report} <- Wizard.set_provider_auth_mode(:xai, :oauth) do
+      {:ok, entry}
+    end
+  end
+
+  defp xai_login_runner do
+    Application.get_env(:fermix_web, :xai_login_runner, &XAILogin.login/1)
+  end
+
+  defp xai_auth_opener(parent) do
+    fn url ->
+      send(parent, {:xai_auth_url, url})
+      :ok
+    end
+  end
+
+  defp finish_xai_auth_task(socket, ref, result) do
+    case Map.pop(socket.assigns.xai_auth_tasks, ref) do
+      {nil, _tasks} -> socket
+      {task, tasks} -> finish_known_xai_auth(socket, ref, task, tasks, result)
+    end
+  end
+
+  defp finish_known_xai_auth(socket, ref, task, tasks, result) do
+    Process.demonitor(ref, [:flush])
+    finish_xai_auth(socket, task, tasks, result)
+  end
+
+  defp finish_xai_auth(socket, task, tasks, {:ok, _entry}) do
+    socket
+    |> assign(:xai_auth_tasks, tasks)
+    |> assign(:xai_auth_url, nil)
+    |> assign(:restart_pending?, true)
+    |> refresh_report_preserving_provider_form(
+      "#{task.display_name} OAuth connected. Restart the daemon to apply."
+    )
+  end
+
+  defp finish_xai_auth(socket, task, tasks, {:error, reason}) do
+    fail_xai_auth(socket, task, tasks, reason)
+  end
+
+  defp fail_xai_auth_task(socket, ref, reason) do
+    case Map.pop(socket.assigns.xai_auth_tasks, ref) do
+      {nil, _tasks} -> socket
+      {task, tasks} -> fail_xai_auth(socket, task, tasks, reason)
+    end
+  end
+
+  defp fail_xai_auth(socket, task, tasks, reason) do
+    socket
+    |> assign(:xai_auth_tasks, tasks)
+    |> assign(:xai_auth_url, nil)
+    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+  end
+
+  defp xai_auth_running?(tasks), do: map_size(tasks) > 0
+
+  defp maybe_clear_xai_auth_url(socket, url) do
+    if socket.assigns.xai_auth_url == url do
+      assign(socket, :xai_auth_url, nil)
+    else
+      socket
+    end
+  end
+
+  defp xai_auth_summary, do: oauth_profile_summary("xai_oauth")
+
+  # --- Anthropic setup-token / Claude Code import (synchronous, no loopback) -
+
+  defp connect_anthropic(socket, login_fun) do
+    with {:ok, _entry} <- login_fun.(),
+         {:ok, _report} <- Wizard.set_provider_auth_mode(:anthropic, :oauth) do
+      socket
+      |> assign(:restart_pending?, true)
+      |> refresh_report_preserving_provider_form(
+        "Anthropic OAuth connected. Restart the daemon to apply."
+      )
+    else
+      {:error, reason} ->
+        flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")
+    end
+  end
+
+  defp anthropic_auth_summary, do: oauth_profile_summary("anthropic_oauth")
+
+  defp anthropic_login_impl do
+    Application.get_env(:fermix_web, :anthropic_login_impl, AnthropicLogin)
+  end
+
+  # Probe only when Anthropic is the active provider — claude_code_available?
+  # can shell out (keychain), so it should not run on every render.
+  defp anthropic_import_available?(snapshot) do
+    current_provider(snapshot) == :anthropic and anthropic_login_impl().claude_code_available?()
+  end
+
+  # Shared connected/error read for the oauth profiles, with the same gating as
+  # codex_auth_summary: a missing auth file or missing provider is "not
+  # connected, no error".
+  defp oauth_profile_summary(profile) do
+    case Store.read(profile) do
+      {:ok, _entry} -> %{connected?: true, error: nil}
+      {:error, reason} -> %{connected?: false, error: codex_auth_error(reason)}
+    end
+  rescue
+    error in ArgumentError ->
+      %{connected?: false, error: Exception.message(error)}
+  end
+
+  defp parse_auth_mode_field("api_key", _default), do: :api_key
+  defp parse_auth_mode_field("oauth", _default), do: :oauth
+  defp parse_auth_mode_field(_other, default), do: default
+
+  # The radio submits one `auth_mode` for the currently selected provider; route
+  # it to the per-provider answer key (only anthropic/xai expose the picker).
+  defp put_auth_mode_answer(answers, "anthropic", mode),
+    do: maybe_put_string(answers, :anthropic_auth_mode, mode)
+
+  defp put_auth_mode_answer(answers, "xai", mode),
+    do: maybe_put_string(answers, :xai_auth_mode, mode)
+
+  defp put_auth_mode_answer(answers, _provider, _mode), do: answers
+
+  # A pasted Anthropic setup token is stored to the auth store as part of "Save
+  # provider" (no separate button); blank keeps the existing token. The radio
+  # already routes auth_mode = oauth through `put_auth_mode_answer`.
+  defp maybe_store_anthropic_setup_token(%{
+         "provider" => "anthropic",
+         "auth_mode" => "oauth",
+         "anthropic_setup_token" => token
+       }) do
+    case String.trim(token || "") do
+      "" -> :ok
+      trimmed -> store_result(anthropic_login_impl().store_setup_token(trimmed))
+    end
+  end
+
+  defp maybe_store_anthropic_setup_token(_params), do: :ok
+
+  defp store_result(:ok), do: :ok
+  defp store_result({:ok, _entry}), do: :ok
+  defp store_result({:error, reason}), do: {:error, reason}
 
   defp blank?(nil), do: true
   defp blank?(""), do: true

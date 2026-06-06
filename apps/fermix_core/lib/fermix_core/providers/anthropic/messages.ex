@@ -51,6 +51,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
@@ -171,10 +172,12 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       |> maybe_put(:system, system_blocks(system, mode))
       |> maybe_put(:tools, tools |> wire_tools(mode) |> cache_final_tool())
       |> maybe_put(:temperature, resolve_temperature(model, opts))
+      |> maybe_put(:output_config, output_config(Keyword.get(opts, :reasoning_effort)))
 
     turn_state = %{
       model: model,
       auth_mode: mode,
+      reasoning_effort: Keyword.get(opts, :reasoning_effort),
       system: system,
       messages: messages,
       tools: tools,
@@ -333,6 +336,33 @@ defmodule FermixCore.Providers.Anthropic.Messages do
 
   defp forbids_sampling?(model),
     do: Enum.any?(@no_sampling_substrings, &String.contains?(model, &1))
+
+  # Maps the canonical effort level to Anthropic's `output_config.effort` wire
+  # value (low/medium/high/xhigh/max — no `:none`, the floor is `:low`). nil =>
+  # omit the field and let Anthropic apply its own default (high). Per-model
+  # support (e.g. xhigh is Opus-4.7/4.8-only) is enforced by the API's 400, not
+  # here (ReasoningEffort moduledoc).
+  defp output_config(nil), do: nil
+
+  defp output_config(effort) do
+    case ReasoningEffort.parse(effort) do
+      {:ok, level} -> output_config_for_level(level)
+      :error -> raise ArgumentError, "invalid reasoning_effort: #{inspect(effort)}"
+    end
+  end
+
+  defp output_config_for_level(level) do
+    case ReasoningEffort.to_provider(level, :anthropic) do
+      :omit ->
+        nil
+
+      {:ok, value} ->
+        %{effort: value}
+
+      {:error, {:unsupported, lvl, prov}} ->
+        raise ArgumentError, "reasoning_effort #{lvl} is not supported by #{prov}"
+    end
+  end
 
   # --- transport + response handling ---
 
@@ -581,9 +611,9 @@ defmodule FermixCore.Providers.Anthropic.Messages do
         model: turn_state.model,
         status: status,
         tokens: tokens,
-        # Anthropic has no effort mapping (design doc §9); emit nil explicitly
-        # so the provider-call metadata shape stays uniform across adapters.
-        reasoning_effort: nil
+        # The configured effort sent as `output_config.effort` (or nil when
+        # unset → Anthropic's own default), kept uniform across adapters.
+        reasoning_effort: turn_state.reasoning_effort
       }
       |> Map.merge(turn_state.request_metrics)
       |> Map.merge(error_metadata)

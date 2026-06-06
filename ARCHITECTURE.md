@@ -75,28 +75,24 @@ Controllers and channels should normalize input and delegate.
 
 ### `FermixCore.Agents.MainAgent`
 
-`MainAgent` is the persistent top-level agent process. It accepts normalized
-channel messages, enforces one active request per conversation key, cancels stale
-in-flight work for that same conversation, and lets different conversations run
-independently.
+`MainAgent` is the persistent top-level agent process. It owns runtime-context
+cache state and checks out turn-state snapshots for `Gateway.Queue`, which owns
+FIFO scheduling and one active request per conversation key.
 
 Conversation identity is `{channel, chat_id, thread_scope}`. `thread_ts` is used
 as the canonical thread identifier when present.
 
-When a message is processed, `MainAgent`:
+When a turn-state snapshot is checked out, `MainAgent`:
 
 - loads prompt context through `FermixCore.Prompt.PromptComposer`
 - reads recent conversation history from `FermixCore.Memory.ConversationStore`
 - fetches tools from `FermixCore.Tools.Registry`
 - calls `FermixCore.AgentLoop`
-- writes user and assistant messages back to conversation history
 - emits telemetry
-- replies through the channel-provided `reply_fn`
-- starts asynchronous memory extraction when enabled
 
 Architecture Invariant: `MainAgent` does not know how Telegram, Slack, WhatsApp,
-Discord, Signal, or CLI replies are delivered. The only outbound channel coupling
-is the `reply_fn` carried on the message.
+Discord, Signal, or CLI replies are delivered. The channel `reply_fn` stays with
+`Gateway.Queue` and `TurnRunner`; `MainAgent` hands out core runtime state.
 
 ### `FermixCore.AgentLoop`
 

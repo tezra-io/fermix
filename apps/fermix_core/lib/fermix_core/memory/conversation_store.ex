@@ -65,6 +65,24 @@ defmodule FermixCore.Memory.ConversationStore do
     GenServer.call(server, {:add_message, key, role, content, opts})
   end
 
+  @doc """
+  Close an orphaned (stopped) user turn by appending an assistant marker.
+
+  When `/stop` halts a turn mid-run, the turn's user message has already been
+  persisted but no assistant reply ever commits — leaving a trailing user
+  message the next turn would replay and answer. This appends a short assistant
+  marker after it, but only when the conversation's last stored message is a user
+  message (the orphaned turn). The query stays in history/memory; the marker
+  closes the turn so it is not re-answered. Returns `:marked` when a marker was
+  appended, `:skipped` when there was no orphaned user turn to close.
+  """
+  @spec append_stopped_marker(conversation_key(), String.t(), keyword()) :: :marked | :skipped
+  def append_stopped_marker({channel, chat_id, _thread_scope} = key, content, opts \\ [])
+      when is_binary(channel) and is_binary(chat_id) and is_binary(content) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.call(server, {:append_stopped_marker, key, content, opts})
+  end
+
   @spec get_history(conversation_key(), non_neg_integer() | keyword()) :: [message()]
   def get_history(key, limit_or_opts \\ [])
 
@@ -135,29 +153,21 @@ defmodule FermixCore.Memory.ConversationStore do
   end
 
   @impl true
-  def handle_call(
-        {:add_message, {channel, chat_id, _thread_scope} = key, role, content, opts},
-        _from,
-        state
-      ) do
-    start = System.monotonic_time()
-    message = new_message(role, content)
-    updated = append_message(state, key, message)
-    version = Map.get(state.clear_versions, key, 0)
+  def handle_call({:add_message, key, role, content, opts}, _from, state) do
+    bump_history_version({:reply, :ok, append_and_persist(state, key, role, content, opts)}, key)
+  end
 
-    durable? =
-      enqueue_persist_message(state, key, role, content, opts, message.timestamp, version)
-
-    duration_us = elapsed_us(start)
-
-    :telemetry.execute(
-      [:fermix, :memory, :message],
-      %{count: 1, duration_us: duration_us, durable_write_us: 0},
-      %{channel: channel, chat_id: chat_id, durable?: durable?}
-    )
-
-    {:reply, :ok, put_in(state, [:conversations, key], updated)}
-    |> bump_history_version(key)
+  # Guarded close for a stopped turn: append the assistant marker only when the
+  # last stored message is the orphaned user turn, so we never break role
+  # alternation or mark a turn that already has a reply.
+  def handle_call({:append_stopped_marker, key, content, opts}, _from, state) do
+    if last_message_user?(state, key) do
+      marker_opts = Keyword.put_new(opts, :sender, "main")
+      next_state = append_and_persist(state, key, "assistant", content, marker_opts)
+      bump_history_version({:reply, :marked, next_state}, key)
+    else
+      {:reply, :skipped, state}
+    end
   end
 
   def handle_call({:clear, key}, _from, state) do
@@ -235,6 +245,32 @@ defmodule FermixCore.Memory.ConversationStore do
 
   def handle_call(:list_conversations, _from, state) do
     {:reply, Map.keys(state.conversations), state}
+  end
+
+  defp append_and_persist(state, {channel, chat_id, _thread_scope} = key, role, content, opts) do
+    start = System.monotonic_time()
+    message = new_message(role, content)
+    updated = append_message(state, key, message)
+    version = Map.get(state.clear_versions, key, 0)
+
+    durable? =
+      enqueue_persist_message(state, key, role, content, opts, message.timestamp, version)
+
+    :telemetry.execute(
+      [:fermix, :memory, :message],
+      %{count: 1, duration_us: elapsed_us(start), durable_write_us: 0},
+      %{channel: channel, chat_id: chat_id, durable?: durable?}
+    )
+
+    put_in(state, [:conversations, key], updated)
+  end
+
+  # In-memory history is newest-first, so the head is the most recent message.
+  defp last_message_user?(state, key) do
+    case Map.get(state.conversations, key) do
+      [%{role: "user"} | _rest] -> true
+      _other -> false
+    end
   end
 
   defp new_message(role, content) do

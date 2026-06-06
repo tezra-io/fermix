@@ -34,10 +34,8 @@ if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
       :ok
 
     {:error, reason} ->
-      IO.warn(
-        "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
-          inspect(reason) <> " — booting with compile-time defaults"
-      )
+      raise "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
+              inspect(reason)
   end
 end
 

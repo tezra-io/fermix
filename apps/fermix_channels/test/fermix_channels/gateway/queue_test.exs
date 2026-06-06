@@ -3,9 +3,9 @@ defmodule FermixChannels.Gateway.QueueTest do
 
   import ExUnit.CaptureLog
 
-  alias FermixCore.Memory.ConversationStore
   alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Queue
+  alias FermixCore.Memory.ConversationStore
 
   # Stands in for `FermixCore.Agents.MainAgent.checkout_turn_state/2`. The turn
   # state it returns only needs to carry the test pid the fake runner reports to.

@@ -345,6 +345,31 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
                )
     end
 
+    test "sends output_config.effort when reasoning_effort is set" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["output_config"] == %{"effort" => "high"}
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               Messages.chat(
+                 [%{role: "user", content: "."}],
+                 [],
+                 chat_opts(reasoning_effort: :high)
+               )
+    end
+
+    test "omits output_config when reasoning_effort is unset" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "output_config")
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} = Messages.chat([%{role: "user", content: "."}], [], chat_opts())
+    end
+
     test "includes temperature for models that accept sampling params" do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)

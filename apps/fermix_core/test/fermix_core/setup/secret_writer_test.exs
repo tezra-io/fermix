@@ -40,6 +40,7 @@ defmodule FermixCore.Setup.SecretWriterTest do
 
   setup do
     previous = Application.get_env(:fermix_core, :secret_writer)
+    previous_candidates = Application.get_env(:fermix_core, :secret_writer_candidates)
     FermixTestSupport.SecretWriterStub.reset()
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
 
@@ -47,6 +48,11 @@ defmodule FermixCore.Setup.SecretWriterTest do
       case previous do
         nil -> Application.delete_env(:fermix_core, :secret_writer)
         value -> Application.put_env(:fermix_core, :secret_writer, value)
+      end
+
+      case previous_candidates do
+        nil -> Application.delete_env(:fermix_core, :secret_writer_candidates)
+        value -> Application.put_env(:fermix_core, :secret_writer_candidates, value)
       end
 
       FermixTestSupport.SecretWriterStub.reset()
@@ -62,13 +68,26 @@ defmodule FermixCore.Setup.SecretWriterTest do
 
   test "auto writer selects an available portable candidate" do
     Application.delete_env(:fermix_core, :secret_writer)
-    candidates = [UnavailableCandidate, AvailableCandidate]
 
-    assert SecretWriter.available?(candidates: candidates)
-    assert :ok = SecretWriter.put(:openai_api_key, "sk-test", candidates: candidates)
-    assert {:ok, "from-auto"} = SecretWriter.get(:openai_api_key, candidates: candidates)
+    Application.put_env(:fermix_core, :secret_writer_candidates, [
+      UnavailableCandidate,
+      AvailableCandidate
+    ])
+
+    assert SecretWriter.available?()
+    assert :ok = SecretWriter.put(:openai_api_key, "sk-test")
+    assert {:ok, "from-auto"} = SecretWriter.get(:openai_api_key)
 
     assert %{command: "/bin/fake-keyring", args: ["openai_api_key"]} =
-             SecretWriter.command_source(:openai_api_key, candidates: candidates)
+             SecretWriter.command_source(:openai_api_key)
+  end
+
+  test "secret-tool command source uses linux secret-tool lookup attributes" do
+    assert %{
+             command: command,
+             args: ["lookup", "service", "fermix", "account", "fermix", "env", "OPENAI_API_KEY"]
+           } = SecretWriter.SecretTool.command_source(:openai_api_key)
+
+    assert command == "secret-tool" or String.ends_with?(command, "/secret-tool")
   end
 end

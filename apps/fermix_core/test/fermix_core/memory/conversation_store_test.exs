@@ -140,6 +140,42 @@ defmodule FermixCore.Memory.ConversationStoreTest do
     assert [%{content: "msg2"}] = ConversationStore.get_history(@key2, server: store)
   end
 
+  # --- append_stopped_marker (stopped-turn marker) ---
+
+  test "append_stopped_marker closes an orphaned user turn with an assistant marker",
+       %{store: store} do
+    ConversationStore.add_message(@key, "user", "the stopped question", server: store)
+    sync(store)
+
+    assert :marked = ConversationStore.append_stopped_marker(@key, "[stopped]", server: store)
+    sync(store)
+
+    history = ConversationStore.get_history(@key, server: store)
+
+    assert [
+             %{role: "user", content: "the stopped question"},
+             %{role: "assistant", content: "[stopped]"}
+           ] = history
+  end
+
+  test "append_stopped_marker skips when the last message is not a user turn",
+       %{store: store} do
+    ConversationStore.add_message(@key, "user", "answered question", server: store)
+    ConversationStore.add_message(@key, "assistant", "the answer", server: store)
+    sync(store)
+
+    assert :skipped = ConversationStore.append_stopped_marker(@key, "[stopped]", server: store)
+    sync(store)
+
+    history = ConversationStore.get_history(@key, server: store)
+    assert ["answered question", "the answer"] == Enum.map(history, & &1.content)
+  end
+
+  test "append_stopped_marker skips when the conversation has no history", %{store: store} do
+    assert :skipped = ConversationStore.append_stopped_marker(@key, "[stopped]", server: store)
+    assert [] == ConversationStore.get_history(@key, server: store)
+  end
+
   # --- Rolling window / compaction ---
 
   test "compacts messages when over max_messages limit", %{store: store} do
