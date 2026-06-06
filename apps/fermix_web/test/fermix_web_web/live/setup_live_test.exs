@@ -773,6 +773,17 @@ defmodule FermixWebWeb.SetupLiveTest do
   end
 
   describe "Personalization form" do
+    test "defaults the timezone field to America/New_York when none is set", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> element("button[phx-value-tab=\"personalization\"]")
+        |> render_click()
+
+      assert html =~ "America/New_York"
+    end
+
     test "submitting persists name, timezone, and communication style", %{
       conn: conn,
       tmp_home: tmp_home

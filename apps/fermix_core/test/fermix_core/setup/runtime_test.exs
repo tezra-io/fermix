@@ -96,8 +96,16 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     :ok =
       ConfigStore.save_snapshot(
-        snapshot_with_openai_key(baseline_snapshot(), Keyword.get(opts, :openai_api_key))
+        baseline_snapshot()
+        |> snapshot_with_openai_key(Keyword.get(opts, :openai_api_key))
+        |> maybe_drop_personalization(Keyword.get(opts, :personalization, true))
       )
+  end
+
+  defp maybe_drop_personalization(snapshot, true), do: snapshot
+
+  defp maybe_drop_personalization(snapshot, false) do
+    %{snapshot | fermix_core: Keyword.delete(snapshot.fermix_core, :personalization)}
   end
 
   # Persist the openai api_key as a plaintext config literal. On hosts with an
@@ -240,6 +248,27 @@ defmodule FermixCore.Setup.RuntimeTest do
   end
 
   defp puts_lines(agent), do: agent |> Agent.get(& &1) |> Enum.reverse()
+
+  describe "personalization defaults" do
+    test "blank timezone answer falls back to America/New_York" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home, personalization: false)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      personalization = snapshot.fermix_core |> Keyword.get(:personalization, [])
+      assert Keyword.get(personalization, :timezone) == "America/New_York"
+    end
+  end
 
   describe "finalize probe wiring" do
     test "skip_probe: true bypasses the probe entirely" do

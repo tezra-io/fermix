@@ -750,7 +750,9 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       user_name: Keyword.get(personalization, :user_name, ""),
-      timezone: Keyword.get(personalization, :timezone, ""),
+      # Default to New York so the form is never blank; the agent reads this
+      # (via Application env) to stamp each turn with the current local date.
+      timezone: Keyword.get(personalization, :timezone, "America/New_York"),
       communication_style: Keyword.get(personalization, :communication_style, "")
     }
   end

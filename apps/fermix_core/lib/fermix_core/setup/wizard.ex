@@ -532,7 +532,9 @@ defmodule FermixCore.Setup.Wizard do
       },
       %{
         key: :timezone,
-        label: "Your timezone (e.g. America/Los_Angeles)",
+        label: "Your timezone (e.g. America/Los_Angeles; blank = America/New_York)",
+        # Keep in sync with the web setup default in FermixWebWeb.SetupLive.
+        default: "America/New_York",
         required?: missing_component?(state, "personalization")
       },
       %{

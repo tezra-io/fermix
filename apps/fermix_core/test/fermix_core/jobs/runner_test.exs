@@ -144,6 +144,11 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     assert Enum.any?(
              messages,
+             &(&1.role == "system" and &1.content =~ "Current date:")
+           )
+
+    assert Enum.any?(
+             messages,
              &(&1.role == "user" and &1.content == "Summarize the repository status.")
            )
 
