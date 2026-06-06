@@ -45,7 +45,13 @@ defmodule FermixCore.Providers.XAI.Responses do
   def chat(messages, capabilities, opts)
       when is_list(messages) and messages != [] and is_list(capabilities) and is_list(opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    auth = resolve_auth!(opts)
+
+    with {:ok, auth} <- resolve_auth(opts) do
+      do_chat(messages, capabilities, auth, req_options, opts)
+    end
+  end
+
+  defp do_chat(messages, capabilities, auth, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
 
     {instructions, input} = ResponsesShared.build_input(messages)
@@ -65,7 +71,13 @@ defmodule FermixCore.Providers.XAI.Responses do
       when is_map(provider_state) and is_list(tool_results) and tool_results != [] and
              is_list(opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    auth = resolve_auth!(opts)
+
+    with {:ok, auth} <- resolve_auth(opts) do
+      do_continue(provider_state, tool_results, auth, req_options, opts)
+    end
+  end
+
+  defp do_continue(provider_state, tool_results, auth, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
 
     %{input: prior_input, output_items: output_items, tools: tools, capabilities: capabilities} =
@@ -160,40 +172,49 @@ defmodule FermixCore.Providers.XAI.Responses do
 
   # --- auth ---
 
-  defp resolve_auth!(opts) do
+  defp resolve_auth(opts) do
     api_key = nonempty_string(Keyword.get(opts, :api_key))
     access_token = nonempty_string(Keyword.get(opts, :access_token))
     auth_profile = Keyword.get(opts, :auth_profile)
 
     cond do
       api_key ->
-        {:api_key, api_key}
+        {:ok, {:api_key, api_key}}
 
       access_token ->
-        {:oauth_static, access_token}
+        {:ok, {:oauth_static, access_token}}
 
       is_binary(auth_profile) ->
-        {:oauth_server, Keyword.get(opts, :token_server, TokenSupervisor), auth_profile}
+        {:ok, {:oauth_server, Keyword.get(opts, :token_server, TokenSupervisor), auth_profile}}
 
       true ->
-        raise ArgumentError, "XAI.Responses requires :api_key, :access_token, or :auth_profile"
+        {:error,
+         ProviderError.auth(
+           :xai,
+           :responses,
+           "XAI.Responses requires :api_key, :access_token, or :auth_profile"
+         )}
     end
   end
 
   defp auth_mode({:api_key, _key}), do: :api_key
   defp auth_mode(_auth), do: :oauth
 
-  defp current_bearer({:api_key, key}), do: key
-  defp current_bearer({:oauth_static, token}), do: token
+  defp current_bearer({:api_key, key}), do: {:ok, key}
+  defp current_bearer({:oauth_static, token}), do: {:ok, token}
 
   defp current_bearer({:oauth_server, server, profile}) do
     case server.get_token(profile) do
       {:ok, token} ->
-        token
+        {:ok, token}
 
       {:error, reason} ->
-        raise ArgumentError,
-              "XAI.Responses requires a bearer token: token server returned #{inspect(reason)}"
+        {:error,
+         ProviderError.auth(
+           :xai,
+           :responses,
+           "XAI.Responses requires a bearer token: token server returned #{inspect(reason)}"
+         )}
     end
   end
 
@@ -237,6 +258,13 @@ defmodule FermixCore.Providers.XAI.Responses do
   end
 
   defp attempt(base_url, auth, body, req_options, turn_state) do
+    case current_bearer(auth) do
+      {:ok, bearer} -> do_attempt(base_url, bearer, body, req_options, turn_state)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp do_attempt(base_url, bearer, body, req_options, turn_state) do
     raw =
       Req.new(
         url: "#{base_url}/responses",
@@ -244,7 +272,7 @@ defmodule FermixCore.Providers.XAI.Responses do
         json: body,
         receive_timeout: @receive_timeout_ms,
         headers: [
-          {"authorization", "Bearer " <> current_bearer(auth)},
+          {"authorization", "Bearer " <> bearer},
           {"content-type", "application/json"}
         ]
       )

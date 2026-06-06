@@ -213,10 +213,11 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       assert turn.provider_state.capabilities == [capability()]
     end
 
-    test "raises when api_key is missing" do
-      assert_raise ArgumentError, ~r/requires :api_key/, fn ->
-        Responses.chat([%{role: "user", content: "x"}], [], model: "gpt-5.4-mini")
-      end
+    test "returns an auth error when api_key is missing" do
+      assert {:error, {:provider_error, %{provider: :openai, kind: :auth, message: message}}} =
+               Responses.chat([%{role: "user", content: "x"}], [], model: "gpt-5.4-mini")
+
+      assert message =~ "requires :api_key"
     end
 
     test "returns structured provider errors on a non-200 response" do

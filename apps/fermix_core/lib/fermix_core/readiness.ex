@@ -16,8 +16,6 @@ defmodule FermixCore.Readiness do
   alias FermixCore.Config
   alias FermixCore.Realtime.Config, as: RealtimeConfig
 
-  require Logger
-
   @typedoc """
   Public readiness state.
 
@@ -197,13 +195,6 @@ defmodule FermixCore.Readiness do
       {:error, _reason} ->
         false
     end
-  rescue
-    e in ArgumentError ->
-      Logger.warning(
-        "Readiness: Auth.Store.read(#{profile}) raised — auth.json may be malformed: #{Exception.message(e)}"
-      )
-
-      false
   end
 
   defp telegram_failure do
@@ -364,13 +355,6 @@ defmodule FermixCore.Readiness do
       {:ok, entry} -> present?(entry.tokens.access_token)
       {:error, _reason} -> false
     end
-  rescue
-    e in ArgumentError ->
-      Logger.warning(
-        "Readiness: Auth.Store.read(:openai_codex) raised — auth.json may be malformed: #{Exception.message(e)}"
-      )
-
-      false
   end
 
   defp configured?(config, keys) do

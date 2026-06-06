@@ -99,6 +99,65 @@ defmodule FermixCore.Sandbox.EnvTest do
     assert {:error, :env_command_output_not_single_value} = Env.build(config)
   end
 
+  test "command env source rejects oversized helper output" do
+    config =
+      command_source_config(["-c", "head -c 9000 /dev/zero | tr '\\0' 'a'"], 5_000)
+
+    assert {:error, :env_command_output_too_large} = Env.build(config)
+  end
+
+  test "missing helper executable returns an error instead of crashing" do
+    missing = "/no/such/helper-#{System.unique_integer([:positive])}"
+
+    config =
+      Config.normalize(
+        env: [
+          allow: ["FERMIX_TEST_SECRET"],
+          sources: %{
+            "FERMIX_TEST_SECRET" => [source: :command, command: missing, args: []]
+          }
+        ]
+      )
+
+    assert {:error, {:env_command_not_found, ^missing}} = Env.build(config)
+
+    message = Env.format_error({:env_command_not_found, missing})
+    assert message =~ missing
+    assert message =~ "fermix sandbox env set"
+  end
+
+  test "helper timeout kills the OS child" do
+    marker =
+      Path.join(System.tmp_dir!(), "fermix_env_kill_#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(marker) end)
+
+    config = command_source_config(["-c", "sleep 0.4; touch #{marker}"], 100)
+
+    assert {:error, {:env_command_timeout, _command, 100}} = Env.build(config)
+
+    Process.sleep(800)
+    refute File.exists?(marker), "helper child outlived the timeout — touch ran to completion"
+  end
+
+  defp command_source_config(args, timeout_ms) do
+    sh = System.find_executable("sh") || "/bin/sh"
+
+    Config.normalize(
+      env: [
+        allow: ["FERMIX_TEST_SECRET"],
+        sources: %{
+          "FERMIX_TEST_SECRET" => [
+            source: :command,
+            command: sh,
+            args: args,
+            timeout_ms: timeout_ms
+          ]
+        }
+      ]
+    )
+  end
+
   test "command env build requires pass_env names to be allowed" do
     config = Config.normalize(env: [allow: []])
 

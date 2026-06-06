@@ -44,7 +44,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    bearer = require_bearer_token!(opts)
+
+    with {:ok, bearer} <- fetch_bearer_token(opts) do
+      do_chat(messages, capabilities, bearer, req_options, opts)
+    end
+  end
+
+  defp do_chat(messages, capabilities, bearer, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
@@ -81,7 +87,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @impl true
   def continue(provider_state, tool_results, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    bearer = require_bearer_token!(opts)
+
+    with {:ok, bearer} <- fetch_bearer_token(opts) do
+      do_continue(provider_state, tool_results, bearer, req_options, opts)
+    end
+  end
+
+  defp do_continue(provider_state, tool_results, bearer, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
@@ -195,27 +207,39 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     end
   end
 
-  defp require_bearer_token!(opts) do
+  defp fetch_bearer_token(opts) do
     cond do
       key = nonempty_string(Keyword.get(opts, :api_key)) ->
-        key
+        {:ok, key}
 
       key = nonempty_string(Keyword.get(opts, :access_token)) ->
-        key
+        {:ok, key}
 
       token_server = Keyword.get(opts, :token_server) ->
-        case TokenManager.get_token(token_server) do
-          {:ok, token} ->
-            token
-
-          {:error, reason} ->
-            raise ArgumentError,
-                  "OpenAI.Responses requires a bearer token: TokenManager returned #{inspect(reason)}"
-        end
+        bearer_from_token_server(token_server)
 
       true ->
-        raise ArgumentError,
-              "OpenAI.Responses requires :api_key, :access_token, or :token_server"
+        {:error,
+         ProviderError.auth(
+           :openai,
+           :responses,
+           "OpenAI.Responses requires :api_key, :access_token, or :token_server"
+         )}
+    end
+  end
+
+  defp bearer_from_token_server(token_server) do
+    case TokenManager.get_token(token_server) do
+      {:ok, token} ->
+        {:ok, token}
+
+      {:error, reason} ->
+        {:error,
+         ProviderError.auth(
+           :openai,
+           :responses,
+           "OpenAI.Responses requires a bearer token: TokenManager returned #{inspect(reason)}"
+         )}
     end
   end
 

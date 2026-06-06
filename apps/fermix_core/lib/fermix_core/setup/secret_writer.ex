@@ -72,6 +72,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @behaviour FermixCore.Setup.SecretWriter
 
+  alias FermixCore.CommandRunner
   alias FermixCore.Setup.SecretPaths
 
   @account "fermix"
@@ -138,19 +139,27 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   defp timeout(opts), do: Keyword.get(opts, :timeout_ms, @default_timeout_ms)
 
+  # CommandRunner kills the OS child on timeout — the prior Task.async +
+  # System.cmd pattern only ended the BEAM task and left `security` running
+  # (e.g. hung on a locked keychain).
   defp run(binary, args, timeout_ms) do
     command = Enum.join([binary | args_without_secret(args)], " ")
-    task = Task.async(fn -> System.cmd(binary, args, stderr_to_stdout: true) end)
 
-    case Task.yield(task, timeout_ms) || Task.shutdown(task) do
-      {:ok, {output, 0}} ->
+    case CommandRunner.run(binary, args, timeout_ms: timeout_ms) do
+      {:ok, %{exit: 0, stdout: output, truncated?: false}} ->
         {:ok, output}
 
-      {:ok, {output, code}} ->
+      {:ok, %{exit: code, stdout: output}} ->
         {:error, {:helper_failed, command, code, String.slice(output, 0, 200)}}
 
-      nil ->
+      {:error, {:timeout, ^timeout_ms}} ->
         {:error, {:helper_timeout, command, timeout_ms}}
+
+      {:error, {:executable_not_found, _path}} ->
+        {:error, :unavailable}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

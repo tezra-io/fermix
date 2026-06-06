@@ -88,7 +88,12 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   def supports_streaming?, do: false
 
   defp request(messages, capabilities, opts) do
-    api_key = require_api_key!(opts)
+    with {:ok, api_key} <- fetch_api_key(opts) do
+      do_request(messages, capabilities, api_key, opts)
+    end
+  end
+
+  defp do_request(messages, capabilities, api_key, opts) do
     model = Keyword.fetch!(opts, :model)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
@@ -234,10 +239,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     )
   end
 
-  defp require_api_key!(opts) do
+  defp fetch_api_key(opts) do
     case Keyword.get(opts, :api_key) do
-      key when is_binary(key) and key != "" -> key
-      _ -> raise ArgumentError, "OpenAI.ChatCompletions.chat/3 requires :api_key"
+      key when is_binary(key) and key != "" ->
+        {:ok, key}
+
+      _ ->
+        {:error,
+         ProviderError.auth(
+           :openai,
+           :chat_completions,
+           "OpenAI.ChatCompletions.chat/3 requires :api_key"
+         )}
     end
   end
 

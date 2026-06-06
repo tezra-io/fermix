@@ -32,6 +32,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
@@ -44,7 +45,13 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    auth = resolve_auth!(opts)
+
+    with {:ok, auth} <- resolve_auth(opts) do
+      do_chat(messages, capabilities, auth, req_options, opts)
+    end
+  end
+
+  defp do_chat(messages, capabilities, auth, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     url = Keyword.get(opts, :base_url, @default_url)
 
@@ -95,7 +102,13 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   @impl true
   def continue(provider_state, tool_results, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    auth = resolve_auth!(opts)
+
+    with {:ok, auth} <- resolve_auth(opts) do
+      do_continue(provider_state, tool_results, auth, req_options, opts)
+    end
+  end
+
+  defp do_continue(provider_state, tool_results, auth, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     url = Keyword.get(opts, :base_url, @default_url)
 
@@ -527,17 +540,21 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp message_text(_item), do: ""
 
-  defp resolve_auth!(opts) do
+  defp resolve_auth(opts) do
     case Keyword.get(opts, :access_token) do
       token when is_binary(token) and token != "" ->
-        %{token: token, refreshable?: false, token_server: nil}
+        {:ok, %{token: token, refreshable?: false, token_server: nil}}
 
       _ ->
         token_server = Keyword.get(opts, :token_server, TokenManager)
 
         case TokenManager.get_token(token_server) do
-          {:ok, token} -> %{token: token, refreshable?: true, token_server: token_server}
-          {:error, reason} -> raise ArgumentError, "Codex auth required: #{inspect(reason)}"
+          {:ok, token} ->
+            {:ok, %{token: token, refreshable?: true, token_server: token_server}}
+
+          {:error, reason} ->
+            {:error,
+             ProviderError.auth(:openai_codex, :codex, "Codex auth required: #{inspect(reason)}")}
         end
     end
   end

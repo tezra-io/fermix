@@ -220,12 +220,14 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           name: stub_server
         )
 
-      assert_raise ArgumentError, ~r/Codex auth required/, fn ->
-        Codex.chat([%{role: "user", content: "x"}], [],
-          model: "gpt-5",
-          token_server: stub_server
-        )
-      end
+      assert {:error,
+              {:provider_error, %{provider: :openai_codex, kind: :auth, message: message}}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 model: "gpt-5",
+                 token_server: stub_server
+               )
+
+      assert message =~ "Codex auth required"
     end
 
     test "returns {:error, _} on a non-200 response" do
