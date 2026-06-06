@@ -204,7 +204,12 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
     )
 
     Req.Test.stub(test_id, fn conn ->
-      send(test_pid, :web_search_request)
+      # Only a *followed* redirect reaches the leak target. The keyed backend
+      # forces redirect: false, so the 302 surfaces as a provider error and
+      # web_search degrades to DuckDuckGo (a legitimate second request to a
+      # different host) — but a request to evil.example would mean the redirect
+      # was followed (the regression this test guards against).
+      if conn.host == "evil.example", do: send(test_pid, :redirect_followed)
 
       conn
       |> Plug.Conn.put_resp_header("location", "https://evil.example/leak")
@@ -222,9 +227,8 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
     assert result.success == false
     assert result.error =~ "provider_error"
 
-    # redirect: false → the 302 is surfaced, never followed to the target host
-    assert_received :web_search_request
-    refute_received :web_search_request
+    # redirect: false → the 302 is surfaced, never followed to the leak target
+    refute_received :redirect_followed
   end
 
   test "manual unknown backend names use the DuckDuckGo default" do
@@ -238,6 +242,58 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
       )
 
     assert_result(result, "Fermix", "https://example.com/fermix", "Elixir agent platform.")
+  end
+
+  test "degrades to duckduckgo when the configured backend errors (e.g. out of credits)" do
+    handler_id = attach_tool_telemetry()
+
+    result =
+      execute_search(
+        [backend: :exa, exa_api_key: "exa-secret"],
+        fn conn ->
+          case conn.host do
+            "html.duckduckgo.com" -> Plug.Conn.resp(conn, 200, ddg_results_fixture())
+            _exa -> Plug.Conn.resp(conn, 402, "")
+          end
+        end
+      )
+
+    # DuckDuckGo served the results, and the degrade is visible in the trace.
+    assert_result(result, "Fermix", "https://example.com/fermix", "Elixir agent platform.")
+
+    assert_receive {:telemetry,
+                    %{backend: "duckduckgo", primary_backend: "exa", degraded: true} = meta}
+
+    assert meta.fallback_reason =~ "402"
+    :telemetry.detach(handler_id)
+  end
+
+  test "does not fall back when the configured backend is already duckduckgo" do
+    # A DuckDuckGo failure surfaces as an error — there is nothing keyless to
+    # degrade to, so the error is not masked by a second attempt.
+    assert_error([backend: :duckduckgo], 500, %{}, "network")
+  end
+
+  test "surfaces the configured backend's error when the duckduckgo fallback also fails" do
+    test_id = :"web_search_both_fail_#{System.unique_integer([:positive])}"
+
+    Application.put_env(:fermix_core, :tools,
+      web_search: [backend: :exa, exa_api_key: "exa-secret"]
+    )
+
+    # Both the exa endpoint and the duckduckgo fallback fail.
+    Req.Test.stub(test_id, fn conn -> Plug.Conn.resp(conn, 402, "") end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    assert {:ok, result} = WebSearch.execute(%{"query" => "fermix"}, context)
+    assert result.success == false
+    # The operator's chosen backend (exa) error is surfaced, not duckduckgo's.
+    assert result.error =~ "provider_error"
   end
 
   defp execute_search(tools, handler) do

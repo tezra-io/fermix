@@ -5,6 +5,8 @@ defmodule FermixCore.Tools.WebSearch do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  require Logger
+
   alias FermixCore.Tools.Support
   alias FermixCore.Tools.WebSearch.Backends.Brave
   alias FermixCore.Tools.WebSearch.Backends.DuckDuckGo
@@ -24,6 +26,13 @@ defmodule FermixCore.Tools.WebSearch do
   @backend_names Map.keys(@backend_modules)
   @max_query_length 1_024
   @max_results 10
+
+  # web_search degrades to keyless DuckDuckGo only when the configured backend is
+  # *unavailable*: out of credits / HTTP 402 and other provider errors, rate
+  # limits, transport failures, or response-schema drift. Auth / missing-key and
+  # bad-query errors are deliberately NOT degradable — they must surface so they
+  # get fixed, not be masked behind a different provider.
+  @degradable_error_prefixes ["provider_error", "rate_limited", "network", "parser_changed"]
 
   @impl true
   def name, do: "web_search"
@@ -97,16 +106,81 @@ defmodule FermixCore.Tools.WebSearch do
     {backend_name, backend} = active_backend(config)
 
     with {:ok, query} <- Support.required_string(args, "query"),
-         :ok <- validate_query(query),
-         {:ok, results, backend_trace} <- backend.search(query, backend_opts(config, context)) do
-      trimmed = Enum.take(results, @max_results)
-      metadata = Map.merge(backend_trace, result_metadata(backend.name(), length(trimmed)))
-      Support.success_json(trimmed, metadata)
+         :ok <- validate_query(query) do
+      run_backend(backend, backend_name, query, config, context)
     else
-      {:error, reason, backend_trace} -> error_result(reason, backend_name, backend_trace)
       {:error, reason} -> error_result(reason, backend_name, %{})
     end
   end
+
+  # Runs the configured backend. On a backend *execution* error (e.g. Exa out of
+  # credits -> HTTP 402, or a transport failure) — never on empty results or a
+  # bad query — degrade ONCE to the keyless DuckDuckGo backend, so a dead paid
+  # provider doesn't break web search. The degrade is loud: a warning log plus
+  # `degraded`/`primary_backend`/`fallback_reason` in the result metadata (which
+  # rides the tool trace), never silent — the broken backend stays visible and
+  # fixable instead of masked.
+  defp run_backend(backend, backend_name, query, config, context) do
+    case backend.search(query, backend_opts(config, context)) do
+      {:ok, results, trace} -> search_success(results, backend_name, trace)
+      error -> maybe_degrade(error, backend_name, query, config, context)
+    end
+  end
+
+  # Degrade ONCE to keyless DuckDuckGo only when the configured (non-DuckDuckGo)
+  # backend is *unavailable* (see `@degradable_error_prefixes`). Auth/missing-key
+  # and bad-query errors surface as-is. Loud, not silent: a warning log plus
+  # `degraded`/`primary_backend`/`fallback_reason` in the trace keep the broken
+  # backend visible and fixable.
+  defp maybe_degrade(error, backend_name, query, config, context) do
+    {reason, trace} = error_parts(error)
+
+    if backend_name != :duckduckgo and degradable?(reason) do
+      degrade_to_duckduckgo(reason, backend_name, query, config, context)
+    else
+      error_result(reason, backend_name, trace)
+    end
+  end
+
+  defp degrade_to_duckduckgo(reason, backend_name, query, config, context) do
+    Logger.warning(
+      "web_search backend #{backend_name} failed (#{reason}); degrading to duckduckgo"
+    )
+
+    case DuckDuckGo.search(query, backend_opts(config, context)) do
+      {:ok, results, ddg_trace} ->
+        trace =
+          Map.merge(ddg_trace, %{
+            primary_backend: Atom.to_string(backend_name),
+            fallback_reason: reason,
+            degraded: true
+          })
+
+        search_success(results, :duckduckgo, trace)
+
+      duckduckgo_error ->
+        {ddg_reason, _trace} = error_parts(duckduckgo_error)
+        # Both failed — surface the operator's chosen backend error, not DuckDuckGo's.
+        error_result(reason, backend_name, %{
+          fallback: "duckduckgo_failed",
+          duckduckgo_error: ddg_reason
+        })
+    end
+  end
+
+  defp degradable?(reason) when is_binary(reason),
+    do: String.starts_with?(reason, @degradable_error_prefixes)
+
+  defp degradable?(_reason), do: false
+
+  defp search_success(results, backend_name, trace) do
+    trimmed = Enum.take(results, @max_results)
+    metadata = Map.merge(trace, result_metadata(backend_name, length(trimmed)))
+    Support.success_json(trimmed, metadata)
+  end
+
+  defp error_parts({:error, reason, trace}), do: {reason, trace}
+  defp error_parts({:error, reason}), do: {reason, %{}}
 
   defp validate_query(query) do
     if String.length(query) <= @max_query_length do
