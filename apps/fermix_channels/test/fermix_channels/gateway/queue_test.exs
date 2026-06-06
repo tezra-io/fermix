@@ -215,7 +215,7 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:reply, "reply:a"}, 5_000
     end
 
-    test "clears the active slot when a turn crashes", ctx do
+    test "clears the active slot and replies when a turn crashes", ctx do
       queue = start_queue(ctx)
 
       capture_log(fn ->
@@ -225,6 +225,8 @@ defmodule FermixChannels.Gateway.QueueTest do
 
         send(turn_pid, {:proceed, :crash})
         assert_receive {:DOWN, ^ref, :process, ^turn_pid, _reason}, 5_000
+        assert_receive {:reply, reply}, 5_000
+        assert reply =~ "error processing your message"
         assert eventually(fn -> Queue.status(queue).active_requests == 0 end)
       end)
     end
