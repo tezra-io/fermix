@@ -34,6 +34,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
@@ -193,6 +194,11 @@ defmodule FermixCore.Agents.TurnRunner do
       channel: msg.channel
     }
 
+    # The composed prompt + runtime section are cached per profile, so the
+    # current date can't live there (it would freeze until the cache is
+    # invalidated). Inject it fresh every turn instead.
+    messages = inject_current_date(messages)
+
     # `/ultra` is now a run-mode of the normal turn (not a separate
     # orchestrator): the tag unlocks the wider `subagents` caps via
     # `subagent_mode: :ultra` in context (which the loop reads when refreshing
@@ -225,6 +231,13 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp apply_run_profile(_normal, messages, context), do: {messages, context}
+
+  # Kept in the leading system run (the Anthropic adapter requires system
+  # messages to lead) so the date sits with the rest of the system prompt.
+  defp inject_current_date(messages) do
+    {system_run, rest} = Enum.split_while(messages, &(&1.role == "system"))
+    system_run ++ [%{role: "system", content: CurrentDate.note()}] ++ rest
+  end
 
   # Insert the ultra-mode addendum as the last leading system message — after
   # the composed system prompt, before history. Keeps system messages leading

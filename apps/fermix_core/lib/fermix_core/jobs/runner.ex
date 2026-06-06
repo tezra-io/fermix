@@ -16,6 +16,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Setup.ConfigStore
@@ -383,6 +384,7 @@ defmodule FermixCore.Jobs.Runner do
   defp fallback_loop_input(state, reason) do
     messages = [
       %{role: "system", content: cron_guidance()},
+      %{role: "system", content: CurrentDate.note()},
       %{role: "user", content: state.job.task_prompt}
     ]
 
@@ -400,11 +402,14 @@ defmodule FermixCore.Jobs.Runner do
     SkillRegistry.load(state.skill_registry, state.job.skill_name)
   end
 
+  # Job runs bypass TurnRunner, so they stamp the current date themselves —
+  # scheduled work is exactly where "today" matters most.
   defp prompt_messages(job, skill) do
     [
       %{role: "system", content: cron_guidance()},
       skill_prompt_message(skill, job),
       %{role: "system", content: job_context_prompt(job)},
+      %{role: "system", content: CurrentDate.note()},
       %{role: "user", content: job.task_prompt}
     ]
     |> Enum.reject(&is_nil/1)
