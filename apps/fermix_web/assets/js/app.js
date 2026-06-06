@@ -78,6 +78,10 @@ window.addEventListener("phx:codex-auth-open", ({detail}) => {
   openAuthUrl(detail?.url)
 })
 
+window.addEventListener("phx:xai-auth-open", ({detail}) => {
+  openAuthUrl(detail?.url)
+})
+
 // connect if there are any LiveViews on the page
 liveSocket.connect()
 

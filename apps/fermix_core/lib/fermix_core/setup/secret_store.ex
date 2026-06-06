@@ -6,6 +6,7 @@ defmodule FermixCore.Setup.SecretStore do
   through `SecretWriter` before the snapshot is written to disk.
   """
 
+  alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretWriter
 
@@ -192,7 +193,7 @@ defmodule FermixCore.Setup.SecretStore do
 
   defp warn_plaintext_secret(secret) do
     Logger.warning(
-      "config.toml contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
+      "#{ConfigStore.path()} contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
     )
   end
 

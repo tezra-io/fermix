@@ -306,10 +306,10 @@ defmodule FermixCore.Setup.WizardTest do
 
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s(source = "command")
-    assert contents =~ ~s(command = "/usr/bin/security")
+    assert contents =~ ~s(command = "stub-keyring")
 
     assert contents =~
-             ~s(args = ["find-generic-password", "-a", "fermix", "-s", "fermix:OPENAI_API_KEY", "-w"])
+             ~s(args = ["openai_api_key"])
 
     refute contents =~ ~s([sandbox.env.TELEGRAM_BOT_TOKEN])
   end
@@ -514,7 +514,7 @@ defmodule FermixCore.Setup.WizardTest do
     assert :reasoning_effort in keys
   end
 
-  test "reconfigure omits reasoning_effort for a provider that can't use it (Anthropic)" do
+  test "reconfigure offers reasoning_effort for Anthropic (now wired)" do
     tmp_home =
       Path.join(
         System.tmp_dir!(),
@@ -542,7 +542,7 @@ defmodule FermixCore.Setup.WizardTest do
       |> Wizard.reconfigure_prompts([])
       |> Enum.map(& &1.key)
 
-    refute :reasoning_effort in keys
+    assert :reasoning_effort in keys
   end
 
   test "prompts include provider/default_model/reasoning_effort when agent.provider is unset" do
@@ -1208,14 +1208,23 @@ defmodule FermixCore.Setup.WizardTest do
       end
     end
 
-    test "raises when reasoning_effort answered for :anthropic provider" do
-      Application.put_env(:fermix_core, :providers, anthropic: [api_key: "sk-ant-test"])
+    test "persists reasoning_effort for :anthropic provider" do
+      # Anthropic active but no api_key → readiness stays :setup_required so
+      # commit skips prompt-file seeding (no memory repo in this test).
       Application.put_env(:fermix_core, :agent, name: "fermix", provider: :anthropic)
-      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
 
-      assert_raise ArgumentError, ~r/reasoning_effort applies to :openai/, fn ->
-        Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "high")
-      end
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard, reasoning_effort: "high")
+
+      {:ok, snapshot} = ConfigStore.load_runtime_config()
+
+      effort =
+        snapshot.fermix_core
+        |> Keyword.get(:providers, [])
+        |> Keyword.get(:anthropic, [])
+        |> Keyword.get(:reasoning_effort)
+
+      assert effort == :high
     end
   end
 
@@ -1348,6 +1357,49 @@ defmodule FermixCore.Setup.WizardTest do
       assert {:ok, "sk-already-on-disk"} =
                FermixTestSupport.SecretWriterStub.get(:openai_api_key)
     end
+  end
+
+  describe "set_provider_auth_mode/2" do
+    test "writes the named provider's auth_mode to config" do
+      assert {:ok, _report} = Wizard.set_provider_auth_mode(:xai, :oauth)
+      assert provider_auth_mode(:xai) == :oauth
+
+      assert {:ok, _report} = Wizard.set_provider_auth_mode(:xai, :api_key)
+      assert provider_auth_mode(:xai) == :api_key
+    end
+
+    test "targets the named provider regardless of the active provider" do
+      assert {:ok, _report} = Wizard.set_provider_auth_mode(:anthropic, :oauth)
+      assert provider_auth_mode(:anthropic) == :oauth
+    end
+
+    test "raises on an invalid auth_mode" do
+      assert_raise ArgumentError, ~r/auth_mode must be/, fn ->
+        Wizard.set_provider_auth_mode(:xai, :bogus)
+      end
+    end
+  end
+
+  describe "save_answers/2 provider auth_mode" do
+    test "persists per-provider auth_mode answers to the right blocks" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 anthropic_auth_mode: "oauth",
+                 xai_auth_mode: "oauth"
+               )
+
+      assert provider_auth_mode(:anthropic) == :oauth
+      assert provider_auth_mode(:xai) == :oauth
+    end
+  end
+
+  defp provider_auth_mode(provider) do
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+
+    snapshot.fermix_core
+    |> Keyword.get(:providers, [])
+    |> Keyword.get(provider, [])
+    |> Keyword.get(:auth_mode)
   end
 
   defp restore_env(app, key, :error), do: Application.delete_env(app, key)

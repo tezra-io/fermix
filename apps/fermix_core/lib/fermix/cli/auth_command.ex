@@ -19,6 +19,7 @@ defmodule Fermix.CLI.AuthCommand do
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Setup.Wizard
 
   @login_switches [
     no_browser: :boolean,
@@ -91,12 +92,19 @@ defmodule Fermix.CLI.AuthCommand do
   end
 
   defp anthropic_result({:ok, entry}) do
-    IO.puts(
-      "Connected Claude subscription (#{entry.auth_mode}). Tokens saved to #{Store.path()}."
-    )
+    case select_route(:anthropic, :oauth) do
+      :ok ->
+        IO.puts(
+          "Connected Claude subscription (#{entry.auth_mode}); set anthropic auth_mode = oauth. " <>
+            "Tokens saved to #{Store.path()}."
+        )
 
-    IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
-    0
+        IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
+        0
+
+      {:error, reason} ->
+        error("connected, but failed to set anthropic auth_mode = oauth: #{inspect(reason)}")
+    end
   end
 
   defp anthropic_result({:error, reason}),
@@ -111,14 +119,38 @@ defmodule Fermix.CLI.AuthCommand do
 
     case XAILogin.login(login_opts) do
       {:ok, _entry} ->
-        IO.puts("Connected xAI Grok (oauth_pkce). Tokens saved to #{Store.path()}.")
-        IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
-        0
+        case select_route(:xai, :oauth) do
+          :ok ->
+            IO.puts(
+              "Connected xAI Grok (oauth_pkce); set xai auth_mode = oauth. " <>
+                "Tokens saved to #{Store.path()}."
+            )
+
+            IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
+            0
+
+          {:error, reason} ->
+            error("connected, but failed to set xai auth_mode = oauth: #{inspect(reason)}")
+        end
 
       {:error, reason} ->
         error("xai login failed: #{inspect(reason)}")
     end
   end
+
+  # Token write != route selection: RouteResolver keys on the config
+  # [providers.<p>].auth_mode, so a stored OAuth token is inert until auth_mode
+  # is "oauth". Keep them in sync here (and revert to api_key on logout).
+  defp select_route(provider, mode) do
+    case Wizard.set_provider_auth_mode(provider, mode) do
+      {:ok, _report} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp revert_route(@anthropic_profile), do: select_route(:anthropic, :api_key)
+  defp revert_route(@xai_profile), do: select_route(:xai, :api_key)
+  defp revert_route(_profile), do: :ok
 
   defp timeout_ms(nil), do: nil
   defp timeout_ms(seconds) when is_integer(seconds) and seconds > 0, do: seconds * 1_000
@@ -181,9 +213,17 @@ defmodule Fermix.CLI.AuthCommand do
 
     case Store.delete_provider(profile, path) do
       :ok ->
-        IO.puts("Logged out. Removed #{profile} entry from #{path}.")
-        IO.puts("Restart the daemon: `fermix restart`.")
-        0
+        case revert_route(profile) do
+          :ok ->
+            IO.puts("Logged out. Removed #{profile} entry from #{path}.")
+            IO.puts("Restart the daemon: `fermix restart`.")
+            0
+
+          {:error, reason} ->
+            error(
+              "removed credentials, but failed to revert auth_mode to api_key: #{inspect(reason)}"
+            )
+        end
 
       {:error, :no_auth_file} ->
         already_logged_out(profile, path)

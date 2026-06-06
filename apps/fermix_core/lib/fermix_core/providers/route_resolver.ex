@@ -159,6 +159,7 @@ defmodule FermixCore.Providers.RouteResolver do
     [model: model, base_url: base_url]
     |> maybe_put(:api_key, Keyword.get(opts, :api_key) || Keyword.get(config, :api_key))
     |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+    |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:anthropic, opts))
     |> maybe_put(:req_options, Keyword.get(opts, :req_options))
   end
 
@@ -173,6 +174,7 @@ defmodule FermixCore.Providers.RouteResolver do
     ]
     |> maybe_put(:access_token, Keyword.get(opts, :access_token))
     |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+    |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:anthropic, opts))
     |> maybe_put(:req_options, Keyword.get(opts, :req_options))
   end
 

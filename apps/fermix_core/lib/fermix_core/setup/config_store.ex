@@ -828,6 +828,10 @@ defmodule FermixCore.Setup.ConfigStore do
       :default_model,
       normalize_string(lookup(config, "default_model", :default_model))
     )
+    |> put_if_present(
+      :reasoning_effort,
+      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
+    )
   end
 
   defp normalize_xai(nil), do: []

@@ -3,6 +3,8 @@ defmodule Fermix.CLI.AuthCommandTest do
 
   alias Fermix.CLI.AuthCommand
   alias FermixCore.Auth.Store
+  alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Wizard
 
   setup do
     dir = Path.join(System.tmp_dir!(), "fermix_auth_cli_#{System.unique_integer([:positive])}")
@@ -177,6 +179,51 @@ defmodule Fermix.CLI.AuthCommandTest do
     end
   end
 
+  describe "auth login/logout config route (auth_mode)" do
+    test "anthropic login sets config auth_mode to oauth; logout reverts to api_key" do
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run([
+                   "login",
+                   "--provider",
+                   "anthropic",
+                   "--setup-token",
+                   "sk-ant-oat01"
+                 ])
+               end)
+
+      assert provider_auth_mode(:anthropic) == :oauth
+
+      assert 0 ==
+               capture_out_status(fn ->
+                 AuthCommand.run(["logout", "--provider", "anthropic"])
+               end)
+
+      assert provider_auth_mode(:anthropic) == :api_key
+    end
+
+    test "xai logout reverts config auth_mode to api_key", %{dir: dir} do
+      {:ok, _report} = Wizard.set_provider_auth_mode(:xai, :oauth)
+      assert provider_auth_mode(:xai) == :oauth
+
+      :ok =
+        Store.write(
+          "xai_oauth",
+          %{
+            auth_mode: "oauth_pkce",
+            provider: "xai",
+            tokens: %{access_token: "xai-at", refresh_token: "xai-rt"},
+            expires_at: nil,
+            last_refresh: nil
+          },
+          Path.join(dir, "auth.json")
+        )
+
+      assert 0 == capture_out_status(fn -> AuthCommand.run(["logout", "--provider", "xai"]) end)
+      assert provider_auth_mode(:xai) == :api_key
+    end
+  end
+
   describe "auth (no args)" do
     test "prints usage and returns 2" do
       assert 2 == capture_err_status(fn -> AuthCommand.run([]) end)
@@ -234,6 +281,15 @@ defmodule Fermix.CLI.AuthCommandTest do
 
   defp future_iso(seconds) do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
+  end
+
+  defp provider_auth_mode(provider) do
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+
+    snapshot.fermix_core
+    |> Keyword.get(:providers, [])
+    |> Keyword.get(provider, [])
+    |> Keyword.get(:auth_mode)
   end
 
   defp capture_out(fun), do: ExUnit.CaptureIO.capture_io(:stdio, fun)

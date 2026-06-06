@@ -21,11 +21,14 @@ defmodule FermixCore.Setup.Wizard do
 
   @type provider :: ModelCatalog.provider()
   @type reasoning_effort :: :none | :low | :medium | :high | :xhigh | :max
+  @type auth_mode :: :api_key | :oauth
 
   @type answer ::
           {:openai_api_key, String.t()}
           | {:anthropic_api_key, String.t()}
           | {:xai_api_key, String.t()}
+          | {:anthropic_auth_mode, auth_mode() | String.t()}
+          | {:xai_auth_mode, auth_mode() | String.t()}
           | {:provider, provider() | String.t()}
           | {:default_model, String.t()}
           | {:reasoning_effort, reasoning_effort() | String.t()}
@@ -163,11 +166,10 @@ defmodule FermixCore.Setup.Wizard do
     |> Enum.map(&Map.put(&1, :required?, true))
   end
 
-  # reasoning_effort is wired for OpenAI/Codex/xAI; the Anthropic adapter
-  # doesn't send it (design doc §9), so don't offer it on reconfigure for a
-  # provider that can't persist or use it.
+  # reasoning_effort is wired for OpenAI/Codex/xAI/Anthropic (each adapter sends
+  # its provider-specific field). Only offer it on reconfigure for those.
   defp reconfigure_offered?(%{key: :reasoning_effort}, persisted) do
-    persisted_provider(persisted) in [:openai, :openai_codex, :xai]
+    persisted_provider(persisted) in [:openai, :openai_codex, :anthropic, :xai]
   end
 
   defp reconfigure_offered?(%{key: :fast}, persisted) do
@@ -270,7 +272,7 @@ defmodule FermixCore.Setup.Wizard do
         default: :high,
         required?:
           (context.provider_unset? or
-             context.prompt_provider in [:openai, :openai_codex, :xai]) and
+             context.prompt_provider in [:openai, :openai_codex, :anthropic, :xai]) and
             context.effort_unset?
       },
       %{
@@ -553,6 +555,8 @@ defmodule FermixCore.Setup.Wizard do
       |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
       |> put_anthropic_api_key(Keyword.get(answers, :anthropic_api_key))
       |> put_xai_api_key(Keyword.get(answers, :xai_api_key))
+      |> put_provider_auth_mode(:anthropic, Keyword.get(answers, :anthropic_auth_mode))
+      |> put_provider_auth_mode(:xai, Keyword.get(answers, :xai_auth_mode))
       |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_provider_selection(Keyword.get(answers, :provider))
       |> put_default_model(Keyword.get(answers, :default_model))
@@ -610,6 +614,22 @@ defmodule FermixCore.Setup.Wizard do
     # as plaintext. Anything already in the persisted TOML stays put.
     snapshot
     |> Map.put(:sandbox, sandbox)
+    |> drop_unanswered_env_only_secrets([])
+    |> commit_snapshot()
+  end
+
+  @doc """
+  Sets a provider's `auth_mode` (`:api_key` or `:oauth`) without going through
+  the prompt-driven `save_answers/2` path. Used by the CLI `fermix auth
+  login/logout` commands so the OAuth token write and the config route selector
+  stay in sync (a stored token is inert unless `auth_mode = "oauth"`). Routes
+  through the same save → apply → seed → report cycle as `save_answers/2`.
+  """
+  @spec set_provider_auth_mode(provider(), auth_mode() | String.t()) ::
+          {:ok, report()} | {:error, term()}
+  def set_provider_auth_mode(provider, mode) when provider in [:anthropic, :xai] do
+    ConfigStore.current_snapshot()
+    |> put_provider_auth_mode(provider, mode)
     |> drop_unanswered_env_only_secrets([])
     |> commit_snapshot()
   end
@@ -896,6 +916,35 @@ defmodule FermixCore.Setup.Wizard do
     )
   end
 
+  # blank/nil → no-op; an invalid value raises rather than silently dropping
+  # (a bad auth_mode would leave the route on api_key and confuse the operator).
+  defp put_provider_auth_mode(snapshot, _provider, nil), do: snapshot
+  defp put_provider_auth_mode(snapshot, _provider, ""), do: snapshot
+
+  defp put_provider_auth_mode(snapshot, provider, mode) do
+    normalized = normalize_auth_mode!(mode)
+    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
+    block = providers |> Keyword.get(provider, []) |> Keyword.put(:auth_mode, normalized)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(
+        Map.get(snapshot, :fermix_core, []),
+        :providers,
+        Keyword.put(providers, provider, block)
+      )
+    )
+  end
+
+  defp normalize_auth_mode!(mode) when mode in [:api_key, :oauth], do: mode
+  defp normalize_auth_mode!("api_key"), do: :api_key
+  defp normalize_auth_mode!("oauth"), do: :oauth
+
+  defp normalize_auth_mode!(other) do
+    raise ArgumentError, "auth_mode must be :api_key or :oauth, got: #{inspect(other)}"
+  end
+
   defp put_anthropic_secret(snapshot, sentinel) do
     providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
 
@@ -939,11 +988,11 @@ defmodule FermixCore.Setup.Wizard do
     effort = parse_reasoning_effort!(value)
     provider = active_provider(snapshot)
 
-    if provider in [:openai, :openai_codex, :xai] do
+    if provider in [:openai, :openai_codex, :anthropic, :xai] do
       update_active_provider_block(snapshot, :reasoning_effort, effort)
     else
       raise ArgumentError,
-            "reasoning_effort applies to :openai, :openai_codex, or :xai providers only; selected provider is #{inspect(provider)}"
+            "reasoning_effort applies to :openai, :openai_codex, :anthropic, or :xai providers only; selected provider is #{inspect(provider)}"
     end
   end
 

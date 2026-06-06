@@ -23,6 +23,9 @@ defmodule FermixCore.Setup.SecretStoreTest do
     def put(_key, _value, _opts \\ []) do
       raise "secure-on-save must not write when the keychain read failed"
     end
+
+    @impl true
+    def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
   end
 
   setup do
@@ -153,6 +156,16 @@ defmodule FermixCore.Setup.SecretStoreTest do
   test "plaintext warning includes the active config path" do
     previous_home = System.get_env("FERMIX_HOME")
     home = FermixTestSupport.SafeRm.make_tmp_dir!("secret-store-warning")
+
+    on_exit(fn ->
+      case previous_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(home)
+    end)
+
     System.put_env("FERMIX_HOME", home)
 
     log =
@@ -162,12 +175,5 @@ defmodule FermixCore.Setup.SecretStoreTest do
 
     assert log =~ Path.join(home, "config.toml")
     assert log =~ "TELEGRAM_BOT_TOKEN"
-
-    case previous_home do
-      nil -> System.delete_env("FERMIX_HOME")
-      value -> System.put_env("FERMIX_HOME", value)
-    end
-
-    FermixTestSupport.SafeRm.rm_rf!(home)
   end
 end

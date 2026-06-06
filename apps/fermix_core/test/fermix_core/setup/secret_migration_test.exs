@@ -77,10 +77,10 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s([sandbox.env.ANTHROPIC_API_KEY])
     assert contents =~ ~s(source = "command")
-    assert contents =~ ~s(command = "/usr/bin/security")
+    assert contents =~ ~s(command = "stub-keyring")
 
     assert contents =~
-             ~s(args = ["find-generic-password", "-a", "fermix", "-s", "fermix:OPENAI_API_KEY", "-w"])
+             ~s(args = ["openai_api_key"])
 
     assert contents =~ ~r/allow = \[[^\]]*"OPENAI_API_KEY"/
     assert contents =~ ~r/allow = \[[^\]]*"ANTHROPIC_API_KEY"/

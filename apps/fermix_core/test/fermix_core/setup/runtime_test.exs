@@ -180,13 +180,29 @@ defmodule FermixCore.Setup.RuntimeTest do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-runtime-file-#{System.unique_integer([:positive])}")
 
-    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    previous_home = System.get_env("FERMIX_HOME")
+
+    on_exit(fn ->
+      case previous_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
 
     File.write!(tmp_home, "not a directory")
     System.put_env("FERMIX_HOME", tmp_home)
 
+    # runtime.exs lives at the umbrella root, but this test runs with the
+    # fermix_core app dir as CWD — anchor to __DIR__ rather than the CWD.
+    runtime_exs = Path.expand("../../../../../config/runtime.exs", __DIR__)
+
+    # Evaluate through Config.Reader (not Code.eval_file): runtime.exs uses
+    # `config/2`, which only works inside the Config context. The bootstrap
+    # block raises before any env-dependent config is read.
     assert_raise RuntimeError, ~r/bootstrap_runtime_config failed.*:enotdir/s, fn ->
-      Code.eval_file(Path.expand("config/runtime.exs"))
+      Config.Reader.read!(runtime_exs)
     end
   end
 

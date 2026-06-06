@@ -8,6 +8,33 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Setup.ConfigStore
 
+  # Hermetic Anthropic backend stub — writes the auth store (tmp FERMIX_HOME) but
+  # never touches the real keychain / ~/.claude. Injected via :anthropic_login_impl.
+  defmodule AnthropicLoginStub do
+    alias FermixCore.Auth.Store
+
+    @entry %{
+      auth_mode: "setup_token",
+      provider: "anthropic",
+      tokens: %{access_token: "ant-at", refresh_token: nil},
+      expires_at: nil,
+      last_refresh: nil,
+      status: "ready"
+    }
+
+    def store_setup_token(_token, _opts \\ []) do
+      :ok = Store.write("anthropic_oauth", @entry)
+      {:ok, @entry}
+    end
+
+    def import_claude_code(_opts \\ []) do
+      :ok = Store.write("anthropic_oauth", @entry)
+      {:ok, @entry}
+    end
+
+    def claude_code_available?(_opts \\ []), do: true
+  end
+
   setup %{conn: conn} do
     providers = Application.fetch_env(:fermix_core, :providers)
     personalization = Application.get_env(:fermix_core, :personalization, [])
@@ -19,6 +46,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
     plugin_auth_url_timeout_ms = Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms)
     codex_login_runner = Application.get_env(:fermix_web, :codex_login_runner)
+    xai_login_runner = Application.get_env(:fermix_web, :xai_login_runner)
+    anthropic_login_impl = Application.get_env(:fermix_web, :anthropic_login_impl)
     doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
     fermix_home = System.get_env("FERMIX_HOME")
 
@@ -38,6 +67,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :plugin_auth_runner)
     Application.delete_env(:fermix_web, :plugin_auth_url_timeout_ms)
     Application.delete_env(:fermix_web, :codex_login_runner)
+    Application.delete_env(:fermix_web, :xai_login_runner)
+    Application.delete_env(:fermix_web, :anthropic_login_impl)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
 
     on_exit(fn ->
@@ -51,6 +82,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
       restore_env(:fermix_web, :plugin_auth_url_timeout_ms, plugin_auth_url_timeout_ms)
       restore_env(:fermix_web, :codex_login_runner, codex_login_runner)
+      restore_env(:fermix_web, :xai_login_runner, xai_login_runner)
+      restore_env(:fermix_web, :anthropic_login_impl, anthropic_login_impl)
       restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
 
       case fermix_home do
@@ -770,6 +803,131 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert entry.auth_mode == "chatgpt"
       assert entry.tokens.access_token == "codex_access_token"
     end
+
+    test "shows the API key / OAuth picker for xAI and anthropic", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "xai"})
+        |> render_change()
+
+      assert html =~ "Authentication"
+      assert html =~ ~s(name="provider_form[auth_mode]")
+    end
+
+    test "xAI OAuth connect stores the token and switches auth_mode to oauth", %{conn: conn} do
+      parent = self()
+
+      Application.put_env(:fermix_web, :xai_login_runner, fn opts ->
+        Keyword.fetch!(opts, :opener).("https://auth.x.ai/grok")
+        send(parent, {:xai_login_started, Keyword.keys(opts)})
+
+        :ok =
+          Store.write("xai_oauth", %{
+            auth_mode: "oauth_pkce",
+            provider: "xai",
+            tokens: %{access_token: "xai-at", refresh_token: "xai-rt"},
+            expires_at: nil,
+            last_refresh: nil,
+            status: "ready"
+          })
+
+        {:ok, %{provider: "xai"}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "xai"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{provider: "xai", auth_mode: "oauth"}
+      )
+      |> render_change()
+
+      html = view |> element(~s|button[phx-click="xai_login"]|) |> render_click()
+      assert html =~ "Opening Grok sign-in"
+      assert_receive {:xai_login_started, keys}
+      assert :opener in keys
+
+      html = render_until(view, "Grok OAuth connected.")
+      assert html =~ "Grok OAuth connected"
+      assert {:ok, _entry} = Store.read("xai_oauth")
+      assert provider_auth_mode(:xai) == :oauth
+    end
+
+    test "Anthropic OAuth: pasting a token and Save provider stores it and sets auth_mode", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :anthropic_login_impl, AnthropicLoginStub)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "anthropic"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{provider: "anthropic", auth_mode: "oauth"}
+      )
+      |> render_change()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{
+            provider: "anthropic",
+            auth_mode: "oauth",
+            anthropic_setup_token: "sk-ant-oat01"
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Provider saved"
+      assert {:ok, _entry} = Store.read("anthropic_oauth")
+      assert provider_auth_mode(:anthropic) == :oauth
+    end
+
+    test "Anthropic OAuth: Save provider with a blank token keeps existing and sets auth_mode", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :anthropic_login_impl, AnthropicLoginStub)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "anthropic"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{provider: "anthropic", auth_mode: "oauth"}
+      )
+      |> render_change()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{provider: "anthropic", auth_mode: "oauth", anthropic_setup_token: ""}
+        )
+        |> render_submit()
+
+      assert html =~ "Provider saved"
+      assert provider_auth_mode(:anthropic) == :oauth
+    end
+  end
+
+  defp provider_auth_mode(provider) do
+    {:ok, snapshot} = ConfigStore.load_runtime_config()
+
+    snapshot.fermix_core
+    |> Keyword.get(:providers, [])
+    |> Keyword.get(provider, [])
+    |> Keyword.get(:auth_mode)
   end
 
   describe "Personalization form" do
