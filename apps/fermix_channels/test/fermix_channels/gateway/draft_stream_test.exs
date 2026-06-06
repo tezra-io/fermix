@@ -443,6 +443,32 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert_receive {:block_sent, "A short standalone note before running tools."}, 1_000
     end
 
+    test "a mid-stream provider retry (cumulative restarts shorter) never crashes the engine" do
+      pid = DraftStream.start_link(block_spec(self()), @block_fast)
+
+      DraftStream.push(
+        pid,
+        {:text_delta, "First paragraph fully streamed.\n\nSecond part begins"}
+      )
+
+      assert_receive {:block_sent, "First paragraph fully streamed."}, 1_000
+
+      # Transport drop → HttpClient retries with a FRESH SSE parser: the
+      # cumulative restarts from a short prefix. Must not binary_part-crash.
+      DraftStream.push(pid, {:text_delta, "First par"})
+      Process.sleep(30)
+      assert Process.alive?(pid)
+      refute_received {:block_sent, _early}
+
+      # The retried stream regrows past the consumed offset — emission resumes.
+      regrown = "First paragraph fully streamed.\n\nSecond part begins, and finishes properly."
+      DraftStream.push(pid, {:text_delta, regrown})
+      DraftStream.push(pid, {:text_done, regrown})
+      assert_receive {:block_sent, "Second part begins, and finishes properly."}, 1_000
+
+      assert {:ok, nil} = DraftStream.seal(pid, regrown)
+    end
+
     test "discard makes no channel calls in block mode" do
       pid = DraftStream.start_link(block_spec(self()), @block_fast)
 

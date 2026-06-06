@@ -353,9 +353,15 @@ defmodule FermixChannels.Channels.Telegram do
   # The seal is the one reliable draft write: bounded retries honoring
   # Telegram's retry_after; an idempotent no-op ("message is not modified")
   # counts as success — the desired final state already holds.
+  # The whole retry budget (sleeps + requests) must stay inside the engine's
+  # 15 s seal timeout — a longer wait would get the engine hard-killed
+  # mid-sleep, leaving an orphaned draft. Worst case here: 2 × 4 s sleeps +
+  # 3 requests ≈ 11 s. If Telegram demands a longer retry_after than that,
+  # retries exhaust and the engine's seal-failure path discards the draft and
+  # the full reply goes out as a fresh send — the designed recovery.
   @seal_retry_attempts 3
   @seal_retry_base_ms 400
-  @seal_retry_max_wait_ms 30_000
+  @seal_retry_max_wait_ms 4_000
 
   defp seal_with_retry(token, chat_id, message_id, html, attempt) do
     case post_seal_edit(token, chat_id, message_id, html) do
