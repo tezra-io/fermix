@@ -203,10 +203,9 @@ defmodule Fermix.CLI.DaemonTest do
     assert is_binary(reply["skill"]["body"])
   end
 
-  test "request reassembles a reply larger than the socket line buffer" do
-    # `{:packet, :line}` truncates a line past the inet driver buffer (9216
-    # bytes), so a single recv would cut a large reply mid-stream. The client
-    # must accumulate until the trailing newline. 300 KB is far past any buffer.
+  test "request handles a reply larger than the old 9216-byte inet line buffer" do
+    # With {:packet, 4} framing the inet driver delivers the full payload in one
+    # recv regardless of size. 300 KB verifies there is no silent truncation.
     dir = mkdir!()
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
     socket_path = Path.join(dir, "big.sock")
@@ -216,25 +215,55 @@ defmodule Fermix.CLI.DaemonTest do
     {:ok, listener} =
       :gen_tcp.listen(0, [
         :binary,
-        {:packet, :line},
+        {:packet, 4},
         {:active, false},
         {:ifaddr, {:local, to_charlist(socket_path)}}
       ])
 
     on_exit(fn -> :gen_tcp.close(listener) end)
 
-    # Linked to the test pid, so it dies with the test on any failure path.
     Task.async(fn ->
       {:ok, conn} = :gen_tcp.accept(listener, 2_000)
       {:ok, _request} = :gen_tcp.recv(conn, 0, 2_000)
-      :ok = :gen_tcp.send(conn, [payload, "\n"])
-      :gen_tcp.recv(conn, 0, 2_000)
+      :ok = :gen_tcp.send(conn, payload)
       :gen_tcp.close(conn)
     end)
 
     assert {:ok, reply} = Client.request("big", socket_path: socket_path, timeout: 2_000)
     assert reply["status"] == "ok"
     assert reply["body"] == big_value
+  end
+
+  test "request fails fast on an oversized frame header instead of buffering" do
+    # Version skew: a pre-packet-4 daemon replies with newline-delimited JSON.
+    # Read as a {:packet, 4} header, its first 4 ASCII bytes declare a ~2 GB
+    # frame. The :packet_size bound turns that into an immediate :emsgsize
+    # instead of buffering toward 2 GB until the timeout expires.
+    dir = mkdir!()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+    socket_path = Path.join(dir, "old.sock")
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [
+        :binary,
+        {:active, false},
+        {:ifaddr, {:local, to_charlist(socket_path)}}
+      ])
+
+    on_exit(fn -> :gen_tcp.close(listener) end)
+
+    Task.async(fn ->
+      {:ok, conn} = :gen_tcp.accept(listener, 2_000)
+      {:ok, _request} = :gen_tcp.recv(conn, 0, 2_000)
+      :ok = :gen_tcp.send(conn, [Jason.encode!(%{"status" => "ok"}), "\n"])
+      # Hold the socket open like an old daemon awaiting its next line, so
+      # the client cannot mistake a close for end-of-frame.
+      _ = :gen_tcp.recv(conn, 0, 2_000)
+      :gen_tcp.close(conn)
+    end)
+
+    assert {:error, :emsgsize} =
+             Client.request("status", socket_path: socket_path, timeout: 2_000)
   end
 
   defp mkdir! do
