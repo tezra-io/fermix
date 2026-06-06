@@ -176,6 +176,20 @@ defmodule FermixCore.Setup.RuntimeTest do
     path
   end
 
+  test "runtime config file raises when bootstrap returns an error" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-runtime-file-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    File.write!(tmp_home, "not a directory")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    assert_raise RuntimeError, ~r/bootstrap_runtime_config failed.*:enotdir/s, fn ->
+      Code.eval_file(Path.expand("config/runtime.exs"))
+    end
+  end
+
   defp pick_free_port do
     {:ok, socket} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
     {:ok, port} = :inet.port(socket)

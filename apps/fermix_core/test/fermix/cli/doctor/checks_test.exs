@@ -368,6 +368,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "setup secrets"
       assert result.status == :warn
       assert result.detail =~ "OPENAI_API_KEY"
+      assert result.detail =~ Path.join(home, "config.toml")
       assert result.detail =~ "fermix setup --migrate-secrets"
     end
 

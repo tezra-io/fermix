@@ -1,6 +1,8 @@
 defmodule FermixCore.Setup.SecretStoreTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
 
@@ -146,5 +148,26 @@ defmodule FermixCore.Setup.SecretStoreTest do
 
       assert SecretStore.get_snapshot_value(secured, @path) == SecretWriter.sentinel()
     end
+  end
+
+  test "plaintext warning includes the active config path" do
+    previous_home = System.get_env("FERMIX_HOME")
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("secret-store-warning")
+    System.put_env("FERMIX_HOME", home)
+
+    log =
+      capture_log(fn ->
+        SecretStore.resolve_sentinels(snapshot_with("plain-token"), warn_plaintext: true)
+      end)
+
+    assert log =~ Path.join(home, "config.toml")
+    assert log =~ "TELEGRAM_BOT_TOKEN"
+
+    case previous_home do
+      nil -> System.delete_env("FERMIX_HOME")
+      value -> System.put_env("FERMIX_HOME", value)
+    end
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
   end
 end
