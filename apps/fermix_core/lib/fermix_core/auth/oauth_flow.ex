@@ -32,6 +32,11 @@ defmodule FermixCore.Auth.OAuthFlow do
   @redirect_port 1455
   @scopes "openid profile email offline_access"
   @default_timeout_ms 300_000
+  # A loopback catcher reads the request line with a non-buffering raw recv, so
+  # the request can arrive split across reads — accumulate up to a full line,
+  # bounded by a per-read wait and a byte cap.
+  @per_recv_timeout_ms 5_000
+  @max_request_bytes 64_000
 
   @type pkce :: %{code_verifier: String.t(), code_challenge: String.t(), state: String.t()}
 
@@ -393,7 +398,7 @@ defmodule FermixCore.Auth.OAuthFlow do
     else
       case :gen_tcp.accept(listener, min(remaining, 5_000)) do
         {:ok, conn} ->
-          handle_connection(conn, expected_state)
+          handle_connection(conn, expected_state, deadline)
           |> after_connection(listener, expected_state, deadline)
 
         {:error, :timeout} ->
@@ -412,17 +417,46 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   defp after_connection({:error, _reason} = err, _listener, _state, _deadline), do: err
 
-  defp handle_connection(conn, expected_state) do
-    case :gen_tcp.recv(conn, 0, 5_000) do
-      {:ok, request} ->
-        result = parse_request_path(request) |> resolve_callback(expected_state)
-        send_response(conn, result)
-        :gen_tcp.close(conn)
-        result
+  defp handle_connection(conn, expected_state, deadline) do
+    result =
+      case read_request(conn, "", deadline) do
+        {:ok, request} -> parse_request_path(request) |> resolve_callback(expected_state)
+        {:retry, _reason} = retry -> retry
+      end
 
-      {:error, reason} ->
-        :gen_tcp.close(conn)
-        {:error, {:recv_failed, reason}}
+    send_response(conn, result)
+    :gen_tcp.close(conn)
+    result
+  end
+
+  # The listener fields more than the OAuth callback: browser/OS preconnect
+  # probes, TLS handshakes, empty connect-then-close, and the callback itself
+  # can arrive split across reads (raw recv returns on first data, not at a line
+  # boundary). Accumulate until the request line is terminated; treat anything
+  # unreadable as junk to skip (retry), bounded by the byte cap and the deadline.
+  defp read_request(conn, acc, deadline) do
+    cond do
+      String.contains?(acc, "\n") ->
+        {:ok, acc}
+
+      byte_size(acc) > @max_request_bytes ->
+        {:retry, :request_too_large}
+
+      true ->
+        read_more(conn, acc, deadline)
+    end
+  end
+
+  defp read_more(conn, acc, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      {:retry, :deadline}
+    else
+      case :gen_tcp.recv(conn, 0, min(remaining, @per_recv_timeout_ms)) do
+        {:ok, chunk} -> read_request(conn, acc <> chunk, deadline)
+        {:error, reason} -> {:retry, {:recv, reason}}
+      end
     end
   end
 
@@ -430,11 +464,17 @@ defmodule FermixCore.Auth.OAuthFlow do
     if browser_preflight?(path) do
       {:retry, :preflight}
     else
+      # A genuine callback (valid code+state, an error param, or a state
+      # mismatch) is terminal — only its parse result ends the wait.
       parse_callback_path(path, expected_state)
     end
   end
 
-  defp resolve_callback({:error, _reason} = err, _expected_state), do: err
+  # A parseable but non-callback request (path not starting with "/", e.g. an
+  # absolute-form proxy probe) or an unparseable request line is junk: skip it
+  # and keep accepting until the real callback or the deadline.
+  defp resolve_callback({:ok, _other_path}, _expected_state), do: {:retry, :non_callback}
+  defp resolve_callback({:error, :malformed_request}, _expected_state), do: {:retry, :malformed}
 
   # Browsers and OS preflight requests (favicon.ico, /, robots.txt) hit the
   # listener before the OAuth callback. Skip them and keep accepting.
