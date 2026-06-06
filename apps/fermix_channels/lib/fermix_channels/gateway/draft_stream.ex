@@ -475,8 +475,14 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   defp idle_flush(state), do: state
 
+  # A mid-stream provider retry restarts the SSE cumulative from empty
+  # (HttpClient retries a dropped connection with a fresh parser), so the
+  # buffer can be SHORTER than the consumed offset — clamp, never crash.
+  # Emission resumes once the retried stream regrows past the offset; the
+  # seal prefix-check guarantees the final reply is correct either way.
   defp unsent(state) do
-    binary_part(state.buffer, state.sent_upto, byte_size(state.buffer) - state.sent_upto)
+    start = min(state.sent_upto, byte_size(state.buffer))
+    binary_part(state.buffer, start, byte_size(state.buffer) - start)
   end
 
   # Next emit-ready chunk of the unsent region: prefer the last paragraph
