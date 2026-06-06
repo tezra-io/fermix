@@ -33,7 +33,7 @@ Built-ins seed into the single capability registry at boot; outbound MCP tools r
 - **Skills & delegation**: `skill_view`, `skill_run`, `skill_list`, `skill_create`, `subagents` (bounded temp sub-agents)
 - **Meta**: `tool_help`, `send_attachment` (local sandbox file; URLs rejected), `model_routing_config` (writes `[fermix_core.routing]`; not yet consumed at runtime)
 
-Built-ins need no API keys except alternate backends/integrations; default `web_search` is DuckDuckGo.
+Built-ins need no API keys except alternate backends/integrations; default `web_search` is DuckDuckGo. If a configured non-DuckDuckGo backend (Brave/Exa/Tavily/etc.) hard-errors (auth, credits/HTTP 402, transport), `web_search` degrades once to keyless DuckDuckGo — loudly (a warning log + `degraded`/`primary_backend`/`fallback_reason` in the trace), not silently — so the broken backend stays visible. Empty results do not trigger the degrade.
 
 ## Skills
 
