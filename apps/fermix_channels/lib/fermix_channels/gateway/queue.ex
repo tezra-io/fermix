@@ -24,10 +24,19 @@ defmodule FermixChannels.Gateway.Queue do
 
   require Logger
 
+  alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Typing
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Memory.ConversationStore
+
+  # Appended (as an assistant turn) to a conversation whose active turn was
+  # stopped mid-run, closing the orphaned user message so the next turn keeps it
+  # in history but does not replay and answer it.
+  @stopped_turn_marker "(The previous request was stopped before I finished it. " <>
+                         "It is kept here for context only — I should not act on it now " <>
+                         "unless asked again.)"
 
   @type status :: %{
           active_conversations: non_neg_integer(),
@@ -84,6 +93,7 @@ defmodule FermixChannels.Gateway.Queue do
       main_agent: Keyword.get(opts, :main_agent, MainAgent),
       turn_runner: Keyword.get(opts, :turn_runner, TurnRunner),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+      conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       conversations: %{},
       task_refs: %{}
     }
@@ -128,6 +138,15 @@ defmodule FermixChannels.Gateway.Queue do
       end
 
     {:reply, fresh?, state}
+  end
+
+  def handle_call({:final_reply_delivered, conversation_key, pid}, _from, state) do
+    state =
+      update_active_request(state, conversation_key, pid, fn active ->
+        Map.put(active, :final_reply_delivered?, true)
+      end)
+
+    {:reply, :ok, state}
   end
 
   @impl true
@@ -212,7 +231,7 @@ defmodule FermixChannels.Gateway.Queue do
         # so a near-instant turn can never exit before we monitor it — which
         # would deliver a spurious `{:DOWN, _, _, _, :noproc}` and mislabel an
         # ordinary turn as crashed. See `await_run_signal/1`.
-        state = mark_request_started(state, conversation_key, conversation, request_id, pid)
+        state = mark_request_started(state, conversation_key, conversation, request_id, pid, msg)
         send(pid, {self(), :run})
         state
 
@@ -277,13 +296,37 @@ defmodule FermixChannels.Gateway.Queue do
       {:ok, turn_state, cache_status} ->
         core_msg =
           msg
-          |> Map.drop([:reply_fn, :typing_fn, :typing_interval_ms, :typing_timeout_ms])
+          |> Map.drop([
+            :reply_fn,
+            :typing_fn,
+            :typing_interval_ms,
+            :typing_timeout_ms,
+            :stream_spec
+          ])
           |> Map.put(:__runtime_context_cache_status, cache_status)
 
-        run_and_deliver(Map.merge(turn, %{turn_state: turn_state, core_msg: core_msg}))
+        turn
+        |> Map.merge(%{turn_state: turn_state, core_msg: core_msg})
+        |> start_draft_stream()
+        |> run_and_deliver()
 
       {:error, reason} ->
         deliver_checkout_error(turn, reason)
+    end
+  end
+
+  # Spawn the draft engine (linked to this turn task) when the gateway resolved
+  # streaming eligibility and attached a spec; otherwise the turn runs today's
+  # exact non-streaming path (docs/design/CHANNEL_STREAMING.md §5.6).
+  defp start_draft_stream(%{msg: msg} = turn) do
+    case Map.get(msg, :stream_spec) do
+      %DraftStream.Spec{} = spec ->
+        pid = DraftStream.start_link(spec)
+        callback = fn event -> DraftStream.push(pid, event) end
+        Map.merge(turn, %{draft_pid: pid, stream_callback: callback})
+
+      nil ->
+        Map.merge(turn, %{draft_pid: nil, stream_callback: nil})
     end
   end
 
@@ -297,21 +340,71 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
-    case runner.run(core_msg, turn_state, turn.deliver) do
+    case run_turn(runner, core_msg, turn_state, turn.deliver, turn.stream_callback) do
       {:ok, response, context_tokens} ->
         # A turn stopped by `/stop` mid-run must neither deliver nor commit.
         if fresh?(turn) do
-          turn.deliver.({:text, response})
+          deliver_final(turn, response)
+          mark_final_reply_delivered(turn)
 
           core_msg
           |> runner.commit(turn_state, response, context_tokens)
           |> maybe_notify_compacted(turn.deliver)
         else
+          discard_draft(turn)
           :stopped
         end
 
       {:error, reason} ->
+        discard_draft(turn)
+
         if fresh?(turn), do: turn.deliver.({:text, runner.error_reply(reason)}), else: :stopped
+    end
+  end
+
+  # Streaming turns thread the engine callback via run/4; everything else keeps
+  # the 3-arity call so non-streaming surfaces (and runner stubs) are untouched.
+  defp run_turn(runner, core_msg, turn_state, deliver, nil),
+    do: runner.run(core_msg, turn_state, deliver)
+
+  defp run_turn(runner, core_msg, turn_state, deliver, stream_callback)
+       when is_function(stream_callback, 1),
+       do: runner.run(core_msg, turn_state, deliver, stream_callback)
+
+  # Final delivery for a streamed turn: seal the draft with the authoritative
+  # response. `:no_draft` (no deltas ever arrived) and seal failure both fall
+  # through to one fresh normal send — the user always gets the full answer.
+  defp deliver_final(%{draft_pid: nil} = turn, response) do
+    turn.deliver.({:text, response})
+  end
+
+  defp deliver_final(%{draft_pid: pid} = turn, response) when is_pid(pid) do
+    case DraftStream.seal(pid, response) do
+      {:ok, :no_draft} ->
+        turn.deliver.({:text, response})
+
+      {:ok, nil} ->
+        :ok
+
+      {:ok, overflow} when is_binary(overflow) ->
+        turn.deliver.({:text, overflow})
+
+      {:error, reason} ->
+        Logger.warning("Draft seal failed; delivering fresh reply: #{inspect(reason)}")
+        turn.deliver.({:text, response})
+    end
+  end
+
+  defp discard_draft(%{draft_pid: nil}), do: :ok
+
+  defp discard_draft(%{draft_pid: pid}) when is_pid(pid) do
+    case DraftStream.discard(pid) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Draft discard failed: #{inspect(reason)}")
+        :ok
     end
   end
 
@@ -322,6 +415,12 @@ defmodule FermixChannels.Gateway.Queue do
     GenServer.call(owner, {:fresh?, conversation_key, self()})
   catch
     :exit, _reason -> false
+  end
+
+  defp mark_final_reply_delivered(%{owner: owner, conversation_key: conversation_key}) do
+    GenServer.call(owner, {:final_reply_delivered, conversation_key, self()})
+  catch
+    :exit, _reason -> :ok
   end
 
   # `commit/4` returns `:compacted` when it summarized the history; surface a
@@ -363,7 +462,7 @@ defmodule FermixChannels.Gateway.Queue do
   defp checkout_error_reply(_reason),
     do: {"Sorry, I encountered an error processing your message.", false}
 
-  defp mark_request_started(state, conversation_key, conversation, request_id, pid) do
+  defp mark_request_started(state, conversation_key, conversation, request_id, pid, msg) do
     monitor_ref = Process.monitor(pid)
 
     Logger.info("Starting turn #{request_id} for #{format_conversation_key(conversation_key)}")
@@ -376,7 +475,11 @@ defmodule FermixChannels.Gateway.Queue do
           request_id: request_id,
           pid: pid,
           monitor_ref: monitor_ref,
-          started_at_us: System.monotonic_time(:microsecond)
+          started_at_us: System.monotonic_time(:microsecond),
+          final_reply_delivered?: false,
+          # Kept so a crashed turn (which dies before its own reply_fn runs) can
+          # still deliver the generic error reply from `clear_active_request`.
+          message: msg
         }
     }
 
@@ -400,6 +503,7 @@ defmodule FermixChannels.Gateway.Queue do
           %{reason: completion_reason(reason)}
         )
 
+        maybe_reply_on_crash(active, reason)
         put_conversation_runtime(state, conversation_key, %{conversation | active: nil})
 
       _conversation ->
@@ -407,8 +511,33 @@ defmodule FermixChannels.Gateway.Queue do
     end
   end
 
+  # A crashed turn can die before its own `reply_fn` runs, so the sender would
+  # otherwise get silence. If the final reply was already delivered, do not send
+  # a second generic error for a later commit/cleanup crash.
+  defp maybe_reply_on_crash(active, reason) do
+    if completion_reason(reason) == :crashed and
+         not Map.get(active, :final_reply_delivered?, false) do
+      send_error_reply_async(
+        active.message,
+        "Sorry, I encountered an error processing your message."
+      )
+    end
+
+    :ok
+  end
+
   defp completion_reason(:normal), do: :normal
   defp completion_reason(_other), do: :crashed
+
+  defp update_active_request(state, conversation_key, pid, fun) do
+    case Map.get(state.conversations, conversation_key) do
+      %{active: %{pid: ^pid} = active} = conversation ->
+        put_conversation_runtime(state, conversation_key, %{conversation | active: fun.(active)})
+
+      _conversation ->
+        state
+    end
+  end
 
   defp put_conversation_runtime(
          state,
@@ -445,8 +574,9 @@ defmodule FermixChannels.Gateway.Queue do
   defp stop_all_conversations(state) do
     counts =
       Enum.reduce(state.conversations, %{active_stopped: 0, pending_cleared: 0}, fn
-        {_key, runtime}, counts ->
+        {key, runtime}, counts ->
           terminate_active(state.task_supervisor, runtime)
+          mark_stopped_turn(state, key, runtime)
           tally_stopped(runtime, counts)
       end)
 
@@ -458,6 +588,21 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   defp terminate_active(_task_supervisor, _runtime), do: :ok
+
+  # A stopped active turn already persisted its user message but never committed
+  # a reply. Append a marker (after the task is dead, so it can't write more) so
+  # the next turn keeps the request in history without re-answering it. The
+  # ConversationStore guard no-ops if the user message was never persisted (turn
+  # killed before it stored). Best-effort: a down store must not crash the stop.
+  defp mark_stopped_turn(_state, _key, %{active: nil}), do: :skipped
+
+  defp mark_stopped_turn(state, key, %{active: _active}) do
+    ConversationStore.append_stopped_marker(key, @stopped_turn_marker,
+      server: state.conversation_store
+    )
+  catch
+    :exit, _reason -> :skipped
+  end
 
   defp tally_stopped(runtime, counts) do
     pending_count = :queue.len(Map.get(runtime, :pending, :queue.new()))

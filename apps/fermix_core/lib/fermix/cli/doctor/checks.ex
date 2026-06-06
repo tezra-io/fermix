@@ -245,6 +245,42 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @doc """
+  Channel streaming configuration sanity (docs/design/CHANNEL_STREAMING.md §7):
+  `streaming = "draft"` on a channel that cannot edit drafts is a silent no-op
+  at runtime, so doctor is the loud boundary. `"block"` sends ordinary messages
+  and works on every channel — nothing to validate. There is deliberately no
+  provider-streaming check — env overrides and per-run profiles make a
+  config-derived provider warning wrong in both directions; provider capability
+  shows up in stream telemetry instead.
+  """
+  @spec streaming_config([FermixCore.Setup.Doctor.streaming_report()]) :: result()
+  def streaming_config(report \\ ProviderProbe.streaming_config_report()) do
+    misconfigured =
+      Enum.filter(report, &(&1.streaming == "draft" and &1.capability != :draft_edit))
+
+    enabled = Enum.filter(report, &(&1.streaming != "off"))
+
+    cond do
+      misconfigured != [] ->
+        warn(
+          "channel streaming",
+          "streaming = \"draft\" on channels that cannot edit drafts (ignored at runtime): " <>
+            Enum.map_join(misconfigured, ", ", & &1.name)
+        )
+
+      enabled == [] ->
+        ok("channel streaming", "off (no channel opted in)")
+
+      true ->
+        ok(
+          "channel streaming",
+          "streaming on: " <>
+            Enum.map_join(enabled, ", ", fn entry -> "#{entry.name}=#{entry.streaming}" end)
+        )
+    end
+  end
+
   @spec sandbox_config() :: result()
   def sandbox_config do
     config = SandboxConfig.current()
@@ -301,7 +337,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
           warn(
             "setup secrets",
-            "plaintext setup secrets found: #{names}; run `fermix setup --migrate-secrets`"
+            "plaintext setup secrets found in #{ConfigStore.path()}: #{names}; run `fermix setup --migrate-secrets`"
           )
       end
     else

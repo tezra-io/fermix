@@ -21,6 +21,22 @@ defmodule FermixCore.AgentLoop do
 
   @max_iterations 25
 
+  @typedoc """
+  Channel-streaming events emitted through `stream_callback` (see
+  docs/design/CHANNEL_STREAMING.md §5.1). The loop emits `:session_started`
+  once and `:iteration_started` before every provider call; streaming
+  adapters emit `:text_delta`/`:reasoning_delta` through the same callback
+  (threaded via `adapter_opts[:stream_callback]`).
+  """
+  @type stream_event ::
+          {:session_started, String.t() | nil}
+          | {:iteration_started, pos_integer()}
+          | {:text_delta, String.t()}
+          | {:text_done, String.t()}
+          | {:reasoning_delta, String.t()}
+          | {:reasoning_done, String.t()}
+  @type stream_callback :: (stream_event() -> any())
+
   @type loop_opts :: [
           messages: [map()],
           capabilities: [Capability.t()],
@@ -37,6 +53,7 @@ defmodule FermixCore.AgentLoop do
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
           activity_callback: (term() -> any()) | nil,
+          stream_callback: stream_callback() | nil,
           context: map(),
           capability_registry: GenServer.server()
         ]
@@ -51,6 +68,7 @@ defmodule FermixCore.AgentLoop do
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
   def run(opts) do
     state = build_state(opts)
+    emit_stream(state, {:session_started, Map.get(state.context, :session_id)})
 
     case initial_chat(state) do
       {:ok, turn, state} -> continue_until_terminal(turn, state)
@@ -108,7 +126,8 @@ defmodule FermixCore.AgentLoop do
       total_tokens: 0,
       context_tokens: 0,
       loop_detector: loop_detector_state(opts),
-      activity_callback: Keyword.get(opts, :activity_callback)
+      activity_callback: Keyword.get(opts, :activity_callback),
+      stream_callback: Keyword.get(opts, :stream_callback)
     }
   end
 
@@ -208,6 +227,7 @@ defmodule FermixCore.AgentLoop do
     |> maybe_put_adapter_opt(:agent, context_agent(context))
     |> maybe_put_adapter_opt(:session_id, Map.get(context, :session_id))
     |> maybe_put_adapter_opt(:parent_session, Map.get(context, :parent_session))
+    |> maybe_put_adapter_opt(:stream_callback, Keyword.get(opts, :stream_callback))
     |> Keyword.merge(Keyword.get(opts, :adapter_opts, []))
   end
 
@@ -219,6 +239,7 @@ defmodule FermixCore.AgentLoop do
 
   defp initial_chat(state) do
     start = System.monotonic_time(:millisecond)
+    emit_stream(state, {:iteration_started, state.iteration + 1})
 
     with :ok <- emit_activity(state, :provider_start),
          {:ok, turn} <- state.adapter.chat(state.messages, state.capabilities, state.adapter_opts) do
@@ -279,6 +300,7 @@ defmodule FermixCore.AgentLoop do
 
   defp continuation_call(provider_state, tool_results, _warning, state) do
     start = System.monotonic_time(:millisecond)
+    emit_stream(state, {:iteration_started, state.iteration + 1})
 
     emit_activity(state, :provider_start)
 
@@ -531,4 +553,18 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp emit_activity(_state, _event), do: :ok
+
+  # Loop-side stream events (session/iteration bookkeeping). Mirrors
+  # emit_activity: a raising callback is logged, never crashes the turn —
+  # streaming is a preview layer, the turn's reply path is authoritative.
+  defp emit_stream(%{stream_callback: callback}, event) when is_function(callback, 1) do
+    callback.(event)
+    :ok
+  rescue
+    error ->
+      Logger.warning("AgentLoop stream callback raised: #{Exception.message(error)}")
+      :ok
+  end
+
+  defp emit_stream(_state, _event), do: :ok
 end

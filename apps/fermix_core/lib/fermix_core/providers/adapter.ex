@@ -16,6 +16,16 @@ defmodule FermixCore.Providers.Adapter do
   Codex is treated as a separate provider key (`:openai_codex`) because
   the wire surface — URL, request body, response shape, streaming —
   diverges from the standard `api.openai.com/v1/responses` flow.
+
+  ## Streaming deltas (optional)
+
+  `chat/3`/`continue/3` opts may carry `:stream_callback` — a 1-arity
+  function (see `FermixCore.AgentLoop.stream_callback/0`). Adapters whose
+  `supports_streaming?/0` is true SHOULD invoke it as
+  `cb.({:text_delta, cumulative})` while consuming the provider stream,
+  where `cumulative` is the composed answer text so far. Non-streaming
+  adapters ignore the opt — no behaviour change, no extra callback to
+  implement. See docs/design/CHANNEL_STREAMING.md §5.2.
   """
 
   alias FermixCore.Capabilities.Capability

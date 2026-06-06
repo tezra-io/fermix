@@ -48,11 +48,17 @@ defmodule FermixCore.Agents.TurnRunner do
   via `commit/4` only after delivery. The caller (gateway) owns delivery,
   typing, FIFO ordering, and the commit. `deliver` is the gateway delivery
   closure, exposed to mid-turn channel tools via the agent-loop context.
+
+  `stream_callback` (optional 4th argument) is the channel-streaming seam
+  (docs/design/CHANNEL_STREAMING.md §5.2): an opaque 1-arity closure built by
+  the gateway that receives `AgentLoop.stream_event()`s. `nil` (the 3-arity
+  call) threads nothing — non-streaming surfaces (background runs, CLI sync,
+  cron) keep calling `run/3` and are byte-identical to before.
   """
-  @spec run(map(), map(), Reply.reply_fn()) ::
+  @spec run(map(), map(), Reply.reply_fn(), AgentLoop.stream_callback() | nil) ::
           {:ok, String.t(), non_neg_integer()} | {:error, term()}
-  def run(msg, turn_state, deliver) when is_function(deliver, 1) do
-    run_message_loop(msg, turn_state, deliver)
+  def run(msg, turn_state, deliver, stream_callback \\ nil) when is_function(deliver, 1) do
+    run_message_loop(msg, turn_state, deliver, stream_callback)
   end
 
   @doc """
@@ -146,7 +152,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp codex_transport_closed_error?(_reason), do: false
 
-  defp run_message_loop(msg, state, deliver) do
+  defp run_message_loop(msg, state, deliver, stream_callback) do
     start = System.monotonic_time(:millisecond)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
@@ -212,7 +218,8 @@ defmodule FermixCore.Agents.TurnRunner do
       Telemetry.timed_us(fn ->
         build_loop_runtime(state, messages, context,
           source_trust: source_trust,
-          capabilities: profile.capabilities
+          capabilities: profile.capabilities,
+          stream_callback: stream_callback
         )
       end)
 
@@ -455,6 +462,7 @@ defmodule FermixCore.Agents.TurnRunner do
       ]
       |> maybe_put_trust(Keyword.get(opts, :source_trust))
       |> maybe_put_capabilities(Keyword.get(opts, :capabilities))
+      |> maybe_put_stream_callback(Keyword.get(opts, :stream_callback))
 
     case resolve_loop_adapter(state) do
       {:adapter, mod, opts} ->
@@ -485,6 +493,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp maybe_put_capabilities(opts, capabilities) when is_list(capabilities),
     do: Keyword.put(opts, :capabilities, capabilities)
+
+  defp maybe_put_stream_callback(opts, nil), do: opts
+
+  defp maybe_put_stream_callback(opts, callback) when is_function(callback, 1),
+    do: Keyword.put(opts, :stream_callback, callback)
 
   defp resolve_loop_adapter(state) do
     cond do

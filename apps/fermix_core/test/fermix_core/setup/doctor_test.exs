@@ -575,6 +575,71 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  defmodule DraftCapableAdapter do
+    def stream_capability, do: :draft_edit
+  end
+
+  defmodule NoStreamAdapter do
+  end
+
+  describe "streaming_config_report/0" do
+    test "pairs each configured channel's streaming opt-in with its capability" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "drafty",
+          config_key: :drafty_channel,
+          adapter: DraftCapableAdapter,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        },
+        %{
+          name: "plain",
+          config_key: :plain_channel,
+          adapter: NoStreamAdapter,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        },
+        %{
+          name: "unconfigured",
+          config_key: :unconfigured_channel,
+          adapter: NoStreamAdapter,
+          remote?: true,
+          transport: :webhook,
+          child: nil
+        }
+      ])
+
+      Application.put_env(:fermix_channels, :drafty_channel, streaming: "draft")
+      Application.put_env(:fermix_channels, :plain_channel, streaming: "draft")
+
+      on_exit(fn ->
+        Application.delete_env(:fermix_channels, :channel_registry)
+        Application.delete_env(:fermix_channels, :drafty_channel)
+        Application.delete_env(:fermix_channels, :plain_channel)
+      end)
+
+      report = Doctor.streaming_config_report()
+
+      assert %{
+               channel: :drafty_channel,
+               name: "drafty",
+               streaming: "draft",
+               capability: :draft_edit
+             } in report
+
+      assert %{
+               channel: :plain_channel,
+               name: "plain",
+               streaming: "draft",
+               capability: :none
+             } in report
+
+      refute Enum.any?(report, &(&1.channel == :unconfigured_channel))
+    end
+  end
+
   describe "network errors" do
     test "returns network error tuple on transport failure" do
       put_provider(:openai, api_key: "sk-test")

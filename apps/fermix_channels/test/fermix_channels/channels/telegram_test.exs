@@ -558,4 +558,178 @@ defmodule FermixChannels.Channels.TelegramTest do
       :telemetry.detach("test-channel-outbound")
     end
   end
+
+  # -- Draft streaming contract (docs/design/CHANNEL_STREAMING.md §6) --
+
+  defp draft_message(thread_ts \\ nil) do
+    Message.new!(%{
+      id: "1",
+      content: "hi",
+      sender: "alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      thread_ts: thread_ts,
+      metadata: %{user_id: "111"}
+    })
+  end
+
+  describe "stream_capability/0" do
+    test "declares draft_edit" do
+      assert Telegram.stream_capability() == :draft_edit
+    end
+  end
+
+  describe "open_draft/2" do
+    test "sends the rendered draft and returns the message_id" do
+      stub_telegram(self(), 200, %{"ok" => true, "result" => %{"message_id" => 777}})
+
+      assert {:ok, 777} = Telegram.open_draft(draft_message(), "**bold** start")
+
+      assert_receive {:telegram_request, path, body}
+      assert path =~ "/sendMessage"
+      assert body["chat_id"] == "123"
+      assert body["parse_mode"] == "HTML"
+      assert body["text"] == "<b>bold</b> start"
+    end
+
+    test "carries the thread id" do
+      stub_telegram(self(), 200, %{"ok" => true, "result" => %{"message_id" => 7}})
+
+      assert {:ok, 7} = Telegram.open_draft(draft_message(99), "draft text here")
+
+      assert_receive {:telegram_request, _path, body}
+      assert body["message_thread_id"] == 99
+    end
+
+    test "surfaces API errors" do
+      stub_telegram(self(), 403, %{"ok" => false, "description" => "Forbidden"})
+      assert {:error, _reason} = Telegram.open_draft(draft_message(), "draft text")
+    end
+  end
+
+  describe "edit_draft/3" do
+    test "edits in place with the full re-rendered snapshot" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = Telegram.edit_draft(draft_message(), 777, "now *italic*")
+
+      assert_receive {:telegram_request, path, body}
+      assert path =~ "/editMessageText"
+      assert body["chat_id"] == "123"
+      assert body["message_id"] == 777
+      assert body["parse_mode"] == "HTML"
+      assert body["text"] == "now <i>italic</i>"
+    end
+
+    test "holds an overflowing draft to the largest fitting prefix" do
+      stub_telegram(self(), 200, %{"ok" => true})
+      long = String.duplicate("word ", 2_000)
+
+      assert :ok = Telegram.edit_draft(draft_message(), 777, long)
+
+      assert_receive {:telegram_request, _path, body}
+      assert String.length(body["text"]) <= 4096
+    end
+
+    test "does not retry — interim edits are best-effort" do
+      stub_telegram(self(), 429, %{"ok" => false, "parameters" => %{"retry_after" => 1}})
+
+      assert {:error, {:rate_limited, 1_000}} = Telegram.edit_draft(draft_message(), 777, "text")
+
+      assert_receive {:telegram_request, _path, _body}
+      refute_receive {:telegram_request, _path2, _body2}, 100
+    end
+  end
+
+  describe "seal_draft/3" do
+    test "one in-place edit; no remainder for fitting text" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert {:ok, nil} = Telegram.seal_draft(draft_message(), 777, "final **answer**")
+
+      assert_receive {:telegram_request, path, body}
+      assert path =~ "/editMessageText"
+      assert body["message_id"] == 777
+      assert body["text"] == "final <b>answer</b>"
+    end
+
+    test "treats 'message is not modified' as success" do
+      stub_telegram(self(), 400, %{
+        "ok" => false,
+        "description" => "Bad Request: message is not modified: text and reply markup unchanged"
+      })
+
+      assert {:ok, nil} = Telegram.seal_draft(draft_message(), 777, "same text")
+    end
+
+    test "overflow seals the prefix in place and returns the raw remainder" do
+      stub_telegram(self(), 200, %{"ok" => true})
+      long = String.duplicate("word ", 2_000)
+
+      assert {:ok, remainder} = Telegram.seal_draft(draft_message(), 777, long)
+
+      assert is_binary(remainder)
+      assert String.ends_with?(long, remainder)
+
+      assert_receive {:telegram_request, _path, body}
+      assert String.length(body["text"]) <= 4096
+    end
+
+    test "retries a rate-limited seal honoring retry_after" do
+      {:ok, agent} = Agent.start_link(fn -> 0 end)
+      test_pid = self()
+
+      Req.Test.stub(:telegram, fn conn ->
+        {:ok, req_body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:telegram_request, conn.request_path, Jason.decode!(req_body)})
+        attempt = Agent.get_and_update(agent, fn n -> {n + 1, n + 1} end)
+
+        {status, body} =
+          if attempt == 1 do
+            {429, %{"ok" => false, "parameters" => %{"retry_after" => 0}}}
+          else
+            {200, %{"ok" => true}}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(status, Jason.encode!(body))
+      end)
+
+      assert {:ok, nil} = Telegram.seal_draft(draft_message(), 777, "final")
+
+      assert_receive {:telegram_request, _p1, _b1}
+      assert_receive {:telegram_request, _p2, _b2}
+    end
+
+    test "persistent failure exhausts the bounded retries" do
+      stub_telegram(self(), 500, %{"ok" => false})
+
+      assert {:error, _reason} = Telegram.seal_draft(draft_message(), 777, "final")
+
+      assert_receive {:telegram_request, _p1, _b1}
+      assert_receive {:telegram_request, _p2, _b2}
+      assert_receive {:telegram_request, _p3, _b3}
+      refute_receive {:telegram_request, _p4, _b4}, 100
+    end
+  end
+
+  describe "discard_draft/2" do
+    test "deletes the draft message" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = Telegram.discard_draft(draft_message(), 777)
+
+      assert_receive {:telegram_request, path, body}
+      assert path =~ "/deleteMessage"
+      assert body["chat_id"] == "123"
+      assert body["message_id"] == 777
+    end
+
+    test "surfaces delete failures" do
+      stub_telegram(self(), 400, %{"ok" => false, "description" => "message to delete not found"})
+      assert {:error, _reason} = Telegram.discard_draft(draft_message(), 777)
+    end
+  end
 end

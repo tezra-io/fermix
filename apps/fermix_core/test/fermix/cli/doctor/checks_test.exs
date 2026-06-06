@@ -178,6 +178,51 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "streaming_config/1" do
+    test "ok when no channel opted in" do
+      result = Checks.streaming_config([])
+
+      assert result.name == "channel streaming"
+      assert result.status == :ok
+      assert result.detail =~ "off"
+    end
+
+    test "ok when an opted-in channel can edit drafts" do
+      report = [
+        %{channel: :telegram, name: "telegram", streaming: "draft", capability: :draft_edit},
+        %{channel: :signal, name: "signal", streaming: "off", capability: :none}
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "streaming on: telegram=draft"
+    end
+
+    test "block mode is ok on any channel — no edit capability required" do
+      report = [
+        %{channel: :whatsapp, name: "whatsapp", streaming: "block", capability: :none}
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :ok
+      assert result.detail =~ "whatsapp=block"
+    end
+
+    test "warns loudly when streaming is configured on a channel without the capability" do
+      report = [
+        %{channel: :whatsapp, name: "whatsapp", streaming: "draft", capability: :none}
+      ]
+
+      result = Checks.streaming_config(report)
+
+      assert result.status == :warn
+      assert result.detail =~ "cannot edit drafts"
+      assert result.detail =~ "whatsapp"
+    end
+  end
+
   describe "compaction_config/0" do
     setup do
       original_providers = Application.get_env(:fermix_core, :providers, [])

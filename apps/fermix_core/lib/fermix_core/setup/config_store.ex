@@ -1206,6 +1206,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_command_auth(config)
     |> put_ids_if_present(
@@ -1220,6 +1221,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(
       :access_token,
       normalize_string(lookup(config, "access_token", :access_token))
@@ -1246,6 +1248,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(:bot_user_id, normalize_string(lookup(config, "bot_user_id", :bot_user_id)))
     |> put_command_auth(config)
@@ -1261,6 +1264,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(
       :signing_secret,
@@ -1279,6 +1283,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:account, normalize_string(lookup(config, "account", :account)))
     |> put_if_present(:cli_path, normalize_string(lookup(config, "cli_path", :cli_path)))
     |> put_command_auth(config)
@@ -1303,6 +1308,25 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_mode("gateway"), do: :gateway
   defp normalize_mode("subprocess"), do: :subprocess
   defp normalize_mode(_value), do: nil
+
+  # Channel streaming opt-in (docs/design/CHANNEL_STREAMING.md §7). Shared by
+  # every channel normalizer so a misconfigured opt-in on ANY channel is
+  # visible to doctor instead of being dropped by the allowlist.
+  defp put_streaming(fields, config) do
+    put_if_present(
+      fields,
+      :streaming,
+      normalize_streaming(lookup(config, "streaming", :streaming))
+    )
+  end
+
+  defp normalize_streaming(nil), do: nil
+  defp normalize_streaming(value) when value in ["off", "draft", "block"], do: value
+
+  defp normalize_streaming(value) do
+    raise ArgumentError,
+          "invalid channel streaming #{inspect(value)}; expected \"off\", \"draft\", or \"block\""
+  end
 
   defp normalize_string(value) when is_binary(value) do
     trimmed = String.trim(value)

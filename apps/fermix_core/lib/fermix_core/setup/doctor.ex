@@ -154,6 +154,53 @@ defmodule FermixCore.Setup.Doctor do
     end)
   end
 
+  @type streaming_report :: %{
+          channel: atom(),
+          name: String.t(),
+          streaming: String.t(),
+          capability: :draft_edit | :none
+        }
+
+  @doc """
+  Per-channel draft-streaming opt-in vs channel capability
+  (docs/design/CHANNEL_STREAMING.md §7). Config + module introspection only —
+  no network. A channel opted into `streaming = "draft"` without the
+  `:draft_edit` capability is the misconfiguration doctor warns about.
+  """
+  @spec streaming_config_report() :: [streaming_report()]
+  def streaming_config_report do
+    channel_registry()
+    |> Enum.flat_map(&streaming_channel_report/1)
+  end
+
+  defp streaming_channel_report(%{config_key: nil}), do: []
+
+  defp streaming_channel_report(%{config_key: key, name: name, adapter: adapter})
+       when is_atom(key) do
+    case FermixCore.Config.channel(key) do
+      {:ok, config} ->
+        [
+          %{
+            channel: key,
+            name: name,
+            streaming: Keyword.get(config, :streaming, "off"),
+            capability: adapter_stream_capability(adapter)
+          }
+        ]
+
+      {:error, :not_configured} ->
+        []
+    end
+  end
+
+  defp adapter_stream_capability(adapter) when is_atom(adapter) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :stream_capability, 0) do
+      adapter.stream_capability()
+    else
+      :none
+    end
+  end
+
   @doc """
   Reports the active `web_search` backend and whether its credential is present.
 
