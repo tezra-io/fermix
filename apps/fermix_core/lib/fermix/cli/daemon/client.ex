@@ -10,12 +10,11 @@ defmodule Fermix.CLI.Daemon.Client do
 
   @default_timeout_ms 3_000
 
-  # `{:packet, :line}` truncates a line longer than the inet driver's read
-  # buffer (9216 bytes by default, independent of OS), handing back the partial
-  # chunk without its trailing newline. Accumulate chunks until one ends in "\n"
-  # so large replies (e.g. a full skill body) decode whole. Bounded so a daemon
-  # that never newline-terminates fails loud instead of looping forever.
-  @max_response_bytes 4_194_304
+  # Upper bound on one reply frame. Without it a corrupt or version-skewed
+  # header (e.g. a pre-packet-4 daemon's newline-framed JSON, whose first 4
+  # ASCII bytes read as a ~2 GB length) buffers toward 2 GB until the timeout;
+  # with it the read fails immediately with :emsgsize.
+  @max_frame_bytes 4_194_304
 
   @spec status(keyword()) :: {:ok, map()} | {:error, term()}
   def status(opts \\ []), do: request("status", opts)
@@ -44,44 +43,31 @@ defmodule Fermix.CLI.Daemon.Client do
     :gen_tcp.connect(
       {:local, to_charlist(socket_path)},
       0,
-      [:binary, {:active, false}, {:packet, :line}],
+      [:binary, {:active, false}, {:packet, 4}, {:packet_size, @max_frame_bytes}],
       timeout
     )
   end
 
   defp exchange(conn, method, opts, timeout) do
-    payload = Jason.encode!(request_payload(method, opts)) <> "\n"
+    payload = Jason.encode!(request_payload(method, opts))
 
     try do
       with :ok <- :gen_tcp.send(conn, payload),
-           {:ok, line} <- recv_line(conn, timeout, [], 0) do
-        Jason.decode(String.trim(line))
+           {:ok, data} <- :gen_tcp.recv(conn, 0, timeout) do
+        case Jason.decode(data) do
+          {:ok, decoded} ->
+            {:ok, decoded}
+
+          {:error, %Jason.DecodeError{position: pos}} ->
+            # A packet-4 frame arrives whole or not at all, so a decode
+            # failure means malformed JSON, not truncation.
+            {:error, "response_decode_failed:#{pos}"}
+        end
       else
         {:error, reason} -> {:error, reason}
       end
     after
       :gen_tcp.close(conn)
-    end
-  end
-
-  # `timeout` is the read deadline for each chunk, not the whole reply. That is
-  # fine here: every caller talks to a trusted same-host daemon that writes the
-  # reply as one line, so reads do not dribble across many chunks.
-  @spec recv_line(:gen_tcp.socket(), non_neg_integer(), iodata(), non_neg_integer()) ::
-          {:ok, binary()} | {:error, term()}
-  defp recv_line(_conn, _timeout, _acc, size) when size > @max_response_bytes,
-    do: {:error, :response_too_large}
-
-  defp recv_line(conn, timeout, acc, size) do
-    case :gen_tcp.recv(conn, 0, timeout) do
-      {:ok, chunk} when binary_part(chunk, byte_size(chunk), -1) == "\n" ->
-        {:ok, IO.iodata_to_binary([acc, chunk])}
-
-      {:ok, chunk} ->
-        recv_line(conn, timeout, [acc, chunk], size + byte_size(chunk))
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
