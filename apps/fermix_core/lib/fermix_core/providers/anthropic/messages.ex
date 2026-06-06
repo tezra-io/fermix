@@ -151,7 +151,13 @@ defmodule FermixCore.Providers.Anthropic.Messages do
 
   defp request(messages, system, tools, capabilities, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    auth = resolve_auth!(opts)
+
+    with {:ok, auth} <- resolve_auth(opts) do
+      do_request(messages, system, tools, capabilities, auth, req_options, opts)
+    end
+  end
+
+  defp do_request(messages, system, tools, capabilities, auth, req_options, opts) do
     mode = auth_mode(auth)
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
@@ -184,24 +190,28 @@ defmodule FermixCore.Providers.Anthropic.Messages do
 
   # Mode is decided by which credential opts the route supplied; the
   # resolver guarantees exclusivity (api_key never reaches an oauth route).
-  defp resolve_auth!(opts) do
+  defp resolve_auth(opts) do
     api_key = nonempty_string(Keyword.get(opts, :api_key))
     access_token = nonempty_string(Keyword.get(opts, :access_token))
     auth_profile = Keyword.get(opts, :auth_profile)
 
     cond do
       api_key ->
-        {:api_key, api_key}
+        {:ok, {:api_key, api_key}}
 
       access_token ->
-        {:oauth_static, access_token}
+        {:ok, {:oauth_static, access_token}}
 
       is_binary(auth_profile) ->
-        {:oauth_server, Keyword.get(opts, :token_server, TokenSupervisor), auth_profile}
+        {:ok, {:oauth_server, Keyword.get(opts, :token_server, TokenSupervisor), auth_profile}}
 
       true ->
-        raise ArgumentError,
-              "Anthropic.Messages requires :api_key, :access_token, or :auth_profile"
+        {:error,
+         ProviderError.auth(
+           :anthropic,
+           :messages,
+           "Anthropic.Messages requires :api_key, :access_token, or :auth_profile"
+         )}
     end
   end
 
@@ -361,13 +371,20 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   end
 
   defp attempt(base_url, auth, body, req_options, turn_state) do
+    case current_credential(auth) do
+      {:error, _reason} = error -> {error, nil}
+      credential -> do_attempt(base_url, credential, body, req_options, turn_state)
+    end
+  end
+
+  defp do_attempt(base_url, credential, body, req_options, turn_state) do
     raw =
       Req.new(
         url: "#{base_url}/messages",
         method: :post,
         json: body,
         receive_timeout: @receive_timeout_ms,
-        headers: request_headers(current_credential(auth))
+        headers: request_headers(credential)
       )
       |> Req.merge(req_options)
       |> HttpClient.request("Anthropic Messages")
@@ -403,8 +420,12 @@ defmodule FermixCore.Providers.Anthropic.Messages do
         {:oauth, token}
 
       {:error, reason} ->
-        raise ArgumentError,
-              "Anthropic.Messages requires a bearer token: token server returned #{inspect(reason)}"
+        {:error,
+         ProviderError.auth(
+           :anthropic,
+           :messages,
+           "Anthropic.Messages requires a bearer token: token server returned #{inspect(reason)}"
+         )}
     end
   end
 

@@ -164,10 +164,11 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
                Responses.chat([%{role: "user", content: "go"}], [enum_capability()], chat_opts())
     end
 
-    test "raises without a credential" do
-      assert_raise ArgumentError, ~r/api_key/, fn ->
-        Responses.chat([%{role: "user", content: "x"}], [], model: "grok-4.3")
-      end
+    test "returns an auth error without a credential" do
+      assert {:error, {:provider_error, %{provider: :xai, kind: :auth, message: message}}} =
+               Responses.chat([%{role: "user", content: "x"}], [], model: "grok-4.3")
+
+      assert message =~ ":api_key"
     end
   end
 

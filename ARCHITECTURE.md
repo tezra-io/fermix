@@ -18,8 +18,10 @@ At the highest level:
 
 1. A channel adapter receives platform-specific input.
 2. The adapter normalizes it into a `FermixChannels.Message`.
-3. `FermixChannels.Dispatcher` optionally transcribes audio, builds a `reply_fn`,
-   and sends the normalized message to `FermixCore.Agents.MainAgent`.
+3. `FermixChannels.Gateway.ingest/2` authorizes the sender, optionally
+   transcribes audio, dispatches slash commands, builds a `reply_fn`, and hands
+   the turn to `Gateway.Queue`, which runs one FIFO turn per conversation
+   against `FermixCore.Agents.MainAgent`.
 4. `MainAgent` builds prompt context from bootstrap files, prompt memory,
    conversation history, and runtime capability sections.
 5. `FermixCore.AgentLoop` calls the configured provider, executes tool calls
@@ -234,9 +236,12 @@ The shared channel boundary is:
 - build a one-argument `reply_fn`
 - optionally download attachments for shared transcription
 
-`FermixChannels.Dispatcher` is the bridge from channels into core. It runs the
-shared transcription hook, normalizes map inputs into `Message`, builds the
-reply function, and calls `MainAgent.handle_message/2`.
+`FermixChannels.Gateway.ingest/2` is the bridge from channels into core. It
+normalizes map inputs into `Message`, authorizes the sender, runs the shared
+transcription hook, dispatches slash commands, builds the reply function, and
+hands the turn to `Gateway.Queue` (one FIFO turn per conversation).
+`FermixChannels.Dispatcher` remains only as a thin compatibility alias for
+`Gateway.ingest/2`.
 
 Current adapters:
 
@@ -247,7 +252,7 @@ Current adapters:
 - `Slack` uses signed Events API webhook ingress and Web API replies.
 - `Discord` uses a supervised Gateway connection and REST replies.
 - `Signal` uses a supervised `signal-cli` receive loop and subprocess sends.
-- `CLI` provides a local smoke path through the same dispatcher and agent.
+- `CLI` provides a local smoke path through the same gateway and agent.
 
 Architecture Invariant: channel adapters own platform quirks and auth checks.
 After dispatch, the agent sees only normalized message fields and a `reply_fn`.

@@ -76,6 +76,26 @@ defmodule FermixCore.Auth.StoreTest do
       File.write!(path, "not json")
       assert {:error, {:invalid_json, _}} = Store.read(:openai, path)
     end
+
+    test "returns invalid_auth_entry when the entry has no access_token" do
+      path = tmp_path()
+
+      data = %{
+        "version" => 2,
+        "providers" => %{
+          "openai_codex" => %{"auth_mode" => "chatgpt", "tokens" => %{"access_token" => ""}},
+          "anthropic" => %{"auth_mode" => "oauth"}
+        }
+      }
+
+      File.write!(path, Jason.encode!(data))
+
+      assert {:error, {:invalid_auth_entry, :openai_codex, :missing_access_token}} =
+               Store.read(:openai_codex, path)
+
+      assert {:error, {:invalid_auth_entry, :anthropic, :missing_access_token}} =
+               Store.read(:anthropic, path)
+    end
   end
 
   describe "write/3" do

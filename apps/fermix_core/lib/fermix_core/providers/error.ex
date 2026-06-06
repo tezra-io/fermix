@@ -43,6 +43,26 @@ defmodule FermixCore.Providers.Error do
      }}
   end
 
+  @doc """
+  Credential preflight failure — no usable key/token before any request
+  was made. `kind: :auth` routes channel replies to the same "fix your
+  auth" message as a provider 401, with `status: nil` marking that no
+  HTTP exchange happened.
+  """
+  @spec auth(provider(), adapter(), String.t()) :: {:provider_error, api_error()}
+  def auth(provider, adapter, message)
+      when is_atom(provider) and is_atom(adapter) and is_binary(message) do
+    {:provider_error,
+     %{
+       provider: provider,
+       adapter: adapter,
+       status: nil,
+       kind: :auth,
+       code: nil,
+       message: message
+     }}
+  end
+
   @spec not_implemented(provider(), adapter()) :: {:provider_error, api_error()}
   def not_implemented(provider, adapter) when is_atom(provider) and is_atom(adapter) do
     {:provider_error,

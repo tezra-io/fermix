@@ -170,10 +170,11 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert metadata.adapter == :chat_completions
     end
 
-    test "raises when api_key is missing" do
-      assert_raise ArgumentError, ~r/requires :api_key/, fn ->
-        ChatCompletions.chat([], [], model: "gpt-5.4-mini")
-      end
+    test "returns an auth error when api_key is missing" do
+      assert {:error, {:provider_error, %{provider: :openai, kind: :auth, message: message}}} =
+               ChatCompletions.chat([], [], model: "gpt-5.4-mini")
+
+      assert message =~ "requires :api_key"
     end
 
     test "returns structured provider errors on a non-200 response" do

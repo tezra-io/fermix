@@ -93,6 +93,64 @@ defmodule FermixCore.Tools.FileReadTest do
     end
   end
 
+  describe "execute/2 - offset/limit validation" do
+    test "rejects offset 0 instead of silently dropping the last line",
+         %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file, "offset" => 0}, context)
+      assert result.success == false
+      assert result.error =~ "offset"
+      assert result.error =~ "positive integer"
+    end
+
+    test "rejects negative offset", %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file, "offset" => -2}, context)
+      assert result.success == false
+      assert result.error =~ "offset"
+    end
+
+    test "rejects non-positive limit", %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file, "limit" => 0}, context)
+      assert result.success == false
+      assert result.error =~ "limit"
+      assert result.error =~ "positive integer"
+    end
+
+    test "rejects non-integer offset", %{test_file: file, context: context} do
+      assert {:ok, result} = FileRead.execute(%{"path" => file, "offset" => "3"}, context)
+      assert result.success == false
+      assert result.error =~ "offset"
+    end
+  end
+
+  describe "execute/2 - output byte cap" do
+    test "caps oversized output and points at the continuation offset",
+         %{dir: dir, context: context} do
+      big = Path.join(dir, "big.txt")
+      line = String.duplicate("x", 99)
+      File.write!(big, Enum.map_join(1..2_000, "\n", fn _i -> line end))
+
+      assert {:ok, result} = FileRead.execute(%{"path" => big}, context)
+      assert result.success == true
+      assert result.output =~ "truncated"
+      assert [_output, continue_from] = Regex.run(~r/continue with offset (\d+)/, result.output)
+
+      resumed = String.to_integer(continue_from)
+      assert resumed > 1 and resumed <= 2_000
+      # marker line aside, the emitted content stays within the cap
+      assert byte_size(result.output) <= 100_000 + 200
+    end
+
+    test "fails loud when a single line exceeds the cap", %{dir: dir, context: context} do
+      monster = Path.join(dir, "monster.txt")
+      File.write!(monster, String.duplicate("y", 150_000))
+
+      assert {:ok, result} = FileRead.execute(%{"path" => monster}, context)
+      assert result.success == false
+      assert result.error =~ "exceeds"
+      assert result.error =~ "byte"
+    end
+  end
+
   describe "execute/2 - error cases" do
     test "returns error for nonexistent file", %{dir: dir, context: context} do
       path = Path.join(dir, "nonexistent.txt")

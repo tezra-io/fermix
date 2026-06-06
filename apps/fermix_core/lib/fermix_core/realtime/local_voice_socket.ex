@@ -125,7 +125,31 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     ])
   end
 
+  # If the socket file exists, probe it before deleting. A live listener
+  # answers; a stale file from a previous crash refuses or errors. Unlinking
+  # a live socket would let us bind the same path while the original keeps
+  # serving clients but is no longer reachable at it. Same discipline as the
+  # daemon control socket (`Fermix.CLI.Daemon`).
   defp clear_stale_socket(socket_path) do
+    cond do
+      not File.exists?(socket_path) -> :ok
+      live_socket?(socket_path) -> {:error, {:another_voice_socket_running, socket_path}}
+      true -> rm_stale(socket_path)
+    end
+  end
+
+  defp live_socket?(socket_path) do
+    case :gen_tcp.connect({:local, to_charlist(socket_path)}, 0, [:binary, {:active, false}], 500) do
+      {:ok, conn} ->
+        _ = :gen_tcp.close(conn)
+        true
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp rm_stale(socket_path) do
     case File.rm(socket_path) do
       :ok -> :ok
       {:error, :enoent} -> :ok

@@ -375,10 +375,11 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
                )
     end
 
-    test "raises without an api_key" do
-      assert_raise ArgumentError, ~r/api_key/, fn ->
-        Messages.chat([%{role: "user", content: "x"}], [], model: "claude-sonnet-4-6")
-      end
+    test "returns an auth error without a credential" do
+      assert {:error, {:provider_error, %{provider: :anthropic, kind: :auth, message: message}}} =
+               Messages.chat([%{role: "user", content: "x"}], [], model: "claude-sonnet-4-6")
+
+      assert message =~ ":api_key"
     end
 
     test "raises when no non-system messages remain" do
