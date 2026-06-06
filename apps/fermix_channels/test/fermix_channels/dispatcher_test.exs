@@ -746,4 +746,99 @@ defmodule FermixChannels.DispatcherTest do
       "usage" => %{"input_tokens" => 9, "output_tokens" => 3}
     }
   end
+
+  # -- Draft-stream eligibility (docs/design/CHANNEL_STREAMING.md §5.6) --
+
+  defmodule StreamingChannel do
+    def build_text_reply(%Message{reply_target: reply_target}) do
+      fn text ->
+        send(self(), {:reply_sent, reply_target, text, []})
+        :ok
+      end
+    end
+
+    def build_media_reply(%Message{}) do
+      fn _media_part -> {:error, :media_unsupported} end
+    end
+
+    def stream_capability, do: :draft_edit
+
+    def open_draft(%Message{}, _text), do: {:ok, 1}
+    def edit_draft(%Message{}, _handle, _text), do: :ok
+    def seal_draft(%Message{}, _handle, _text), do: {:ok, nil}
+    def discard_draft(%Message{}, _handle), do: :ok
+  end
+
+  describe "draft-stream eligibility" do
+    defp stream_message do
+      %Message{
+        id: "s1",
+        content: "stream please",
+        sender: "alice",
+        channel: "telegram",
+        chat_id: "123",
+        reply_target: "123",
+        metadata: %{user_id: "test-sender"}
+      }
+    end
+
+    defp dispatch_for_streaming(channel) do
+      Dispatcher.dispatch([stream_message()],
+        channel: channel,
+        agent: CapturingAgent,
+        agent_server: self()
+      )
+    end
+
+    test "attaches a stream_spec when the channel is draft-capable and config opts in" do
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "test-sender",
+        streaming: "draft"
+      )
+
+      assert :ok = dispatch_for_streaming(StreamingChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert %FermixChannels.Gateway.DraftStream.Spec{channel: "telegram"} =
+               agent_message.stream_spec
+    end
+
+    test "no stream_spec when streaming config is off (the default)" do
+      assert :ok = dispatch_for_streaming(StreamingChannel)
+
+      assert_receive {:agent_message, agent_message}
+      refute Map.has_key?(agent_message, :stream_spec)
+    end
+
+    test "no stream_spec when the channel lacks the draft capability" do
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "test-sender",
+        streaming: "draft"
+      )
+
+      assert :ok = dispatch_for_streaming(ReplyChannel)
+
+      assert_receive {:agent_message, agent_message}
+      refute Map.has_key?(agent_message, :stream_spec)
+    end
+
+    test "block mode attaches a send-based spec on any channel (no capability needed)" do
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "test-sender",
+        streaming: "block"
+      )
+
+      assert :ok = dispatch_for_streaming(ReplyChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert %FermixChannels.Gateway.DraftStream.Spec{mode: :block, channel: "telegram"} =
+               agent_message.stream_spec
+
+      # The send closure routes through the gateway reply path.
+      assert :ok = agent_message.stream_spec.send.("block text")
+      assert_received {:reply_sent, "123", "block text", []}
+    end
+  end
 end

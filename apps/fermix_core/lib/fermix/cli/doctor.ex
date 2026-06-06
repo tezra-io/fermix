@@ -40,6 +40,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.recent_log_activity(),
       Checks.compaction_config(),
       Checks.command_owner_config(),
+      Checks.streaming_config(),
       Checks.sandbox_config(),
       Checks.sandbox_trace_suggestions(),
       Checks.auth_file_permissions(),

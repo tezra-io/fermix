@@ -529,6 +529,55 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     end
   end
 
+  test "channel streaming survives the load normalizers for every channel" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_channels.telegram]
+    streaming = "block"
+
+    [fermix_channels.whatsapp]
+    streaming = "off"
+
+    [fermix_channels.signal]
+    streaming = "draft"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+
+    telegram = Keyword.get(loaded.fermix_channels, :telegram, [])
+    assert Keyword.get(telegram, :streaming) == "block"
+
+    whatsapp = Keyword.get(loaded.fermix_channels, :whatsapp, [])
+    assert Keyword.get(whatsapp, :streaming) == "off"
+
+    signal = Keyword.get(loaded.fermix_channels, :signal, [])
+    assert Keyword.get(signal, :streaming) == "draft"
+  end
+
+  test "load_runtime_config rejects an invalid channel streaming value from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_channels.telegram]
+    streaming = "blast"
+    """)
+
+    assert_raise ArgumentError, ~r/streaming/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
   test "apply_snapshot writes personalization and agent into Application env" do
     Application.put_env(:fermix_core, :personalization, [])
     Application.put_env(:fermix_core, :agent, [])

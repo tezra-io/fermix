@@ -82,6 +82,43 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
+  describe "chat/3 with stream_callback" do
+    test "fires incremental text deltas whose final cumulative equals the turn content" do
+      test_pid = self()
+      cb = fn event -> send(test_pid, {:delta, event}) end
+
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_z","content":[]}}
+
+      data: {"type":"response.output_text.delta","output_index":0,"delta":"Hel"}
+
+      data: {"type":"response.output_text.delta","output_index":0,"delta":"lo"}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_z","content":[{"type":"output_text","text":"Hello"}]}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":1}}}
+
+      data: [DONE]
+
+      """
+
+      assert {:ok, turn} = run_chat(sse, stream_callback: cb)
+
+      assert_received {:delta, {:text_delta, "Hel"}}
+      assert_received {:delta, {:text_delta, "Hello"}}
+      # The completed message item fires the semantic block boundary.
+      assert_received {:delta, {:text_done, "Hello"}}
+      refute_received {:delta, _other}
+      assert turn.content == "Hello"
+    end
+
+    test "without stream_callback the same stream parses with no events" do
+      assert {:ok, turn} = run_chat(terminal_message_sse("ok"))
+      refute_received {:delta, _any}
+      assert turn.content == "ok"
+    end
+  end
+
   describe "chat/3 — request shape" do
     test "emits provider telemetry with request shape" do
       test_pid = self()
@@ -1220,7 +1257,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     """
   end
 
-  defp run_chat(sse) do
+  defp run_chat(sse, extra_opts \\ []) do
     test_id = :"codex_chat_#{System.unique_integer([:positive])}"
 
     Req.Test.stub(test_id, fn conn ->
@@ -1232,10 +1269,12 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     Codex.chat(
       [%{role: "user", content: "Hi"}],
       [capability()],
-      access_token: @jwt_with_sub,
-      model: "gpt-5",
-      base_url: "https://chatgpt.test/codex/responses",
-      req_options: [plug: {Req.Test, test_id}]
+      [
+        access_token: @jwt_with_sub,
+        model: "gpt-5",
+        base_url: "https://chatgpt.test/codex/responses",
+        req_options: [plug: {Req.Test, test_id}]
+      ] ++ extra_opts
     )
   end
 end

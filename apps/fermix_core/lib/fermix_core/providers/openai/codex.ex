@@ -96,7 +96,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
         ResponsesShared.request_metrics(input, resolved_instructions, tools, capabilities)
     }
 
-    post(url, body, auth, req_options, turn_state)
+    post(url, body, auth, req_options, turn_state, Keyword.get(opts, :stream_callback))
   end
 
   @impl true
@@ -159,7 +159,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       request_metrics: ResponsesShared.request_metrics(next_input, instructions, tools, caps)
     }
 
-    post(url, body, auth, req_options, turn_state)
+    post(url, body, auth, req_options, turn_state, Keyword.get(opts, :stream_callback))
   end
 
   @impl true
@@ -187,12 +187,12 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     |> maybe_put_header("chatgpt-account-id", decode_jwt_account_id(token))
   end
 
-  defp post(url, body, auth, req_options, turn_state) do
+  defp post(url, body, auth, req_options, turn_state, stream_callback) do
     start = System.monotonic_time(:millisecond)
 
     wire_result =
-      request_once(url, body, auth.token, req_options)
-      |> maybe_refresh_and_retry(url, body, auth, req_options)
+      request_once(url, body, auth.token, req_options, stream_callback)
+      |> maybe_refresh_and_retry(url, body, auth, req_options, stream_callback)
 
     result = handle_response(wire_result, turn_state)
 
@@ -216,7 +216,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   # transport errors can be classified: zero chunks means the connection
   # died before Codex sent anything (stale pool / network blip), not
   # mid-response.
-  defp request_once(url, body, token, req_options) do
+  defp request_once(url, body, token, req_options, stream_callback) do
     chunks_seen = :counters.new(1, [])
 
     Req.new(
@@ -227,7 +227,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       receive_timeout: receive_timeout_for(body),
       into: fn chunk, acc ->
         :counters.add(chunks_seen, 1, 1)
-        collect_sse(chunk, acc)
+        collect_sse(chunk, acc, stream_callback)
       end
     )
     |> Req.merge(req_options)
@@ -252,9 +252,9 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp tag_transport_errors(result, _chunks_seen), do: result
 
-  defp collect_sse({:data, chunk}, {req, response}) when is_binary(chunk) do
+  defp collect_sse({:data, chunk}, {req, response}, stream_callback) when is_binary(chunk) do
     if response.status in 200..299 do
-      state = current_sse_state(response) |> SSEParser.feed(chunk)
+      state = current_sse_state(response, stream_callback) |> SSEParser.feed(chunk)
       {:cont, {req, Req.Response.put_private(response, :codex_sse_state, state)}}
     else
       body = ensure_binary_body(response.body)
@@ -262,8 +262,11 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     end
   end
 
-  defp current_sse_state(%{private: %{codex_sse_state: %SSEParser{} = state}}), do: state
-  defp current_sse_state(_response), do: SSEParser.new()
+  defp current_sse_state(%{private: %{codex_sse_state: %SSEParser{} = state}}, _callback),
+    do: state
+
+  defp current_sse_state(_response, callback),
+    do: SSEParser.new(delta_callback: callback)
 
   defp ensure_binary_body(body) when is_binary(body), do: body
   defp ensure_binary_body(_body), do: ""
@@ -282,14 +285,15 @@ defmodule FermixCore.Providers.OpenAI.Codex do
          url,
          request_body,
          %{refreshable?: true, token_server: token_server},
-         req_options
+         req_options,
+         stream_callback
        ) do
     if token_invalidated?(response_body) do
       Logger.warning("Codex bearer was invalidated; refreshing token and retrying once")
 
       case TokenManager.refresh(token_server) do
         {:ok, refreshed_token} ->
-          request_once(url, request_body, refreshed_token, req_options)
+          request_once(url, request_body, refreshed_token, req_options, stream_callback)
 
         {:error, :auth_invalidated} ->
           {:auth_invalidated, response_body}
@@ -303,7 +307,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     end
   end
 
-  defp maybe_refresh_and_retry(response, _url, _body, _auth, _req_options), do: response
+  defp maybe_refresh_and_retry(response, _url, _body, _auth, _req_options, _stream_callback),
+    do: response
 
   defp handle_response({:auth_invalidated, body}, _turn_state) do
     Logger.error("Codex auth invalidated and refresh exhausted: #{inspect(body)}")

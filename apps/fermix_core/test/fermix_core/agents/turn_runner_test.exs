@@ -303,6 +303,53 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert Process.get(:looping_adapter_step) == 100
     end
 
+    test "run/4 threads the stream callback into adapter_opts; run/3 stays callback-free" do
+      registry_name = :"turn_runner_stream_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_stream_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "streamed_turn",
+        sender: "user",
+        content: "stream this",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter: SummaryAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        )
+
+      test_pid = self()
+      cb = fn event -> send(test_pid, {:stream, event}) end
+
+      assert {:ok, "summary from commit", _tokens} =
+               TurnRunner.run(msg, turn_state, fn _part -> :ok end, cb)
+
+      assert_receive {:summary_chat, _messages, opts}
+      assert Keyword.get(opts, :stream_callback) == cb
+      # The loop emits the bootstrap events through the same callback.
+      assert_received {:stream, {:session_started, "main-" <> _}}
+      assert_received {:stream, {:iteration_started, 1}}
+
+      # 3-arity path threads no callback.
+      assert {:ok, "summary from commit", _tokens} =
+               TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+      assert_receive {:summary_chat, _messages, plain_opts}
+      refute Keyword.has_key?(plain_opts, :stream_callback)
+    end
+
     test "persists the accepted user message when the agent loop fails" do
       registry_name = :"turn_runner_failure_registry_#{System.unique_integer([:positive])}"
       store_name = :"turn_runner_failure_store_#{System.unique_integer([:positive])}"

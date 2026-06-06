@@ -824,4 +824,47 @@ defmodule FermixCore.AgentLoopTest do
       assert result.iterations == 2
     end
   end
+
+  # -- Stream callback (channel streaming seam, docs/design/CHANNEL_STREAMING.md §5.1) --
+
+  describe "run/1 with stream_callback" do
+    test "emits session_started then iteration_started per provider call and injects the callback into adapter_opts",
+         %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{text: "hi"})]),
+        turn("done")
+      ])
+
+      test_pid = self()
+      cb = fn event -> send(test_pid, {:stream, event}) end
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 stream_callback: cb,
+                 context: %{agent_name: "test", conversation_key: :test, session_id: "sess-1"}
+               )
+
+      # Mailbox order is emission order: session bootstrap, then one
+      # iteration_started per provider call (chat + continue).
+      assert_received {:stream, {:session_started, "sess-1"}}
+      assert_received {:stream, {:iteration_started, 1}}
+      assert_received {:stream, {:iteration_started, 2}}
+      refute_received {:stream, _other}
+
+      assert [{_messages, _caps, opts}] = mock_calls()
+      assert Keyword.get(opts, :stream_callback) == cb
+    end
+
+    test "without stream_callback nothing is emitted and adapter_opts stay clean" do
+      set_mock_responses([turn("plain")])
+
+      assert {:ok, %{response: "plain"}} = run_loop([])
+
+      assert [{_messages, _caps, opts}] = mock_calls()
+      refute Keyword.has_key?(opts, :stream_callback)
+    end
+  end
 end

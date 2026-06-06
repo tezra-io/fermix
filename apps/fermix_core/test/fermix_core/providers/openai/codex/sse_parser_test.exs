@@ -211,4 +211,162 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
       assert finalized["model"] == "gpt-5"
     end
   end
+
+  describe "new/1 with delta_callback" do
+    defp text_delta_event(idx, delta) do
+      "data: " <>
+        Jason.encode!(%{
+          "type" => "response.output_text.delta",
+          "output_index" => idx,
+          "delta" => delta
+        }) <> "\n\n"
+    end
+
+    defp collect_deltas(sse_chunks) do
+      {:ok, agent} = Agent.start_link(fn -> [] end)
+      cb = fn event -> Agent.update(agent, &[event | &1]) end
+
+      state =
+        Enum.reduce(sse_chunks, SSEParser.new(delta_callback: cb), &SSEParser.feed(&2, &1))
+
+      events = Agent.get(agent, &Enum.reverse/1)
+      Agent.stop(agent)
+      {state, events}
+    end
+
+    test "fires {:text_delta, cumulative} per output_text.delta with growing cumulative" do
+      chunks = [
+        text_delta_event(0, "Hel"),
+        text_delta_event(0, "lo "),
+        text_delta_event(0, "world")
+      ]
+
+      {_state, events} = collect_deltas(chunks)
+
+      assert events == [
+               {:text_delta, "Hel"},
+               {:text_delta, "Hello "},
+               {:text_delta, "Hello world"}
+             ]
+    end
+
+    test "cumulative composes across output indices in index order" do
+      # Two message items; deltas interleave. The cumulative snapshot must be
+      # the index-ordered join — matching ResponsesShared.extract_text/1's
+      # composition of the finalized body — never just the changed index.
+      chunks = [
+        text_delta_event(2, "Second part."),
+        text_delta_event(0, "First "),
+        text_delta_event(0, "part. ")
+      ]
+
+      {_state, events} = collect_deltas(chunks)
+
+      assert events == [
+               {:text_delta, "Second part."},
+               {:text_delta, "First Second part."},
+               {:text_delta, "First part. Second part."}
+             ]
+    end
+
+    test "function_call argument deltas do not fire the callback" do
+      arg_delta =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.function_call_arguments.delta",
+            "output_index" => 0,
+            "delta" => "{\"k\":1}"
+          }) <> "\n\n"
+
+      {_state, events} = collect_deltas([arg_delta])
+      assert events == []
+    end
+
+    test "new/0 still parses without a callback" do
+      state = SSEParser.new() |> SSEParser.feed(text_delta_event(0, "hi"))
+      assert state.text_buffers == %{0 => "hi"}
+    end
+
+    test "new/1 rejects a non-function callback" do
+      assert_raise FunctionClauseError, fn ->
+        SSEParser.new(delta_callback: :not_a_fun)
+      end
+    end
+
+    test "a completed message item fires {:text_done, composed} — the semantic block boundary" do
+      done_event =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.output_item.done",
+            "output_index" => 0,
+            "item" => %{
+              "type" => "message",
+              "id" => "msg_1",
+              "content" => [%{"type" => "output_text", "text" => "Hello world"}]
+            }
+          }) <> "\n\n"
+
+      {_state, events} =
+        collect_deltas([text_delta_event(0, "Hello"), text_delta_event(0, " world"), done_event])
+
+      assert events == [
+               {:text_delta, "Hello"},
+               {:text_delta, "Hello world"},
+               {:text_done, "Hello world"}
+             ]
+    end
+
+    test "a completed reasoning item fires {:reasoning_done, summary}" do
+      reasoning_done =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.output_item.done",
+            "output_index" => 0,
+            "item" => %{
+              "type" => "reasoning",
+              "summary" => [
+                %{"type" => "summary_text", "text" => "Deciding to check the calendar first."},
+                %{"type" => "summary_text", "text" => "Then summarize."}
+              ]
+            }
+          }) <> "\n\n"
+
+      {_state, events} = collect_deltas([reasoning_done])
+
+      assert events == [
+               {:reasoning_done, "Deciding to check the calendar first.\n\nThen summarize."}
+             ]
+    end
+
+    test "a reasoning item without summary text fires nothing" do
+      bare_reasoning =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.output_item.done",
+            "output_index" => 0,
+            "item" => %{"type" => "reasoning", "summary" => [], "encrypted_content" => "xx"}
+          }) <> "\n\n"
+
+      {_state, events} = collect_deltas([bare_reasoning])
+      assert events == []
+    end
+
+    test "function_call item completion fires nothing" do
+      fc_done =
+        "data: " <>
+          Jason.encode!(%{
+            "type" => "response.output_item.done",
+            "output_index" => 0,
+            "item" => %{
+              "type" => "function_call",
+              "call_id" => "c1",
+              "name" => "x",
+              "arguments" => "{}"
+            }
+          }) <> "\n\n"
+
+      {_state, events} = collect_deltas([fc_done])
+      assert events == []
+    end
+  end
 end
