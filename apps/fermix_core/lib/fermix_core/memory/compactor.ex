@@ -5,8 +5,12 @@ defmodule FermixCore.Memory.Compactor do
   Checkpoint resource revisions are audit history only. M4.6 runtime behavior does not
   read checkpoints from the resource registry or support checkpoint rollback.
 
-  Over-budget compaction requires `route: {route_key, adapter_opts}`. There is no
-  hardcoded provider fallback; orphaned callers without a route fail loudly.
+  Over-budget compaction requires `route: {route_key, adapter_opts}`. Compactor
+  itself is single-route and does no provider fallback internally; the
+  primary/fallback route chain is owned by the callers (TurnRunner's
+  auto-compaction and the channel `/compact` command) via
+  `FermixCore.Providers.Failover.run_chain/3`. Orphaned callers without a
+  route fail loudly.
   """
 
   require Logger

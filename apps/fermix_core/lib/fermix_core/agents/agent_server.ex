@@ -91,6 +91,7 @@ defmodule FermixCore.Agents.AgentServer do
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       adapter_overrides: Keyword.get(opts, :adapter_overrides, []),
+      ordered_routes: Keyword.get(opts, :ordered_routes),
       pending_task: nil,
       started_at: started_at,
       started_monotonic_ms: System.monotonic_time(:millisecond)
@@ -137,9 +138,8 @@ defmodule FermixCore.Agents.AgentServer do
         execute_task(
           state.definition,
           state.session_id,
-          state.provider,
+          routing(state),
           state.capability_registry,
-          state.adapter_overrides,
           task,
           context
         )
@@ -234,15 +234,15 @@ defmodule FermixCore.Agents.AgentServer do
     :ok
   end
 
-  defp execute_task(
-         definition,
-         session_id,
-         provider,
-         capability_registry,
-         adapter_overrides,
-         task,
-         context
-       ) do
+  defp routing(state) do
+    %{
+      provider: state.provider,
+      adapter_overrides: state.adapter_overrides,
+      ordered_routes: state.ordered_routes
+    }
+  end
+
+  defp execute_task(definition, session_id, routing, capability_registry, task, context) do
     messages = [
       %{role: "system", content: definition.system_prompt},
       %{role: "user", content: build_task_prompt(task, Map.get(context, :task_context))}
@@ -267,32 +267,44 @@ defmodule FermixCore.Agents.AgentServer do
       capability_registry: capability_registry
     ]
 
-    loop_opts = build_loop_opts(base, definition, provider, adapter_overrides)
+    loop_opts = build_loop_opts(base, definition, routing)
     AgentLoop.run(loop_opts)
   end
 
-  defp build_loop_opts(base, definition, provider, adapter_overrides) when is_atom(provider) do
+  defp build_loop_opts(base, definition, %{provider: provider} = routing)
+       when is_atom(provider) do
     if adapter_capable?(provider) do
       base
       |> Keyword.put(:adapter, provider)
       |> Keyword.put(:adapter_opts, model: definition.model || "mock-model")
     else
-      build_route_loop_opts(base, definition, adapter_overrides)
+      base
+      |> Keyword.put(:routes, route_chain(definition, routing))
+      |> put_unless_nil(:temperature, definition.temperature)
     end
   end
 
-  defp build_route_loop_opts(base, definition, adapter_overrides) do
-    overrides =
-      adapter_overrides
-      |> put_unless_nil(:provider, definition.provider)
-      |> put_unless_nil(:model, definition.model)
-      |> put_unless_nil(:temperature, definition.temperature)
+  # Explicit definition provider/model overrides stay strict — a one-route
+  # list (§7, deferred decision 3). Without an override the worker inherits
+  # the parent turn's route chain; absent that (direct AgentServer use),
+  # it resolves a single route from its overrides as before.
+  defp route_chain(definition, routing) do
+    strict? = definition.provider != nil or definition.model != nil
 
-    {route_key, adapter_opts} = RouteResolver.resolve!(overrides)
+    case {strict?, routing.ordered_routes} do
+      {false, [_ | _] = inherited} ->
+        inherited
 
-    base
-    |> Keyword.put(:route_key, route_key)
-    |> Keyword.put(:adapter_opts, adapter_opts)
+      _strict_or_uninherited ->
+        [RouteResolver.resolve!(definition_overrides(definition, routing))]
+    end
+  end
+
+  defp definition_overrides(definition, routing) do
+    routing.adapter_overrides
+    |> put_unless_nil(:provider, definition.provider)
+    |> put_unless_nil(:model, definition.model)
+    |> put_unless_nil(:temperature, definition.temperature)
   end
 
   defp put_unless_nil(opts, _key, nil), do: opts

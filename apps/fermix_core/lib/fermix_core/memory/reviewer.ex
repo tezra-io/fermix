@@ -13,7 +13,8 @@ defmodule FermixCore.Memory.Reviewer do
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.ReviewTools
   alias FermixCore.Providers.Adapter
-  alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Providers.Failover
+  alias FermixCore.Providers.Selection
 
   @nothing_to_save "Nothing to save."
 
@@ -55,6 +56,7 @@ defmodule FermixCore.Memory.Reviewer do
       adapter: Keyword.get(opts, :adapter),
       adapter_opts: Keyword.get(opts, :adapter_opts, []),
       route_key: Keyword.get(opts, :route_key),
+      routes: Keyword.get(opts, :routes),
       repo: Keyword.get(opts, :repo, Config.repo_server(opts)),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       prompt_files: Keyword.get(opts, :prompt_files, PromptFiles),
@@ -358,6 +360,14 @@ defmodule FermixCore.Memory.Reviewer do
     provider_turn(%{ctx | adapter: Adapter.for_route(route_key)}, messages)
   end
 
+  # The turn runner threads the turn's ordered route chain; review is a
+  # single call with no provider state, so failover can cover it whole (§7).
+  # Matched BEFORE the legacy provider clause: the turn runner passes both
+  # (`provider:` is its always-present module default), and the chain wins.
+  defp provider_turn(%{routes: [_ | _] = routes} = ctx, messages) do
+    run_route_chain(routes, ctx, messages)
+  end
+
   defp provider_turn(%{provider: provider} = ctx, messages) when not is_nil(provider) do
     case provider.chat(messages, provider_opts(ctx)) do
       {:ok, response} -> {:ok, response}
@@ -365,32 +375,35 @@ defmodule FermixCore.Memory.Reviewer do
     end
   end
 
+  # Voice and CLI entry points pass neither an adapter nor an explicit
+  # provider; resolve the configured primary/fallback chain here (lazily, so
+  # a misconfiguration surfaces as a handled review failure rather than
+  # crashing the caller) instead of hardcoding a provider.
   defp provider_turn(ctx, messages) do
-    case resolve_configured_route() do
-      {:ok, route_key, adapter_opts} ->
-        provider_turn(
-          %{
-            ctx
-            | route_key: route_key,
-              adapter_opts: Keyword.merge(adapter_opts, ctx.adapter_opts)
-          },
-          messages
-        )
-
-      {:error, reason} ->
-        {:error, reason}
+    case Selection.ordered_routes() do
+      {:ok, routes} -> run_route_chain(routes, ctx, messages)
+      {:error, reason} -> {:error, {:route_resolution_failed, reason}}
     end
   end
 
-  # Voice and CLI entry points pass neither an adapter nor an explicit
-  # provider; resolve the configured main-model route here (lazily, so a
-  # misconfiguration surfaces as a handled review failure rather than
-  # crashing the caller) instead of hardcoding a provider.
-  defp resolve_configured_route do
-    {route_key, adapter_opts} = RouteResolver.resolve!()
-    {:ok, route_key, adapter_opts}
-  rescue
-    error -> {:error, {:route_resolution_failed, Exception.message(error)}}
+  defp run_route_chain(routes, ctx, messages) do
+    attempt = fn {route_key, route_opts} ->
+      # Route opts may carry a pre-bound :adapter (the same seam as
+      # AgentLoop.bind_route); it is never re-resolved via for_route.
+      {adapter, route_opts} = Keyword.pop(route_opts, :adapter)
+
+      attempt_ctx = %{
+        ctx
+        | adapter: adapter || Adapter.for_route(route_key),
+          adapter_opts: Keyword.merge(route_opts, ctx.adapter_opts)
+      }
+
+      provider_turn(attempt_ctx, messages)
+    end
+
+    Failover.run_chain(routes, attempt,
+      telemetry: %{agent: "memory_reviewer", surface: :memory_review}
+    )
   end
 
   defp provider_opts(ctx) do

@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.WizardTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.ConfigStore
@@ -223,10 +224,154 @@ defmodule FermixCore.Setup.WizardTest do
     agent = Keyword.get(persisted.fermix_core, :agent, [])
     xai = persisted.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
 
-    assert Keyword.get(agent, :provider) == :xai
+    # save_answers writes the primary flag, never [fermix_core.agent].provider.
+    refute Keyword.has_key?(agent, :provider)
+    assert Keyword.get(xai, :primary) == true
     assert Keyword.get(xai, :api_key) == "xai-key"
     assert Keyword.get(xai, :default_model) == "grok-4.3"
     assert Keyword.get(xai, :reasoning_effort) == :high
+  end
+
+  test "a newly configured provider is auto-promoted and the old primary keeps its settings" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-promote")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "anthropic",
+               anthropic_api_key: "sk-ant",
+               default_model: "claude-sonnet-4-6"
+             )
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(xai_api_key: "xai-key")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:xai], :primary) == true
+    assert Keyword.get(providers[:anthropic], :primary) == false
+    assert Keyword.get(providers[:anthropic], :api_key) == "sk-ant"
+    assert Keyword.get(providers[:anthropic], :default_model) == "claude-sonnet-4-6"
+  end
+
+  test "an auto-promoted provider receives the same save's model/effort fields" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-promote-fields")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # No explicit :provider answer — anthropic is newly configured, gets
+    # auto-promoted, and the model/effort from the SAME save must land on
+    # its block (promotion runs before the field writers, §4).
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               anthropic_api_key: "sk-ant",
+               default_model: "claude-opus-4-7",
+               reasoning_effort: "high"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:anthropic], :primary) == true
+    assert Keyword.get(providers[:anthropic], :default_model) == "claude-opus-4-7"
+    assert Keyword.get(providers[:anthropic], :reasoning_effort) == :high
+    refute Keyword.has_key?(providers[:openai] || [], :default_model)
+  end
+
+  test "re-saving credentials for an already configured provider does not steal primary" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-no-steal")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "anthropic", anthropic_api_key: "sk-ant")
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(anthropic_api_key: "sk-ant-2")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:anthropic], :primary) == true
+  end
+
+  test "explicitly checking another provider as primary clears only the old primary flag" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-switch")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               anthropic_api_key: "sk-ant"
+             )
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "anthropic")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:anthropic], :primary) == true
+    assert Keyword.get(providers[:openai], :primary) == false
+    assert Keyword.get(providers[:openai], :api_key) == "sk-x"
+  end
+
+  test "set_provider_auth_mode (CLI login path) never promotes a provider to primary" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-cli-no-promote")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "openai", openai_api_key: "sk-x")
+
+    assert :ok =
+             AuthStore.write("xai_oauth", %{
+               auth_mode: "oauth_pkce",
+               provider: "xai",
+               tokens: %{access_token: "xai-at", refresh_token: nil},
+               expires_at: nil,
+               last_refresh: nil
+             })
+
+    assert {:ok, _} = Wizard.set_provider_auth_mode(:xai, :oauth)
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:openai], :primary) == true
+    refute Keyword.get(providers[:xai], :primary) == true
   end
 
   test "save_answers writes all setup secrets through SecretWriter" do
@@ -1088,13 +1233,14 @@ defmodule FermixCore.Setup.WizardTest do
       providers = Keyword.get(persisted.fermix_core, :providers, [])
       codex = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex, :primary) == true
       assert Keyword.get(codex, :default_model) == "gpt-5.4"
       assert Keyword.get(codex, :reasoning_effort) == :medium
       assert Keyword.get(codex, :fast) == true
     end
 
-    test "default_model writes to the active provider block (per agent.provider)" do
+    test "default_model writes to the active provider block (per primary flag)" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-active-#{System.unique_integer([:positive])}")
 
@@ -1169,7 +1315,10 @@ defmodule FermixCore.Setup.WizardTest do
         |> Wizard.save_answers(provider: :anthropic)
 
       {:ok, persisted} = ConfigStore.load_runtime_config()
-      assert Keyword.get(Keyword.get(persisted.fermix_core, :agent, []), :provider) == :anthropic
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+      refute Keyword.has_key?(Keyword.get(persisted.fermix_core, :agent, []), :provider)
+      assert Keyword.get(providers[:anthropic], :primary) == true
     end
 
     test "raises ArgumentError on unknown provider string" do

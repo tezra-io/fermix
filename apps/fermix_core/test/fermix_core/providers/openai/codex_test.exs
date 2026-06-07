@@ -257,14 +257,33 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           name: stub_server
         )
 
-      assert {:error,
-              {:provider_error, %{provider: :openai_codex, kind: :auth, message: message}}} =
+      assert {:error, {:provider_error, %{provider: :openai_codex, kind: :auth} = error}} =
                Codex.chat([%{role: "user", content: "x"}], [],
                  model: "gpt-5",
                  token_server: stub_server
                )
 
-      assert message =~ "Codex auth required"
+      # Tagged oauth so an unusable token is terminal-for-route and the
+      # failover chain can try a configured fallback.
+      assert error.auth_mode == :oauth
+      assert error.message =~ "Codex auth required"
+    end
+
+    test "a dead token server returns a structured oauth auth error instead of exiting" do
+      # Today's scheduled-job failure shape: the TokenManager process is not
+      # alive, GenServer.call would exit :noproc and crash the agent loop —
+      # the adapter must degrade it to a structured, failover-eligible error.
+      dead_server = :"codex_test_dead_token_server_#{System.unique_integer([:positive])}"
+
+      assert {:error, {:provider_error, %{provider: :openai_codex, kind: :auth} = error}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 model: "gpt-5",
+                 token_server: dead_server
+               )
+
+      assert error.auth_mode == :oauth
+      assert error.message =~ "token_server_unavailable"
+      assert error.message =~ "noproc"
     end
 
     test "returns {:error, _} on a non-200 response" do
@@ -272,7 +291,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         Plug.Conn.send_resp(conn, 401, "unauthorized")
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -280,7 +299,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message == "Codex API error: 401"
+      assert error.provider == :openai_codex
+      assert error.status == 401
+      assert error.kind == :auth
+      assert error.auth_mode == :oauth
     end
 
     test "provider telemetry includes the agent when supplied" do
@@ -393,7 +415,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           token_server: token_server,
           model: "gpt-5",
@@ -401,8 +423,12 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message =~ "Codex auth invalidated"
-      assert message =~ "fermix auth login"
+      # Refresh exhausted -> residual structured :auth error, tagged oauth so
+      # the failover layer treats it as terminal-for-route (no second refresh).
+      assert error.kind == :auth
+      assert error.status == 401
+      assert error.auth_mode == :oauth
+      assert error.message =~ "invalidated"
     end
 
     test "surfaces refresh failures instead of returning the original 401" do
@@ -428,7 +454,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           token_server: token_server,
           model: "gpt-5",
@@ -436,9 +462,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message =~ "Codex token refresh failed"
-      assert message =~ ":timeout"
-      refute message == "Codex API error: 401"
+      assert error.kind == :auth
+      assert error.auth_mode == :oauth
+      assert error.message =~ "Codex token refresh failed"
+      assert error.message =~ ":timeout"
     end
   end
 
@@ -933,7 +960,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
       assert measurements.duration_ms >= 0
       assert metadata.status == :error
-      assert metadata.error_kind == :transport
+      assert metadata.error_kind == :transport_closed
       assert metadata.transport_error_reason == :closed
       assert metadata.transport_stage == :before_response
       assert metadata.error =~ "before any response data"
@@ -944,7 +971,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         Req.Test.transport_error(conn, :closed)
       end)
 
-      {:error, message} =
+      {:error, {:provider_transport_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -952,10 +979,11 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert is_binary(message)
-      assert message =~ "before any response data"
-      refute message =~ "mid-response"
-      refute message =~ "reasoning_effort"
+      assert error.kind == :transport_closed
+      assert error.stage == :before_response
+      assert error.message =~ "before any response data"
+      refute error.message =~ "mid-response"
+      refute error.message =~ "reasoning_effort"
     end
 
     test ":timeout becomes an actionable operator-readable message without an effort steer" do
@@ -963,7 +991,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         Req.Test.transport_error(conn, :timeout)
       end)
 
-      {:error, message} =
+      {:error, {:provider_transport_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -971,10 +999,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert is_binary(message)
-      assert message =~ "no data for"
-      assert message =~ "receive_timeout"
-      refute message =~ "Lower reasoning_effort"
+      assert error.kind == :timeout
+      assert error.message =~ "no data for"
+      assert error.message =~ "receive_timeout"
+      refute error.message =~ "Lower reasoning_effort"
     end
 
     test ":closed retries once and succeeds on the second attempt (stale-pool recovery)" do
@@ -1022,7 +1050,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         Req.Test.transport_error(conn, :closed)
       end)
 
-      {:error, message} =
+      {:error, {:provider_transport_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -1030,7 +1058,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, test_id}]
         )
 
-      assert message =~ "before any response data"
+      assert error.message =~ "before any response data"
       assert_received {:codex_attempt, 1}
       assert_received {:codex_attempt, 2}
       refute_received {:codex_attempt, 3}
@@ -1083,7 +1111,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         {req, %Req.TransportError{reason: :closed}}
       end
 
-      {:error, message} =
+      {:error, {:provider_transport_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -1091,8 +1119,9 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [adapter: adapter]
         )
 
-      assert message =~ "mid-response"
-      refute message =~ "before any response data"
+      assert error.stage == :mid_stream
+      assert error.message =~ "mid-response"
+      refute error.message =~ "before any response data"
 
       assert_receive {:telemetry, [:fermix, :provider, :call], metadata}
       assert metadata.transport_stage == :mid_stream

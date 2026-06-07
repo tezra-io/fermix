@@ -36,6 +36,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Reply
@@ -97,6 +98,14 @@ defmodule FermixCore.Agents.TurnRunner do
 
   @doc "Map an agent-loop error reason to the user-facing reply text."
   @spec error_reply(term()) :: String.t()
+  def error_reply({:all_routes_failed, [{_provider, _reason} | _rest] = attempted}) do
+    providers = Enum.map_join(attempted, ", ", fn {provider, _reason} -> to_string(provider) end)
+    {_last_provider, last_reason} = List.last(attempted)
+
+    "All configured providers failed (tried: #{providers}). Last error: " <>
+      error_reply(last_reason)
+  end
+
   def error_reply(reason) do
     cond do
       context_length_error?(reason) ->
@@ -110,11 +119,6 @@ defmodule FermixCore.Agents.TurnRunner do
       max_iterations_error?(reason) ->
         "I hit the investigation step limit before finishing that request. " <>
           "Try narrowing the ask, or rerun it as a deeper investigation after increasing limits."
-
-      codex_transport_closed_error?(reason) ->
-        "The Codex provider closed the response stream before returning an answer. " <>
-          "This is not a confirmed context-window error. Send /compact or /new, then resend; " <>
-          "if it persists, lower reasoning_effort or check ChatGPT account status."
 
       reply = provider_error_reply(reason) ->
         reply
@@ -143,14 +147,6 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp max_iterations_error?(_reason), do: false
-
-  defp codex_transport_closed_error?(reason) when is_binary(reason) do
-    reason
-    |> String.downcase()
-    |> String.contains?("codex stream closed by peer")
-  end
-
-  defp codex_transport_closed_error?(_reason), do: false
 
   defp run_message_loop(msg, state, deliver, stream_callback) do
     start = System.monotonic_time(:millisecond)
@@ -185,6 +181,10 @@ defmodule FermixCore.Agents.TurnRunner do
       session_id: "main-#{System.unique_integer([:positive, :monotonic])}",
       capability_registry: state.capability_registry,
       provider: state.provider,
+      # Turn-start route-chain snapshot for subagents (§7): static for the
+      # turn — a subagent spawned after a mid-turn failover still starts at
+      # the primary and runs its own bounded failover.
+      ordered_routes: Map.get(state, :ordered_routes),
       skill_registry: state.skill_registry,
       agent_supervisor: state.agent_supervisor,
       task_supervisor: state.task_supervisor,
@@ -335,12 +335,12 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   # See `error_reply/1` for the auth-vs-generic mapping these patterns drive.
+  # (The Codex `{:auth_invalidated, _}`/`{:refresh_failed, _}` tuples are gone —
+  # the adapter now returns structured `{:provider_error, %{kind: :auth}}`.)
   defp auth_error?(:no_auth_file), do: true
   defp auth_error?(:auth_invalidated), do: true
   defp auth_error?(:refresh_failed), do: true
   defp auth_error?(:invalid_grant), do: true
-  defp auth_error?({:auth_invalidated, _body}), do: true
-  defp auth_error?({:refresh_failed, _reason}), do: true
   defp auth_error?({:provider_error, status, _body}) when status in [401, 403], do: true
   defp auth_error?({:provider_error, %{kind: :auth}}), do: true
   defp auth_error?({:provider_error, %{status: status}}) when status in [401, 403], do: true
@@ -470,19 +470,18 @@ defmodule FermixCore.Agents.TurnRunner do
         |> Keyword.put(:adapter, mod)
         |> Keyword.put(:adapter_opts, opts)
 
-      {:route, key, opts} ->
-        base
-        |> Keyword.put(:route_key, key)
-        |> Keyword.put(:adapter_opts, opts)
+      {:routes, routes} ->
+        Keyword.put(base, :routes, routes)
     end
   end
 
-  # The compaction route mirrors the loop's adapter/route resolution; commit/3
+  # The compaction route chain mirrors the loop's resolution; commit/3
   # recomputes it (cheap) so run/3 needn't thread it through its return value.
+  # Returns {adapter_or_nil, routes} — one shape downstream.
   defp compaction_target(state) do
     case resolve_loop_adapter(state) do
-      {:adapter, mod, opts} -> {mod, direct_adapter_route_key(state, opts), opts}
-      {:route, key, opts} -> {nil, key, opts}
+      {:adapter, mod, opts} -> {mod, [{direct_adapter_route_key(state, opts), opts}]}
+      {:routes, routes} -> {nil, routes}
     end
   end
 
@@ -510,8 +509,21 @@ defmodule FermixCore.Agents.TurnRunner do
         {:adapter, state.provider, Keyword.put(state.adapter_opts, :model, "mock-model")}
 
       true ->
+        {:routes, state_routes(state)}
+    end
+  end
+
+  # MainAgent snapshots Selection.ordered_routes at boot. When the snapshot
+  # is unavailable (boot logged a config error, e.g. multiple primaries),
+  # resolve per turn so the clear error raises loudly on the turn path.
+  defp state_routes(state) do
+    case Map.get(state, :ordered_routes) do
+      [_ | _] = routes ->
+        routes
+
+      _missing ->
         {route_key, adapter_opts} = RouteResolver.resolve!(state.adapter_overrides)
-        {:route, route_key, adapter_opts}
+        [{route_key, adapter_opts}]
     end
   end
 
@@ -545,20 +557,13 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp preflight_auto_compact_now(conversation_key, state, profile, history, user_message, config) do
-    {adapter, route_key, adapter_opts} = compaction_target(state)
-    context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
+    {_adapter, [{lead_key, _lead_opts} | _rest]} = target = compaction_target(state)
+    context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
     prompt_tokens = preflight_prompt_tokens(state.runtime_context, profile, history, user_message)
 
     if prompt_tokens / context_window >= threshold do
-      compact_preflight_history(
-        conversation_key,
-        history,
-        state,
-        {adapter, route_key, adapter_opts},
-        context_window,
-        config
-      )
+      compact_preflight_history(conversation_key, history, state, target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
       {history, :ok}
@@ -571,25 +576,8 @@ defmodule FermixCore.Agents.TurnRunner do
     |> Compactor.estimate_tokens()
   end
 
-  defp compact_preflight_history(
-         conversation_key,
-         history,
-         state,
-         {adapter, route_key, adapter_opts},
-         context_window,
-         config
-       ) do
-    result =
-      run_auto_compaction(
-        conversation_key,
-        history,
-        Compactor.estimate_tokens(history),
-        adapter,
-        route_key,
-        compaction_adapter_opts(adapter_opts, config),
-        context_window,
-        state
-      )
+  defp compact_preflight_history(conversation_key, history, state, target, config) do
+    result = run_auto_compaction(conversation_key, history, target, config, state)
 
     case result do
       :compacted -> reload_compacted_history(conversation_key, state, history)
@@ -648,41 +636,20 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp maybe_auto_compact_now(conversation_key, state, compaction_target, config, context_tokens) do
-    {adapter, route_key, adapter_opts} = compaction_target
-    context_window = ModelCatalog.context_window_for(route_key.provider, route_key.model)
+    {_adapter, [{lead_key, _lead_opts} | _rest]} = compaction_target
+    context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
 
     if context_tokens / context_window >= threshold do
-      compact_when_over_threshold(
-        conversation_key,
-        state,
-        {adapter, route_key, adapter_opts},
-        context_window,
-        config
-      )
+      compact_when_over_threshold(conversation_key, state, compaction_target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
     end
   end
 
-  defp compact_when_over_threshold(
-         conversation_key,
-         state,
-         {adapter, route_key, adapter_opts},
-         context_window,
-         config
-       ) do
+  defp compact_when_over_threshold(conversation_key, state, target, config) do
     with {:ok, history} <- conversation_history(conversation_key, state) do
-      run_auto_compaction(
-        conversation_key,
-        history,
-        Compactor.estimate_tokens(history),
-        adapter,
-        route_key,
-        compaction_adapter_opts(adapter_opts, config),
-        context_window,
-        state
-      )
+      run_auto_compaction(conversation_key, history, target, config, state)
     else
       {:error, reason} -> emit_auto_compaction_skipped(conversation_key, reason)
     end
@@ -711,58 +678,31 @@ defmodule FermixCore.Agents.TurnRunner do
     }
   end
 
-  defp run_auto_compaction(
-         conversation_key,
-         history,
-         before_tokens,
-         adapter,
-         route_key,
-         adapter_opts,
-         context_window,
-         state
-       ) do
-    budget = trunc(0.5 * context_window)
+  # Compaction failover runs through the same shared executor as the agent
+  # loop's initial chat — no second retry loop. Compactor itself stays
+  # single-route; the chain lives here.
+  defp run_auto_compaction(conversation_key, history, {adapter, routes}, config, state) do
+    before_tokens = Compactor.estimate_tokens(history)
+    attempt = compaction_attempt(history, adapter, config, conversation_key, state)
 
     {compaction_result, duration_us} =
       Telemetry.timed_us(fn ->
-        Compactor.compact(history,
-          enabled: true,
-          token_budget: budget,
-          route: {route_key, adapter_opts},
-          adapter: adapter,
-          context: compaction_context(conversation_key, state)
-        )
+        routes
+        |> compaction_routes(before_tokens)
+        |> Failover.run_chain(attempt, telemetry: %{agent: "main", surface: :compaction})
       end)
 
     case compaction_result do
-      {:ok, %{messages: compacted, compacted?: true}} ->
-        after_tokens = Compactor.estimate_tokens(compacted)
-
-        :ok =
-          ConversationStore.replace_history(conversation_key, compacted,
-            server: state.conversation_store,
-            agent_id: state.memory_agent_id,
-            owner_id: state.memory_owner_id
-          )
-
-        :telemetry.execute(
-          [:fermix, :compaction, :auto],
-          %{before_tokens: before_tokens, after_tokens: after_tokens, duration_us: duration_us},
-          %{
-            conversation_key: conversation_key,
-            provider: route_key.provider,
-            model: route_key.model
-          }
+      {:ok, {%{messages: compacted, compacted?: true}, route_key}} ->
+        commit_compacted_history(
+          conversation_key,
+          state,
+          compacted,
+          route_key,
+          {before_tokens, duration_us}
         )
 
-        # Compaction is a context-refresh point: drop the cached runtime context
-        # so the next turn rebuilds it (bootstrap + USER.md/MEMORY.md + tools),
-        # picking up any memory the reviewer wrote during this conversation.
-        invalidate_runtime_context(state)
-        clear_auto_compaction_failure(state, conversation_key)
-        :compacted
-
-      {:ok, %{compacted?: false}} ->
+      {:ok, {%{compacted?: false}, _route_key}} ->
         emit_auto_compaction_skipped(conversation_key, :nothing_to_compact)
 
       {:error, reason} ->
@@ -770,6 +710,73 @@ defmodule FermixCore.Agents.TurnRunner do
         emit_auto_compaction_skipped(conversation_key, reason)
         record_auto_compaction_failure(state, conversation_key)
     end
+  end
+
+  defp compaction_attempt(history, adapter, config, conversation_key, state) do
+    fn {route_key, adapter_opts} ->
+      # Route opts may carry a pre-bound :adapter (the same seam as
+      # AgentLoop.bind_route); it is never re-resolved via for_route.
+      {route_adapter, adapter_opts} = Keyword.pop(adapter_opts, :adapter)
+
+      result =
+        Compactor.compact(history,
+          enabled: true,
+          token_budget:
+            trunc(0.5 * ModelCatalog.context_window_for(route_key.provider, route_key.model)),
+          route: {route_key, compaction_adapter_opts(adapter_opts, config)},
+          adapter: adapter || route_adapter,
+          context: compaction_context(conversation_key, state)
+        )
+
+      # Unwrap Compactor's tag so the shared executor classifies (and
+      # emits failover telemetry for) the real provider reason.
+      case result do
+        {:ok, compacted} -> {:ok, {compacted, route_key}}
+        {:error, {:compaction_failed, reason}} -> {:error, reason}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # Skip-not-clamp (§7): the lead route triggered compaction and always
+  # stays; a fallback whose context window cannot fit the summarization
+  # prompt is excluded rather than shrinking the lead budget.
+  defp compaction_routes([lead | rest], prompt_tokens) do
+    [
+      lead
+      | Enum.filter(rest, fn {route_key, _opts} ->
+          ModelCatalog.context_window_for(route_key.provider, route_key.model) >= prompt_tokens
+        end)
+    ]
+  end
+
+  defp commit_compacted_history(conversation_key, state, compacted, route_key, timing) do
+    {before_tokens, duration_us} = timing
+    after_tokens = Compactor.estimate_tokens(compacted)
+
+    :ok =
+      ConversationStore.replace_history(conversation_key, compacted,
+        server: state.conversation_store,
+        agent_id: state.memory_agent_id,
+        owner_id: state.memory_owner_id
+      )
+
+    :telemetry.execute(
+      [:fermix, :compaction, :auto],
+      %{before_tokens: before_tokens, after_tokens: after_tokens, duration_us: duration_us},
+      %{
+        conversation_key: conversation_key,
+        provider: route_key.provider,
+        model: route_key.model
+      }
+    )
+
+    # Compaction is a context-refresh point: drop the cached runtime context
+    # so the next turn rebuilds it (bootstrap + USER.md/MEMORY.md + tools),
+    # picking up any memory the reviewer wrote during this conversation.
+    invalidate_runtime_context(state)
+    clear_auto_compaction_failure(state, conversation_key)
+    :compacted
   end
 
   defp compaction_context(conversation_key, state) do
@@ -964,10 +971,8 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp add_reviewer_route(opts, state) do
     case resolve_loop_adapter(state) do
-      {:route, route_key, adapter_opts} ->
-        opts
-        |> Keyword.put(:route_key, route_key)
-        |> Keyword.put(:adapter_opts, adapter_opts)
+      {:routes, routes} ->
+        Keyword.put(opts, :routes, routes)
 
       {:adapter, mod, adapter_opts} ->
         opts

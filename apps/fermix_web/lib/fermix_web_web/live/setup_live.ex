@@ -17,6 +17,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -1386,11 +1387,20 @@ defmodule FermixWebWeb.SetupLive do
   defp blank?(value) when is_binary(value), do: String.trim(value) == ""
   defp blank?(_value), do: false
 
+  # Primary flag first, legacy agent.provider as migration input. Multiple
+  # hand-edited primaries map to the default so the setup page stays usable
+  # as the repair surface.
   defp current_provider(snapshot) do
-    snapshot
-    |> get_fermix_core(:agent)
-    |> Keyword.get(:provider)
-    |> normalize_provider()
+    chosen =
+      PrimaryConfig.chosen_in(
+        get_fermix_core(snapshot, :providers),
+        get_fermix_core(snapshot, :agent)
+      )
+
+    case chosen do
+      {:ok, provider} -> normalize_provider(provider)
+      {:error, :multiple_primary} -> normalize_provider(nil)
+    end
   end
 
   defp get_fermix_core(snapshot, key) do

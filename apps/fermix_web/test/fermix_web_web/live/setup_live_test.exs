@@ -698,8 +698,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(xai, :reasoning_effort) == :high
       assert Keyword.get(xai, :api_key) == "xai-from-live-test"
 
-      agent = Application.get_env(:fermix_core, :agent, [])
-      assert Keyword.get(agent, :provider) == :xai
+      assert Keyword.get(xai, :primary) == true
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ "[fermix_core.providers.xai]"

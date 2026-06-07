@@ -34,6 +34,7 @@ defmodule Fermix.CLI.Doctor do
   defp collect_results(full?) do
     base = [
       Checks.readiness(),
+      Checks.fallback_providers(),
       Checks.workspace_layout(),
       Checks.service_unit(),
       Checks.daemon_socket(),

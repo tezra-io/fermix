@@ -21,6 +21,16 @@ defmodule FermixCore.Providers.Telemetry do
           | {:output, term()}
           | {:tool_calls, [term()] | nil}
 
+  @doc """
+  Emit a provider-failover transition event. One event per failover —
+  `from_*`/`to_*` name the routes, `reason_kind` the Error kind that made the
+  attempt eligible. Per-attempt details stay on the normal `:call` events.
+  """
+  @spec emit_failover(map()) :: :ok
+  def emit_failover(metadata) when is_map(metadata) do
+    :telemetry.execute([:fermix, :provider, :failover], %{count: 1}, metadata)
+  end
+
   @doc "Emit a provider-call event from already-built `metadata`."
   @spec emit_call(map(), non_neg_integer(), [opt()]) :: :ok
   def emit_call(metadata, duration_ms, opts \\ [])

@@ -9,24 +9,36 @@ defmodule FermixCore.Providers.Error do
 
   @type provider :: atom()
   @type adapter :: atom()
+
+  @typedoc """
+  Where the failure happened relative to user-visible output. Streaming
+  adapters tag `:mid_stream` once response chunks were seen; everything
+  else defaults to `:before_response`. Failover eligibility keys on this
+  (docs/design/MULTI_PROVIDER_FAILOVER.md §5 Streaming Boundary).
+  """
+  @type stage :: :before_response | :mid_stream
+
   @type api_error :: %{
           provider: provider(),
           adapter: adapter(),
           status: pos_integer() | nil,
           kind: atom(),
           code: String.t() | nil,
-          message: String.t()
+          message: String.t(),
+          stage: stage()
         }
   @type transport_error :: %{
           provider: provider(),
           adapter: adapter(),
           reason: term(),
           kind: atom(),
-          message: String.t()
+          message: String.t(),
+          stage: stage()
         }
 
-  @spec api(provider(), adapter(), pos_integer(), term()) :: {:provider_error, api_error()}
-  def api(provider, adapter, status, body)
+  @spec api(provider(), adapter(), pos_integer(), term(), keyword()) ::
+          {:provider_error, api_error()}
+  def api(provider, adapter, status, body, opts \\ [])
       when is_atom(provider) and is_atom(adapter) and is_integer(status) and status > 0 do
     decoded = decode_body(body)
     code = error_code(decoded)
@@ -39,7 +51,8 @@ defmodule FermixCore.Providers.Error do
        status: status,
        kind: api_kind(status, code, message),
        code: code,
-       message: message
+       message: message,
+       stage: stage_opt(opts)
      }}
   end
 
@@ -59,7 +72,8 @@ defmodule FermixCore.Providers.Error do
        status: nil,
        kind: :auth,
        code: nil,
-       message: message
+       message: message,
+       stage: :before_response
      }}
   end
 
@@ -72,19 +86,25 @@ defmodule FermixCore.Providers.Error do
        status: nil,
        kind: :not_implemented,
        code: nil,
-       message: "#{provider_label(provider)} #{adapter} adapter is not implemented yet"
+       message: "#{provider_label(provider)} #{adapter} adapter is not implemented yet",
+       stage: :before_response
      }}
   end
 
-  @spec transport(provider(), adapter(), term()) :: {:provider_transport_error, transport_error()}
-  def transport(provider, adapter, reason) when is_atom(provider) and is_atom(adapter) do
+  @spec transport(provider(), adapter(), term(), keyword()) ::
+          {:provider_transport_error, transport_error()}
+  def transport(provider, adapter, reason, opts \\ [])
+      when is_atom(provider) and is_atom(adapter) do
     {:provider_transport_error,
      %{
        provider: provider,
        adapter: adapter,
        reason: reason,
        kind: transport_kind(reason),
-       message: "#{provider_label(provider)} transport error: #{inspect(reason)}"
+       message:
+         Keyword.get(opts, :message) ||
+           "#{provider_label(provider)} transport error: #{inspect(reason)}",
+       stage: stage_opt(opts)
      }}
   end
 
@@ -147,6 +167,17 @@ defmodule FermixCore.Providers.Error do
   defp transport_kind(:closed), do: :transport_closed
   defp transport_kind(:econnrefused), do: :network
   defp transport_kind(_reason), do: :transport
+
+  defp stage_opt(opts) do
+    case Keyword.get(opts, :stage, :before_response) do
+      stage when stage in [:before_response, :mid_stream] ->
+        stage
+
+      other ->
+        raise ArgumentError,
+              "invalid error stage: #{inspect(other)}; expected :before_response or :mid_stream"
+    end
+  end
 
   defp decode_body(body) when is_map(body), do: body
 

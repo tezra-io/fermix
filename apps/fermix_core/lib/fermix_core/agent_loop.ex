@@ -17,6 +17,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.Failover
   alias FermixCore.Telemetry
 
   @max_iterations 25
@@ -37,6 +38,20 @@ defmodule FermixCore.AgentLoop do
           | {:reasoning_done, String.t()}
   @type stream_callback :: (stream_event() -> any())
 
+  @typedoc """
+  Route input is ONE shape: `routes` — an ordered `[{route_key, adapter_opts}]`
+  list. A one-element list means no failover (the pre-failover behavior); the
+  initial `chat/3` fails over across the list for eligible errors
+  (docs/design/MULTI_PROVIDER_FAILOVER.md §5). `continue/3` always stays on
+  the route that answered the initial call.
+
+  A directly injected `adapter` (test mocks, adapter-capable providers) is
+  sugar for a one-element routes list whose entry carries the pre-bound
+  module — it never fails over and is never re-resolved via `for_route/1`.
+  A route's `adapter_opts` may carry `:adapter` for the same purpose.
+  """
+  @type route :: {Adapter.route_key(), keyword()}
+
   @type loop_opts :: [
           messages: [map()],
           capabilities: [Capability.t()],
@@ -44,8 +59,7 @@ defmodule FermixCore.AgentLoop do
           policy: CapabilityRegistry.policy_spec(),
           trust: CapabilityRegistry.trust(),
           excluded_categories: [atom()] | nil,
-          route_key: Adapter.route_key(),
-          adapter_opts: keyword(),
+          routes: [route()],
           model: String.t(),
           temperature: float(),
           max_iterations: pos_integer(),
@@ -82,7 +96,8 @@ defmodule FermixCore.AgentLoop do
     policy = Keyword.get(opts, :policy)
     trust = Keyword.get(opts, :trust)
     excluded_categories = Keyword.get(opts, :excluded_categories)
-    {adapter, route_key} = resolve_adapter(opts)
+    routes = resolve_routes(opts)
+    {first_route_key, _first_opts} = hd(routes)
     context = Keyword.get(opts, :context, %{})
 
     {capabilities, capability_duration_us} =
@@ -101,7 +116,7 @@ defmodule FermixCore.AgentLoop do
     emit_capability_selection_telemetry(
       capabilities,
       capability_duration_us,
-      route_key,
+      first_route_key,
       context,
       %{
         trust: trust,
@@ -117,9 +132,12 @@ defmodule FermixCore.AgentLoop do
       capabilities_by_name: index_by_name(capabilities),
       allowed_tools: allowed_tools,
       capability_registry: capability_registry,
-      adapter: adapter,
-      route_key: route_key,
-      adapter_opts: build_adapter_opts(opts, route_key, context),
+      routes: routes,
+      adapter: nil,
+      route_key: first_route_key,
+      adapter_opts: [],
+      temperature: Keyword.get(opts, :temperature, 0.7),
+      stream: stream_state(Keyword.get(opts, :stream_callback)),
       max_iter: Keyword.get(opts, :max_iterations, @max_iterations),
       context: context,
       iteration: 0,
@@ -157,11 +175,16 @@ defmodule FermixCore.AgentLoop do
     Map.new(capabilities, fn %Capability{name: name} = capability -> {name, capability} end)
   end
 
-  defp resolve_adapter(opts) do
+  # ONE route shape: `routes` (ordered list). A top-level injected `:adapter`
+  # is sugar for a one-element list carrying the pre-bound module in its
+  # route opts — the adapter-wins branch in `bind_route/2`, never re-resolved.
+  defp resolve_routes(opts) do
     case Keyword.get(opts, :adapter) do
       nil ->
-        route_key = Keyword.fetch!(opts, :route_key)
-        {Adapter.for_route(route_key), route_key}
+        case Keyword.fetch!(opts, :routes) do
+          [_ | _] = routes -> routes
+          [] -> raise ArgumentError, "AgentLoop requires at least one route"
+        end
 
       adapter when is_atom(adapter) ->
         route_key =
@@ -172,9 +195,63 @@ defmodule FermixCore.AgentLoop do
             base_url: "mock://"
           })
 
-        {adapter, route_key}
+        [{route_key, Keyword.put(Keyword.get(opts, :adapter_opts, []), :adapter, adapter)}]
     end
   end
+
+  # Binds one attempt: adapter module + per-route adapter opts. Cross-cutting
+  # opts (correlation ids, the wrapped stream callback, temperature) are
+  # merged onto every attempted route at this single point; the route's own
+  # opts win, exactly like the pre-failover merge.
+  defp bind_route(state, {route_key, route_opts}) do
+    {adapter, route_opts} = Keyword.pop(route_opts, :adapter)
+
+    adapter_opts =
+      [
+        model: route_key.model,
+        base_url: route_key.base_url,
+        temperature: state.temperature
+      ]
+      |> maybe_put_adapter_opt(:agent, context_agent(state.context))
+      |> maybe_put_adapter_opt(:session_id, Map.get(state.context, :session_id))
+      |> maybe_put_adapter_opt(:parent_session, Map.get(state.context, :parent_session))
+      |> maybe_put_adapter_opt(:stream_callback, state.stream.callback)
+      |> Keyword.merge(route_opts)
+
+    %{
+      state
+      | adapter: adapter || Adapter.for_route(route_key),
+        route_key: route_key,
+        adapter_opts: adapter_opts
+    }
+  end
+
+  # The emitted? flag (§5 Streaming Boundary): the loop wraps the stream
+  # callback so it KNOWS whether user-visible content was flushed — the
+  # authoritative gate, since an adapter's `stage` derives from raw chunk
+  # arrival, not from what the callback emitted.
+  defp stream_state(nil), do: %{callback: nil, emitted: nil}
+
+  defp stream_state(callback) when is_function(callback, 1) do
+    emitted = :counters.new(1, [])
+
+    wrapped = fn event ->
+      record_stream_content(emitted, event)
+      callback.(event)
+    end
+
+    %{callback: wrapped, emitted: emitted}
+  end
+
+  defp record_stream_content(counter, {:text_delta, _delta}), do: :counters.add(counter, 1, 1)
+
+  defp record_stream_content(counter, {:reasoning_delta, _delta}),
+    do: :counters.add(counter, 1, 1)
+
+  defp record_stream_content(_counter, _event), do: :ok
+
+  defp stream_content_emitted?(%{emitted: nil}), do: false
+  defp stream_content_emitted?(%{emitted: counter}), do: :counters.get(counter, 1) > 0
 
   defp default_capabilities(nil, registry, opts) do
     CapabilityRegistry.list_for(registry, opts)
@@ -218,46 +295,69 @@ defmodule FermixCore.AgentLoop do
     |> Map.reject(fn {_key, count} -> count == 0 end)
   end
 
-  defp build_adapter_opts(opts, route_key, context) do
-    [
-      model: route_key.model,
-      base_url: route_key.base_url,
-      temperature: Keyword.get(opts, :temperature, 0.7)
-    ]
-    |> maybe_put_adapter_opt(:agent, context_agent(context))
-    |> maybe_put_adapter_opt(:session_id, Map.get(context, :session_id))
-    |> maybe_put_adapter_opt(:parent_session, Map.get(context, :parent_session))
-    |> maybe_put_adapter_opt(:stream_callback, Keyword.get(opts, :stream_callback))
-    |> Keyword.merge(Keyword.get(opts, :adapter_opts, []))
-  end
-
   defp maybe_put_adapter_opt(opts, _key, nil), do: opts
   defp maybe_put_adapter_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp context_agent(%{agent_name: agent}) when is_binary(agent) or is_atom(agent), do: agent
   defp context_agent(_context), do: nil
 
+  # The initial chat is the only failover point: bounded by the route count
+  # via the shared executor. Once a route answers, the whole tool loop
+  # (`continue/3`) stays on it — provider_state is provider-specific.
   defp initial_chat(state) do
     start = System.monotonic_time(:millisecond)
     emit_stream(state, {:iteration_started, state.iteration + 1})
+    emit_activity(state, :provider_start)
 
-    with :ok <- emit_activity(state, :provider_start),
-         {:ok, turn} <- state.adapter.chat(state.messages, state.capabilities, state.adapter_opts) do
-      emit_activity(state, :provider_response)
-      duration_ms = System.monotonic_time(:millisecond) - start
-      emit_telemetry(state.iteration + 1, duration_ms, turn.tool_calls != [])
+    case Failover.run_chain(state.routes, initial_attempt(state), failover_opts(state)) do
+      {:ok, {turn, bound}} ->
+        emit_activity(bound, :provider_response)
+        duration_ms = System.monotonic_time(:millisecond) - start
+        emit_telemetry(bound.iteration + 1, duration_ms, turn.tool_calls != [])
 
-      {:ok, turn,
-       %{
-         state
-         | iteration: state.iteration + 1,
-           total_tokens: state.total_tokens + turn.usage.total_tokens,
-           context_tokens: peak_context_tokens(state, turn)
-       }}
-    else
+        {:ok, turn,
+         %{
+           bound
+           | iteration: bound.iteration + 1,
+             total_tokens: bound.total_tokens + turn.usage.total_tokens,
+             context_tokens: peak_context_tokens(bound, turn)
+         }}
+
       {:error, reason} ->
         Logger.error("LLM call failed: #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  defp initial_attempt(state) do
+    fn route ->
+      bound = bind_route(state, route)
+
+      case bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
+        {:ok, turn} -> {:ok, {turn, bound}}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  # Streaming boundary (§5): once any delta reached the user, switching
+  # providers would mix outputs — the loop's emitted? flag gates eligibility
+  # on top of the error's own kind/stage.
+  defp failover_opts(state) do
+    [
+      eligible?: fn reason ->
+        not stream_content_emitted?(state.stream) and Failover.eligible?(reason)
+      end,
+      telemetry: failover_telemetry_meta(state)
+    ]
+  end
+
+  defp failover_telemetry_meta(state) do
+    meta = %{agent: context_agent(state.context) || "unknown"}
+
+    case Map.get(state.context, :session_id) do
+      nil -> meta
+      session_id -> Map.put(meta, :session_id, session_id)
     end
   end
 

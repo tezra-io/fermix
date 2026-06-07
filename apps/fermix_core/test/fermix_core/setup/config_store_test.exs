@@ -158,6 +158,56 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(agent, :name) == "aira"
   end
 
+  test "save/load round-trips provider primary flags" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          openai: [primary: false, api_key: "sk-x"],
+          anthropic: [primary: true, auth_mode: :oauth]
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.providers.anthropic]"
+    assert contents =~ "primary = true"
+    assert contents =~ "primary = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:anthropic], :primary) == true
+    assert Keyword.get(providers[:openai], :primary) == false
+  end
+
+  test "missing primary stays absent and a non-boolean primary is dropped" do
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          openai: [api_key: "sk-x"],
+          xai: [api_key: "xai-key", primary: "yes"]
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    providers = ConfigStore.persistable_snapshot(snapshot).fermix_core[:providers]
+
+    refute Keyword.has_key?(providers[:openai], :primary)
+    refute Keyword.has_key?(providers[:xai], :primary)
+  end
+
   test "save/load round-trip preserves web search backend config" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

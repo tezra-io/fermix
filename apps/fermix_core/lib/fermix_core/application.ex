@@ -26,6 +26,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Store
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Prompt.BootstrapRename
+  alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
   alias FermixCore.Sandbox.CommandCapabilities
@@ -179,15 +181,20 @@ defmodule FermixCore.Application do
       1
   end
 
+  # Codex participates in routing when it is the chosen primary (flag or
+  # legacy agent.provider — PrimaryConfig owns that migration) OR a
+  # configured failover fallback, so the token manager must be up for
+  # either. Starting it tokenless is harmless (it serves {:error, :no_token});
+  # NOT starting it while Codex is routable crashes the first Codex call
+  # with :noproc.
   defp maybe_token_manager do
-    provider =
-      Application.get_env(:fermix_core, :agent, [])
-      |> Keyword.get(:provider, :openai)
+    if codex_routable?(), do: [TokenManager], else: []
+  end
 
-    if provider == :openai_codex do
-      [TokenManager]
-    else
-      []
+  defp codex_routable? do
+    case PrimaryConfig.primary() do
+      {:ok, :openai_codex} -> true
+      _other_or_multiple -> Selection.configured?(:openai_codex)
     end
   end
 
