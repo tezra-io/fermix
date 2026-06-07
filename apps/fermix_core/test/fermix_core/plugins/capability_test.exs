@@ -76,7 +76,7 @@ defmodule FermixCore.Plugins.CapabilityTest do
     assert cap.metadata.when_to_use == "Create a Google Calendar event."
   end
 
-  test "registers only tools whose required scopes were granted", %{registry: registry} do
+  test "registers all ready-plugin tools regardless of granted scope", %{registry: registry} do
     Application.put_env(:fermix_core, :plugins,
       enabled: ["google_calendar"],
       entries: %{"google_calendar" => [auth_profile: "google_calendar:primary"]}
@@ -101,7 +101,9 @@ defmodule FermixCore.Plugins.CapabilityTest do
 
     assert {:ok, %{registered: names}} = Capabilities.reload(registry)
     assert "google_calendar_search_events" in names
-    refute "google_calendar_create_event" in names
+    # calendar.events was NOT granted, but the write tool still registers so the
+    # agent surfaces a graceful "reauthorize" error instead of the tool vanishing.
+    assert "google_calendar_create_event" in names
   end
 
   test "unregisters plugin tools when plugin is disabled", %{registry: registry} do

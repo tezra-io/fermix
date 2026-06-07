@@ -162,7 +162,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
                )
 
       assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
-                      %{adapter: :responses} = metadata}
+                      %{provider: :openai, adapter: :responses} = metadata}
 
       assert measurements.duration_ms >= 0
       assert metadata.input_items == 1
@@ -213,18 +213,28 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       assert turn.provider_state.capabilities == [capability()]
     end
 
-    test "raises when api_key is missing" do
-      assert_raise ArgumentError, ~r/requires :api_key/, fn ->
-        Responses.chat([%{role: "user", content: "x"}], [], model: "gpt-5.4-mini")
-      end
+    test "returns an auth error when api_key is missing" do
+      assert {:error, {:provider_error, %{provider: :openai, kind: :auth, message: message}}} =
+               Responses.chat([%{role: "user", content: "x"}], [], model: "gpt-5.4-mini")
+
+      assert message =~ "requires :api_key"
     end
 
-    test "returns {:error, _} on a non-200 response" do
+    test "returns structured provider errors on a non-200 response" do
       Req.Test.stub(__MODULE__, fn conn ->
-        Plug.Conn.send_resp(conn, 500, Jason.encode!(%{error: "boom"}))
+        Plug.Conn.send_resp(
+          conn,
+          429,
+          Jason.encode!(%{
+            error: %{
+              code: "rate_limit_exceeded",
+              message: "Too many requests"
+            }
+          })
+        )
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Responses.chat([%{role: "user", content: "x"}], [],
           api_key: "sk-test",
           model: "gpt-5.4-mini",
@@ -232,7 +242,52 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message == "OpenAI Responses API error: 500"
+      assert error.provider == :openai
+      assert error.adapter == :responses
+      assert error.status == 429
+      assert error.kind == :rate_limit
+      assert error.code == "rate_limit_exceeded"
+      assert error.message == "Too many requests"
+    end
+
+    test "error telemetry includes provider error details" do
+      test_pid = self()
+      telemetry_id = "responses-provider-error-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        telemetry_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(
+          conn,
+          503,
+          Jason.encode!(%{"error" => %{"message" => "service overloaded"}})
+        )
+      end)
+
+      {:error, {:provider_error, _error}} =
+        Responses.chat([%{role: "user", content: "x"}], [],
+          api_key: "sk-test",
+          model: "gpt-5.4-mini",
+          base_url: "https://api.openai.com/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
+                      %{provider: :openai, adapter: :responses, error_status: 503} = metadata}
+
+      assert measurements.duration_ms >= 0
+      assert metadata.status == :error
+      assert metadata.error_kind == :provider_unavailable
+      assert metadata.error == "service overloaded"
     end
 
     test "provider telemetry includes the agent when supplied" do
@@ -262,8 +317,13 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements, metadata}
-      assert metadata.agent == "main"
+      # Pattern-filter on agent: the handler is attached to the global event,
+      # so concurrently-running async tests emit provider calls (without
+      # :agent) that would otherwise be received here first.
+      assert_receive {:telemetry, [:fermix, :provider, :call], _measurements,
+                      %{agent: "main"} = metadata}
+
+      assert metadata.adapter == :responses
     end
   end
 

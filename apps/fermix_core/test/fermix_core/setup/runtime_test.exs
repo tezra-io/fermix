@@ -96,8 +96,16 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     :ok =
       ConfigStore.save_snapshot(
-        snapshot_with_openai_key(baseline_snapshot(), Keyword.get(opts, :openai_api_key))
+        baseline_snapshot()
+        |> snapshot_with_openai_key(Keyword.get(opts, :openai_api_key))
+        |> maybe_drop_personalization(Keyword.get(opts, :personalization, true))
       )
+  end
+
+  defp maybe_drop_personalization(snapshot, true), do: snapshot
+
+  defp maybe_drop_personalization(snapshot, false) do
+    %{snapshot | fermix_core: Keyword.delete(snapshot.fermix_core, :personalization)}
   end
 
   # Persist the openai api_key as a plaintext config literal. On hosts with an
@@ -166,6 +174,36 @@ defmodule FermixCore.Setup.RuntimeTest do
     )
 
     path
+  end
+
+  test "runtime config file raises when bootstrap returns an error" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-runtime-file-#{System.unique_integer([:positive])}")
+
+    previous_home = System.get_env("FERMIX_HOME")
+
+    on_exit(fn ->
+      case previous_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+    end)
+
+    File.write!(tmp_home, "not a directory")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    # runtime.exs lives at the umbrella root, but this test runs with the
+    # fermix_core app dir as CWD — anchor to __DIR__ rather than the CWD.
+    runtime_exs = Path.expand("../../../../../config/runtime.exs", __DIR__)
+
+    # Evaluate through Config.Reader (not Code.eval_file): runtime.exs uses
+    # `config/2`, which only works inside the Config context. The bootstrap
+    # block raises before any env-dependent config is read.
+    assert_raise RuntimeError, ~r/bootstrap_runtime_config failed.*:enotdir/s, fn ->
+      Config.Reader.read!(runtime_exs)
+    end
   end
 
   defp pick_free_port do
@@ -240,6 +278,27 @@ defmodule FermixCore.Setup.RuntimeTest do
   end
 
   defp puts_lines(agent), do: agent |> Agent.get(& &1) |> Enum.reverse()
+
+  describe "personalization defaults" do
+    test "blank timezone answer falls back to America/New_York" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home, personalization: false)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      personalization = snapshot.fermix_core |> Keyword.get(:personalization, [])
+      assert Keyword.get(personalization, :timezone) == "America/New_York"
+    end
+  end
 
   describe "finalize probe wiring" do
     test "skip_probe: true bypasses the probe entirely" do
@@ -442,8 +501,8 @@ defmodule FermixCore.Setup.RuntimeTest do
           prompt: fn _ -> "" end
         )
 
-      assert Keyword.get(Application.get_env(:fermix_core, :agent, []), :provider) ==
-               :openai_codex
+      env_codex = Application.get_env(:fermix_core, :providers, [])[:openai_codex] || []
+      assert Keyword.get(env_codex, :primary) == true
 
       assert {:error, message} = result
 
@@ -567,6 +626,12 @@ defmodule FermixCore.Setup.RuntimeTest do
                    default_model: "gpt-5.5",
                    reasoning_effort: "high",
                    fermix_auth_path: auth_path,
+                   # Isolate the codex-import probe so it never stats the host's
+                   # real ~/.codex/auth.json (provider:openai is unconfigured here,
+                   # so maybe_import_codex would otherwise reach the host fallback).
+                   # The prompt "n" already declines the import, so the outcome is
+                   # unchanged — this just keeps the test strictly host-independent.
+                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
                    oauth_opener: fn url ->
                      send(self(), {:oauth_opened, url})
                      :ok
@@ -614,8 +679,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = Application.get_env(:fermix_core, :providers, [])
       refute Keyword.has_key?(providers[:openai], :auth_mode)
 
-      agent = Application.get_env(:fermix_core, :agent, [])
-      assert Keyword.get(agent, :provider) == :openai_codex
+      env_codex = Application.get_env(:fermix_core, :providers, [])[:openai_codex] || []
+      assert Keyword.get(env_codex, :primary) == true
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
@@ -714,6 +779,13 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :realtime_persist_transcripts) == true
     end
 
+    test "keeps the xai_api_key flag as an answer" do
+      answers = Runtime.provided_answers(provider: "xai", xai_api_key: "xai-key")
+
+      assert Keyword.get(answers, :provider) == "xai"
+      assert Keyword.get(answers, :xai_api_key) == "xai-key"
+    end
+
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
@@ -739,10 +811,86 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
       assert Keyword.get(codex_block, :fast) == false
+    end
+
+    test "non-interactive xai run persists the api key, provider, model, and effort" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "xai",
+                   xai_api_key: "xai-key",
+                   default_model: "grok-4.3",
+                   reasoning_effort: "high",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      agent = snapshot.fermix_core |> Keyword.get(:agent, [])
+      xai_block = snapshot.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
+
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(xai_block, :primary) == true
+      assert Keyword.get(xai_block, :api_key) == "xai-key"
+      assert Keyword.get(xai_block, :default_model) == "grok-4.3"
+      assert Keyword.get(xai_block, :reasoning_effort) == :high
+    end
+
+    test "explicitly selecting a non-codex provider suppresses the Codex import even with a Codex auth file present" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      # A real, importable Codex auth file: codex_available?/1 returns true, so the
+      # only thing standing between this xai run and a live token import is the
+      # selected-provider guard under test.
+      codex_path = write_codex_auth(home)
+      test_pid = self()
+
+      # If the import ever fires, run_codex_import -> RefreshClient.refresh hits
+      # this plug. An xai run must never reach it: a non-codex provider selection
+      # suppresses the import outright.
+      refresh_spy = fn conn ->
+        send(test_pid, :codex_refresh_called)
+        __MODULE__.success_plug(conn)
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "xai",
+                   xai_api_key: "xai-key",
+                   default_model: "grok-4.3",
+                   reasoning_effort: "high",
+                   skip_probe: true,
+                   codex_auth_path: codex_path,
+                   req_options: [plug: refresh_spy]
+                 ],
+                 puts: puts,
+                 # Blank answers: the import prompt would default to YES pre-fix.
+                 prompt: fn _ -> "" end
+               )
+
+      refute_received :codex_refresh_called
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      xai_block = snapshot.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
+      assert Keyword.get(xai_block, :primary) == true
     end
 
     test "provided channel flags do not suppress missing provider/model prompts" do
@@ -803,7 +951,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
       assert Keyword.get(codex_block, :fast) == false
@@ -851,9 +1000,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(snapshot.fermix_core |> Keyword.get(:agent, []), :provider) ==
-               :openai_codex
-
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end
@@ -921,7 +1068,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end

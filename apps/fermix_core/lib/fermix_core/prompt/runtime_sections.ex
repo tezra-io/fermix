@@ -78,7 +78,12 @@ defmodule FermixCore.Prompt.RuntimeSections do
     """
     ## Runtime Contract
     - Capabilities are available through the capability registry for built-in tools and MCP tools.
-    - Prefer direct Fermix built-ins over shell, curl, grep, browser, computer-use, or external automation when a built-in owns the verb.
+    - Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb.
+    - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
+      - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
+      - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
+      - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms). It is a first-class built-in, not a fallback.
+      - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
     - For reminders, recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks, use `schedule_job`.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
@@ -93,10 +98,11 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   defp sub_agent_orchestration do
     """
-    ## Sub-Agent Orchestration
-    - Use `subagents` when a request has independent substantial parts and delegation is likely to improve speed, coverage, or quality. You may use it even if the user did not explicitly ask for subagents.
+    ## Delegate Wide, Think at the Center
+    - When a task splits into independent parts, delegate. Use `subagents` to spawn a separate worker for each narrow part and run them in parallel — never hand one worker a multi-part job. You may delegate even if the user did not ask for subagents.
+    - Prefer more narrow workers over fewer broad ones: one worker = one question, one source, one angle. If a part is still broad, split it further before delegating. Width is cheap; a worker handed too much overshoots.
     - Describe each task as a goal. Do not name which tools a subagent should use — it selects its own from a controlled surface (read, web, MCP/plugins, skills, sandbox-bounded shell; no direct writes).
-    - Keep fanout modest. Do not delegate trivial work, tightly-coupled reasoning, or work where coordination overhead exceeds the benefit.
+    - Workers gather; you reason. Judgment, comparison, and synthesis stay with you — pull the workers' findings into one answer; don't push your thinking down into a worker. Don't delegate tightly-coupled reasoning or trivial work where coordination overhead exceeds the benefit.
     - Do not claim work ran in parallel unless `subagents` ran multiple workers concurrently. Synthesize the returned results yourself and state any important gaps or failures.
     """
     |> String.trim()

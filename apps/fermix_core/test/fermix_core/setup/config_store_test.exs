@@ -53,6 +53,23 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
   defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 
+  test "current_snapshot carries all four provider blocks" do
+    original = Application.get_env(:fermix_core, :providers, [])
+
+    try do
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-key"])
+
+      providers = ConfigStore.current_snapshot().fermix_core[:providers]
+
+      assert Keyword.has_key?(providers, :openai)
+      assert Keyword.has_key?(providers, :openai_codex)
+      assert Keyword.has_key?(providers, :anthropic)
+      assert providers[:xai] == [api_key: "xai-key"]
+    after
+      Application.put_env(:fermix_core, :providers, original)
+    end
+  end
+
   test "workspace_paths follow FERMIX_HOME and match the persisted runtime layout" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -65,11 +82,29 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              plugins: Path.join(tmp_home, "plugins"),
+             browser: Path.join(tmp_home, "browser"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),
              logs: Path.join(tmp_home, "logs")
            }
+  end
+
+  test "an empty FERMIX_HOME is treated as unset, not a cwd-relative path" do
+    # An empty string is truthy in Elixir, so `get_env() || default` did NOT
+    # fall back — fermix_home/0 returned "" and workspace paths became
+    # cwd-relative (e.g. "skills"), so booting from the repo root seeded the
+    # bundled skills into ./skills instead of ~/.fermix/skills.
+    System.put_env("FERMIX_HOME", "")
+
+    default_home = Path.join(System.user_home!(), ".fermix")
+
+    assert ConfigStore.fermix_home() == default_home
+    refute ConfigStore.fermix_home() == ""
+
+    skills = ConfigStore.workspace_paths().skills
+    assert skills == Path.join(default_home, "skills")
+    assert Path.type(skills) == :absolute
   end
 
   test "memory_paths follow FERMIX_HOME and match the runtime memory layout" do
@@ -121,6 +156,56 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(personalization, :timezone) == "Asia/Singapore"
     assert Keyword.get(personalization, :communication_style) == "blunt"
     assert Keyword.get(agent, :name) == "aira"
+  end
+
+  test "save/load round-trips provider primary flags" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          openai: [primary: false, api_key: "sk-x"],
+          anthropic: [primary: true, auth_mode: :oauth]
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.providers.anthropic]"
+    assert contents =~ "primary = true"
+    assert contents =~ "primary = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:anthropic], :primary) == true
+    assert Keyword.get(providers[:openai], :primary) == false
+  end
+
+  test "missing primary stays absent and a non-boolean primary is dropped" do
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          openai: [api_key: "sk-x"],
+          xai: [api_key: "xai-key", primary: "yes"]
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    providers = ConfigStore.persistable_snapshot(snapshot).fermix_core[:providers]
+
+    refute Keyword.has_key?(providers[:openai], :primary)
+    refute Keyword.has_key?(providers[:xai], :primary)
   end
 
   test "save/load round-trip preserves web search backend config" do
@@ -213,7 +298,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ "[fermix_core.plugins.removed_plugin]"
     assert contents =~ "unsupported = true"
     assert contents =~ "[fermix_core.oauth.google]"
-    assert contents =~ ~s(client_secret = "desktop-secret")
+    assert contents =~ ~s(client_secret = "@keyring")
+    refute contents =~ "desktop-secret"
+
+    assert {:ok, "desktop-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:google_oauth_client_secret)
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
     plugins = Keyword.get(loaded.fermix_core, :plugins, [])
@@ -227,8 +316,13 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     google = Map.get(oauth, "google", [])
     assert Keyword.get(google, :client_type) == "desktop_public_pkce"
     assert Keyword.get(google, :client_id) == "123.apps.googleusercontent.com"
-    assert Keyword.get(google, :client_secret) == "desktop-secret"
+    assert Keyword.get(google, :client_secret) == "@keyring"
     assert Keyword.get(google, :redirect_port) == 1455
+
+    assert {:ok, resolved} = ConfigStore.load_runtime_config()
+    resolved_oauth = Keyword.get(resolved.fermix_core, :oauth, %{})
+    resolved_google = Map.get(resolved_oauth, "google", [])
+    assert Keyword.get(resolved_google, :client_secret) == "desktop-secret"
   end
 
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do
@@ -481,6 +575,55 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     """)
 
     assert_raise ArgumentError, ~r/extraction_timeout_ms/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "channel streaming survives the load normalizers for every channel" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_channels.telegram]
+    streaming = "block"
+
+    [fermix_channels.whatsapp]
+    streaming = "off"
+
+    [fermix_channels.signal]
+    streaming = "draft"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+
+    telegram = Keyword.get(loaded.fermix_channels, :telegram, [])
+    assert Keyword.get(telegram, :streaming) == "block"
+
+    whatsapp = Keyword.get(loaded.fermix_channels, :whatsapp, [])
+    assert Keyword.get(whatsapp, :streaming) == "off"
+
+    signal = Keyword.get(loaded.fermix_channels, :signal, [])
+    assert Keyword.get(signal, :streaming) == "draft"
+  end
+
+  test "load_runtime_config rejects an invalid channel streaming value from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_channels.telegram]
+    streaming = "blast"
+    """)
+
+    assert_raise ArgumentError, ~r/streaming/, fn ->
       ConfigStore.load_runtime_config()
     end
   end
@@ -824,6 +967,40 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     anthropic = Keyword.get(providers, :anthropic, [])
     assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
     assert Keyword.get(anthropic, :api_key) == "sk-ant"
+  end
+
+  test "save/load round-trips auth_mode = :oauth for xai and anthropic" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          anthropic: [auth_mode: :oauth, default_model: "claude-opus-4-7"],
+          xai: [auth_mode: :oauth, default_model: "grok-4.3"]
+        ],
+        agent: [name: "fermix", provider: :xai]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    # OAuth mode must survive serialization (the snapshot is normalized on save).
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(auth_mode = "oauth")
+
+    # ...and survive parsing back, so RouteResolver/doctor use the OAuth profile
+    # instead of silently demanding an API key.
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert providers |> Keyword.get(:anthropic, []) |> Keyword.get(:auth_mode) == :oauth
+    assert providers |> Keyword.get(:xai, []) |> Keyword.get(:auth_mode) == :oauth
   end
 
   test "load_runtime_config migrates a persisted reasoning_effort = \"minimal\" to :low" do

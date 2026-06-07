@@ -15,6 +15,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Plugins.Runtime
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
+  alias FermixCore.Providers.Error, as: ProviderError
 
   # -- Mock provider backed by named Agent for cross-process access --
 
@@ -900,16 +901,18 @@ defmodule FermixCore.Agents.MainAgentTest do
       # Verify provider received messages including history
       [{messages, _opts}] = MockProvider.get_calls()
 
-      # Should have: composed systems + 2 history messages + new user message
-      assert length(messages) == 6
+      # Should have: composed systems + datetime note + 2 history messages + new user message
+      assert length(messages) == 7
 
-      [identity, fermix, runtime, hist_user, hist_assistant, new_user] = messages
+      [identity, fermix, runtime, datetime, hist_user, hist_assistant, new_user] = messages
       assert identity.role == "system"
       assert identity.content == Defaults.identity_md()
       assert fermix.role == "system"
       assert fermix.content == Defaults.fermix_md()
       assert runtime.role == "system"
       assert runtime.content =~ "## Runtime Contract"
+      assert datetime.role == "system"
+      assert datetime.content =~ "Current date:"
       assert hist_user.role == "user"
       assert hist_user.content == "First question"
       assert hist_assistant.role == "assistant"
@@ -927,10 +930,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "No prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, runtime, user] = messages
+      [identity, fermix, runtime, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
       assert runtime.role == "system"
+      assert datetime.content =~ "Current date:"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
       refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
       assert user.content == "Hello without memory files"
@@ -952,7 +956,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Fallback prompt"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, runtime, user] = messages
+      [identity, fermix, runtime, datetime, user] = messages
 
       refute File.exists?(identity_path)
       refute File.exists?(fermix_path)
@@ -961,6 +965,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert identity.content == Defaults.identity_md()
       assert fermix.content == Defaults.fermix_md()
       assert runtime.content =~ "## Runtime Contract"
+      assert datetime.content =~ "Current date:"
       assert user.content == "Hello first run"
     end
 
@@ -977,10 +982,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Empty prompt files"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, runtime, user] = messages
+      [identity, fermix, runtime, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
       assert runtime.role == "system"
+      assert datetime.content =~ "Current date:"
       refute Enum.any?(messages, &(&1.content =~ "## Preferences"))
       refute Enum.any?(messages, &(&1.content =~ "## Working Rules"))
       assert user.content == "Hello with empty files"
@@ -999,7 +1005,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, memory_context, runtime, user] = messages
+      [identity, fermix, memory_context, runtime, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
       assert memory_context.content =~ "<memory-context>"
@@ -1008,6 +1014,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert memory_context.content =~ "MEMORY (agent's working notes)"
       assert memory_context.content =~ "## Working Rules\n- warnings are errors"
       assert runtime.content =~ "## Runtime Contract"
+      assert datetime.content =~ "Current date:"
       assert user.content == "Hello with prompt memory"
     end
 
@@ -1036,10 +1043,12 @@ defmodule FermixCore.Agents.MainAgentTest do
                "system",
                "system",
                "system",
+               "system",
                "user"
              ]
 
       memory_context = Enum.at(messages, 3).content
+      datetime = Enum.at(messages, 5).content
 
       assert Enum.map(messages, & &1.content) == [
                "IDENTITY bootstrap",
@@ -1047,12 +1056,14 @@ defmodule FermixCore.Agents.MainAgentTest do
                "AGENTS bootstrap",
                memory_context,
                runtime_message(messages).content,
+               datetime,
                "Hello with bootstrap"
              ]
 
       assert memory_context =~ "<memory-context>"
       assert memory_context =~ "USER memory"
       assert memory_context =~ "AGENT memory"
+      assert datetime =~ "Current date:"
     end
 
     test "sends error message via reply_fn on agent loop failure", %{agent: agent} do
@@ -1091,7 +1102,16 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "sends an auth-specific reply when the Codex refresh chain fails", %{agent: agent} do
-      MockProvider.set_responses([{:error, {:auth_invalidated, %{"error" => "invalid_grant"}}}])
+      # The Codex adapter returns a residual structured :auth error once its
+      # internal refresh+retry is exhausted (no more {:auth_invalidated, _}).
+      MockProvider.set_responses([
+        {:error,
+         ProviderError.auth(
+           :openai_codex,
+           :codex,
+           "Codex auth invalidated; refresh exhausted"
+         )}
+      ])
 
       msg = make_message("Hello")
       run_turn(msg, agent)
@@ -1803,6 +1823,77 @@ defmodule FermixCore.Agents.MainAgentTest do
       end)
 
       :ok
+    end
+
+    test "a primary flag drives adapter_overrides and the status route chain" do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("main-agent-primary")
+      fermix_home = System.get_env("FERMIX_HOME")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case fermix_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [primary: true, api_key: "sk-ant", default_model: "claude-sonnet-4-6"],
+        openai: [api_key: "sk-x", default_model: "gpt-5.5"]
+      )
+
+      name = :"main_agent_primary_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+
+      assert Keyword.get(:sys.get_state(pid).adapter_overrides, :provider) == :anthropic
+
+      status = MainAgent.status(pid)
+      assert status.primary_provider == :anthropic
+      assert status.fallback_providers == [:openai]
+      assert status.provider == :anthropic
+      assert status.model == "claude-sonnet-4-6"
+
+      GenServer.stop(pid)
+    end
+
+    test "status still names an unconfigured primary; the serving fallback stays a fallback" do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("main-agent-degraded")
+      fermix_home = System.get_env("FERMIX_HOME")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case fermix_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+
+      # Primary anthropic has NO credentials; Selection routes to the
+      # configured openai fallback — status must keep reporting anthropic as
+      # the (degraded) primary, matching readiness (§8).
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [primary: true, default_model: "claude-sonnet-4-6"],
+        openai: [api_key: "sk-x", default_model: "gpt-5.5"]
+      )
+
+      name = :"main_agent_degraded_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+
+      status = MainAgent.status(pid)
+      assert status.primary_provider == :anthropic
+      assert status.fallback_providers == [:openai]
+      assert status.provider == :anthropic
+      assert status.model == "claude-sonnet-4-6"
+
+      GenServer.stop(pid)
     end
 
     test "bakes provider/model/reasoning_effort from config into adapter_overrides" do

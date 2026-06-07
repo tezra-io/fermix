@@ -22,7 +22,7 @@ defmodule FermixChannels.Gateway.Commands do
   end
 
   @spec dispatch(result(), Reply.reply_fn(), map()) ::
-          :ok | :passthrough | {:error, term()}
+          :ok | :passthrough | {:enqueue, Message.t()} | {:error, term()}
   def dispatch(command_result, reply_fn, context) do
     {result, duration_us} =
       Telemetry.timed_us(fn -> do_dispatch(command_result, reply_fn, context) end)
@@ -35,8 +35,15 @@ defmodule FermixChannels.Gateway.Commands do
 
   defp do_dispatch({:command, name, args, message}, reply_fn, context) do
     case Registry.lookup(name) do
-      {:ok, handler} -> run_command(name, handler, message, args, reply_fn, context)
-      :error -> :passthrough
+      {:ok, handler} ->
+        run_command(name, handler, message, args, reply_fn, context)
+
+      # Deliberate policy: an unrecognized slash command is NOT a hard error —
+      # it passes through to the agent as ordinary text (so `/notacommand` and
+      # bare slashes in prose still reach the model). Make commands a hard
+      # boundary here only if that product decision changes.
+      :error ->
+        :passthrough
     end
   end
 
@@ -91,6 +98,7 @@ defmodule FermixChannels.Gateway.Commands do
 
   defp dispatch_status(:ok), do: :ok
   defp dispatch_status(:passthrough), do: :passthrough
+  defp dispatch_status({:enqueue, _message}), do: :enqueued
   defp dispatch_status({:error, :unauthorized}), do: :unauthorized
   defp dispatch_status({:error, _reason}), do: :error
 

@@ -1,0 +1,115 @@
+suite: ultra
+title: "/ultra — wide fan-out on complex multi-part tasks"
+description: >
+  Exercises /ultra: each query starts with "/ultra ", which the gateway tags
+  `run_profile: :ultra`.
+
+  Since the Option B collapse (2026-06-04) /ultra is NOT a separate orchestrator —
+  it is a NORMAL agent turn run with the ultra caps unlocked (`subagent_mode: :ultra`
+  → up to ~50 narrow probes, <=12 concurrent) plus an exhaustive-mode prompt
+  addendum. The model decomposes, fans out WIDE through the `subagents` tool, and
+  synthesizes one answer.
+
+  Because it is a normal turn, its workers NEST under the parent trace like regular
+  `subagents`, so /ultra is now fully gradeable: the parent trace carries the
+  `subagents` tool span, the nested `subagent:*` worker spans (breadth), real cost,
+  and the final answer. (The old orphan-telemetry gap that forced reply-only gates
+  is gone — see docs/design/ADAPTIVE_EFFORT_AND_DELEGATION.md.)
+
+  COST/TIME: a wide /ultra run is EXPENSIVE and SLOW — one observed run was ~38
+  probes, ~17 minutes, ~$85. Run ONE case at a time, deliberately; `timeout_ms` is
+  sized to outwait the full fan-out under load (45 min). `min_subagent_spawns` is a
+  conservative floor (the model sizes the fan-out to the task; /ultra typically goes
+  much wider).
+defaults:
+  timeout_ms: 2700000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: comparative_research_recommend
+    title: "Compares several options across dimensions and recommends one"
+    severity: normal
+    tags: [ultra, fanout, research]
+    cases:
+      - id: databases_high_write
+        query: >
+          /ultra Compare the trade-offs of three database options for a
+          high-write, time-series-heavy workload — PostgreSQL, Cassandra, and
+          ClickHouse — across write throughput, read/query patterns, operational
+          complexity, and cost at scale. Then recommend one and justify the
+          choice with concrete reasons.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 3
+          reply_matches: "(?i)postgres"
+          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
+          max_cost_usd: 120
+        rubric: >
+          Covers all three databases (PostgreSQL, Cassandra, ClickHouse) across
+          the requested dimensions (write throughput, query patterns,
+          operational complexity, cost), then makes a single clear recommendation
+          with concrete justification grounded in those trade-offs.
+      - id: cloud_providers_ml
+        query: >
+          /ultra I'm choosing a cloud provider for a GPU-heavy machine-learning
+          training platform. Compare AWS, Google Cloud, and Azure on GPU
+          availability and instance options, managed ML tooling, pricing and
+          spot/preemptible economics, and data-egress costs. Weigh the trade-offs
+          and recommend one provider with reasons.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 3
+          reply_matches: "(?i)\\baws\\b|amazon"
+          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
+          max_cost_usd: 120
+        rubric: >
+          Compares AWS, Google Cloud, and Azure across the requested dimensions
+          (GPU availability, managed ML tooling, pricing/spot economics, egress
+          costs), then recommends a single provider with reasons tied to the
+          comparison rather than a generic answer.
+
+  - id: multipart_planning
+    title: "Decomposes a broad planning task and synthesizes a structured plan"
+    severity: normal
+    tags: [ultra, fanout, planning]
+    cases:
+      - id: launch_plan_saas
+        query: >
+          /ultra Put together a launch plan for a small B2B SaaS scheduling tool
+          aimed at dental clinics. Cover four areas: target market and
+          positioning, a pricing model with tiers, the first three months of
+          go-to-market and marketing channels, and the key product and
+          engineering milestones needed to be launch-ready. Pull it together into
+          one coherent plan.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 3
+          reply_matches: "(?i)pricing"
+          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
+          max_cost_usd: 120
+        rubric: >
+          Addresses all four requested areas (market/positioning, tiered pricing,
+          a first-three-months go-to-market plan, and product/engineering
+          milestones) and weaves them into one coherent launch plan rather than
+          answering only one part.
+      - id: migration_strategy
+        query: >
+          /ultra We run a monolithic Rails app and want to move toward services.
+          Lay out a migration strategy that covers: how to decide which pieces to
+          extract first, the data-ownership and database-splitting approach,
+          rollout and deployment safety (feature flags, canaries, rollback), and
+          the observability and on-call changes we'll need. End with a phased
+          roadmap.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 3
+          reply_matches: "(?i)roadmap|phase"
+          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
+          max_cost_usd: 120
+        rubric: >
+          Covers all four requested dimensions (what to extract first, data
+          ownership / database splitting, rollout safety such as feature flags
+          and canaries, and observability/on-call changes) and ends with a phased
+          roadmap, synthesizing the parts into one strategy.

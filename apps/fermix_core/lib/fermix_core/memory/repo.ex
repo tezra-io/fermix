@@ -6,6 +6,7 @@ defmodule FermixCore.Memory.Repo do
   use GenServer
 
   alias Exqlite.Sqlite3
+  alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Scope
 
@@ -136,7 +137,7 @@ defmodule FermixCore.Memory.Repo do
     ON resource_revisions(agent_id, resource_type, scope_id, created_at DESC);
   """
 
-  @jobs_schema_sql """
+  @jobs_schema_sql_template """
   ALTER TABLE memories ADD COLUMN source_id TEXT;
   ALTER TABLE memories ADD COLUMN source_type TEXT;
   ALTER TABLE memories ADD COLUMN source_name TEXT;
@@ -157,7 +158,7 @@ defmodule FermixCore.Memory.Repo do
     session_mode TEXT NOT NULL DEFAULT 'isolated',
     provider TEXT,
     model TEXT,
-    max_iterations INTEGER NOT NULL DEFAULT 25,
+    max_iterations INTEGER NOT NULL DEFAULT {{max_iterations_default}},
     timeout_seconds INTEGER,
     inactivity_timeout_seconds INTEGER,
     capability_policy_json TEXT,
@@ -1281,6 +1282,11 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  defp jobs_schema_sql do
+    default = Integer.to_string(IterationLimits.scheduled_job_default())
+    String.replace(@jobs_schema_sql_template, "{{max_iterations_default}}", default)
+  end
+
   defp apply_jobs_migration(conn, versions) do
     if Enum.member?(versions, @jobs_migration_version) do
       :ok
@@ -1289,7 +1295,7 @@ defmodule FermixCore.Memory.Repo do
         conn,
         """
         BEGIN;
-        #{@jobs_schema_sql}
+        #{jobs_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@jobs_migration_version});
         COMMIT;
         """
@@ -2669,7 +2675,12 @@ defmodule FermixCore.Memory.Repo do
       session_mode: string_with_default!(attrs, :session_mode, "isolated"),
       provider: optional_string!(attrs, :provider),
       model: optional_string!(attrs, :model),
-      max_iterations: positive_integer_with_default!(attrs, :max_iterations, 25),
+      max_iterations:
+        positive_integer_with_default!(
+          attrs,
+          :max_iterations,
+          IterationLimits.scheduled_job_default()
+        ),
       timeout_seconds: optional_positive_integer!(attrs, :timeout_seconds),
       inactivity_timeout_seconds: optional_positive_integer!(attrs, :inactivity_timeout_seconds),
       capability_policy:

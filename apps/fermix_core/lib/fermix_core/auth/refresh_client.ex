@@ -7,6 +7,7 @@ defmodule FermixCore.Auth.RefreshClient do
 
   require Logger
 
+  alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
 
@@ -129,8 +130,9 @@ defmodule FermixCore.Auth.RefreshClient do
         secs when is_integer(secs) and secs > 0 ->
           DateTime.add(DateTime.utc_now(), secs, :second)
 
+        # xAI omits expires_in; derive from the JWT exp claim (§6.4).
         _ ->
-          nil
+          JwtClaims.expires_at(access)
       end
 
     {:ok,

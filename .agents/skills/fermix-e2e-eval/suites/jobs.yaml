@@ -1,0 +1,170 @@
+suite: jobs
+title: "Scheduled jobs — schedule, list, pause/resume, remove"
+description: >
+  Exercises the scheduled-jobs subsystem end to end via the CLI: creating a
+  recurring reminder, listing what's scheduled, pausing/resuming it, and
+  removing it. Every scenario is a SELF-CLEANING multi-turn lifecycle that ends
+  with remove_job so no durable cron job is left behind after the eval runs —
+  this matters because these jobs persist in the daemon's job registry. Gates
+  are tolerant of the model's route: the model phrases confirmations differently
+  and may take an extra read step (e.g. list before remove), so tool gates use
+  tools_any and the reply assertions use case-insensitive regex on the final
+  reply text. The "that reminder / that job" follow-ups rely on the shared
+  conversation thread, so each lifecycle lives in ONE multi-turn case.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: schedule_list_remove
+    title: "Schedule a recurring reminder, list it, then delete it"
+    severity: normal
+    tags: [jobs, core, lifecycle]
+    cases:
+      - id: weekday_stretch
+        turns:
+          - query: "Remind me every weekday at 9am to stand up and stretch."
+            expect:
+              tools_any: [schedule_job]
+              reply_matches: "(?i)stretch|remind|scheduled|9\\s*am|weekday|every|set up"
+          - query: "Show me my scheduled jobs."
+            expect:
+              tools_any: [list_jobs]
+              reply_matches: "(?i)stretch|stand up|9\\s*am|weekday"
+          - query: "Okay, delete that stretch reminder."
+            expect:
+              tools_any: [remove_job]
+              reply_matches: "(?i)remov|delet|cancel|gone|done"
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: >
+          Schedules a recurring weekday-9am stretch reminder, then lists it
+          showing the stretch reminder, then removes it — confirming the
+          deletion at the end. No leftover job should remain.
+      - id: hourly_water_reminder
+        turns:
+          - query: "Set up a job that pings me every hour to drink water during the workday."
+            expect:
+              tools_any: [schedule_job]
+              reply_matches: "(?i)water|hour|remind|scheduled|set up|every"
+          - query: "What jobs do I currently have running?"
+            expect:
+              tools_any: [list_jobs]
+              reply_matches: "(?i)water|hour"
+          - query: "Get rid of that water reminder, please."
+            expect:
+              tools_any: [remove_job]
+              reply_matches: "(?i)remov|delet|cancel|gone|done"
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: >
+          Creates an hourly water-reminder job, lists it back, and then removes
+          it, confirming the removal. Ends with no leftover job.
+
+  - id: pause_resume_lifecycle
+    title: "Schedule, pause, resume, then remove a job"
+    severity: normal
+    tags: [jobs, lifecycle, pause-resume]
+    cases:
+      - id: standup_pause_resume
+        turns:
+          - query: "Schedule a daily 8:30am reminder for me to post my standup update."
+            expect:
+              tools_any: [schedule_job]
+              reply_matches: "(?i)standup|stand-up|8:?30|remind|scheduled|daily|set up"
+          - query: "I'm on vacation this week — pause that standup reminder for now."
+            expect:
+              tools_any: [pause_job]
+              reply_matches: "(?i)paus|hold|suspend|stopp?ed"
+          - query: "I'm back. Resume the standup reminder."
+            expect:
+              tools_any: [resume_job]
+              reply_matches: "(?i)resum|re-?enabl|active|back on|running"
+          - query: "Actually I switched teams — remove the standup reminder entirely."
+            expect:
+              tools_any: [remove_job]
+              reply_matches: "(?i)remov|delet|cancel|gone|done"
+        expect:
+          max_cost_usd: 2.0
+          max_duration_ms: 180000
+        rubric: >
+          Walks the full lifecycle: schedules a daily standup reminder, pauses
+          it, resumes it, and finally removes it, confirming each step. No job
+          is left behind.
+      - id: backup_pause_resume
+        turns:
+          - query: "Create a job that reminds me to back up my laptop every Sunday night at 10pm."
+            expect:
+              tools_any: [schedule_job]
+              reply_matches: "(?i)back\\s*up|sunday|10\\s*pm|remind|scheduled|set up"
+          - query: "Pause the backup reminder while I sort out my drive."
+            expect:
+              tools_any: [pause_job]
+              reply_matches: "(?i)paus|hold|suspend|stopp?ed"
+          - query: "Drive's fixed — turn the backup reminder back on."
+            expect:
+              tools_any: [resume_job]
+              reply_matches: "(?i)resum|re-?enabl|active|back on|running"
+          - query: "Never mind, delete the backup reminder."
+            expect:
+              tools_any: [remove_job]
+              reply_matches: "(?i)remov|delet|cancel|gone|done"
+        expect:
+          max_cost_usd: 2.0
+          max_duration_ms: 180000
+        rubric: >
+          Schedules a weekly backup reminder, pauses it, resumes it, then
+          removes it — confirming each action and leaving no durable job.
+
+  - id: schedule_update_remove
+    title: "Schedule a job, change its timing, then remove it"
+    severity: normal
+    tags: [jobs, lifecycle, update]
+    cases:
+      - id: meds_retime
+        turns:
+          - query: "Remind me to take my medication every day at 7am."
+            expect:
+              tools_any: [schedule_job]
+              reply_matches: "(?i)medication|meds|7\\s*am|remind|scheduled|daily|set up"
+          - query: "Actually, move that medication reminder to 8am instead."
+            expect:
+              tools_any: [update_job, schedule_job]
+              reply_matches: "(?i)8\\s*am|updat|chang|moved|reschedul"
+          - query: "Thanks — now delete the medication reminder."
+            expect:
+              tools_any: [remove_job]
+              reply_matches: "(?i)remov|delet|cancel|gone|done"
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: >
+          Schedules a daily 7am medication reminder, retimes it to 8am, then
+          removes it. Acknowledges the time change and the deletion. Leaves no
+          leftover job.
+      - id: report_retime
+        turns:
+          - query: "Set a weekly reminder every Friday at 4pm to send the status report."
+            expect:
+              tools_any: [schedule_job]
+              reply_matches: "(?i)status report|friday|4\\s*pm|remind|scheduled|weekly|set up"
+          - query: "Change that report reminder to Thursday at 3pm."
+            expect:
+              tools_any: [update_job, schedule_job]
+              reply_matches: "(?i)thursday|3\\s*pm|updat|chang|moved|reschedul"
+          - query: "Great, you can remove the report reminder now."
+            expect:
+              tools_any: [remove_job]
+              reply_matches: "(?i)remov|delet|cancel|gone|done"
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: >
+          Schedules a weekly Friday-4pm report reminder, reschedules it to
+          Thursday 3pm, then removes it — confirming the change and the
+          deletion. Ends clean with no durable job.

@@ -118,9 +118,191 @@ defmodule FermixCore.Providers.RouteResolverTest do
       assert opts[:base_url] == "https://anthropic.example/v1"
     end
 
+    test ":anthropic sources api_key, default_model, and base_url from the provider config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          anthropic: [
+            api_key: "sk-ant-config",
+            default_model: "claude-haiku-4-5",
+            base_url: "https://anthropic-proxy.example/v1"
+          ]
+        )
+
+        {route_key, opts} = RouteResolver.resolve!(provider: :anthropic)
+
+        assert route_key.model == "claude-haiku-4-5"
+        assert route_key.base_url == "https://anthropic-proxy.example/v1"
+        assert opts[:api_key] == "sk-ant-config"
+        assert opts[:model] == "claude-haiku-4-5"
+        assert opts[:base_url] == "https://anthropic-proxy.example/v1"
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test ":anthropic explicit opts override the provider config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          anthropic: [api_key: "sk-ant-config", default_model: "claude-haiku-4-5"]
+        )
+
+        {route_key, opts} =
+          RouteResolver.resolve!(
+            provider: :anthropic,
+            model: "claude-sonnet-4-6",
+            api_key: "sk-ant-explicit"
+          )
+
+        assert route_key.model == "claude-sonnet-4-6"
+        assert opts[:api_key] == "sk-ant-explicit"
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test ":anthropic auth_mode :oauth produces an oauth route bound to the anthropic_oauth profile" do
+      {route_key, opts} = RouteResolver.resolve!(provider: :anthropic, auth_mode: :oauth)
+
+      assert route_key.auth_mode == :oauth
+      assert route_key.base_url == "https://api.anthropic.com/v1"
+      assert opts[:auth_profile] == "anthropic_oauth"
+      assert opts[:token_server] == FermixCore.Auth.TokenSupervisor
+      refute Keyword.has_key?(opts, :api_key)
+    end
+
+    test ":anthropic auth_mode from the config block selects oauth and drops the configured api_key" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          anthropic: [auth_mode: "oauth", api_key: "sk-ant-config"]
+        )
+
+        {route_key, opts} = RouteResolver.resolve!(provider: :anthropic)
+
+        assert route_key.auth_mode == :oauth
+        assert opts[:auth_profile] == "anthropic_oauth"
+        refute Keyword.has_key?(opts, :api_key)
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test ":anthropic explicit access_token flows into the oauth route" do
+      {_route_key, opts} =
+        RouteResolver.resolve!(provider: :anthropic, auth_mode: :oauth, access_token: "tok")
+
+      assert opts[:access_token] == "tok"
+    end
+
+    test ":anthropic api_key mode never carries oauth artifacts (billing-flip guard)" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        # No api_key configured at all — the route must NOT degrade into
+        # oauth or sneak any credential in from another source.
+        Application.put_env(:fermix_core, :providers, anthropic: [auth_mode: "api_key"])
+
+        {route_key, opts} = RouteResolver.resolve!(provider: :anthropic)
+
+        assert route_key.auth_mode == :api_key
+        refute Keyword.has_key?(opts, :auth_profile)
+        refute Keyword.has_key?(opts, :access_token)
+        refute Keyword.has_key?(opts, :token_server)
+        refute Keyword.has_key?(opts, :api_key)
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test ":anthropic rejects an unknown auth_mode" do
+      assert_raise ArgumentError, ~r/auth_mode/, fn ->
+        RouteResolver.resolve!(provider: :anthropic, auth_mode: :strange)
+      end
+    end
+
+    test ":xai produces an xAI route_key with sane defaults" do
+      {route_key, opts} = RouteResolver.resolve!(provider: :xai, api_key: "xai-key")
+
+      assert route_key.provider == :xai
+      assert route_key.auth_mode == :api_key
+      assert route_key.base_url == "https://api.x.ai/v1"
+      assert is_binary(route_key.model) and route_key.model != ""
+
+      assert opts[:api_key] == "xai-key"
+      assert Adapter.for_route(route_key) == FermixCore.Providers.XAI.Responses
+    end
+
+    test ":xai sources api_key, default_model, base_url, and effort from the config block" do
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          xai: [
+            api_key: "xai-config",
+            default_model: "grok-code-fast-1",
+            base_url: "https://xai-proxy.example/v1",
+            reasoning_effort: :high
+          ]
+        )
+
+        {route_key, opts} = RouteResolver.resolve!(provider: :xai)
+
+        assert route_key.model == "grok-code-fast-1"
+        assert route_key.base_url == "https://xai-proxy.example/v1"
+        assert opts[:api_key] == "xai-config"
+        assert opts[:reasoning_effort] == :high
+      after
+        Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+
+    test ":xai auth_mode :oauth produces an oauth route bound to the xai_oauth profile" do
+      {route_key, opts} =
+        RouteResolver.resolve!(provider: :xai, auth_mode: :oauth, reasoning_effort: :low)
+
+      assert route_key.auth_mode == :oauth
+      assert opts[:auth_profile] == "xai_oauth"
+      assert opts[:token_server] == FermixCore.Auth.TokenSupervisor
+      assert opts[:reasoning_effort] == :low
+      refute Keyword.has_key?(opts, :api_key)
+    end
+
     test "unknown provider raises ArgumentError" do
       assert_raise ArgumentError, ~r/no resolver for provider/, fn ->
         RouteResolver.resolve!(provider: :mystery)
+      end
+    end
+
+    test "switching the configured provider re-resolves the next route (§2.1)" do
+      original_agent = Application.get_env(:fermix_core, :agent, [])
+      original_providers = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          anthropic: [api_key: "sk-ant"],
+          xai: [api_key: "xai-key"]
+        )
+
+        Application.put_env(:fermix_core, :agent, provider: :anthropic)
+        {route_key, _opts} = RouteResolver.resolve!()
+        assert route_key.provider == :anthropic
+        assert Adapter.for_route(route_key) == AnthropicMessages
+
+        # Setup flips the active provider — the very next resolution must
+        # follow, with no stale route or adapter reuse.
+        Application.put_env(:fermix_core, :agent, provider: :xai)
+        {route_key, opts} = RouteResolver.resolve!()
+        assert route_key.provider == :xai
+        assert opts[:api_key] == "xai-key"
+        assert Adapter.for_route(route_key) == FermixCore.Providers.XAI.Responses
+      after
+        Application.put_env(:fermix_core, :agent, original_agent)
+        Application.put_env(:fermix_core, :providers, original_providers)
       end
     end
 
@@ -345,6 +527,46 @@ defmodule FermixCore.Providers.RouteResolverTest do
         refute Keyword.has_key?(opts, :store)
       after
         Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+  end
+
+  describe "primary flag selection" do
+    setup do
+      providers = Application.get_env(:fermix_core, :providers, [])
+      agent = Application.get_env(:fermix_core, :agent, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :providers, providers)
+        Application.put_env(:fermix_core, :agent, agent)
+      end)
+
+      :ok
+    end
+
+    test "resolve!() honors a provider block primary flag over the legacy agent provider" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-x"],
+        anthropic: [primary: true, api_key: "sk-ant"]
+      )
+
+      Application.put_env(:fermix_core, :agent, provider: :openai)
+
+      {route_key, _opts} = RouteResolver.resolve!()
+
+      assert route_key.provider == :anthropic
+    end
+
+    test "resolve!() fails loud when more than one provider is primary" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, api_key: "sk-x"],
+        xai: [primary: true, api_key: "xai-key"]
+      )
+
+      Application.put_env(:fermix_core, :agent, [])
+
+      assert_raise ArgumentError, ~r/exactly one provider/, fn ->
+        RouteResolver.resolve!()
       end
     end
   end

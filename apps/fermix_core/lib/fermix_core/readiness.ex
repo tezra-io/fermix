@@ -12,11 +12,10 @@ defmodule FermixCore.Readiness do
   checks yet.
   """
 
-  alias FermixCore.Auth.Store
   alias FermixCore.Config
+  alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
-
-  require Logger
 
   @typedoc """
   Public readiness state.
@@ -70,69 +69,121 @@ defmodule FermixCore.Readiness do
     end
   end
 
+  # Eligibility (credential presence) is owned by Selection — readiness only
+  # maps "not configured" to its actionable setup message. The primary comes
+  # from PrimaryConfig (flag first, legacy agent.provider as migration input).
   defp provider_failure do
-    case active_provider() do
-      :openai -> openai_failure()
-      :openai_codex -> openai_codex_failure()
-      :anthropic -> anthropic_failure()
-      _other -> openai_failure()
+    case PrimaryConfig.primary() do
+      {:ok, provider} -> primary_provider_failure(known_provider(provider))
+      {:error, :multiple_primary} -> multiple_primary_action()
     end
   end
 
-  defp active_provider do
-    Application.get_env(:fermix_core, :agent, [])
-    |> Keyword.get(:provider, :openai)
+  defp known_provider(provider) do
+    if provider in [:openai, :openai_codex, :anthropic, :xai], do: provider, else: :openai
   end
 
-  defp openai_failure do
-    case Config.provider(:openai) do
-      {:ok, config} when is_list(config) ->
-        if openai_configured?(config) do
-          nil
-        else
-          %{
-            component: "provider:openai",
-            action: "Set OPENAI_API_KEY."
-          }
-        end
+  defp primary_provider_failure(provider) do
+    block = provider_block(provider)
 
-      _ ->
+    cond do
+      invalid_auth_mode?(provider, block) ->
+        invalid_auth_mode_action("provider:#{provider}", Keyword.get(block, :auth_mode))
+
+      Selection.configured?(provider, block) ->
+        nil
+
+      true ->
+        provider |> missing_credentials_action(block) |> note_available_fallbacks()
+    end
+  end
+
+  # Primary unavailable but fallbacks configured: the failure stays (setup is
+  # still needed) and names the fallbacks that serve turns meanwhile (§8).
+  # fallback_providers/0 never includes the primary itself.
+  defp note_available_fallbacks(failure) do
+    case Selection.fallback_providers() do
+      {:ok, [_ | _] = fallbacks} ->
         %{
-          component: "provider:openai",
-          action: "Set OPENAI_API_KEY."
+          failure
+          | action:
+              failure.action <>
+                " Configured fallback providers (#{Enum.map_join(fallbacks, ", ", &to_string/1)}) serve turns meanwhile."
         }
+
+      _none_or_error ->
+        failure
     end
   end
 
-  defp openai_codex_failure do
-    if codex_configured?() do
-      nil
-    else
+  defp provider_block(provider) do
+    case Config.provider(provider) do
+      {:ok, config} when is_list(config) -> config
+      _not_configured -> []
+    end
+  end
+
+  defp invalid_auth_mode?(provider, block) when provider in [:anthropic, :xai] do
+    case Keyword.get(block, :auth_mode) do
+      nil -> false
+      mode when mode in [:oauth, "oauth", :api_key, "api_key"] -> false
+      _other -> true
+    end
+  end
+
+  defp invalid_auth_mode?(_provider, _block), do: false
+
+  defp missing_credentials_action(:openai, _block) do
+    %{component: "provider:openai", action: "Set OPENAI_API_KEY."}
+  end
+
+  defp missing_credentials_action(:openai_codex, _block) do
+    %{
+      component: "provider:openai_codex",
+      action: "Run mix fermix.setup --import-codex to import Codex OAuth tokens."
+    }
+  end
+
+  defp missing_credentials_action(:anthropic, block) do
+    if oauth_mode?(block) do
       %{
-        component: "provider:openai_codex",
-        action: "Run mix fermix.setup --import-codex to import Codex OAuth tokens."
+        component: "provider:anthropic",
+        action: "Connect the Claude subscription: `fermix auth login --provider anthropic`."
       }
+    else
+      %{component: "provider:anthropic", action: "Set ANTHROPIC_API_KEY."}
     end
   end
 
-  defp anthropic_failure do
-    case Config.provider(:anthropic) do
-      {:ok, config} when is_list(config) ->
-        if present?(Keyword.get(config, :api_key)) do
-          nil
-        else
-          %{
-            component: "provider:anthropic",
-            action: "Set ANTHROPIC_API_KEY."
-          }
-        end
-
-      _ ->
-        %{
-          component: "provider:anthropic",
-          action: "Set ANTHROPIC_API_KEY."
-        }
+  defp missing_credentials_action(:xai, block) do
+    if oauth_mode?(block) do
+      %{
+        component: "provider:xai",
+        action: "Connect xAI Grok: `fermix auth login --provider xai`."
+      }
+    else
+      %{component: "provider:xai", action: "Set XAI_API_KEY."}
     end
+  end
+
+  defp oauth_mode?(block), do: Keyword.get(block, :auth_mode) in [:oauth, "oauth"]
+
+  defp multiple_primary_action do
+    %{
+      component: "provider:config",
+      action:
+        "More than one provider has primary = true in config.toml — mark exactly one provider primary."
+    }
+  end
+
+  # An unrecognized auth_mode (e.g. a typo) must NOT report ready just because an
+  # api_key happens to be set — RouteResolver.parse_auth_mode!/2 raises on it at
+  # the first turn, so surface it as a setup failure instead.
+  defp invalid_auth_mode_action(component, mode) do
+    %{
+      component: component,
+      action: "Invalid auth_mode #{inspect(mode)} — set it to \"api_key\" or \"oauth\"."
+    }
   end
 
   defp telegram_failure do
@@ -277,29 +328,8 @@ defmodule FermixCore.Readiness do
     channel_enabled?(config, true)
   end
 
-  defp openai_configured?(config) do
-    present?(Keyword.get(config, :api_key))
-  end
-
   defp regular_openai_api_key? do
-    case Config.provider(:openai) do
-      {:ok, config} when is_list(config) -> openai_configured?(config)
-      _ -> false
-    end
-  end
-
-  defp codex_configured? do
-    case Store.read(:openai_codex) do
-      {:ok, entry} -> present?(entry.tokens.access_token)
-      {:error, _reason} -> false
-    end
-  rescue
-    e in ArgumentError ->
-      Logger.warning(
-        "Readiness: Auth.Store.read(:openai_codex) raised — auth.json may be malformed: #{Exception.message(e)}"
-      )
-
-      false
+    Selection.configured?(:openai, provider_block(:openai))
   end
 
   defp configured?(config, keys) do

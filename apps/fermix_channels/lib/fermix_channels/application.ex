@@ -13,6 +13,10 @@ defmodule FermixChannels.Application do
     readiness = Readiness.report()
     log_missing_ingress_authorization(readiness)
 
+    # Fail fast on a misconfigured command list: a duplicate name/alias would
+    # silently shadow a command via the registry's first-match lookup.
+    FermixChannels.Gateway.Commands.Registry.validate!()
+
     # The gateway owns the turn queue; core introspection reads its status
     # through this runtime-registered provider (no compile-time core→channels
     # dependency). Registered here so the provider is present iff the queue runs.
@@ -21,6 +25,7 @@ defmodule FermixChannels.Application do
     children =
       [
         FermixChannels.Gateway.Queue,
+        FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Idempotency
       ] ++ ChannelRegistry.transport_children(readiness)

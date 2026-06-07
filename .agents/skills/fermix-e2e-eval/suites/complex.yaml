@@ -1,0 +1,138 @@
+suite: complex
+title: "Complex — multi-tool chains and subagent fan-out"
+description: >
+  Harder tasks that force the assistant to chain several tools in one turn, and
+  (separately) to spawn subagents for parallel work. The `multi_tool_*` scenarios
+  are cheap and fast (a couple of tool calls). The `subagent_*` scenarios are
+  EXPENSIVE and SLOW: a real fan-out runs each worker as a full agent (one observed
+  run was 254 spans / ~5 min / ~$20). They carry long timeouts and high budgets and
+  should be run deliberately, one at a time — never in a bulk `--all`. Subagent
+  workers nest in the parent trace as `subagent:<id>` spans, so breadth is asserted
+  with `min_subagent_spawns` (a soft floor — the model sizes the fan-out to the task).
+defaults:
+  timeout_ms: 240000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: multi_tool_web_then_file
+    title: "Researches on the web, then writes the result to a file"
+    severity: normal
+    tags: [complex, multi-tool, web, files]
+    cases:
+      - id: economies_to_file
+        query: "Search the web for the three largest national economies by GDP, then save a one-line
+          summary of them to eval_scratch/economies.txt."
+        expect:
+          tools_any: [web_search]
+          min_tool_calls: 2
+          reply_matches: "(?i)saved|wrote|written|economies\\.txt|file"
+          max_cost_usd: 1.5
+          max_duration_ms: 200000
+        rubric: "Searches the web for the largest economies and writes a summary file; confirms the save."
+      - id: weather_note
+        query: "Look up the current population of Japan online, then write it into a note at
+          eval_scratch/japan_pop.txt and tell me you've done it."
+        expect:
+          tools_any: [web_search]
+          min_tool_calls: 2
+          reply_matches: "(?i)saved|wrote|written|japan_pop|file|note"
+          max_cost_usd: 1.5
+          max_duration_ms: 200000
+        rubric: "Looks up Japan's population and writes it to the note file, then confirms."
+
+  - id: multi_tool_shell_then_file
+    title: "Runs a shell command, then persists the result"
+    severity: normal
+    tags: [complex, multi-tool, shell, files]
+    cases:
+      - id: count_lines_to_file
+        query: "Use the shell to count how many files are in the current directory, then write that
+          count to eval_scratch/file_count.txt."
+        expect:
+          # shell can both compute AND write a file in one command, so no
+          # min_tool_calls floor here (that's only genuine for web_search -> file).
+          tools_any: [shell]
+          reply_matches: "(?i)saved|wrote|written|file_count|count"
+          max_cost_usd: 1.0
+          max_duration_ms: 180000
+        rubric: "Counts files via the shell and writes the number to the file, confirming the result."
+      - id: uptime_to_file
+        query: "Check the system date with a shell command and append it as a timestamped line to
+          eval_scratch/checks.log."
+        expect:
+          # shell can both compute AND write a file in one command, so no
+          # min_tool_calls floor here (that's only genuine for web_search -> file).
+          tools_any: [shell]
+          reply_matches: "(?i)appended|wrote|written|checks\\.log|logged|date"
+          max_cost_usd: 1.0
+          max_duration_ms: 180000
+        rubric: "Gets the date via shell and appends a timestamped line to the log file."
+
+  # ----------------------------------------------------------------------------
+  # EXPENSIVE — real subagent fan-out. ~minutes and ~$10-25 PER CASE. Run one at a
+  # time on purpose (e.g. --scenario subagent_parallel_compare --max-cases 1).
+  # ----------------------------------------------------------------------------
+  - id: subagent_parallel_compare
+    title: "Spawns subagents to compare several options in parallel"
+    severity: normal
+    tags: [complex, subagents, expensive]
+    cases:
+      - id: three_databases
+        query: "Use parallel subagents to research PostgreSQL, MySQL, and SQLite at the same time —
+          one worker per database — covering performance, licensing, and typical use cases. Then give
+          me a single comparison."
+        timeout_ms: 900000
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)postgres"
+          reply_not_matches: "(?i)i can'?t|i'?m not able|unable to"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: "Spawns subagents and returns one comparison covering PostgreSQL, MySQL, and SQLite."
+      - id: three_clouds
+        query: "Spin up separate workers to research AWS, GCP, and Azure in parallel — pricing model,
+          free tier, and managed-Kubernetes offering for each — and then summarize the differences."
+        timeout_ms: 900000
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)aws|amazon"
+          reply_not_matches: "(?i)i can'?t|i'?m not able|unable to"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: "Spawns workers for AWS, GCP, and Azure and summarizes the pricing/free-tier/k8s differences."
+
+  - id: subagent_multi_branch_research
+    title: "Spawns subagents for an inherently multi-branch task"
+    severity: normal
+    tags: [complex, subagents, expensive]
+    cases:
+      - id: city_trip_branches
+        query: "Plan a 4-city Europe itinerary (Lisbon, Barcelona, Rome, Athens). Research each city in
+          parallel with separate workers — top sight, a food to try, and a rough daily budget — then
+          combine into one plan."
+        timeout_ms: 900000
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)lisbon"
+          reply_not_matches: "(?i)i can'?t|i'?m not able|unable to"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: "Fans out per-city research and returns one itinerary covering all four cities."
+      - id: language_comparison
+        query: "Compare Rust, Go, and Elixir for building a high-concurrency backend. Use a separate
+          worker per language to gather concurrency model, ecosystem maturity, and learning curve,
+          then recommend one."
+        timeout_ms: 900000
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)rust|elixir|go\\b"
+          reply_not_matches: "(?i)i can'?t|i'?m not able|unable to"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: "Fans out per-language research and recommends one with justification."

@@ -3,18 +3,17 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Memory.Repo
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   def run(tool_name, context, fun) do
     start = System.monotonic_time(:millisecond)
-    agent = Map.get(context, :agent_name, "unknown")
     result = fun.()
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
-      telemetry_metadata(tool_name, agent, result, success)
+    ToolTelemetry.exec(tool_name, context, success, duration,
+      metadata: maybe_put_error(%{}, result),
+      result: result
     )
 
     result
@@ -124,11 +123,6 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   defp timestamp(nil), do: nil
   defp timestamp(%DateTime{} = value), do: DateTime.to_iso8601(value)
-
-  defp telemetry_metadata(tool_name, agent, result, success) do
-    %{tool: tool_name, agent: agent, success: success}
-    |> maybe_put_error(result)
-  end
 
   defp maybe_put_error(metadata, {:ok, %{success: false, error: error}})
        when is_binary(error) do

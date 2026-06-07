@@ -41,6 +41,7 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
       assert ReasoningEffort.levels_for(:openai) == [:none, :low, :medium, :high, :xhigh]
       assert ReasoningEffort.levels_for(:openai_codex) == [:none, :low, :medium, :high, :xhigh]
       assert ReasoningEffort.levels_for(:anthropic) == [:low, :medium, :high, :xhigh, :max]
+      assert ReasoningEffort.levels_for(:xai) == [:none, :low, :medium, :high]
       assert ReasoningEffort.levels_for(:unknown) == []
     end
 
@@ -49,6 +50,14 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
       refute ReasoningEffort.supported?(:max, :openai)
       assert ReasoningEffort.supported?(:max, :anthropic)
       refute ReasoningEffort.supported?(:none, :anthropic)
+      assert ReasoningEffort.supported?(:none, :xai)
+      refute ReasoningEffort.supported?(:xhigh, :xai)
+    end
+
+    test "xai clamps above-ceiling levels to high" do
+      assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "high"}
+      assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "high"}
+      assert ReasoningEffort.to_provider(:none, :xai) == :omit
     end
   end
 

@@ -62,6 +62,15 @@ defmodule FermixCore.Providers.AdapterTest do
              }) == AnthropicMessages
     end
 
+    test "xai provider routes to XAI.Responses" do
+      assert Adapter.for_route(%{
+               provider: :xai,
+               model: "grok-4.3",
+               auth_mode: :api_key,
+               base_url: "https://api.x.ai/v1"
+             }) == FermixCore.Providers.XAI.Responses
+    end
+
     for provider <- [:openrouter, :together, :groq] do
       test "#{provider} routes to ChatCompletions" do
         assert Adapter.for_route(%{

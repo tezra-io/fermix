@@ -2,6 +2,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Auth.OAuthFlow
+  alias FermixCore.Auth.OAuthProvider
 
   describe "generate_pkce/0" do
     test "produces verifier, challenge, and state" do
@@ -127,6 +128,66 @@ defmodule FermixCore.Auth.OAuthFlowTest do
 
       assert {:error, :invalid_token_response} =
                OAuthFlow.exchange_code("c", "v", plug: plug)
+    end
+
+    test "echoes the code challenge for providers that re-validate PKCE at exchange" do
+      provider = OAuthProvider.xai()
+
+      expected_challenge =
+        :sha256 |> :crypto.hash("the-verifier") |> Base.url_encode64(padding: false)
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        assert params["code_verifier"] == "the-verifier"
+        assert params["code_challenge"] == expected_challenge
+        assert params["code_challenge_method"] == "S256"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "AT", "expires_in" => 60})
+        )
+      end
+
+      assert {:ok, _tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:56121/callback",
+                 plug: plug
+               )
+    end
+
+    test "providers without the echo flag never send the challenge at exchange" do
+      provider = OAuthProvider.google(client_id: "cid")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        refute Map.has_key?(params, "code_challenge")
+        refute Map.has_key?(params, "code_challenge_method")
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "AT", "expires_in" => 60})
+        )
+      end
+
+      assert {:ok, _tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:1455/auth/callback",
+                 plug: plug
+               )
     end
   end
 
@@ -257,6 +318,121 @@ defmodule FermixCore.Auth.OAuthFlowTest do
 
       :gen_tcp.close(blocker)
     end
+
+    test "recovers from an empty connection (connect-then-close) before the real callback" do
+      port = pick_free_port()
+      parent = self()
+
+      opener = fn url ->
+        Task.start(fn ->
+          state = state_from(url)
+          # A browser/OS preconnect probe opens and closes without sending.
+          deliver_empty(port)
+          Process.sleep(50)
+          deliver_callback(port, "/auth/callback?code=C&state=#{state}")
+        end)
+
+        send(parent, {:opened, url})
+        :ok
+      end
+
+      assert {:ok, %{access_token: "AT"}} =
+               OAuthFlow.start_loopback(
+                 port: port,
+                 opener: opener,
+                 timeout_ms: 5_000,
+                 puts: fn _ -> :ok end,
+                 req_options: [plug: access_token_plug("AT")]
+               )
+    end
+
+    test "recovers from a junk (non-HTTP) connection before the real callback" do
+      port = pick_free_port()
+      parent = self()
+
+      opener = fn url ->
+        Task.start(fn ->
+          state = state_from(url)
+          # Non-HTTP bytes (TLS ClientHello-shaped); no parseable request line.
+          deliver_junk(port, <<22, 3, 1, 0, 5, 1, 0, 0, 1, 0>>)
+          Process.sleep(50)
+          deliver_callback(port, "/auth/callback?code=C&state=#{state}")
+        end)
+
+        send(parent, {:opened, url})
+        :ok
+      end
+
+      assert {:ok, %{access_token: "AT"}} =
+               OAuthFlow.start_loopback(
+                 port: port,
+                 opener: opener,
+                 timeout_ms: 5_000,
+                 puts: fn _ -> :ok end,
+                 req_options: [plug: access_token_plug("AT")]
+               )
+    end
+
+    test "accumulates a request line split across reads (full code, not truncated)" do
+      port = pick_free_port()
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:exchanged_code, Map.get(URI.decode_query(body), "code")})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "AT", "expires_in" => 3600})
+        )
+      end
+
+      code = "LONG-AUTH-CODE-0123456789-abcdefghij"
+
+      opener = fn url ->
+        Task.start(fn ->
+          state = state_from(url)
+          deliver_fragmented(port, "/auth/callback?code=#{code}&state=#{state}")
+        end)
+
+        send(parent, {:opened, url})
+        :ok
+      end
+
+      assert {:ok, %{access_token: "AT"}} =
+               OAuthFlow.start_loopback(
+                 port: port,
+                 opener: opener,
+                 timeout_ms: 5_000,
+                 puts: fn _ -> :ok end,
+                 req_options: [plug: plug]
+               )
+
+      assert_received {:exchanged_code, ^code}
+    end
+
+    test "a state mismatch on the real callback still fails fast (does not retry to timeout)" do
+      port = pick_free_port()
+      parent = self()
+
+      opener = fn url ->
+        Task.start(fn -> deliver_callback(port, "/auth/callback?code=C&state=WRONG") end)
+        send(parent, {:opened, url})
+        :ok
+      end
+
+      # timeout_ms is generous; a genuine callback-validation error must return
+      # immediately rather than being retried until the deadline.
+      assert {:error, :state_mismatch} =
+               OAuthFlow.start_loopback(
+                 port: port,
+                 opener: opener,
+                 timeout_ms: 5_000,
+                 puts: fn _ -> :ok end
+               )
+    end
   end
 
   defp pick_free_port do
@@ -273,5 +449,49 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     :ok = :gen_tcp.send(conn, request)
     {:ok, _resp} = :gen_tcp.recv(conn, 0, 5_000)
     :gen_tcp.close(conn)
+  end
+
+  # Connect and close without sending — a browser/OS preconnect probe.
+  defp deliver_empty(port) do
+    {:ok, conn} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+    :gen_tcp.close(conn)
+  end
+
+  # Connect, send non-HTTP bytes, close — a port probe / TLS handshake.
+  defp deliver_junk(port, bytes) do
+    {:ok, conn} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+    :ok = :gen_tcp.send(conn, bytes)
+    :gen_tcp.close(conn)
+  end
+
+  # Send the request line split mid-path across two writes, so the server's
+  # first read sees a truncated line with no terminator.
+  defp deliver_fragmented(port, path) do
+    {:ok, conn} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
+
+    {first, second} = String.split_at(path, div(String.length(path), 2))
+    :ok = :gen_tcp.send(conn, "GET #{first}")
+    Process.sleep(100)
+
+    :ok =
+      :gen_tcp.send(
+        conn,
+        "#{second} HTTP/1.1\r\nHost: localhost:#{port}\r\nConnection: close\r\n\r\n"
+      )
+
+    {:ok, _resp} = :gen_tcp.recv(conn, 0, 5_000)
+    :gen_tcp.close(conn)
+  end
+
+  defp state_from(url) do
+    url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")
+  end
+
+  defp access_token_plug(token) do
+    fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, Jason.encode!(%{"access_token" => token, "expires_in" => 3600}))
+    end
   end
 end

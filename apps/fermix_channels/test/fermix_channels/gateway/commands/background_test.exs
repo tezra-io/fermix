@@ -1,0 +1,148 @@
+defmodule FermixChannels.Gateway.Commands.BackgroundTest do
+  use ExUnit.Case, async: true
+
+  alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
+  alias FermixChannels.Gateway.Commands.Background
+  alias FermixChannels.Gateway.Commands.Tasks
+  alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.WorkRegistry
+
+  defmodule FakeBackgroundRun do
+    def run(%{prompt: prompt, source_trust: :operator}), do: {:ok, "summary of: " <> prompt}
+  end
+
+  defmodule FailingBackgroundRun do
+    def run(_request), do: {:error, :checkout_unavailable}
+  end
+
+  setup do
+    work_sup = start_supervised!({Task.Supervisor, []})
+
+    registry =
+      start_supervised!(
+        {WorkRegistry,
+         name: :"wr_#{System.unique_integer([:positive])}", work_supervisor: work_sup}
+      )
+
+    %{registry: registry}
+  end
+
+  defp message(content) do
+    Message.new!(%{
+      id: "m1",
+      content: content,
+      sender: "a",
+      channel: "telegram",
+      chat_id: "c1",
+      reply_target: "c1",
+      metadata: %{}
+    })
+  end
+
+  defp reply_fn(pid), do: fn {:text, text} -> send(pid, {:reply, text}) end
+
+  defp operator_context(registry, background_run \\ FakeBackgroundRun) do
+    %{
+      authorization: %IngressAuthorization{role: :operator, trust: :operator},
+      conversation_key: {"telegram", "c1", :root},
+      work_registry: registry,
+      background_run: background_run
+    }
+  end
+
+  defp eventually(fun, attempts \\ 100)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(20)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  describe "Background.execute/3" do
+    test "rejects a blank prompt with usage" do
+      ctx = %{authorization: %IngressAuthorization{role: :operator, trust: :operator}}
+      assert :ok = Background.execute(message(""), reply_fn(self()), ctx)
+      assert_receive {:reply, "Usage: /background <prompt>"}
+    end
+
+    test "starts work, acks with a work id, and delivers the result", %{registry: registry} do
+      assert :ok =
+               Background.execute(
+                 message("summarize the news"),
+                 reply_fn(self()),
+                 operator_context(registry)
+               )
+
+      # ack (sent by the command) and result (sent by the background task) race;
+      # collect both and check order-independently.
+      assert_receive {:reply, first}, 2_000
+      assert_receive {:reply, second}, 2_000
+      replies = [first, second]
+
+      assert Enum.any?(replies, &(&1 =~ ~r/Started background work bg-\w+/))
+      assert Enum.any?(replies, &(&1 =~ "summary of: summarize the news"))
+
+      assert eventually(fn -> match?([%{command: "background"}], WorkRegistry.list(registry)) end)
+    end
+
+    test "a failed background run is recorded as :failed", %{registry: registry} do
+      import ExUnit.CaptureLog
+
+      capture_log(fn ->
+        Background.execute(
+          message("do it"),
+          reply_fn(self()),
+          operator_context(registry, FailingBackgroundRun)
+        )
+
+        assert_receive {:reply, _a}, 2_000
+        assert_receive {:reply, _b}, 2_000
+
+        scope = {"telegram", "c1", :root}
+
+        assert eventually(fn ->
+                 match?([%{status: :failed}], WorkRegistry.list(registry, scope))
+               end)
+      end)
+    end
+  end
+
+  describe "Tasks.execute/3" do
+    test "lists background work for the requesting conversation", %{registry: registry} do
+      Background.execute(message("do a thing"), reply_fn(self()), operator_context(registry))
+      assert_receive {:reply, _a}, 2_000
+      assert_receive {:reply, _b}, 2_000
+
+      ctx = %{work_registry: registry, conversation_key: {"telegram", "c1", :root}}
+      assert :ok = Tasks.execute(message(""), reply_fn(self()), ctx)
+      assert_receive {:reply, listing}
+      assert listing =~ "Background work:"
+      assert listing =~ "do a thing"
+    end
+
+    test "is scoped: a different conversation sees nothing", %{registry: registry} do
+      Background.execute(
+        message("conversation A work"),
+        reply_fn(self()),
+        operator_context(registry)
+      )
+
+      assert_receive {:reply, _a}, 2_000
+      assert_receive {:reply, _b}, 2_000
+
+      other = %{work_registry: registry, conversation_key: {"telegram", "OTHER", :root}}
+      assert :ok = Tasks.execute(message(""), reply_fn(self()), other)
+      assert_receive {:reply, "No background work."}
+    end
+
+    test "reports when there is no background work", %{registry: registry} do
+      ctx = %{work_registry: registry, conversation_key: {"telegram", "c1", :root}}
+      assert :ok = Tasks.execute(message(""), reply_fn(self()), ctx)
+      assert_receive {:reply, "No background work."}
+    end
+  end
+end

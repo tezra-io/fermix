@@ -80,7 +80,8 @@ defmodule FermixCore.Agents.WorkerRun do
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       capability_registry:
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
-      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
+      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+      ordered_routes: Keyword.get(opts, :ordered_routes)
     ]
   end
 

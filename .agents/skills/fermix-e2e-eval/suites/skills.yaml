@@ -1,0 +1,112 @@
+suite: skills
+title: "Skills — list and view installed skills"
+description: >
+  Exercises the read side of the skills subsystem: enumerating installed skills
+  (skill_list) and opening a named skill to read its contents (skill_view). Gates
+  are tolerant of the model's route — a "what skills do you have" request may be
+  served by skill_list, while opening a specific skill by name may use skill_view
+  (often after a skill_list to discover the exact id). The two installed builtin
+  skills are browser-guidance and self-knowledge, so list scenarios assert at
+  least one of those names appears in the reply, and view scenarios assert the
+  requested skill's name plus a snippet of what it covers.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: list_installed_skills
+    title: "Lists the installed skills on request"
+    severity: normal
+    tags: [skills, list]
+    cases:
+      - id: what_skills_do_you_have
+        query: "What skills do you have installed?"
+        expect:
+          tools_any: [skill_list]
+          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Lists the installed skills, naming at least browser_guidance or self_knowledge, without inventing skills that aren't installed."
+      - id: list_your_skills
+        query: "Can you list your installed skills for me?"
+        expect:
+          tools_any: [skill_list]
+          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Enumerates the available skills, mentioning at least one of the real installed skill names."
+      - id: which_capabilities_skills
+        query: "Which skills are available to you right now? Just give me the names."
+        expect:
+          tools_any: [skill_list]
+          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Reports the installed skill names, grounded in the actual skill_list output."
+
+  - id: view_named_skill
+    title: "Opens a named skill and describes its contents"
+    severity: normal
+    tags: [skills, view]
+    cases:
+      - id: show_browser_guidance
+        query: "Show me the browser_guidance skill."
+        expect:
+          tools_any: [skill_view, skill_list]
+          reply_matches: "(?i)browser"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: "Opens the browser_guidance skill and summarizes or quotes its content, mentioning browser-related guidance."
+      - id: open_self_knowledge
+        query: "Open the self_knowledge skill and tell me what it covers."
+        expect:
+          tools_any: [skill_view, skill_list]
+          reply_matches: "(?i)self.?knowledge|fermix"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: "Reads the self_knowledge skill and explains what it covers, grounded in the skill's actual content rather than guessing."
+      - id: read_browser_skill_natural
+        query: "I want to read what the browser guidance skill says — can you pull it up?"
+        expect:
+          tools_any: [skill_view, skill_list]
+          reply_matches: "(?i)browser"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: "Locates and views the browser_guidance skill, then relays what it says about browser usage."
+
+  - id: list_then_view
+    title: "Discovers a skill from the list, then opens it"
+    severity: normal
+    tags: [skills, list, view]
+    cases:
+      - id: list_then_open_self_knowledge
+        turns:
+          - query: "First, what skills do you have?"
+            expect:
+              tools_any: [skill_list]
+              reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          - query: "Great — now open the self_knowledge one and tell me what it's for."
+            expect:
+              tools_any: [skill_view]
+              reply_matches: "(?i)self.?knowledge|fermix"
+        expect:
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: "Lists the installed skills, then opens self_knowledge and explains its purpose using the skill's real content."
+      - id: list_then_open_browser_guidance
+        turns:
+          - query: "List the skills you've got available."
+            expect:
+              tools_any: [skill_list]
+              reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          - query: "Pull up the browser_guidance one so I can see what's in it."
+            expect:
+              tools_any: [skill_view]
+              reply_matches: "(?i)browser"
+        expect:
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: "Enumerates the skills, then views browser_guidance and reports its contents."

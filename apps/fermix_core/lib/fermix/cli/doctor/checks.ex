@@ -13,6 +13,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Providers.Selection
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
@@ -156,6 +157,27 @@ defmodule Fermix.CLI.Doctor.Checks do
       {:error, {:network, reason}} ->
         warn("auth probe", "network error: #{inspect(reason)}")
     end
+  rescue
+    # E.g. hand-edited config with multiple primary providers — report it
+    # as a failed check instead of aborting the whole --full run.
+    error in ArgumentError -> fail("auth probe", Exception.message(error))
+  end
+
+  # Fallback health (§8): configured non-primary providers are listed as
+  # fallback availability, never as primary readiness blockers. Presence
+  # only — the live probe stays on the primary.
+  @spec fallback_providers() :: result()
+  def fallback_providers do
+    case Selection.fallback_providers() do
+      {:ok, []} ->
+        ok("provider fallbacks", "none configured — failover disabled")
+
+      {:ok, fallbacks} ->
+        ok("provider fallbacks", "configured: #{Enum.map_join(fallbacks, ", ", &to_string/1)}")
+
+      {:error, reason} ->
+        fail("provider fallbacks", "route selection failed: #{inspect(reason)}")
+    end
   end
 
   @spec channel_health(keyword()) :: result()
@@ -245,6 +267,42 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @doc """
+  Channel streaming configuration sanity (docs/design/CHANNEL_STREAMING.md §7):
+  `streaming = "draft"` on a channel that cannot edit drafts is a silent no-op
+  at runtime, so doctor is the loud boundary. `"block"` sends ordinary messages
+  and works on every channel — nothing to validate. There is deliberately no
+  provider-streaming check — env overrides and per-run profiles make a
+  config-derived provider warning wrong in both directions; provider capability
+  shows up in stream telemetry instead.
+  """
+  @spec streaming_config([FermixCore.Setup.Doctor.streaming_report()]) :: result()
+  def streaming_config(report \\ ProviderProbe.streaming_config_report()) do
+    misconfigured =
+      Enum.filter(report, &(&1.streaming == "draft" and &1.capability != :draft_edit))
+
+    enabled = Enum.filter(report, &(&1.streaming != "off"))
+
+    cond do
+      misconfigured != [] ->
+        warn(
+          "channel streaming",
+          "streaming = \"draft\" on channels that cannot edit drafts (ignored at runtime): " <>
+            Enum.map_join(misconfigured, ", ", & &1.name)
+        )
+
+      enabled == [] ->
+        ok("channel streaming", "off (no channel opted in)")
+
+      true ->
+        ok(
+          "channel streaming",
+          "streaming on: " <>
+            Enum.map_join(enabled, ", ", fn entry -> "#{entry.name}=#{entry.streaming}" end)
+        )
+    end
+  end
+
   @spec sandbox_config() :: result()
   def sandbox_config do
     config = SandboxConfig.current()
@@ -301,7 +359,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
           warn(
             "setup secrets",
-            "plaintext setup secrets found: #{names}; run `fermix setup --migrate-secrets`"
+            "plaintext setup secrets found in #{ConfigStore.path()}: #{names}; run `fermix setup --migrate-secrets`"
           )
       end
     else

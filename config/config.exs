@@ -36,6 +36,10 @@ config :logger, :default_formatter,
   format: "$time $metadata[$level] $message\n",
   metadata: [:request_id]
 
+config :phoenix,
+  filter_parameters:
+    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token)
+
 config :fermix_core,
   providers: [
     openai: [
@@ -70,6 +74,35 @@ config :fermix_core, :memory,
   loop_detection_kill_threshold: 5,
   owner_id: "default",
   agent_id: "main"
+
+# Regular `subagents` tool caps (LLM-facing, advertised in its schema). Biased
+# toward "delegate wide" — more, narrower workers beats a few fat ones (worker
+# brevity lowers actual depth/time, not these ceilings). Kept below the :ultra
+# block so the ultra > regular ordering holds. /ultra raises them via the :ultra
+# block by tagging its context `subagent_mode: :ultra`. System-side knobs.
+config :fermix_core, :subagents,
+  max_tasks: 10,
+  hard_max_concurrency: 8,
+  default_max_concurrency: 4,
+  max_result_bytes: 60_000
+
+# /ultra exhaustive mode. Breadth ≫ regular (many narrow probes), depth <
+# regular (probes are narrow, so fewer iterations each). The fanout_* keys are
+# what the /ultra run-mode raises the subagents caps to via `subagent_mode:
+# :ultra`. System-side knobs, not a config.toml surface.
+config :fermix_core, :ultra,
+  max_subtasks: 50,
+  fanout_max_concurrency: 12,
+  fanout_max_result_bytes: 300_000,
+  fanout_worker_iterations: 40
+
+# Per-agent loop depth caps (previously implicit IterationLimits @defaults; made
+# explicit + tunable). This is DEPTH (how long one agent loops); the knobs above
+# are BREADTH (how many run). /ultra workers override subagent depth via :ultra.
+config :fermix_core, :iteration_limits,
+  interactive: 100,
+  subagent: 100,
+  scheduled_job_default: 100
 
 config :fermix_core, :jobs,
   scheduler_enabled: true,
@@ -116,6 +149,10 @@ config :fermix_channels,
   ]
 
 config :fermix_core, :trace, base_dir: Path.expand("~/.fermix/traces")
+
+# Telemetry/trace content capture. Off by default so traces stay lean; flip on
+# (config or FERMIX_TRACE_CONTENT) to attach prompt/response bodies for eval.
+config :fermix_core, :telemetry, capture_content: false
 
 config :fermix_core, :log,
   file: Path.expand("~/.fermix/logs/fermix.log"),

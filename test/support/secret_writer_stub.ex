@@ -25,6 +25,11 @@ defmodule FermixTestSupport.SecretWriterStub do
     end
   end
 
+  @impl true
+  def command_source(key, _opts \\ []) when is_atom(key) do
+    %{source: :command, command: "stub-keyring", args: [Atom.to_string(key)]}
+  end
+
   def reset do
     ensure_table()
     :ets.delete_all_objects(@table)
@@ -59,4 +64,7 @@ defmodule FermixTestSupport.UnavailableSecretWriter do
 
   @impl true
   def get(_key, _opts \\ []), do: {:error, :unavailable}
+
+  @impl true
+  def command_source(_key, _opts \\ []), do: %{source: :command, command: "", args: []}
 end

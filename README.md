@@ -32,7 +32,7 @@ Confirm the daemon is up:
 
 ```bash
 $ fermix status
-fermix: running (pid 12345, version 0.1.0, up 4s)
+fermix: running (pid 12345, version 0.2.0, up 4s)
 ```
 
 ## Install

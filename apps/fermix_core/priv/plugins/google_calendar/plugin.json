@@ -42,6 +42,34 @@
       "policy_class": "external_api",
       "read_only": false,
       "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+    },
+    {
+      "name": "google_calendar_update_event",
+      "description": "Update fields on an existing event (partial patch).",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+    },
+    {
+      "name": "google_calendar_delete_event",
+      "description": "Delete a calendar event.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+    },
+    {
+      "name": "google_calendar_respond_to_event",
+      "description": "RSVP to an invite (accepted, declined, tentative).",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+    },
+    {
+      "name": "google_calendar_move_event",
+      "description": "Move an event to another calendar.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
     }
   ],
   "skills": [

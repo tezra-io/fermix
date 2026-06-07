@@ -9,10 +9,20 @@ defmodule FermixCore.Providers.ModelCatalog do
   typos are caught by the doctor probe at boot/wizard finalize.
   """
 
-  @type provider :: :openai | :openai_codex | :anthropic
+  @type provider :: :openai | :openai_codex | :anthropic | :xai
   @type entry :: {id :: String.t(), label :: String.t(), context_window :: pos_integer()}
 
   @unknown_model_default_ctx 100_000
+
+  # Same models, two access routes with different effective windows: the Codex
+  # (ChatGPT subscription / OAuth) path caps the shared models at 400k, while the
+  # OpenAI direct API (api key) serves the full window. Keyed per provider so the
+  # window follows the auth path automatically (see models_for/1).
+  @openai_codex [
+    {"gpt-5.5", "GPT-5.5 (default, latest)", 400_000},
+    {"gpt-5.4", "GPT-5.4", 400_000},
+    {"gpt-5.4-mini", "GPT-5.4 mini (faster, cheaper)", 400_000}
+  ]
 
   @openai [
     {"gpt-5.5", "GPT-5.5 (default, recommended)", 1_050_000},
@@ -20,25 +30,48 @@ defmodule FermixCore.Providers.ModelCatalog do
     {"gpt-5.4-mini", "GPT-5.4 mini", 400_000}
   ]
 
-  @openai_codex [
-    {"gpt-5.5", "GPT-5.5 (default, latest)", 400_000},
-    {"gpt-5.4", "GPT-5.4", 400_000},
-    {"gpt-5.4-mini", "GPT-5.4 mini (faster, cheaper)", 400_000}
-  ]
-
+  # Context windows are the API defaults the adapter actually gets (it does not
+  # send the `context-1m` beta header, design doc §8) — compaction thresholds key
+  # off these. The 4.6+ generation (Opus 4.8/4.7, Sonnet 4.6) ships the full 1M
+  # window by default at standard pricing; only Haiku 4.5 is 200k. (Older
+  # Sonnet 4/4.5 still need the beta for 1M, but they are not in this catalog.)
   @anthropic [
     {"claude-sonnet-4-6", "Claude Sonnet 4.6 (recommended)", 1_000_000},
-    {"claude-opus-4-7", "Claude Opus 4.7 (best quality)", 1_000_000},
+    {"claude-opus-4-8", "Claude Opus 4.8 (best quality)", 1_000_000},
+    {"claude-opus-4-7", "Claude Opus 4.7", 1_000_000},
     {"claude-haiku-4-5", "Claude Haiku 4.5 (fastest)", 200_000}
   ]
 
+  # Anthropic requires `max_tokens` on every request; these are the
+  # per-model output ceilings (Hermes reference values — verify against
+  # current Anthropic docs before the SSE follow-up raises the adapter's
+  # non-streaming cap above them).
+  @anthropic_max_output %{
+    "claude-sonnet-4-6" => 64_000,
+    "claude-opus-4-8" => 128_000,
+    "claude-opus-4-7" => 128_000,
+    "claude-haiku-4-5" => 64_000
+  }
+  @default_max_output_tokens 8_192
+
+  # xAI model names are volatile (design doc §8) — stale ids fail in the
+  # doctor probe, not the first user turn. Windows from current xAI docs:
+  # Grok 4.3 = 1M, Grok 4.20 = 256k (same window as Grok 4), code-fast = 256k.
+  @xai [
+    {"grok-4.3", "Grok 4.3 (recommended)", 1_000_000},
+    {"grok-4.20-0309-reasoning", "Grok 4.20 reasoning", 256_000},
+    {"grok-4.20-0309-non-reasoning", "Grok 4.20 non-reasoning", 256_000},
+    {"grok-code-fast-1", "Grok Code Fast (cheap, coding)", 256_000}
+  ]
+
   @spec providers() :: [provider()]
-  def providers, do: [:openai, :openai_codex, :anthropic]
+  def providers, do: [:openai_codex, :openai, :anthropic, :xai]
 
   @spec models_for(provider()) :: [entry()]
-  def models_for(:openai), do: @openai
   def models_for(:openai_codex), do: @openai_codex
+  def models_for(:openai), do: @openai
   def models_for(:anthropic), do: @anthropic
+  def models_for(:xai), do: @xai
 
   @spec default_model_for(provider()) :: String.t()
   def default_model_for(provider) do
@@ -66,8 +99,17 @@ defmodule FermixCore.Providers.ModelCatalog do
     end
   end
 
+  @spec max_output_tokens_for(atom(), String.t()) :: pos_integer()
+  def max_output_tokens_for(:anthropic, model_id) when is_binary(model_id) do
+    Map.get(@anthropic_max_output, model_id, @default_max_output_tokens)
+  end
+
+  def max_output_tokens_for(provider, model_id) when is_atom(provider) and is_binary(model_id) do
+    @default_max_output_tokens
+  end
+
   defp models_for_context_window(provider)
-       when provider in [:openai, :openai_codex, :anthropic] do
+       when provider in [:openai, :openai_codex, :anthropic, :xai] do
     models_for(provider)
   end
 

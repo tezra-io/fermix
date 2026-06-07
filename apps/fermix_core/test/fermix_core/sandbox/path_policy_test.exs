@@ -4,6 +4,26 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.PathPolicy
 
+  test "an empty FERMIX_HOME yields absolute protected paths, not cwd-relative ones" do
+    previous = System.get_env("FERMIX_HOME")
+    System.put_env("FERMIX_HOME", "")
+
+    on_exit(fn ->
+      case previous do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+    end)
+
+    config = Config.normalize(mode: :standard, workspace_root: "/tmp/workspace")
+    protected = PathPolicy.protected_paths(config)
+
+    # Pre-fix, fermix_home/0 returned "" so the home-derived entries became
+    # cwd-relative (config.toml -> <repo>/config.toml). Post-fix they resolve
+    # under ~/.fermix.
+    assert Enum.any?(protected, &String.ends_with?(&1, "/.fermix/config.toml"))
+  end
+
   test "denies symlink escapes after resolving the target" do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-root")
     outside = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-outside")

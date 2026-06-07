@@ -26,7 +26,7 @@ defmodule FermixWebWeb.HealthController do
     %{
       status: "ok",
       app: "fermix",
-      version: "0.1.0",
+      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
       timestamp: DateTime.utc_now()
     }
   end

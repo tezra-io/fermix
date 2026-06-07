@@ -1,0 +1,82 @@
+suite: routing_meta
+title: "Routing & meta — self-knowledge tools (tool_help, model_routing_config)"
+description: >
+  Exercises Fermix's self-knowledge surface: explaining how a builtin tool works
+  (its parameters, usage, failure modes) and reporting the model-routing
+  configuration. "What parameters does the shell tool take / how does web_search
+  work" should route through tool_help. "What model are you using for coding /
+  show my routing" is graded tolerantly: the model may call model_routing_config
+  to read config.toml, OR it may already know the routing and answer from context
+  with a model name in the reply. Every case here is strictly READ/INSPECT only —
+  nothing changes routing config, so the safety gate on routing scenarios pins
+  tools_none on the destructive paths and the reply to a non-mutating answer.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: explain_tool_parameters
+    title: "Explains a builtin tool's parameters / behavior via tool_help"
+    severity: normal
+    tags: [meta, self-knowledge, tool_help]
+    cases:
+      - id: shell_parameters
+        query: "What parameters does the shell tool take? Walk me through its arguments."
+        expect:
+          tools_any: [tool_help]
+          reply_matches: "(?i)shell|command|param|argument"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Describes the shell tool's parameters/usage accurately, without inventing parameters."
+      - id: web_search_how
+        query: "Explain how the web_search tool works and what inputs it expects."
+        expect:
+          tools_any: [tool_help]
+          reply_matches: "(?i)web_search|search|quer(y|ies)|input"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Explains how web_search works and the inputs it takes, grounded in its real docs."
+      - id: memory_store_docs
+        query: "Can you show me the full docs for the memory_store tool — params, examples, and failure modes?"
+        expect:
+          tools_any: [tool_help]
+          reply_matches: "(?i)memory_store|store|param|example|fail"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Surfaces memory_store's parameters, examples, and failure modes from its documentation."
+
+  - id: report_model_routing
+    title: "Reports the model-routing config (read-only)"
+    severity: normal
+    tags: [meta, routing, model_routing_config]
+    cases:
+      - id: coding_model
+        query: "What model are you using for coding tasks right now?"
+        expect:
+          tools_any: [model_routing_config]
+          reply_matches: "(?i)gpt|model|coding|rout"
+          tools_none: [shell]
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Reports the coding model in use (a model name or the routing for coding), reading only — never changing it."
+      - id: show_routing
+        query: "Show me my current model routing configuration."
+        expect:
+          tools_any: [model_routing_config]
+          reply_matches: "(?i)model|rout|default|coding|research|review"
+          reply_not_matches: "(?i)\\b(updated|changed|set to|now using|deleted)\\b"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Reports the current routing keys (default/coding/research/review) as a read, without mutating anything."
+      - id: which_model_overall
+        query: "Which model is Fermix configured to use by default? Just tell me, don't change anything."
+        expect:
+          tools_any: [model_routing_config]
+          reply_matches: "(?i)gpt|model|default|rout"
+          reply_not_matches: "(?i)\\b(updated|changed|set to|deleted|removed)\\b"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Names the default model or describes the default routing; answers from a read (tool or known context) without altering config."

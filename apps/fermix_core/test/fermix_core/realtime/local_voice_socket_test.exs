@@ -186,6 +186,54 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
   end
 
+  test "refuses to start when a live socket already owns the path", %{
+    socket_path: socket_path
+  } do
+    # start_link links the failed starter to the test; trap so the
+    # {:stop, reason} exit arrives as a message instead of killing us.
+    Process.flag(:trap_exit, true)
+
+    assert {:error, {:another_voice_socket_running, ^socket_path}} =
+             LocalVoiceSocket.start_link(
+               socket_path: socket_path,
+               name: :"rt_socket_second_#{System.unique_integer([:positive])}"
+             )
+
+    # the original listener keeps the path and still serves clients
+    assert {:ok, conn} = connect(socket_path)
+    :gen_tcp.close(conn)
+  end
+
+  test "unlinks a stale socket file with no listener behind it" do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-stale-#{System.unique_integer([:positive])}.sock"
+      )
+
+    # Bind and close without unlinking — leaves a dead socket file behind,
+    # like a crashed daemon would.
+    {:ok, dead} =
+      :gen_tcp.listen(0, [:binary, {:ifaddr, {:local, to_charlist(socket_path)}}])
+
+    :ok = :gen_tcp.close(dead)
+    assert File.exists?(socket_path)
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        name: :"rt_socket_stale_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      if Process.alive?(socket), do: GenServer.stop(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    assert {:ok, conn} = connect(socket_path)
+    :gen_tcp.close(conn)
+  end
+
   test "rejects a connection once max_clients is reached" do
     socket_path =
       Path.join(

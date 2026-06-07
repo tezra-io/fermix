@@ -6,7 +6,9 @@ defmodule FermixCore.AgentLoopTest do
   alias FermixCore.AgentLoop
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Providers.Error, as: ProviderError
 
   # -- Mock adapter --
 
@@ -274,6 +276,73 @@ defmodule FermixCore.AgentLoopTest do
       [{_state, [tool_result], _opts}] = mock_continues()
       assert tool_result.call_id == "call_1"
       assert tool_result.output == "Echo: hi"
+    end
+  end
+
+  # -- Context-aware tool schema (ultra fan-out width) --
+
+  describe "run/1 refreshes context-aware tool schemas" do
+    test "an ultra context widens the subagents schema the model sees", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{agent_name: "test", conversation_key: :test, subagent_mode: :ultra}
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.name == "subagents"
+      assert cap.parameters.properties.tasks.maxItems == 50
+      assert cap.parameters.properties.max_concurrency.maximum == 12
+    end
+
+    test "a normal context leaves the regular subagents schema", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [subagents_cap])
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.parameters.properties.tasks.maxItems == 10
+    end
+
+    test "does NOT clobber a tool whose executor module exports parameters/1 (plugin guard)",
+         %{registry: registry} do
+      set_mock_responses([turn("done")])
+
+      # Plugin tools are registered with executor {Plugins.ToolExecutor, :execute,
+      # [name, tool]}; ToolExecutor exports a name→schema `parameters/1` lookup —
+      # NOT a context hook. The refresh must key off `dynamic_parameters/1`, which
+      # ToolExecutor does not export, so this schema must survive untouched.
+      real_schema = %{
+        "type" => "object",
+        "required" => ["to", "subject", "body"],
+        "properties" => %{"to" => %{"type" => "string"}}
+      }
+
+      plugin_cap =
+        Capability.new(%{
+          name: "gmail_send_message",
+          description: "Send mail.",
+          parameters: real_schema,
+          kind: :builtin,
+          policy_class: :external_api,
+          executor: {FermixCore.Plugins.ToolExecutor, :execute, ["gmail_send_message", %{}]}
+        })
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [plugin_cap],
+                 context: %{agent_name: "test", conversation_key: :test, subagent_mode: :ultra}
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.parameters == real_schema
+      assert cap.parameters["required"] == ["to", "subject", "body"]
     end
   end
 
@@ -614,6 +683,388 @@ defmodule FermixCore.AgentLoopTest do
       assert_raise KeyError, fn ->
         AgentLoop.run(adapter: MockAdapter, adapter_opts: [model: "mock"])
       end
+    end
+  end
+
+  # -- Provider-switching integration (design doc §2.1): the loop drives the
+  # real provider adapters end-to-end over their wire shapes, with the
+  # route_key/adapter_opts contract every caller uses. --
+
+  describe "run/1 routed through the real Anthropic adapter (integration)" do
+    test "drives a two-round tool loop over the Anthropic wire shape", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        has_tool_result? =
+          Enum.any?(decoded["messages"], fn message ->
+            is_list(message["content"]) and
+              Enum.any?(message["content"], &(&1["type"] == "tool_result"))
+          end)
+
+        response =
+          if has_tool_result? do
+            %{
+              "model" => "claude-sonnet-4-6",
+              "stop_reason" => "end_turn",
+              "content" => [%{"type" => "text", "text" => "echoed and done"}],
+              "usage" => %{"input_tokens" => 9, "output_tokens" => 4}
+            }
+          else
+            %{
+              "model" => "claude-sonnet-4-6",
+              "stop_reason" => "tool_use",
+              "content" => [
+                %{
+                  "type" => "tool_use",
+                  "id" => "toolu_1",
+                  "name" => "echo",
+                  "input" => %{"text" => "hi"}
+                }
+              ],
+              "usage" => %{"input_tokens" => 7, "output_tokens" => 5}
+            }
+          end
+
+        Req.Test.json(conn, response)
+      end)
+
+      route_key = %{
+        provider: :anthropic,
+        model: "claude-sonnet-4-6",
+        auth_mode: :api_key,
+        base_url: "https://api.anthropic.com/v1"
+      }
+
+      assert {:ok, result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "echo hi"}],
+                 routes: [
+                   {route_key,
+                    [
+                      api_key: "sk-ant-test",
+                      model: "claude-sonnet-4-6",
+                      base_url: "https://api.anthropic.com/v1",
+                      req_options: [plug: {Req.Test, __MODULE__}]
+                    ]}
+                 ],
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert result.response == "echoed and done"
+      assert result.iterations == 2
+    end
+  end
+
+  describe "run/1 routed through the real xAI adapter (integration)" do
+    test "drives a two-round tool loop over the Responses wire shape", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        has_output? =
+          Enum.any?(decoded["input"], &(&1["type"] == "function_call_output"))
+
+        response =
+          if has_output? do
+            %{
+              "model" => "grok-4.3",
+              "output" => [
+                %{
+                  "type" => "message",
+                  "id" => "msg_2",
+                  "content" => [%{"type" => "output_text", "text" => "echoed and done"}]
+                }
+              ],
+              "usage" => %{"input_tokens" => 9, "output_tokens" => 4}
+            }
+          else
+            %{
+              "model" => "grok-4.3",
+              "output" => [
+                %{
+                  "type" => "function_call",
+                  "id" => "fc_1",
+                  "call_id" => "call_1",
+                  "name" => "echo",
+                  "arguments" => Jason.encode!(%{"text" => "hi"})
+                }
+              ],
+              "usage" => %{"input_tokens" => 7, "output_tokens" => 5}
+            }
+          end
+
+        Req.Test.json(conn, response)
+      end)
+
+      route_key = %{
+        provider: :xai,
+        model: "grok-4.3",
+        auth_mode: :api_key,
+        base_url: "https://api.x.ai/v1"
+      }
+
+      assert {:ok, result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "echo hi"}],
+                 routes: [
+                   {route_key,
+                    [
+                      api_key: "xai-test",
+                      model: "grok-4.3",
+                      base_url: "https://api.x.ai/v1",
+                      req_options: [plug: {Req.Test, __MODULE__}]
+                    ]}
+                 ],
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert result.response == "echoed and done"
+      assert result.iterations == 2
+    end
+  end
+
+  # -- Stream callback (channel streaming seam, docs/design/CHANNEL_STREAMING.md §5.1) --
+
+  describe "run/1 with stream_callback" do
+    test "emits session_started then iteration_started per provider call and injects the callback into adapter_opts",
+         %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{text: "hi"})]),
+        turn("done")
+      ])
+
+      test_pid = self()
+      cb = fn event -> send(test_pid, {:stream, event}) end
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(
+                 capability_registry: registry,
+                 stream_callback: cb,
+                 context: %{agent_name: "test", conversation_key: :test, session_id: "sess-1"}
+               )
+
+      # Mailbox order is emission order: session bootstrap, then one
+      # iteration_started per provider call (chat + continue).
+      assert_received {:stream, {:session_started, "sess-1"}}
+      assert_received {:stream, {:iteration_started, 1}}
+      assert_received {:stream, {:iteration_started, 2}}
+      refute_received {:stream, _other}
+
+      assert [{_messages, _caps, opts}] = mock_calls()
+
+      # The loop wraps the callback (it tracks the emitted? failover gate),
+      # so assert forwarding rather than function identity.
+      injected = Keyword.fetch!(opts, :stream_callback)
+      assert is_function(injected, 1)
+      injected.({:text_delta, "partial"})
+      assert_received {:stream, {:text_delta, "partial"}}
+    end
+
+    test "without stream_callback nothing is emitted and adapter_opts stay clean" do
+      set_mock_responses([turn("plain")])
+
+      assert {:ok, %{response: "plain"}} = run_loop([])
+
+      assert [{_messages, _caps, opts}] = mock_calls()
+      refute Keyword.has_key?(opts, :stream_callback)
+    end
+  end
+
+  # -- Initial-chat failover (docs/design/MULTI_PROVIDER_FAILOVER.md §5) --
+
+  defmodule EligibleFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :eligible_fail})
+      {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
+  defmodule AuthFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :auth_fail})
+      {:error, ProviderError.api(:openai, __MODULE__, 401, %{})}
+    end
+  end
+
+  defmodule RecoveringAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :recovering})
+
+      {:ok,
+       %{
+         content: "recovered",
+         tool_calls: [],
+         provider_state: nil,
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: opts[:model]
+       }}
+    end
+  end
+
+  defmodule StreamThenFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :stream_then_fail})
+      opts[:stream_callback].({:text_delta, "partial answer"})
+
+      {:error, ProviderError.transport(:openai_codex, __MODULE__, :closed, stage: :mid_stream)}
+    end
+  end
+
+  defmodule QuietMidStreamFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :quiet_mid_stream_fail})
+      # Raw SSE chunks were seen (stage: :mid_stream) but nothing was ever
+      # emitted through the stream callback — nothing is user-visible.
+      {:error, ProviderError.transport(:openai_codex, __MODULE__, :timeout, stage: :mid_stream)}
+    end
+  end
+
+  defmodule ContinueFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :continue_fail})
+
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [
+           %{id: "fc_1", call_id: "c1", name: "echo", arguments: ~s({"text":"hi"})}
+         ],
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: opts[:model]
+       }}
+    end
+
+    def continue(_provider_state, _tool_results, _opts) do
+      {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
+  describe "run/1 initial-chat failover" do
+    defp failover_routes(first_adapter, second_adapter) do
+      [
+        {%{
+           provider: :anthropic,
+           model: "claude-x",
+           auth_mode: :api_key,
+           base_url: "https://a/v1"
+         }, [adapter: first_adapter, model: "claude-x", test_pid: self()]},
+        {%{provider: :openai, model: "gpt-x", auth_mode: :api_key, base_url: "https://o/v1"},
+         [adapter: second_adapter, model: "gpt-x", test_pid: self()]}
+      ]
+    end
+
+    test "an eligible primary error falls over to the next route", %{registry: registry} do
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(EligibleFailAdapter, RecoveringAdapter),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test, session_id: "s-1"}
+               )
+
+      assert_received {:chat, :eligible_fail}
+      assert_received {:chat, :recovering}
+    end
+
+    test "an api-key auth failure does not fall over", %{registry: registry} do
+      assert {:error, {:provider_error, %{kind: :auth}}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(AuthFailAdapter, RecoveringAdapter),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert_received {:chat, :auth_fail}
+      refute_received {:chat, :recovering}
+    end
+
+    test "all routes failing returns the attempted providers and reasons", %{registry: registry} do
+      assert {:error, {:all_routes_failed, [{:anthropic, _}, {:openai, _}]}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(EligibleFailAdapter, EligibleFailAdapter),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+    end
+
+    test "mid-stream failure after user-visible content does not fall over", %{
+      registry: registry
+    } do
+      test_pid = self()
+
+      assert {:error, {:provider_transport_error, %{stage: :mid_stream}}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(StreamThenFailAdapter, RecoveringAdapter),
+                 capability_registry: registry,
+                 stream_callback: fn event -> send(test_pid, {:stream, event}) end,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert_received {:chat, :stream_then_fail}
+      refute_received {:chat, :recovering}
+    end
+
+    test "a mid-stream failure with nothing emitted falls over (callback present)", %{
+      registry: registry
+    } do
+      test_pid = self()
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(QuietMidStreamFailAdapter, RecoveringAdapter),
+                 capability_registry: registry,
+                 stream_callback: fn event -> send(test_pid, {:stream, event}) end,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert_received {:chat, :quiet_mid_stream_fail}
+      assert_received {:chat, :recovering}
+    end
+
+    test "a mid-stream failure on a non-streaming surface (no callback) falls over", %{
+      registry: registry
+    } do
+      # Jobs, memory review, compaction, and non-streaming channels thread no
+      # stream callback — raw chunks nobody saw must not strand the fallback.
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(QuietMidStreamFailAdapter, RecoveringAdapter),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert_received {:chat, :quiet_mid_stream_fail}
+      assert_received {:chat, :recovering}
+    end
+
+    test "a mid-loop continue failure does not fall over", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      assert {:error, {:provider_transport_error, _}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "hi"}],
+                 routes: failover_routes(ContinueFailAdapter, RecoveringAdapter),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert_received {:chat, :continue_fail}
+      refute_received {:chat, :recovering}
     end
   end
 end

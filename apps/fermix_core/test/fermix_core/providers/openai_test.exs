@@ -269,8 +269,12 @@ defmodule FermixCore.Providers.OpenAITest do
       error_body = %{"error" => %{"message" => "Rate limit exceeded"}}
       stub_openai(self(), 429, error_body)
 
-      assert {:error, msg} = chat([%{role: "user", content: "hi"}])
-      assert msg =~ "429"
+      assert {:error, {:provider_error, error}} = chat([%{role: "user", content: "hi"}])
+      assert error.provider == :openai
+      assert error.adapter == :chat_completions
+      assert error.status == 429
+      assert error.kind == :rate_limit
+      assert error.message == "Rate limit exceeded"
     end
 
     test "returns error on malformed response (missing choices)" do

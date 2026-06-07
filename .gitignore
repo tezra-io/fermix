@@ -70,3 +70,7 @@ docs/design/
 #Logs
 .playwright-mcp/
 
+#.agents
+.agents/skills/.venv/
+.agents/skills/bin/
+.agents/skills/reports/

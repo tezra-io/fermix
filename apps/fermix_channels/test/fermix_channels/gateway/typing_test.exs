@@ -36,6 +36,36 @@ defmodule FermixChannels.Gateway.TypingTest do
     assert :work_done = Typing.with_indicator(nil, [], fn -> :work_done end)
   end
 
+  test "force-stopping a stuck typing indicator does not kill the work process" do
+    test_pid = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        result =
+          Typing.with_indicator(
+            fn ->
+              send(test_pid, :typing_started)
+
+              receive do
+                :never -> :ok
+              end
+            end,
+            [interval_ms: 10, timeout_ms: 1_000],
+            fn ->
+              Process.sleep(20)
+              :work_done
+            end
+          )
+
+        send(test_pid, {:typing_result, result})
+      end)
+
+    assert_receive :typing_started, 500
+    assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 1_000
+    assert reason == :normal
+    assert_received {:typing_result, :work_done}
+  end
+
   test "tolerates a typing_fn that reports an expected transport error" do
     capture_log(fn ->
       result =

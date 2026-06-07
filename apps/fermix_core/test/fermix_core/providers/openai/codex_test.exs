@@ -82,6 +82,43 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
   end
 
+  describe "chat/3 with stream_callback" do
+    test "fires incremental text deltas whose final cumulative equals the turn content" do
+      test_pid = self()
+      cb = fn event -> send(test_pid, {:delta, event}) end
+
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_z","content":[]}}
+
+      data: {"type":"response.output_text.delta","output_index":0,"delta":"Hel"}
+
+      data: {"type":"response.output_text.delta","output_index":0,"delta":"lo"}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg_z","content":[{"type":"output_text","text":"Hello"}]}}
+
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":1,"output_tokens":1}}}
+
+      data: [DONE]
+
+      """
+
+      assert {:ok, turn} = run_chat(sse, stream_callback: cb)
+
+      assert_received {:delta, {:text_delta, "Hel"}}
+      assert_received {:delta, {:text_delta, "Hello"}}
+      # The completed message item fires the semantic block boundary.
+      assert_received {:delta, {:text_done, "Hello"}}
+      refute_received {:delta, _other}
+      assert turn.content == "Hello"
+    end
+
+    test "without stream_callback the same stream parses with no events" do
+      assert {:ok, turn} = run_chat(terminal_message_sse("ok"))
+      refute_received {:delta, _any}
+      assert turn.content == "ok"
+    end
+  end
+
   describe "chat/3 — request shape" do
     test "emits provider telemetry with request shape" do
       test_pid = self()
@@ -220,12 +257,33 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           name: stub_server
         )
 
-      assert_raise ArgumentError, ~r/Codex auth required/, fn ->
-        Codex.chat([%{role: "user", content: "x"}], [],
-          model: "gpt-5",
-          token_server: stub_server
-        )
-      end
+      assert {:error, {:provider_error, %{provider: :openai_codex, kind: :auth} = error}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 model: "gpt-5",
+                 token_server: stub_server
+               )
+
+      # Tagged oauth so an unusable token is terminal-for-route and the
+      # failover chain can try a configured fallback.
+      assert error.auth_mode == :oauth
+      assert error.message =~ "Codex auth required"
+    end
+
+    test "a dead token server returns a structured oauth auth error instead of exiting" do
+      # Today's scheduled-job failure shape: the TokenManager process is not
+      # alive, GenServer.call would exit :noproc and crash the agent loop —
+      # the adapter must degrade it to a structured, failover-eligible error.
+      dead_server = :"codex_test_dead_token_server_#{System.unique_integer([:positive])}"
+
+      assert {:error, {:provider_error, %{provider: :openai_codex, kind: :auth} = error}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 model: "gpt-5",
+                 token_server: dead_server
+               )
+
+      assert error.auth_mode == :oauth
+      assert error.message =~ "token_server_unavailable"
+      assert error.message =~ "noproc"
     end
 
     test "returns {:error, _} on a non-200 response" do
@@ -233,7 +291,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         Plug.Conn.send_resp(conn, 401, "unauthorized")
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -241,7 +299,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message == "Codex API error: 401"
+      assert error.provider == :openai_codex
+      assert error.status == 401
+      assert error.kind == :auth
+      assert error.auth_mode == :oauth
     end
 
     test "provider telemetry includes the agent when supplied" do
@@ -354,7 +415,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           token_server: token_server,
           model: "gpt-5",
@@ -362,8 +423,12 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message =~ "Codex auth invalidated"
-      assert message =~ "fermix auth login"
+      # Refresh exhausted -> residual structured :auth error, tagged oauth so
+      # the failover layer treats it as terminal-for-route (no second refresh).
+      assert error.kind == :auth
+      assert error.status == 401
+      assert error.auth_mode == :oauth
+      assert error.message =~ "invalidated"
     end
 
     test "surfaces refresh failures instead of returning the original 401" do
@@ -389,7 +454,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         )
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           token_server: token_server,
           model: "gpt-5",
@@ -397,9 +462,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message =~ "Codex token refresh failed"
-      assert message =~ ":timeout"
-      refute message == "Codex API error: 401"
+      assert error.kind == :auth
+      assert error.auth_mode == :oauth
+      assert error.message =~ "Codex token refresh failed"
+      assert error.message =~ ":timeout"
     end
   end
 
@@ -864,12 +930,26 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   end
 
   describe "chat/3 — transport errors" do
-    test ":closed becomes an actionable operator-readable message" do
+    test "emits transport error telemetry with the closed-stream reason" do
+      test_pid = self()
+      handler_id = "test-codex-transport-error-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
       Req.Test.stub(__MODULE__, fn conn ->
         Req.Test.transport_error(conn, :closed)
       end)
 
-      {:error, message} =
+      {:error, _message} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -877,17 +957,41 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert is_binary(message)
-      assert message =~ "closed by peer"
-      assert message =~ "reasoning_effort"
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements, metadata}
+      assert measurements.duration_ms >= 0
+      assert metadata.status == :error
+      assert metadata.error_kind == :transport_closed
+      assert metadata.transport_error_reason == :closed
+      assert metadata.transport_stage == :before_response
+      assert metadata.error =~ "before any response data"
     end
 
-    test ":timeout becomes an actionable operator-readable message" do
+    test ":closed before any data is classified as a stale-connection error, not mid-response" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.transport_error(conn, :closed)
+      end)
+
+      {:error, {:provider_transport_error, error}} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert error.kind == :transport_closed
+      assert error.stage == :before_response
+      assert error.message =~ "before any response data"
+      refute error.message =~ "mid-response"
+      refute error.message =~ "reasoning_effort"
+    end
+
+    test ":timeout becomes an actionable operator-readable message without an effort steer" do
       Req.Test.stub(__MODULE__, fn conn ->
         Req.Test.transport_error(conn, :timeout)
       end)
 
-      {:error, message} =
+      {:error, {:provider_transport_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -895,9 +999,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert is_binary(message)
-      assert message =~ "no data for"
-      assert message =~ "receive_timeout"
+      assert error.kind == :timeout
+      assert error.message =~ "no data for"
+      assert error.message =~ "receive_timeout"
+      refute error.message =~ "Lower reasoning_effort"
     end
 
     test ":closed retries once and succeeds on the second attempt (stale-pool recovery)" do
@@ -945,7 +1050,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
         Req.Test.transport_error(conn, :closed)
       end)
 
-      {:error, message} =
+      {:error, {:provider_transport_error, error}} =
         Codex.chat([%{role: "user", content: "x"}], [],
           access_token: @jwt_with_sub,
           model: "gpt-5",
@@ -953,7 +1058,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, test_id}]
         )
 
-      assert message =~ "closed by peer"
+      assert error.message =~ "before any response data"
       assert_received {:codex_attempt, 1}
       assert_received {:codex_attempt, 2}
       refute_received {:codex_attempt, 3}
@@ -980,6 +1085,129 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
 
       assert_received {:codex_attempt, 1}
       refute_received {:codex_attempt, 2}
+    end
+
+    test ":closed after response data has streamed is classified mid-stream" do
+      test_pid = self()
+      handler_id = "test-codex-mid-stream-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # Req.Test.transport_error/2 raises before any chunk reaches the
+      # :into callback, so it can only ever produce :before_response. To
+      # exercise the chunk-counting classifier end-to-end, drive the SSE
+      # :into callback directly, then surface the transport error.
+      adapter = fn req ->
+        {:cont, _acc} = req.into.({:data, "data: {}\n\n"}, {req, Req.Response.new(status: 200)})
+        {req, %Req.TransportError{reason: :closed}}
+      end
+
+      {:error, {:provider_transport_error, error}} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: adapter]
+        )
+
+      assert error.stage == :mid_stream
+      assert error.message =~ "mid-response"
+      refute error.message =~ "before any response data"
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], metadata}
+      assert metadata.transport_stage == :mid_stream
+    end
+  end
+
+  describe "receive_timeout_for/1" do
+    test "xhigh reasoning widens the between-chunk window to 120s" do
+      assert Codex.receive_timeout_for(%{reasoning: %{effort: "xhigh", summary: "auto"}}) ==
+               120_000
+    end
+
+    test "all other efforts keep the 60s default" do
+      assert Codex.receive_timeout_for(%{reasoning: %{effort: "high", summary: "auto"}}) ==
+               60_000
+
+      assert Codex.receive_timeout_for(%{reasoning: %{effort: "medium"}}) == 60_000
+      assert Codex.receive_timeout_for(%{model: "gpt-5"}) == 60_000
+    end
+
+    test "xhigh reasoning wires the 120s window into the actual request" do
+      test_pid = self()
+
+      adapter = fn req ->
+        send(test_pid, {:codex_receive_timeout, req.options[:receive_timeout]})
+        {req, %Req.TransportError{reason: :timeout}}
+      end
+
+      {:error, _message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          reasoning_effort: "xhigh",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: adapter]
+        )
+
+      assert_received {:codex_receive_timeout, 120_000}
+    end
+
+    test "an explicit req_options receive_timeout overrides the per-effort default" do
+      test_pid = self()
+
+      adapter = fn req ->
+        send(test_pid, {:codex_receive_timeout, req.options[:receive_timeout]})
+        {req, %Req.TransportError{reason: :timeout}}
+      end
+
+      {:error, _message} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          reasoning_effort: "xhigh",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [adapter: adapter, receive_timeout: 1_234]
+        )
+
+      assert_received {:codex_receive_timeout, 1_234}
+    end
+  end
+
+  describe "transport_error_message/2" do
+    test ":closed before any response data points at the connection, not the model" do
+      message = Codex.transport_error_message(:closed, :before_response)
+
+      assert message =~ "before any response data"
+      refute message =~ "reasoning_effort"
+    end
+
+    test ":closed mid-stream stays a genuine mid-response error" do
+      message = Codex.transport_error_message(:closed, :mid_stream)
+
+      assert message =~ "mid-response"
+      refute message =~ "reasoning_effort"
+    end
+
+    test ":timeout describes stream starvation and the per-effort window" do
+      message = Codex.transport_error_message(:timeout, :mid_stream)
+
+      assert message =~ "no data for"
+      assert message =~ "receive_timeout"
+      refute message =~ "Lower reasoning_effort"
+    end
+
+    test "unknown reasons fall through to an inspect message" do
+      assert Codex.transport_error_message(:ehostunreach, :before_response) =~ ":ehostunreach"
     end
   end
 
@@ -1058,7 +1286,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     """
   end
 
-  defp run_chat(sse) do
+  defp run_chat(sse, extra_opts \\ []) do
     test_id = :"codex_chat_#{System.unique_integer([:positive])}"
 
     Req.Test.stub(test_id, fn conn ->
@@ -1070,10 +1298,12 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     Codex.chat(
       [%{role: "user", content: "Hi"}],
       [capability()],
-      access_token: @jwt_with_sub,
-      model: "gpt-5",
-      base_url: "https://chatgpt.test/codex/responses",
-      req_options: [plug: {Req.Test, test_id}]
+      [
+        access_token: @jwt_with_sub,
+        model: "gpt-5",
+        base_url: "https://chatgpt.test/codex/responses",
+        req_options: [plug: {Req.Test, test_id}]
+      ] ++ extra_opts
     )
   end
 end

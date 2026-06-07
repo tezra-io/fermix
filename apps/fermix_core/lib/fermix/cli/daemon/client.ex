@@ -10,6 +10,12 @@ defmodule Fermix.CLI.Daemon.Client do
 
   @default_timeout_ms 3_000
 
+  # Upper bound on one reply frame. Without it a corrupt or version-skewed
+  # header (e.g. a pre-packet-4 daemon's newline-framed JSON, whose first 4
+  # ASCII bytes read as a ~2 GB length) buffers toward 2 GB until the timeout;
+  # with it the read fails immediately with :emsgsize.
+  @max_frame_bytes 4_194_304
+
   @spec status(keyword()) :: {:ok, map()} | {:error, term()}
   def status(opts \\ []), do: request("status", opts)
 
@@ -37,18 +43,26 @@ defmodule Fermix.CLI.Daemon.Client do
     :gen_tcp.connect(
       {:local, to_charlist(socket_path)},
       0,
-      [:binary, {:active, false}, {:packet, :line}],
+      [:binary, {:active, false}, {:packet, 4}, {:packet_size, @max_frame_bytes}],
       timeout
     )
   end
 
   defp exchange(conn, method, opts, timeout) do
-    payload = Jason.encode!(request_payload(method, opts)) <> "\n"
+    payload = Jason.encode!(request_payload(method, opts))
 
     try do
       with :ok <- :gen_tcp.send(conn, payload),
-           {:ok, line} <- :gen_tcp.recv(conn, 0, timeout) do
-        Jason.decode(String.trim(line))
+           {:ok, data} <- :gen_tcp.recv(conn, 0, timeout) do
+        case Jason.decode(data) do
+          {:ok, decoded} ->
+            {:ok, decoded}
+
+          {:error, %Jason.DecodeError{position: pos}} ->
+            # A packet-4 frame arrives whole or not at all, so a decode
+            # failure means malformed JSON, not truncation.
+            {:error, "response_decode_failed:#{pos}"}
+        end
       else
         {:error, reason} -> {:error, reason}
       end

@@ -66,8 +66,11 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
             "expected one of #{inspect(ReasoningEffort.levels())}"
   end
 
-  @spec to_provider_tools([Capability.t()]) :: [map()]
-  def to_provider_tools(capabilities) when is_list(capabilities) do
+  # The optional `adapter` tag keeps tool-schema telemetry distinguishable
+  # per consumer (e.g. :xai_responses vs the OpenAI adapters' default).
+  @spec to_provider_tools([Capability.t()], atom()) :: [map()]
+  def to_provider_tools(capabilities, adapter \\ :responses_shared)
+      when is_list(capabilities) and is_atom(adapter) do
     {tools, duration_us} =
       Telemetry.timed_us(fn ->
         Enum.map(capabilities, fn %Capability{} = cap ->
@@ -81,7 +84,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
         end)
       end)
 
-    emit_tool_schema_telemetry(tools, capabilities, duration_us)
+    emit_tool_schema_telemetry(tools, capabilities, duration_us, adapter)
     tools
   end
 
@@ -177,7 +180,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   defp string_size(value) when is_binary(value), do: byte_size(value)
   defp string_size(_value), do: 0
 
-  defp emit_tool_schema_telemetry(tools, capabilities, duration_us) do
+  defp emit_tool_schema_telemetry(tools, capabilities, duration_us, adapter) do
     :telemetry.execute(
       [:fermix, :provider, :tool_schema],
       %{
@@ -185,7 +188,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
         tools_count: length(tools),
         capabilities_count: length(capabilities)
       },
-      %{adapter: :responses_shared}
+      %{adapter: adapter}
     )
   end
 

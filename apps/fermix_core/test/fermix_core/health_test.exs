@@ -69,6 +69,7 @@ defmodule FermixCore.HealthTest do
       )
 
     assert report.status == :degraded
+    assert report.version == to_string(Application.spec(:fermix_core, :vsn))
     assert report.config.path == Path.join(tmp_home, "config.toml")
     assert report.config.home == tmp_home
 
@@ -78,6 +79,7 @@ defmodule FermixCore.HealthTest do
              bootstrap: Path.join(tmp_home, "bootstrap"),
              skills: Path.join(tmp_home, "skills"),
              plugins: Path.join(tmp_home, "plugins"),
+             browser: Path.join(tmp_home, "browser"),
              journals: Path.join(tmp_home, "journals"),
              realtime: Path.join(tmp_home, "realtime"),
              traces: Path.join(tmp_home, "traces"),

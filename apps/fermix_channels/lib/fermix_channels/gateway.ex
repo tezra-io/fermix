@@ -14,8 +14,10 @@ defmodule FermixChannels.Gateway do
   require Logger
 
   alias FermixChannels.Gateway.Authorizer
+  alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Delivery
+  alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
@@ -60,6 +62,41 @@ defmodule FermixChannels.Gateway do
     end
   end
 
+  # Streaming eligibility (docs/design/CHANNEL_STREAMING.md §5.6): resolved
+  # once per turn, HERE — the only layer holding the channel module. Returns a
+  # closure spec the queue's turn task drives, or nil (typing-only, today's
+  # exact path). Degradation is this one computed decision, never a runtime
+  # retry-with-different-mechanism.
+  #
+  # "draft" needs a draft-capable channel (in-place edits); "block" sends
+  # completed chunks as ordinary replies, so every channel qualifies.
+  defp build_stream_spec(channel, %Message{} = message, reply_fn) do
+    case streaming_config(ChannelRegistry.channel_key(message.channel)) do
+      "draft" ->
+        if draft_capable?(channel), do: DraftStream.build_spec(channel, message)
+
+      "block" ->
+        DraftStream.build_block_spec(message.channel, fn text -> reply_fn.({:text, text}) end)
+
+      _off ->
+        nil
+    end
+  end
+
+  defp draft_capable?(channel) do
+    function_exported?(channel, :stream_capability, 0) and
+      channel.stream_capability() == :draft_edit
+  end
+
+  defp streaming_config(nil), do: "off"
+
+  defp streaming_config(config_key) when is_atom(config_key) do
+    case FermixCore.Config.channel(config_key) do
+      {:ok, config} -> Keyword.get(config, :streaming, "off")
+      {:error, :not_configured} -> "off"
+    end
+  end
+
   defp to_agent_message(%Message{} = message), do: Map.from_struct(message)
 
   defp dispatch_message(
@@ -89,6 +126,7 @@ defmodule FermixChannels.Gateway do
         Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
 
       typing_fn = build_typing_fn(channel, reply_message)
+      stream_spec = build_stream_spec(channel, reply_message, reply_fn)
 
       context =
         command_context(
@@ -114,8 +152,25 @@ defmodule FermixChannels.Gateway do
         {:error, _reason} = error ->
           error
 
+        # A command (e.g. /ultra) handled parsing/auth but wants the agent to run
+        # a turn on a modified message (prefix stripped, run_profile tagged).
+        {:enqueue, agent_message} ->
+          deliver_to_agent(
+            agent_message,
+            authorization,
+            agent,
+            agent_server,
+            {reply_fn, typing_fn, stream_spec}
+          )
+
         :passthrough ->
-          deliver_to_agent(reply_message, authorization, agent, agent_server, reply_fn, typing_fn)
+          deliver_to_agent(
+            reply_message,
+            authorization,
+            agent,
+            agent_server,
+            {reply_fn, typing_fn, stream_spec}
+          )
       end
     else
       {:error, {:invalid_message, _field}} = error ->
@@ -148,17 +203,23 @@ defmodule FermixChannels.Gateway do
     result
   end
 
-  defp deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn) do
+  defp deliver_to_agent(message, authorization, agent, agent_server, closures) do
     {result, duration_us} =
       Telemetry.timed_us(fn ->
-        do_deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn)
+        do_deliver_to_agent(message, authorization, agent, agent_server, closures)
       end)
 
     emit_agent_delivery_telemetry(message, result, duration_us)
     result
   end
 
-  defp do_deliver_to_agent(message, authorization, agent, agent_server, reply_fn, typing_fn) do
+  defp do_deliver_to_agent(
+         message,
+         authorization,
+         agent,
+         agent_server,
+         {reply_fn, typing_fn, stream_spec}
+       ) do
     if agent_alive?(agent_server) do
       agent_message =
         message
@@ -166,6 +227,7 @@ defmodule FermixChannels.Gateway do
         |> Map.put(:reply_fn, reply_fn)
         |> Map.put(:source_trust, authorization.trust)
         |> maybe_put_typing_fn(typing_fn)
+        |> maybe_put_stream_spec(stream_spec)
 
       handle_agent_delivery(agent.handle_message(agent_message, agent_server))
     else
@@ -258,6 +320,12 @@ defmodule FermixChannels.Gateway do
   end
 
   defp maybe_put_typing_fn(message, _typing_fn), do: message
+
+  defp maybe_put_stream_spec(message, %DraftStream.Spec{} = stream_spec) do
+    Map.put(message, :stream_spec, stream_spec)
+  end
+
+  defp maybe_put_stream_spec(message, _stream_spec), do: message
 
   defp handle_agent_delivery(:ok), do: :ok
 

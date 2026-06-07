@@ -149,22 +149,29 @@ defmodule FermixCore.Prompt.PromptComposer do
     end)
   end
 
-  defp scan_part(%{kind: :generated} = part, acc), do: acc ++ [part]
-
-  defp scan_part(part, acc) do
+  # Memory is the only file-backed part with an untrusted-input vector (the
+  # memory reviewer ingests guest conversation), so it is scanned. It is already
+  # defanged downstream by the <memory-context> data-framing wrapper, so a match
+  # is flagged for observability but the part is KEPT — dropping it would
+  # silently erase the agent's working memory over a benign pattern match (e.g. a
+  # fact ABOUT prompt injection). Bootstrap and generated parts are trusted (no
+  # untrusted write path) and are not scanned.
+  defp scan_part(%{kind: :prompt_memory} = part, acc) do
     case InjectionScan.scan(part.content) do
       {:ok, _content} ->
         acc ++ [part]
 
       {:suspect, _content, matches} ->
-        record_suspect_part(part, matches)
-        acc
+        record_flagged_part(part, matches)
+        acc ++ [part]
     end
   end
 
-  defp record_suspect_part(part, matches) do
+  defp scan_part(part, acc), do: acc ++ [part]
+
+  defp record_flagged_part(part, matches) do
     Logger.warning(
-      "prompt part excluded by injection scan: #{inspect(part.name)} #{inspect(part.source_path)} #{inspect(matches)}"
+      "prompt part flagged by injection scan (kept as data): #{inspect(part.name)} #{inspect(part.source_path)} #{inspect(matches)}"
     )
 
     :telemetry.execute(

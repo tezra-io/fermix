@@ -13,8 +13,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
-  alias FermixCore.Setup.SecretPaths
-  alias FermixCore.Setup.SecretWriter
+  alias FermixCore.Setup.SecretStore
 
   require Logger
 
@@ -24,6 +23,7 @@ defmodule FermixCore.Setup.ConfigStore do
     bootstrap: "bootstrap",
     skills: "skills",
     plugins: "plugins",
+    browser: "browser",
     journals: "journals",
     realtime: "realtime",
     traces: "traces",
@@ -51,7 +51,13 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @spec fermix_home() :: String.t()
   def fermix_home do
-    System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    # An empty string is truthy, so a bare `|| default` would NOT fall back —
+    # it would leave fermix_home as "" and make every workspace path
+    # cwd-relative (e.g. ./skills). Treat blank as unset.
+    case System.get_env("FERMIX_HOME") do
+      home when is_binary(home) and home != "" -> home
+      _ -> Path.join(System.user_home!(), ".fermix")
+    end
   end
 
   @spec path() :: String.t()
@@ -63,6 +69,7 @@ defmodule FermixCore.Setup.ConfigStore do
           bootstrap: String.t(),
           skills: String.t(),
           plugins: String.t(),
+          browser: String.t(),
           journals: String.t(),
           realtime: String.t(),
           traces: String.t(),
@@ -91,7 +98,8 @@ defmodule FermixCore.Setup.ConfigStore do
         providers: [
           openai: Keyword.get(providers, :openai, []),
           openai_codex: Keyword.get(providers, :openai_codex, []),
-          anthropic: Keyword.get(providers, :anthropic, [])
+          anthropic: Keyword.get(providers, :anthropic, []),
+          xai: Keyword.get(providers, :xai, [])
         ],
         personalization: Application.get_env(:fermix_core, :personalization, []),
         agent: Application.get_env(:fermix_core, :agent, []),
@@ -134,14 +142,10 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  @spec save_snapshot(runtime_config()) :: :ok | {:error, term()}
-  def save_snapshot(snapshot) do
-    persisted =
-      snapshot
-      |> persistable_snapshot()
-      |> preserve_existing_sentinels()
-
-    with :ok <- File.mkdir_p(fermix_home()),
+  @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
+  def save_snapshot(snapshot, opts \\ []) do
+    with {:ok, persisted} <- persisted_snapshot(snapshot, opts),
+         :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
          :ok <- File.write(path(), dump_snapshot(persisted)) do
       :ok
@@ -153,13 +157,14 @@ defmodule FermixCore.Setup.ConfigStore do
     persisted =
       snapshot
       |> persistable_snapshot()
-      |> resolve_keyring_sentinels(warn_plaintext: false)
+      |> SecretStore.resolve_sentinels(warn_plaintext: false)
 
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
     apply_provider_config(:openai, Keyword.get(providers, :openai, []))
     apply_provider_config(:openai_codex, Keyword.get(providers, :openai_codex, []))
     apply_provider_config(:anthropic, Keyword.get(providers, :anthropic, []))
+    apply_provider_config(:xai, Keyword.get(providers, :xai, []))
 
     apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
@@ -234,7 +239,8 @@ defmodule FermixCore.Setup.ConfigStore do
         providers: [
           openai: providers |> Keyword.get(:openai, []) |> normalize_openai(),
           openai_codex: providers |> Keyword.get(:openai_codex, []) |> normalize_openai_codex(),
-          anthropic: providers |> Keyword.get(:anthropic, []) |> normalize_anthropic()
+          anthropic: providers |> Keyword.get(:anthropic, []) |> normalize_anthropic(),
+          xai: providers |> Keyword.get(:xai, []) |> normalize_xai()
         ],
         personalization:
           snapshot
@@ -338,7 +344,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp empty_runtime_config do
     %{
       fermix_core: [
-        providers: [openai: [], openai_codex: [], anthropic: []],
+        providers: [openai: [], openai_codex: [], anthropic: [], xai: []],
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
         agent: [name: "fermix"],
         jobs: [],
@@ -358,95 +364,27 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp maybe_resolve_keyring(snapshot, opts) do
     if Keyword.get(opts, :resolve_secrets, true) do
-      resolve_keyring_sentinels(snapshot, warn_plaintext: true)
+      SecretStore.resolve_sentinels(snapshot, warn_plaintext: true)
     else
       snapshot
     end
   end
 
-  defp preserve_existing_sentinels(snapshot) do
+  defp persisted_snapshot(snapshot, opts) do
+    persistable = persistable_snapshot(snapshot)
+
+    if Keyword.get(opts, :secure_secrets, true) do
+      SecretStore.secure_snapshot(persistable, previous: existing_persisted_snapshot())
+    else
+      {:ok, persistable}
+    end
+  end
+
+  defp existing_persisted_snapshot do
     case load_runtime_config(resolve_secrets: false) do
-      {:ok, persisted} -> preserve_existing_sentinels(snapshot, persisted)
-      {:error, _reason} -> snapshot
+      {:ok, persisted} -> persisted
+      {:error, _reason} -> nil
     end
-  end
-
-  defp preserve_existing_sentinels(snapshot, persisted) do
-    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
-      old_value = get_snapshot_value(persisted, secret.path)
-      new_value = get_snapshot_value(acc, secret.path)
-
-      if old_value == SecretWriter.sentinel() and secret_value?(new_value) do
-        put_snapshot_value(acc, secret.path, SecretWriter.sentinel())
-      else
-        acc
-      end
-    end)
-  end
-
-  defp secret_value?(value) when value in [nil, "", "@keyring"], do: false
-  defp secret_value?(value), do: is_binary(value)
-
-  defp resolve_keyring_sentinels(snapshot, opts) do
-    warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
-
-    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
-      case get_snapshot_value(acc, secret.path) do
-        nil ->
-          acc
-
-        value when is_binary(value) ->
-          resolve_secret_value(acc, secret, value, warn_plaintext?)
-
-        _other ->
-          acc
-      end
-    end)
-  end
-
-  defp resolve_secret_value(snapshot, secret, value, warn_plaintext?) do
-    if value == SecretWriter.sentinel() do
-      put_snapshot_value(snapshot, secret.path, SecretWriter.get!(secret.key))
-    else
-      if warn_plaintext?, do: warn_plaintext_secret(secret)
-      snapshot
-    end
-  end
-
-  defp warn_plaintext_secret(secret) do
-    Logger.warning(
-      "config.toml contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
-    )
-  end
-
-  defp get_snapshot_value(snapshot, [root | rest]) do
-    snapshot
-    |> Map.get(root, [])
-    |> get_keyword_value(rest)
-  end
-
-  defp get_keyword_value(keyword, [key]) when is_list(keyword), do: Keyword.get(keyword, key)
-
-  defp get_keyword_value(keyword, [key | rest]) when is_list(keyword) do
-    keyword
-    |> Keyword.get(key, [])
-    |> get_keyword_value(rest)
-  end
-
-  defp get_keyword_value(_value, _path), do: nil
-
-  defp put_snapshot_value(snapshot, [root | rest], value) do
-    section = Map.get(snapshot, root, [])
-    Map.put(snapshot, root, put_keyword_value(section, rest, value))
-  end
-
-  defp put_keyword_value(keyword, [key], value) when is_list(keyword) do
-    Keyword.put(keyword, key, value)
-  end
-
-  defp put_keyword_value(keyword, [key | rest], value) when is_list(keyword) do
-    nested = Keyword.get(keyword, key, [])
-    Keyword.put(keyword, key, put_keyword_value(nested, rest, value))
   end
 
   defp apply_provider_config(provider, config) do
@@ -574,6 +512,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(
         ["fermix_core", "providers", "anthropic"],
         Keyword.get(providers, :anthropic, [])
+      ),
+      render_section(
+        ["fermix_core", "providers", "xai"],
+        Keyword.get(providers, :xai, [])
       ),
       render_section(["fermix_core", "personalization"], personalization),
       render_section(["fermix_core", "jobs"], Keyword.drop(jobs, [:default_delivery_target])),
@@ -762,7 +704,8 @@ defmodule FermixCore.Setup.ConfigStore do
           openai_codex:
             normalize_openai_codex(get_in(document, ["fermix_core", "providers", "openai_codex"])),
           anthropic:
-            normalize_anthropic(get_in(document, ["fermix_core", "providers", "anthropic"]))
+            normalize_anthropic(get_in(document, ["fermix_core", "providers", "anthropic"])),
+          xai: normalize_xai(get_in(document, ["fermix_core", "providers", "xai"]))
         ],
         personalization:
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
@@ -858,6 +801,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :reasoning_effort,
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_openai_codex(nil), do: []
@@ -873,6 +817,7 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
     |> put_if_present(:fast, normalize_bool(lookup(config, "fast", :fast)))
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_anthropic(nil), do: []
@@ -885,6 +830,29 @@ defmodule FermixCore.Setup.ConfigStore do
       :default_model,
       normalize_string(lookup(config, "default_model", :default_model))
     )
+    |> put_if_present(
+      :reasoning_effort,
+      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
+    )
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
+  end
+
+  defp normalize_xai(nil), do: []
+
+  defp normalize_xai(config) do
+    []
+    |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
+    |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
+    |> put_if_present(:base_url, normalize_string(lookup(config, "base_url", :base_url)))
+    |> put_if_present(
+      :default_model,
+      normalize_string(lookup(config, "default_model", :default_model))
+    )
+    |> put_if_present(
+      :reasoning_effort,
+      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
+    )
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_realtime(config) do
@@ -1065,9 +1033,11 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_provider(:openai), do: :openai
   defp normalize_provider(:openai_codex), do: :openai_codex
   defp normalize_provider(:anthropic), do: :anthropic
+  defp normalize_provider(:xai), do: :xai
   defp normalize_provider("openai"), do: :openai
   defp normalize_provider("openai_codex"), do: :openai_codex
   defp normalize_provider("anthropic"), do: :anthropic
+  defp normalize_provider("xai"), do: :xai
   defp normalize_provider(_), do: nil
 
   defp normalize_personalization(nil), do: []
@@ -1244,6 +1214,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_command_auth(config)
     |> put_ids_if_present(
@@ -1258,6 +1229,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(
       :access_token,
       normalize_string(lookup(config, "access_token", :access_token))
@@ -1284,6 +1256,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(:bot_user_id, normalize_string(lookup(config, "bot_user_id", :bot_user_id)))
     |> put_command_auth(config)
@@ -1299,6 +1272,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:bot_token, normalize_string(lookup(config, "bot_token", :bot_token)))
     |> put_if_present(
       :signing_secret,
@@ -1317,6 +1291,7 @@ defmodule FermixCore.Setup.ConfigStore do
     []
     |> put_if_present(:enabled, lookup(config, "enabled", :enabled))
     |> put_if_present(:mode, normalize_mode(lookup(config, "mode", :mode)))
+    |> put_streaming(config)
     |> put_if_present(:account, normalize_string(lookup(config, "account", :account)))
     |> put_if_present(:cli_path, normalize_string(lookup(config, "cli_path", :cli_path)))
     |> put_command_auth(config)
@@ -1328,6 +1303,8 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_auth_mode(:api_key), do: :api_key
   defp normalize_auth_mode("api_key"), do: :api_key
+  defp normalize_auth_mode(:oauth), do: :oauth
+  defp normalize_auth_mode("oauth"), do: :oauth
   defp normalize_auth_mode(_value), do: nil
 
   defp normalize_mode(:polling), do: :polling
@@ -1339,6 +1316,25 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_mode("gateway"), do: :gateway
   defp normalize_mode("subprocess"), do: :subprocess
   defp normalize_mode(_value), do: nil
+
+  # Channel streaming opt-in (docs/design/CHANNEL_STREAMING.md §7). Shared by
+  # every channel normalizer so a misconfigured opt-in on ANY channel is
+  # visible to doctor instead of being dropped by the allowlist.
+  defp put_streaming(fields, config) do
+    put_if_present(
+      fields,
+      :streaming,
+      normalize_streaming(lookup(config, "streaming", :streaming))
+    )
+  end
+
+  defp normalize_streaming(nil), do: nil
+  defp normalize_streaming(value) when value in ["off", "draft", "block"], do: value
+
+  defp normalize_streaming(value) do
+    raise ArgumentError,
+          "invalid channel streaming #{inspect(value)}; expected \"off\", \"draft\", or \"block\""
+  end
 
   defp normalize_string(value) when is_binary(value) do
     trimmed = String.trim(value)

@@ -34,12 +34,14 @@ defmodule Fermix.CLI.Doctor do
   defp collect_results(full?) do
     base = [
       Checks.readiness(),
+      Checks.fallback_providers(),
       Checks.workspace_layout(),
       Checks.service_unit(),
       Checks.daemon_socket(),
       Checks.recent_log_activity(),
       Checks.compaction_config(),
       Checks.command_owner_config(),
+      Checks.streaming_config(),
       Checks.sandbox_config(),
       Checks.sandbox_trace_suggestions(),
       Checks.auth_file_permissions(),

@@ -1,0 +1,128 @@
+suite: subagents
+title: "Subagents — parallel delegation of broad tasks"
+description: >
+  Exercises the delegation subsystem (the `subagents` tool). Two shapes of
+  request: a naturally broad "research and compare three different X" prompt
+  that INVITES fan-out without naming subagents, and an explicit "use parallel
+  workers to ..." prompt that names the mechanism. A scripted model cannot be
+  forced to fan out — the route is the model's choice every run — so the real
+  gates here grade the OUTCOME: every branch of the broad task must appear in
+  the final reply. `tools_any: [subagents]` is included only as a soft signal
+  on the explicit scenario, where naming parallel workers makes the tool a
+  reasonable (but still not guaranteed) choice. Budgets are deliberately higher
+  than a single lookup because fan-out runs several sub-turns. The implicit
+  scenario does NOT gate on the tool at all — broad research can validly be
+  answered in one pass.
+defaults:
+  # Fan-out is SLOW and EXPENSIVE: an observed React/Svelte/Vue run was 254 spans,
+  # ~5-9 min, ~$20. Timeout and budgets are sized for that; do not bulk-run.
+  # No `no_tool_errors` default: a worker's occasional failed web_fetch among 100+
+  # tool calls is normal and must not fail the case.
+  timeout_ms: 900000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: broad_compare_implicit
+    title: "Broad compare-three task — model may fan out, grade the outcome not the route"
+    severity: normal
+    tags: [subagents, delegation, research]
+    cases:
+      # The prompt invites decomposition but never says "subagents". Whether the
+      # model fans out or answers in one pass is its choice — both are valid — so
+      # we gate ONLY on the reply covering all three branches, not on any tool.
+      - id: compare_three_databases
+        query: >
+          Research and compare three different databases for me — PostgreSQL,
+          MongoDB, and Redis. For each one, tell me what it's best suited for
+          and one real downside.
+        expect:
+          reply_matches: "(?i)postgres"
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          max_cost_usd: 25
+          max_duration_ms: 900000
+        rubric: >
+          Covers all three databases (PostgreSQL, MongoDB, Redis), giving each a
+          best-fit use case and at least one genuine downside, without confusing
+          them or inventing capabilities.
+      - id: compare_three_cloud_providers
+        query: >
+          I'm picking a cloud provider. Compare AWS, Google Cloud, and Azure
+          across pricing model, strongest service area, and learning curve, then
+          give me a one-line recommendation for a small startup.
+        expect:
+          reply_matches: "(?i)aws|amazon"
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          max_cost_usd: 25
+          max_duration_ms: 900000
+        rubric: >
+          Compares AWS, Google Cloud, and Azure on pricing, strongest area, and
+          learning curve, and ends with a clear one-line startup recommendation.
+      - id: compare_three_languages
+        query: >
+          Look into Rust, Go, and Elixir and tell me, for each, the kind of
+          backend system it shines at and its biggest adoption hurdle.
+        expect:
+          reply_matches: "(?i)\\brust\\b"
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          max_cost_usd: 25
+          max_duration_ms: 900000
+        rubric: >
+          Addresses Rust, Go, and Elixir individually with a fitting backend
+          use case and a real adoption hurdle for each, without mixing them up.
+
+  - id: explicit_parallel_workers
+    title: "User explicitly asks for parallel subagents/workers"
+    severity: normal
+    tags: [subagents, delegation, parallel]
+    cases:
+      # The user names parallel workers, so the subagents tool is a reasonable
+      # route — but a scripted model still can't be forced onto it, so tools_any
+      # stays a SOFT signal alongside the real outcome gate (all branches present).
+      - id: parallel_three_frameworks
+        query: >
+          Use parallel subagents to research three frontend frameworks at once —
+          React, Svelte, and Vue — and then bring back a side-by-side summary of
+          their bundle size, learning curve, and ecosystem maturity.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)react"
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Returns a consolidated comparison of React, Svelte, and Vue covering
+          bundle size, learning curve, and ecosystem maturity for each.
+      - id: parallel_workers_topics
+        query: >
+          Spin up parallel workers to look into three things independently and
+          report back together: the health benefits of green tea, the basics of
+          composting, and how noise-cancelling headphones work.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)green tea"
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Reports on all three independent topics — green tea benefits,
+          composting basics, and how noise-cancelling headphones work — in one
+          consolidated answer.
+      - id: parallel_city_briefs
+        query: >
+          Fan this out to several subagents working in parallel: put together a
+          short travel brief for Tokyo, Lisbon, and Cape Town — one must-see
+          sight and the best season to visit for each — then combine them.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?i)tokyo"
+          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Produces a combined travel brief covering Tokyo, Lisbon, and Cape Town,
+          each with a must-see sight and a recommended season to visit.

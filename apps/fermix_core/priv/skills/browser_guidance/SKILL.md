@@ -1,0 +1,41 @@
+---
+name: browser-guidance
+description: Use when operating websites or local web apps through the built-in browser tool.
+allowed_tools: ["browser"]
+---
+
+# Browser Guidance
+
+Use `browser` for JavaScript-capable pages. Choose the right web tool once, read with `snapshot`, act with current refs, then verify with `wait`/`get`.
+
+## Tool Routing
+
+- `web_search`: static facts, no known URL.
+- `web_fetch`: one known URL with readable server HTML.
+- `browser`: JavaScript-rendered pages, forms, clicks, login checks, live/interactive data, dashboards, seat maps.
+- Never shell-scrape JavaScript sites. Empty/partial `web_search` or `web_fetch` output on dynamic content means switch to `browser`.
+
+## Operating Loop
+
+1. Use the default profile unless login state, user observation, or a headless-only blocker requires another.
+2. `open`/`navigate`, then `snapshot`; snapshot refs are valid only for that page state.
+3. Pass the intended `target` when multiple tabs exist.
+4. After page-changing actions, verify with `wait`/`get`; snapshot again only when refs or structure changed.
+
+## Actions
+
+- `fill` sets a field value; `type` appends.
+- `submit` uses a field ref from the form and clicks the primary submit/search control.
+- `click`/`submit` may return sampled `url`; `fill`/`type` may return sampled `value`. Receipts are immediate observations, not proof that async navigation or rendering finished.
+- Use `wait` for expected URL/text/element/load changes; use `get` for cheap URL/title/text/ready-state reads.
+
+## Tab And Ref Hygiene
+
+- Reuse one tab target per flow. If popups or retries create extras, use `tabs`, then `focus` or `close`.
+- On stale/missing refs: snapshot the same target, retry once with the new ref, then report the blocker.
+- Avoid snapshot churn; do not snapshot after every successful `fill`.
+- Treat screenshots, PDFs, and downloads as artifacts. Do not claim the model saw screenshot pixels unless the runtime feeds image bytes back to the model.
+
+## Stop Conditions
+
+Stop and report for CAPTCHA, 2FA, payment confirmation, missing credentials, URL-policy blocks, unsafe dialogs, repeated launch/profile errors, or the same action failing twice with no new information.

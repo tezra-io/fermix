@@ -13,9 +13,13 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Delivery
+  alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Prompt.CurrentDate
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Providers.Selection
   alias FermixCore.Setup.ConfigStore
 
   @default_timeout_ms 30 * 60 * 1_000
@@ -145,6 +149,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
+    JobTelemetry.run_start(state.job, run, loop_input)
     run
   end
 
@@ -167,6 +172,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
+    JobTelemetry.run_complete(state.job, run, result)
     run
   end
 
@@ -229,6 +235,7 @@ defmodule FermixCore.Jobs.Runner do
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
     failed_state = %{state | run: run}
+    JobTelemetry.run_error(state.job, run, status, error)
     finalize_failed_job(failed_state, status, error)
     finalize_delivery(failed_state, failure_delivery_text(state, status, error))
   end
@@ -378,6 +385,7 @@ defmodule FermixCore.Jobs.Runner do
   defp fallback_loop_input(state, reason) do
     messages = [
       %{role: "system", content: cron_guidance()},
+      %{role: "system", content: CurrentDate.note()},
       %{role: "user", content: state.job.task_prompt}
     ]
 
@@ -395,11 +403,14 @@ defmodule FermixCore.Jobs.Runner do
     SkillRegistry.load(state.skill_registry, state.job.skill_name)
   end
 
+  # Job runs bypass TurnRunner, so they stamp the current date themselves —
+  # scheduled work is exactly where "today" matters most.
   defp prompt_messages(job, skill) do
     [
       %{role: "system", content: cron_guidance()},
       skill_prompt_message(skill, job),
       %{role: "system", content: job_context_prompt(job)},
+      %{role: "system", content: CurrentDate.note()},
       %{role: "user", content: job.task_prompt}
     ]
     |> Enum.reject(&is_nil/1)
@@ -507,11 +518,27 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp add_adapter_opts(base, state) do
-    {route_key, adapter_opts} = RouteResolver.resolve!(route_opts(state.job))
+    Keyword.put(base, :routes, job_routes(state.job))
+  end
 
-    base
-    |> Keyword.put(:route_key, route_key)
-    |> Keyword.put(:adapter_opts, adapter_opts)
+  # Jobs with a persisted provider/model stay strict (one route) for
+  # reproducibility; jobs without one follow the current primary/fallback
+  # chain at execution time (§7). Route-selection failures (e.g. multiple
+  # primaries) raise here and fail the run loudly.
+  defp job_routes(job) do
+    case route_opts(job) do
+      [] ->
+        case Selection.ordered_routes() do
+          {:ok, routes} ->
+            routes
+
+          {:error, reason} ->
+            raise ArgumentError, "scheduled job route selection failed: #{inspect(reason)}"
+        end
+
+      explicit ->
+        [RouteResolver.resolve!(explicit)]
+    end
   end
 
   defp route_opts(job) do
@@ -520,16 +547,19 @@ defmodule FermixCore.Jobs.Runner do
     |> maybe_put(:model, job.model)
   end
 
-  defp provider_atom(nil), do: nil
-  defp provider_atom("openai"), do: :openai
-  defp provider_atom("openai_codex"), do: :openai_codex
-  defp provider_atom("anthropic"), do: :anthropic
+  # Public for tests — provider-string parsing is a known regression site
+  # (provider design doc §13: "jobs raise on unknown provider strings").
+  # Derived from the catalog so new providers don't need a clause here.
+  @doc false
+  @spec provider_atom(String.t() | atom() | nil) :: atom() | nil
+  def provider_atom(nil), do: nil
 
-  defp provider_atom(other) when is_binary(other) do
-    raise ArgumentError, "unsupported scheduled job provider #{inspect(other)}"
+  def provider_atom(provider) when is_binary(provider) do
+    Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == provider)) ||
+      raise ArgumentError, "unsupported scheduled job provider #{inspect(provider)}"
   end
 
-  defp provider_atom(other) when is_atom(other), do: other
+  def provider_atom(other) when is_atom(other), do: other
 
   defp capability_policy([]), do: @default_capability_policy
   defp capability_policy(nil), do: @default_capability_policy
