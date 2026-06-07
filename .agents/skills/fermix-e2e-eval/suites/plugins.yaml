@@ -113,3 +113,4 @@ scenarios:
           tools_any: [google_calendar_search_events]
           tools_none: [google_calendar_create_event]
           reply_matches: "(?i)free|available|busy|conflict|booked|open|slot|tuesday"
+          reply_not_matches: "(?i)\\b(unable to (access|determine|check)|i can'?t (access|check|determine)|couldn'?t (access|check))\\b"

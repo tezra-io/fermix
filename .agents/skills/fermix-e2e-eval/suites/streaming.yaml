@@ -70,3 +70,4 @@ scenarios:
         expect:
           tools_all: ["stream:open", "stream:seal"]
           tools_none: ["stream:discard"]
+          reply_matches: "(?i)bullet|help|can|skill|task|•|-"

@@ -74,6 +74,7 @@ scenarios:
       - id: which_model_overall
         query: "Which model is Fermix configured to use by default? Just tell me, don't change anything."
         expect:
+          tools_any: [model_routing_config]
           reply_matches: "(?i)gpt|model|default|rout"
           reply_not_matches: "(?i)\\b(updated|changed|set to|deleted|removed)\\b"
           max_cost_usd: 0.5
