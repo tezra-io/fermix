@@ -637,6 +637,24 @@ defmodule FermixCore.Setup.Wizard do
     |> commit_snapshot()
   end
 
+  @doc """
+  Marks `provider` as the primary provider without going through the
+  prompt-driven `save_answers/2` path. Used by the web setup OAuth-completion
+  handlers: connecting a provider's credentials must also persist the config
+  pointer the runtime resolves through `PrimaryConfig.primary/0`, since a stored
+  token is inert if no provider is primary (the end-of-setup probe resolves the
+  active provider through that flag). Reads the current persisted snapshot — so
+  it never clobbers an `auth_mode` the login flow just wrote — and routes
+  through the same save → apply → seed → report cycle as `save_answers/2`.
+  """
+  @spec mark_primary(provider()) :: {:ok, report()} | {:error, term()}
+  def mark_primary(provider) when provider in [:openai, :openai_codex, :anthropic, :xai] do
+    ConfigStore.current_snapshot()
+    |> mark_primary_provider(provider)
+    |> drop_unanswered_env_only_secrets([])
+    |> commit_snapshot()
+  end
+
   defp commit_snapshot(snapshot) do
     with :ok <- ConfigStore.save_snapshot(snapshot),
          :ok <- ConfigStore.apply_snapshot(snapshot),
