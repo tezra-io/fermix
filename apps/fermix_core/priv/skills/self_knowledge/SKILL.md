@@ -65,7 +65,7 @@ Filesystem/exec built-ins (`shell`, `file_*`, search, `git_*`, `send_attachment`
 
 ## Plugins
 
-Bundled OAuth plugins: Gmail, Google Calendar, Google Drive. Tools register only when granted scopes cover their required scopes. Manage with `fermix plugins enable|disable NAME` and `fermix plugins auth login|reauthorize|refresh|logout NAME`; tokens/scopes live in `~/.fermix/auth.json`. Plugin skills load at guest trust.
+Bundled OAuth plugins: Gmail, Google Calendar, Google Drive. A connected plugin registers all its tools; if a tool's scope wasn't granted, calling it returns a graceful "reauthorize" error rather than the tool vanishing. Other Google 403s are classified distinctly (file-permission, organizer-only, rate-limit) so the message says what actually failed. Manage with `fermix plugins enable|disable NAME` and `fermix plugins auth login|reauthorize|refresh|logout NAME`; tokens/scopes live in `~/.fermix/auth.json`. Plugin skills load at guest trust.
 
 ## Voice (macOS, off by default)
 
