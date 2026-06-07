@@ -33,6 +33,15 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
     }
   end
 
+  defp short_lived_entry do
+    %{
+      anthropic_entry()
+      | provider: "custom",
+        expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+        last_refresh: DateTime.utc_now()
+    }
+  end
+
   defp refresh_plug(conn) do
     conn
     |> Plug.Conn.put_resp_content_type("application/json")
@@ -86,6 +95,14 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
 
       assert {:error, :unsupported_provider} =
                TokenSupervisor.refresh_entry("anthropic_oauth", entry, [])
+    end
+  end
+
+  describe "get_token/1 — direct fallback" do
+    test "reuses a recently refreshed short-lived token" do
+      :ok = Store.write("custom_oauth", short_lived_entry())
+
+      assert {:ok, "old_at"} = TokenSupervisor.get_token("custom_oauth")
     end
   end
 
