@@ -17,15 +17,18 @@ defmodule FermixCore.Providers.RouteResolver do
   """
 
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
 
   @default_openai_base_url "https://api.openai.com/v1"
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
   @default_anthropic_base_url "https://api.anthropic.com/v1"
   @default_anthropic_model "claude-sonnet-4-6"
+  @default_xai_base_url "https://api.x.ai/v1"
 
   @type resolution :: {Adapter.route_key(), keyword()}
 
@@ -36,14 +39,23 @@ defmodule FermixCore.Providers.RouteResolver do
       :openai -> resolve_openai!(opts)
       :openai_codex -> resolve_codex!(opts)
       :anthropic -> resolve_anthropic!(opts)
+      :xai -> resolve_xai!(opts)
       other -> raise ArgumentError, "no resolver for provider #{inspect(other)}"
     end
   end
 
+  # PrimaryConfig owns the primary-flag + legacy-`agent.provider` migration
+  # rules, so bare `resolve!()` callers read the same primary as Selection.
   defp configured_provider do
-    :fermix_core
-    |> Application.get_env(:agent, [])
-    |> Keyword.get(:provider)
+    case PrimaryConfig.primary() do
+      {:ok, provider} ->
+        provider
+
+      {:error, :multiple_primary} ->
+        raise ArgumentError,
+              "more than one provider has primary = true in config.toml; " <>
+                "mark exactly one provider primary"
+    end
   end
 
   @spec resolve_openai!(keyword()) :: resolution()
@@ -128,23 +140,110 @@ defmodule FermixCore.Providers.RouteResolver do
   end
 
   defp resolve_anthropic!(opts) do
-    model = Keyword.get(opts, :model) || @default_anthropic_model
-    base_url = Keyword.get(opts, :base_url, @default_anthropic_base_url)
+    config =
+      case Config.provider(:anthropic) do
+        {:ok, cfg} -> cfg
+        {:error, :not_configured} -> []
+      end
 
-    route_key = %{
-      provider: :anthropic,
+    model =
+      Keyword.get(opts, :model) ||
+        Keyword.get(config, :default_model, @default_anthropic_model)
+
+    base_url =
+      Keyword.get(opts, :base_url) ||
+        Keyword.get(config, :base_url, @default_anthropic_base_url)
+
+    auth_mode =
+      parse_anthropic_auth_mode!(
+        Keyword.get(opts, :auth_mode) || Keyword.get(config, :auth_mode, :api_key)
+      )
+
+    route_key = %{provider: :anthropic, model: model, auth_mode: auth_mode, base_url: base_url}
+
+    {route_key, anthropic_adapter_opts(auth_mode, model, base_url, opts, config)}
+  end
+
+  defp anthropic_adapter_opts(:api_key, model, base_url, opts, config) do
+    [model: model, base_url: base_url]
+    |> maybe_put(:api_key, Keyword.get(opts, :api_key) || Keyword.get(config, :api_key))
+    |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+    |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:anthropic, opts))
+    |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+  end
+
+  # The configured api_key never leaks into the oauth route — the selected
+  # auth mode is the billing expectation (design doc §5.2, no fallbacks).
+  defp anthropic_adapter_opts(:oauth, model, base_url, opts, _config) do
+    [
       model: model,
-      auth_mode: Keyword.get(opts, :auth_mode, :api_key),
-      base_url: base_url
-    }
+      base_url: base_url,
+      token_server: Keyword.get(opts, :token_server, TokenSupervisor),
+      auth_profile: "anthropic_oauth"
+    ]
+    |> maybe_put(:access_token, Keyword.get(opts, :access_token))
+    |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+    |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:anthropic, opts))
+    |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+  end
 
-    adapter_opts =
-      [model: model, base_url: base_url]
-      |> maybe_put(:api_key, Keyword.get(opts, :api_key))
-      |> maybe_put(:temperature, Keyword.get(opts, :temperature))
-      |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+  defp resolve_xai!(opts) do
+    config =
+      case Config.provider(:xai) do
+        {:ok, cfg} -> cfg
+        {:error, :not_configured} -> []
+      end
 
-    {route_key, adapter_opts}
+    model =
+      Keyword.get(opts, :model) ||
+        Keyword.get(config, :default_model, ModelCatalog.default_model_for(:xai))
+
+    base_url =
+      Keyword.get(opts, :base_url) || Keyword.get(config, :base_url, @default_xai_base_url)
+
+    auth_mode =
+      parse_auth_mode!(
+        :xai,
+        Keyword.get(opts, :auth_mode) || Keyword.get(config, :auth_mode, :api_key)
+      )
+
+    route_key = %{provider: :xai, model: model, auth_mode: auth_mode, base_url: base_url}
+
+    {route_key, xai_adapter_opts(auth_mode, model, base_url, opts, config)}
+  end
+
+  defp xai_adapter_opts(:api_key, model, base_url, opts, config) do
+    [model: model, base_url: base_url]
+    |> maybe_put(:api_key, Keyword.get(opts, :api_key) || Keyword.get(config, :api_key))
+    |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+    |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:xai, opts))
+    |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+  end
+
+  # The configured api_key never leaks into the oauth route (§6.3 — the
+  # selected auth mode is the billing expectation, no fallbacks).
+  defp xai_adapter_opts(:oauth, model, base_url, opts, _config) do
+    [
+      model: model,
+      base_url: base_url,
+      token_server: Keyword.get(opts, :token_server, TokenSupervisor),
+      auth_profile: "xai_oauth"
+    ]
+    |> maybe_put(:access_token, Keyword.get(opts, :access_token))
+    |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+    |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:xai, opts))
+    |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+  end
+
+  defp parse_anthropic_auth_mode!(mode), do: parse_auth_mode!(:anthropic, mode)
+
+  defp parse_auth_mode!(_provider, mode) when mode in [:api_key, :oauth], do: mode
+  defp parse_auth_mode!(_provider, "api_key"), do: :api_key
+  defp parse_auth_mode!(_provider, "oauth"), do: :oauth
+
+  defp parse_auth_mode!(provider, other) do
+    raise ArgumentError,
+          "invalid #{provider} auth_mode: #{inspect(other)}; expected api_key or oauth"
   end
 
   defp maybe_put(opts, _key, nil), do: opts

@@ -15,6 +15,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.SecretMigration
@@ -23,6 +24,7 @@ defmodule FermixCore.Setup.Runtime do
   @answer_keys [
     :openai_api_key,
     :anthropic_api_key,
+    :xai_api_key,
     :provider,
     :default_model,
     :reasoning_effort,
@@ -99,6 +101,14 @@ defmodule FermixCore.Setup.Runtime do
         {:ok, []}
 
       Keyword.get(opts, :openai_api_key) not in [nil, ""] ->
+        {:ok, []}
+
+      selected_provider(opts) not in [nil, :openai_codex] ->
+        # The user explicitly chose a non-codex provider (e.g. xai, anthropic).
+        # Importing ChatGPT tokens from the Codex CLI is only relevant to
+        # `openai_codex`, so don't probe ~/.codex or prompt for it — mirror the
+        # `openai_api_key` guard above. (`nil` = no explicit selection yet, e.g.
+        # a bare interactive setup or `--import-codex`, which still offers it.)
         {:ok, []}
 
       not CodexImport.codex_available?(codex_path(opts)) ->
@@ -379,10 +389,15 @@ defmodule FermixCore.Setup.Runtime do
   defp selected_codex_provider?("openai_codex"), do: true
   defp selected_codex_provider?(_provider), do: false
 
+  # Reads the chosen provider through PrimaryConfig (primary flag, else the
+  # legacy agent.provider migration input). Multiple primaries fall through
+  # to :openai here — setup is the repair surface and must keep running;
+  # routing and readiness fail loud on it.
   defp active_provider do
-    :fermix_core
-    |> Application.get_env(:agent, [])
-    |> Keyword.get(:provider, :openai)
+    case PrimaryConfig.primary() do
+      {:ok, provider} -> provider
+      {:error, :multiple_primary} -> :openai
+    end
   end
 
   defp collect_answers(report, opts, prompt) do
@@ -452,11 +467,15 @@ defmodule FermixCore.Setup.Runtime do
   defp answered?(answers, key), do: Keyword.get(answers, key) not in [nil, ""]
 
   defp irrelevant_prompt?(%{key: :openai_api_key}, answers) do
-    selected_provider(answers) in [:openai_codex, :anthropic]
+    selected_provider(answers) in [:openai_codex, :anthropic, :xai]
   end
 
   defp irrelevant_prompt?(%{key: :anthropic_api_key}, answers) do
-    selected_provider(answers) in [:openai, :openai_codex]
+    selected_provider(answers) in [:openai, :openai_codex, :xai]
+  end
+
+  defp irrelevant_prompt?(%{key: :xai_api_key}, answers) do
+    selected_provider(answers) in [:openai, :openai_codex, :anthropic]
   end
 
   defp irrelevant_prompt?(%{key: :reasoning_effort}, answers) do
@@ -485,7 +504,7 @@ defmodule FermixCore.Setup.Runtime do
 
   defp prompt_for_answers(%{key: :default_model} = prompt_info, answers) do
     case selected_provider(answers) do
-      provider when provider in [:openai, :openai_codex, :anthropic] ->
+      provider when provider in [:openai, :openai_codex, :anthropic, :xai] ->
         default = ModelCatalog.default_model_for(provider)
         %{prompt_info | label: "Default model (blank = #{default})", default: default}
 
@@ -498,10 +517,11 @@ defmodule FermixCore.Setup.Runtime do
 
   defp selected_provider(answers) do
     case Keyword.get(answers, :provider) do
-      provider when provider in [:openai, :openai_codex, :anthropic] -> provider
+      provider when provider in [:openai, :openai_codex, :anthropic, :xai] -> provider
       "openai" -> :openai
       "openai_codex" -> :openai_codex
       "anthropic" -> :anthropic
+      "xai" -> :xai
       _value -> nil
     end
   end

@@ -131,6 +131,46 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
+
+    test "reuses a recently refreshed short-lived token" do
+      dir = tmp_dir()
+      test_pid = self()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+              "expires_at" => future_iso8601(1)
+            }
+          }
+        })
+
+      refresh_plug = fn conn ->
+        send(test_pid, :refresh_called)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "new_at",
+            "refresh_token" => "new_rt",
+            "expires_in" => 60
+          })
+        )
+      end
+
+      name = start_manager(fermix_auth_path: fermix_path, req_options: [plug: refresh_plug])
+      assert {:ok, "new_at"} = TokenManager.get_token(name)
+      assert_receive :refresh_called
+      assert {:ok, "new_at"} = TokenManager.get_token(name)
+      refute_receive :refresh_called, 100
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
   end
 
   describe "refresh/1" do
@@ -186,6 +226,201 @@ defmodule FermixCore.Auth.TokenManagerTest do
     end
   end
 
+  describe "anthropic_oauth refresh" do
+    defp write_anthropic_auth(dir) do
+      write_auth_file(dir, "fermix_auth.json", %{
+        "version" => 2,
+        "providers" => %{
+          "anthropic_oauth" => %{
+            "auth_mode" => "claude_code_import",
+            "provider" => "anthropic",
+            "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+            "expires_at" => future_iso8601(3600)
+          }
+        }
+      })
+    end
+
+    test "refreshes via the Anthropic token endpoint and persists the entry" do
+      dir = tmp_dir()
+      fermix_path = write_anthropic_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "anthropic_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:ok, "new_at"} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      data = Jason.decode!(raw)
+      entry = data["providers"]["anthropic_oauth"]
+      assert entry["tokens"]["access_token"] == "new_at"
+      assert entry["tokens"]["refresh_token"] == "new_rt"
+      assert entry["provider"] == "anthropic"
+      assert entry["status"] == "ready"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "permanent refresh failure marks the profile reauthorization_required" do
+      dir = tmp_dir()
+      fermix_path = write_anthropic_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "anthropic_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_400_plug/1]
+        )
+
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      data = Jason.decode!(raw)
+      assert data["providers"]["anthropic_oauth"]["status"] == "reauthorization_required"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    def permanent_400_plug(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        400,
+        Jason.encode!(%{"error" => "invalid_grant"})
+      )
+    end
+  end
+
+  describe "xai_oauth refresh" do
+    defp write_xai_auth(dir) do
+      write_auth_file(dir, "fermix_auth.json", %{
+        "version" => 2,
+        "providers" => %{
+          "xai_oauth" => %{
+            "auth_mode" => "oauth_pkce",
+            "provider" => "xai",
+            "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+            "expires_at" => future_iso8601(3600)
+          }
+        }
+      })
+    end
+
+    test "refreshes via the xAI token endpoint and persists the entry" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.refresh_plug/1]
+        )
+
+      assert {:ok, "new_at"} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      entry = Jason.decode!(raw)["providers"]["xai_oauth"]
+      assert entry["tokens"]["access_token"] == "new_at"
+      assert entry["provider"] == "xai"
+      assert entry["status"] == "ready"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "403 surfaces tier denial without quarantining the profile" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.tier_denied_403_plug/1]
+        )
+
+      assert {:error, :xai_oauth_tier_denied} = TokenManager.refresh(name)
+
+      # Tokens kept, no reauthorization_required status (design doc §6.5).
+      assert {:ok, raw} = File.read(fermix_path)
+      entry = Jason.decode!(raw)["providers"]["xai_oauth"]
+      assert entry["tokens"]["refresh_token"] == "old_rt"
+      refute entry["status"] == "reauthorization_required"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "400 invalid_grant quarantines the profile" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.permanent_400_plug/1]
+        )
+
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      assert Jason.decode!(raw)["providers"]["xai_oauth"]["status"] == "reauthorization_required"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    def tier_denied_403_plug(conn) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(403, Jason.encode!(%{"error" => "plan does not include API access"}))
+    end
+
+    def jwt_refresh_plug(conn) do
+      header = Base.url_encode64(~s({"alg":"none"}), padding: false)
+
+      payload =
+        %{"exp" => System.os_time(:second) + 3600}
+        |> Jason.encode!()
+        |> Base.url_encode64(padding: false)
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        200,
+        Jason.encode!(%{
+          "access_token" => "#{header}.#{payload}.sig",
+          "refresh_token" => "new_rt"
+        })
+      )
+    end
+
+    test "a refresh response without expires_in derives expiry from the JWT exp claim" do
+      dir = tmp_dir()
+      fermix_path = write_xai_auth(dir)
+
+      name =
+        start_manager(
+          auth_profile: "xai_oauth",
+          fermix_auth_path: fermix_path,
+          req_options: [plug: &__MODULE__.jwt_refresh_plug/1]
+        )
+
+      assert {:ok, _token} = TokenManager.refresh(name)
+
+      assert {:ok, raw} = File.read(fermix_path)
+      entry = Jason.decode!(raw)["providers"]["xai_oauth"]
+      # Without the JWT fallback this would be nil and scheduled refresh
+      # would silently stop (design doc §6.4).
+      assert is_binary(entry["expires_at"])
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+  end
+
   describe "permanent refresh failures" do
     def permanent_401_plug(conn) do
       conn
@@ -230,8 +465,35 @@ defmodule FermixCore.Auth.TokenManagerTest do
     end
   end
 
-  describe "scheduled refresh" do
-    test "stays alive when scheduled refresh fires and fails" do
+  describe "lazy refresh" do
+    test "does not refresh after startup without a get_token or explicit refresh call" do
+      dir = tmp_dir()
+      test_pid = self()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "soon", "refresh_token" => "rt"},
+              "expires_at" => future_iso8601(2)
+            }
+          }
+        })
+
+      refresh_plug = fn conn ->
+        send(test_pid, :refresh_called)
+        __MODULE__.refresh_plug(conn)
+      end
+
+      _name = start_manager(fermix_auth_path: fermix_path, req_options: [plug: refresh_plug])
+      refute_receive :refresh_called, 1_500
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "stays alive when lazy refresh fails during get_token" do
       dir = tmp_dir()
 
       fermix_path =
@@ -248,7 +510,6 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:error, "Refresh failed (500): \"test-noop\""} = TokenManager.get_token(name)
-      Process.sleep(1_500)
       assert Process.whereis(name) |> Process.alive?()
 
       FermixTestSupport.SafeRm.rm_rf!(dir)

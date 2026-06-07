@@ -4,7 +4,7 @@ defmodule Fermix.CLI.Daemon do
 
   Listens on a Unix domain socket at `~/.fermix/daemon.sock` (user
   scope) or `/var/run/fermix.sock` (system scope) and serves a tiny
-  newline-delimited JSON request/response protocol. Two methods:
+  4-byte-length-prefixed JSON request/response protocol. Two methods:
 
       {"method":"status"}    -> {"status":"ok","version":"...","uptime_ms":N}
       {"method":"shutdown"}  -> {"status":"shutting_down"}  then :init.stop()
@@ -32,6 +32,10 @@ defmodule Fermix.CLI.Daemon do
   @accept_idle_ms 200
   @skill_name_pattern ~r/^[A-Za-z0-9_-]{1,64}$/
   @skill_view_max_bytes 65_536
+  # Upper bound on one request frame. A corrupt or version-skewed header
+  # (e.g. an old line-framed client's JSON read as a ~2 GB length) fails
+  # immediately with :emsgsize instead of buffering until timeout.
+  @max_frame_bytes 4_194_304
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -56,7 +60,8 @@ defmodule Fermix.CLI.Daemon do
       :binary,
       {:active, false},
       {:ifaddr, {:local, socket_path}},
-      {:packet, :line},
+      {:packet, 4},
+      {:packet_size, @max_frame_bytes},
       {:reuseaddr, true}
     ]
 
@@ -95,7 +100,7 @@ defmodule Fermix.CLI.Daemon do
     case :gen_tcp.connect(
            {:local, to_charlist(socket_path)},
            0,
-           [:binary, {:active, false}, {:packet, :line}],
+           [:binary, {:active, false}, {:packet, 4}],
            500
          ) do
       {:ok, conn} ->
@@ -152,7 +157,7 @@ defmodule Fermix.CLI.Daemon do
     case :gen_tcp.recv(conn, 0, @recv_timeout_ms) do
       {:ok, line} ->
         response = handle_request(String.trim(line), state)
-        :gen_tcp.send(conn, [Jason.encode!(response), "\n"])
+        :gen_tcp.send(conn, Jason.encode!(response))
         maybe_finalize(response)
 
       {:error, _reason} ->

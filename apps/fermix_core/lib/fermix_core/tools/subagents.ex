@@ -21,16 +21,19 @@ defmodule FermixCore.Tools.Subagents do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Agents.AgentSupervisor
+  alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.WorkerRun
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Tools.Support
 
-  @default_max_concurrency 3
+  # Regular-mode caps (fallback defaults; the live values come from the
+  # :subagents config block). /ultra raises these via context.subagent_mode ==
+  # :ultra reading the :ultra config block — see the *_cap/1 resolvers below.
+  @default_max_concurrency 4
   @hard_max_concurrency 8
   @default_timeout_seconds 300
   @hard_timeout_seconds 900
-  @default_max_iterations 8
-  @max_tasks 8
+  @max_tasks 10
   @max_result_bytes 60_000
 
   # Context keys stripped before a worker runs: channel-reply targeting and the
@@ -46,7 +49,11 @@ defmodule FermixCore.Tools.Subagents do
     :memory_agent_id,
     :memory_owner_id,
     :memory_store,
-    :memory_repo
+    :memory_repo,
+    # Main-turn-only marker — a worker can never call `subagents` (depth guard),
+    # so it must not inherit the ultra mode and advertise the wide (unreachable)
+    # fan-out schema in its own prompt.
+    :subagent_mode
   ]
 
   @impl true
@@ -60,8 +67,20 @@ defmodule FermixCore.Tools.Subagents do
       "not tools; the caller must synthesize the returned results."
   end
 
+  # The arity-0 callback (baked into the Capability at registration) advertises
+  # the *regular* caps. `dynamic_parameters/1` is the context-aware schema the
+  # agent loop refreshes per-turn (`AgentLoop` calls it for any tool whose
+  # backing module exports `dynamic_parameters/1`), so an `/ultra` turn
+  # advertises the wider ultra caps (50 tasks / 12 concurrency) and the model
+  # can request wide fan-out through the tool. The hook is a *distinct* name
+  # (not `parameters/1`) so it can never collide with a tool module that
+  # happens to export `parameters/1` for another purpose (e.g. the plugin
+  # `ToolExecutor`'s name→schema lookup).
   @impl true
-  def parameters do
+  def parameters, do: dynamic_parameters(%{})
+
+  @spec dynamic_parameters(map()) :: map()
+  def dynamic_parameters(context) when is_map(context) do
     %{
       type: "object",
       required: ["tasks"],
@@ -69,7 +88,7 @@ defmodule FermixCore.Tools.Subagents do
         tasks: %{
           type: "array",
           minItems: 1,
-          maxItems: @max_tasks,
+          maxItems: max_tasks_cap(context),
           description: "Independent subagent assignments.",
           items: %{
             type: "object",
@@ -89,9 +108,9 @@ defmodule FermixCore.Tools.Subagents do
         max_concurrency: %{
           type: "integer",
           minimum: 1,
-          maximum: @hard_max_concurrency,
+          maximum: hard_max_concurrency_cap(context),
           description:
-            "Max concurrently running subagents. Defaults to #{@default_max_concurrency}."
+            "Max concurrently running subagents. Defaults to #{default_max_concurrency_cap(context)}."
         },
         timeout_seconds: %{
           type: "integer",
@@ -155,8 +174,8 @@ defmodule FermixCore.Tools.Subagents do
   defp do_execute(args, context) do
     with {:ok, depth} <- check_recursion(context),
          {:ok, source_trust} <- fetch_source_trust(context),
-         {:ok, tasks} <- validate_tasks(args),
-         {:ok, max_concurrency} <- validate_concurrency(args),
+         {:ok, tasks} <- validate_tasks(args, context),
+         {:ok, max_concurrency} <- validate_concurrency(args, context),
          {:ok, timeout_seconds} <- validate_timeout(args) do
       run_fanout(tasks, source_trust, max_concurrency, timeout_seconds, depth, args, context)
     else
@@ -171,7 +190,7 @@ defmodule FermixCore.Tools.Subagents do
     task_supervisor = Map.get(context, :task_supervisor, FermixCore.TaskSupervisor)
     shared_context = Support.optional_string(args, "shared_context")
     result_format = Support.optional_string(args, "result_format", "structured")
-    per_worker_bytes = max(1, div(@max_result_bytes, length(tasks)))
+    per_worker_bytes = max(1, div(max_result_bytes_cap(context), length(tasks)))
 
     results =
       task_supervisor
@@ -186,7 +205,8 @@ defmodule FermixCore.Tools.Subagents do
             spawn_opts: spawn_opts,
             shared_context: shared_context,
             result_format: result_format,
-            per_worker_bytes: per_worker_bytes
+            per_worker_bytes: per_worker_bytes,
+            worker_iterations: worker_iterations_cap(context)
           })
         end,
         max_concurrency: max_concurrency,
@@ -205,7 +225,15 @@ defmodule FermixCore.Tools.Subagents do
   end
 
   defp run_one(task, run) do
-    definition = build_definition(task.id, run.source_trust, run.policy, run.timeout_seconds)
+    definition =
+      build_definition(
+        task.id,
+        run.source_trust,
+        run.policy,
+        run.timeout_seconds,
+        run.worker_iterations
+      )
+
     prompt = worker_prompt(task, run.shared_context, run.result_format)
     opts = Keyword.put(run.spawn_opts, :timeout_seconds, run.timeout_seconds)
 
@@ -218,7 +246,7 @@ defmodule FermixCore.Tools.Subagents do
     end
   end
 
-  defp build_definition(id, trust, policy, timeout_seconds) do
+  defp build_definition(id, trust, policy, timeout_seconds, max_iterations) do
     %AgentDefinition{
       name: "subagent:#{id}",
       description: "Temporary generic Fermix subagent for #{id}",
@@ -232,7 +260,7 @@ defmodule FermixCore.Tools.Subagents do
       allowed_tools: nil,
       policy: policy,
       trust: trust,
-      max_iterations: @default_max_iterations,
+      max_iterations: max_iterations,
       timeout_seconds: timeout_seconds,
       parent: "main",
       delegates_to: []
@@ -251,25 +279,41 @@ defmodule FermixCore.Tools.Subagents do
 
   defp base_spawn_opts(context) do
     [
+      # Runs in the coordinator (the inline tool call on the turn task), so
+      # `self()` is the coordinator process. Parenting workers to it lets
+      # `AgentServer`'s parent-down monitor reap them when the coordinator is
+      # cancelled (e.g. `/stop` terminating the turn) — otherwise the workers,
+      # spawned nolink under the task supervisor, would outlive the stopped turn.
+      parent: self(),
       parent_name: Map.get(context, :agent_name, "main"),
       parent_session: Map.get(context, :session_id),
       provider: Map.get(context, :provider, FermixCore.Providers.OpenAI),
       capability_registry: Map.get(context, :capability_registry, CapabilityRegistry),
       task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor),
-      agent_supervisor: Map.get(context, :agent_supervisor, AgentSupervisor)
+      agent_supervisor: Map.get(context, :agent_supervisor, AgentSupervisor),
+      # Parent turn's route chain (§7): workers without an explicit
+      # provider/model override inherit it instead of re-resolving from
+      # global config.
+      ordered_routes: Map.get(context, :ordered_routes)
     ]
   end
 
   defp worker_system_prompt do
     """
-    You are a temporary Fermix subagent invoked by the main agent.
+    You are a temporary Fermix subagent invoked by the main agent. You are one of many
+    parallel workers; you handle one narrow slice, not the whole problem.
 
-    You do not talk to the user directly. Complete only the assigned task and
-    return your findings to the parent agent.
+    You do not talk to the user directly. Complete only the assigned task and return your
+    findings to the parent agent.
 
-    Return: concise findings; the sources or evidence you used; important
-    uncertainty; any failures or missing information; and follow-up work the
-    parent should consider.
+    Work efficiently: gather just enough evidence to answer your one task well, then stop and
+    return. Use as few tool calls as you can — the moment you can answer, you are done. Do not
+    broaden the task, chase tangents, collect extra confirmation, or compare across topics;
+    breadth and synthesis are the main agent's job, not yours. If the task is impossible or a
+    source fails, say so briefly and return — do not keep retrying variations.
+
+    Return: concise findings; the sources or evidence you used; important uncertainty; any
+    failures or missing information; and follow-up work the parent should consider.
     """
     |> String.trim()
   end
@@ -382,13 +426,15 @@ defmodule FermixCore.Tools.Subagents do
     end
   end
 
-  defp validate_tasks(args) do
+  defp validate_tasks(args, context) do
+    max_tasks = max_tasks_cap(context)
+
     case Map.get(args, "tasks") do
       [] ->
         {:error, "tasks must be a non-empty array."}
 
-      tasks when is_list(tasks) and length(tasks) > @max_tasks ->
-        {:error, "Too many tasks: #{length(tasks)} (max #{@max_tasks})."}
+      tasks when is_list(tasks) and length(tasks) > max_tasks ->
+        {:error, "Too many tasks: #{length(tasks)} (max #{max_tasks})."}
 
       tasks when is_list(tasks) ->
         parse_tasks(tasks)
@@ -425,13 +471,15 @@ defmodule FermixCore.Tools.Subagents do
     end
   end
 
-  defp validate_concurrency(args) do
-    case Map.get(args, "max_concurrency", @default_max_concurrency) do
-      n when is_integer(n) and n >= 1 and n <= @hard_max_concurrency ->
+  defp validate_concurrency(args, context) do
+    hard = hard_max_concurrency_cap(context)
+
+    case Map.get(args, "max_concurrency", default_max_concurrency_cap(context)) do
+      n when is_integer(n) and n >= 1 and n <= hard ->
         {:ok, n}
 
       n when is_integer(n) ->
-        {:error, "max_concurrency #{n} is out of range (1..#{@hard_max_concurrency})."}
+        {:error, "max_concurrency #{n} is out of range (1..#{hard})."}
 
       _ ->
         {:error, "max_concurrency must be an integer."}
@@ -448,6 +496,53 @@ defmodule FermixCore.Tools.Subagents do
 
       _ ->
         {:error, "timeout_seconds must be an integer."}
+    end
+  end
+
+  # --- Cap resolvers: regular (:subagents config) vs /ultra (:ultra config) ---
+  # One code path — the cap resolves from context.subagent_mode + config, never a
+  # second fan-out flow. /ultra tags its context `subagent_mode: :ultra` and reads
+  # the :ultra block; everything else reads the :subagents block. Literal defaults
+  # match the module attributes / the :ultra config so a missing key still behaves.
+
+  defp max_tasks_cap(%{subagent_mode: :ultra}), do: ultra_cfg(:max_subtasks, 50)
+  defp max_tasks_cap(_context), do: sub_cfg(:max_tasks, @max_tasks)
+
+  defp hard_max_concurrency_cap(%{subagent_mode: :ultra}),
+    do: ultra_cfg(:fanout_max_concurrency, 12)
+
+  defp hard_max_concurrency_cap(_context),
+    do: sub_cfg(:hard_max_concurrency, @hard_max_concurrency)
+
+  # Ultra omitting max_concurrency defaults to the ultra fan-out concurrency,
+  # not the regular 2 — otherwise a wide ultra fan-out runs nearly serial.
+  defp default_max_concurrency_cap(%{subagent_mode: :ultra}),
+    do: ultra_cfg(:fanout_max_concurrency, 12)
+
+  defp default_max_concurrency_cap(_context),
+    do: sub_cfg(:default_max_concurrency, @default_max_concurrency)
+
+  defp max_result_bytes_cap(%{subagent_mode: :ultra}),
+    do: ultra_cfg(:fanout_max_result_bytes, 300_000)
+
+  defp max_result_bytes_cap(_context), do: sub_cfg(:max_result_bytes, @max_result_bytes)
+
+  defp worker_iterations_cap(%{subagent_mode: :ultra}),
+    do: ultra_cfg(:fanout_worker_iterations, 40)
+
+  defp worker_iterations_cap(_context), do: IterationLimits.subagent()
+
+  defp sub_cfg(key, default), do: cfg(:subagents, key, default)
+  defp ultra_cfg(key, default), do: cfg(:ultra, key, default)
+
+  defp cfg(block, key, default) do
+    value = :fermix_core |> Application.get_env(block, []) |> Keyword.get(key, default)
+
+    if is_integer(value) and value > 0 do
+      value
+    else
+      raise ArgumentError,
+            "invalid #{block}.#{key} #{inspect(value)}; expected a positive integer"
     end
   end
 end

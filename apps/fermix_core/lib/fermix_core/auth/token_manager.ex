@@ -16,12 +16,10 @@ defmodule FermixCore.Auth.TokenManager do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenSupervisor
 
   require Logger
-
-  @refresh_skew_ms 90_000
-  @retry_backoff_ms 30_000
 
   # --- Client API ---
 
@@ -83,7 +81,6 @@ defmodule FermixCore.Auth.TokenManager do
       entry: nil,
       fermix_path: fermix_path,
       req_options: req_options,
-      refresh_timer: nil,
       invalidated: false
     }
 
@@ -91,7 +88,7 @@ defmodule FermixCore.Auth.TokenManager do
       {:ok, entry} ->
         state = apply_entry(state, entry)
         Logger.info("TokenManager: loaded tokens, expires #{inspect(state.expires_at)}")
-        {:ok, schedule_refresh(state)}
+        {:ok, state}
 
       {:error, reason} ->
         Logger.warning("TokenManager: no tokens found — #{Redaction.format(reason)}")
@@ -109,7 +106,7 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   def handle_call(:get_token, _from, state) do
-    if should_refresh?(state.expires_at) do
+    if TokenExpiry.refresh_due?(state.expires_at) do
       case do_refresh(state) do
         {:ok, state} -> {:reply, {:ok, state.access_token}, state}
         {:error, reason, state} -> {:reply, {:error, reason}, state}
@@ -149,7 +146,6 @@ defmodule FermixCore.Auth.TokenManager do
           state
           |> Map.put(:invalidated, false)
           |> apply_entry(entry)
-          |> schedule_refresh()
 
         Logger.info("TokenManager: reloaded tokens, expires #{inspect(state.expires_at)}")
         {:reply, {:ok, state.access_token}, state}
@@ -157,26 +153,6 @@ defmodule FermixCore.Auth.TokenManager do
       {:error, reason} ->
         Logger.warning("TokenManager: reload failed — #{Redaction.format(reason)}")
         {:reply, {:error, reason}, state}
-    end
-  end
-
-  @impl true
-  def handle_info(:refresh, state) do
-    case do_refresh(state) do
-      {:ok, state} ->
-        Logger.info("TokenManager: refreshed successfully")
-        {:noreply, state}
-
-      # Permanent failure — token chain is dead; stop retrying. The user
-      # must rotate credentials (`fermix auth login`) and restart the
-      # daemon. The error was already logged by do_refresh/1.
-      {:error, :auth_invalidated, state} ->
-        {:noreply, state}
-
-      {:error, reason, state} ->
-        Logger.error("TokenManager: refresh failed — #{Redaction.format(reason)}")
-        timer = Process.send_after(self(), :refresh, @retry_backoff_ms)
-        {:noreply, %{state | refresh_timer: timer}}
     end
   end
 
@@ -191,12 +167,7 @@ defmodule FermixCore.Auth.TokenManager do
 
     case refresh_entry(state.auth_profile, entry, state.fermix_path, state.req_options) do
       {:ok, entry} ->
-        state =
-          state
-          |> apply_entry(entry)
-          |> schedule_refresh()
-
-        {:ok, state}
+        {:ok, apply_entry(state, entry)}
 
       {:error, {:permanent, status, body}} ->
         Logger.error(
@@ -206,36 +177,23 @@ defmodule FermixCore.Auth.TokenManager do
 
         reason = permanent_reason(state.auth_profile)
         mark_reauthorization_required(state.auth_profile, entry, state.fermix_path)
-        {:error, reason, %{state | invalidated: true, refresh_timer: nil}}
+        {:error, reason, %{state | invalidated: true}}
 
       {:error, reason} ->
         {:error, reason, state}
     end
   end
 
-  defp apply_entry(state, %{tokens: tokens, expires_at: expires_at}) do
+  defp apply_entry(state, %{tokens: tokens, expires_at: expires_at} = entry) do
     %{
       state
       | access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,
         expires_at: expires_at,
-        entry: Map.merge(state.entry || %{}, %{tokens: tokens, expires_at: expires_at})
+        # Keep the whole entry — refresh dispatch keys on :provider
+        # (anthropic/google), which a tokens-only merge silently dropped.
+        entry: Map.merge(state.entry || %{}, entry)
     }
-  end
-
-  defp schedule_refresh(state) do
-    if state.refresh_timer, do: Process.cancel_timer(state.refresh_timer)
-
-    case state.expires_at do
-      nil ->
-        %{state | refresh_timer: nil}
-
-      expires_at ->
-        ms = DateTime.diff(expires_at, DateTime.utc_now(), :millisecond)
-        delay = max(ms - @refresh_skew_ms, 1_000)
-        timer = Process.send_after(self(), :refresh, delay)
-        %{state | refresh_timer: timer}
-    end
   end
 
   defp entry_from_state(state) do
@@ -254,7 +212,7 @@ defmodule FermixCore.Auth.TokenManager do
       refresh_token: state.refresh_token
     })
     |> Map.put(:expires_at, state.expires_at)
-    |> Map.put(:last_refresh, nil)
+    |> Map.put(:last_refresh, Map.get(base, :last_refresh))
   end
 
   defp refresh_entry(:openai_codex, entry, path, req_options) do
@@ -263,6 +221,42 @@ defmodule FermixCore.Auth.TokenManager do
 
   defp refresh_entry("openai_codex", entry, path, req_options) do
     CodexToken.refresh_entry(entry, path, req_options)
+  end
+
+  defp refresh_entry(
+         auth_profile,
+         %{provider: "anthropic", tokens: %{refresh_token: refresh_token}} = entry,
+         path,
+         req_options
+       )
+       when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, tokens} <-
+           RefreshClient.refresh(OAuthProvider.anthropic(), refresh_token, req_options),
+         refreshed <- apply_tokens(entry, tokens),
+         :ok <- Store.write(auth_profile, refreshed, path) do
+      {:ok, refreshed}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp refresh_entry(
+         auth_profile,
+         %{provider: "xai", tokens: %{refresh_token: refresh_token}} = entry,
+         path,
+         req_options
+       )
+       when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, tokens} <- RefreshClient.refresh(OAuthProvider.xai(), refresh_token, req_options),
+         refreshed <- apply_tokens(entry, tokens),
+         :ok <- Store.write(auth_profile, refreshed, path) do
+      {:ok, refreshed}
+    else
+      # 403 is tier/entitlement denial, not a stale token — surface it
+      # without tripping the central permanent-failure quarantine (§6.5).
+      {:error, {:permanent, 403, _body}} -> {:error, :xai_oauth_tier_denied}
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp refresh_entry(
@@ -321,14 +315,9 @@ defmodule FermixCore.Auth.TokenManager do
           refresh_token: tokens.refresh_token || entry.tokens.refresh_token
         },
         expires_at: tokens.expires_at,
+        last_refresh: DateTime.utc_now(),
         status: "ready"
     }
-  end
-
-  defp should_refresh?(nil), do: false
-
-  defp should_refresh?(expires_at) do
-    DateTime.diff(expires_at, DateTime.utc_now(), :millisecond) <= @refresh_skew_ms
   end
 
   defp permanent_reason(:openai_codex), do: :auth_invalidated

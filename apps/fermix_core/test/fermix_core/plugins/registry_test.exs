@@ -21,7 +21,7 @@ defmodule FermixCore.Plugins.RegistryTest do
     assert drive.display_name == "Google Drive"
     assert drive.auth.type == :oauth2
     assert drive.auth.provider == "google"
-    assert "https://www.googleapis.com/auth/drive.metadata.readonly" in drive.auth.scopes
+    assert "https://www.googleapis.com/auth/drive" in drive.auth.scopes
     assert Map.get(drive.interface, "logo") == "assets/app-icon.png"
   end
 

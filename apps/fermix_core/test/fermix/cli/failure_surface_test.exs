@@ -223,15 +223,15 @@ defmodule Fermix.CLI.FailureSurfaceTest do
           :binary,
           {:active, false},
           {:ifaddr, {:local, socket_path}},
-          {:packet, :line},
+          {:packet, 4},
           {:reuseaddr, true}
         ])
 
       File.chmod!(socket_path, 0o600)
       send(parent, :fake_daemon_ready)
       {:ok, conn} = :gen_tcp.accept(listen_socket, 1_000)
-      {:ok, _line} = :gen_tcp.recv(conn, 0, 1_000)
-      :ok = :gen_tcp.send(conn, [Jason.encode!(response), "\n"])
+      {:ok, _request} = :gen_tcp.recv(conn, 0, 1_000)
+      :ok = :gen_tcp.send(conn, Jason.encode!(response))
       :gen_tcp.close(conn)
       :gen_tcp.close(listen_socket)
       FermixTestSupport.SafeRm.rm(socket_path)

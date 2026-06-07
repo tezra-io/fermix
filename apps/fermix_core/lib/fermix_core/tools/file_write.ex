@@ -7,6 +7,7 @@ defmodule FermixCore.Tools.FileWrite do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Sandbox
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @impl true
   @spec name() :: String.t()
@@ -72,18 +73,11 @@ defmodule FermixCore.Tools.FileWrite do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    agent = Map.get(context, :agent_name, "unknown")
-
     result = do_execute(args, context)
-
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
-      %{tool: "file_write", agent: agent, success: success}
-    )
+    ToolTelemetry.exec("file_write", context, success, duration, input: args, result: result)
 
     result
   end

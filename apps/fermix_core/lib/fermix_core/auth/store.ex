@@ -35,7 +35,7 @@ defmodule FermixCore.Auth.Store do
          {:ok, data} <- Jason.decode(raw),
          {:ok, providers} <- providers_map(data),
          {:ok, entry} <- fetch_provider(providers, provider) do
-      {:ok, normalize(entry)}
+      normalize(provider, entry)
     else
       {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
       {:error, :enoent} -> {:error, :no_auth_file}
@@ -125,14 +125,18 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
-  defp normalize(entry) do
+  defp normalize(provider, entry) do
     tokens = Map.get(entry, "tokens", %{})
     access = Map.get(tokens, "access_token")
 
-    if not (is_binary(access) and access != "") do
-      raise ArgumentError, "auth entry missing access_token"
+    if is_binary(access) and access != "" do
+      {:ok, normalized_entry(entry, tokens, access)}
+    else
+      {:error, {:invalid_auth_entry, provider, :missing_access_token}}
     end
+  end
 
+  defp normalized_entry(entry, tokens, access) do
     %{
       auth_mode: Map.get(entry, "auth_mode") || "chatgpt",
       provider: Map.get(entry, "provider"),

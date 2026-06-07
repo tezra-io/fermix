@@ -77,6 +77,42 @@ defmodule Fermix.CLI.ServiceTest do
     end
   end
 
+  describe "spec/2 fermix_path (Homebrew)" do
+    test "rewrites a Homebrew Cellar path to the stable bin symlink" do
+      tmp = mkdir!()
+      cellar = Path.join([tmp, "Cellar", "fermix", "0.1.0", "bin", "fermix"])
+      symlink = Path.join([tmp, "bin", "fermix"])
+      File.mkdir_p!(Path.dirname(cellar))
+      File.write!(cellar, "stub")
+      File.mkdir_p!(Path.dirname(symlink))
+      File.write!(symlink, "stub")
+
+      opts = Keyword.put(fixture_opts(:darwin, tmp), :fermix_path, cellar)
+      {:ok, spec} = Service.spec(:user, opts)
+
+      assert spec.fermix_path == symlink
+    end
+
+    test "keeps the Cellar path when the stable bin symlink is missing" do
+      tmp = mkdir!()
+      cellar = Path.join([tmp, "Cellar", "fermix", "0.1.0", "bin", "fermix"])
+      File.mkdir_p!(Path.dirname(cellar))
+      File.write!(cellar, "stub")
+
+      opts = Keyword.put(fixture_opts(:darwin, tmp), :fermix_path, cellar)
+      {:ok, spec} = Service.spec(:user, opts)
+
+      assert spec.fermix_path == cellar
+    end
+
+    test "leaves a non-Cellar path unchanged" do
+      tmp = mkdir!()
+      {:ok, spec} = Service.spec(:user, fixture_opts(:darwin, tmp))
+
+      assert spec.fermix_path == Path.join(tmp, "fermix")
+    end
+  end
+
   defp fixture_opts(os, tmp) do
     [
       os: os,

@@ -6,7 +6,7 @@ defmodule FermixCore.Setup.SecretPaths do
   @type secret :: %{
           :key => atom(),
           :env => String.t(),
-          :path => [atom()],
+          :path => [atom() | String.t()],
           optional(:sandbox_env) => boolean()
         }
 
@@ -21,6 +21,12 @@ defmodule FermixCore.Setup.SecretPaths do
       key: :anthropic_api_key,
       env: "ANTHROPIC_API_KEY",
       path: [:fermix_core, :providers, :anthropic, :api_key],
+      sandbox_env: true
+    },
+    %{
+      key: :xai_api_key,
+      env: "XAI_API_KEY",
+      path: [:fermix_core, :providers, :xai, :api_key],
       sandbox_env: true
     },
     %{
@@ -52,6 +58,11 @@ defmodule FermixCore.Setup.SecretPaths do
       env: "PERPLEXITY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :perplexity_api_key],
       sandbox_env: true
+    },
+    %{
+      key: :google_oauth_client_secret,
+      env: "GOOGLE_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "google", :client_secret]
     },
     %{
       key: :telegram_bot_token,

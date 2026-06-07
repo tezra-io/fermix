@@ -9,6 +9,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
 
   @registry FermixCore.Auth.TokenRegistry
@@ -143,18 +144,19 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
-  defp direct_read_entry(auth_profile, %{tokens: %{access_token: token}, expires_at: expires_at})
+  defp direct_read_entry(
+         auth_profile,
+         %{tokens: %{access_token: token}, expires_at: expires_at}
+       )
        when is_binary(token) and token != "" do
-    if should_refresh?(expires_at), do: direct_refresh(auth_profile), else: {:ok, token}
+    if TokenExpiry.refresh_due?(expires_at) do
+      direct_refresh(auth_profile)
+    else
+      {:ok, token}
+    end
   end
 
   defp direct_read_entry(_auth_profile, _entry), do: {:error, :no_token}
-
-  defp should_refresh?(nil), do: false
-
-  defp should_refresh?(expires_at) do
-    DateTime.diff(expires_at, DateTime.utc_now(), :millisecond) <= 120_000
-  end
 
   defp direct_status(auth_profile) do
     case Store.read(auth_profile) do
@@ -168,20 +170,27 @@ defmodule FermixCore.Auth.TokenSupervisor do
 
   defp direct_refresh(auth_profile) do
     with {:ok, entry} <- Store.read(auth_profile),
-         {:ok, refreshed} <- refresh_entry(auth_profile, entry) do
+         {:ok, refreshed} <- refresh_entry(auth_profile, entry, []) do
       {:ok, refreshed.tokens.access_token}
     end
   end
 
-  defp refresh_entry("openai_codex", entry), do: CodexToken.refresh_entry(entry, Store.path(), [])
+  # Public for tests: the direct (process-less) refresh dispatch is a real
+  # production path and needs `req_options` injection to be hermetic.
+  @doc false
+  @spec refresh_entry(String.t(), Store.entry(), keyword()) ::
+          {:ok, Store.entry()} | {:error, term()}
+  def refresh_entry("openai_codex", entry, req_options),
+    do: CodexToken.refresh_entry(entry, Store.path(), req_options)
 
-  defp refresh_entry(
-         auth_profile,
-         %{provider: "google", tokens: %{refresh_token: refresh_token}} = entry
-       )
-       when is_binary(refresh_token) and refresh_token != "" do
-    with {:ok, provider} <- google_provider(entry),
-         {:ok, tokens} <- RefreshClient.refresh(provider, refresh_token, []),
+  def refresh_entry(
+        auth_profile,
+        %{provider: "anthropic", tokens: %{refresh_token: refresh_token}} = entry,
+        req_options
+      )
+      when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, tokens} <-
+           RefreshClient.refresh(OAuthProvider.anthropic(), refresh_token, req_options),
          refreshed <- apply_tokens(entry, tokens),
          :ok <- Store.write(auth_profile, refreshed) do
       {:ok, refreshed}
@@ -194,7 +203,51 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
-  defp refresh_entry(_auth_profile, _entry), do: {:error, :unsupported_provider}
+  def refresh_entry(
+        auth_profile,
+        %{provider: "xai", tokens: %{refresh_token: refresh_token}} = entry,
+        req_options
+      )
+      when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, tokens} <- RefreshClient.refresh(OAuthProvider.xai(), refresh_token, req_options),
+         refreshed <- apply_tokens(entry, tokens),
+         :ok <- Store.write(auth_profile, refreshed) do
+      {:ok, refreshed}
+    else
+      # 403 is tier/entitlement denial, not a stale token — keep tokens,
+      # no quarantine (design doc §6.5).
+      {:error, {:permanent, 403, _body}} ->
+        {:error, :xai_oauth_tier_denied}
+
+      {:error, {:permanent, _status, _body}} ->
+        mark_reauthorization_required(auth_profile, entry)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def refresh_entry(
+        auth_profile,
+        %{provider: "google", tokens: %{refresh_token: refresh_token}} = entry,
+        req_options
+      )
+      when is_binary(refresh_token) and refresh_token != "" do
+    with {:ok, provider} <- google_provider(entry),
+         {:ok, tokens} <- RefreshClient.refresh(provider, refresh_token, req_options),
+         refreshed <- apply_tokens(entry, tokens),
+         :ok <- Store.write(auth_profile, refreshed) do
+      {:ok, refreshed}
+    else
+      {:error, {:permanent, _status, _body}} ->
+        mark_reauthorization_required(auth_profile, entry)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  def refresh_entry(_auth_profile, _entry, _req_options), do: {:error, :unsupported_provider}
 
   defp google_provider(entry) do
     case google_client_config() do
@@ -242,6 +295,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
           refresh_token: tokens.refresh_token || entry.tokens.refresh_token
         },
         expires_at: tokens.expires_at,
+        last_refresh: DateTime.utc_now(),
         status: "ready"
     }
   end

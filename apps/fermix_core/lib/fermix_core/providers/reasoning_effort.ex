@@ -18,20 +18,23 @@ defmodule FermixCore.Providers.ReasoningEffort do
   """
 
   @type level :: :none | :low | :medium | :high | :xhigh | :max
-  @type provider :: :openai | :openai_codex | :anthropic
+  @type provider :: :openai | :openai_codex | :anthropic | :xai
   @type mapping :: :omit | {:ok, String.t()} | {:error, {:unsupported, atom(), atom()}}
 
   @levels [:none, :low, :medium, :high, :xhigh, :max]
 
-  # Per-provider API vocabularies (not per-model). `anthropic`'s subset is
-  # encoded for the upcoming adapter slice and is consumed by `to_provider/2`,
-  # but no setup surface offers it yet — the wizard (normal + reconfigure) and
-  # web UI gate effort selection to OpenAI/Codex until the Anthropic adapter
-  # sends `output_config.effort`. xAI/Groq are reference-only, absent until wired.
+  # Per-provider API vocabularies (not per-model). The wizard (normal +
+  # reconfigure) and web UI offer effort selection for OpenAI/Codex/xAI and gate
+  # it out for `anthropic` until its adapter sends `output_config.effort` — the
+  # `anthropic` subset below is encoded for that upcoming adapter slice and is
+  # consumed by `to_provider/2`, but no setup surface offers it yet. `xai` is
+  # consumed by `XAI.Responses` (per-model rejection stays in that adapter —
+  # §6.2 of the provider design).
   @provider_levels %{
     openai: [:none, :low, :medium, :high, :xhigh],
     openai_codex: [:none, :low, :medium, :high, :xhigh],
-    anthropic: [:low, :medium, :high, :xhigh, :max]
+    anthropic: [:low, :medium, :high, :xhigh, :max],
+    xai: [:none, :low, :medium, :high]
   }
 
   @spec levels() :: [level()]

@@ -16,9 +16,9 @@ defmodule Fermix.CLI.Upgrade.InstallMethod do
           | {:unmanaged, Path.t()}
           | {:error, term()}
 
-  @spec detect(Path.t() | nil) :: method()
-  def detect(binary_path \\ nil) do
-    path = binary_path || System.find_executable("fermix")
+  @spec detect(Path.t() | nil, (-> Path.t() | nil)) :: method()
+  def detect(binary_path \\ nil, resolve_self \\ &default_self_path/0) do
+    path = binary_path || resolve_self.()
 
     cond do
       is_nil(path) -> {:error, :fermix_not_on_path}
@@ -27,6 +27,8 @@ defmodule Fermix.CLI.Upgrade.InstallMethod do
       true -> {:unmanaged, path}
     end
   end
+
+  defp default_self_path, do: System.find_executable("fermix")
 
   # Brew links binaries from the Cellar into a `bin/` directory, so the
   # path operators actually invoke (e.g. `/usr/local/bin/fermix`) is

@@ -28,6 +28,10 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Reviewer
   alias FermixCore.Memory.Store
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.SessionSupervisor
   alias FermixCore.Reply
   alias FermixCore.Telemetry
@@ -60,6 +64,8 @@ defmodule FermixCore.Agents.MainAgent do
           pid: pid(),
           available_skills: [String.t()],
           provider: atom() | nil,
+          primary_provider: atom() | nil,
+          fallback_providers: [atom()],
           model: String.t() | nil,
           memory: %{
             review_interval_hours: non_neg_integer(),
@@ -110,11 +116,14 @@ defmodule FermixCore.Agents.MainAgent do
 
     skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
 
+    adapter_overrides = resolved_adapter_overrides(opts)
+
     state = %{
       provider: Keyword.get(opts, :provider, FermixCore.Providers.OpenAI),
       capability_registry:
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
-      adapter_overrides: resolved_adapter_overrides(opts),
+      adapter_overrides: adapter_overrides,
+      ordered_routes: resolved_ordered_routes(opts, adapter_overrides),
       adapter: Keyword.get(opts, :adapter),
       adapter_opts: Keyword.get(opts, :adapter_opts, []),
       agent_supervisor: Keyword.get(opts, :agent_supervisor, AgentSupervisor),
@@ -162,32 +171,90 @@ defmodule FermixCore.Agents.MainAgent do
     end
   end
 
+  # Derives the chosen provider through PrimaryConfig (primary flag, else
+  # legacy agent.provider) — never reads agent.provider directly, so the
+  # baked overrides can't diverge from the flag after a primary switch.
   defp adapter_overrides_from_config do
-    agent_config = Application.get_env(:fermix_core, :agent, [])
     providers = Application.get_env(:fermix_core, :providers, [])
+    agent_config = Application.get_env(:fermix_core, :agent, [])
 
-    case Keyword.get(agent_config, :provider) do
-      nil ->
+    case PrimaryConfig.chosen_in(providers, agent_config) do
+      {:ok, nil} ->
         []
 
-      provider when provider in [:openai, :openai_codex, :anthropic] ->
-        provider_config = Keyword.get(providers, provider, [])
+      {:ok, provider} ->
+        chosen_provider_overrides(provider, providers)
 
-        [provider: provider]
-        |> maybe_put_override(:model, Keyword.get(provider_config, :default_model))
-        |> maybe_put_override(:reasoning_effort, Keyword.get(provider_config, :reasoning_effort))
-
-      other ->
-        Logger.warning(
-          "MainAgent ignoring unknown provider #{inspect(other)} in :fermix_core, :agent, :provider"
+      {:error, :multiple_primary} ->
+        Logger.error(
+          "MainAgent: more than one provider has primary = true in config.toml; " <>
+            "mark exactly one provider primary"
         )
 
         []
     end
   end
 
+  defp chosen_provider_overrides(provider, providers) do
+    if provider in ModelCatalog.providers() do
+      provider_config = Keyword.get(providers, provider, [])
+
+      [provider: provider]
+      |> maybe_put_override(:model, Keyword.get(provider_config, :default_model))
+      |> maybe_put_override(:reasoning_effort, Keyword.get(provider_config, :reasoning_effort))
+    else
+      Logger.warning(
+        "MainAgent ignoring unknown provider #{inspect(provider)} in :fermix_core, :agent, :provider"
+      )
+
+      []
+    end
+  end
+
   defp maybe_put_override(overrides, _key, nil), do: overrides
   defp maybe_put_override(overrides, key, value), do: Keyword.put(overrides, key, value)
+
+  # Boot snapshot of the ordered provider route chain (§5): primary first,
+  # configured fallbacks behind it. EXPLICIT caller overrides (opts) stay
+  # strict — a one-route list, no fallbacks — because an override's
+  # model/effort must never leak onto other providers' routes. The
+  # config-derived overrides (primary flag) take the Selection chain.
+  # Returns nil when the snapshot cannot be built — TurnRunner then resolves
+  # per turn so the clear config error raises loudly on the turn path
+  # instead of crash-looping the daemon at boot.
+  defp resolved_ordered_routes(opts, adapter_overrides) do
+    cond do
+      Keyword.get(opts, :adapter) -> nil
+      adapter_capable?(Keyword.get(opts, :provider)) -> nil
+      Keyword.get(opts, :adapter_overrides, []) != [] -> strict_route(adapter_overrides)
+      true -> selection_routes()
+    end
+  end
+
+  defp strict_route(adapter_overrides) do
+    [RouteResolver.resolve!(adapter_overrides)]
+  rescue
+    error ->
+      Logger.error("MainAgent could not resolve provider route: #{Exception.message(error)}")
+      nil
+  end
+
+  defp selection_routes do
+    case Selection.ordered_routes() do
+      {:ok, routes} ->
+        routes
+
+      {:error, reason} ->
+        Logger.error("MainAgent could not build provider routes: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  defp adapter_capable?(nil), do: false
+
+  defp adapter_capable?(mod) when is_atom(mod) do
+    Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
+  end
 
   @impl true
   def handle_call({:checkout_turn_state, _msg}, _from, state) do
@@ -251,6 +318,7 @@ defmodule FermixCore.Agents.MainAgent do
       provider: state.provider,
       capability_registry: state.capability_registry,
       adapter_overrides: state.adapter_overrides,
+      ordered_routes: state.ordered_routes,
       adapter: state.adapter,
       adapter_opts: state.adapter_opts,
       skill_registry: state.skill_registry,
@@ -380,13 +448,18 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   defp status_from_state(state) do
+    primary = status_primary(state)
+
     %{
       name: "main",
       health: :online,
       pid: self(),
       available_skills: skill_names(state.available_skills),
-      provider: Keyword.get(state.adapter_overrides, :provider) || provider_name(state.provider),
-      model: Keyword.get(state.adapter_overrides, :model),
+      # Legacy `provider` maps to the primary for API compatibility (§8).
+      provider: primary,
+      primary_provider: primary,
+      fallback_providers: status_fallbacks(state, primary),
+      model: status_model(state, primary),
       memory: %{
         review_interval_hours: state.review_interval_hours,
         agent_id: state.memory_agent_id,
@@ -394,6 +467,37 @@ defmodule FermixCore.Agents.MainAgent do
       }
     }
   end
+
+  # The CONFIGURED primary, not the route-chain leader: when the primary is
+  # unconfigured, Selection drops it from the chain and a fallback leads —
+  # status must still name the configured primary (and list the serving
+  # fallback as a fallback), matching what readiness reports (§8).
+  defp status_primary(state) do
+    Keyword.get(state.adapter_overrides, :provider) ||
+      lead_route_provider(state.ordered_routes) ||
+      provider_name(state.provider)
+  end
+
+  defp lead_route_provider([{lead_key, _opts} | _rest]), do: lead_key.provider
+  defp lead_route_provider(_routes), do: nil
+
+  defp status_fallbacks(%{ordered_routes: [_ | _] = routes}, primary) do
+    routes
+    |> Enum.map(fn {route_key, _opts} -> route_key.provider end)
+    |> Enum.reject(&(&1 == primary))
+  end
+
+  defp status_fallbacks(_state, _primary), do: []
+
+  # The primary's model — from its route when it is in the chain, else from
+  # the baked overrides (its configured default_model).
+  defp status_model(%{ordered_routes: [_ | _] = routes} = state, primary) do
+    Enum.find_value(routes, Keyword.get(state.adapter_overrides, :model), fn {route_key, _opts} ->
+      if route_key.provider == primary, do: route_key.model
+    end)
+  end
+
+  defp status_model(state, _primary), do: Keyword.get(state.adapter_overrides, :model)
 
   defp skill_names(skills) when is_list(skills) do
     skills
@@ -407,6 +511,7 @@ defmodule FermixCore.Agents.MainAgent do
   defp provider_name(FermixCore.Providers.OpenAI.ChatCompletions), do: :openai
   defp provider_name(FermixCore.Providers.OpenAI.Codex), do: :openai_codex
   defp provider_name(FermixCore.Providers.Anthropic.Messages), do: :anthropic
+  defp provider_name(FermixCore.Providers.XAI.Responses), do: :xai
 
   defp provider_name(provider) when is_atom(provider) do
     case Atom.to_string(provider) do

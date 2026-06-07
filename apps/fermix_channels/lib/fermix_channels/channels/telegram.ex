@@ -169,6 +169,60 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # -- Draft streaming (docs/design/CHANNEL_STREAMING.md §6) --
+
+  @impl true
+  @spec stream_capability() :: :draft_edit
+  def stream_capability, do: :draft_edit
+
+  @impl true
+  @spec open_draft(FermixChannels.Gateway.Channel.message(), String.t()) ::
+          {:ok, integer()} | {:error, term()}
+  def open_draft(%Message{reply_target: reply_target, thread_ts: thread_ts}, text)
+      when is_binary(text) do
+    body =
+      %{chat_id: reply_target, text: draft_html(text), parse_mode: "HTML"}
+      |> maybe_put_draft_thread(thread_ts)
+
+    with {:ok, token} <- get_bot_token() do
+      post_draft_open(token, body)
+    end
+  end
+
+  @impl true
+  @spec edit_draft(FermixChannels.Gateway.Channel.message(), integer(), String.t()) ::
+          :ok | {:error, term()}
+  def edit_draft(%Message{reply_target: reply_target}, message_id, text)
+      when is_integer(message_id) and is_binary(text) do
+    with {:ok, token} <- get_bot_token() do
+      post_draft_edit(token, reply_target, message_id, draft_html(text))
+    end
+  end
+
+  @impl true
+  @spec seal_draft(FermixChannels.Gateway.Channel.message(), integer(), String.t()) ::
+          {:ok, String.t() | nil} | {:error, term()}
+  def seal_draft(%Message{reply_target: reply_target}, message_id, text)
+      when is_integer(message_id) and is_binary(text) do
+    {prefix, remainder} = seal_split(text)
+
+    with {:ok, token} <- get_bot_token(),
+         :ok <-
+           seal_with_retry(token, reply_target, message_id, basic_markdown_to_html(prefix), 1) do
+      {:ok, remainder}
+    end
+  end
+
+  @impl true
+  @spec discard_draft(FermixChannels.Gateway.Channel.message(), integer()) ::
+          :ok | {:error, term()}
+  def discard_draft(%Message{reply_target: reply_target}, message_id)
+      when is_integer(message_id) do
+    with {:ok, token} <- get_bot_token() do
+      post_draft_delete(token, reply_target, message_id)
+    end
+  end
+
   # -- Internals --
 
   defp classify_health_response(
@@ -232,6 +286,166 @@ defmodule FermixChannels.Channels.Telegram do
       end
     end
   end
+
+  # Render the largest prefix of the cumulative draft text that fits the
+  # message limit. Re-rendering the full prefix each tick keeps partial
+  # markdown structurally balanced; mid-stream overflow holds the draft at
+  # the prefix — authoritative multi-chunk delivery happens once, at seal.
+  defp draft_html(text) do
+    text
+    |> seal_split()
+    |> elem(0)
+    |> basic_markdown_to_html()
+  end
+
+  defp seal_split(text) do
+    if telegram_rendered_length(text) <= @max_message_length do
+      {text, nil}
+    else
+      {prefix, rest} = take_rendered_prefix(text)
+      {prefix, rest}
+    end
+  end
+
+  defp post_draft_open(token, body) do
+    url = "#{@bot_api_base}/bot#{token}/sendMessage"
+
+    result =
+      Req.new(url: url, method: :post, json: body)
+      |> Req.merge(req_options([]))
+      |> HttpClient.request("Telegram sendMessage (draft)")
+
+    case result do
+      {:ok, %{status: 200, body: %{"result" => %{"message_id" => id}}}} when is_integer(id) ->
+        {:ok, id}
+
+      {:ok, %{status: 200, body: response}} ->
+        Logger.error("Telegram draft open returned no message_id: #{inspect(response)}")
+        {:error, :missing_message_id}
+
+      {:ok, %{status: status, body: response} = api_response} ->
+        Logger.error("Telegram draft open failed: #{status} - #{inspect(response)}")
+        telegram_api_error(api_response)
+
+      {:error, reason} ->
+        Logger.error("Telegram draft open request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # Interim edits are best-effort by contract: no retry, warnings not errors —
+  # the engine counts failures and freezes the preview; the seal still lands.
+  defp post_draft_edit(token, chat_id, message_id, html) do
+    case post_edit_message_text(token, chat_id, message_id, html) do
+      {:ok, %{status: 200}} ->
+        :ok
+
+      {:ok, %{status: status, body: response} = api_response} ->
+        Logger.warning("Telegram draft edit failed: #{status} - #{inspect(response)}")
+        telegram_api_error(api_response)
+
+      {:error, reason} ->
+        Logger.warning("Telegram draft edit request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  # The seal is the one reliable draft write: bounded retries honoring
+  # Telegram's retry_after; an idempotent no-op ("message is not modified")
+  # counts as success — the desired final state already holds.
+  # The whole retry budget (sleeps + requests) must stay inside the engine's
+  # 15 s seal timeout — a longer wait would get the engine hard-killed
+  # mid-sleep, leaving an orphaned draft. Worst case here: 2 × 4 s sleeps +
+  # 3 requests ≈ 11 s. If Telegram demands a longer retry_after than that,
+  # retries exhaust and the engine's seal-failure path discards the draft and
+  # the full reply goes out as a fresh send — the designed recovery.
+  @seal_retry_attempts 3
+  @seal_retry_base_ms 400
+  @seal_retry_max_wait_ms 4_000
+
+  defp seal_with_retry(token, chat_id, message_id, html, attempt) do
+    case post_seal_edit(token, chat_id, message_id, html) do
+      :ok -> :ok
+      {:error, reason} -> retry_seal(token, chat_id, message_id, html, attempt, reason)
+    end
+  end
+
+  defp retry_seal(_token, _chat_id, _message_id, _html, @seal_retry_attempts, reason) do
+    Logger.error("Telegram draft seal exhausted retries: #{inspect(reason)}")
+    {:error, reason}
+  end
+
+  defp retry_seal(token, chat_id, message_id, html, attempt, reason) do
+    Process.sleep(seal_backoff_ms(attempt, reason))
+    seal_with_retry(token, chat_id, message_id, html, attempt + 1)
+  end
+
+  defp seal_backoff_ms(_attempt, {:rate_limited, retry_after_ms}),
+    do: min(retry_after_ms, @seal_retry_max_wait_ms)
+
+  defp seal_backoff_ms(attempt, _reason), do: @seal_retry_base_ms * attempt
+
+  defp post_seal_edit(token, chat_id, message_id, html) do
+    case post_edit_message_text(token, chat_id, message_id, html) do
+      {:ok, %{status: 200}} ->
+        :ok
+
+      {:ok, %{status: 400, body: %{"description" => description}}}
+      when is_binary(description) ->
+        classify_seal_400(description)
+
+      {:ok, %{status: status, body: response} = api_response} ->
+        Logger.warning("Telegram draft seal attempt failed: #{status} - #{inspect(response)}")
+        telegram_api_error(api_response)
+
+      {:error, reason} ->
+        Logger.warning("Telegram draft seal request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp classify_seal_400(description) do
+    if String.contains?(description, "message is not modified") do
+      :ok
+    else
+      {:error, "Telegram API error: 400 - #{description}"}
+    end
+  end
+
+  defp post_edit_message_text(token, chat_id, message_id, html) do
+    url = "#{@bot_api_base}/bot#{token}/editMessageText"
+    body = %{chat_id: chat_id, message_id: message_id, text: html, parse_mode: "HTML"}
+
+    Req.new(url: url, method: :post, json: body)
+    |> Req.merge(req_options([]))
+    |> HttpClient.request("Telegram editMessageText")
+  end
+
+  defp post_draft_delete(token, chat_id, message_id) do
+    url = "#{@bot_api_base}/bot#{token}/deleteMessage"
+    body = %{chat_id: chat_id, message_id: message_id}
+
+    result =
+      Req.new(url: url, method: :post, json: body)
+      |> Req.merge(req_options([]))
+      |> HttpClient.request("Telegram deleteMessage")
+
+    case result do
+      {:ok, %{status: 200}} ->
+        :ok
+
+      {:ok, %{status: status, body: response} = api_response} ->
+        Logger.warning("Telegram draft delete failed: #{status} - #{inspect(response)}")
+        telegram_api_error(api_response)
+
+      {:error, reason} ->
+        Logger.warning("Telegram draft delete request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
+  end
+
+  defp maybe_put_draft_thread(body, nil), do: body
+  defp maybe_put_draft_thread(body, thread_ts), do: Map.put(body, :message_thread_id, thread_ts)
 
   defp send_claimed_media(:duplicate, _chat_id, _media_part, _opts), do: :ok
 

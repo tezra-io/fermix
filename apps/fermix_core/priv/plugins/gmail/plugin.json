@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "gmail",
   "display_name": "Gmail",
-  "description": "Read mail metadata and optionally draft or send messages.",
+  "description": "Search mail, read message details, and optionally send messages.",
   "category": "productivity",
   "version": "1.0.0",
   "default_enabled": false,
@@ -25,13 +25,22 @@
       "email",
       "profile",
       "https://www.googleapis.com/auth/gmail.readonly",
-      "https://www.googleapis.com/auth/gmail.send"
+      "https://www.googleapis.com/auth/gmail.send",
+      "https://www.googleapis.com/auth/gmail.compose",
+      "https://www.googleapis.com/auth/gmail.modify"
     ]
   },
   "tools": [
     {
       "name": "gmail_search_messages",
-      "description": "Search Gmail messages.",
+      "description": "Search Gmail and return message summaries (sender, subject, date, snippet).",
+      "policy_class": "external_api",
+      "read_only": true,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
+    },
+    {
+      "name": "gmail_get_message",
+      "description": "Fetch a single Gmail message's headers and body by id.",
       "policy_class": "external_api",
       "read_only": true,
       "requires_scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
@@ -42,6 +51,55 @@
       "policy_class": "external_api",
       "read_only": false,
       "requires_scopes": ["https://www.googleapis.com/auth/gmail.send"]
+    },
+    {
+      "name": "gmail_reply_to_thread",
+      "description": "Reply within an existing Gmail thread.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.send"]
+    },
+    {
+      "name": "gmail_create_draft",
+      "description": "Create a Gmail draft (does not send).",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.compose"]
+    },
+    {
+      "name": "gmail_send_draft",
+      "description": "Send an existing Gmail draft by id.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.compose"]
+    },
+    {
+      "name": "gmail_modify_message_labels",
+      "description": "Add or remove labels on a message (mark read/unread, archive, star).",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.modify"]
+    },
+    {
+      "name": "gmail_trash_message",
+      "description": "Move a Gmail message to Trash.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.modify"]
+    },
+    {
+      "name": "gmail_untrash_message",
+      "description": "Restore a Gmail message from Trash.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.modify"]
+    },
+    {
+      "name": "gmail_create_label",
+      "description": "Create a Gmail label.",
+      "policy_class": "external_api",
+      "read_only": false,
+      "requires_scopes": ["https://www.googleapis.com/auth/gmail.modify"]
     }
   ],
   "skills": [

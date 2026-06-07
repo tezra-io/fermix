@@ -26,7 +26,7 @@ defmodule Fermix.CLI.QueryCommandsTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      stop_daemon(daemon)
       restore_env("FERMIX_HOME", previous_home)
       FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
@@ -83,7 +83,7 @@ defmodule Fermix.CLI.QueryCommandsTest do
     decoded = Jason.decode!(output)
     assert is_integer(decoded["count"])
     assert is_list(decoded["skills"])
-    assert Enum.any?(decoded["skills"], &(&1["name"] == "self_knowledge"))
+    assert Enum.any?(decoded["skills"], &(&1["name"] == "self-knowledge"))
   end
 
   defp run_command(fun) do
@@ -110,6 +110,19 @@ defmodule Fermix.CLI.QueryCommandsTest do
 
     File.mkdir_p!(path)
     path
+  end
+
+  # The daemon can die between an aliveness check and the stop (it owns a
+  # socket task tree that tears down on test exit), so a `Process.alive?` guard
+  # is a TOCTOU race — the `:noproc` exit then aborts on_exit before
+  # `restore_env`/`rm_rf!` run, leaking this test's FERMIX_HOME into every
+  # later test in the suite (seen as flaky CI failures in unrelated sandbox
+  # tests). Tolerate exactly the already-dead case; the teardown only needs
+  # the daemon gone.
+  defp stop_daemon(daemon) do
+    GenServer.stop(daemon, :normal, 1_000)
+  catch
+    :exit, {:noproc, _} -> :ok
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)

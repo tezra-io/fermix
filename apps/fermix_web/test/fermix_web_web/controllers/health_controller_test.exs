@@ -43,7 +43,7 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert body["status"] == "ok"
       assert body["app"] == "fermix"
-      assert body["version"] == "0.1.0"
+      assert body["version"] == to_string(Application.spec(:fermix_core, :vsn))
       assert is_binary(body["timestamp"])
     end
 

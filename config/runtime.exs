@@ -34,10 +34,8 @@ if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
       :ok
 
     {:error, reason} ->
-      IO.warn(
-        "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
-          inspect(reason) <> " — booting with compile-time defaults"
-      )
+      raise "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
+              inspect(reason)
   end
 end
 
@@ -46,7 +44,14 @@ workspace_paths =
        function_exported?(FermixCore.Setup.ConfigStore, :workspace_paths, 0) do
     FermixCore.Setup.ConfigStore.workspace_paths()
   else
-    fermix_home = System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
+    # Mirror ConfigStore.fermix_home/0: a blank FERMIX_HOME ("") is truthy, so
+    # `|| default` would not fall back and workspace paths would go cwd-relative
+    # (e.g. ./skills). Treat blank as unset.
+    fermix_home =
+      case System.get_env("FERMIX_HOME") do
+        home when is_binary(home) and home != "" -> home
+        _ -> Path.join(System.user_home!(), ".fermix")
+      end
 
     %{
       bootstrap: Path.join(fermix_home, "bootstrap"),
@@ -64,9 +69,15 @@ existing_providers = Application.get_env(:fermix_core, :providers, [])
 existing_openai = Keyword.get(existing_providers, :openai, [])
 existing_openai_codex = Keyword.get(existing_providers, :openai_codex, [])
 existing_anthropic = Keyword.get(existing_providers, :anthropic, [])
+existing_xai = Keyword.get(existing_providers, :xai, [])
 existing_agent = Application.get_env(:fermix_core, :agent, [])
 
 openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
+
+# Keep in sync with FermixCore.Providers.ModelCatalog.providers/0 — config
+# files are evaluated before the app is guaranteed loaded, so the list is
+# spelled out here rather than derived.
+known_providers = ["openai", "openai_codex", "anthropic", "xai"]
 
 # FERMIX_PROVIDER overlays the agent's provider selection. Invalid values
 # log a warning and fall through to whatever TOML / agent block already
@@ -79,13 +90,13 @@ selected_provider =
     "" ->
       Keyword.get(existing_agent, :provider)
 
-    raw when raw in ["openai", "openai_codex", "anthropic"] ->
+    raw when raw in ["openai", "openai_codex", "anthropic", "xai"] ->
       String.to_atom(raw)
 
     raw ->
       IO.warn(
         "FERMIX_PROVIDER=#{inspect(raw)} is not a known provider " <>
-          "(openai | openai_codex | anthropic) — ignoring overlay"
+          "(#{Enum.join(known_providers, " | ")}) — ignoring overlay"
       )
 
       Keyword.get(existing_agent, :provider)
@@ -168,13 +179,36 @@ merged_openai =
   |> then(&apply_provider_overlay.(:openai, &1))
 
 merged_openai_codex = apply_provider_overlay.(:openai_codex, existing_openai_codex)
-merged_anthropic = apply_provider_overlay.(:anthropic, existing_anthropic)
+
+# Optional env overlays for API keys and auth modes; empty/absent vars
+# leave the TOML-hydrated values untouched.
+put_env_overlay = fn config, key, env_name ->
+  case System.get_env(env_name) do
+    nil -> config
+    "" -> config
+    value -> Keyword.put(config, key, value)
+  end
+end
+
+merged_anthropic =
+  existing_anthropic
+  |> put_env_overlay.(:api_key, "ANTHROPIC_API_KEY")
+  |> put_env_overlay.(:auth_mode, "FERMIX_ANTHROPIC_AUTH_MODE")
+  |> then(&apply_provider_overlay.(:anthropic, &1))
+
+merged_xai =
+  existing_xai
+  |> put_env_overlay.(:api_key, "XAI_API_KEY")
+  |> put_env_overlay.(:base_url, "XAI_BASE_URL")
+  |> put_env_overlay.(:auth_mode, "FERMIX_XAI_AUTH_MODE")
+  |> then(&apply_provider_overlay.(:xai, &1))
 
 merged_providers =
   existing_providers
   |> Keyword.put(:openai, merged_openai)
   |> Keyword.put(:openai_codex, merged_openai_codex)
   |> Keyword.put(:anthropic, merged_anthropic)
+  |> Keyword.put(:xai, merged_xai)
 
 config :fermix_core, providers: merged_providers
 
@@ -288,6 +322,23 @@ config :fermix_core,
        Keyword.merge(existing_trace,
          base_dir: System.get_env("FERMIX_TRACE_DIR") || workspace_paths.traces
        )
+
+existing_telemetry = Application.get_env(:fermix_core, :telemetry, [])
+
+# Content capture (prompt/response/tool bodies in traces). One knob for the
+# common case: exporting to Opik turns content ON by default — if you're
+# observing, you want to see everything. FERMIX_TRACE_CONTENT is the explicit
+# override (e.g. "=0" for Opik-without-bodies, or "=1" for content in the local
+# JSONL with no Opik).
+capture_content =
+  case env_bool.("FERMIX_TRACE_CONTENT") do
+    :__unset__ -> env_bool.("FERMIX_OPIK_ENABLED") == true
+    explicit -> explicit
+  end
+
+config :fermix_core,
+       :telemetry,
+       Keyword.put(existing_telemetry, :capture_content, capture_content)
 
 config :fermix_core,
        :log,

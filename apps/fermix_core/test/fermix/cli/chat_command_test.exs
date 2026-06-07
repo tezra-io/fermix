@@ -143,6 +143,50 @@ defmodule Fermix.CLI.ChatCommandTest do
            }
   end
 
+  test "emits valid JSON error envelope when daemon sends malformed JSON" do
+    # Simulate the recv_line truncation: a daemon that sends invalid JSON (e.g. a
+    # 9216-byte partial body). The client gets a Jason.DecodeError struct back from
+    # Client.agent_message; render_error must not crash on that non-string reason.
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "daemon.sock")
+
+    {:ok, listen_socket} =
+      :gen_tcp.listen(0, [
+        :binary,
+        {:active, false},
+        {:packet, :line},
+        {:ifaddr, {:local, to_charlist(socket_path)}},
+        {:reuseaddr, true}
+      ])
+
+    acceptor =
+      Task.async(fn ->
+        {:ok, conn} = :gen_tcp.accept(listen_socket, 5_000)
+        # recv the client request then send back malformed JSON (no closing brace)
+        _ = :gen_tcp.recv(conn, 0, 5_000)
+        :gen_tcp.send(conn, "{\"status\":\"ok\",\"response\": TRUNCATED\n")
+        :gen_tcp.close(conn)
+      end)
+
+    prev_home = System.get_env("FERMIX_HOME")
+    System.put_env("FERMIX_HOME", socket_dir)
+
+    output =
+      capture_io(fn ->
+        assert ChatCommand.run(["--json", "--timeout", "2000", "hello"]) == 1
+      end)
+
+    Task.await(acceptor, 5_000)
+
+    decoded = Jason.decode!(output)
+    assert decoded["status"] == "error"
+    assert is_binary(decoded["error"]) and decoded["error"] != ""
+
+    restore_env("FERMIX_HOME", prev_home)
+    :gen_tcp.close(listen_socket)
+    FermixTestSupport.SafeRm.rm_rf!(socket_dir)
+  end
+
   test "reads stdin only when --stdin is provided" do
     test_self = self()
 

@@ -8,6 +8,7 @@ defmodule FermixCore.Introspection.Overview do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
 
   @spec snapshot(keyword()) :: {:ok, map()} | {:error, term()}
@@ -193,18 +194,25 @@ defmodule FermixCore.Introspection.Overview do
     }
   end
 
+  # Active provider tracks the primary flag (legacy agent.provider only as
+  # migration input) so the overview can't drift after a primary switch.
   defp provider_summary do
-    agent = Application.get_env(:fermix_core, :agent, [])
     providers = Application.get_env(:fermix_core, :providers, [])
-    active = Keyword.get(agent, :provider, :openai)
-    provider_config = Keyword.get(providers, active, [])
 
-    %{
-      active: active,
-      model: Keyword.get(provider_config, :default_model),
-      auth_mode: Keyword.get(provider_config, :auth_mode),
-      reasoning_effort: Keyword.get(provider_config, :reasoning_effort)
-    }
+    case PrimaryConfig.primary() do
+      {:ok, active} ->
+        provider_config = Keyword.get(providers, active, [])
+
+        %{
+          active: active,
+          model: Keyword.get(provider_config, :default_model),
+          auth_mode: Keyword.get(provider_config, :auth_mode),
+          reasoning_effort: Keyword.get(provider_config, :reasoning_effort)
+        }
+
+      {:error, :multiple_primary} ->
+        %{active: :invalid_config, model: nil, auth_mode: nil, reasoning_effort: nil}
+    end
   end
 
   defp empty_capability_counts, do: %{builtin: 0, skill: 0, mcp: 0, total: 0}

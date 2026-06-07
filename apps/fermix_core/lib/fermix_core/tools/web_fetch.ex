@@ -17,7 +17,9 @@ defmodule FermixCore.Tools.WebFetch do
   def name, do: "web_fetch"
 
   @impl true
-  def description, do: "Fetch a public HTTP(S) URL and return readable markdown-light text."
+  def description,
+    do:
+      "Fetch ONE known public HTTP(S) URL and return readable markdown-light text. USE WHEN the content is in the server HTML; do NOT use for JavaScript-rendered or interactive pages (use browser)."
 
   @impl true
   def parameters do
@@ -29,7 +31,9 @@ defmodule FermixCore.Tools.WebFetch do
   end
 
   @impl true
-  def when_to_use, do: "Fetch and summarize the contents of a known public URL."
+  def when_to_use,
+    do:
+      "The readable text of one known static URL — not JS-rendered or interactive pages (use browser)."
 
   @impl true
   def examples,

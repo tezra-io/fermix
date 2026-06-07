@@ -138,6 +138,12 @@ defmodule FermixCore.Tools.SubagentsTest do
 
   defp text_turn(content), do: %{content: content, tool_calls: []}
 
+  defp tool_turns(count) do
+    for step <- 1..count do
+      call_turn("c#{step}", "missing_tool", %{"step" => step})
+    end
+  end
+
   defp call_turn(call_id, name, args),
     do: %{content: "", tool_calls: [tool_call(call_id, name, args)]}
 
@@ -183,6 +189,154 @@ defmodule FermixCore.Tools.SubagentsTest do
 
   defp decode_output({:ok, %{success: true, output: json}}), do: Jason.decode!(json)
 
+  defp agent_children(supervisor) do
+    supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.map(fn {_id, pid, _type, _modules} -> pid end)
+    |> Enum.filter(&is_pid/1)
+  end
+
+  defp eventually(fun), do: eventually(fun, 100)
+  defp eventually(_fun, 0), do: false
+
+  defp eventually(fun, attempts) do
+    if fun.() do
+      true
+    else
+      Process.sleep(20)
+      eventually(fun, attempts - 1)
+    end
+  end
+
+  describe "coordinator cancellation" do
+    test "killing the coordinator reaps its in-flight subagent workers", ctx do
+      MockAdapter.set_turns([])
+      test_pid = self()
+
+      coordinator =
+        spawn(fn ->
+          Subagents.execute(
+            %{"tasks" => [%{"id" => "slow", "task" => "SLOWWORKER hang for a while"}]},
+            context(ctx)
+          )
+
+          send(test_pid, :coordinator_finished)
+        end)
+
+      # The worker AgentServer spawns, then blocks ~6.5s in its first chat call.
+      assert eventually(fn -> agent_children(ctx.agent_supervisor) != [] end)
+      [worker_pid] = agent_children(ctx.agent_supervisor)
+      worker_ref = Process.monitor(worker_pid)
+
+      # Cancel the coordinator the way `/stop` terminates a turn task.
+      Process.exit(coordinator, :kill)
+
+      # The worker's parent-down monitor stops it well before its sleep ends.
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker_pid, _reason}, 2_000
+      assert eventually(fn -> agent_children(ctx.agent_supervisor) == [] end)
+      refute_received :coordinator_finished
+    end
+  end
+
+  describe "dynamic_parameters/1 — context-aware schema" do
+    test "regular context advertises the regular caps" do
+      schema = Subagents.dynamic_parameters(%{})
+      assert schema.properties.tasks.maxItems == 10
+      assert schema.properties.max_concurrency.maximum == 8
+      assert schema.properties.max_concurrency.description =~ "Defaults to 4"
+    end
+
+    test "ultra context advertises the wide ultra caps (50 tasks / 12 concurrency)" do
+      schema = Subagents.dynamic_parameters(%{subagent_mode: :ultra})
+      assert schema.properties.tasks.maxItems == 50
+      assert schema.properties.max_concurrency.maximum == 12
+      # Ultra omitting max_concurrency defaults to the wide fan-out concurrency.
+      assert schema.properties.max_concurrency.description =~ "Defaults to 12"
+    end
+
+    test "the arity-0 callback matches the regular schema" do
+      assert Subagents.parameters() == Subagents.dynamic_parameters(%{})
+    end
+  end
+
+  describe "ultra mode caps" do
+    test "subagent_mode: :ultra raises breadth + concurrency above the regular max", ctx do
+      MockAdapter.set_turns([])
+      # 12 tasks at concurrency 12 — both exceed the regular caps (max 10 / 8),
+      # but the /ultra context lifts them (max_subtasks 50, fanout conc 12).
+      tasks = for n <- 1..12, do: %{"id" => "t#{n}", "task" => "do #{n}"}
+
+      result =
+        Subagents.execute(
+          %{"tasks" => tasks, "max_concurrency" => 12},
+          context(ctx, %{subagent_mode: :ultra})
+        )
+
+      summary = decode_output(result)["summary"]
+      assert summary["requested"] == 12
+      assert summary["completed"] == 12
+    end
+  end
+
+  describe "ultra fan-out: trace nesting + default concurrency" do
+    test "threads the parent turn's session_id into workers as parent_session (no orphan trace)",
+         ctx do
+      MockAdapter.set_turns([])
+      test_pid = self()
+      handler = "subagents-parent-session-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :agent, :start],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:agent_start, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      tasks = [%{"id" => "t1", "task" => "do one thing"}]
+
+      result =
+        %{"tasks" => tasks}
+        |> Subagents.execute(context(ctx, %{subagent_mode: :ultra}))
+        |> decode_output()
+
+      assert result["summary"]["completed"] == 1
+
+      # Option B's headline property: the worker nests under the parent turn's
+      # trace (session_id "main-session") instead of orphaning, because the
+      # fan-out passes the parent's session_id through as parent_session.
+      assert_receive {:agent_start, %{name: "subagent:t1", parent_session: "main-session"}}, 2_000
+    end
+
+    test "ultra default concurrency (omitted max_concurrency) runs more than the regular cap of 4 at once",
+         ctx do
+      MockAdapter.set_turns([])
+      test_pid = self()
+
+      # Six SLOWWORKER tasks, no max_concurrency: ultra's omitted default (12)
+      # must let all six run at once. The regular default (4) would cap in-flight
+      # workers at four, so observing six concurrent children proves the wide
+      # ultra default reached execution — not just the advertised schema.
+      tasks = for n <- 1..6, do: %{"id" => "t#{n}", "task" => "SLOWWORKER hang #{n}"}
+
+      coordinator =
+        spawn(fn ->
+          Subagents.execute(%{"tasks" => tasks}, context(ctx, %{subagent_mode: :ultra}))
+          send(test_pid, :coordinator_finished)
+        end)
+
+      assert eventually(fn -> length(agent_children(ctx.agent_supervisor)) == 6 end)
+
+      # Reap the hung workers instead of waiting out the 6.5s SLOWWORKER sleeps.
+      Process.exit(coordinator, :kill)
+      assert eventually(fn -> agent_children(ctx.agent_supervisor) == [] end)
+      refute_received :coordinator_finished
+    end
+  end
+
   describe "validation (rejected before spawn)" do
     test "missing tasks", ctx do
       assert {:ok, %{success: false, error: error}} = Subagents.execute(%{}, context(ctx))
@@ -196,13 +350,13 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert error =~ "non-empty"
     end
 
-    test "too many tasks", ctx do
-      tasks = for n <- 1..9, do: %{"id" => "t#{n}", "task" => "do #{n}"}
+    test "too many tasks (regular cap)", ctx do
+      tasks = for n <- 1..12, do: %{"id" => "t#{n}", "task" => "do #{n}"}
 
       assert {:ok, %{success: false, error: error}} =
                Subagents.execute(%{"tasks" => tasks}, context(ctx))
 
-      assert error =~ "Too many tasks"
+      assert error =~ "Too many tasks: 12 (max 10)"
     end
 
     test "duplicate ids", ctx do
@@ -268,6 +422,18 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert worker["iterations"] == 1
       assert result["summary"]["requested"] == 1
       assert result["summary"]["completed"] == 1
+    end
+
+    test "temporary workers have enough iterations for deeper delegated work", ctx do
+      MockAdapter.set_turns(tool_turns(99) ++ [text_turn("finished at 100")])
+
+      tasks = [%{"id" => "deep", "task" => "Investigate a complex issue."}]
+      result = Subagents.execute(%{"tasks" => tasks}, context(ctx)) |> decode_output()
+
+      assert [worker] = result["results"]
+      assert worker["status"] == "completed"
+      assert worker["iterations"] == 100
+      assert worker["output"] == "finished at 100"
     end
 
     test "partial timeout: a slow worker times out while a fast one completes", ctx do

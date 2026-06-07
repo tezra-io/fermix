@@ -7,6 +7,7 @@ defmodule FermixCore.Tools.SendAttachment do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Sandbox
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @kinds ~w(image document audio video voice)a
 
@@ -87,7 +88,6 @@ defmodule FermixCore.Tools.SendAttachment do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    agent = Map.get(context, :agent_name, "unknown")
 
     result =
       case do_execute(args, context) do
@@ -98,11 +98,7 @@ defmodule FermixCore.Tools.SendAttachment do
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
-    :telemetry.execute(
-      [:fermix, :tool, :exec],
-      %{duration_ms: duration},
-      %{tool: "send_attachment", agent: agent, success: success}
-    )
+    ToolTelemetry.exec("send_attachment", context, success, duration, input: args, result: result)
 
     result
   end

@@ -32,7 +32,9 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.ResponsesShared
+  alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
 
@@ -42,7 +44,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    bearer = require_bearer_token!(opts)
+
+    with {:ok, bearer} <- fetch_bearer_token(opts) do
+      do_chat(messages, capabilities, bearer, req_options, opts)
+    end
+  end
+
+  defp do_chat(messages, capabilities, bearer, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
@@ -67,6 +75,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       tools: tools,
       capabilities: capabilities,
       agent: Keyword.get(opts, :agent),
+      session_id: Keyword.get(opts, :session_id),
+      parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
       request_metrics: ResponsesShared.request_metrics(input, instructions, tools, capabilities)
     }
@@ -77,7 +87,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   @impl true
   def continue(provider_state, tool_results, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
-    bearer = require_bearer_token!(opts)
+
+    with {:ok, bearer} <- fetch_bearer_token(opts) do
+      do_continue(provider_state, tool_results, bearer, req_options, opts)
+    end
+  end
+
+  defp do_continue(provider_state, tool_results, bearer, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
@@ -104,6 +120,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       tools: tools,
       capabilities: caps,
       agent: Keyword.get(opts, :agent),
+      session_id: Keyword.get(opts, :session_id),
+      parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
       request_metrics: ResponsesShared.request_metrics(next_input, nil, tools, caps)
     }
@@ -164,13 +182,13 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       {:error, :context_length_exceeded}
     else
       Logger.error("OpenAI Responses API error: #{status} - #{inspect(body)}")
-      {:error, "OpenAI Responses API error: #{status}"}
+      {:error, ProviderError.api(:openai, :responses, status, body)}
     end
   end
 
   defp handle_response({:error, %Req.TransportError{reason: reason}}, _turn_state) do
     Logger.error("OpenAI Responses transport error: #{inspect(reason)}")
-    {:error, reason}
+    {:error, ProviderError.transport(:openai, :responses, reason)}
   end
 
   defp handle_response({:error, reason}, _turn_state) do
@@ -189,27 +207,39 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     end
   end
 
-  defp require_bearer_token!(opts) do
+  defp fetch_bearer_token(opts) do
     cond do
       key = nonempty_string(Keyword.get(opts, :api_key)) ->
-        key
+        {:ok, key}
 
       key = nonempty_string(Keyword.get(opts, :access_token)) ->
-        key
+        {:ok, key}
 
       token_server = Keyword.get(opts, :token_server) ->
-        case TokenManager.get_token(token_server) do
-          {:ok, token} ->
-            token
-
-          {:error, reason} ->
-            raise ArgumentError,
-                  "OpenAI.Responses requires a bearer token: TokenManager returned #{inspect(reason)}"
-        end
+        bearer_from_token_server(token_server)
 
       true ->
-        raise ArgumentError,
-              "OpenAI.Responses requires :api_key, :access_token, or :token_server"
+        {:error,
+         ProviderError.auth(
+           :openai,
+           :responses,
+           "OpenAI.Responses requires :api_key, :access_token, or :token_server"
+         )}
+    end
+  end
+
+  defp bearer_from_token_server(token_server) do
+    case TokenManager.get_token(token_server) do
+      {:ok, token} ->
+        {:ok, token}
+
+      {:error, reason} ->
+        {:error,
+         ProviderError.auth(
+           :openai,
+           :responses,
+           "OpenAI.Responses requires a bearer token: TokenManager returned #{inspect(reason)}"
+         )}
     end
   end
 
@@ -217,18 +247,17 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp nonempty_string(_), do: nil
 
   defp emit_telemetry(result, turn_state, duration_ms) do
-    {status, tokens} =
+    {status, tokens, output, tool_calls, error_metadata} =
       case result do
         {:ok, resp} ->
-          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens}}
+          {:ok, %{prompt: resp.usage.prompt_tokens, completion: resp.usage.completion_tokens},
+           Map.get(resp, :content), Map.get(resp, :tool_calls), %{}}
 
-        {:error, _} ->
-          {:error, %{}}
+        {:error, reason} ->
+          {:error, %{}, nil, nil, ProviderError.telemetry_metadata(reason)}
       end
 
-    :telemetry.execute(
-      [:fermix, :provider, :call],
-      %{duration_ms: duration_ms},
+    metadata =
       %{
         provider: :openai,
         adapter: :responses,
@@ -238,7 +267,14 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         reasoning_effort: Map.get(turn_state, :reasoning_effort)
       }
       |> Map.merge(Map.get(turn_state, :request_metrics, %{}))
+      |> Map.merge(error_metadata)
       |> maybe_put(:agent, Map.get(turn_state, :agent))
+
+    ProviderTelemetry.emit_call(metadata, duration_ms,
+      session_id: Map.get(turn_state, :session_id),
+      parent_session: Map.get(turn_state, :parent_session),
+      output: output,
+      tool_calls: tool_calls
     )
   end
 end

@@ -9,10 +9,25 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   # Two entry points:
   #
   #   * `parse/1` — single-shot, takes the full SSE body as a binary.
-  #   * `new/0` + `feed/2` + `finalize/1` — incremental, for use inside a
+  #   * `new/1` + `feed/2` + `finalize/1` — incremental, for use inside a
   #     `Req` `:into` callback. `feed/2` carries a `leftover` buffer for
   #     partial events that straddle chunk boundaries; `finalize/1` drains
   #     any tail and produces the body-shaped map.
+  #
+  # `new/1` accepts `delta_callback:` — a 1-arity function invoked with:
+  #   * `{:text_delta, cumulative}` after each `response.output_text.delta`,
+  #     where `cumulative` is the composed text across ALL output indices in
+  #     index order (mirroring `ResponsesShared.extract_text/1`, so the
+  #     streamed prefix always matches the final answer's composition);
+  #   * `{:text_done, cumulative}` when a message output item completes — the
+  #     SEMANTIC block boundary (one model "thought"/message), which block
+  #     streaming uses instead of character counts;
+  #   * `{:reasoning_done, summary}` when a reasoning item completes with a
+  #     non-empty summary (the model's decision-making notes; requested via
+  #     `reasoning.summary = "auto"`).
+  # This is the provider delta seam for channel streaming
+  # (docs/design/CHANNEL_STREAMING.md §5.2); the finalized-body path is
+  # unaffected by the callback.
   #
   # Event grammar handled (others are ignored):
   #
@@ -43,12 +58,19 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
             text_buffers: %{},
             usage: %{},
             model: nil,
-            leftover: ""
+            leftover: "",
+            delta_callback: nil
 
   @type t :: %__MODULE__{}
+  @type delta_callback :: ({:text_delta, String.t()} -> any())
 
-  @spec new() :: t()
-  def new, do: %__MODULE__{}
+  @spec new(keyword()) :: t()
+  def new(opts \\ []) when is_list(opts) do
+    %__MODULE__{delta_callback: validate_delta_callback(Keyword.get(opts, :delta_callback))}
+  end
+
+  defp validate_delta_callback(nil), do: nil
+  defp validate_delta_callback(cb) when is_function(cb, 1), do: cb
 
   @spec parse(binary()) :: %{required(String.t()) => term()}
   def parse(body) when is_binary(body) do
@@ -134,7 +156,9 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
          state
        )
        when is_binary(delta) do
-    %{state | text_buffers: append_buffer(state.text_buffers, idx, delta)}
+    state = %{state | text_buffers: append_buffer(state.text_buffers, idx, delta)}
+    emit_text_delta(state)
+    state
   end
 
   defp reduce_event(
@@ -142,7 +166,9 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
          state
        )
        when is_map(item) do
-    %{state | items: Map.put(state.items, idx, item)}
+    state = %{state | items: Map.put(state.items, idx, item)}
+    emit_item_done(state, item)
+    state
   end
 
   defp reduce_event(%{"type" => type, "response" => resp}, state)
@@ -172,6 +198,53 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
 
   defp append_buffer(buffers, idx, delta) do
     Map.update(buffers, idx, delta, &(&1 <> delta))
+  end
+
+  defp emit_text_delta(%__MODULE__{delta_callback: nil}), do: :ok
+
+  defp emit_text_delta(%__MODULE__{delta_callback: cb} = state) when is_function(cb, 1) do
+    cb.({:text_delta, composed_text(state)})
+    :ok
+  end
+
+  defp emit_item_done(%__MODULE__{delta_callback: nil}, _item), do: :ok
+
+  defp emit_item_done(%__MODULE__{delta_callback: cb} = state, %{"type" => "message"})
+       when is_function(cb, 1) do
+    cb.({:text_done, composed_text(state)})
+    :ok
+  end
+
+  defp emit_item_done(%__MODULE__{delta_callback: cb}, %{"type" => "reasoning"} = item)
+       when is_function(cb, 1) do
+    case reasoning_summary_text(item) do
+      "" -> :ok
+      summary -> cb.({:reasoning_done, summary})
+    end
+
+    :ok
+  end
+
+  defp emit_item_done(_state, _item), do: :ok
+
+  defp reasoning_summary_text(%{"summary" => parts}) when is_list(parts) do
+    parts
+    |> Enum.flat_map(fn
+      %{"text" => text} when is_binary(text) -> [text]
+      _part -> []
+    end)
+    |> Enum.join("\n\n")
+    |> String.trim()
+  end
+
+  defp reasoning_summary_text(_item), do: ""
+
+  # Joined across all output indices in index order — the same composition
+  # ResponsesShared.extract_text/1 applies to the finalized body.
+  defp composed_text(%__MODULE__{text_buffers: buffers}) do
+    buffers
+    |> Enum.sort_by(fn {idx, _text} -> idx end)
+    |> Enum.map_join("", fn {_idx, text} -> text end)
   end
 
   defp build_body(state) do

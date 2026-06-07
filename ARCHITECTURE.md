@@ -18,8 +18,10 @@ At the highest level:
 
 1. A channel adapter receives platform-specific input.
 2. The adapter normalizes it into a `FermixChannels.Message`.
-3. `FermixChannels.Dispatcher` optionally transcribes audio, builds a `reply_fn`,
-   and sends the normalized message to `FermixCore.Agents.MainAgent`.
+3. `FermixChannels.Gateway.ingest/2` authorizes the sender, optionally
+   transcribes audio, dispatches slash commands, builds a `reply_fn`, and hands
+   the turn to `Gateway.Queue`, which runs one FIFO turn per conversation
+   against `FermixCore.Agents.MainAgent`.
 4. `MainAgent` builds prompt context from bootstrap files, prompt memory,
    conversation history, and runtime capability sections.
 5. `FermixCore.AgentLoop` calls the configured provider, executes tool calls
@@ -73,28 +75,24 @@ Controllers and channels should normalize input and delegate.
 
 ### `FermixCore.Agents.MainAgent`
 
-`MainAgent` is the persistent top-level agent process. It accepts normalized
-channel messages, enforces one active request per conversation key, cancels stale
-in-flight work for that same conversation, and lets different conversations run
-independently.
+`MainAgent` is the persistent top-level agent process. It owns runtime-context
+cache state and checks out turn-state snapshots for `Gateway.Queue`, which owns
+FIFO scheduling and one active request per conversation key.
 
 Conversation identity is `{channel, chat_id, thread_scope}`. `thread_ts` is used
 as the canonical thread identifier when present.
 
-When a message is processed, `MainAgent`:
+When a turn-state snapshot is checked out, `MainAgent`:
 
 - loads prompt context through `FermixCore.Prompt.PromptComposer`
 - reads recent conversation history from `FermixCore.Memory.ConversationStore`
 - fetches tools from `FermixCore.Tools.Registry`
 - calls `FermixCore.AgentLoop`
-- writes user and assistant messages back to conversation history
 - emits telemetry
-- replies through the channel-provided `reply_fn`
-- starts asynchronous memory extraction when enabled
 
 Architecture Invariant: `MainAgent` does not know how Telegram, Slack, WhatsApp,
-Discord, Signal, or CLI replies are delivered. The only outbound channel coupling
-is the `reply_fn` carried on the message.
+Discord, Signal, or CLI replies are delivered. The channel `reply_fn` stays with
+`Gateway.Queue` and `TurnRunner`; `MainAgent` hands out core runtime state.
 
 ### `FermixCore.AgentLoop`
 
@@ -234,9 +232,12 @@ The shared channel boundary is:
 - build a one-argument `reply_fn`
 - optionally download attachments for shared transcription
 
-`FermixChannels.Dispatcher` is the bridge from channels into core. It runs the
-shared transcription hook, normalizes map inputs into `Message`, builds the
-reply function, and calls `MainAgent.handle_message/2`.
+`FermixChannels.Gateway.ingest/2` is the bridge from channels into core. It
+normalizes map inputs into `Message`, authorizes the sender, runs the shared
+transcription hook, dispatches slash commands, builds the reply function, and
+hands the turn to `Gateway.Queue` (one FIFO turn per conversation).
+`FermixChannels.Dispatcher` remains only as a thin compatibility alias for
+`Gateway.ingest/2`.
 
 Current adapters:
 
@@ -247,7 +248,7 @@ Current adapters:
 - `Slack` uses signed Events API webhook ingress and Web API replies.
 - `Discord` uses a supervised Gateway connection and REST replies.
 - `Signal` uses a supervised `signal-cli` receive loop and subprocess sends.
-- `CLI` provides a local smoke path through the same dispatcher and agent.
+- `CLI` provides a local smoke path through the same gateway and agent.
 
 Architecture Invariant: channel adapters own platform quirks and auth checks.
 After dispatch, the agent sees only normalized message fields and a `reply_fn`.

@@ -20,6 +20,8 @@ Elixir-native multi-agent AI platform. Phoenix gateway, OTP-supervised agents, R
 - Implement the smallest change that satisfies the design.
 - Run the relevant repo commands below before calling the work done. Default expectation: typecheck or build, tests, and lint.
 - For docs, config, or scaffolding changes, run the relevant checks and say what is not applicable.
+- When a change adds, removes, or materially alters a feature, capability, tool, channel, provider, config surface, or CLI verb, update the `self_knowledge` skill (`apps/fermix_core/priv/skills/self_knowledge/SKILL.md`) in the same change. It is Fermix's runtime self-reference for explaining and fixing itself, and goes stale silently otherwise.
+- When adding/altering a **tool, provider, or run-type**, route its telemetry through the shared emitters so it stays correlatable (and Opik-traceable) — tool events via `FermixCore.Tools.Telemetry.exec/5`, provider calls via `FermixCore.Providers.Telemetry.emit_call/3`; **never** hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`. A new run-type needs a unique `session_id` (+ `parent_session` if spawned) and lifecycle bookend events; a genuinely new event name/run-kind also needs a `fermix_opik` plugin update (`projects/fermix-plugins`). See `docs/TELEMETRY_CONTRACT.md`.
 - Never mark work done without proof.
 
 ## Code Rules (Non-Negotiable)
@@ -53,6 +55,7 @@ mix format --check-formatted
 ```
 
 ## Docs
+- `docs/TELEMETRY_CONTRACT.md` — Telemetry/observability contract — how new tools/providers/run-types stay correlatable + Opik-traceable (shared emitters, `session_id`/`parent_session`, content gating, the cross-repo `fermix_opik` rule)
 - `docs/PROJECT_PLAN.md` — Full plan with phases
 - `docs/PHASE1_TASKS.md` — 16 tasks with implementation code
 - `docs/ROADMAP.md` — Post-MVP feature roadmap (M2-M9)
@@ -75,10 +78,12 @@ mix format --check-formatted
 - `docs/MILESTONE_9_1_REALTIME_VOICE.md` — M9.1 design (shipped) — native macOS floating voice companion backed by OpenAI Realtime, daemon-owned tools/memory/traces, click-to-talk first, always-listening later
 - `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` — M9.2 design (draft reviewed) — full-duplex cleanup for macOS AEC, Realtime API shape, setup prompts, and removed legacy voice mode knobs
 - `docs/MILESTONE_9_3_PET_ANIMATION.md` — M9.3 design (draft) — pure-SwiftUI animation pass for FermixPet: `TimelineView` sine motion, PNG cache, expression cross-fade, audio-RMS speaking pulse, blink, one-shot event reactions
+- `docs/design/ANTHROPIC_XAI_PROVIDER_IMPLEMENTATION.md` — Anthropic + xAI provider design (draft) — API-key + OAuth auth modes (Claude Code / Grok subscription), Claude Code request emulation, provider touchpoint checklist
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
 - **Test cleanup wiped the host (M5-shaped pass, 2026-04).** Codex generated a unit test whose `on_exit` hook called `File.rm_rf!(dir)` on a computed path; an empty interpolation collapsed `dir` to a root path and the host filesystem was wiped during `mix test`. **Rule:** never call `File.rm_rf` / `File.rm_rf!` / `File.rm` / `File.rm!` directly in `test/`. Route through `FermixCore.TestSupport.SafeRm.rm_rf!/1` (lands in M5 Stage 0), which hard-asserts the path is under a tmp prefix with ≥4 segments and no `..`. Sandbox tests must also never call `System.cmd` or `Port.open` — classify dangerous commands as strings via `Sandbox.classify/3`, never execute them. See `docs/MILESTONE_5_WORKSPACE_SANDBOX.md` §11.
+- **Tests overwrote real keychain secrets (secure-on-save, 2026-06).** When secure-on-save landed, tests that persisted config snapshots with fixture secrets ran against the real macOS `security` writer (`-U` updates in place) and clobbered the operator's actual keyring entries (`fermix:OPENAI_API_KEY`, `fermix:TELEGRAM_BOT_TOKEN`) — silently green locally, 24 failures on writer-less Linux CI. **Rule:** any test that can reach `SecretWriter` must run against `FermixTestSupport.SecretWriterStub` — `config/test.exs` now sets it as the test-env default; never delete that default, and tests exercising the writer-less path override with `UnavailableSecretWriter`, not by removing the stub. Same family as the SafeRm rule: tests must never mutate host state (filesystem, keychain, real `FERMIX_HOME`).
 
 ---
 _Every mistake is a rule waiting to be written._

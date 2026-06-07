@@ -24,6 +24,9 @@ defmodule FermixChannels.Gateway.Channel do
           {:ok, %{required(:detail) => String.t(), optional(:latency_ms) => non_neg_integer()}}
           | {:error, term()}
 
+  @typedoc "Opaque draft handle owned by the channel (Telegram: integer message_id)."
+  @type stream_handle :: term()
+
   @doc """
   Parse a webhook payload into messages.
 
@@ -72,5 +75,47 @@ defmodule FermixChannels.Gateway.Channel do
   @doc "Probe configured channel credentials and runtime prerequisites."
   @callback health_check(keyword()) :: health_result()
 
-  @optional_callbacks [start_typing: 1, download_attachment: 2, health_check: 1]
+  @doc """
+  Streaming tier this channel supports (docs/design/CHANNEL_STREAMING.md §5.4).
+
+  `:draft_edit` — the channel can create a message and edit it in place, so
+  it can render a live draft of the reply while the turn runs. Channels
+  without the callback (or returning `:none`) stay typing-only; the gateway
+  resolves this once per turn, never mid-run.
+  """
+  @callback stream_capability() :: :draft_edit | :none
+
+  @doc "Create the live draft message. Returns a handle for later edits."
+  @callback open_draft(message(), String.t()) :: {:ok, stream_handle()} | {:error, term()}
+
+  @doc """
+  Replace the draft's visible text in place. Receives the full cumulative
+  snapshot (the channel re-renders the whole prefix, keeping partial markup
+  balanced). Best-effort: never retried; an error stops further edits for
+  the turn.
+  """
+  @callback edit_draft(message(), stream_handle(), String.t()) :: :ok | {:error, term()}
+
+  @doc """
+  Final reliable write of the authoritative reply text over the draft
+  (retry-wrapped inside the channel). If the text overflows the platform
+  limit, seal the largest fitting prefix in place and return the remainder
+  for normal delivery; `{:ok, nil}` means the whole text was sealed.
+  """
+  @callback seal_draft(message(), stream_handle(), String.t()) ::
+              {:ok, String.t() | nil} | {:error, term()}
+
+  @doc "Delete the draft (turn stopped, superseded, or errored)."
+  @callback discard_draft(message(), stream_handle()) :: :ok | {:error, term()}
+
+  @optional_callbacks [
+    start_typing: 1,
+    download_attachment: 2,
+    health_check: 1,
+    stream_capability: 0,
+    open_draft: 2,
+    edit_draft: 3,
+    seal_draft: 3,
+    discard_draft: 2
+  ]
 end

@@ -9,6 +9,8 @@ config :logger, level: :warning
 
 config :fermix_core, :log, enabled: false
 
+config :fermix_core, :browser, cdp_port_range: 19_100..19_199
+
 config :fermix_core, :memory,
   enabled: false,
   extraction_enabled: false,
@@ -66,3 +68,9 @@ config :phoenix_live_view,
 
 config :phoenix,
   sort_verified_routes_query_params: true
+
+# Hermetic default: tests must never touch a real OS keychain. Secure-on-save
+# (SecretStore) routes through this stub; tests exercising the writer-less path
+# override with FermixTestSupport.UnavailableSecretWriter. The module lives in
+# test/support and is loaded by each app's test_helper.exs.
+config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub

@@ -170,18 +170,23 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert metadata.adapter == :chat_completions
     end
 
-    test "raises when api_key is missing" do
-      assert_raise ArgumentError, ~r/requires :api_key/, fn ->
-        ChatCompletions.chat([], [], model: "gpt-5.4-mini")
-      end
+    test "returns an auth error when api_key is missing" do
+      assert {:error, {:provider_error, %{provider: :openai, kind: :auth, message: message}}} =
+               ChatCompletions.chat([], [], model: "gpt-5.4-mini")
+
+      assert message =~ "requires :api_key"
     end
 
-    test "returns {:error, status} on a non-200 response" do
+    test "returns structured provider errors on a non-200 response" do
       Req.Test.stub(__MODULE__, fn conn ->
-        Plug.Conn.send_resp(conn, 401, Jason.encode!(%{error: %{message: "bad key"}}))
+        Plug.Conn.send_resp(
+          conn,
+          401,
+          Jason.encode!(%{error: %{code: "invalid_api_key", message: "bad key"}})
+        )
       end)
 
-      {:error, message} =
+      {:error, {:provider_error, error}} =
         ChatCompletions.chat([%{role: "user", content: "x"}], [],
           api_key: "sk-test",
           model: "gpt-5.4-mini",
@@ -189,7 +194,53 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
-      assert message == "OpenAI API error: 401"
+      assert error.provider == :openai
+      assert error.adapter == :chat_completions
+      assert error.status == 401
+      assert error.kind == :auth
+      assert error.code == "invalid_api_key"
+      assert error.message == "bad key"
+    end
+
+    test "error telemetry includes provider error details" do
+      test_pid = self()
+      telemetry_id = "chat-completions-provider-error-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        telemetry_id,
+        [:fermix, :provider, :call],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(telemetry_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(
+          conn,
+          429,
+          Jason.encode!(%{error: %{code: "insufficient_quota", message: "quota exhausted"}})
+        )
+      end)
+
+      {:error, {:provider_error, _error}} =
+        ChatCompletions.chat([%{role: "user", content: "x"}], [],
+          api_key: "sk-test",
+          model: "gpt-5.4-mini",
+          base_url: "https://api.openai.com/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry, [:fermix, :provider, :call], measurements,
+                      %{adapter: :chat_completions, error_status: 429} = metadata}
+
+      assert measurements.duration_ms >= 0
+      assert metadata.status == :error
+      assert metadata.error_kind == :quota
+      assert metadata.error_code == "insufficient_quota"
+      assert metadata.error == "quota exhausted"
     end
   end
 

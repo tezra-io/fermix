@@ -9,8 +9,7 @@ defmodule FermixCore.Auth.CodexToken do
 
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
-
-  @refresh_skew_ms 90_000
+  alias FermixCore.Auth.TokenExpiry
 
   @spec get_token(keyword()) :: {:ok, String.t()} | {:error, term()}
   def get_token(opts \\ []) when is_list(opts) do
@@ -58,17 +57,11 @@ defmodule FermixCore.Auth.CodexToken do
     do: {:error, :no_refresh_token}
 
   defp refresh_if_needed(entry, path, refresh_opts) do
-    case refresh_state(entry.expires_at) do
-      :fresh -> {:ok, entry}
-      :refresh -> refresh_entry(entry, path, refresh_opts)
+    if TokenExpiry.refresh_due?(entry.expires_at) do
+      refresh_entry(entry, path, refresh_opts)
+    else
+      {:ok, entry}
     end
-  end
-
-  defp refresh_state(nil), do: :fresh
-
-  defp refresh_state(expires_at) do
-    ms = DateTime.diff(expires_at, DateTime.utc_now(), :millisecond)
-    if ms <= @refresh_skew_ms, do: :refresh, else: :fresh
   end
 
   defp apply_tokens(entry, tokens) do
@@ -78,7 +71,8 @@ defmodule FermixCore.Auth.CodexToken do
           access_token: tokens.access_token,
           refresh_token: tokens.refresh_token || entry.tokens.refresh_token
         },
-        expires_at: tokens.expires_at
+        expires_at: tokens.expires_at,
+        last_refresh: DateTime.utc_now()
     }
   end
 

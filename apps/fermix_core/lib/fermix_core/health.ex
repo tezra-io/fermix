@@ -61,7 +61,7 @@ defmodule FermixCore.Health do
     %{
       status: overall_status(boot_report.status, channels, memory, realtime),
       app: "fermix",
-      version: "0.1.0",
+      version: to_string(Application.spec(:fermix_core, :vsn) || "unknown"),
       timestamp: timestamp,
       failures: Map.get(boot_report, :failures, []),
       config_path: boot_report.config_path,

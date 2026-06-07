@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 14 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 16 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -77,7 +77,11 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     assert contents =~ ~s([sandbox.env.OPENAI_API_KEY])
     assert contents =~ ~s([sandbox.env.ANTHROPIC_API_KEY])
     assert contents =~ ~s(source = "command")
-    assert contents =~ ~s(command = "/usr/bin/security")
+    assert contents =~ ~s(command = "stub-keyring")
+
+    assert contents =~
+             ~s(args = ["openai_api_key"])
+
     assert contents =~ ~r/allow = \[[^\]]*"OPENAI_API_KEY"/
     assert contents =~ ~r/allow = \[[^\]]*"ANTHROPIC_API_KEY"/
 
@@ -120,12 +124,20 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_core.providers.anthropic]
     api_key = "sk-ant-old"
 
+    [fermix_core.providers.xai]
+    api_key = "xai-old"
+
     [fermix_core.tools.web_search]
     tavily_api_key = "tavily-old"
     exa_api_key = "exa-old"
     parallel_api_key = "parallel-old"
     brave_api_key = "brave-old"
     perplexity_api_key = "perplexity-old"
+
+    [fermix_core.oauth.google]
+    client_type = "desktop_public_pkce"
+    client_id = "123.apps.googleusercontent.com"
+    client_secret = "google-oauth-old"
 
     [fermix_channels.telegram]
     bot_token = "telegram-old"
@@ -149,11 +161,13 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     %{
       openai_api_key: "sk-old",
       anthropic_api_key: "sk-ant-old",
+      xai_api_key: "xai-old",
       tavily_api_key: "tavily-old",
       exa_api_key: "exa-old",
       parallel_api_key: "parallel-old",
       brave_api_key: "brave-old",
       perplexity_api_key: "perplexity-old",
+      google_oauth_client_secret: "google-oauth-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",

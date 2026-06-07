@@ -3,6 +3,7 @@ defmodule FermixCore.Sandbox.Env do
   Builds child-process environments from explicit sandbox passthrough config.
   """
 
+  alias FermixCore.CommandRunner
   alias FermixCore.Sandbox.Config
 
   @default_keys ~w(PATH HOME USER LANG SHELL TMPDIR)
@@ -43,6 +44,11 @@ defmodule FermixCore.Sandbox.Env do
   def format_error({:missing_env, name}) when is_binary(name) do
     "#{name} could not be resolved via configured source. Run " <>
       "`fermix sandbox env set #{name} -- <helper> [args...]` to reconfigure."
+  end
+
+  def format_error({:env_command_not_found, command}) when is_binary(command) do
+    "#{command} could not be found while resolving an env value. Install it or reconfigure " <>
+      "with `fermix sandbox env set NAME -- <helper> [args...]`."
   end
 
   def format_error({:env_command_failed, command, code, output}) do
@@ -133,21 +139,37 @@ defmodule FermixCore.Sandbox.Env do
 
   defp read_command(%{command: command, args: args, timeout_ms: timeout})
        when is_binary(command) do
-    task = Task.async(fn -> System.cmd(command, args, stderr_to_stdout: true) end)
-
-    case Task.yield(task, timeout) || Task.shutdown(task) do
-      {:ok, {output, 0}} ->
-        normalize_secret_output(output)
-
-      {:ok, {output, code}} ->
-        {:error, {:env_command_failed, command, code, String.slice(output, 0, 200)}}
-
-      nil ->
-        {:error, {:env_command_timeout, command, timeout}}
+    case System.find_executable(command) do
+      nil -> {:error, {:env_command_not_found, command}}
+      executable -> run_command(command, executable, args, timeout)
     end
   end
 
   defp read_command(_source), do: {:error, :invalid_env_command_source}
+
+  # CommandRunner kills the OS child on timeout — the prior Task.async +
+  # System.cmd pattern only ended the BEAM task and left the helper running.
+  defp run_command(command, executable, args, timeout) do
+    case CommandRunner.run(executable, args, timeout_ms: timeout) do
+      {:ok, %{truncated?: true}} ->
+        {:error, :env_command_output_too_large}
+
+      {:ok, %{exit: 0, stdout: output}} ->
+        normalize_secret_output(output)
+
+      {:ok, %{exit: code, stdout: output}} ->
+        {:error, {:env_command_failed, command, code, String.slice(output, 0, 200)}}
+
+      {:error, {:timeout, ^timeout}} ->
+        {:error, {:env_command_timeout, command, timeout}}
+
+      {:error, {:executable_not_found, _path}} ->
+        {:error, {:env_command_not_found, command}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp normalize_secret_output(output) when byte_size(output) <= @secret_max_bytes do
     output

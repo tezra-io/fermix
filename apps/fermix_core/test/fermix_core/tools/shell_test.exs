@@ -214,6 +214,25 @@ defmodule FermixCore.Tools.ShellTest do
       :telemetry.detach(handler_id)
     end
 
+    test "includes bounded redacted command failure details" do
+      handler_id = attach_telemetry()
+
+      Shell.execute(
+        %{"command" => "API_TOKEN=super-secret sh -c 'echo nope; exit 7'"},
+        @context
+      )
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.success == false
+      assert metadata.command =~ "API_TOKEN=[REDACTED]"
+      refute metadata.command =~ "super-secret"
+      assert metadata.exit_code == 7
+      assert metadata.failure == "exit_nonzero"
+      assert metadata.error_summary =~ "exit code 7"
+
+      :telemetry.detach(handler_id)
+    end
+
     test "emits telemetry even on validation error" do
       handler_id = attach_telemetry()
 
