@@ -11,7 +11,6 @@ Use this skill when the Google Calendar plugin is enabled and connected. It turn
 
 - `google_calendar_search_events` (read-only) — find events. Args: `query`, optional `calendar_id` (default `primary`), `max_results` (default 10).
 - `google_calendar_create_event` — add an event. Args: `summary`, `start`, `end` (ISO 8601), optional `description`, `calendar_id`, `time_zone` (IANA).
-- `google_calendar_quick_add_event` — create an event from a natural-language phrase. Args: `text` (e.g. "Lunch with Sara tomorrow 1pm"), optional `calendar_id`.
 - `google_calendar_update_event` — change fields on an existing event (partial). Args: `event_id`, plus any of `summary`, `description`, `location`, `start`, `end`, `time_zone`; optional `calendar_id`, `send_updates`.
 - `google_calendar_respond_to_event` — RSVP to an invite. Args: `event_id`, `response_status` (`accepted` | `declined` | `tentative`); optional `calendar_id`, `send_updates`. Preserves the other attendees.
 - `google_calendar_move_event` — move an event to another calendar. Args: `event_id`, `destination_calendar_id`; optional `calendar_id` (source), `send_updates`.
