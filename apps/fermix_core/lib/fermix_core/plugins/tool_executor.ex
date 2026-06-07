@@ -159,7 +159,11 @@ defmodule FermixCore.Plugins.ToolExecutor do
   def parameters("google_calendar_respond_to_event") do
     object_schema(["event_id", "response_status"], %{
       "event_id" => %{type: "string"},
-      "response_status" => %{type: "string", description: "accepted | declined | tentative."},
+      "response_status" => %{
+        type: "string",
+        enum: ["accepted", "declined", "tentative"],
+        description: "accepted | declined | tentative."
+      },
       "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
       "send_updates" => %{type: "string", description: "all | externalOnly | none."}
     })
@@ -170,14 +174,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
       "event_id" => %{type: "string"},
       "destination_calendar_id" => %{type: "string", description: "Target calendar id."},
       "calendar_id" => %{type: "string", description: "Source calendar id, default primary."},
-      "send_updates" => %{type: "string", description: "all | externalOnly | none."}
-    })
-  end
-
-  def parameters("google_calendar_quick_add_event") do
-    object_schema(["text"], %{
-      "text" => %{type: "string", description: "Natural-language event, e.g. \"Lunch 1pm\"."},
-      "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
       "send_updates" => %{type: "string", description: "all | externalOnly | none."}
     })
   end
@@ -233,17 +229,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   def parameters("google_drive_delete_file") do
     object_schema(["file_id"], %{"file_id" => %{type: "string"}})
-  end
-
-  def parameters("google_drive_share_file") do
-    object_schema(["file_id", "role", "type"], %{
-      "file_id" => %{type: "string"},
-      "role" => %{type: "string", description: "reader | commenter | writer."},
-      "type" => %{type: "string", description: "user | group | domain | anyone."},
-      "email_address" => %{type: "string", description: "For type user/group."},
-      "domain" => %{type: "string", description: "For type domain."},
-      "send_notification_email" => %{type: "boolean"}
-    })
   end
 
   def parameters(_name), do: object_schema([], %{})
@@ -401,7 +386,8 @@ defmodule FermixCore.Plugins.ToolExecutor do
     url = event_url(args)
     status = Map.get(args, "response_status")
 
-    with {:ok, event} <- http_request(:get, url, token, base),
+    with :ok <- validate_response_status(status),
+         {:ok, event} <- http_request(:get, url, token, base),
          {:ok, attendees} <- rsvp_attendees(Map.get(event, "attendees"), status) do
       request(:patch, url, token, [
         {:json, %{"attendees" => attendees}},
@@ -430,28 +416,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
       })
 
     request(:post, "#{event_url(args)}/move", token, [{:params, params} | base])
-  end
-
-  defp dispatch(
-         "google_calendar_quick_add_event",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    calendar_id = Map.get(args, "calendar_id", "primary")
-
-    params =
-      drop_blank_values(%{
-        "text" => Map.get(args, "text"),
-        "sendUpdates" => Map.get(args, "send_updates")
-      })
-
-    url = "#{@calendar_base}/calendars/#{URI.encode(calendar_id)}/events/quickAdd"
-    request(:post, url, token, [{:params, params} | base])
   end
 
   defp dispatch("gmail_search_messages", args, context, plugin_name, auth_profile, token, tool) do
@@ -576,6 +540,10 @@ defmodule FermixCore.Plugins.ToolExecutor do
     ])
   end
 
+  # google_drive_trash_file and google_drive_delete_file are implemented and tested
+  # but withheld from google_drive/plugin.json (so they do not register as agent
+  # tools) pending the M10 runtime approval flow. Re-add their manifest entries to
+  # enable; kept together here so both stay verified.
   defp dispatch("google_drive_trash_file", args, context, plugin_name, auth_profile, token, tool) do
     base = base_opts(context, plugin_name, auth_profile, tool)
     trashed = Map.get(args, "restore", false) != true
@@ -588,26 +556,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp dispatch("google_drive_delete_file", args, context, plugin_name, auth_profile, token, tool) do
     base = base_opts(context, plugin_name, auth_profile, tool)
     request(:delete, "#{@drive_base}/files/#{Map.get(args, "file_id")}", token, base)
-  end
-
-  defp dispatch("google_drive_share_file", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-
-    body =
-      drop_blank_values(%{
-        "role" => Map.get(args, "role"),
-        "type" => Map.get(args, "type"),
-        "emailAddress" => Map.get(args, "email_address"),
-        "domain" => Map.get(args, "domain")
-      })
-
-    params =
-      drop_blank_values(%{"sendNotificationEmail" => Map.get(args, "send_notification_email")})
-
-    request(:post, "#{@drive_base}/files/#{Map.get(args, "file_id")}/permissions", token, [
-      {:json, body},
-      {:params, params} | base
-    ])
   end
 
   defp dispatch("gmail_send_message", args, context, plugin_name, auth_profile, token, tool) do
@@ -919,6 +867,12 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp calendar_send_updates(args) do
     drop_blank_values(%{"sendUpdates" => Map.get(args, "send_updates")})
+  end
+
+  defp validate_response_status(status) when status in ~w(accepted declined tentative), do: :ok
+
+  defp validate_response_status(_status) do
+    {:error, Tool.error("response_status must be one of: accepted, declined, tentative")}
   end
 
   # RSVP preserves the full attendee list and only flips the authenticated

@@ -656,6 +656,27 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert Enum.any?(attendees, &(&1["email"] == "other@x.test"))
   end
 
+  test "rejects an invalid RSVP response_status without calling the provider" do
+    parent = self()
+
+    plug = fn conn ->
+      send(parent, {:cal, conn.method, conn.request_path})
+      Plug.Conn.send_resp(conn, 200, "{}")
+    end
+
+    assert {:ok, result} =
+             ToolExecutor.execute(
+               %{"event_id" => "evt-1", "response_status" => "maybe"},
+               calendar_context(plug),
+               "google_calendar",
+               %{"name" => "google_calendar_respond_to_event", "read_only" => false}
+             )
+
+    assert result.success == false
+    assert result.error =~ "response_status must be"
+    refute_received {:cal, _method, _path}
+  end
+
   test "moves an event to another calendar" do
     parent = self()
 
@@ -679,31 +700,6 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.success == true
     assert_received {:cal, "POST", "/calendar/v3/calendars/primary/events/evt-1/move", params}
     assert params["destination"] == "cal-2"
-  end
-
-  test "quick-adds an event from natural language" do
-    parent = self()
-
-    plug = fn conn ->
-      conn = Plug.Conn.fetch_query_params(conn)
-      send(parent, {:cal, conn.method, conn.request_path, conn.query_params})
-
-      conn
-      |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "evt-9"}))
-    end
-
-    assert {:ok, result} =
-             ToolExecutor.execute(
-               %{"text" => "Lunch tomorrow 1pm"},
-               calendar_context(plug),
-               "google_calendar",
-               %{"name" => "google_calendar_quick_add_event", "read_only" => false}
-             )
-
-    assert result.success == true
-    assert_received {:cal, "POST", "/calendar/v3/calendars/primary/events/quickAdd", params}
-    assert params["text"] == "Lunch tomorrow 1pm"
   end
 
   defp drive_context(plug) do
@@ -893,38 +889,5 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.success == true
     assert Jason.decode!(result.output) == %{"ok" => true}
     assert_received {:drive, "DELETE", "/drive/v3/files/file-1"}
-  end
-
-  test "shares a Drive file with a user" do
-    parent = self()
-
-    plug = fn conn ->
-      {:ok, raw, conn} = Plug.Conn.read_body(conn)
-      send(parent, {:drive, conn.method, conn.request_path, raw})
-
-      conn
-      |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "perm-1", "role" => "reader"}))
-    end
-
-    assert {:ok, result} =
-             ToolExecutor.execute(
-               %{
-                 "file_id" => "file-1",
-                 "role" => "reader",
-                 "type" => "user",
-                 "email_address" => "a@b.test"
-               },
-               drive_context(plug),
-               "google_drive",
-               %{"name" => "google_drive_share_file", "read_only" => false}
-             )
-
-    assert result.success == true
-    assert_received {:drive, "POST", "/drive/v3/files/file-1/permissions", raw}
-    decoded = Jason.decode!(raw)
-    assert decoded["role"] == "reader"
-    assert decoded["type"] == "user"
-    assert decoded["emailAddress"] == "a@b.test"
   end
 end

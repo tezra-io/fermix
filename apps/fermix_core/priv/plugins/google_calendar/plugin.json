@@ -70,13 +70,6 @@
       "policy_class": "external_api",
       "read_only": false,
       "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
-    },
-    {
-      "name": "google_calendar_quick_add_event",
-      "description": "Create an event from a natural-language phrase.",
-      "policy_class": "external_api",
-      "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
     }
   ],
   "skills": [

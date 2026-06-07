@@ -2,7 +2,7 @@
   "schema_version": 1,
   "name": "google_drive",
   "display_name": "Google Drive",
-  "description": "Search Drive and create, edit, organize, share, or delete files from Fermix with a connected Google account.",
+  "description": "Search Drive and create, edit, organize, and copy files from Fermix with a connected Google account.",
   "category": "productivity",
   "version": "1.0.0",
   "default_enabled": false,
@@ -24,6 +24,7 @@
       "openid",
       "email",
       "profile",
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
       "https://www.googleapis.com/auth/drive"
     ]
   },
@@ -33,7 +34,7 @@
       "description": "Search Google Drive file metadata.",
       "policy_class": "external_api",
       "read_only": true,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
+      "requires_scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"]
     },
     {
       "name": "google_drive_create_folder",
@@ -66,27 +67,6 @@
     {
       "name": "google_drive_copy_file",
       "description": "Copy a Drive file.",
-      "policy_class": "external_api",
-      "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
-    },
-    {
-      "name": "google_drive_trash_file",
-      "description": "Move a Drive file to Trash (or restore it).",
-      "policy_class": "external_api",
-      "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
-    },
-    {
-      "name": "google_drive_delete_file",
-      "description": "Permanently delete a Drive file.",
-      "policy_class": "external_api",
-      "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
-    },
-    {
-      "name": "google_drive_share_file",
-      "description": "Share a Drive file (create a permission).",
       "policy_class": "external_api",
       "read_only": false,
       "requires_scopes": ["https://www.googleapis.com/auth/drive"]
