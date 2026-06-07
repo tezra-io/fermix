@@ -81,6 +81,50 @@ defmodule FermixCore.Auth.CodexTokenTest do
     assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "new_rt"
   end
 
+  test "does not refresh a recently refreshed short-lived token on the next read" do
+    dir = tmp_dir()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    test_pid = self()
+
+    path =
+      write_auth_file(dir, %{
+        "auth_mode" => "chatgpt",
+        "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+        "expires_at" => future_iso8601(1)
+      })
+
+    refresh_plug = fn conn ->
+      send(test_pid, :refresh_called)
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        200,
+        Jason.encode!(%{
+          "access_token" => "new_at",
+          "refresh_token" => "new_rt",
+          "expires_in" => 60
+        })
+      )
+    end
+
+    assert {:ok, "new_at"} =
+             CodexToken.get_token(
+               fermix_auth_path: path,
+               refresh_req_options: [plug: refresh_plug]
+             )
+
+    assert_receive :refresh_called
+
+    assert {:ok, "new_at"} =
+             CodexToken.get_token(
+               fermix_auth_path: path,
+               refresh_req_options: [plug: refresh_plug]
+             )
+
+    refute_receive :refresh_called, 100
+  end
+
   test "returns a visible error when an expired token has no refresh token" do
     dir = tmp_dir()
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)

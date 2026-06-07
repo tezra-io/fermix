@@ -131,6 +131,46 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
+
+    test "reuses a recently refreshed short-lived token" do
+      dir = tmp_dir()
+      test_pid = self()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+              "expires_at" => future_iso8601(1)
+            }
+          }
+        })
+
+      refresh_plug = fn conn ->
+        send(test_pid, :refresh_called)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "new_at",
+            "refresh_token" => "new_rt",
+            "expires_in" => 60
+          })
+        )
+      end
+
+      name = start_manager(fermix_auth_path: fermix_path, req_options: [plug: refresh_plug])
+      assert {:ok, "new_at"} = TokenManager.get_token(name)
+      assert_receive :refresh_called
+      assert {:ok, "new_at"} = TokenManager.get_token(name)
+      refute_receive :refresh_called, 100
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
   end
 
   describe "refresh/1" do
@@ -379,61 +419,6 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
-
-    test "a scheduled refresh hitting tier denial stops the timer instead of looping" do
-      dir = tmp_dir()
-      fermix_path = write_xai_auth(dir)
-
-      name =
-        start_manager(
-          auth_profile: "xai_oauth",
-          fermix_auth_path: fermix_path,
-          req_options: [plug: &__MODULE__.tier_denied_403_plug/1]
-        )
-
-      pid = Process.whereis(name)
-      send(pid, :refresh)
-
-      # The manager must survive and must NOT re-arm the retry timer —
-      # a 403 entitlement denial can never be fixed by retrying (§6.5).
-      :ok = wait_until(fn -> :sys.get_state(pid).refresh_timer == nil end)
-      assert Process.alive?(pid)
-
-      FermixTestSupport.SafeRm.rm_rf!(dir)
-    end
-
-    test "a scheduled refresh hitting a permanent failure stops instead of looping" do
-      dir = tmp_dir()
-      fermix_path = write_xai_auth(dir)
-
-      name =
-        start_manager(
-          auth_profile: "xai_oauth",
-          fermix_auth_path: fermix_path,
-          req_options: [plug: &__MODULE__.permanent_400_plug/1]
-        )
-
-      pid = Process.whereis(name)
-      send(pid, :refresh)
-
-      :ok = wait_until(fn -> :sys.get_state(pid).invalidated end)
-      assert :sys.get_state(pid).refresh_timer == nil
-      assert Process.alive?(pid)
-
-      FermixTestSupport.SafeRm.rm_rf!(dir)
-    end
-
-    defp wait_until(fun, attempts \\ 50)
-    defp wait_until(_fun, 0), do: {:error, :timeout}
-
-    defp wait_until(fun, attempts) do
-      if fun.() do
-        :ok
-      else
-        Process.sleep(10)
-        wait_until(fun, attempts - 1)
-      end
-    end
   end
 
   describe "permanent refresh failures" do
@@ -480,8 +465,35 @@ defmodule FermixCore.Auth.TokenManagerTest do
     end
   end
 
-  describe "scheduled refresh" do
-    test "stays alive when scheduled refresh fires and fails" do
+  describe "lazy refresh" do
+    test "does not refresh after startup without a get_token or explicit refresh call" do
+      dir = tmp_dir()
+      test_pid = self()
+
+      fermix_path =
+        write_auth_file(dir, "fermix_auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "soon", "refresh_token" => "rt"},
+              "expires_at" => future_iso8601(2)
+            }
+          }
+        })
+
+      refresh_plug = fn conn ->
+        send(test_pid, :refresh_called)
+        __MODULE__.refresh_plug(conn)
+      end
+
+      _name = start_manager(fermix_auth_path: fermix_path, req_options: [plug: refresh_plug])
+      refute_receive :refresh_called, 1_500
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "stays alive when lazy refresh fails during get_token" do
       dir = tmp_dir()
 
       fermix_path =
@@ -498,7 +510,6 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:error, "Refresh failed (500): \"test-noop\""} = TokenManager.get_token(name)
-      Process.sleep(1_500)
       assert Process.whereis(name) |> Process.alive?()
 
       FermixTestSupport.SafeRm.rm_rf!(dir)

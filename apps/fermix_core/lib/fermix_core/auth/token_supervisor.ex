@@ -9,6 +9,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
 
   @registry FermixCore.Auth.TokenRegistry
@@ -143,18 +144,19 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
-  defp direct_read_entry(auth_profile, %{tokens: %{access_token: token}, expires_at: expires_at})
+  defp direct_read_entry(
+         auth_profile,
+         %{tokens: %{access_token: token}, expires_at: expires_at}
+       )
        when is_binary(token) and token != "" do
-    if should_refresh?(expires_at), do: direct_refresh(auth_profile), else: {:ok, token}
+    if TokenExpiry.refresh_due?(expires_at) do
+      direct_refresh(auth_profile)
+    else
+      {:ok, token}
+    end
   end
 
   defp direct_read_entry(_auth_profile, _entry), do: {:error, :no_token}
-
-  defp should_refresh?(nil), do: false
-
-  defp should_refresh?(expires_at) do
-    DateTime.diff(expires_at, DateTime.utc_now(), :millisecond) <= 120_000
-  end
 
   defp direct_status(auth_profile) do
     case Store.read(auth_profile) do
@@ -293,6 +295,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
           refresh_token: tokens.refresh_token || entry.tokens.refresh_token
         },
         expires_at: tokens.expires_at,
+        last_refresh: DateTime.utc_now(),
         status: "ready"
     }
   end
