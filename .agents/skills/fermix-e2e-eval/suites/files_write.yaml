@@ -1,0 +1,83 @@
+suite: files_write
+title: "Filesystem writes — create and edit scratch files"
+description: >
+  Exercises the assistant's ability to write to the daemon workspace: creating a
+  small text file at an eval-scoped scratch path, and adding/appending a line to a
+  file. These cases create REAL scratch files in the daemon's workspace under
+  eval_scratch/ — they are clearly temporary, eval-owned paths and are safe to
+  leave behind. Gates are tolerant of the model's route: a brand-new file may go
+  through file_write, while adding a line to an existing file may use either
+  file_edit or file_write depending on how the model frames the change, so the
+  edit/append scenario accepts both. We assert the relevant write tool fired and
+  that the reply confirms the create/edit, but never pin exact tool order.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: create_scratch_file
+    title: "Creates a small text file at a scratch path"
+    severity: normal
+    tags: [files, write, core]
+    cases:
+      - id: notes_file
+        query: "Create a small text file at eval_scratch/notes.txt with the single line: hello from fermix"
+        expect:
+          tools_any: [file_write]
+          reply_matches: "(?i)created|wrote|written|saved|notes\\.txt"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Confirms it created eval_scratch/notes.txt containing the line 'hello from fermix'."
+      - id: todo_file
+        query: "Please make a new file eval_scratch/todo.txt and put 'buy milk' in it."
+        expect:
+          tools_any: [file_write]
+          reply_matches: "(?i)created|made|wrote|written|saved|todo\\.txt"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Confirms it created eval_scratch/todo.txt containing 'buy milk'."
+      - id: greeting_file
+        query: "Write a text file to eval_scratch/greeting.txt whose contents are exactly: good morning"
+        expect:
+          tools_any: [file_write]
+          reply_matches: "(?i)wrote|written|created|saved|greeting\\.txt"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Confirms it wrote eval_scratch/greeting.txt containing 'good morning'."
+
+  - id: create_then_append
+    title: "Creates a file, then adds a line to it"
+    severity: normal
+    tags: [files, write, edit]
+    cases:
+      - id: shopping_list
+        turns:
+          - query: "Create a file at eval_scratch/shopping.txt with one line: apples"
+            expect:
+              tools_any: [file_write]
+              reply_matches: "(?i)created|wrote|written|saved|shopping\\.txt"
+          - query: "Now add a second line to that file that says: bananas"
+            expect:
+              tools_any: [file_edit, file_write]
+              reply_matches: "(?i)added|appended|updated|edited|bananas"
+        expect:
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: "Creates eval_scratch/shopping.txt with 'apples', then adds a 'bananas' line, confirming the update."
+      - id: log_file
+        turns:
+          - query: "Make a new file eval_scratch/log.txt containing the line: start"
+            expect:
+              tools_any: [file_write]
+              reply_matches: "(?i)created|made|wrote|written|saved|log\\.txt"
+          - query: "Append a line to eval_scratch/log.txt that reads: end"
+            expect:
+              tools_any: [file_edit, file_write]
+              reply_matches: "(?i)appended|added|updated|edited|end"
+        expect:
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: "Creates eval_scratch/log.txt with 'start', then appends an 'end' line, confirming the change."

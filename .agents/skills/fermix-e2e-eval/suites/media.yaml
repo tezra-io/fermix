@@ -1,0 +1,83 @@
+suite: media
+title: "Media — outbound attachments via send_attachment"
+description: >
+  Exercises the outbound attachment path (the send_attachment builtin tool). The
+  harness drives the local CLI channel, which has NO media reply port — so there
+  are exactly two valid outcomes for any "send me this file" request and the gates
+  tolerate both: (a) the model calls send_attachment and the delivery fails with a
+  media-unsupported / no-channel-reply error (the tool span carries error_info),
+  or (b) the model recognises the CLI can't carry attachments and explains so in
+  text without calling the tool. Because the tool-error outcome is EXPECTED here,
+  these cases deliberately do NOT assert no_tool_errors and the suite does not
+  default it on — the turn itself still completes (status ok). Gates lean on a
+  tolerant reply regex (attach / file / can't / cannot / channel / unsupported /
+  here's the …) and only loosely probe the tool route with tools_any. Every query
+  names a concrete file so the model has something specific to "attach".
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: attach_local_file
+    title: "Asked to attach a concrete local file on the CLI channel"
+    severity: normal
+    tags: [media, attachments]
+    cases:
+      - id: send_pdf_report
+        query: "Send me the file ~/reports/q2-summary.pdf as an attachment please."
+        expect:
+          reply_matches: "(?i)attach|file|can'?t|cannot|channel|unsupported|here'?s the"
+          max_cost_usd: 0.6
+          max_duration_ms: 90000
+        rubric: >
+          Either attempts to attach q2-summary.pdf or clearly explains that the
+          current CLI channel can't carry file attachments. Does not falsely claim
+          a file was successfully delivered when this channel can't send media.
+      - id: attach_logfile
+        query: "Can you attach /tmp/build.log so I can download it?"
+        expect:
+          reply_matches: "(?i)attach|file|can'?t|cannot|channel|unsupported|here'?s the"
+          max_cost_usd: 0.6
+          max_duration_ms: 90000
+        rubric: >
+          Attempts to send build.log via send_attachment or explains the CLI
+          channel doesn't support attachments. No fabricated success.
+      - id: send_image
+        query: "Please send the screenshot at ./screenshots/login-bug.png to me."
+        expect:
+          reply_matches: "(?i)attach|file|image|can'?t|cannot|channel|unsupported|here'?s the"
+          max_cost_usd: 0.6
+          max_duration_ms: 90000
+        rubric: >
+          Tries to attach login-bug.png or states the channel can't send images,
+          without inventing a successful delivery.
+
+  - id: tries_send_attachment_tool
+    title: "Model reaches for the send_attachment tool on an explicit request"
+    severity: normal
+    tags: [media, attachments, tool-route]
+    cases:
+      - id: explicit_attach_csv
+        query: "Attach the file data/exports/users.csv to this conversation."
+        expect:
+          tools_any: [send_attachment]
+          reply_matches: "(?i)attach|file|csv|can'?t|cannot|channel|unsupported|here'?s the"
+          max_cost_usd: 0.8
+          max_duration_ms: 120000
+        rubric: >
+          Calls send_attachment for users.csv (delivery is expected to fail on the
+          CLI channel) and then explains the channel limitation rather than
+          claiming success.
+      - id: explicit_attach_archive
+        query: "Use your attachment tool to send me /Users/me/Downloads/backup.zip."
+        expect:
+          tools_any: [send_attachment]
+          reply_matches: "(?i)attach|file|zip|can'?t|cannot|channel|unsupported|here'?s the"
+          max_cost_usd: 0.8
+          max_duration_ms: 120000
+        rubric: >
+          Invokes send_attachment for backup.zip; on the media-unsupported error
+          it reports that the CLI channel can't deliver attachments instead of
+          asserting the file was sent.
