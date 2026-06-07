@@ -1,0 +1,181 @@
+suite: knowledge_qa
+title: "Knowledge Q&A — answer directly from reasoning, no tools"
+description: >
+  The foundational smoke test: plain reasoning and Q&A the model should answer
+  straight from its own knowledge, without reaching for tools. Covers arithmetic
+  and logic, definitions, short explanations, "explain like I'm five", a small
+  self-contained coding question, and simple comparisons. Gates assert the reply
+  content and keep iterations/cost small. Where the answer is unambiguously a
+  closed-form fact (math, definitions, language trivia), we add tools_none to
+  prove it answered directly rather than searching/shelling out. We deliberately
+  do NOT use tools_none on questions a model might legitimately look up (current
+  events, version-specific library behaviour) — none of those appear here.
+defaults:
+  timeout_ms: 120000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: arithmetic_and_logic
+    title: "Arithmetic and simple logic, answered from reasoning"
+    severity: normal
+    tags: [knowledge, math, no-tools]
+    cases:
+      - id: percentage_calc
+        query: "What's 15% of 240? Just the number is fine."
+        expect:
+          reply_matches: "(?i)\\b36\\b"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Answers that 15% of 240 is 36."
+      - id: word_problem
+        query: "If a train leaves at 2:15pm and arrives at 4:45pm, how long was the trip?"
+        expect:
+          reply_matches: "(?i)2\\s*(hours?|hrs?)\\s*(and\\s*)?30\\s*min|2\\s*h(ours?)?\\s*30|two and a half|150\\s*min"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Answers that the trip took 2 hours and 30 minutes."
+      - id: parity_logic
+        query: "I have 3 red socks and 4 blue socks in a drawer. If I pull two socks at random, can I be sure they match? Yes or no, and why."
+        expect:
+          reply_matches: "(?i)\\bno\\b"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 3
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "Answers no — two random socks are not guaranteed to be the same colour."
+
+  - id: definitions
+    title: "Plain definitions answered without lookup"
+    severity: normal
+    tags: [knowledge, definitions, no-tools]
+    cases:
+      - id: define_photosynthesis
+        query: "In one sentence, what is photosynthesis?"
+        expect:
+          reply_matches: "(?i)(sun)?light.*(energy|sugar|glucose|food)|plants?.*(light|sunlight).*(energy|food|sugar)"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Defines photosynthesis as plants converting light into chemical energy/food."
+      - id: define_inflation
+        query: "What does the word 'inflation' mean in economics?"
+        expect:
+          reply_matches: "(?i)(general|overall|sustained).*(rise|increase).*pric|pric.*(rise|increase|go(ing)? up)|purchasing power"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Defines inflation as a general rise in prices / fall in purchasing power."
+      - id: define_idempotent
+        query: "What does it mean for an HTTP method to be idempotent?"
+        expect:
+          reply_matches: "(?i)(same|identical).*(result|effect|state)|repeat(ed|ing)?.*(no|same|without).*(additional|further|extra|different)|multiple.*(times|requests).*same"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "Explains idempotent as repeating the request yielding the same effect/state as doing it once."
+
+  - id: explain_like_five
+    title: "Short, simple explanations of a concept"
+    severity: normal
+    tags: [knowledge, explain]
+    cases:
+      - id: eli5_gravity
+        query: "Explain gravity like I'm five."
+        expect:
+          reply_matches: "(?i)(pull|pulls|pulling|attract).*(down|earth|ground|together|each other)|things? fall"
+          max_iterations: 2
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "Explains gravity simply as the pull that brings things toward the ground / each other."
+      - id: eli5_wifi
+        query: "How does WiFi work? Keep it really simple, like explaining to a kid."
+        expect:
+          reply_matches: "(?i)(radio|invisible).*(wave|signal)|wireless.*(signal|wave)|through the air"
+          max_iterations: 3
+          max_cost_usd: 0.5
+          max_duration_ms: 75000
+        rubric: "Explains WiFi simply as sending data through invisible radio waves through the air."
+      - id: eli5_recursion
+        query: "Explain recursion in plain English to someone new to programming."
+        expect:
+          reply_matches: "(?i)(call|calls|calling|defin).*itself|repeat.*smaller|breaks?.*(down|into).*smaller"
+          max_iterations: 3
+          max_cost_usd: 0.5
+          max_duration_ms: 75000
+        rubric: "Explains recursion as a function that calls itself / breaks a problem into smaller versions of itself."
+
+  - id: small_coding_question
+    title: "A small coding question answerable from knowledge"
+    severity: normal
+    tags: [knowledge, coding, no-tools]
+    cases:
+      - id: reverse_string_python
+        query: "What's the shortest way to reverse a string in Python?"
+        expect:
+          reply_matches: "(?i)\\[::-1\\]"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "Gives the Python slice idiom s[::-1] for reversing a string."
+      - id: list_vs_tuple
+        query: "In Python, what's the main difference between a list and a tuple?"
+        expect:
+          reply_matches: "(?i)mutab|immutab|can(no|')?t.*(change|modif|reassign)|tuples?.*(fixed|immutable)"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "States that lists are mutable and tuples are immutable."
+      - id: fizzbuzz_modulo
+        query: "In a FizzBuzz, which operator do you use to check if a number is divisible by 3?"
+        expect:
+          reply_matches: "(?i)modul(o|us)|remainder|%|mod\\b"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Identifies the modulo / remainder operator (%) as the divisibility check."
+
+  - id: comparisons
+    title: "Simple factual comparisons from knowledge"
+    severity: normal
+    tags: [knowledge, comparison, no-tools]
+    cases:
+      - id: tcp_vs_udp
+        query: "Quick comparison: what's the key difference between TCP and UDP?"
+        expect:
+          reply_matches: "(?i)(reliab|connection|ordered|guarantee|acknowledge).*tcp|tcp.*(reliab|connection|ordered|guarantee)|udp.*(faster|connectionless|no\\s*guarantee|unreliable|lossy)"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "Contrasts TCP as reliable/connection-oriented with UDP as faster/connectionless without delivery guarantees."
+      - id: bigger_number
+        query: "Which is larger, one million or one thousand thousand?"
+        expect:
+          reply_matches: "(?i)equal|same|both.*(equal|same)|1,?000,?000|one million.*=.*thousand thousand|they(')?re the same"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Recognises that one million equals one thousand thousand — they are the same."
+      - id: cpu_vs_gpu
+        query: "In one or two lines, how is a GPU different from a CPU?"
+        expect:
+          reply_matches: "(?i)parallel|many (small )?cores|thousands of cores|graphics|throughput.*latency|cpu.*(few|fewer|general).*core"
+          tools_none: [web_search, shell, file_read]
+          max_iterations: 2
+          max_cost_usd: 0.4
+          max_duration_ms: 60000
+        rubric: "Contrasts a GPU's many parallel cores with a CPU's fewer general-purpose cores."

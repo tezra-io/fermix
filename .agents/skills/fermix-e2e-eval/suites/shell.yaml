@@ -1,0 +1,100 @@
+suite: shell
+title: "Shell — safe, read-only command execution"
+description: >
+  Exercises the assistant's ability to answer questions that require running a
+  harmless, read-only-ish local command via the shell tool: the current date and
+  time, listing a directory, counting lines in a file, checking disk usage, and a
+  plain echo. Every command here is non-destructive. Gates are tolerant of the
+  model's route — it may phrase the result differently, choose a slightly
+  different flag, or run one or two commands — so each case asserts the shell tool
+  was used plus a plausible result token in the reply, never an exact command
+  string. Budgets reflect cheap, single-shot local lookups.
+defaults:
+  timeout_ms: 120000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: datetime_and_echo
+    title: "Reports the current date/time and echoes literal text"
+    severity: normal
+    tags: [shell, core]
+    cases:
+      - id: current_datetime
+        query: "What's the current date and time on this machine?"
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)20[0-9]{2}|:[0-5][0-9]|UTC|GMT|am|pm"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Reports the machine's current date and/or time, obtained by running a command rather than guessed."
+      - id: today_date_only
+        query: "Can you tell me today's date? Run a command to check."
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)20[0-9]{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "States today's date based on a command's output, not a guess."
+      - id: echo_hello
+        query: "Run echo to print 'hello world' for me."
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)hello world"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Runs echo and reports the output 'hello world'."
+
+  - id: inspect_directory
+    title: "Lists files and counts lines in a file"
+    severity: normal
+    tags: [shell]
+    cases:
+      - id: list_files
+        query: "List the files in the current directory."
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)\\.|/|file|director|empty|no files|total"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Lists the contents of the current working directory from a command's output."
+      - id: list_files_phrasing_two
+        query: "What files do I have here in this folder right now?"
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)\\.|/|file|director|empty|no files|total|here"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Reports the files present in the current directory, obtained by running a listing command."
+      - id: count_lines
+        query: "How many lines are in the README file? Use a command to count them."
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)[0-9]+\\s*(lines?)?|no such file|not found|doesn't exist|couldn't find"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Reports a line count for the README via a counting command, or clearly states the file was not found — without fabricating a number."
+
+  - id: disk_usage
+    title: "Reports disk usage"
+    severity: normal
+    tags: [shell]
+    cases:
+      - id: disk_usage_plain
+        query: "What's my disk usage on this machine?"
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)[0-9].*(%|[KMGT]i?B|byte)|used|available|free|capacity"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Reports disk usage (used/available/percentage) from a command's output rather than guessing."
+      - id: disk_space_phrasing_two
+        query: "Run a command to check how much free disk space I have left."
+        expect:
+          tools_any: [shell]
+          reply_matches: "(?i)[0-9].*(%|[KMGT]i?B|byte)|free|available|remaining|left|space"
+          max_cost_usd: 0.3
+          max_duration_ms: 60000
+        rubric: "Reports remaining free disk space based on a real command's output."

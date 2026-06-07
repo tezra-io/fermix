@@ -1,0 +1,109 @@
+suite: files_read
+title: "Read-only filesystem — read, glob, and content search"
+description: >
+  Exercises the read-only filesystem tools (file_read, glob_search,
+  content_search) against the Fermix repo at /Users/sujshe/projects/fermix, the
+  way the developer actually uses them: read a specific file and summarize it,
+  find files by glob pattern, and grep the repo for a term. Sandbox roots are
+  uncertain on any given run, so a read or search can legitimately be DENIED —
+  gates are deliberately tolerant. Each scenario asserts tools_any over the
+  plausible read tools plus a reply_matches on the substance, and never gates on
+  no_tool_errors (a denied root is an expected, non-fatal outcome). The model may
+  pick different valid routes (glob then read, or content_search alone), so
+  tools_all / tools_in_order are avoided.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: read_and_summarize_file
+    title: "Reads a named file and summarizes its contents"
+    severity: normal
+    tags: [files, read]
+    cases:
+      - id: claude_md_code_rules
+        query: "Read the CLAUDE.md at the root of the Fermix repo (/Users/sujshe/projects/fermix/CLAUDE.md) and summarize the non-negotiable code rules for me."
+        expect:
+          tools_any: [file_read, content_search, glob_search]
+          reply_matches: "(?i)linear flow|nesting|small function|surgical|fallback|warning|code rule|denied|cannot (read|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 0.6
+          max_duration_ms: 90000
+        rubric: "Either summarizes the code rules from CLAUDE.md (e.g. linear flow, bounded loops, small functions, surgical changes, no fallbacks) or clearly reports that the file could not be read because the path is outside the allowed sandbox. Does not invent rules."
+      - id: read_telemetry_doc
+        query: "Open docs/TELEMETRY_CONTRACT.md in the fermix repo and tell me in a couple of sentences what it's about."
+        expect:
+          tools_any: [file_read, glob_search, content_search]
+          reply_matches: "(?i)telemetry|trace|opik|emitter|session_id|observab|denied|cannot (read|access|find)|not (allowed|permitted|found)|outside.*sandbox"
+          max_cost_usd: 0.6
+          max_duration_ms: 90000
+        rubric: "Summarizes the telemetry/observability contract (shared emitters, session correlation, Opik tracing) from the doc, or reports it could not access the file. Does not fabricate doc contents."
+      - id: read_mix_exs
+        query: "Can you read the umbrella mix.exs (/Users/sujshe/projects/fermix/mix.exs) and tell me what the project's Elixir version requirement is?"
+        expect:
+          tools_any: [file_read, content_search, glob_search]
+          reply_matches: "(?i)elixir|~>|version|mix\\.exs|denied|cannot (read|access)|not (allowed|permitted)|no such file|outside.*sandbox"
+          max_cost_usd: 0.6
+          max_duration_ms: 90000
+        rubric: "Reports the Elixir version requirement found in mix.exs, or clearly states the file could not be read. Does not guess a version it did not see."
+
+  - id: find_files_by_pattern
+    title: "Finds source files by glob pattern"
+    severity: normal
+    tags: [files, glob]
+    cases:
+      - id: ex_files_mentioning_gateway
+        query: "Find all the *.ex files under apps in the fermix repo that mention Gateway, and list a few of them."
+        expect:
+          tools_any: [glob_search, content_search, file_read]
+          reply_matches: "(?i)gateway|\\.ex|apps/|no (match|result|file)|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 1.0
+          max_duration_ms: 120000
+        rubric: "Lists one or more .ex files under apps/ that reference Gateway, or reports that no matches were found or that the search was not permitted. Does not invent file paths."
+      - id: list_test_files
+        query: "List the Elixir test files in the project — anything matching apps/**/test/**/*_test.exs would do."
+        expect:
+          tools_any: [glob_search, content_search, file_read]
+          reply_matches: "(?i)_test\\.exs|/test/|apps/|no (match|result|file)|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 1.0
+          max_duration_ms: 120000
+        rubric: "Lists one or more *_test.exs files under apps/**/test, or reports no matches / that the glob was not permitted. Does not fabricate file names."
+      - id: find_markdown_docs
+        query: "Glob for the milestone design docs in the repo — the markdown files under docs that start with MILESTONE. What do you find?"
+        expect:
+          tools_any: [glob_search, content_search, file_read]
+          reply_matches: "(?i)milestone|\\.md|docs/|no (match|result|file)|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 1.0
+          max_duration_ms: 120000
+        rubric: "Returns one or more MILESTONE_*.md files under docs/, or reports no matches / a denied search. Does not invent doc names."
+
+  - id: search_repo_for_term
+    title: "Searches repo content for a term and reports where it is used"
+    severity: normal
+    tags: [files, search]
+    cases:
+      - id: hardline_usage
+        query: "Search the fermix repo for the word 'hardline' and tell me where it's used."
+        expect:
+          tools_any: [content_search, glob_search, file_read]
+          reply_matches: "(?i)hardline|sandbox|blocklist|\\.ex|\\.md|no (match|result|occurrence)|not found|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 1.0
+          max_duration_ms: 120000
+        rubric: "Reports the files/locations where 'hardline' appears (e.g. the sandbox blocklist code/docs), or states no matches were found / the search was denied. Does not invent locations."
+      - id: telemetry_execute_calls
+        query: "Where in the codebase do we call :telemetry.execute with the [:fermix, :tool, :exec] event? Grep for it and point me at the files."
+        expect:
+          tools_any: [content_search, glob_search, file_read]
+          reply_matches: "(?i)telemetry|:fermix|:exec|\\.ex|no (match|result|occurrence)|not found|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 1.0
+          max_duration_ms: 120000
+        rubric: "Identifies the file(s) where the [:fermix, :tool, :exec] telemetry event is emitted, or reports no matches / a denied search. Does not fabricate call sites."
+      - id: count_saferm_mentions
+        query: "How many places mention SafeRm across the repo? Do a content search and summarize where it shows up."
+        expect:
+          tools_any: [content_search, glob_search, file_read]
+          reply_matches: "(?i)saferm|test|rm_rf|sandbox|no (match|result|occurrence)|not found|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          max_cost_usd: 1.0
+          max_duration_ms: 120000
+        rubric: "Summarizes where SafeRm is referenced (e.g. test support and sandbox-related code/docs), or reports no matches / that the search was not permitted. Does not invent matches."

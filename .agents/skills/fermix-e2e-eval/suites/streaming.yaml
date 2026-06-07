@@ -1,0 +1,72 @@
+# Channel streaming — live streamed replies (docs/design/CHANNEL_STREAMING.md).
+#
+# Stream lifecycle phases export to Opik as tool-type spans named
+# `stream:open` / `stream:block` / `stream:seal` / `stream:discard` (interim
+# draft edits are deliberately not exported), so the normal tools_* gates
+# grade them. The telegram cases below are MODE-AGNOSTIC: both `"draft"`
+# (one edited message) and `"block"` (separate chunk messages) emit
+# stream:open + stream:seal, so they pass under whichever mode the dev
+# daemon config enables.
+#
+# Two tiers:
+#   - cli_never_streams: fully automated. `fermix ask` turns run the CLI sync
+#     path, which must NEVER stream (design §5.6) — guards the exclusion live.
+#   - telegram_draft_stream: operator-assisted (`--operator`). Real Telegram
+#     inbound can't be synthesized (real Bot API, polling), so the runner asks
+#     you to send ONE marked message from your phone, then finds the trace by
+#     marker and grades it automatically. Preconditions: dev daemon built from
+#     a streaming-capable branch, `[fermix_channels.telegram] streaming =
+#     "draft"` or `"block"` in ~/.fermix-dev/config.toml, daemon restarted
+#     after enabling.
+suite: streaming
+title: "Channel streaming — live draft replies"
+description: >
+  Verifies the draft-stream rail end-to-end: CLI turns never stream (the
+  design's explicit exclusion), and a real Telegram turn opens a draft,
+  edits it in place, and seals it to the final reply (stream:open +
+  stream:seal spans, no stream:discard on a successful turn).
+defaults:
+  timeout_ms: 180000
+  judge: false
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: cli_never_streams
+    title: "CLI/ask turns never stream (design §5.6 exclusion)"
+    severity: critical
+    tags: [streaming, safety]
+    cases:
+      - id: plain_ask_no_stream
+        query: "In one short sentence, what is the BEAM virtual machine?"
+        expect:
+          tools_none: ["stream:open", "stream:seal", "stream:discard"]
+          reply_matches: "(?i)erlang|virtual machine|vm"
+      - id: tool_ask_no_stream
+        query: "Run `echo stream-check-ok` in the shell and tell me exactly what it printed."
+        expect:
+          tools_any: [shell]
+          tools_none: ["stream:open", "stream:seal", "stream:discard"]
+          reply_matches: "stream-check-ok"
+
+  - id: telegram_draft_stream
+    title: "Telegram turn streams a draft and seals it in place (operator-assisted)"
+    severity: critical
+    tags: [streaming, operator]
+    cases:
+      - id: short_answer_stream
+        drive: telegram_operator
+        timeout_ms: 300000
+        query: "Reply with three full sentences about why the sky looks blue."
+        expect:
+          tools_all: ["stream:open", "stream:seal"]
+          tools_none: ["stream:discard"]
+          reply_matches: "(?i)scatter|rayleigh|wavelength|blue"
+      - id: longer_answer_stream
+        drive: telegram_operator
+        timeout_ms: 300000
+        query: "Give me a five-bullet summary of the kinds of things you can help me with."
+        expect:
+          tools_all: ["stream:open", "stream:seal"]
+          tools_none: ["stream:discard"]
