@@ -25,12 +25,12 @@ defmodule FermixCore.Plugins.Capabilities do
     end
   end
 
+  # Register every tool of a ready plugin regardless of granted scope. Per-tool
+  # scope is enforced at call time (FermixCore.Plugins.ToolExecutor), so a tool
+  # whose write scope wasn't granted surfaces a graceful "reauthorize" error
+  # instead of silently vanishing from the agent's toolset.
   defp register_plugin(server, %Plugin{} = plugin) do
-    granted = plugin |> Status.granted_scopes() |> MapSet.new()
-
-    plugin.tools
-    |> Enum.filter(&tool_granted?(granted, &1))
-    |> Enum.flat_map(fn tool ->
+    Enum.flat_map(plugin.tools, fn tool ->
       capability = capability(plugin, tool)
 
       case CapabilityRegistry.register(server, capability) do
@@ -38,13 +38,6 @@ defmodule FermixCore.Plugins.Capabilities do
         {:error, {:duplicate_name, _name}} -> []
       end
     end)
-  end
-
-  defp tool_granted?(granted, tool) do
-    tool
-    |> Map.get("requires_scopes", [])
-    |> MapSet.new()
-    |> MapSet.subset?(granted)
   end
 
   defp capability(plugin, tool) do
