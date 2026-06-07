@@ -6,7 +6,9 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.Selection
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -169,11 +171,11 @@ defmodule FermixCore.Setup.Wizard do
   # reasoning_effort is wired for OpenAI/Codex/xAI/Anthropic (each adapter sends
   # its provider-specific field). Only offer it on reconfigure for those.
   defp reconfigure_offered?(%{key: :reasoning_effort}, persisted) do
-    persisted_provider(persisted) in [:openai, :openai_codex, :anthropic, :xai]
+    chosen_provider(persisted) in [:openai, :openai_codex, :anthropic, :xai]
   end
 
   defp reconfigure_offered?(%{key: :fast}, persisted) do
-    persisted_provider(persisted) == :openai_codex
+    chosen_provider(persisted) == :openai_codex
   end
 
   defp reconfigure_offered?(_prompt, _persisted), do: true
@@ -186,10 +188,10 @@ defmodule FermixCore.Setup.Wizard do
     # for the token whenever it is unpersisted forces it onto disk where the
     # daemon will see it.
     persisted = persisted_snapshot()
-    persisted_provider = persisted_provider(persisted)
+    persisted_provider = chosen_provider(persisted)
 
     prompt_provider =
-      persisted_provider || valid_provider(configured_provider(state.config_snapshot)) || :openai
+      persisted_provider || valid_provider(chosen_provider(state.config_snapshot)) || :openai
 
     context = prompt_context(state, persisted, persisted_provider, prompt_provider)
 
@@ -558,7 +560,8 @@ defmodule FermixCore.Setup.Wizard do
       |> put_provider_auth_mode(:anthropic, Keyword.get(answers, :anthropic_auth_mode))
       |> put_provider_auth_mode(:xai, Keyword.get(answers, :xai_auth_mode))
       |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
-      |> put_provider_selection(Keyword.get(answers, :provider))
+      |> put_primary_selection(Keyword.get(answers, :provider))
+      |> maybe_promote_newly_configured(blank?(Keyword.get(answers, :provider)))
       |> put_default_model(Keyword.get(answers, :default_model))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
       |> put_fast(Keyword.get(answers, :fast))
@@ -640,6 +643,35 @@ defmodule FermixCore.Setup.Wizard do
          {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
+  end
+
+  # "Newly configured" = a pre/post eligibility diff against the persisted
+  # TOML snapshot (docs/design/MULTI_PROVIDER_FAILOVER.md §2). Runs in the
+  # save_answers pipeline AFTER credential/auth-mode answers are applied
+  # (so OAuth auth-mode flips are seen) and BEFORE the model/effort/fast
+  # writers (so a newly promoted provider receives its fields — §4). An
+  # explicit provider answer disables it (put_primary_selection already
+  # chose). The CLI login path (`set_provider_auth_mode`) has no promotion
+  # code at all — primary promotion is a setup-save decision only. Codex
+  # never trips this diff (its credentials live in the auth store, not the
+  # snapshot); it becomes primary via the explicit provider answer.
+  defp maybe_promote_newly_configured(snapshot, false), do: snapshot
+
+  defp maybe_promote_newly_configured(snapshot, true) do
+    case newly_configured_providers(snapshot) do
+      [] -> snapshot
+      # Catalog order — deterministic when one save configures several.
+      [provider | _rest] -> mark_primary_provider(snapshot, provider)
+    end
+  end
+
+  defp newly_configured_providers(snapshot) do
+    persisted = persisted_snapshot()
+
+    Enum.filter(ModelCatalog.providers(), fn provider ->
+      Selection.configured?(provider, provider_config(snapshot, provider)) and
+        not Selection.configured?(provider, provider_config(persisted, provider))
+    end)
   end
 
   defp maybe_put_sandbox_mode(sandbox, nil), do: sandbox
@@ -732,25 +764,28 @@ defmodule FermixCore.Setup.Wizard do
 
     cond do
       Enum.any?(components, &String.starts_with?(&1, "provider:")) -> :provider
-      persisted_provider(snapshot) == nil -> :model
+      chosen_provider(snapshot) == nil -> :model
       Enum.any?(@channel_components, &MapSet.member?(components, &1)) -> :channel
       MapSet.member?(components, "personalization") -> :personalization
       true -> :review
     end
   end
 
-  defp persisted_provider(snapshot) do
-    snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:agent, [])
-    |> Keyword.get(:provider)
-  end
+  # The explicitly chosen provider (primary flag, else legacy
+  # agent.provider) or nil — nil keeps the provider question in setup.
+  # Hand-edited multiple primaries also map to nil here so setup stays
+  # usable as the repair surface (the next save rewrites exactly one
+  # primary); routing and readiness fail loud on it elsewhere.
+  defp chosen_provider(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
 
-  defp configured_provider(snapshot) do
-    snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:agent, [])
-    |> Keyword.get(:provider)
+    case PrimaryConfig.chosen_in(
+           Keyword.get(fermix_core, :providers, []),
+           Keyword.get(fermix_core, :agent, [])
+         ) do
+      {:ok, provider} -> provider
+      {:error, :multiple_primary} -> nil
+    end
   end
 
   defp valid_provider(provider) do
@@ -956,19 +991,49 @@ defmodule FermixCore.Setup.Wizard do
     Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :anthropic, anthropic))
   end
 
-  defp put_provider_selection(snapshot, nil), do: snapshot
-  defp put_provider_selection(snapshot, ""), do: snapshot
+  defp put_primary_selection(snapshot, nil), do: snapshot
+  defp put_primary_selection(snapshot, ""), do: snapshot
 
-  defp put_provider_selection(snapshot, value) do
-    provider = parse_provider!(value)
+  defp put_primary_selection(snapshot, value),
+    do: mark_primary_provider(snapshot, parse_provider!(value))
+
+  @doc """
+  Marks exactly one provider primary: `primary = true` on `provider`,
+  `primary = false` on every other non-empty provider block (absence
+  already means false — never materialize a block just to carry it).
+  Also completes the legacy migration by dropping `agent.provider` from
+  the snapshot: once flags are written, nothing writes the legacy key.
+  """
+  @spec mark_primary_provider(ConfigStore.runtime_config(), provider()) ::
+          ConfigStore.runtime_config()
+  def mark_primary_provider(snapshot, provider) when is_atom(provider) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
-    agent = Keyword.get(fermix_core, :agent, [])
+    providers = Keyword.get(fermix_core, :providers, [])
+
+    updated =
+      Enum.reduce(ModelCatalog.providers(), providers, fn p, acc ->
+        set_primary_flag(acc, p, p == provider)
+      end)
+
+    agent = fermix_core |> Keyword.get(:agent, []) |> Keyword.delete(:provider)
 
     Map.put(
       snapshot,
       :fermix_core,
-      Keyword.put(fermix_core, :agent, Keyword.put(agent, :provider, provider))
+      fermix_core |> Keyword.put(:providers, updated) |> Keyword.put(:agent, agent)
     )
+  end
+
+  defp set_primary_flag(providers, provider, true) do
+    block = providers |> Keyword.get(provider, []) |> Keyword.put(:primary, true)
+    Keyword.put(providers, provider, block)
+  end
+
+  defp set_primary_flag(providers, provider, false) do
+    case Keyword.get(providers, provider, []) do
+      [] -> providers
+      block -> Keyword.put(providers, provider, Keyword.put(block, :primary, false))
+    end
   end
 
   defp put_default_model(snapshot, nil), do: snapshot
@@ -1056,14 +1121,23 @@ defmodule FermixCore.Setup.Wizard do
     raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
   end
 
+  # Which provider block receives model/effort/fast writes. Re-anchored on
+  # the primary flag (mark_primary_provider runs earlier in the save
+  # pipeline); the legacy agent.provider key remains readable as migration
+  # input until the first flag write removes it.
   defp active_provider(snapshot) do
-    snapshot
-    |> Map.get(:fermix_core, [])
-    |> Keyword.get(:agent, [])
-    |> Keyword.get(:provider)
-    |> case do
-      nil -> :openai
-      provider -> provider
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+
+    case PrimaryConfig.primary_in(
+           Keyword.get(fermix_core, :providers, []),
+           Keyword.get(fermix_core, :agent, [])
+         ) do
+      {:ok, provider} ->
+        provider
+
+      {:error, :multiple_primary} ->
+        raise ArgumentError,
+              "more than one provider has primary = true; mark exactly one provider primary"
     end
   end
 

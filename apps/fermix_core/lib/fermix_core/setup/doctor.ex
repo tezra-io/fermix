@@ -23,6 +23,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Tools.WebSearch
 
   @type provider :: :openai | :openai_codex | :anthropic | :xai
@@ -323,17 +324,19 @@ defmodule FermixCore.Setup.Doctor do
 
   @spec active_provider() :: provider()
   def active_provider do
-    case Application.get_env(:fermix_core, :agent, []) |> Keyword.get(:provider) do
-      nil ->
-        :openai
-
-      provider when provider in [:openai, :openai_codex, :anthropic, :xai] ->
+    case PrimaryConfig.primary() do
+      {:ok, provider} when provider in [:openai, :openai_codex, :anthropic, :xai] ->
         provider
 
-      other ->
+      {:ok, other} ->
         raise ArgumentError,
               "unknown provider #{inspect(other)} in :fermix_core, :agent, :provider; " <>
                 "expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &inspect/1)}"
+
+      {:error, :multiple_primary} ->
+        raise ArgumentError,
+              "more than one provider has primary = true in config.toml; " <>
+                "mark exactly one provider primary"
     end
   end
 

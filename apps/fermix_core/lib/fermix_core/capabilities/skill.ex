@@ -85,6 +85,9 @@ defmodule FermixCore.Capabilities.Skill do
              Map.get(context, :capability_registry, FermixCore.Capabilities.Registry),
            task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor),
            agent_supervisor: agent_supervisor(context),
+           # Parent turn's route chain (§7) — skill workers without an
+           # explicit provider/model override inherit it like `subagents`.
+           ordered_routes: Map.get(context, :ordered_routes),
            timeout_seconds: definition.timeout_seconds
          ) do
       {:ok, session_id, terminal} ->

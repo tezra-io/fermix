@@ -801,6 +801,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :reasoning_effort,
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_openai_codex(nil), do: []
@@ -816,6 +817,7 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
     |> put_if_present(:fast, normalize_bool(lookup(config, "fast", :fast)))
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_anthropic(nil), do: []
@@ -832,6 +834,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :reasoning_effort,
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_xai(nil), do: []
@@ -849,6 +852,7 @@ defmodule FermixCore.Setup.ConfigStore do
       :reasoning_effort,
       normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
     )
+    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
   end
 
   defp normalize_realtime(config) do

@@ -211,7 +211,8 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     providers = Keyword.get(persisted.fermix_core, :providers, [])
     codex = Keyword.get(providers, :openai_codex, [])
 
-    assert Keyword.get(agent, :provider) == :openai_codex
+    refute Keyword.has_key?(agent, :provider)
+    assert Keyword.get(codex, :primary) == true
     assert Keyword.get(codex, :default_model) == "gpt-5.5"
     assert Keyword.get(codex, :reasoning_effort) == :high
     assert Keyword.get(codex, :fast) == false

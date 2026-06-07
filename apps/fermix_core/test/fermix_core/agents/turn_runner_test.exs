@@ -5,6 +5,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Providers.Error, as: ProviderError
 
   defmodule NoopReviewer do
     def start_background(_opts), do: :ok
@@ -193,6 +194,13 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  defmodule TimeoutCompactAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:compact_chat, :primary})
+      {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
   setup do
     compaction = Application.get_env(:fermix_core, :compaction, [])
 
@@ -204,6 +212,96 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   end
 
   describe "commit/4" do
+    test "auto-compaction fails over past an eligible provider error with the real reason_kind" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.1,
+        reasoning_effort: :medium
+      )
+
+      handler_id = "compaction-failover-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :failover],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:failover_telemetry, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      store_name = :"turn_runner_failover_store_#{System.unique_integer([:positive])}"
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      main_agent = start_supervised!({MainAgentStub, test_pid: self()})
+      chat_id = "compaction_failover_#{System.unique_integer([:positive])}"
+      conversation_key = {"telegram", chat_id, :root}
+      older_content = String.duplicate("older context ", 25_000)
+
+      ConversationStore.add_message(conversation_key, "user", older_content, server: store)
+      :sys.get_state(store)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "latest question",
+        source_trust: :operator
+      }
+
+      routes = [
+        {%{
+           provider: :anthropic,
+           model: "claude-x",
+           auth_mode: :api_key,
+           base_url: "https://a/v1"
+         }, [adapter: TimeoutCompactAdapter, model: "claude-x", test_pid: self()]},
+        {%{provider: :openai, model: "gpt-x", auth_mode: :api_key, base_url: "https://o/v1"},
+         [adapter: SummaryAdapter, model: "gpt-x", test_pid: self()]}
+      ]
+
+      turn_state = %{
+        adapter: nil,
+        adapter_opts: [],
+        provider: nil,
+        adapter_overrides: [],
+        ordered_routes: routes,
+        conversation_store: store,
+        memory_agent_id: "main",
+        memory_owner_id: "default",
+        memory_reviewer: NoopReviewer,
+        memory_repo: nil,
+        task_supervisor: self(),
+        main_agent_server: main_agent,
+        extraction_timeout_ms: 1_000,
+        review_interval_hours: 24,
+        review_max_messages: 50,
+        review_input_token_budget: 4_000,
+        review_failure_backoff_ms: 60_000,
+        compaction_failures: %{}
+      }
+
+      assert :compacted = TurnRunner.commit(msg, turn_state, "assistant reply", 50_000)
+
+      assert_receive {:compact_chat, :primary}, 5_000
+      assert_receive {:summary_chat, _messages, _opts}, 5_000
+
+      # The Compactor's {:compaction_failed, _} wrapper is unwrapped before
+      # classification, so telemetry carries the real provider reason.
+      assert_receive {:failover_telemetry, metadata}
+      assert metadata.reason_kind == :timeout
+      assert metadata.from_provider == :anthropic
+      assert metadata.to_provider == :openai
+      assert metadata.surface == :compaction
+    end
+
     test "returns :compacted when post-delivery auto-compaction rewrites history" do
       Application.put_env(:fermix_core, :compaction,
         enabled: true,
@@ -337,7 +435,13 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                TurnRunner.run(msg, turn_state, fn _part -> :ok end, cb)
 
       assert_receive {:summary_chat, _messages, opts}
-      assert Keyword.get(opts, :stream_callback) == cb
+
+      # The loop wraps the callback (emitted? failover gate) — assert
+      # forwarding rather than function identity.
+      injected = Keyword.fetch!(opts, :stream_callback)
+      assert is_function(injected, 1)
+      injected.({:text_delta, "partial"})
+      assert_received {:stream, {:text_delta, "partial"}}
       # The loop emits the bootstrap events through the same callback.
       assert_received {:stream, {:session_started, "main-" <> _}}
       assert_received {:stream, {:iteration_started, 1}}
@@ -647,17 +751,27 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute reply == "Sorry, I encountered an error processing your message."
     end
 
-    test "maps Codex stream closure to an actionable provider message" do
+    test "maps a structured Codex mid-stream closure to an actionable provider message" do
       reply =
         TurnRunner.error_reply(
-          "Codex stream closed by peer mid-response. Retry; if it persists, lower reasoning_effort or check ChatGPT account status."
+          ProviderError.transport(:openai_codex, :codex, :closed, stage: :mid_stream)
         )
 
       assert reply =~ "Codex"
       assert reply =~ "closed"
-      assert reply =~ "/compact"
-      assert reply =~ "reasoning_effort"
       refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "maps an exhausted failover chain to a reply naming the attempted providers" do
+      last = ProviderError.transport(:openai, :responses, :timeout)
+
+      reply =
+        TurnRunner.error_reply({:all_routes_failed, [{:anthropic, :ignored}, {:openai, last}]})
+
+      assert reply =~ "All configured providers failed"
+      assert reply =~ "anthropic"
+      assert reply =~ "openai"
+      assert reply =~ "network timeout"
     end
 
     test "falls back to the generic message for unrelated errors" do

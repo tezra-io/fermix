@@ -291,7 +291,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     if token_invalidated?(response_body) do
       Logger.warning("Codex bearer was invalidated; refreshing token and retrying once")
 
-      case TokenManager.refresh(token_server) do
+      case refresh_token(token_server) do
         {:ok, refreshed_token} ->
           request_once(url, request_body, refreshed_token, req_options, stream_callback)
 
@@ -310,17 +310,23 @@ defmodule FermixCore.Providers.OpenAI.Codex do
   defp maybe_refresh_and_retry(response, _url, _body, _auth, _req_options, _stream_callback),
     do: response
 
+  # Failover-relevant failures return structured `Providers.Error` values
+  # (kind + stage) like every other adapter — `Failover.eligible?/1` reads
+  # the contract, never message strings. A residual `kind: :auth` here means
+  # the internal refresh+retry above already ran and failed, so it is tagged
+  # `auth_mode: :oauth` (terminal for this route, eligible for fallback).
   defp handle_response({:auth_invalidated, body}, _turn_state) do
     Logger.error("Codex auth invalidated and refresh exhausted: #{inspect(body)}")
-
-    {:error,
-     "Codex auth invalidated. Run `fermix auth login` to mint fresh tokens, " <>
-       "then restart the daemon."}
+    {:error, tag_oauth(ProviderError.api(:openai_codex, :codex, 401, body))}
   end
 
   defp handle_response({:refresh_failed, reason}, _turn_state) do
     Logger.error("Codex token refresh failed: #{inspect(reason)}")
-    {:error, "Codex token refresh failed: #{inspect(reason)}"}
+
+    {:error,
+     tag_oauth(
+       ProviderError.auth(:openai_codex, :codex, "Codex token refresh failed: #{inspect(reason)}")
+     )}
   end
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state) do
@@ -362,13 +368,23 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp handle_response({:error, %Req.TransportError{reason: reason}, stage}, _turn_state) do
     Logger.error("Codex transport error: #{inspect(reason)} (#{stage})")
-    {:error, transport_error_message(reason, stage)}
+
+    {:error,
+     ProviderError.transport(:openai_codex, :codex, reason,
+       stage: stage,
+       message: transport_error_message(reason, stage)
+     )}
   end
 
   defp handle_response({:error, reason}, _turn_state) do
     Logger.error("Codex request failed: #{inspect(reason)}")
     {:error, reason}
   end
+
+  defp tag_oauth({:provider_error, %{kind: :auth} = error}),
+    do: {:provider_error, Map.put(error, :auth_mode, :oauth)}
+
+  defp tag_oauth(error), do: error
 
   @doc false
   @spec transport_error_message(atom() | tuple(), :before_response | :mid_stream) :: String.t()
@@ -553,16 +569,45 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       _ ->
         token_server = Keyword.get(opts, :token_server, TokenManager)
 
-        case TokenManager.get_token(token_server) do
+        case fetch_token(token_server) do
           {:ok, token} ->
             {:ok, %{token: token, refreshable?: true, token_server: token_server}}
 
           {:error, reason} ->
+            # Tagged oauth: an unusable token (or a dead token server) is
+            # terminal for this route and eligible for fallback — the chain
+            # must be able to try a configured fallback provider.
             {:error,
-             ProviderError.auth(:openai_codex, :codex, "Codex auth required: #{inspect(reason)}")}
+             tag_oauth(
+               ProviderError.auth(
+                 :openai_codex,
+                 :codex,
+                 "Codex auth required: #{inspect(reason)}"
+               )
+             )}
         end
     end
   end
+
+  # The token server can be down entirely (crashed at runtime, or never
+  # started in this boot). GenServer.call would exit :noproc/:timeout and
+  # crash the whole agent loop — bypassing failover. Degrade it to an error
+  # tuple so the route fails over instead.
+  defp fetch_token(token_server) do
+    TokenManager.get_token(token_server)
+  catch
+    :exit, reason -> {:error, {:token_server_unavailable, exit_kind(reason)}}
+  end
+
+  defp refresh_token(token_server) do
+    TokenManager.refresh(token_server)
+  catch
+    :exit, reason -> {:error, {:token_server_unavailable, exit_kind(reason)}}
+  end
+
+  defp exit_kind({kind, _call}) when is_atom(kind), do: kind
+  defp exit_kind(reason) when is_atom(reason), do: reason
+  defp exit_kind(_reason), do: :exit
 
   defp token_invalidated?(body) do
     body
@@ -598,7 +643,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   defp log_api_error(status, body) do
     Logger.error("Codex Responses API error: #{status} - #{inspect(body)}")
-    {:error, "Codex API error: #{status}"}
+    {:error, tag_oauth(ProviderError.api(:openai_codex, :codex, status, body))}
   end
 
   defp emit_telemetry(result, wire_result, turn_state, duration_ms) do
@@ -638,13 +683,16 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     %{error_kind: :context_length, error: "context_length_exceeded"}
   end
 
-  defp error_metadata(reason, {:error, %Req.TransportError{reason: transport_reason}, stage}) do
-    %{
-      error_kind: :transport,
-      transport_error_reason: transport_reason,
-      transport_stage: stage,
-      error: error_text(reason)
-    }
+  # `transport_stage` keeps its historical telemetry field name now that the
+  # stage rides on the structured error itself.
+  defp error_metadata({:provider_transport_error, %{stage: stage}} = reason, _wire_result) do
+    reason
+    |> ProviderError.telemetry_metadata()
+    |> Map.put(:transport_stage, stage)
+  end
+
+  defp error_metadata({:provider_error, _error} = reason, _wire_result) do
+    ProviderError.telemetry_metadata(reason)
   end
 
   defp error_metadata(reason, _wire_result),

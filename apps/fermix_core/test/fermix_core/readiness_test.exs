@@ -66,6 +66,62 @@ defmodule FermixCore.ReadinessTest do
     end
   end
 
+  describe "primary/fallback reporting" do
+    setup do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      Application.put_env(:fermix_core, :personalization,
+        user_name: "Sujeeth",
+        timezone: "America/New_York",
+        communication_style: "direct"
+      )
+
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+      :ok
+    end
+
+    test "a primary flag drives the readiness provider check" do
+      Application.put_env(:fermix_core, :providers, anthropic: [primary: true])
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, &(&1.component == "provider:anthropic"))
+    end
+
+    test "an unconfigured primary names the configured fallbacks that serve meanwhile" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [primary: true],
+        openai: [api_key: "sk-x"]
+      )
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:anthropic" and
+                 failure.action =~ "fallback providers (openai)"
+             end)
+    end
+
+    test "multiple primary flags are a configuration error, never silently resolved" do
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [primary: true, api_key: "sk-ant"],
+        openai: [primary: true, api_key: "sk-x"]
+      )
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:config" and
+                 failure.action =~ "exactly one provider primary"
+             end)
+    end
+  end
+
   describe "report/0" do
     test "includes personalization failure alongside other failures" do
       Application.put_env(:fermix_core, :personalization, [])

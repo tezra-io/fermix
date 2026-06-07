@@ -15,6 +15,7 @@ defmodule FermixCore.Agents.MainAgentTest do
   alias FermixCore.Plugins.Runtime
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
+  alias FermixCore.Providers.Error, as: ProviderError
 
   # -- Mock provider backed by named Agent for cross-process access --
 
@@ -1101,7 +1102,16 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
 
     test "sends an auth-specific reply when the Codex refresh chain fails", %{agent: agent} do
-      MockProvider.set_responses([{:error, {:auth_invalidated, %{"error" => "invalid_grant"}}}])
+      # The Codex adapter returns a residual structured :auth error once its
+      # internal refresh+retry is exhausted (no more {:auth_invalidated, _}).
+      MockProvider.set_responses([
+        {:error,
+         ProviderError.auth(
+           :openai_codex,
+           :codex,
+           "Codex auth invalidated; refresh exhausted"
+         )}
+      ])
 
       msg = make_message("Hello")
       run_turn(msg, agent)
@@ -1813,6 +1823,77 @@ defmodule FermixCore.Agents.MainAgentTest do
       end)
 
       :ok
+    end
+
+    test "a primary flag drives adapter_overrides and the status route chain" do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("main-agent-primary")
+      fermix_home = System.get_env("FERMIX_HOME")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case fermix_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [primary: true, api_key: "sk-ant", default_model: "claude-sonnet-4-6"],
+        openai: [api_key: "sk-x", default_model: "gpt-5.5"]
+      )
+
+      name = :"main_agent_primary_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+
+      assert Keyword.get(:sys.get_state(pid).adapter_overrides, :provider) == :anthropic
+
+      status = MainAgent.status(pid)
+      assert status.primary_provider == :anthropic
+      assert status.fallback_providers == [:openai]
+      assert status.provider == :anthropic
+      assert status.model == "claude-sonnet-4-6"
+
+      GenServer.stop(pid)
+    end
+
+    test "status still names an unconfigured primary; the serving fallback stays a fallback" do
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("main-agent-degraded")
+      fermix_home = System.get_env("FERMIX_HOME")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case fermix_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+
+      # Primary anthropic has NO credentials; Selection routes to the
+      # configured openai fallback — status must keep reporting anthropic as
+      # the (degraded) primary, matching readiness (§8).
+      Application.put_env(:fermix_core, :providers,
+        anthropic: [primary: true, default_model: "claude-sonnet-4-6"],
+        openai: [api_key: "sk-x", default_model: "gpt-5.5"]
+      )
+
+      name = :"main_agent_degraded_#{System.unique_integer([:positive])}"
+      {:ok, pid} = MainAgent.start_link(name: name)
+
+      status = MainAgent.status(pid)
+      assert status.primary_provider == :anthropic
+      assert status.fallback_providers == [:openai]
+      assert status.provider == :anthropic
+      assert status.model == "claude-sonnet-4-6"
+
+      GenServer.stop(pid)
     end
 
     test "bakes provider/model/reasoning_effort from config into adapter_overrides" do

@@ -4,6 +4,7 @@ defmodule FermixCore.Memory.ReviewerTest do
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Reviewer
+  alias FermixCore.Providers.Error, as: ProviderError
 
   defmodule FakeProvider do
     def chat(messages, _opts) do
@@ -110,6 +111,48 @@ defmodule FermixCore.Memory.ReviewerTest do
 
     assert {:ok, %{user: user_text}} = PromptFiles.load("main")
     assert user_text =~ "User prefers terse answers"
+  end
+
+  defmodule RouteFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(Process.get(:test_pid), {:route_chat, :primary, opts[:model]})
+      {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
+  defmodule RouteOkAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(Process.get(:test_pid), {:route_chat, :fallback, opts[:model]})
+      {:ok, %{content: "Nothing to save.", tool_calls: [], usage: %{}}}
+    end
+  end
+
+  test "the turn route chain wins over the legacy provider default and fails over", %{repo: repo} do
+    insert_user_message(repo, "hello")
+
+    routes = [
+      {%{provider: :anthropic, model: "claude-x", auth_mode: :api_key, base_url: "https://a/v1"},
+       [adapter: RouteFailAdapter, model: "claude-x"]},
+      {%{provider: :openai, model: "gpt-x", auth_mode: :api_key, base_url: "https://o/v1"},
+       [adapter: RouteOkAdapter, model: "gpt-x"]}
+    ]
+
+    # The turn runner passes BOTH `provider:` (its always-present module
+    # default) and `routes:` — the chain must win, and a timed-out primary
+    # must fall over to the fallback route (§7).
+    assert {:ok, result} =
+             Reviewer.review_now(
+               provider: FailProvider,
+               routes: routes,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert result.status == :nothing_to_save
+    assert_receive {:route_chat, :primary, "claude-x"}
+    assert_receive {:route_chat, :fallback, "gpt-x"}
   end
 
   test "nothing to save advances the reviewed pointer without rebuilding", %{repo: repo} do

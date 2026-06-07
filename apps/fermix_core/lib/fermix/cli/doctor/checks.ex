@@ -13,6 +13,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Providers.Selection
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
@@ -155,6 +156,27 @@ defmodule Fermix.CLI.Doctor.Checks do
 
       {:error, {:network, reason}} ->
         warn("auth probe", "network error: #{inspect(reason)}")
+    end
+  rescue
+    # E.g. hand-edited config with multiple primary providers — report it
+    # as a failed check instead of aborting the whole --full run.
+    error in ArgumentError -> fail("auth probe", Exception.message(error))
+  end
+
+  # Fallback health (§8): configured non-primary providers are listed as
+  # fallback availability, never as primary readiness blockers. Presence
+  # only — the live probe stays on the primary.
+  @spec fallback_providers() :: result()
+  def fallback_providers do
+    case Selection.fallback_providers() do
+      {:ok, []} ->
+        ok("provider fallbacks", "none configured — failover disabled")
+
+      {:ok, fallbacks} ->
+        ok("provider fallbacks", "configured: #{Enum.map_join(fallbacks, ", ", &to_string/1)}")
+
+      {:error, reason} ->
+        fail("provider fallbacks", "route selection failed: #{inspect(reason)}")
     end
   end
 

@@ -21,6 +21,7 @@ defmodule FermixCore.Providers.RouteResolver do
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
 
   @default_openai_base_url "https://api.openai.com/v1"
@@ -43,10 +44,18 @@ defmodule FermixCore.Providers.RouteResolver do
     end
   end
 
+  # PrimaryConfig owns the primary-flag + legacy-`agent.provider` migration
+  # rules, so bare `resolve!()` callers read the same primary as Selection.
   defp configured_provider do
-    :fermix_core
-    |> Application.get_env(:agent, [])
-    |> Keyword.get(:provider)
+    case PrimaryConfig.primary() do
+      {:ok, provider} ->
+        provider
+
+      {:error, :multiple_primary} ->
+        raise ArgumentError,
+              "more than one provider has primary = true in config.toml; " <>
+                "mark exactly one provider primary"
+    end
   end
 
   @spec resolve_openai!(keyword()) :: resolution()

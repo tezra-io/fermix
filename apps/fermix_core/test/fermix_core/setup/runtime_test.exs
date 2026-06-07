@@ -501,8 +501,8 @@ defmodule FermixCore.Setup.RuntimeTest do
           prompt: fn _ -> "" end
         )
 
-      assert Keyword.get(Application.get_env(:fermix_core, :agent, []), :provider) ==
-               :openai_codex
+      env_codex = Application.get_env(:fermix_core, :providers, [])[:openai_codex] || []
+      assert Keyword.get(env_codex, :primary) == true
 
       assert {:error, message} = result
 
@@ -679,8 +679,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = Application.get_env(:fermix_core, :providers, [])
       refute Keyword.has_key?(providers[:openai], :auth_mode)
 
-      agent = Application.get_env(:fermix_core, :agent, [])
-      assert Keyword.get(agent, :provider) == :openai_codex
+      env_codex = Application.get_env(:fermix_core, :providers, [])[:openai_codex] || []
+      assert Keyword.get(env_codex, :primary) == true
 
       lines = puts_lines(collector)
       assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
@@ -811,7 +811,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
       assert Keyword.get(codex_block, :fast) == false
@@ -841,7 +842,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       agent = snapshot.fermix_core |> Keyword.get(:agent, [])
       xai_block = snapshot.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
 
-      assert Keyword.get(agent, :provider) == :xai
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(xai_block, :primary) == true
       assert Keyword.get(xai_block, :api_key) == "xai-key"
       assert Keyword.get(xai_block, :default_model) == "grok-4.3"
       assert Keyword.get(xai_block, :reasoning_effort) == :high
@@ -887,7 +889,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       refute_received :codex_refresh_called
 
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
-      assert snapshot.fermix_core |> Keyword.get(:agent, []) |> Keyword.get(:provider) == :xai
+      xai_block = snapshot.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
+      assert Keyword.get(xai_block, :primary) == true
     end
 
     test "provided channel flags do not suppress missing provider/model prompts" do
@@ -948,7 +951,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
       assert Keyword.get(codex_block, :fast) == false
@@ -996,9 +1000,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(snapshot.fermix_core |> Keyword.get(:agent, []), :provider) ==
-               :openai_codex
-
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end
@@ -1066,7 +1068,8 @@ defmodule FermixCore.Setup.RuntimeTest do
       providers = snapshot.fermix_core |> Keyword.get(:providers, [])
       codex_block = Keyword.get(providers, :openai_codex, [])
 
-      assert Keyword.get(agent, :provider) == :openai_codex
+      refute Keyword.has_key?(agent, :provider)
+      assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end

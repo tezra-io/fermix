@@ -15,6 +15,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.SecretMigration
@@ -388,10 +389,15 @@ defmodule FermixCore.Setup.Runtime do
   defp selected_codex_provider?("openai_codex"), do: true
   defp selected_codex_provider?(_provider), do: false
 
+  # Reads the chosen provider through PrimaryConfig (primary flag, else the
+  # legacy agent.provider migration input). Multiple primaries fall through
+  # to :openai here — setup is the repair surface and must keep running;
+  # routing and readiness fail loud on it.
   defp active_provider do
-    :fermix_core
-    |> Application.get_env(:agent, [])
-    |> Keyword.get(:provider, :openai)
+    case PrimaryConfig.primary() do
+      {:ok, provider} -> provider
+      {:error, :multiple_primary} -> :openai
+    end
   end
 
   defp collect_answers(report, opts, prompt) do

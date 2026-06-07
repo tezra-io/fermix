@@ -530,4 +530,44 @@ defmodule FermixCore.Providers.RouteResolverTest do
       end
     end
   end
+
+  describe "primary flag selection" do
+    setup do
+      providers = Application.get_env(:fermix_core, :providers, [])
+      agent = Application.get_env(:fermix_core, :agent, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :providers, providers)
+        Application.put_env(:fermix_core, :agent, agent)
+      end)
+
+      :ok
+    end
+
+    test "resolve!() honors a provider block primary flag over the legacy agent provider" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-x"],
+        anthropic: [primary: true, api_key: "sk-ant"]
+      )
+
+      Application.put_env(:fermix_core, :agent, provider: :openai)
+
+      {route_key, _opts} = RouteResolver.resolve!()
+
+      assert route_key.provider == :anthropic
+    end
+
+    test "resolve!() fails loud when more than one provider is primary" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, api_key: "sk-x"],
+        xai: [primary: true, api_key: "xai-key"]
+      )
+
+      Application.put_env(:fermix_core, :agent, [])
+
+      assert_raise ArgumentError, ~r/exactly one provider/, fn ->
+        RouteResolver.resolve!()
+      end
+    end
+  end
 end

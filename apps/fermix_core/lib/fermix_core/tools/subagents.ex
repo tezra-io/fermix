@@ -290,7 +290,11 @@ defmodule FermixCore.Tools.Subagents do
       provider: Map.get(context, :provider, FermixCore.Providers.OpenAI),
       capability_registry: Map.get(context, :capability_registry, CapabilityRegistry),
       task_supervisor: Map.get(context, :task_supervisor, FermixCore.TaskSupervisor),
-      agent_supervisor: Map.get(context, :agent_supervisor, AgentSupervisor)
+      agent_supervisor: Map.get(context, :agent_supervisor, AgentSupervisor),
+      # Parent turn's route chain (§7): workers without an explicit
+      # provider/model override inherit it instead of re-resolving from
+      # global config.
+      ordered_routes: Map.get(context, :ordered_routes)
     ]
   end
 

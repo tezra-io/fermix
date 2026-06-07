@@ -19,6 +19,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Providers.Selection
   alias FermixCore.Setup.ConfigStore
 
   @default_timeout_ms 30 * 60 * 1_000
@@ -517,11 +518,27 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp add_adapter_opts(base, state) do
-    {route_key, adapter_opts} = RouteResolver.resolve!(route_opts(state.job))
+    Keyword.put(base, :routes, job_routes(state.job))
+  end
 
-    base
-    |> Keyword.put(:route_key, route_key)
-    |> Keyword.put(:adapter_opts, adapter_opts)
+  # Jobs with a persisted provider/model stay strict (one route) for
+  # reproducibility; jobs without one follow the current primary/fallback
+  # chain at execution time (§7). Route-selection failures (e.g. multiple
+  # primaries) raise here and fail the run loudly.
+  defp job_routes(job) do
+    case route_opts(job) do
+      [] ->
+        case Selection.ordered_routes() do
+          {:ok, routes} ->
+            routes
+
+          {:error, reason} ->
+            raise ArgumentError, "scheduled job route selection failed: #{inspect(reason)}"
+        end
+
+      explicit ->
+        [RouteResolver.resolve!(explicit)]
+    end
   end
 
   defp route_opts(job) do

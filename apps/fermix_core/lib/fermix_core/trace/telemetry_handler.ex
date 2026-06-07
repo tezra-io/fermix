@@ -15,6 +15,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   @core_events [
     %{event: [:fermix, :provider, :call], trace_type: :llm_call, agent_field: :agent},
+    %{
+      event: [:fermix, :provider, :failover],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "provider_failover"
+    },
     %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent},
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
     %{
