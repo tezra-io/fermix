@@ -65,7 +65,7 @@ final class CompanionState: ObservableObject {
         callActive = false
         muted = false
         captureStarted = false
-        audio.shutdown()
+        shutdownAudio()
         socket.close()
         connected = false
     }
@@ -143,9 +143,7 @@ final class CompanionState: ObservableObject {
 
     func disconnect() {
         endCall()
-        // Full mic teardown on disconnect — the pet is going to "off",
-        // so we release the audio session entirely (mic indicator clears).
-        audio.stopCapture()
+        shutdownAudio()
         socket.close()
         connected = false
         mode = .offline
@@ -214,8 +212,7 @@ final class CompanionState: ObservableObject {
     func endCall() {
         // Tear capture down fully so macOS clears the microphone privacy
         // indicator as soon as the local call ends.
-        audio.stopCapture()
-        audio.stopPlayback()
+        shutdownAudio()
         captureStarted = false
         if connected {
             try? socket.send(["type": "call_stop"])
@@ -324,8 +321,7 @@ final class CompanionState: ObservableObject {
             statusText = event["reason"] as? String ?? "error"
             // Server signalled an error — detach handler so no in-flight
             // mic buffer races back to the possibly-broken socket.
-            audio.stopCapture()
-            audio.stopPlayback()
+            shutdownAudio()
             callActive = false
             muted = false
             captureStarted = false
@@ -338,10 +334,8 @@ final class CompanionState: ObservableObject {
         guard callActive && !captureStarted else { return }
 
         do {
-            // Attaches the chunk handler and unmutes the pre-warmed tap.
-            // If the mic wasn't pre-warmed at connect time (permission
-            // not yet granted), beginStreaming sets it up now — falling
-            // back to the slow path on first ever call.
+            // Attaches the chunk handler, starts capture if needed, and
+            // unmutes only after the server confirms listening state.
             try audio.beginStreaming { [weak self] chunk in
                 self?.socket.sendAudioChunk(chunk)
             }
@@ -380,10 +374,8 @@ final class CompanionState: ObservableObject {
 
     private func handlePeerClose() {
         // Daemon socket dropped from the other end. Tear the mic all the
-        // way down — there's nothing to stream to and nothing to come
-        // back to. A subsequent connect() will re-warm.
-        audio.stopCapture()
-        audio.stopPlayback()
+        // way down — there's nothing to stream to.
+        shutdownAudio()
         callActive = false
         muted = false
         captureStarted = false
@@ -405,5 +397,10 @@ final class CompanionState: ObservableObject {
 
     private func debugLog(_ message: String) {
         NSLog("FermixPet: %@", message)
+    }
+
+    private func shutdownAudio() {
+        audio.shutdown()
+        audioLevel = 0
     }
 }

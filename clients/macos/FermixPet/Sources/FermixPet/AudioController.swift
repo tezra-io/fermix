@@ -81,8 +81,8 @@ final class AudioController {
         }
     }
 
-    /// Attach a chunk handler and unmute so the warmed tap starts pushing
-    /// data to the socket. The caller must have already awaited
+    /// Attach a chunk handler and unmute so capture starts pushing data
+    /// to the socket. The caller must have already awaited
     /// `requestCapturePermission()` — this throws `.microphoneDenied` if
     /// permission isn't in hand.
     func beginStreaming(onChunk: @escaping (Data) -> Void) throws {
@@ -99,9 +99,8 @@ final class AudioController {
         setCaptureMuted(false)
     }
 
-    /// Detach the chunk handler and re-mute. The tap and engine stay alive
-    /// so the next call doesn't pay the warm-up cost. No audio leaves the
-    /// process after this returns.
+    /// Detach the chunk handler and re-mute. Full call teardown should use
+    /// `shutdown()` so the macOS microphone indicator clears promptly.
     func stopStreaming() {
         chunkHandlerLock.lock()
         onChunkHandler = nil
@@ -220,7 +219,7 @@ final class AudioController {
         }
     }
 
-    func stopCapture() {
+    private func stopCapture() {
         // Belt: clear the handler so any tap callback racing with teardown
         // can't fire a write to the socket.
         chunkHandlerLock.lock()
