@@ -8,6 +8,26 @@ defmodule FermixCore.Providers.RouteResolverTest do
   alias FermixCore.Providers.OpenAI.Responses
   alias FermixCore.Providers.RouteResolver
 
+  # The "sane defaults" cases assert what RouteResolver produces when nothing is
+  # configured. RouteResolver reads global app env (Config.provider/1), so a leak
+  # from any earlier async:false module (e.g. an anthropic auth_mode = "oauth"
+  # config left in :providers) would flip these defaults. Force a clean baseline
+  # per test and restore it, so the file is neither a victim nor a source of leaks.
+  setup do
+    providers = Application.get_env(:fermix_core, :providers, [])
+    agent = Application.get_env(:fermix_core, :agent, [])
+
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :agent, [])
+
+    on_exit(fn ->
+      Application.put_env(:fermix_core, :providers, providers)
+      Application.put_env(:fermix_core, :agent, agent)
+    end)
+
+    :ok
+  end
+
   describe "resolve!/1" do
     test "nil provider falls back to OpenAI Chat Completions when api_key + non-eligible model" do
       {route_key, opts} =

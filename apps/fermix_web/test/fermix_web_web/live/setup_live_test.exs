@@ -6,6 +6,7 @@ defmodule FermixWebWeb.SetupLiveTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
 
   # Hermetic Anthropic backend stub — writes the auth store (tmp FERMIX_HOME) but
@@ -945,6 +946,48 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert {:ok, entry} = Store.read(:openai_codex)
       assert entry.auth_mode == "chatgpt"
       assert entry.tokens.access_token == "codex_access_token"
+    end
+
+    test "Codex OAuth completion marks it primary without an explicit save", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      parent = self()
+
+      Application.put_env(:fermix_web, :codex_login_runner, fn opts ->
+        Keyword.fetch!(opts, :oauth_opener).("https://auth.openai.test/codex")
+        entry = codex_auth_entry()
+        :ok = Store.write(:openai_codex, entry)
+        send(parent, {:codex_login_started, Keyword.keys(opts)})
+        {:ok, entry}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      # Select Codex and complete OAuth — but never submit "Save provider".
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai_codex",
+          default_model: "gpt-5.5",
+          reasoning_effort: "high"
+        }
+      )
+      |> render_change()
+
+      view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
+      assert_receive {:codex_login_started, _keys}
+      render_until(view, "ChatGPT OAuth connected.")
+
+      # Regression: connecting Codex must leave it the primary provider so the
+      # end-of-setup probe (PrimaryConfig.primary) resolves to it. Previously the
+      # flag was set only by a later save carrying provider=openai_codex, so a
+      # connect-then-probe flow reported "provider not configured".
+      assert PrimaryConfig.primary() == {:ok, :openai_codex}
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.openai_codex]"
+      assert contents =~ "primary = true"
     end
 
     test "shows the API key / OAuth picker for xAI and anthropic", %{conn: conn} do
