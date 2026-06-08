@@ -70,6 +70,11 @@ final class CompanionState: ObservableObject {
         connected = false
     }
 
+    func quitApplication() {
+        shutdown()
+        NSApp.terminate(nil)
+    }
+
     nonisolated private static func defaultSocketPath() -> String {
         let environment = ProcessInfo.processInfo.environment
 
@@ -127,17 +132,6 @@ final class CompanionState: ObservableObject {
             statusText = "idle"
             try socket.send(["type": "client_hello", "protocol_version": 1])
             debugLog("connected realtime socket: \(socketPath)")
-
-            // Pre-warm the mic so first call start doesn't pay the
-            // engine + tap setup cost (~couple of seconds on macOS).
-            // Best-effort: skips silently if mic permission hasn't been
-            // granted yet (we don't want connect to trigger the prompt).
-            do {
-                try audio.warmCapture()
-                debugLog("audio capture pre-warmed")
-            } catch {
-                debugLog("warmCapture failed (will retry on call start): \(String(describing: error))")
-            }
         } catch {
             connected = false
             callActive = false
@@ -218,11 +212,9 @@ final class CompanionState: ObservableObject {
     }
 
     func endCall() {
-        // Detach the chunk handler and re-mute — no audio leaves the
-        // process after this point. The tap and engine stay alive so the
-        // *next* call doesn't repay the warm-up cost. Full teardown
-        // happens in disconnect()/shutdown().
-        audio.stopStreaming()
+        // Tear capture down fully so macOS clears the microphone privacy
+        // indicator as soon as the local call ends.
+        audio.stopCapture()
         audio.stopPlayback()
         captureStarted = false
         if connected {
@@ -331,10 +323,8 @@ final class CompanionState: ObservableObject {
             mode = .error
             statusText = event["reason"] as? String ?? "error"
             // Server signalled an error — detach handler so no in-flight
-            // mic buffer races back to the (possibly-broken) socket. Keep
-            // the engine warm so a recovery / reconnect doesn't pay
-            // startup latency again.
-            audio.stopStreaming()
+            // mic buffer races back to the possibly-broken socket.
+            audio.stopCapture()
             audio.stopPlayback()
             callActive = false
             muted = false
