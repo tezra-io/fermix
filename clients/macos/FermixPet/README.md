@@ -15,11 +15,12 @@ V1 posture:
 - Transcript persistence is controlled by Fermix setup, not by this client.
 - The visible pet is a transparent mascot surface; controls appear on hover.
 
-Run from source:
+Install the app:
 
 ```sh
 cd clients/macos/FermixPet
-./script/build_and_run.sh
+./script/build_and_run.sh install
+open "$HOME/Applications/FermixPet.app"
 ```
 
 When testing against a dev daemon:
@@ -29,8 +30,10 @@ FERMIX_HOME=$HOME/.fermix-dev ./script/build_and_run.sh
 ```
 
 Use the script instead of `swift run FermixPet` for normal GUI testing. It
-stages a local `.app` bundle under `.build/app` so Dock, Quit, microphone
-permissions, and app identity use the FermixPet bundle metadata.
+builds with SwiftPM under `~/Library/Caches/io.tezra.FermixPet`, stages a
+proper `.app` bundle, and installs to `~/Applications/FermixPet.app` when run
+with `install`. Dock, Quit, microphone permissions, and app identity use the
+FermixPet bundle metadata.
 
 On first listen, macOS should prompt for microphone access. If it was denied
 previously, enable `FermixPet` in System Settings -> Privacy & Security ->
@@ -40,8 +43,9 @@ Microphone, or reset the prompt with:
 tccutil reset Microphone io.tezra.FermixPet
 ```
 
-Close the source-run app from the hover `xmark` button, or right-click the pet
-and choose `Quit FermixPet`. `Ctrl-C` in the launch terminal still works.
+Close the app from the hover `xmark` button, or right-click the pet and choose
+`Quit FermixPet`. `Ctrl-C` in the launch terminal still works for source-run
+sessions.
 
 For early shared builds, ad-hoc signing is acceptable. If Gatekeeper quarantines
 a local build, remove quarantine before launching:
