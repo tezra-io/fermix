@@ -431,7 +431,7 @@ For the macOS Realtime companion, point it at the same `FERMIX_HOME`:
 
 ```bash
 cd clients/macos/FermixPet
-FERMIX_HOME=~/.fermix-dev swift run FermixPet
+FERMIX_HOME=~/.fermix-dev ./script/build_and_run.sh
 ```
 
 ### Unit and integration tests

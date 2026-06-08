@@ -8,7 +8,9 @@ V1 posture:
 - The app connects only to the local Fermix daemon socket. By default that is
   `~/.fermix/realtime.sock`; set `FERMIX_HOME` or `FERMIX_REALTIME_SOCKET` for
   dev homes such as `~/.fermix-dev`.
-- The OpenAI API key stays in the Fermix daemon.
+- The OpenAI API key stays in the Fermix daemon. Realtime voice requires a real
+  OpenAI **Platform** API key (`sk-...`, with billing/Realtime access) configured
+  in the daemon — a ChatGPT/Codex OAuth login does **not** authorize Realtime.
 - Capture starts only after the user opens a local call. While the call is
   open, the mic streams continuously and OpenAI server VAD owns turn
   boundaries. There is no always-listening mode when no call is open.
@@ -43,9 +45,21 @@ Microphone, or reset the prompt with:
 tccutil reset Microphone io.tezra.FermixPet
 ```
 
-Close the app from the hover `xmark` button, or right-click the pet and choose
-`Quit FermixPet`. `Ctrl-C` in the launch terminal still works for source-run
-sessions.
+Close the app by right-clicking the pet and choosing `Quit FermixPet`.
+
+If the pet flickers to `listening` and immediately drops back to idle/offline,
+or the mic indicator seems stuck, the daemon usually can't open the Realtime
+session — most often an invalid or missing OpenAI Platform API key. Check it
+with:
+
+```sh
+fermix voice status
+```
+
+A `setup_required` status (or `invalid_api_key` in `~/.fermix/logs/fermix.log`)
+means the key is the problem, not the app. Rebuilding/reinstalling the app
+changes its ad-hoc code signature, so macOS may re-prompt for microphone
+access — re-grant it, or run the `tccutil reset` command above.
 
 For early shared builds, ad-hoc signing is acceptable. If Gatekeeper quarantines
 a local build, remove quarantine before launching:

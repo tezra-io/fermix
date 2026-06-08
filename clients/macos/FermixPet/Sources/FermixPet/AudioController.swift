@@ -99,16 +99,6 @@ final class AudioController {
         setCaptureMuted(false)
     }
 
-    /// Detach the chunk handler and re-mute. Full call teardown should use
-    /// `shutdown()` so the macOS microphone indicator clears promptly.
-    func stopStreaming() {
-        chunkHandlerLock.lock()
-        onChunkHandler = nil
-        chunkHandlerLock.unlock()
-
-        setCaptureMuted(true)
-    }
-
     /// Idempotent: installs the tap, starts the engine, and leaves the
     /// capture path muted+handlerless. Safe to call repeatedly.
     private func ensureCaptureRunning() throws {
