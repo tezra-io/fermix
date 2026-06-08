@@ -291,8 +291,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   defp dispatch_event(%{type: "call_start"}, state) do
     case ensure_session(state) do
       {:ok, session, state} ->
-        with :ok <- state.session_module.call_start(session),
-             :ok <- send_event(state.conn, %{type: "state", state: "listening"}) do
+        with :ok <- state.session_module.call_start(session) do
           {:cont, state}
         else
           {:error, reason} -> send_error_and_stop(reason, state)

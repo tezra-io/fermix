@@ -128,6 +128,7 @@ defmodule FermixCore.Realtime.SessionServer do
            reconnect_attempts: 0,
            reconnect_timer: nil,
            session_update_event: nil,
+           provider_ready?: false,
            current_item_id: nil
          }}
 
@@ -142,11 +143,8 @@ defmodule FermixCore.Realtime.SessionServer do
          {:ok, event} <- build_session_update_event(state) do
       case send_provider_event(state.openai_client, openai_pid, event) do
         :ok ->
-          notify(state.companion, %{type: "state", state: "listening"})
-
           state =
-            %{state | openai_pid: openai_pid, session_update_event: event}
-            |> start_timers()
+            %{state | openai_pid: openai_pid, session_update_event: event, provider_ready?: false}
 
           {:reply, :ok, state}
 
@@ -162,9 +160,14 @@ defmodule FermixCore.Realtime.SessionServer do
     end
   end
 
-  def handle_call(:call_start, _from, %{openai_pid: openai_pid} = state)
+  def handle_call(:call_start, _from, %{openai_pid: openai_pid, provider_ready?: true} = state)
       when is_pid(openai_pid) do
     notify(state.companion, %{type: "state", state: "listening"})
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:call_start, _from, %{openai_pid: openai_pid} = state)
+      when is_pid(openai_pid) do
     {:reply, :ok, state}
   end
 
@@ -302,9 +305,14 @@ defmodule FermixCore.Realtime.SessionServer do
   def handle_info(:reconnect_attempt, state) do
     case attempt_reconnect(state) do
       {:ok, openai_pid, state} ->
-        notify(state.companion, %{type: "state", state: "listening"})
-
-        {:noreply, %{state | openai_pid: openai_pid, reconnect_attempts: 0, reconnect_timer: nil}}
+        {:noreply,
+         %{
+           state
+           | openai_pid: openai_pid,
+             provider_ready?: false,
+             reconnect_attempts: 0,
+             reconnect_timer: nil
+         }}
 
       {:error, _reason, state} ->
         case schedule_reconnect(state) do
@@ -426,6 +434,7 @@ defmodule FermixCore.Realtime.SessionServer do
     |> Map.merge(%{
       openai_pid: nil,
       session_update_event: nil,
+      provider_ready?: false,
       reconnect_attempts: 0,
       reconnect_timer: nil,
       current_item_id: nil
@@ -544,7 +553,18 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp handle_provider_event_internal({:session_created, _event}, state), do: state
 
-  defp handle_provider_event_internal({:session_updated, _event}, state), do: state
+  defp handle_provider_event_internal(
+         {:session_updated, _event},
+         %{provider_ready?: true} = state
+       ),
+       do: state
+
+  defp handle_provider_event_internal({:session_updated, _event}, state) do
+    state
+    |> Map.put(:provider_ready?, true)
+    |> start_timers()
+    |> notify_listening_state()
+  end
 
   defp handle_provider_event_internal({:input_audio_committed, _event}, state), do: state
 
