@@ -15,11 +15,15 @@ fi
 
 if ! awk '
   /func endCall\(\)/ { in_end_call = 1 }
-  in_end_call && /audio\.stopCapture\(\)/ { found = 1 }
+  in_end_call && /shutdownAudio\(\)/ { found = 1 }
   in_end_call && /^    func / && !/func endCall\(\)/ { in_end_call = 0 }
   END { exit(found ? 0 : 1) }
 ' "$STATE_FILE"; then
-  fail "endCall must release microphone capture"
+  fail "endCall must fully shut down audio"
+fi
+
+if rg -n "audio\\.stopCapture\\(\\)" "$STATE_FILE" >/dev/null; then
+  fail "CompanionState must use full audio.shutdown() for teardown"
 fi
 
 echo "runtime_policy_test: ok"
