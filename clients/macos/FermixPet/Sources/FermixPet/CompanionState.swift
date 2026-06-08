@@ -143,7 +143,6 @@ final class CompanionState: ObservableObject {
 
     func disconnect() {
         endCall()
-        shutdownAudio()
         socket.close()
         connected = false
         mode = .offline
