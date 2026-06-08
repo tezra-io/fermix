@@ -2,7 +2,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
   alias FermixCore.Auth.Redaction
-  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
 
   @channels [
@@ -41,6 +40,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
+  attr :provider_statuses, :list, required: true
 
   def page(assigns) do
     ~H"""
@@ -89,6 +89,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               personalization_form={@personalization_form}
               provider_form={@provider_form}
               provider_models={@provider_models}
+              provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
               realtime_form={@realtime_form}
@@ -217,6 +218,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
+  attr :provider_statuses, :list, required: true
 
   defp active_pane(assigns), do: render_active_pane(assigns.active_tab, assigns)
 
@@ -239,25 +241,21 @@ defmodule FermixWebWeb.SetupLive.Components do
       />
 
       <form phx-submit="save_provider" phx-change="provider_changed" class="mt-6">
+        <section class="space-y-3">
+          <p class="text-xs text-base-content/60">
+            Select a provider to set it up below. The one you save becomes primary (it serves
+            every turn); other configured providers are fallbacks. Changing primary needs a
+            daemon restart.
+          </p>
+          <.provider_cards provider_statuses={@provider_statuses} editing={@provider_form.provider} />
+        </section>
+
+        <h3 class="mb-4 mt-6 text-sm font-semibold">
+          Configuring {Atom.to_string(@provider_form.provider)}
+        </h3>
         <div class={provider_grid_class(@provider_form.provider)}>
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
-              <label class="form-control w-full">
-                <span class="label pb-1 text-sm font-medium">Provider</span>
-                <select
-                  name="provider_form[provider]"
-                  class="select select-bordered w-full bg-base-100"
-                >
-                  <option
-                    :for={provider <- ModelCatalog.providers()}
-                    value={Atom.to_string(provider)}
-                    selected={provider == @provider_form.provider}
-                  >
-                    {Atom.to_string(provider)}
-                  </option>
-                </select>
-              </label>
-
               <label class="form-control w-full">
                 <span class="label pb-1 text-sm font-medium">Default model</span>
                 <select
@@ -323,6 +321,67 @@ defmodule FermixWebWeb.SetupLive.Components do
     </div>
     """
   end
+
+  attr :provider_statuses, :list, required: true
+  attr :editing, :atom, required: true
+
+  defp provider_cards(assigns) do
+    ~H"""
+    <div class="grid gap-2 sm:grid-cols-2">
+      <div :for={status <- @provider_statuses} class={provider_card_class(status, @editing)}>
+        <label class="flex min-w-0 flex-1 cursor-pointer items-start gap-3">
+          <input
+            type="radio"
+            name="provider_form[provider]"
+            class="radio radio-sm radio-primary mt-0.5"
+            value={Atom.to_string(status.provider)}
+            checked={status.provider == @editing}
+          />
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="font-medium">{Atom.to_string(status.provider)}</span>
+              <span class={provider_badge_class(status)}>{provider_badge_label(status)}</span>
+            </div>
+            <p :if={status.configured?} class="truncate text-xs text-base-content/60">
+              {status.model}
+            </p>
+            <p :if={not status.configured?} class="text-xs text-base-content/50">
+              Select to set up credentials.
+            </p>
+          </div>
+        </label>
+        <button
+          :if={status.configured? and not status.primary?}
+          type="button"
+          class="btn btn-ghost btn-xs self-center"
+          phx-click="set_primary"
+          phx-value-provider={Atom.to_string(status.provider)}
+        >
+          Set primary
+        </button>
+      </div>
+    </div>
+    """
+  end
+
+  defp provider_card_class(status, editing) do
+    base =
+      "flex items-start justify-between gap-2 rounded-field border p-3 text-sm transition-colors"
+
+    if status.provider == editing do
+      base <> " border-primary bg-primary/5"
+    else
+      base <> " border-base-300 bg-base-100"
+    end
+  end
+
+  defp provider_badge_class(%{primary?: true}), do: "badge badge-sm badge-primary"
+  defp provider_badge_class(%{configured?: true}), do: "badge badge-sm badge-ghost"
+  defp provider_badge_class(_status), do: "badge badge-sm badge-ghost opacity-60"
+
+  defp provider_badge_label(%{primary?: true}), do: "Primary"
+  defp provider_badge_label(%{configured?: true}), do: "Fallback"
+  defp provider_badge_label(_status), do: "Not configured"
 
   defp api_key_mode?(%{provider: :openai}), do: true
 
@@ -764,8 +823,16 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp channels_pane(assigns) do
+    sections = channel_sections(assigns.channels_form, assigns.report)
+    editing = assigns.channels_form.editing
+    editing_section = Enum.find(sections, &(&1.channel == editing)) || hd(sections)
+
     assigns =
-      assign(assigns, :channel_sections, channel_sections(assigns.channels_form, assigns.report))
+      assign(assigns,
+        channel_sections: sections,
+        editing_section: editing_section,
+        editing: editing
+      )
 
     ~H"""
     <div>
@@ -774,18 +841,31 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Add the tokens and owner IDs for the message surfaces this host should accept."
       />
 
-      <form phx-submit="save_channels" class="mt-6 space-y-5">
-        <div class="grid gap-4 xl:grid-cols-2">
-          <.integration_panel
+      <section class="mt-6 space-y-3">
+        <p class="text-xs text-base-content/60">
+          Pick a channel to add its tokens and owner ID. Each channel is independent — there is no
+          primary; configure as many as you need.
+        </p>
+        <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <button
             :for={section <- @channel_sections}
-            title={section.title}
-            status={section.status}
+            type="button"
+            phx-click="select_channel"
+            phx-value-channel={Atom.to_string(section.channel)}
+            class={channel_card_class(section.channel, @editing)}
           >
-            <.channel_field :for={field <- section.fields} field={field} />
-          </.integration_panel>
+            <span class="font-medium">{section.title}</span>
+            <.status_pill status={section.status} />
+          </button>
         </div>
+      </section>
 
-        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save channels" />
+      <form phx-submit="save_channels" class="mt-6 space-y-5">
+        <.integration_panel title={@editing_section.title} status={@editing_section.status}>
+          <.channel_field :for={field <- @editing_section.fields} field={field} />
+        </.integration_panel>
+
+        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save channel" />
       </form>
     </div>
     """
@@ -1663,11 +1743,23 @@ defmodule FermixWebWeb.SetupLive.Components do
       form = Map.fetch!(channels_form, key)
 
       %{
+        channel: key,
         title: title,
         status: channel_status(report, key, form.enabled),
         fields: channel_fields(key, form)
       }
     end)
+  end
+
+  defp channel_card_class(channel, editing) do
+    base =
+      "flex items-center justify-between gap-2 rounded-field border p-3 text-sm transition-colors"
+
+    if channel == editing do
+      base <> " border-primary bg-primary/5"
+    else
+      base <> " border-base-300 bg-base-100 hover:border-primary/40"
+    end
   end
 
   defp channel_fields(:telegram, form) do

@@ -4,13 +4,26 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   alias FermixCore.Realtime.LocalVoiceSocket
 
   defmodule FakeSession do
-    def call_start(pid), do: Agent.update(pid, &Map.put(&1, :call_started?, true))
+    def call_start(pid) do
+      companion = Agent.get(pid, & &1.opts[:companion])
+      send(companion, {:realtime, %{type: "state", state: "listening"}})
+      Agent.update(pid, &Map.put(&1, :call_started?, true))
+    end
+
     def audio_chunk(pid, audio), do: Agent.update(pid, &Map.put(&1, :audio, audio))
 
     def interrupt(pid, audio_end_ms),
       do: Agent.update(pid, &Map.merge(&1, %{interrupted?: true, audio_end_ms: audio_end_ms}))
 
     def mute(pid, enabled?), do: Agent.update(pid, &Map.put(&1, :muted?, enabled?))
+    def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+  end
+
+  defmodule SilentSession do
+    def call_start(pid), do: Agent.update(pid, &Map.put(&1, :call_started?, true))
+    def audio_chunk(_pid, _audio), do: :ok
+    def interrupt(_pid, _audio_end_ms), do: :ok
+    def mute(_pid, _enabled?), do: :ok
     def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
   end
 
@@ -39,7 +52,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(socket), do: GenServer.stop(socket)
+      stop_socket(socket)
       FermixTestSupport.SafeRm.rm(socket_path)
     end)
 
@@ -66,6 +79,49 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :gen_tcp.close(conn)
   end
 
+  test "call_start waits for the session to publish listening state" do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-silent-#{System.unique_integer([:positive])}.sock"
+      )
+
+    {:ok, task_sup} =
+      Task.Supervisor.start_link(
+        name: :"rt_socket_silent_tasks_#{System.unique_integer([:positive])}"
+      )
+
+    test_pid = self()
+
+    session_starter = fn opts ->
+      {:ok, pid} = Agent.start_link(fn -> %{opts: opts} end)
+      send(test_pid, {:silent_session_started, pid})
+      {:ok, pid}
+    end
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        task_supervisor: task_sup,
+        session_starter: session_starter,
+        session_module: SilentSession,
+        name: :"rt_socket_silent_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      stop_socket(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:silent_session_started, _session}, 1_000
+    assert {:error, :timeout} = recv_line(conn, 50)
+
+    :gen_tcp.close(conn)
+  end
+
   test "malformed event returns error and closes that client", %{socket_path: socket_path} do
     {:ok, conn} = connect(socket_path)
     :ok = :gen_tcp.send(conn, "{\n")
@@ -82,6 +138,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert_receive {:session_started, session, _opts}, 1_000
     assert {:ok, line} = recv_line(conn)
     assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+    assert {:error, :timeout} = recv_line(conn, 50)
 
     audio = Base.encode64("1234")
     :ok = :gen_tcp.send(conn, ~s({"type":"audio_chunk","audio":"#{audio}"}\n))
@@ -226,7 +283,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(socket), do: GenServer.stop(socket)
+      stop_socket(socket)
       FermixTestSupport.SafeRm.rm(socket_path)
     end)
 
@@ -263,7 +320,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(socket), do: GenServer.stop(socket)
+      stop_socket(socket)
       FermixTestSupport.SafeRm.rm(socket_path)
     end)
 
@@ -398,4 +455,12 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
   end
 
   defp wait_until(_fun, 0), do: flunk("condition did not become true")
+
+  defp stop_socket(socket) do
+    if Process.alive?(socket) do
+      GenServer.stop(socket)
+    end
+  catch
+    :exit, _reason -> :ok
+  end
 end
