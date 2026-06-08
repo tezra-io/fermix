@@ -464,6 +464,29 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  describe "restart navigation" do
+    test "an explicit ?tab= lands the operator on that tab, not next_action_tab", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?tab=doctor")
+
+      # Provider is unconfigured here, so next_action_tab would normally choose
+      # the provider tab; an explicit ?tab=doctor must win.
+      assert html =~ "Readiness doctor"
+      refute html =~ "Provider &amp; Model"
+    end
+
+    test "no tab param falls through to next_action_tab", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup")
+
+      assert html =~ "Provider &amp; Model"
+    end
+
+    test "an unknown tab param falls back to next_action_tab without crashing", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?tab=bogus")
+
+      assert html =~ "Provider &amp; Model"
+    end
+  end
+
   describe "Search form" do
     test "selecting a backend reveals only that key and persists it", %{
       conn: conn,
@@ -547,6 +570,127 @@ defmodule FermixWebWeb.SetupLiveTest do
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(voice = "cedar")
       assert contents =~ "max_session_minutes = 20"
+    end
+  end
+
+  describe "channel cards" do
+    test "renders a selectable card per channel with status", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?tab=channels")
+
+      for title <- ~w(Telegram WhatsApp Discord Slack Signal) do
+        assert html =~ title
+      end
+
+      assert html =~ ~s(phx-click="select_channel")
+      assert html =~ "Not configured"
+    end
+
+    test "selecting a channel loads its fields into the form", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="whatsapp"]))
+        |> render_click()
+
+      assert html =~ ~s(name="channels_form[whatsapp_access_token]")
+      refute html =~ ~s(name="channels_form[telegram_bot_token]")
+    end
+
+    test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      view
+      |> element(~s(button[phx-click="select_channel"][phx-value-channel="discord"]))
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]",
+          channels_form: %{discord_bot_token: "tok", discord_owner_user_id: "1"}
+        )
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+      assert html =~ ~s(name="channels_form[discord_bot_token]")
+      refute html =~ ~s(name="channels_form[telegram_bot_token]")
+    end
+  end
+
+  describe "primary provider cards" do
+    setup do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-openai", primary: true, default_model: "gpt-5.5"],
+        anthropic: [api_key: "sk-ant", default_model: "claude-opus-4-7"]
+      )
+
+      # Persist to disk so the keys are real config, not env-only secrets that a
+      # later primary-only save would strip.
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+
+      :ok
+    end
+
+    test "render each provider with its primary/fallback/not-configured status", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/setup?tab=provider")
+
+      # openai = configured + primary; anthropic = configured fallback;
+      # openai_codex + xai = unconfigured.
+      assert html =~ "Fallback"
+      assert html =~ "Not configured"
+    end
+
+    test "selecting a provider loads it into the configure form", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "anthropic"})
+        |> render_change()
+
+      assert html =~ "Configuring anthropic"
+      assert html =~ ~s(name="provider_form[anthropic_api_key]")
+    end
+
+    test "an unconfigured provider can be selected to configure (nothing disabled)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "xai"})
+        |> render_change()
+
+      assert html =~ "Configuring xai"
+    end
+
+    test "Set primary flips the flag to a configured fallback without re-entering creds", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> element(~s(button[phx-click="set_primary"][phx-value-provider="anthropic"]))
+        |> render_click()
+
+      assert html =~ "Primary provider set to anthropic"
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      assert Keyword.get(providers[:anthropic], :primary) == true
+      refute Keyword.get(providers[:openai], :primary) == true
+      # Credentials are untouched by a Set-primary flip.
+      assert Keyword.get(providers[:anthropic], :api_key) == "sk-ant"
+    end
+
+    test "the primary provider and unconfigured providers expose no Set primary button", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      # openai is already primary; xai is unconfigured.
+      refute has_element?(view, ~s(button[phx-click="set_primary"][phx-value-provider="openai"]))
+      refute has_element?(view, ~s(button[phx-click="set_primary"][phx-value-provider="xai"]))
     end
   end
 
