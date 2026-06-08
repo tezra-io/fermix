@@ -24,6 +24,12 @@ defmodule FermixCore.Jobs.TelemetryTest do
 
     prior = Application.get_env(:fermix_core, :telemetry, [])
 
+    # Establish the production default (content capture off) as the baseline so
+    # the run_start "no :input" assertion never inherits a capture_content = true
+    # left in app env by another async:false module. Tests that need capture on
+    # set it explicitly.
+    Application.put_env(:fermix_core, :telemetry, capture_content: false)
+
     on_exit(fn ->
       :telemetry.detach(handler)
       Application.put_env(:fermix_core, :telemetry, prior)

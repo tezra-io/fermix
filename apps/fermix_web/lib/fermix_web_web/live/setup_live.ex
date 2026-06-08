@@ -1214,7 +1214,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:codex_auth_tasks, tasks)
     |> assign(:codex_auth_url, nil)
-    |> refresh_report_preserving_provider_form("#{task.display_name} OAuth connected.")
+    |> connect_oauth_provider(:openai_codex, "#{task.display_name} OAuth connected.")
   end
 
   defp finish_codex_auth(socket, task, tasks, {:error, reason}) do
@@ -1226,6 +1226,27 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:codex_auth_tasks, tasks)
     |> assign(:codex_auth_url, nil)
     |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+  end
+
+  # A completed OAuth connection in setup means the user chose this provider, so
+  # persist it as primary now. Otherwise the credential is stored but the config
+  # pointer the end-of-setup probe and runtime routing resolve through
+  # PrimaryConfig.primary/0 is set only if a later "Save provider" submit happens
+  # to carry the selection — the gap that left a freshly-connected Codex provider
+  # reported "not configured". Idempotent with that save; Wizard.mark_primary
+  # reads the current snapshot so an auth_mode the login flow just wrote stays.
+  defp connect_oauth_provider(socket, provider, message) do
+    case Wizard.mark_primary(provider) do
+      {:ok, _report} ->
+        refresh_report_preserving_provider_form(socket, message)
+
+      {:error, reason} ->
+        flash_error(
+          socket,
+          "#{provider} connected, but setting it as the primary provider failed: " <>
+            Redaction.format(reason)
+        )
+    end
   end
 
   defp refresh_report_preserving_provider_form(socket, message) do
@@ -1338,7 +1359,8 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:xai_auth_tasks, tasks)
     |> assign(:xai_auth_url, nil)
     |> assign(:restart_pending?, true)
-    |> refresh_report_preserving_provider_form(
+    |> connect_oauth_provider(
+      :xai,
       "#{task.display_name} OAuth connected. Restart the daemon to apply."
     )
   end
@@ -1380,7 +1402,8 @@ defmodule FermixWebWeb.SetupLive do
          {:ok, _report} <- Wizard.set_provider_auth_mode(:anthropic, :oauth) do
       socket
       |> assign(:restart_pending?, true)
-      |> refresh_report_preserving_provider_form(
+      |> connect_oauth_provider(
+        :anthropic,
         "Anthropic OAuth connected. Restart the daemon to apply."
       )
     else
