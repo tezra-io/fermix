@@ -107,6 +107,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
   test "call_start opens OpenAI session and sends filtered session.update", %{server: server} do
     assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
     assert_receive {:realtime, %{type: "state", state: "listening"}}
 
     openai = SessionServer.openai_pid(server)
@@ -115,6 +116,14 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert event.type == "session.update"
     assert event.session.instructions == "prompt"
     assert [%{name: "echo"}] = event.session.tools
+  end
+
+  test "call_start waits for provider session_updated before listening", %{server: server} do
+    assert :ok = SessionServer.call_start(server)
+    refute_receive {:realtime, %{type: "state", state: "listening"}}, 50
+
+    assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+    assert_receive {:realtime, %{type: "state", state: "listening"}}
   end
 
   test "call_start composes the prompt with the realtime overlay enabled" do
@@ -329,6 +338,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
   test "active-response race from provider is nonfatal", %{server: server} do
     assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
     assert_receive {:realtime, %{type: "state", state: "listening"}}
 
     openai = SessionServer.openai_pid(server)
@@ -347,6 +357,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
   test "cancelled provider response stops queued playback but keeps call live", %{server: server} do
     assert :ok = SessionServer.call_start(server)
+    assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
     assert_receive {:realtime, %{type: "state", state: "listening"}}
 
     assert :ok = SessionServer.handle_provider_event(server, {:audio_delta, "item-7", "audio"})
@@ -590,6 +601,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
       assert :ok = SessionServer.call_start(server)
       assert_receive {:start_link_called, _opts}, 200
+      assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
       assert_receive {:realtime, %{type: "state", state: "listening"}}
 
       original = SessionServer.openai_pid(server)
@@ -597,6 +609,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}, 100
       assert_receive {:start_link_called, _opts}, 500
+      assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
       assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
 
       reconnected = SessionServer.openai_pid(server)
