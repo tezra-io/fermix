@@ -561,7 +561,10 @@ defmodule FermixCore.Setup.Wizard do
       |> put_provider_auth_mode(:xai, Keyword.get(answers, :xai_auth_mode))
       |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_primary_selection(Keyword.get(answers, :provider))
-      |> maybe_promote_newly_configured(blank?(Keyword.get(answers, :provider)))
+      |> maybe_promote_newly_configured(
+        blank?(Keyword.get(answers, :provider)),
+        promotion_excluded_providers(answers)
+      )
       |> put_default_model(Keyword.get(answers, :default_model))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
       |> put_fast(Keyword.get(answers, :fast))
@@ -655,21 +658,34 @@ defmodule FermixCore.Setup.Wizard do
   # code at all — primary promotion is a setup-save decision only. Codex
   # never trips this diff (its credentials live in the auth store, not the
   # snapshot); it becomes primary via the explicit provider answer.
-  defp maybe_promote_newly_configured(snapshot, false), do: snapshot
+  defp maybe_promote_newly_configured(snapshot, false, _excluded), do: snapshot
 
-  defp maybe_promote_newly_configured(snapshot, true) do
-    case newly_configured_providers(snapshot) do
+  defp maybe_promote_newly_configured(snapshot, true, excluded) do
+    case newly_configured_providers(snapshot, excluded) do
       [] -> snapshot
       # Catalog order — deterministic when one save configures several.
       [provider | _rest] -> mark_primary_provider(snapshot, provider)
     end
   end
 
-  defp newly_configured_providers(snapshot) do
+  # The Realtime key shares the OpenAI provider api_key slot (put_openai_api_key
+  # at the :realtime_api_key step). A realtime-only save therefore makes :openai
+  # *look* newly configured without being a provider-tab decision, so it must not
+  # steal an existing primary. A genuine :openai_api_key answer is unaffected.
+  defp promotion_excluded_providers(answers) do
+    if answered?(answers, :realtime_api_key) and not answered?(answers, :openai_api_key) do
+      [:openai]
+    else
+      []
+    end
+  end
+
+  defp newly_configured_providers(snapshot, excluded) do
     persisted = persisted_snapshot()
 
     Enum.filter(ModelCatalog.providers(), fn provider ->
-      Selection.configured?(provider, provider_config(snapshot, provider)) and
+      provider not in excluded and
+        Selection.configured?(provider, provider_config(snapshot, provider)) and
         not Selection.configured?(provider, provider_config(persisted, provider))
     end)
   end

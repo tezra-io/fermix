@@ -19,6 +19,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
@@ -82,21 +83,25 @@ defmodule FermixWebWeb.SetupLive do
   ]
 
   @impl true
-  def mount(_params, session, socket) do
+  def mount(params, session, socket) do
     if AccessToken.session_authorized?(setup_authorization(session)) do
-      mount_authorized(socket)
+      mount_authorized(socket, requested_tab(params))
     else
       {:ok, redirect(socket, to: ~p"/")}
     end
   end
 
-  defp mount_authorized(socket) do
+  # push_patch from apply_restart sets `?tab=`; with no patch this is a no-op.
+  @impl true
+  def handle_params(_params, _uri, socket), do: {:noreply, socket}
+
+  defp mount_authorized(socket, requested_tab) do
     report = Wizard.report()
 
     socket =
       socket
       |> assign(:page_title, "Fermix setup")
-      |> assign(:active_tab, next_action_tab(report))
+      |> assign(:active_tab, requested_tab || next_action_tab(report))
       |> assign(:saved_flash, nil)
       |> assign(:doctor_result, nil)
       |> assign(:doctor_probe_pending, MapSet.new())
@@ -135,21 +140,14 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("provider_changed", %{"provider_form" => params}, socket) do
     current = socket.assigns.provider_form
     provider = parse_provider_field(Map.get(params, "provider"), current.provider)
-    default_model = present_or(Map.get(params, "default_model"), current.default_model)
 
-    reasoning_effort =
-      parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort)
-
-    fast = parse_fast_field(Map.get(params, "fast"), current.fast)
-    auth_mode = parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode)
-
-    form = %{
-      provider: provider,
-      default_model: default_model,
-      reasoning_effort: reasoning_effort,
-      fast: fast,
-      auth_mode: auth_mode
-    }
+    form =
+      if provider == current.provider do
+        edited_provider_form(current, params)
+      else
+        # Switched provider via the cards — load that provider's saved config.
+        build_provider_form(socket.assigns.report.wizard.config_snapshot, provider)
+      end
 
     {:noreply,
      socket
@@ -178,6 +176,26 @@ defmodule FermixWebWeb.SetupLive do
 
       {:error, reason} ->
         {:noreply, flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")}
+    end
+  end
+
+  # Flip the primary flag to an already-configured provider without re-entering
+  # its credentials (the "Set primary" card action).
+  def handle_event("set_primary", %{"provider" => provider_string}, socket) do
+    provider = parse_provider_field(provider_string, socket.assigns.provider_form.provider)
+    status = Enum.find(socket.assigns.provider_statuses, &(&1.provider == provider))
+
+    if status && status.configured? && not status.primary? do
+      {:noreply,
+       save_answers(
+         socket,
+         [provider: provider_string],
+         "Primary provider set to #{provider}.",
+         nil,
+         restart_required?: true
+       )}
+    else
+      {:noreply, socket}
     end
   end
 
@@ -222,6 +240,8 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("save_channels", %{"channels_form" => params} = root, socket) do
+    editing = socket.assigns.channels_form.editing
+
     answers =
       []
       |> maybe_put_string(:telegram_bot_token, params["telegram_bot_token"])
@@ -240,10 +260,19 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
 
-    {:noreply,
-     save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"),
-       restart_required?: runtime_restart_answers?(answers)
-     )}
+    socket =
+      save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"),
+        restart_required?: runtime_restart_answers?(answers)
+      )
+
+    # assign_report rebuilds channels_form (editing -> default); keep the
+    # operator on the channel they just saved.
+    {:noreply, assign(socket, :channels_form, %{socket.assigns.channels_form | editing: editing})}
+  end
+
+  def handle_event("select_channel", %{"channel" => channel}, socket) do
+    channel = parse_channel_field(channel, socket.assigns.channels_form.editing)
+    {:noreply, assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})}
   end
 
   def handle_event("search_changed", %{"search_form" => params}, socket) do
@@ -367,7 +396,13 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("apply_restart", _params, socket) do
     if Service.supervised?() do
       Process.send_after(self(), :perform_restart, 600)
-      {:noreply, assign(socket, :restarting, true)}
+      # Stamp the current tab into the URL so the post-restart reconnect lands
+      # here instead of next_action_tab bouncing the operator to a partial tab.
+      # push_patch keeps this process alive so :perform_restart still fires.
+      {:noreply,
+       socket
+       |> assign(:restarting, true)
+       |> push_patch(to: ~p"/setup?#{[tab: socket.assigns.active_tab]}")}
     else
       {:noreply,
        flash_error(
@@ -477,6 +512,7 @@ defmodule FermixWebWeb.SetupLive do
       doctor_probe_running?={@doctor_probe_running?}
       provider_form={@provider_form}
       provider_models={@provider_models}
+      provider_statuses={@provider_statuses}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
       realtime_form={@realtime_form}
@@ -501,6 +537,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:tabs, @tabs)
     |> assign(:provider_form, build_provider_form(snapshot))
     |> assign(:provider_models, models_for_safe(current_provider(snapshot)))
+    |> assign(:provider_statuses, build_provider_statuses(snapshot))
     |> assign(:codex_auth, codex_auth_summary())
     |> assign(:xai_auth, xai_auth_summary())
     |> assign(:anthropic_auth, anthropic_auth_summary())
@@ -670,8 +707,21 @@ defmodule FermixWebWeb.SetupLive do
 
   defp maybe_advance(socket, _nav), do: socket
 
-  defp build_provider_form(snapshot) do
-    provider = current_provider(snapshot)
+  defp edited_provider_form(current, params) do
+    %{
+      provider: current.provider,
+      default_model: present_or(Map.get(params, "default_model"), current.default_model),
+      reasoning_effort:
+        parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
+      fast: parse_fast_field(Map.get(params, "fast"), current.fast),
+      auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode)
+    }
+  end
+
+  defp build_provider_form(snapshot),
+    do: build_provider_form(snapshot, current_provider(snapshot))
+
+  defp build_provider_form(snapshot, provider) do
     provider_block = provider_block(snapshot, provider)
 
     %{
@@ -682,6 +732,21 @@ defmodule FermixWebWeb.SetupLive do
       fast: Keyword.get(provider_block, :fast, false),
       auth_mode: Keyword.get(provider_block, :auth_mode, :api_key)
     }
+  end
+
+  defp build_provider_statuses(snapshot) do
+    primary = current_provider(snapshot)
+
+    Enum.map(ModelCatalog.providers(), fn provider ->
+      block = provider_block(snapshot, provider)
+
+      %{
+        provider: provider,
+        configured?: Selection.configured?(provider, block),
+        primary?: provider == primary,
+        model: Keyword.get(block, :default_model) || ModelCatalog.default_model_for(provider)
+      }
+    end)
   end
 
   # Anthropic has no `:none` (its floor is `:low`); its API default is high, so
@@ -706,6 +771,7 @@ defmodule FermixWebWeb.SetupLive do
     channels = Map.get(snapshot, :fermix_channels, [])
 
     %{
+      editing: :telegram,
       telegram: telegram_form(channels),
       whatsapp: whatsapp_form(channels),
       discord: discord_form(channels),
@@ -1425,6 +1491,13 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_provider_field("xai", _default), do: :xai
   defp parse_provider_field(_, default), do: default
 
+  defp parse_channel_field("telegram", _default), do: :telegram
+  defp parse_channel_field("whatsapp", _default), do: :whatsapp
+  defp parse_channel_field("discord", _default), do: :discord
+  defp parse_channel_field("slack", _default), do: :slack
+  defp parse_channel_field("signal", _default), do: :signal
+  defp parse_channel_field(_, default), do: default
+
   defp parse_effort_field(field, default) do
     case ReasoningEffort.parse(field) do
       {:ok, level} -> level
@@ -1524,6 +1597,15 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp tab_known?(tab_id), do: Enum.any?(@tabs, &(&1.id == tab_id))
+
+  # Honor an explicit `?tab=` only when it names a real tab; otherwise fall
+  # through to next_action_tab. Lets apply_restart return the operator to the
+  # tab they restarted from rather than the first incomplete tab.
+  defp requested_tab(%{"tab" => tab}) when is_binary(tab) do
+    if tab_known?(tab), do: tab, else: nil
+  end
+
+  defp requested_tab(_params), do: nil
 
   defp next_action_tab(report) do
     Enum.find_value(@tabs, "provider", fn tab ->
