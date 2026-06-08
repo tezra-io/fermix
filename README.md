@@ -181,11 +181,12 @@ max_estimated_cost_cents_per_session = 100
 persist_transcripts = false
 ```
 
-The companion is a native macOS app (SwiftUI, macOS 13+) — there is no iOS version and no prebuilt download yet, so build it from source (requires Xcode or its command-line tools). Source and full instructions live at [`clients/macos/FermixPet`](clients/macos/FermixPet/README.md). Use the build script (not `swift run`) — it stages a proper `.app` bundle so Dock, Quit, and microphone permissions work:
+The companion is a native macOS app (SwiftUI, macOS 13+) — there is no iOS version and no prebuilt download yet, so build and install it from source (requires Xcode or its command-line tools). Source and full instructions live at [`clients/macos/FermixPet`](clients/macos/FermixPet/README.md). Use the build script (not `swift run`) — it stages a proper `.app` bundle so Dock, Quit, and microphone permissions work:
 
 ```bash
 cd clients/macos/FermixPet
-./script/build_and_run.sh
+./script/build_and_run.sh install
+open "$HOME/Applications/FermixPet.app"
 ```
 
 For source-only development, skip Burrito and run the full daemon from Mix:
@@ -430,7 +431,7 @@ For the macOS Realtime companion, point it at the same `FERMIX_HOME`:
 
 ```bash
 cd clients/macos/FermixPet
-FERMIX_HOME=~/.fermix-dev swift run FermixPet
+FERMIX_HOME=~/.fermix-dev ./script/build_and_run.sh
 ```
 
 ### Unit and integration tests

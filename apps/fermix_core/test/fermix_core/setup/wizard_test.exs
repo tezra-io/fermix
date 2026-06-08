@@ -374,6 +374,56 @@ defmodule FermixCore.Setup.WizardTest do
     refute Keyword.get(providers[:xai], :primary) == true
   end
 
+  test "saving a Realtime API key does not demote the explicitly chosen primary" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-realtime-no-steal")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # Operator explicitly chooses Codex as primary on the provider tab.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "openai_codex", default_model: "gpt-5.5")
+
+    # Then sets a Realtime API key (which shares the OpenAI provider slot) with
+    # NO :provider answer. This must not steal primary from Codex.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(realtime_api_key: "sk-realtime", realtime_enabled: "true")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:openai_codex], :primary) == true
+    refute Keyword.get(providers[:openai], :primary) == true
+    # The Realtime key still lands in the shared OpenAI slot (behavior preserved).
+    assert Keyword.get(providers[:openai], :api_key) == "sk-realtime"
+  end
+
+  test "a genuine OpenAI API-key save still auto-promotes openai" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-openai-promote")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # A real OpenAI credential answer (not a Realtime side-write) still promotes
+    # openai when nothing else is primary — §2/§4 first-time auto-promotion.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(openai_api_key: "sk-x")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:openai], :primary) == true
+  end
+
   test "save_answers writes all setup secrets through SecretWriter" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-secrets")
 

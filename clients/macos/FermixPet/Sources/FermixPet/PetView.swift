@@ -66,7 +66,7 @@ struct PetView: View {
             Divider()
 
             Button("Quit FermixPet") {
-                NSApp.terminate(nil)
+                state.quitApplication()
             }
         }
     }

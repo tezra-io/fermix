@@ -81,23 +81,8 @@ final class AudioController {
         }
     }
 
-    /// Engage the mic hardware on socket connect so the first call doesn't
-    /// pay engine + tap startup cost. **Best-effort**: silently no-ops if
-    /// the user hasn't yet granted microphone permission (we don't want
-    /// pre-warm to trigger a permission prompt — that belongs to the user
-    /// explicitly starting a call).
-    ///
-    /// While warmed but not streaming, the macOS privacy indicator IS lit
-    /// (the OS is reading the live mic) but no bytes leave the process —
-    /// the tap closure drops every buffer because `captureMuted` is true
-    /// and `onChunkHandler` is nil.
-    func warmCapture() throws {
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        try ensureCaptureRunning()
-    }
-
-    /// Attach a chunk handler and unmute so the warmed tap starts pushing
-    /// data to the socket. The caller must have already awaited
+    /// Attach a chunk handler and unmute so capture starts pushing data
+    /// to the socket. The caller must have already awaited
     /// `requestCapturePermission()` — this throws `.microphoneDenied` if
     /// permission isn't in hand.
     func beginStreaming(onChunk: @escaping (Data) -> Void) throws {
@@ -112,17 +97,6 @@ final class AudioController {
         chunkHandlerLock.unlock()
 
         setCaptureMuted(false)
-    }
-
-    /// Detach the chunk handler and re-mute. The tap and engine stay alive
-    /// so the next call doesn't pay the warm-up cost. No audio leaves the
-    /// process after this returns.
-    func stopStreaming() {
-        chunkHandlerLock.lock()
-        onChunkHandler = nil
-        chunkHandlerLock.unlock()
-
-        setCaptureMuted(true)
     }
 
     /// Idempotent: installs the tap, starts the engine, and leaves the
@@ -148,7 +122,7 @@ final class AudioController {
         // We engage the engine first (which lazily binds to the current
         // Core Audio input) and only fall through to noInputDevice if the
         // engine itself reports no usable format. The auth gate is upstream
-        // in beginStreaming/warmCapture; this guard only fires when there
+        // in beginStreaming; this guard only fires when there
         // is literally no mic Core Audio can see.
         let input = engine.inputNode
         var format = Self.usableInputFormat(from: input)
@@ -235,7 +209,7 @@ final class AudioController {
         }
     }
 
-    func stopCapture() {
+    private func stopCapture() {
         // Belt: clear the handler so any tap callback racing with teardown
         // can't fire a write to the socket.
         chunkHandlerLock.lock()
