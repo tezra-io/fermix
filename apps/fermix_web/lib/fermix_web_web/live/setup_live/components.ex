@@ -1321,9 +1321,13 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <.oauth_client_form oauth={@oauth} />
 
+      <p :if={@plugins == []} class="mt-2 text-xs text-base-content/55">
+        Used when connecting {@oauth.display_name} from the catalog below.
+      </p>
+
       <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
 
-      <div class="mt-3 flex flex-col gap-2">
+      <div :if={@plugins != []} class="mt-3 flex flex-col gap-2">
         <.plugin_card
           :for={plugin <- @plugins}
           plugin={plugin}
@@ -2102,13 +2106,16 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # Every non-Google provider with a client form gets one group; the form set
   # (summary.oauth_clients) is the single source of which providers qualify.
+  # A catalog-only provider renders with the form alone — the client must be
+  # savable before its plugin is installed.
   defp oauth_provider_groups(%{plugins: plugins, oauth_clients: oauth_clients}) do
-    plugins
-    |> Enum.filter(&(&1.provider != "google" && Map.has_key?(oauth_clients, &1.provider)))
-    |> Enum.group_by(& &1.provider)
+    by_provider = Enum.group_by(plugins, & &1.provider)
+
+    oauth_clients
+    |> Map.delete("google")
     |> Enum.sort()
-    |> Enum.map(fn {provider, group} ->
-      %{oauth: Map.fetch!(oauth_clients, provider), plugins: group}
+    |> Enum.map(fn {provider, oauth} ->
+      %{oauth: oauth, plugins: Map.get(by_provider, provider, [])}
     end)
   end
 

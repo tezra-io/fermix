@@ -20,7 +20,8 @@ defmodule FermixCore.Plugins.Dist.IndexTest do
       display_name: "GitHub",
       category: "developer",
       description: "GitHub from Fermix",
-      auth_type: "api_key",
+      auth_type: "oauth2",
+      auth_provider: "github",
       rails: ["http"],
       latest: "1.2.0",
       yanked: ["1.1.0"],
@@ -51,6 +52,7 @@ defmodule FermixCore.Plugins.Dist.IndexTest do
       assert index.schema_version == 1
       assert [plugin] = index.plugins
       assert plugin.name == "github"
+      assert plugin.auth_provider == "github"
       assert plugin.rails == ["http"]
       assert [version] = plugin.versions
       assert version.plugin_api == 2

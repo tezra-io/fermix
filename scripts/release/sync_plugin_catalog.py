@@ -106,6 +106,7 @@ def plugin_entry(name, releases, yanked, logo):
             raise SyncError(f"v{version}: manifest name {manifest.get('name')!r} != tag plugin name {name!r}")
     latest_version, _, latest_manifest, _ = ordered[0]
     interface = latest_manifest.get("interface") or {}
+    auth = latest_manifest.get("auth") or {}
     return {
         "name": name,
         "display_name": latest_manifest["display_name"],
@@ -115,7 +116,8 @@ def plugin_entry(name, releases, yanked, logo):
         "developer_name": interface.get("developer_name"),
         "brand_color": interface.get("brand_color"),
         "logo": logo,
-        "auth_type": (latest_manifest.get("auth") or {}).get("type"),
+        "auth_type": auth.get("type"),
+        "auth_provider": auth.get("provider") if auth.get("type") == "oauth2" else None,
         "rails": sorted({tool.get("rail", "http") for tool in latest_manifest.get("tools", [])}),
         "latest": latest_version,
         "yanked": yanked,

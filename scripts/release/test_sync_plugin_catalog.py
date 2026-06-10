@@ -26,7 +26,7 @@ def manifest_fixture(**overrides):
         "version": "1.2.0",
         "min_core_version": "0.2.0",
         "plugin_api": 1,
-        "auth": {"type": "oauth2", "scopes": ["repo"]},
+        "auth": {"type": "oauth2", "provider": "github", "scopes": ["repo"]},
         "interface": {
             "short_description": "Issues and PRs",
             "developer_name": "Tezra",
@@ -94,6 +94,7 @@ class EntryBuildingTest(unittest.TestCase):
         self.assertEqual(entry["brand_color"], "#181717")
         self.assertEqual(entry["logo"], logo)
         self.assertEqual(entry["auth_type"], "oauth2")
+        self.assertEqual(entry["auth_provider"], "github")
         self.assertEqual(entry["rails"], ["http"])
         self.assertEqual(entry["latest"], "1.2.0")
         self.assertEqual(entry["yanked"], [])
@@ -114,6 +115,14 @@ class EntryBuildingTest(unittest.TestCase):
         tools = [{"name": "github_a", "rail": "mcp"}, {"name": "github_b"}, {"name": "github_c", "rail": "http"}]
         entry = sync.plugin_entry("github", [release_fixture(tools=tools)], [], None)
         self.assertEqual(entry["rails"], ["http", "mcp"])
+
+    def test_auth_provider_null_unless_oauth2(self):
+        entry = sync.plugin_entry("github", [release_fixture(auth={"type": "none"})], [], None)
+        self.assertIsNone(entry["auth_provider"])
+        keyed = sync.plugin_entry(
+            "github", [release_fixture(auth={"type": "api_key", "provider": "github"})], [], None
+        )
+        self.assertIsNone(keyed["auth_provider"])
 
     def test_missing_logo_is_null(self):
         entry = sync.plugin_entry("github", [release_fixture()], [], None)
