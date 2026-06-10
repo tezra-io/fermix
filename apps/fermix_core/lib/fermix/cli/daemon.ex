@@ -24,6 +24,8 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Overview
   alias FermixCore.Introspection.Wire
+  alias FermixCore.Observability
+  alias FermixCore.Plugins.Runtime, as: PluginsRuntime
   alias FermixCore.Trace
 
   require Logger
@@ -46,16 +48,17 @@ defmodule Fermix.CLI.Daemon do
   def init(opts) do
     socket_path = Keyword.get(opts, :socket_path, default_socket_path())
     task_supervisor = Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor)
+    plugins_runtime = Keyword.get(opts, :plugins_runtime, PluginsRuntime)
 
     File.mkdir_p!(Path.dirname(socket_path))
 
     case clear_stale_socket(socket_path) do
-      :ok -> do_listen(socket_path, task_supervisor)
+      :ok -> do_listen(socket_path, task_supervisor, plugins_runtime)
       {:error, reason} -> {:stop, reason}
     end
   end
 
-  defp do_listen(socket_path, task_supervisor) do
+  defp do_listen(socket_path, task_supervisor, plugins_runtime) do
     listen_opts = [
       :binary,
       {:active, false},
@@ -76,6 +79,7 @@ defmodule Fermix.CLI.Daemon do
            listen_socket: listen_socket,
            socket_path: socket_path,
            task_supervisor: task_supervisor,
+           plugins_runtime: plugins_runtime,
            started_at_ms: System.monotonic_time(:millisecond)
          }}
 
@@ -188,7 +192,9 @@ defmodule Fermix.CLI.Daemon do
   defp handle_method("skills_list", _request, _state), do: skills_list_reply()
   defp handle_method("skills_view", request, _state), do: skills_view_reply(request)
   defp handle_method("skills_reload", _request, _state), do: skills_reload_reply()
+  defp handle_method("plugins_apply", _request, state), do: plugins_apply_reply(state)
   defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
+  defp handle_method("observability", _request, _state), do: observability_reply()
 
   defp handle_method("shutdown", _request, _state) do
     Trace.record(:agent_event, "daemon", %{event: "shutdown_requested"})
@@ -218,6 +224,12 @@ defmodule Fermix.CLI.Daemon do
 
   defp health_reply do
     %{status: "ok", health: Health.report() |> Wire.json_safe()}
+  end
+
+  # Answered from the daemon process so env/loaded-app/handler state reflect the
+  # daemon, not the CLI that asked. Jason renders the atom status as a string.
+  defp observability_reply do
+    %{status: "ok", observability: Observability.report()}
   end
 
   defp agents_reply do
@@ -286,6 +298,32 @@ defmodule Fermix.CLI.Daemon do
         %{status: "error", reason: inspect(reason)}
     end
   end
+
+  # Re-read persisted config from disk and fan the reload out to the daemon's
+  # runtime surfaces. This is how a sibling CLI VM's plugin mutations
+  # (install/enable/disable/uninstall/...) reach the running daemon.
+  defp plugins_apply_reply(state) do
+    case safe_daemon_call(fn -> state.plugins_runtime.apply_persisted() end) do
+      {:ok, {:ok, summary}} -> %{status: "ok", reload: plugins_apply_summary(summary)}
+      {:ok, {:error, reason}} -> %{status: "error", reason: inspect(reason)}
+      {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  # The skill surfaces of the runtime summary are raw SkillRegistry reload
+  # summaries whose `errors` hold tuples — Wire.json_safe raises on tuples, so
+  # shape them through the same picker skills_reload uses before serializing.
+  defp plugins_apply_summary(summary) do
+    %{
+      capabilities: Wire.json_safe(Map.get(summary, :capabilities)),
+      skills: skill_surface(Map.get(summary, :skills)),
+      main_agent: skill_surface(Map.get(summary, :main_agent)),
+      realtime: Wire.json_safe(Map.get(summary, :realtime))
+    }
+  end
+
+  defp skill_surface(summary) when is_map(summary), do: reload_summary(summary)
+  defp skill_surface(other), do: Wire.json_safe(other)
 
   defp agent_message_reply(request) do
     params = Map.get(request, "params", %{})

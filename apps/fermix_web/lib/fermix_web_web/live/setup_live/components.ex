@@ -30,6 +30,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_models, :list, required: true
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
+  attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
   attr :restart_pending?, :boolean, default: false
@@ -92,6 +93,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
+              installing_plugins={@installing_plugins}
               realtime_form={@realtime_form}
               report={@report}
               restart_pending?={@restart_pending?}
@@ -210,6 +212,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :provider_models, :list, required: true
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
+  attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
   attr :restart_pending?, :boolean, default: false
@@ -885,20 +888,45 @@ defmodule FermixWebWeb.SetupLive.Components do
         plugin_auth_url={@plugin_auth_url}
       />
 
+      <.provider_plugin_group
+        :for={group <- oauth_provider_groups(@plugin_summary)}
+        oauth={group.oauth}
+        plugins={group.plugins}
+        plugin_auth_url={@plugin_auth_url}
+      />
+
       <div
-        :if={@plugin_summary.available && non_google_plugins(@plugin_summary.plugins) != []}
+        :if={@plugin_summary.available && ungrouped_plugins(@plugin_summary) != []}
         class="mt-5 flex flex-col gap-2"
       >
-        <.plugin_card :for={plugin <- non_google_plugins(@plugin_summary.plugins)} plugin={plugin} />
+        <.plugin_card :for={plugin <- ungrouped_plugins(@plugin_summary)} plugin={plugin} />
       </div>
 
-      <.info_panel class="mt-5">
-        <p :if={@plugin_summary.available}>
-          coming later: {Enum.join(@plugin_summary.later, ", ")}.
+      <section :if={@plugin_summary.available} class="mt-5">
+        <h3 class="text-sm font-semibold">Available from the catalog</h3>
+        <p class="mt-1 text-xs text-base-content/55">
+          Plugin catalog ships with Fermix — new plugins arrive with `fermix upgrade`.
         </p>
-        <p :if={!@plugin_summary.available}>
-          Plugin catalog unavailable: {@plugin_summary.error}
+        <p :if={@plugin_summary.index_error} class="mt-1 text-xs text-warning">
+          Catalog index unavailable: {@plugin_summary.index_error}. Installed plugins still work.
         </p>
+        <div :if={@plugin_summary.catalog != []} class="mt-3 flex flex-col gap-2">
+          <.catalog_card
+            :for={entry <- @plugin_summary.catalog}
+            entry={entry}
+            installing?={entry.name in @installing_plugins}
+          />
+        </div>
+        <p
+          :if={@plugin_summary.catalog == [] && !@plugin_summary.index_error}
+          class="mt-2 text-xs text-base-content/55"
+        >
+          No catalog plugins published yet — new plugins arrive with Fermix releases.
+        </p>
+      </section>
+
+      <.info_panel :if={!@plugin_summary.available} class="mt-5">
+        <p>Plugin catalog unavailable: {@plugin_summary.error}</p>
       </.info_panel>
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
@@ -1241,11 +1269,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp google_plugin_group(assigns) do
     assigns =
-      assign(
-        assigns,
-        :google_oauth_configured?,
-        google_oauth_configured?(assigns.plugin_summary.google_oauth)
-      )
+      assigns
+      |> assign(:oauth, Map.fetch!(assigns.plugin_summary.oauth_clients, "google"))
+      |> assign(:plugins, google_plugins(assigns.plugin_summary.plugins))
 
     ~H"""
     <section
@@ -1260,63 +1286,124 @@ defmodule FermixWebWeb.SetupLive.Components do
         <span class="badge badge-ghost badge-sm">OAuth desktop client</span>
       </div>
 
-      <form phx-submit="save_google_oauth" class="mt-3 rounded-field bg-base-200/50 p-3">
-        <div class="grid items-end gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_8rem_auto]">
-          <.text_input
-            label="Client ID (required)"
-            name="google_oauth_form[client_id]"
-            value={@plugin_summary.google_oauth.client_id}
-          />
-          <.secret_input
-            label="Client secret (required)"
-            name="google_oauth_form[client_secret]"
-            set={@plugin_summary.google_oauth.client_secret_set}
-          />
-          <.number_field
-            label="Port"
-            name="google_oauth_form[redirect_port]"
-            value={@plugin_summary.google_oauth.redirect_port}
-          />
-          <button type="submit" class="btn btn-outline btn-sm">
-            <.icon name="hero-key" class="size-4" /> Save
-          </button>
-        </div>
-      </form>
+      <.oauth_client_form oauth={@oauth} />
 
-      <p
-        :if={
-          @plugin_summary.google_oauth.client_id in [nil, ""] ||
-            !@plugin_summary.google_oauth.client_secret_set
-        }
-        class="mt-3 rounded-field border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-base-content/80"
-      >
-        Add your Client ID and Client secret above, then Save before connecting these integrations.
-      </p>
-
-      <div
-        :if={@plugin_auth_url}
-        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-200/50 px-3 py-2 text-xs text-base-content/65"
-      >
-        <span>If the {@plugin_auth_url.display_name} tab did not open, use the fallback link.</span>
-        <a
-          class="link link-primary font-medium"
-          href={@plugin_auth_url.url}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open sign-in
-        </a>
-      </div>
+      <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
 
       <div class="mt-3 flex flex-col gap-2">
         <.plugin_card
-          :for={plugin <- google_plugins(@plugin_summary.plugins)}
+          :for={plugin <- @plugins}
           plugin={plugin}
           label={strip_google_prefix(plugin.display_name)}
-          auth_preopen?={@google_oauth_configured? && plugin.auth_type == :oauth2}
+          auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
         />
       </div>
     </section>
+    """
+  end
+
+  # A non-Google oauth2 provider group: one client form plus the installed
+  # plugin cards that authenticate against it (mirrors the Google group).
+  attr :oauth, :map, required: true
+  attr :plugins, :list, required: true
+  attr :plugin_auth_url, :map, default: nil
+
+  defp provider_plugin_group(assigns) do
+    ~H"""
+    <section
+      data-plugin-group={@oauth.provider}
+      class="mt-5 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-sm font-semibold">{@oauth.display_name}</h3>
+        <span class="badge badge-ghost badge-sm">OAuth client</span>
+      </div>
+
+      <.oauth_client_form oauth={@oauth} />
+
+      <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
+
+      <div class="mt-3 flex flex-col gap-2">
+        <.plugin_card
+          :for={plugin <- @plugins}
+          plugin={plugin}
+          auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+        />
+      </div>
+    </section>
+    """
+  end
+
+  # The per-provider OAuth-client form: client id/secret + redirect port,
+  # submitting to "save_oauth_client" with the provider as a hidden field.
+  attr :oauth, :map, required: true
+
+  defp oauth_client_form(assigns) do
+    ~H"""
+    <form
+      id={"oauth-client-form-#{@oauth.provider}"}
+      phx-submit="save_oauth_client"
+      class="mt-3 rounded-field bg-base-200/50 p-3"
+    >
+      <input type="hidden" name="provider" value={@oauth.provider} />
+      <div class="grid items-end gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_8rem_auto]">
+        <.text_input
+          label="Client ID (required)"
+          name="oauth_client_form[client_id]"
+          value={@oauth.client_id}
+        />
+        <.secret_input
+          label="Client secret (required)"
+          name="oauth_client_form[client_secret]"
+          set={@oauth.client_secret_set}
+        />
+        <.number_field
+          label="Port"
+          name="oauth_client_form[redirect_port]"
+          value={@oauth.redirect_port}
+        />
+        <button type="submit" class="btn btn-outline btn-sm">
+          <.icon name="hero-key" class="size-4" /> Save
+        </button>
+      </div>
+    </form>
+
+    <p
+      :if={!oauth_client_configured?(@oauth)}
+      class="mt-3 rounded-field border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-base-content/80"
+    >
+      Add your Client ID and Client secret above, then Save before connecting these integrations.
+    </p>
+    """
+  end
+
+  attr :plugin_auth_url, :map, default: nil
+  attr :plugins, :list, required: true
+
+  defp auth_fallback_link(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :show?,
+        assigns.plugin_auth_url != nil &&
+          Enum.any?(assigns.plugins, &(&1.name == assigns.plugin_auth_url.name))
+      )
+
+    ~H"""
+    <div
+      :if={@show?}
+      class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-200/50 px-3 py-2 text-xs text-base-content/65"
+    >
+      <span>If the {@plugin_auth_url.display_name} tab did not open, use the fallback link.</span>
+      <a
+        class="link link-primary font-medium"
+        href={@plugin_auth_url.url}
+        target="_blank"
+        rel="noreferrer"
+      >
+        Open sign-in
+      </a>
+    </div>
     """
   end
 
@@ -1349,6 +1436,24 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.status_pill :if={@plugin.status != :not_configured} status={@plugin.status} />
         </div>
         <p :if={@plugin.account} class="truncate text-xs text-base-content/55">{@plugin.account}</p>
+        <p :if={@plugin.yanked_version} class="text-xs text-error">
+          Version {@plugin.yanked_version} was yanked — run `fermix plugins upgrade {@plugin.name}`.
+        </p>
+        <form
+          :if={@plugin.status == :needs_config && @plugin.missing_config != []}
+          id={"plugin-config-form-#{@plugin.name}"}
+          phx-submit="save_plugin_config"
+          class="mt-2 flex flex-wrap items-end gap-2"
+        >
+          <input type="hidden" name="name" value={@plugin.name} />
+          <.text_input
+            :for={entry <- @plugin.missing_config}
+            label={entry.prompt}
+            name={"plugin_config_form[#{entry.key}]"}
+            value=""
+          />
+          <button type="submit" class="btn btn-outline btn-sm">Save</button>
+        </form>
       </div>
 
       <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
@@ -1398,6 +1503,61 @@ defmodule FermixWebWeb.SetupLive.Components do
           phx-value-name={@plugin.name}
         >
           Disable
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  # A not-yet-installed catalog entry (§6): index branding, Available/Installing/
+  # Incompatible pill, and an Enable/Connect action that triggers install-first.
+  attr :entry, :map, required: true
+  attr :installing?, :boolean, default: false
+
+  defp catalog_card(assigns) do
+    assigns = assign(assigns, :blocked_reason, catalog_blocked_reason(assigns.entry))
+
+    ~H"""
+    <section
+      data-catalog-name={@entry.name}
+      class={[
+        "flex w-full items-center gap-3 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm",
+        @blocked_reason && "opacity-60"
+      ]}
+    >
+      <div class="grid size-9 shrink-0 place-items-center overflow-hidden rounded-field border border-base-300 bg-base-100">
+        <img :if={@entry.logo} src={@entry.logo} alt="" class="size-7 object-contain" loading="lazy" />
+        <span :if={!@entry.logo} class="text-sm font-semibold">
+          {String.first(@entry.display_name)}
+        </span>
+      </div>
+
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <h3 class="truncate text-sm font-semibold">{@entry.display_name}</h3>
+          <.status_pill status={catalog_status(@entry, @installing?)} />
+          <span :if={@entry.latest} class="text-xs text-base-content/45">v{@entry.latest}</span>
+        </div>
+        <p :if={@entry.description} class="truncate text-xs text-base-content/55">
+          {@entry.description}
+        </p>
+        <p :if={@entry.mcp?} class="text-xs text-base-content/55">
+          Runs a local process with direct access to the folders you configure.
+        </p>
+        <p :if={@blocked_reason} class="text-xs text-warning">{@blocked_reason}</p>
+      </div>
+
+      <div class="flex shrink-0 items-center gap-1.5">
+        <span :if={@installing?} class="loading loading-spinner loading-xs text-primary" />
+        <button
+          :if={!@blocked_reason && !@installing?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="plugin_enable"
+          phx-value-name={@entry.name}
+        >
+          <.icon name="hero-arrow-down-tray" class="size-3.5" />
+          {if @entry.auth_type == :oauth2, do: "Connect", else: "Enable"}
         </button>
       </div>
     </section>
@@ -1882,18 +2042,26 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp status_pill_class(:partial), do: "badge badge-warning badge-sm"
   defp status_pill_class(:needs_auth), do: "badge badge-warning badge-sm"
   defp status_pill_class(:needs_client_config), do: "badge badge-warning badge-sm"
+  defp status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
   defp status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
   defp status_pill_class(:error), do: "badge badge-error badge-sm"
   defp status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
+  defp status_pill_class(:available), do: "badge badge-ghost badge-sm"
+  defp status_pill_class(:installing), do: "badge badge-info badge-sm"
+  defp status_pill_class(:incompatible), do: "badge badge-ghost badge-sm"
   defp status_pill_class(_), do: "badge badge-ghost badge-sm"
 
   defp status_pill_label(:ready), do: "Ready"
   defp status_pill_label(:partial), do: "Needs setup"
   defp status_pill_label(:needs_auth), do: "Needs auth"
   defp status_pill_label(:needs_client_config), do: "needs client config"
+  defp status_pill_label(:needs_config), do: "Needs config"
   defp status_pill_label(:reauthorization_required), do: "Reauthorize"
   defp status_pill_label(:error), do: "Error"
   defp status_pill_label(:not_configured), do: "Not configured"
+  defp status_pill_label(:available), do: "Available"
+  defp status_pill_label(:installing), do: "Installing"
+  defp status_pill_label(:incompatible), do: "Incompatible"
   defp status_pill_label(_), do: "Unknown"
 
   defp plugin_primary_action(%{auth_type: :oauth2}), do: "Connect"
@@ -1905,17 +2073,55 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp plugin_action_label(:ready), do: "Check"
   defp plugin_action_label(_status), do: "Enable"
 
+  defp catalog_status(_entry, true), do: :installing
+  defp catalog_status(%{compat: {:error, _reason}}, _installing?), do: :incompatible
+  defp catalog_status(_entry, _installing?), do: :available
+
+  # Pre-fetch blockers (§13): an incompatible/yanked/absent latest greys the
+  # card before any artifact download.
+  defp catalog_blocked_reason(%{compat: {:error, reason}}), do: compat_message(reason)
+  defp catalog_blocked_reason(_entry), do: nil
+
+  defp compat_message({:needs_newer_core, :min_core_version, floor}),
+    do: "needs Fermix ≥ #{floor} — run `fermix upgrade`."
+
+  defp compat_message({:needs_newer_core, :plugin_api, api}),
+    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade`."
+
+  defp compat_message({:plugin_too_old, :plugin_api, _api}),
+    do: "built for an older Fermix — awaiting a plugin update."
+
+  defp compat_message({:yanked, _name, version}), do: "version #{version} was yanked."
+  defp compat_message({:version_not_found, _name, _version}), do: "no installable version yet."
+  defp compat_message(other), do: Redaction.format(other)
+
   defp strip_google_prefix("Google " <> rest), do: rest
   defp strip_google_prefix(name), do: name
 
   defp google_plugins(plugins), do: Enum.filter(plugins, &(&1.provider == "google"))
-  defp non_google_plugins(plugins), do: Enum.reject(plugins, &(&1.provider == "google"))
 
-  defp google_oauth_configured?(%{client_id: client_id, client_secret_set: true}) do
+  # Every non-Google provider with a client form gets one group; the form set
+  # (summary.oauth_clients) is the single source of which providers qualify.
+  defp oauth_provider_groups(%{plugins: plugins, oauth_clients: oauth_clients}) do
+    plugins
+    |> Enum.filter(&(&1.provider != "google" && Map.has_key?(oauth_clients, &1.provider)))
+    |> Enum.group_by(& &1.provider)
+    |> Enum.sort()
+    |> Enum.map(fn {provider, group} ->
+      %{oauth: Map.fetch!(oauth_clients, provider), plugins: group}
+    end)
+  end
+
+  # Installed plugins outside every provider group (no oauth2 client form).
+  defp ungrouped_plugins(%{plugins: plugins, oauth_clients: oauth_clients}) do
+    Enum.reject(plugins, &Map.has_key?(oauth_clients, &1.provider))
+  end
+
+  defp oauth_client_configured?(%{client_id: client_id, client_secret_set: true}) do
     present?(client_id)
   end
 
-  defp google_oauth_configured?(_oauth), do: false
+  defp oauth_client_configured?(_oauth), do: false
 
   defp status_badge_class(:ready), do: "badge badge-success badge-sm font-medium"
   defp status_badge_class(:setup_required), do: "badge badge-warning badge-sm font-medium"

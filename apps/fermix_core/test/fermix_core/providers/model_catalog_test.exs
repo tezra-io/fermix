@@ -48,6 +48,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
       # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
       assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
+      assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-opus-4-7") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
       # xAI: Grok 4.3 = 1M, Grok 4.20 = 256k.
@@ -99,6 +100,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   describe "max_output_tokens_for/2" do
     test "returns cataloged output ceilings for Anthropic models" do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-4-6") == 64_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5") == 64_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-4-7") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-haiku-4-5") == 64_000
     end
@@ -117,6 +119,11 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
 
       refute ModelCatalog.known_model?(:openai, "definitely-not-a-real-model")
+    end
+
+    test "claude-fable-5 is cataloged without changing the Anthropic default" do
+      assert ModelCatalog.known_model?(:anthropic, "claude-fable-5")
+      assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
     end
   end
 end

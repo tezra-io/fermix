@@ -90,6 +90,10 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
       {system_run, rest} = Enum.split_while(messages, &(&1.role == "system"))
       assert List.last(system_run).content =~ "Exhaustive mode (/ultra)"
       assert List.last(system_run).content =~ "fan out WIDE with the `subagents` tool"
+      # Ultra also fans out for DEPTH: competing attempts on the same sub-problem,
+      # keep the best-supported (best-of-N), not just breadth across sub-problems.
+      assert List.last(system_run).content =~ "the SAME sub-problem"
+      assert List.last(system_run).content =~ "keep the best-supported"
       assert [%{role: "user", content: "plan a complex trip"}] = rest
     end
 

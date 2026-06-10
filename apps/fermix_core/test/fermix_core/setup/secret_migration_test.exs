@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 16 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 18 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -139,6 +139,16 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     client_id = "123.apps.googleusercontent.com"
     client_secret = "google-oauth-old"
 
+    [fermix_core.oauth.github]
+    client_type = "desktop_public_pkce"
+    client_id = "github-client-id"
+    client_secret = "github-oauth-old"
+
+    [fermix_core.oauth.notion]
+    client_type = "desktop_public_pkce"
+    client_id = "notion-client-id"
+    client_secret = "notion-oauth-old"
+
     [fermix_channels.telegram]
     bot_token = "telegram-old"
 
@@ -168,6 +178,8 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       brave_api_key: "brave-old",
       perplexity_api_key: "perplexity-old",
       google_oauth_client_secret: "google-oauth-old",
+      github_oauth_client_secret: "github-oauth-old",
+      notion_oauth_client_secret: "notion-oauth-old",
       telegram_bot_token: "telegram-old",
       whatsapp_access_token: "whatsapp-access-old",
       whatsapp_verify_token: "whatsapp-verify-old",

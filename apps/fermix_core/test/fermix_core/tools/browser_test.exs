@@ -171,6 +171,58 @@ defmodule FermixCore.Tools.BrowserTest do
 
       :telemetry.detach(handler_id)
     end
+
+    test "failed action records safe failure fields and no bodies when capture is off" do
+      set_capture(false)
+      handler_id = attach_telemetry()
+
+      Browser.execute(%{"action" => "navigate", "url" => "file:///etc/passwd"}, @context)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert metadata.action == "navigate"
+      assert metadata.success == false
+      assert metadata.error_code == "navigation_blocked"
+      assert is_binary(metadata.error_summary)
+      # file:// has no network host → url is dropped (no local path leak)
+      refute Map.has_key?(metadata, :url)
+      # raw bodies stay gated
+      refute Map.has_key?(metadata, :input)
+      refute Map.has_key?(metadata, :output)
+
+      :telemetry.detach(handler_id)
+    end
+
+    test "includes bounded input/output previews only when capture is on" do
+      set_capture(true)
+      handler_id = attach_telemetry()
+
+      Browser.execute(%{"action" => "navigate", "url" => "file:///etc/passwd"}, @context)
+
+      assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+      assert Map.has_key?(metadata, :input)
+      assert Map.has_key?(metadata, :output)
+      # safe failure fields remain present alongside the gated bodies
+      assert metadata.error_code == "navigation_blocked"
+
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  describe "sanitize_url/1" do
+    test "keeps scheme/host/path and drops query, fragment, and userinfo" do
+      assert Browser.sanitize_url("https://user:pass@example.com/a/b?token=secret#frag") ==
+               "https://example.com/a/b"
+    end
+
+    test "drops urls without a network host" do
+      assert Browser.sanitize_url("file:///etc/passwd") == nil
+      assert Browser.sanitize_url("/relative/path") == nil
+      assert Browser.sanitize_url("about:blank") == nil
+    end
+
+    test "is nil-safe" do
+      assert Browser.sanitize_url(nil) == nil
+    end
   end
 
   describe "execute/2 - diagnostics" do
@@ -186,6 +238,12 @@ defmodule FermixCore.Tools.BrowserTest do
       assert is_map(body["chrome"])
       refute output =~ "agent-browser"
     end
+  end
+
+  defp set_capture(value) do
+    prev = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(prev, :capture_content, value))
+    on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prev) end)
   end
 
   defp attach_telemetry do

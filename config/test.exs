@@ -74,3 +74,8 @@ config :phoenix,
 # override with FermixTestSupport.UnavailableSecretWriter. The module lives in
 # test/support and is loaded by each app's test_helper.exs.
 config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub
+
+# Hermetic default: tests must never resolve host runtimes or spawn real
+# `--version` processes. The mcp host-runtime probe (RuntimeProbe) denies by
+# default; tests stub success per-call via :find_executable / :version_fetch.
+config :fermix_core, :runtime_probe_host, FermixTestSupport.HostRuntimeStub

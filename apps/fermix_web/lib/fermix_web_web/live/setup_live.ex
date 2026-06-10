@@ -12,7 +12,9 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
+  alias FermixCore.Plugins.Catalog, as: PluginCatalog
   alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
   alias FermixCore.Plugins.Health, as: PluginHealth
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
@@ -45,6 +47,10 @@ defmodule FermixWebWeb.SetupLive do
   ]
 
   @default_plugin_auth_url_timeout_ms 300_000
+  # Providers the per-provider OAuth-client form supports — mirrors
+  # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
+  # notion 1458.
+  @oauth_client_providers ~w(google github notion)
   @provider_restart_keys [
     :provider,
     :default_model,
@@ -114,6 +120,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:xai_auth_url, nil)
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
+      |> assign(:plugin_install_tasks, %{})
       |> assign_report(report)
 
     {:ok, socket}
@@ -293,26 +300,38 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, save_answers(socket, answers, "Search saved.", Map.get(root, "__nav"))}
   end
 
-  def handle_event("save_google_oauth", %{"google_oauth_form" => params}, socket) do
-    current = current_oauth_provider(socket, "google")
+  def handle_event(
+        "save_oauth_client",
+        %{"provider" => provider, "oauth_client_form" => params},
+        socket
+      )
+      when provider in @oauth_client_providers do
+    current = current_oauth_provider(socket, provider)
 
     opts = [
       client_id: present_or(params["client_id"], Keyword.get(current, :client_id)),
       client_secret: present_or(params["client_secret"], Keyword.get(current, :client_secret)),
       redirect_port:
-        parse_int(params["redirect_port"], Keyword.get(current, :redirect_port, 1455))
+        parse_int(
+          params["redirect_port"],
+          Keyword.get(current, :redirect_port, oauth_default_port(provider))
+        )
     ]
 
-    result = PluginConfig.set_oauth_provider("google", opts)
-    {:noreply, save_config_result(result, socket, "Google OAuth client saved.")}
+    result = PluginConfig.set_oauth_provider(provider, opts)
+    message = "#{oauth_display_name(provider)} OAuth client saved."
+    {:noreply, save_config_result(result, socket, message)}
   end
 
+  # An unknown name is a not-yet-installed catalog plugin: pull it from the
+  # plugin repo first (§11 install → enable), async so the page stays live.
   def handle_event("plugin_enable", %{"name" => name}, socket) do
-    with {:ok, plugin} <- PluginRegistry.find(name) do
-      {:noreply, enable_or_connect_plugin(socket, plugin)}
-    else
+    case PluginRegistry.find(name) do
+      {:ok, plugin} ->
+        {:noreply, enable_or_connect_plugin(socket, plugin)}
+
       :error ->
-        {:noreply, flash_error(socket, "Plugin not found: #{name}")}
+        {:noreply, install_catalog_plugin(socket, name)}
 
       {:error, reason} ->
         {:noreply, flash_error(socket, "Save failed: #{Redaction.format(reason)}")}
@@ -322,6 +341,22 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("plugin_disable", %{"name" => name}, socket) do
     result = PluginConfig.disable(name)
     {:noreply, save_config_result(result, socket, "Plugin disabled.")}
+  end
+
+  # The §4.4 Connect-time collection: the needs_config card form posts the
+  # plugin's missing required manifest config entries.
+  def handle_event(
+        "save_plugin_config",
+        %{"name" => name, "plugin_config_form" => params},
+        socket
+      ) do
+    case save_plugin_settings(name, params) do
+      :ok ->
+        {:noreply, refresh_report(socket, "Plugin configuration saved.")}
+
+      {:error, reason} ->
+        {:noreply, flash_error(socket, "Save failed: #{format_config_error(reason)}")}
+    end
   end
 
   def handle_event("plugin_connect", %{"name" => name}, socket) do
@@ -458,11 +493,11 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_info({ref, result}, socket) when is_reference(ref) do
-    {:noreply, finish_auth_task(socket, ref, result)}
+    {:noreply, finish_task(socket, ref, result)}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, socket) do
-    {:noreply, fail_auth_task(socket, ref, reason)}
+    {:noreply, fail_task(socket, ref, reason)}
   end
 
   def handle_info(:perform_restart, socket) do
@@ -515,6 +550,7 @@ defmodule FermixWebWeb.SetupLive do
       provider_statuses={@provider_statuses}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
+      installing_plugins={plugin_install_names(@plugin_install_tasks)}
       realtime_form={@realtime_form}
       report={@report}
       restart_pending?={@restart_pending?}
@@ -579,15 +615,41 @@ defmodule FermixWebWeb.SetupLive do
     flash_error(socket, "Save failed: #{format_config_error(reason)}")
   end
 
-  defp format_config_error({:missing_oauth_client_field, "google", :client_id}) do
-    "Google OAuth Client ID is required."
+  defp format_config_error({:missing_oauth_client_field, provider, :client_id})
+       when provider in @oauth_client_providers do
+    "#{oauth_display_name(provider)} OAuth Client ID is required."
   end
 
-  defp format_config_error({:missing_oauth_client_field, "google", :client_secret}) do
-    "Google OAuth Client secret is required."
+  defp format_config_error({:missing_oauth_client_field, provider, :client_secret})
+       when provider in @oauth_client_providers do
+    "#{oauth_display_name(provider)} OAuth Client secret is required."
   end
+
+  defp format_config_error({:unknown_config_key, key}),
+    do: "#{key} is not a config key this plugin declares."
+
+  defp format_config_error({:blank_config_value, key}), do: "#{key} requires a value."
 
   defp format_config_error(reason), do: Redaction.format(reason)
+
+  # One commit per key — the form carries only the missing required entries,
+  # typically one (e.g. a vault path). Any failure halts and surfaces loud.
+  defp save_plugin_settings(name, params) when is_map(params) do
+    Enum.reduce_while(params, :ok, fn {key, value}, :ok ->
+      case PluginConfig.set_plugin_setting(name, key, value) do
+        {:ok, _snapshot} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp oauth_display_name("google"), do: "Google"
+  defp oauth_display_name("github"), do: "GitHub"
+  defp oauth_display_name("notion"), do: "Notion"
+
+  defp oauth_default_port("google"), do: 1455
+  defp oauth_default_port("github"), do: 1457
+  defp oauth_default_port("notion"), do: 1458
 
   defp refresh_report(socket, message) do
     Wizard.report()
@@ -923,28 +985,41 @@ defmodule FermixWebWeb.SetupLive do
     %{available: false, count: 0, operator_count: 0, guest_count: 0, names: []}
   end
 
+  # The card grid is the §6 union: installed plugins (registry) plus the
+  # not-yet-installed remainder of the distribution index as catalog cards.
   defp plugin_summary(snapshot) do
-    case PluginRegistry.list() do
-      {:ok, plugins} ->
+    case PluginCatalog.overview(plugins_dist_opts()) do
+      {:ok, overview} ->
+        plugins = installed_cards(overview, snapshot)
+
         %{
           available: true,
-          google_oauth: google_oauth_form(snapshot),
-          plugins: Enum.map(plugins, &plugin_card(&1, snapshot)),
-          later: ["GitHub", "Notion", "Linear", "Filesystem watcher", "Web search migration"]
+          oauth_clients: oauth_client_forms(snapshot, plugins),
+          plugins: plugins,
+          catalog: Enum.map(overview.available, &catalog_card/1),
+          index_error: format_index_error(overview.index_error)
         }
 
       {:error, reason} ->
         %{
           available: false,
           error: Redaction.format(reason),
-          google_oauth: %{},
+          oauth_clients: %{},
           plugins: [],
-          later: []
+          catalog: [],
+          index_error: nil
         }
     end
   end
 
-  defp plugin_card(plugin, snapshot) do
+  defp installed_cards(overview, snapshot) do
+    Enum.map(overview.installed, &plugin_card(&1, snapshot, overview.yanked_installed))
+  end
+
+  defp format_index_error(nil), do: nil
+  defp format_index_error(reason), do: Redaction.format(reason)
+
+  defp plugin_card(plugin, snapshot, yanked_installed) do
     enabled? = plugin.name in enabled_plugins(snapshot)
 
     %{
@@ -957,9 +1032,42 @@ defmodule FermixWebWeb.SetupLive do
       auth_type: plugin.auth.type,
       account: PluginStatus.account_label(plugin),
       enabled?: enabled?,
-      status: PluginStatus.status(plugin)
+      status: PluginStatus.status(plugin),
+      missing_config: missing_config_entries(plugin),
+      yanked_version: Map.get(yanked_installed, plugin.name)
     }
   end
+
+  # The card's config form (§4.4): one input per missing required manifest
+  # config entry, labelled with the manifest prompt.
+  defp missing_config_entries(plugin) do
+    configured = PluginConfig.plugin_settings(plugin.name)
+
+    plugin.config
+    |> Enum.filter(&(&1.required and not Map.has_key?(configured, &1.key)))
+    |> Enum.map(&Map.take(&1, [:key, :prompt]))
+  end
+
+  # A not-yet-installed catalog entry: branding straight from the index (§6 —
+  # no artifact on disk yet, so the logo is the index's inline data URI).
+  defp catalog_card(entry) do
+    %{
+      name: entry.name,
+      display_name: entry.display_name,
+      description: entry.description,
+      category: entry.category,
+      auth_type: entry.auth_type,
+      logo: index_logo_data_uri(entry.logo),
+      latest: entry.latest,
+      mcp?: "mcp" in entry.rails,
+      compat: entry.compat
+    }
+  end
+
+  defp index_logo_data_uri(%{"mime" => mime, "data_base64" => data}),
+    do: "data:#{mime};base64,#{data}"
+
+  defp index_logo_data_uri(_logo), do: nil
 
   defp plugin_asset_data_uri(plugin, key) do
     plugin.interface
@@ -986,13 +1094,26 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(:enabled, [])
   end
 
-  defp google_oauth_form(snapshot) do
-    config = snapshot |> get_fermix_core(:oauth) |> oauth_provider("google")
+  # One client form per distinct oauth2 provider among the installed plugins;
+  # Google's is always present (its plugins ship bundled).
+  defp oauth_client_forms(snapshot, plugins) do
+    plugins
+    |> Enum.filter(&(&1.auth_type == :oauth2 and &1.provider in @oauth_client_providers))
+    |> Enum.map(& &1.provider)
+    |> Kernel.++(["google"])
+    |> Enum.uniq()
+    |> Map.new(fn provider -> {provider, oauth_client_form(snapshot, provider)} end)
+  end
+
+  defp oauth_client_form(snapshot, provider) do
+    config = snapshot |> get_fermix_core(:oauth) |> oauth_provider(provider)
 
     %{
+      provider: provider,
+      display_name: oauth_display_name(provider),
       client_id: Keyword.get(config, :client_id, ""),
       client_secret_set: Keyword.get(config, :client_secret) |> present?(),
-      redirect_port: Keyword.get(config, :redirect_port, 1455)
+      redirect_port: Keyword.get(config, :redirect_port, oauth_default_port(provider))
     }
   end
 
@@ -1004,7 +1125,12 @@ defmodule FermixWebWeb.SetupLive do
 
   defp oauth_provider(oauth, provider) when is_map(oauth), do: Map.get(oauth, provider, [])
 
-  defp oauth_provider(oauth, "google") when is_list(oauth), do: Keyword.get(oauth, :google, [])
+  defp oauth_provider(oauth, provider) when is_list(oauth) do
+    Enum.find_value(oauth, [], fn {key, value} ->
+      if to_string(key) == provider, do: value
+    end)
+  end
+
   defp oauth_provider(_oauth, _provider), do: []
 
   defp enable_or_connect_plugin(socket, %{auth: %{type: :oauth2}} = plugin) do
@@ -1021,9 +1147,11 @@ defmodule FermixWebWeb.SetupLive do
   defp start_plugin_auth_or_explain(socket, plugin) do
     cond do
       missing_plugin_client_config?(plugin) ->
+        provider = oauth_display_name(plugin.auth.provider)
+
         flash_error(
           socket,
-          "Save a Google OAuth desktop client first, then connect #{plugin.display_name}."
+          "Save a #{provider} OAuth client first, then connect #{plugin.display_name}."
         )
 
       plugin_auth_running?(socket, plugin.name) ->
@@ -1104,8 +1232,9 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp missing_plugin_client_config?(%{auth: %{provider: "google"}}) do
-    config = PluginConfig.oauth_provider("google")
+  defp missing_plugin_client_config?(%{auth: %{type: :oauth2, provider: provider}})
+       when provider in @oauth_client_providers do
+    config = PluginConfig.oauth_provider(provider)
     blank?(Keyword.get(config, :client_id)) or blank?(Keyword.get(config, :client_secret))
   end
 
@@ -1117,6 +1246,98 @@ defmodule FermixWebWeb.SetupLive do
       _other -> name
     end
   end
+
+  # --- catalog install (§11: enable on a not-installed card = install first) -
+
+  defp install_catalog_plugin(socket, name) do
+    if plugin_install_running?(socket, name) do
+      flash_info(socket, "#{name} install is already running.")
+    else
+      start_plugin_install(socket, name)
+    end
+  end
+
+  defp plugin_install_running?(socket, name) do
+    socket.assigns.plugin_install_tasks
+    |> Map.values()
+    |> Enum.any?(&(&1.name == name))
+  end
+
+  defp start_plugin_install(socket, name) do
+    opts = plugins_dist_opts()
+
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
+        DistInstaller.run_install(name, opts)
+      end)
+
+    tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, %{name: name})
+
+    socket
+    |> assign(:plugin_install_tasks, tasks)
+    |> flash_info("Installing #{name} from the plugin catalog…")
+  end
+
+  defp finish_plugin_install(socket, task, tasks, {:ok, _status}) do
+    socket
+    |> assign(:plugin_install_tasks, tasks)
+    |> continue_after_install(task.name)
+  end
+
+  defp finish_plugin_install(socket, task, tasks, {:error, reason}) do
+    fail_plugin_install(socket, task, tasks, reason)
+  end
+
+  defp fail_plugin_install(socket, task, tasks, reason) do
+    socket
+    |> assign(:plugin_install_tasks, tasks)
+    |> flash_error("#{task.name} install failed: #{install_error(reason)}")
+  end
+
+  # Install done — continue with the same enable/connect sequence an installed
+  # card uses. Config.commit hot-applies via Runtime.reload inside the daemon.
+  defp continue_after_install(socket, name) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} ->
+        enable_or_connect_plugin(socket, plugin)
+
+      :error ->
+        flash_error(socket, "#{name} installed but did not register — check the daemon logs.")
+
+      {:error, reason} ->
+        flash_error(socket, "Save failed: #{Redaction.format(reason)}")
+    end
+  end
+
+  # Per-stage install error prose (§6) — same vocabulary as the CLI dist verbs.
+  defp install_error({:download_failed, _reason, _url}), do: "download failed (network)."
+  defp install_error({:download_status, status, _url}), do: "download failed (HTTP #{status})."
+  defp install_error({:sha256_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:verification_failed, _reason}), do: "signature invalid — refusing."
+
+  defp install_error({:incompatible, {:needs_newer_core, :min_core_version, floor}}),
+    do: "needs Fermix ≥ #{floor} — run `fermix upgrade` first."
+
+  defp install_error({:incompatible, {:needs_newer_core, :plugin_api, api}}),
+    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade` first."
+
+  defp install_error({:incompatible, {:plugin_too_old, :plugin_api, _api}}),
+    do: "built for an older Fermix — awaiting a plugin update."
+
+  defp install_error({:yanked, name, version}),
+    do: "#{name} #{version} was yanked — not installing."
+
+  defp install_error({:unknown_plugin, _name}),
+    do: "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+
+  defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
+  defp install_error(reason), do: Redaction.format(reason)
+
+  defp plugins_dist_opts do
+    Application.get_env(:fermix_core, :plugins_dist_opts, [])
+  end
+
+  defp plugin_install_names(tasks), do: tasks |> Map.values() |> Enum.map(& &1.name)
 
   defp start_codex_auth(socket) do
     parent = self()
@@ -1158,8 +1379,13 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp finish_auth_task(socket, ref, result) do
+  defp finish_task(socket, ref, result) do
     cond do
+      Map.has_key?(socket.assigns.plugin_install_tasks, ref) ->
+        {task, tasks} = Map.pop(socket.assigns.plugin_install_tasks, ref)
+        Process.demonitor(ref, [:flush])
+        finish_plugin_install(socket, task, tasks, result)
+
       Map.has_key?(socket.assigns.plugin_auth_tasks, ref) ->
         {task, tasks} = Map.pop(socket.assigns.plugin_auth_tasks, ref)
         finish_known_plugin_auth(socket, ref, task, tasks, result)
@@ -1189,8 +1415,12 @@ defmodule FermixWebWeb.SetupLive do
     finish_codex_auth(socket, task, tasks, result)
   end
 
-  defp fail_auth_task(socket, ref, reason) do
+  defp fail_task(socket, ref, reason) do
     cond do
+      Map.has_key?(socket.assigns.plugin_install_tasks, ref) ->
+        {task, tasks} = Map.pop(socket.assigns.plugin_install_tasks, ref)
+        fail_plugin_install(socket, task, tasks, reason)
+
       Map.has_key?(socket.assigns.plugin_auth_tasks, ref) ->
         {task, tasks} = Map.pop(socket.assigns.plugin_auth_tasks, ref)
         fail_plugin_auth(socket, task, tasks, reason)

@@ -81,10 +81,9 @@ defmodule FermixCore.Auth.RefreshClient do
     body =
       %{
         "grant_type" => "refresh_token",
-        "refresh_token" => refresh_token,
-        "client_id" => provider.client_id
+        "refresh_token" => refresh_token
       }
-      |> maybe_put("client_secret", provider.client_secret)
+      |> Map.merge(OAuthProvider.body_credentials(provider))
       |> URI.encode_query()
 
     request =
@@ -92,7 +91,7 @@ defmodule FermixCore.Auth.RefreshClient do
         url: provider.token_url,
         method: :post,
         body: body,
-        headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        headers: OAuthProvider.token_request_headers(provider)
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
@@ -119,10 +118,6 @@ defmodule FermixCore.Auth.RefreshClient do
         {:error, reason}
     end
   end
-
-  defp maybe_put(params, _key, nil), do: params
-  defp maybe_put(params, _key, ""), do: params
-  defp maybe_put(params, key, value), do: Map.put(params, key, value)
 
   defp parse_token_response(%{"access_token" => access} = body) when is_binary(access) do
     expires_at =

@@ -3,6 +3,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
 
   alias FermixCore.Auth.OAuthFlow
   alias FermixCore.Auth.OAuthProvider
+  alias FermixCore.Auth.OAuthProviders
 
   describe "generate_pkce/0" do
     test "produces verifier, challenge, and state" do
@@ -163,7 +164,8 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     end
 
     test "providers without the echo flag never send the challenge at exchange" do
-      provider = OAuthProvider.google(client_id: "cid")
+      {:ok, provider} =
+        OAuthProviders.definition("google", client_id: "cid", client_secret: "sec")
 
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -188,6 +190,82 @@ defmodule FermixCore.Auth.OAuthFlowTest do
                  "http://127.0.0.1:1455/auth/callback",
                  plug: plug
                )
+    end
+
+    test "GitHub exchange sends the accept-json header with body credentials" do
+      {:ok, provider} =
+        OAuthProviders.definition("github",
+          client_id: "gh-id",
+          client_secret: "gh-sec",
+          scopes: ["read:user", "repo"]
+        )
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        assert Plug.Conn.get_req_header(conn, "accept") == ["application/json"]
+        assert params["client_id"] == "gh-id"
+        assert params["client_secret"] == "gh-sec"
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "gh_at", "scope" => "repo,read:user"})
+        )
+      end
+
+      assert {:ok, tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:1457/auth/callback",
+                 plug: plug
+               )
+
+      assert tokens.access_token == "gh_at"
+      assert tokens.scope == "repo,read:user"
+    end
+
+    test "Notion exchange authenticates with HTTP Basic, never body credentials" do
+      {:ok, provider} =
+        OAuthProviders.definition("notion",
+          client_id: "n-id",
+          client_secret: "n-sec",
+          scopes: []
+        )
+
+      expected = "Basic " <> Base.encode64("n-id:n-sec")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        params = URI.decode_query(body)
+
+        assert Plug.Conn.get_req_header(conn, "authorization") == [expected]
+        refute Map.has_key?(params, "client_secret")
+        refute Map.has_key?(params, "client_id")
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "n_at", "refresh_token" => "n_rt"})
+        )
+      end
+
+      assert {:ok, tokens} =
+               OAuthFlow.exchange_code(
+                 provider,
+                 "the-code",
+                 "the-verifier",
+                 "http://127.0.0.1:1458/auth/callback",
+                 plug: plug
+               )
+
+      assert tokens.access_token == "n_at"
+      assert tokens.refresh_token == "n_rt"
     end
   end
 

@@ -37,6 +37,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Sonnet 4/4.5 still need the beta for 1M, but they are not in this catalog.)
   @anthropic [
     {"claude-sonnet-4-6", "Claude Sonnet 4.6 (recommended)", 1_000_000},
+    {"claude-fable-5", "Claude Fable 5", 1_000_000},
     {"claude-opus-4-8", "Claude Opus 4.8 (best quality)", 1_000_000},
     {"claude-opus-4-7", "Claude Opus 4.7", 1_000_000},
     {"claude-haiku-4-5", "Claude Haiku 4.5 (fastest)", 200_000}
@@ -48,6 +49,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   # non-streaming cap above them).
   @anthropic_max_output %{
     "claude-sonnet-4-6" => 64_000,
+    "claude-fable-5" => 64_000,
     "claude-opus-4-8" => 128_000,
     "claude-opus-4-7" => 128_000,
     "claude-haiku-4-5" => 64_000

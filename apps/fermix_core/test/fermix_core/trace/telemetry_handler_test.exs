@@ -123,6 +123,24 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["session_id"] == "mcp-session"
   end
 
+  test "plugin:dist event creates a plugin_dist agent_event trace", %{dir: dir, server: server} do
+    :telemetry.execute(
+      [:fermix, :plugin, :dist],
+      %{duration_ms: 87},
+      %{op: :install, plugin: "github", version: "1.2.0", result: :installed, reason: nil}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "plugin_dist"))
+    assert entry["agent"] == "install"
+    assert entry["plugin"] == "github"
+    assert entry["version"] == "1.2.0"
+    assert entry["result"] == "installed"
+    assert entry["duration_ms"] == 87
+  end
+
   test "channel:message event creates channel_msg trace", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :channel, :message],

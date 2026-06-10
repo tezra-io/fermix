@@ -327,6 +327,169 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     end
   end
 
+  test "a plugin-owned server registers tools under its <plugin>_ prefix with merged metadata",
+       %{cap_registry: cap_registry, suffix: suffix} do
+    {:ok, _} =
+      start_supervised(
+        {McpSupervisor,
+         [
+           name: :"mcp_sup_prefix_#{suffix}",
+           mcp_registry: :"mcp_sup_prefix_reg_#{suffix}",
+           capability_registry: cap_registry,
+           servers: [
+             %{
+               name: "obsidian",
+               prefix: "obsidian_",
+               capability_metadata: %{
+                 plugin_owned?: true,
+                 plugin: "obsidian",
+                 category: :plugin
+               },
+               discoverer: HappyDiscoverer,
+               caller: StubCaller
+             }
+           ]
+         ]},
+        id: :mcp_supervisor_prefix_test
+      )
+
+    assert eventually(fn ->
+             cap_names(cap_registry) |> Enum.sort() ==
+               ["obsidian_create_issue", "obsidian_list_issues"]
+           end)
+
+    {:ok, cap} = CapabilityRegistry.find(cap_registry, "obsidian_create_issue")
+    assert cap.metadata.plugin_owned? == true
+    assert cap.metadata.plugin == "obsidian"
+    assert cap.metadata.category == :plugin
+    assert cap.metadata.mcp_server == "obsidian"
+  end
+
+  describe "reload/2" do
+    test "starts added servers, stops removed ones, keeps unchanged children", %{
+      cap_registry: cap_registry,
+      suffix: suffix
+    } do
+      reg_name = :"mcp_sup_reload_reg_#{suffix}"
+      server_a = %{name: "alpha", discoverer: HappyDiscoverer, caller: StubCaller}
+      server_b = %{name: "beta", discoverer: HappyDiscoverer, caller: StubCaller}
+
+      reload_opts = [
+        capability_registry: cap_registry,
+        mcp_registry: reg_name
+      ]
+
+      sup =
+        start_supervised!(
+          {McpSupervisor,
+           [
+             name: :"mcp_sup_reload_#{suffix}",
+             mcp_registry: reg_name,
+             capability_registry: cap_registry,
+             servers: [server_a]
+           ]},
+          id: :mcp_supervisor_reload_test
+        )
+
+      pid_a = server_child_pid(sup, "alpha")
+      assert is_pid(pid_a)
+
+      assert {:ok, summary} =
+               McpSupervisor.reload(sup, [{:servers, [server_a, server_b]} | reload_opts])
+
+      assert summary.started == ["beta"]
+      assert summary.stopped == []
+      assert summary.unchanged == ["alpha"]
+      assert server_child_pid(sup, "alpha") == pid_a
+      assert is_pid(server_child_pid(sup, "beta"))
+
+      assert {:ok, summary2} = McpSupervisor.reload(sup, [{:servers, [server_b]} | reload_opts])
+      assert summary2.stopped == ["alpha"]
+      assert summary2.started == []
+      assert summary2.unchanged == ["beta"]
+      assert server_child_pid(sup, "alpha") == nil
+    end
+
+    # The disable path (M8.1 §4.5 gap 3): a removed server's child is stopped
+    # by the supervisor — an exit signal, not GenServer.stop/2 — and its
+    # capabilities must be unregistered by terminate/2, which only runs if
+    # the server traps exits.
+    test "stopping a removed server unregisters its capabilities", %{
+      cap_registry: cap_registry,
+      suffix: suffix
+    } do
+      reg_name = :"mcp_sup_reload_teardown_reg_#{suffix}"
+
+      server = %{
+        name: "obsidian",
+        prefix: "obsidian_",
+        discoverer: HappyDiscoverer,
+        caller: StubCaller
+      }
+
+      reload_opts = [capability_registry: cap_registry, mcp_registry: reg_name]
+
+      sup =
+        start_supervised!(
+          {McpSupervisor,
+           [
+             name: :"mcp_sup_reload_teardown_#{suffix}",
+             mcp_registry: reg_name,
+             capability_registry: cap_registry,
+             servers: [server]
+           ]},
+          id: :mcp_supervisor_reload_teardown_test
+        )
+
+      assert eventually(fn ->
+               Enum.sort(cap_names(cap_registry)) ==
+                 ["obsidian_create_issue", "obsidian_list_issues"]
+             end)
+
+      assert {:ok, %{stopped: ["obsidian"]}} =
+               McpSupervisor.reload(sup, [{:servers, []} | reload_opts])
+
+      assert eventually(fn -> cap_names(cap_registry) == [] end)
+    end
+
+    test "a changed spec restarts the server; an identical spec does not", %{
+      cap_registry: cap_registry,
+      suffix: suffix
+    } do
+      reg_name = :"mcp_sup_reload_chg_reg_#{suffix}"
+      server = %{name: "alpha", discoverer: HappyDiscoverer, caller: StubCaller}
+
+      reload_opts = [capability_registry: cap_registry, mcp_registry: reg_name]
+
+      sup =
+        start_supervised!(
+          {McpSupervisor,
+           [
+             name: :"mcp_sup_reload_chg_#{suffix}",
+             mcp_registry: reg_name,
+             capability_registry: cap_registry,
+             servers: [server]
+           ]},
+          id: :mcp_supervisor_reload_changed_test
+        )
+
+      pid = server_child_pid(sup, "alpha")
+
+      assert {:ok, %{unchanged: ["alpha"]}} =
+               McpSupervisor.reload(sup, [{:servers, [server]} | reload_opts])
+
+      assert server_child_pid(sup, "alpha") == pid
+
+      changed = Map.put(server, :env, %{"NEW" => "value"})
+
+      assert {:ok, summary} = McpSupervisor.reload(sup, [{:servers, [changed]} | reload_opts])
+      assert summary.stopped == ["alpha"]
+      assert summary.started == ["alpha"]
+      new_pid = server_child_pid(sup, "alpha")
+      assert is_pid(new_pid) and new_pid != pid
+    end
+  end
+
   test "skips Anubis starter for servers without command (test/discoverer-only path)", %{
     cap_registry: cap_registry,
     suffix: suffix
@@ -359,6 +522,15 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     cap_registry
     |> CapabilityRegistry.list(kind: :mcp)
     |> Enum.map(& &1.name)
+  end
+
+  defp server_child_pid(sup, name) do
+    sup
+    |> Supervisor.which_children()
+    |> Enum.find_value(fn
+      {{:mcp_server_supervisor, ^name, _hash}, pid, _type, _modules} -> pid
+      _other -> nil
+    end)
   end
 
   defp eventually(fun, deadline_ms \\ 500) do

@@ -25,6 +25,17 @@ defmodule Fermix.CLI.Service do
   @label "io.tezra.fermix"
   @linux_unit "fermix.service"
 
+  # Non-secret observability env propagated into the OS service file so the
+  # installed daemon behaves like the setup shell. FERMIX_OPIK_ENABLED is the
+  # activation switch; the rest are overrides with working defaults. The Opik
+  # API key is deliberately absent — secrets never go into launchd/systemd files.
+  @observability_env ~w(
+    FERMIX_OPIK_ENABLED
+    FERMIX_OPIK_BASE_URL
+    FERMIX_OPIK_PROJECT
+    FERMIX_TRACE_CONTENT
+  )
+
   @type scope :: :user | :system
   @type os :: :darwin | :linux
 
@@ -34,6 +45,7 @@ defmodule Fermix.CLI.Service do
           unit_path: Path.t(),
           fermix_path: Path.t(),
           fermix_home: Path.t(),
+          service_env: %{String.t() => String.t()},
           log_path: Path.t(),
           label: String.t(),
           linux_unit: String.t()
@@ -114,12 +126,15 @@ defmodule Fermix.CLI.Service do
   end
 
   defp build_spec(os, scope, opts) do
+    home = fermix_home(opts)
+
     %{
       os: os,
       scope: scope,
       unit_path: unit_path(os, scope, opts),
       fermix_path: fermix_path(opts),
-      fermix_home: fermix_home(opts),
+      fermix_home: home,
+      service_env: service_env(opts, home),
       log_path: log_path(opts),
       label: @label,
       linux_unit: @linux_unit
@@ -192,6 +207,27 @@ defmodule Fermix.CLI.Service do
   # Delegate to the canonical resolver (which treats a blank FERMIX_HOME as
   # unset) rather than re-deriving it here.
   defp default_fermix_home, do: ConfigStore.fermix_home()
+
+  # The env map written into the unit file: the FERMIX_HOME baseline plus any
+  # set, allowlisted observability vars. The source is the install-time process
+  # env by default; callers (and tests) inject an explicit `:env` map to snapshot
+  # deterministically. It is a snapshot — changing the env later needs a reinstall.
+  defp service_env(opts, fermix_home) do
+    source = Keyword.get(opts, :env) || system_observability_env()
+
+    source
+    |> Map.take(@observability_env)
+    |> Map.reject(fn {_key, value} -> blank?(value) end)
+    |> Map.put("FERMIX_HOME", fermix_home)
+  end
+
+  defp system_observability_env do
+    Map.new(@observability_env, fn key -> {key, System.get_env(key)} end)
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(_value), do: false
 
   defp detect_os(opts) do
     Keyword.get(opts, :os) ||

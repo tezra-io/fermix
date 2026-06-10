@@ -265,6 +265,9 @@ defmodule FermixCore.Agents.TurnRunner do
     - Decompose it broadly and fan out WIDE with the `subagents` tool: many narrow, parallel
       probes, each gathering one specific piece of evidence. Prefer more probes over fewer —
       one probe = one question / one source / one angle.
+    - For the hardest or highest-stakes sub-problems, also fan out for DEPTH: run two or three
+      independent `subagents` on the SAME sub-problem (different framings or approaches),
+      compare their results, and keep the best-supported answer — discard the rest.
     - Don't answer from a single pass when the question has many facets; gather first.
     - Before relying on a finding, check it is well-supported; drop weak or unsupported ones.
     - Then synthesize everything into one thorough, well-organized answer, and note any gaps

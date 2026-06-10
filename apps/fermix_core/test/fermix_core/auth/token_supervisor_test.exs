@@ -106,6 +106,130 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
     end
   end
 
+  describe "refresh_entry/3 — plugin oauth providers (registry path)" do
+    setup do
+      previous = Application.get_env(:fermix_core, :oauth)
+
+      Application.put_env(:fermix_core, :oauth, %{
+        "google" => [
+          client_type: "desktop_public_pkce",
+          client_id: "g-id",
+          client_secret: "g-sec"
+        ],
+        "github" => [
+          client_type: "desktop_public_pkce",
+          client_id: "gh-id",
+          client_secret: "gh-sec"
+        ],
+        "notion" => [
+          client_type: "desktop_public_pkce",
+          client_id: "n-id",
+          client_secret: "n-sec"
+        ]
+      })
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_core, :oauth)
+          value -> Application.put_env(:fermix_core, :oauth, value)
+        end
+      end)
+
+      :ok
+    end
+
+    defp plugin_oauth_entry(provider) do
+      %{
+        auth_mode: "oauth2",
+        provider: provider,
+        granted_scopes: ["a-scope"],
+        tokens: %{access_token: "old_at", refresh_token: "old_rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), 60, :second),
+        last_refresh: nil,
+        status: "ready"
+      }
+    end
+
+    test "refreshes a github entry through the provider registry" do
+      :ok = Store.write("github:primary", plugin_oauth_entry("github"))
+      {:ok, entry} = Store.read("github:primary")
+
+      parent = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:refresh_request, URI.decode_query(body), conn.req_headers})
+        refresh_plug(conn)
+      end
+
+      assert {:ok, refreshed} = TokenSupervisor.refresh_entry("github:primary", entry, plug: plug)
+      assert refreshed.tokens.access_token == "new_at"
+
+      assert {:ok, stored} = Store.read("github:primary")
+      assert stored.tokens.access_token == "new_at"
+      assert stored.provider == "github"
+
+      assert_received {:refresh_request, params, headers}
+      assert params["client_id"] == "gh-id"
+      assert params["client_secret"] == "gh-sec"
+      assert {"accept", "application/json"} in headers
+    end
+
+    test "refreshes a notion entry with HTTP Basic auth and rotates the pair" do
+      :ok = Store.write("notion:primary", plugin_oauth_entry("notion"))
+      {:ok, entry} = Store.read("notion:primary")
+
+      parent = self()
+      expected = "Basic " <> Base.encode64("n-id:n-sec")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:refresh_request, URI.decode_query(body), conn.req_headers})
+        refresh_plug(conn)
+      end
+
+      assert {:ok, refreshed} = TokenSupervisor.refresh_entry("notion:primary", entry, plug: plug)
+      assert refreshed.tokens.access_token == "new_at"
+      assert refreshed.tokens.refresh_token == "new_rt"
+
+      assert_received {:refresh_request, params, headers}
+      refute Map.has_key?(params, "client_secret")
+      refute Map.has_key?(params, "client_id")
+      assert {"authorization", expected} in headers
+    end
+
+    test "google still refreshes through the registry (regression)" do
+      :ok = Store.write("google_calendar:primary", plugin_oauth_entry("google"))
+      {:ok, entry} = Store.read("google_calendar:primary")
+
+      assert {:ok, refreshed} =
+               TokenSupervisor.refresh_entry("google_calendar:primary", entry,
+                 plug: &refresh_plug/1
+               )
+
+      assert refreshed.tokens.access_token == "new_at"
+
+      assert {:ok, stored} = Store.read("google_calendar:primary")
+      assert stored.tokens.access_token == "new_at"
+      assert stored.tokens.refresh_token == "new_rt"
+    end
+
+    test "unknown providers stay unsupported" do
+      entry = plugin_oauth_entry("linear")
+
+      assert {:error, :unsupported_provider} =
+               TokenSupervisor.refresh_entry("linear:primary", entry, [])
+    end
+
+    test "a known provider without saved client config fails with needs_client_config" do
+      Application.put_env(:fermix_core, :oauth, %{})
+      entry = plugin_oauth_entry("github")
+
+      assert {:error, :needs_client_config} =
+               TokenSupervisor.refresh_entry("github:primary", entry, [])
+    end
+  end
+
   describe "refresh_entry/3 — xai" do
     defp xai_entry do
       %{anthropic_entry() | auth_mode: "oauth_pkce", provider: "xai"}

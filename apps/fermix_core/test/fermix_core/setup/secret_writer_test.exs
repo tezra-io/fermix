@@ -82,6 +82,14 @@ defmodule FermixCore.Setup.SecretWriterTest do
              SecretWriter.command_source(:openai_api_key)
   end
 
+  test "format_error trims helper output" do
+    reason = {:helper_failed, "/bin/keyring lookup", 44, "missing secret\n"}
+
+    assert SecretWriter.format_error(:tavily_api_key, reason) ==
+             "TAVILY_API_KEY could not be resolved from @keyring: " <>
+               "/bin/keyring lookup exited 44: missing secret"
+  end
+
   test "secret-tool command source uses linux secret-tool lookup attributes" do
     assert %{
              command: command,

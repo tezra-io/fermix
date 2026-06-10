@@ -15,7 +15,11 @@ defmodule FermixCore.Auth.OAuthProvider do
           redirect_path: String.t(),
           scopes: [String.t()],
           extra_authorize_params: map(),
-          echo_code_challenge?: boolean()
+          echo_code_challenge?: boolean(),
+          token_headers: [{String.t(), String.t()}],
+          token_auth: :body | :basic,
+          scope_delimiter: String.t(),
+          fixed_port?: boolean()
         }
 
   @enforce_keys [
@@ -42,8 +46,52 @@ defmodule FermixCore.Auth.OAuthProvider do
     extra_authorize_params: %{},
     # Some token endpoints (xAI) re-validate PKCE and require the
     # code_challenge echoed alongside code_verifier during exchange.
-    echo_code_challenge?: false
+    echo_code_challenge?: false,
+    # Extra headers on token-endpoint requests (code exchange + refresh) —
+    # GitHub needs {"accept", "application/json"} or it answers form-encoded.
+    token_headers: [],
+    # How client credentials reach the token endpoint: form body (default)
+    # or an HTTP Basic Authorization header (Notion).
+    token_auth: :body,
+    # Delimiter of the token-response `scope` field (GitHub joins with ",").
+    scope_delimiter: " ",
+    # Providers with exact-match registered redirect URIs (Notion) must bind
+    # the configured port exactly — no port fallback.
+    fixed_port?: false
   ]
+
+  @doc """
+  Headers for token-endpoint requests (code exchange and refresh): the form
+  content type, the provider's extra `token_headers`, and — for `:basic`
+  providers — the client credentials as an HTTP Basic Authorization header.
+  """
+  @spec token_request_headers(t()) :: [{String.t(), String.t()}]
+  def token_request_headers(%__MODULE__{} = provider) do
+    [{"content-type", "application/x-www-form-urlencoded"}] ++
+      provider.token_headers ++ basic_auth_header(provider)
+  end
+
+  @doc """
+  Client credentials for the token-request form body. Empty for `:basic`
+  providers — their credentials travel in the Authorization header instead.
+  """
+  @spec body_credentials(t()) :: %{optional(String.t()) => String.t()}
+  def body_credentials(%__MODULE__{token_auth: :basic}), do: %{}
+
+  def body_credentials(%__MODULE__{} = provider) do
+    put_present(%{"client_id" => provider.client_id}, "client_secret", provider.client_secret)
+  end
+
+  defp basic_auth_header(%__MODULE__{token_auth: :basic} = provider) do
+    credentials = Base.encode64("#{provider.client_id}:#{provider.client_secret}")
+    [{"authorization", "Basic " <> credentials}]
+  end
+
+  defp basic_auth_header(%__MODULE__{}), do: []
+
+  defp put_present(params, _key, nil), do: params
+  defp put_present(params, _key, ""), do: params
+  defp put_present(params, key, value), do: Map.put(params, key, value)
 
   # Reference values from the Hermes port (design doc §5.6) — verify against
   # current Claude Code behavior before shipping native PKCE. The redirect is
@@ -88,22 +136,5 @@ defmodule FermixCore.Auth.OAuthProvider do
 
   defp generate_nonce do
     24 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-  end
-
-  @spec google(keyword()) :: t()
-  def google(opts) when is_list(opts) do
-    %__MODULE__{
-      id: :google,
-      authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
-      token_url: "https://oauth2.googleapis.com/token",
-      userinfo_url: "https://openidconnect.googleapis.com/v1/userinfo",
-      client_id: Keyword.fetch!(opts, :client_id),
-      client_secret: Keyword.get(opts, :client_secret),
-      redirect_host: Keyword.get(opts, :redirect_host, "127.0.0.1"),
-      redirect_port: Keyword.get(opts, :redirect_port, 1455),
-      redirect_path: Keyword.get(opts, :redirect_path, "/auth/callback"),
-      scopes: Keyword.get(opts, :scopes, []),
-      extra_authorize_params: %{"access_type" => "offline", "prompt" => "consent"}
-    }
   end
 end

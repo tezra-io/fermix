@@ -81,7 +81,7 @@ defmodule FermixCore.Tools.TelemetryTest do
     refute Map.has_key?(metadata, :output)
   end
 
-  test "content is attached and truncated when capture is enabled" do
+  test "content is attached whole when capture is enabled" do
     set_capture_content(true)
     context = %{agent_name: "main", session_id: "main-1"}
     big_output = String.duplicate("x", 5_000)
@@ -90,7 +90,22 @@ defmodule FermixCore.Tools.TelemetryTest do
 
     assert_receive {:tool_exec, _measurements, metadata}
     assert metadata.input == "ls -la"
-    assert String.length(metadata.output) < 5_000
-    assert String.ends_with?(metadata.output, "…[truncated]")
+    # Capture on means full fidelity — no 2k truncation (that bound applies
+    # only when capture is off; see FermixCore.TelemetryTest).
+    assert metadata.output == big_output
+  end
+
+  test "a failed result's error text is previewed as output when capture is enabled" do
+    set_capture_content(true)
+    context = %{agent_name: "main", session_id: "main-1"}
+    # Builtin failures (Tool.error/1) carry output: "" — the error text is the
+    # body worth tracing, and an empty output must not shadow it.
+    error_text = "boom (code): {\"console\":[]}"
+    result = {:ok, %{success: false, output: "", error: error_text}}
+
+    ToolTelemetry.exec("browser", context, false, 5, result: result)
+
+    assert_receive {:tool_exec, _measurements, metadata}
+    assert metadata.output == error_text
   end
 end

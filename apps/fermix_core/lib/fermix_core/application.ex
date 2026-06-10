@@ -25,6 +25,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
+  alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
@@ -124,6 +125,7 @@ defmodule FermixCore.Application do
         CapabilityRegistry,
         BuiltinSeeder,
         {CommandCapabilities, capability_registry: CapabilityRegistry},
+        PluginInstaller,
         {PluginCapabilitySeeder, capability_registry: CapabilityRegistry},
         {SkillRegistry, capability_registry: CapabilityRegistry},
         {McpSupervisor, capability_registry: CapabilityRegistry},

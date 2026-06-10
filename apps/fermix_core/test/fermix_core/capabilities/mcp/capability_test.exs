@@ -70,7 +70,9 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       assert cap.metadata.original_name == "create_issue"
       assert cap.metadata.sanitized_name == "mcp_github_create_issue"
       assert cap.parameters == descriptor.input_schema
-      assert {McpCapability, :invoke, ["github", "create_issue", StubCaller]} = cap.executor
+
+      assert {McpCapability, :invoke,
+              ["github", "create_issue", "mcp_github_create_issue", StubCaller]} = cap.executor
     end
 
     test "tool_overrides flip hidden_from_agent? to true" do
@@ -115,6 +117,59 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       refute result.success
       assert result.error =~ "MCP tool 'github/create_issue' failed"
       assert result.error =~ "unauthorized"
+    end
+  end
+
+  describe "invoke/6 telemetry" do
+    setup do
+      handler = "mcp-capability-telemetry-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :tool, :exec],
+        fn _event, measurements, metadata, _config ->
+          send(test_pid, {:tool_exec, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+      :ok
+    end
+
+    test "emits [:fermix, :tool, :exec] with the sanitized name, server, and correlation on success" do
+      descriptor = %{name: "create_issue", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("github", descriptor, caller: StubCaller)
+      :ok = StubCaller.set_response("github", "create_issue", {:ok, "issue #42 created"})
+
+      context = %{agent_name: "main", session_id: "main-7", parent_session: "cron-1"}
+      assert {:ok, result} = Capability.execute(cap, %{"title" => "T"}, context)
+      assert result.success
+
+      assert_receive {:tool_exec, %{duration_ms: duration}, metadata}
+      assert is_integer(duration) and duration >= 0
+      assert metadata.tool == "mcp_github_create_issue"
+      assert metadata.agent == "main"
+      assert metadata.success == true
+      assert metadata.mcp_server == "github"
+      assert metadata.session_id == "main-7"
+      assert metadata.parent_session == "cron-1"
+    end
+
+    test "emits success: false with the error reason on a failed MCP call" do
+      descriptor = %{name: "create_issue", description: "x", input_schema: %{}}
+      cap = McpCapability.from_tool_descriptor("github", descriptor, caller: StubCaller)
+      :ok = StubCaller.set_response("github", "create_issue", {:error, :unauthorized})
+
+      assert {:ok, result} = Capability.execute(cap, %{}, %{agent_name: "main"})
+      refute result.success
+
+      assert_receive {:tool_exec, _measurements, metadata}
+      assert metadata.tool == "mcp_github_create_issue"
+      assert metadata.success == false
+      assert metadata.mcp_server == "github"
+      assert metadata.error =~ "unauthorized"
     end
   end
 end

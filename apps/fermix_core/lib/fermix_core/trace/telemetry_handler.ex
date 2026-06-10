@@ -58,6 +58,14 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :agent,
       trace_event: "capability_select"
+    },
+    # Plugin distribution ops (install/uninstall/gc). Catalog-scope
+    # ops carry `plugin: nil`, so the row's agent is the op itself.
+    %{
+      event: [:fermix, :plugin, :dist],
+      trace_type: :agent_event,
+      agent_field: :op,
+      trace_event: "plugin_dist"
     }
   ]
 
@@ -72,6 +80,48 @@ defmodule FermixCore.Trace.TelemetryHandler do
       event: [:fermix, :mcp, :inbound, :call],
       trace_type: :tool_exec,
       agent_field: :client_name
+    }
+  ]
+
+  # Realtime voice lifecycle (its own WebSocket session). Tool calls and the
+  # model turn reuse `[:fermix, :tool, :exec]` / `[:fermix, :provider, :call]`;
+  # only these provider-lifecycle markers are realtime-specific.
+  @realtime_events [
+    %{
+      event: [:fermix, :realtime, :call_start],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_call_start"
+    },
+    %{
+      event: [:fermix, :realtime, :session_created],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_session_created"
+    },
+    %{
+      event: [:fermix, :realtime, :session_updated],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_session_updated"
+    },
+    %{
+      event: [:fermix, :realtime, :provider_error],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_provider_error"
+    },
+    %{
+      event: [:fermix, :realtime, :reconnect],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_reconnect"
+    },
+    %{
+      event: [:fermix, :realtime, :call_stop],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_call_stop"
     }
   ]
 
@@ -117,6 +167,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   defp event_definitions do
     @core_events ++
       @mcp_inbound_events ++
+      @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions()
   end

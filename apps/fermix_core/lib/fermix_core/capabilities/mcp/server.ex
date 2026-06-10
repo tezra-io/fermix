@@ -31,6 +31,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
           | {:caller, module()}
           | {:approved?, boolean()}
           | {:tools_overrides, %{String.t() => map()}}
+          | {:name_prefix, String.t() | nil}
+          | {:extra_metadata, map() | nil}
           | {:capability_registry, GenServer.server()}
           | {:mcp_registry, GenServer.server()}
 
@@ -44,12 +46,19 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   @impl true
   def init(opts) do
+    # Supervisor shutdown (the plugin-disable reload path) delivers an exit
+    # signal, not GenServer.stop/2 — terminate/2 only unregisters this
+    # server's capabilities if exits are trapped.
+    Process.flag(:trap_exit, true)
+
     state = %{
       server_name: Keyword.fetch!(opts, :server_name),
       client: Keyword.get(opts, :client),
       discoverer: Keyword.get(opts, :discoverer, FermixCore.Capabilities.MCP.Discoverer.Anubis),
       caller: Keyword.get(opts, :caller, FermixCore.Capabilities.MCP.Caller.Anubis),
       tools_overrides: Keyword.get(opts, :tools_overrides, %{}),
+      name_prefix: Keyword.get(opts, :name_prefix),
+      extra_metadata: Keyword.get(opts, :extra_metadata),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       mcp_registry: Keyword.get(opts, :mcp_registry, McpRegistry),
       skill_registry: Keyword.get(opts, :skill_registry, SkillRegistry),
@@ -169,13 +178,15 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp register_descriptor(descriptor, state) do
     overrides = Map.get(state.tools_overrides, descriptor.name, %{})
     original = descriptor.name
-    sanitized = Naming.candidate(state.server_name, original)
+    sanitized = Naming.candidate(state.server_name, original, prefix: state.name_prefix)
 
     with :ok <- reject_skill_name_collision(sanitized, state, original) do
       capability =
         McpCapability.from_tool_descriptor(state.server_name, descriptor,
           caller: state.caller,
-          tool_overrides: overrides
+          tool_overrides: overrides,
+          name_prefix: state.name_prefix,
+          extra_metadata: state.extra_metadata
         )
 
       case CapabilityRegistry.register(state.capability_registry, capability) do
