@@ -50,7 +50,8 @@ defmodule FermixTestSupport.DistFixtures do
   Wire `DistFetcherStub` to serve `tgz` (plus sig/cert fixtures) for
   `name@version` and return the catalog-index plugin entry map.
 
-  Options: `:yanked`, `:plugin_api`, `:target`, `:index_sha`, `:latest`.
+  Options: `:yanked`, `:plugin_api`, `:target`, `:index_sha`, `:latest`,
+  `:auth_type`, `:auth_provider`.
   """
   @spec wire(Path.t(), String.t(), String.t(), Path.t(), String.t(), keyword()) :: map()
   def wire(fixtures, name, version, tgz, sha, opts \\ []) do
@@ -68,7 +69,8 @@ defmodule FermixTestSupport.DistFixtures do
       "name" => name,
       "display_name" => name,
       "category" => "developer",
-      "auth_type" => "none",
+      "auth_type" => Keyword.get(opts, :auth_type, "none"),
+      "auth_provider" => Keyword.get(opts, :auth_provider),
       "rails" => ["http"],
       "latest" => Keyword.get(opts, :latest, version),
       "yanked" => Keyword.get(opts, :yanked, []),

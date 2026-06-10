@@ -991,12 +991,13 @@ defmodule FermixWebWeb.SetupLive do
     case PluginCatalog.overview(plugins_dist_opts()) do
       {:ok, overview} ->
         plugins = installed_cards(overview, snapshot)
+        catalog = Enum.map(overview.available, &catalog_card/1)
 
         %{
           available: true,
-          oauth_clients: oauth_client_forms(snapshot, plugins),
+          oauth_clients: oauth_client_forms(snapshot, plugins ++ catalog),
           plugins: plugins,
-          catalog: Enum.map(overview.available, &catalog_card/1),
+          catalog: catalog,
           index_error: format_index_error(overview.index_error)
         }
 
@@ -1057,6 +1058,7 @@ defmodule FermixWebWeb.SetupLive do
       description: entry.description,
       category: entry.category,
       auth_type: entry.auth_type,
+      provider: entry.provider,
       logo: index_logo_data_uri(entry.logo),
       latest: entry.latest,
       mcp?: "mcp" in entry.rails,
@@ -1094,10 +1096,12 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(:enabled, [])
   end
 
-  # One client form per distinct oauth2 provider among the installed plugins;
-  # Google's is always present (its plugins ship bundled).
-  defp oauth_client_forms(snapshot, plugins) do
-    plugins
+  # One client form per distinct oauth2 provider among the installed ∪ catalog
+  # cards (both shapes carry an atom `auth_type` and a `provider`), so the
+  # client can be saved before its plugin is installed; Google's is always
+  # present (its plugins ship bundled).
+  defp oauth_client_forms(snapshot, cards) do
+    cards
     |> Enum.filter(&(&1.auth_type == :oauth2 and &1.provider in @oauth_client_providers))
     |> Enum.map(& &1.provider)
     |> Kernel.++(["google"])

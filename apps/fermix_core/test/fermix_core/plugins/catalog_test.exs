@@ -33,6 +33,7 @@ defmodule FermixCore.Plugins.CatalogTest do
       "description" => "#{name} from the catalog",
       "category" => "developer",
       "auth_type" => Keyword.get(opts, :auth_type, "none"),
+      "auth_provider" => Keyword.get(opts, :auth_provider),
       "rails" => Keyword.get(opts, :rails, ["http"]),
       "logo" => Keyword.get(opts, :logo),
       "latest" => Keyword.get(opts, :latest, "1.0.0"),
@@ -104,12 +105,22 @@ defmodule FermixCore.Plugins.CatalogTest do
       assert entry.display_name == "hackernews"
       assert entry.description == "hackernews from the catalog"
       assert entry.auth_type == :none
+      assert entry.provider == nil
       assert entry.rails == ["http"]
       assert entry.logo == logo
       assert entry.latest == "1.0.0"
       assert entry.compat == :ok
       assert overview.yanked_installed == %{}
       assert overview.index_error == nil
+    end
+
+    test "an oauth2 index entry carries its auth provider", %{root: root} do
+      entries = [index_entry("github", auth_type: "oauth2", auth_provider: "github")]
+      overview = overview!(root, entries)
+
+      assert [entry] = overview.available
+      assert entry.auth_type == :oauth2
+      assert entry.provider == "github"
     end
 
     test "installed and bundled names are not repeated as available", %{root: root} do

@@ -1492,6 +1492,43 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(github, :client_secret) == "gh-secret"
     end
 
+    test "a catalog-only github plugin renders a GitHub client form that persists", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        wire_catalog_plugin(fixtures, "github", "1.0.0",
+          auth_type: "oauth2",
+          auth_provider: "github"
+        )
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      # Nothing installed: the provider group renders with just the client
+      # form + hint, and the plugin itself stays a catalog card.
+      assert html =~ ~s(data-plugin-group="github")
+      assert html =~ ~s(id="oauth-client-form-github")
+      assert html =~ "Used when connecting GitHub"
+      assert html =~ ~s(data-catalog-name="github")
+      refute html =~ ~s(data-plugin-name="github")
+
+      html =
+        view
+        |> form("#oauth-client-form-github",
+          oauth_client_form: %{client_id: "Iv1.github-client", client_secret: "gh-secret"}
+        )
+        |> render_submit()
+
+      assert html =~ "GitHub OAuth client saved."
+      github = PluginConfig.oauth_provider("github")
+      assert Keyword.get(github, :client_id) == "Iv1.github-client"
+      assert Keyword.get(github, :client_secret) == "gh-secret"
+    end
+
     test "connect on a github plugin without a client names GitHub in the pre-flight", %{
       conn: conn,
       tmp_home: tmp_home,
