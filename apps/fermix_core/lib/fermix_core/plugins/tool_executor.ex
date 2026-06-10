@@ -6,7 +6,9 @@ defmodule FermixCore.Plugins.ToolExecutor do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Net.Guard
   alias FermixCore.Plugins.Config
+  alias FermixCore.Plugins.Http.Interpreter
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -21,25 +23,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
   @rate_limit_reasons ~w(rateLimitExceeded userRateLimitExceeded dailyLimitExceeded quotaExceeded)
 
   @spec parameters(String.t()) :: map()
-  def parameters("google_calendar_search_events") do
-    object_schema(["query"], %{
-      "query" => %{type: "string", description: "Text query for events."},
-      "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
-      "max_results" => %{type: "integer", description: "Maximum events, default 10."}
-    })
-  end
-
-  def parameters("google_calendar_create_event") do
-    object_schema(["summary", "start", "end"], %{
-      "summary" => %{type: "string"},
-      "description" => %{type: "string"},
-      "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
-      "start" => %{type: "string", description: "ISO8601 start date/time."},
-      "end" => %{type: "string", description: "ISO8601 end date/time."},
-      "time_zone" => %{type: "string", description: "IANA timezone."}
-    })
-  end
-
   def parameters("gmail_search_messages") do
     object_schema(["query"], %{
       "query" => %{type: "string", description: "Gmail search query."},
@@ -93,69 +76,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
     })
   end
 
-  def parameters("gmail_send_draft") do
-    object_schema(["id"], %{
-      "id" => %{type: "string", description: "Draft id from gmail_create_draft."}
-    })
-  end
-
-  def parameters("gmail_modify_message_labels") do
-    object_schema(["id"], %{
-      "id" => %{type: "string", description: "Message id."},
-      "add_label_ids" => %{
-        type: "array",
-        items: %{type: "string"},
-        description: "Label ids to add; e.g. STARRED, UNREAD."
-      },
-      "remove_label_ids" => %{
-        type: "array",
-        items: %{type: "string"},
-        description: "Label ids to remove; UNREAD marks read, INBOX archives."
-      }
-    })
-  end
-
-  def parameters("gmail_trash_message") do
-    object_schema(["id"], %{"id" => %{type: "string", description: "Message id."}})
-  end
-
-  def parameters("gmail_untrash_message") do
-    object_schema(["id"], %{"id" => %{type: "string", description: "Message id."}})
-  end
-
-  def parameters("gmail_create_label") do
-    object_schema(["name"], %{
-      "name" => %{type: "string", description: "Label name; use '/' for nesting."},
-      "label_list_visibility" => %{
-        type: "string",
-        description: "labelShow | labelShowIfUnread | labelHide."
-      },
-      "message_list_visibility" => %{type: "string", description: "show | hide."}
-    })
-  end
-
-  def parameters("google_calendar_update_event") do
-    object_schema(["event_id"], %{
-      "event_id" => %{type: "string"},
-      "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
-      "summary" => %{type: "string"},
-      "description" => %{type: "string"},
-      "location" => %{type: "string"},
-      "start" => %{type: "string", description: "ISO8601 start date/time."},
-      "end" => %{type: "string", description: "ISO8601 end date/time."},
-      "time_zone" => %{type: "string", description: "IANA timezone."},
-      "send_updates" => %{type: "string", description: "all | externalOnly | none."}
-    })
-  end
-
-  def parameters("google_calendar_delete_event") do
-    object_schema(["event_id"], %{
-      "event_id" => %{type: "string"},
-      "calendar_id" => %{type: "string", description: "Calendar id, default primary."},
-      "send_updates" => %{type: "string", description: "all | externalOnly | none."}
-    })
-  end
-
   def parameters("google_calendar_respond_to_event") do
     object_schema(["event_id", "response_status"], %{
       "event_id" => %{type: "string"},
@@ -169,51 +89,12 @@ defmodule FermixCore.Plugins.ToolExecutor do
     })
   end
 
-  def parameters("google_calendar_move_event") do
-    object_schema(["event_id", "destination_calendar_id"], %{
-      "event_id" => %{type: "string"},
-      "destination_calendar_id" => %{type: "string", description: "Target calendar id."},
-      "calendar_id" => %{type: "string", description: "Source calendar id, default primary."},
-      "send_updates" => %{type: "string", description: "all | externalOnly | none."}
-    })
-  end
-
-  def parameters("google_drive_create_folder") do
-    object_schema(["name"], %{
-      "name" => %{type: "string"},
-      "parent_id" => %{type: "string", description: "Parent folder id; omit for root."}
-    })
-  end
-
   def parameters("google_drive_upload_file") do
     object_schema(["name", "content"], %{
       "name" => %{type: "string", description: "File name with extension."},
       "content" => %{type: "string", description: "Text content of the file."},
       "mime_type" => %{type: "string", description: "MIME type, default text/plain."},
       "parent_id" => %{type: "string", description: "Parent folder id; omit for root."}
-    })
-  end
-
-  def parameters("google_drive_update_file") do
-    object_schema(["file_id", "name"], %{
-      "file_id" => %{type: "string"},
-      "name" => %{type: "string", description: "New name."}
-    })
-  end
-
-  def parameters("google_drive_move_file") do
-    object_schema(["file_id", "add_parent_id"], %{
-      "file_id" => %{type: "string"},
-      "add_parent_id" => %{type: "string", description: "Destination folder id."},
-      "remove_parent_id" => %{type: "string", description: "Current parent folder id to detach."}
-    })
-  end
-
-  def parameters("google_drive_copy_file") do
-    object_schema(["file_id"], %{
-      "file_id" => %{type: "string"},
-      "name" => %{type: "string", description: "Name for the copy."},
-      "parent_id" => %{type: "string", description: "Destination folder id."}
     })
   end
 
@@ -244,18 +125,155 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp do_execute(args, context, plugin_name, tool) do
     with {:ok, plugin} <- Registry.find(plugin_name),
+         :ok <- ensure_enabled(plugin),
          :ok <- ensure_granted(plugin, tool, context),
          auth_profile <- Config.auth_profile(plugin),
          {:ok, token} <- get_token(auth_profile, context) do
-      tool
-      |> Map.get("name")
-      |> dispatch(args, context, plugin_name, auth_profile, token, tool)
+      run_tool(args, context, plugin, plugin_name, auth_profile, token, tool)
     else
       {:error, reason} -> {:ok, Tool.error(format_auth_error(plugin_name, reason))}
       {:missing_scope, result} -> {:ok, result}
+      {:disabled, result} -> {:ok, result}
       :error -> {:ok, Tool.error("unknown plugin: #{plugin_name}")}
     end
   end
+
+  # Call-time refusal for the stale-context window (§4.5 gap 2): a disabled
+  # plugin's tool answers with honest enable guidance instead of falling
+  # through to the auth ladder. Every other status proceeds — the downstream
+  # auth errors already say the right thing (e.g. "enabled but not connected").
+  defp ensure_enabled(plugin) do
+    if Status.status(plugin) == :not_configured do
+      {:disabled,
+       Tool.error(
+         "#{plugin.name} is disabled — enable it on the setup page or run " <>
+           "`fermix plugins enable #{plugin.name}`."
+       )}
+    else
+      :ok
+    end
+  end
+
+  # A tool with a declarative `request` template runs through the in-VM HTTP
+  # interpreter (§5.3); a tool without one uses its hardcoded dispatch clause.
+  defp run_tool(args, context, plugin, plugin_name, auth_profile, token, tool) do
+    if Map.has_key?(tool, "request") do
+      run_declarative(args, context, plugin, plugin_name, auth_profile, token, tool)
+    else
+      tool
+      |> Map.get("name")
+      |> dispatch(args, context, plugin_name, auth_profile, token, tool)
+    end
+  end
+
+  defp run_declarative(args, context, plugin, plugin_name, auth_profile, token, tool) do
+    Interpreter.run(tool, args,
+      http: declarative_seam(context, plugin_name, auth_profile, tool, token),
+      auth_header: nil,
+      auth_type: plugin.auth.type,
+      plugin: plugin_name,
+      requires_scopes: Map.get(tool, "requires_scopes", []),
+      error_classifier: google_error_classifier(plugin, plugin_name, tool)
+    )
+  end
+
+  # Google plugins keep their machine-readable 403/401 classification
+  # (`format_forbidden`/`format_auth_error`) instead of the interpreter's
+  # generic prose; other providers (github/notion api_key) fall back to generic.
+  defp google_error_classifier(%{auth: %{provider: "google"}}, plugin_name, tool) do
+    fn
+      403, _headers, body -> format_forbidden(plugin_name, tool, decode_body_or_empty(body))
+      401, _headers, _body -> format_auth_error(plugin_name, :reauthorization_required)
+      _status, _headers, _body -> nil
+    end
+  end
+
+  defp google_error_classifier(_plugin, _plugin_name, _tool), do: nil
+
+  defp decode_body_or_empty(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> decoded
+      {:error, _} -> %{}
+    end
+  end
+
+  # The interpreter shapes the request/response; this seam owns transport, the
+  # `Authorization` header, the test plug passthrough, and the one-shot 401
+  # refresh-retry for read-only tools (parity with the hardcoded path).
+  defp declarative_seam(context, plugin_name, auth_profile, tool, token) do
+    fn request ->
+      declarative_call(request, token, 0, context, plugin_name, auth_profile, tool)
+    end
+  end
+
+  defp declarative_call(request, token, attempt, context, plugin_name, auth_profile, tool) do
+    case guard_url(request.url, context) do
+      :ok -> issue_declarative(request, token, attempt, context, plugin_name, auth_profile, tool)
+      {:error, reason} -> {:error, {:blocked_url, reason}}
+    end
+  end
+
+  # SSRF floor for manifest-supplied URLs (same posture as web_fetch): block
+  # loopback/private/metadata hosts before any transport. Injectable for
+  # hermetic tests (`:plugin_url_guard`); production default is the real guard.
+  defp guard_url(url, context) do
+    guard = Map.get(context, :plugin_url_guard, &Guard.validate/1)
+    guard.(url)
+  end
+
+  defp issue_declarative(request, token, attempt, context, plugin_name, auth_profile, tool) do
+    req_options = Map.get(context, :plugin_req_options, [])
+
+    req =
+      Req.new(
+        method: request.method,
+        url: request.url,
+        params: request.query,
+        headers: [{"authorization", "Bearer #{token}"} | request.headers],
+        decode_body: false
+      )
+      |> maybe_merge(:json, request.body)
+      |> Req.merge(req_options)
+
+    case Req.request(req) do
+      {:ok, %{status: 401}} when attempt == 0 ->
+        refresh_or_pass(request, attempt, context, plugin_name, auth_profile, tool)
+
+      {:ok, response} ->
+        {:ok,
+         %{
+           status: response.status,
+           headers: normalize_headers(response.headers),
+           body: to_string(response.body)
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp refresh_or_pass(request, _attempt, context, plugin_name, auth_profile, tool) do
+    if Map.get(tool, "read_only") == true do
+      case refresh_token(auth_profile, context) do
+        {:ok, fresh} ->
+          declarative_call(request, fresh, 1, context, plugin_name, auth_profile, tool)
+
+        {:error, reason} ->
+          # Surface the refresh failure itself (network vs revoked grant)
+          # instead of synthesizing a 401 that classifies as a generic
+          # reauthorize — parity with the hardcoded path's format_auth_error.
+          {:error, {:token_refresh_failed, reason}}
+      end
+    else
+      # A write 401 is terminal — hand the 401 to the interpreter to classify.
+      {:ok, %{status: 401, headers: [], body: ""}}
+    end
+  end
+
+  defp normalize_headers(headers) when is_map(headers),
+    do: Enum.map(headers, fn {k, v} -> {k, v |> List.wrap() |> Enum.join(", ")} end)
+
+  defp normalize_headers(headers) when is_list(headers), do: headers
 
   # Pre-flight: if the connection never granted this tool's scope, fail with
   # reauthorize guidance before spending an API call.
@@ -271,106 +289,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
   defp granted_scopes(plugin, context) do
     getter = Map.get(context, :plugin_granted_scopes_getter, &Status.granted_scopes/1)
     getter.(plugin)
-  end
-
-  defp dispatch(
-         "google_calendar_search_events",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    calendar_id = Map.get(args, "calendar_id", "primary")
-
-    params =
-      %{
-        "q" => Map.get(args, "query"),
-        "maxResults" => Map.get(args, "max_results", 10),
-        "singleEvents" => true,
-        "orderBy" => "startTime"
-      }
-      |> drop_blank_values()
-
-    request(:get, "#{@calendar_base}/calendars/#{URI.encode(calendar_id)}/events", token,
-      params: params,
-      context: context,
-      plugin_name: plugin_name,
-      auth_profile: auth_profile,
-      tool: tool
-    )
-  end
-
-  defp dispatch(
-         "google_calendar_create_event",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    calendar_id = Map.get(args, "calendar_id", "primary")
-    time_zone = Map.get(args, "time_zone")
-
-    body =
-      %{
-        "summary" => Map.get(args, "summary"),
-        "description" => Map.get(args, "description"),
-        "start" => calendar_time(Map.get(args, "start"), time_zone),
-        "end" => calendar_time(Map.get(args, "end"), time_zone)
-      }
-      |> drop_blank_values()
-
-    request(:post, "#{@calendar_base}/calendars/#{URI.encode(calendar_id)}/events", token,
-      json: body,
-      context: context,
-      plugin_name: plugin_name,
-      auth_profile: auth_profile,
-      tool: tool
-    )
-  end
-
-  defp dispatch(
-         "google_calendar_update_event",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    time_zone = Map.get(args, "time_zone")
-
-    body =
-      %{
-        "summary" => Map.get(args, "summary"),
-        "description" => Map.get(args, "description"),
-        "location" => Map.get(args, "location"),
-        "start" => calendar_time(Map.get(args, "start"), time_zone),
-        "end" => calendar_time(Map.get(args, "end"), time_zone)
-      }
-      |> drop_blank_values()
-
-    request(:patch, event_url(args), token, [
-      {:json, body},
-      {:params, calendar_send_updates(args)} | base
-    ])
-  end
-
-  defp dispatch(
-         "google_calendar_delete_event",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    request(:delete, event_url(args), token, [{:params, calendar_send_updates(args)} | base])
   end
 
   defp dispatch(
@@ -467,27 +385,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
     )
   end
 
-  defp dispatch(
-         "google_drive_create_folder",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-
-    body =
-      drop_blank_values(%{
-        "name" => Map.get(args, "name"),
-        "mimeType" => "application/vnd.google-apps.folder",
-        "parents" => drive_parents(args)
-      })
-
-    request(:post, "#{@drive_base}/files", token, [{:json, body} | base])
-  end
-
   defp dispatch("google_drive_upload_file", args, context, plugin_name, auth_profile, token, tool) do
     base = base_opts(context, plugin_name, auth_profile, tool)
     mime = Map.get(args, "mime_type", "text/plain")
@@ -505,38 +402,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
       {:params, %{"uploadType" => "multipart"}},
       {:body, body},
       {:content_type, content_type} | base
-    ])
-  end
-
-  defp dispatch("google_drive_update_file", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    body = drop_blank_values(%{"name" => Map.get(args, "name")})
-
-    request(:patch, "#{@drive_base}/files/#{Map.get(args, "file_id")}", token, [
-      {:json, body} | base
-    ])
-  end
-
-  defp dispatch("google_drive_move_file", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-
-    params =
-      drop_blank_values(%{
-        "addParents" => Map.get(args, "add_parent_id"),
-        "removeParents" => Map.get(args, "remove_parent_id")
-      })
-
-    request(:patch, "#{@drive_base}/files/#{Map.get(args, "file_id")}", token, [
-      {:params, params} | base
-    ])
-  end
-
-  defp dispatch("google_drive_copy_file", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    body = drop_blank_values(%{"name" => Map.get(args, "name"), "parents" => drive_parents(args)})
-
-    request(:post, "#{@drive_base}/files/#{Map.get(args, "file_id")}/copy", token, [
-      {:json, body} | base
     ])
   end
 
@@ -584,58 +449,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
     request(:post, "#{@gmail_base}/users/me/drafts", token, [
       {:json, %{"message" => message}} | base
     ])
-  end
-
-  defp dispatch("gmail_send_draft", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-
-    request(:post, "#{@gmail_base}/users/me/drafts/send", token, [
-      {:json, %{"id" => Map.get(args, "id")}} | base
-    ])
-  end
-
-  defp dispatch(
-         "gmail_modify_message_labels",
-         args,
-         context,
-         plugin_name,
-         auth_profile,
-         token,
-         tool
-       ) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-
-    body = %{
-      "addLabelIds" => Map.get(args, "add_label_ids", []),
-      "removeLabelIds" => Map.get(args, "remove_label_ids", [])
-    }
-
-    request(:post, "#{@gmail_base}/users/me/messages/#{Map.get(args, "id")}/modify", token, [
-      {:json, body} | base
-    ])
-  end
-
-  defp dispatch("gmail_trash_message", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    request(:post, "#{@gmail_base}/users/me/messages/#{Map.get(args, "id")}/trash", token, base)
-  end
-
-  defp dispatch("gmail_untrash_message", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-    request(:post, "#{@gmail_base}/users/me/messages/#{Map.get(args, "id")}/untrash", token, base)
-  end
-
-  defp dispatch("gmail_create_label", args, context, plugin_name, auth_profile, token, tool) do
-    base = base_opts(context, plugin_name, auth_profile, tool)
-
-    body =
-      drop_blank_values(%{
-        "name" => Map.get(args, "name"),
-        "labelListVisibility" => Map.get(args, "label_list_visibility"),
-        "messageListVisibility" => Map.get(args, "message_list_visibility")
-      })
-
-    request(:post, "#{@gmail_base}/users/me/labels", token, [{:json, body} | base])
   end
 
   defp dispatch("gmail_get_message", args, context, plugin_name, auth_profile, token, tool) do
@@ -847,16 +660,6 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp maybe_put_body(request, body, content_type) do
     Req.merge(request, body: body, headers: [{"content-type", content_type}])
-  end
-
-  defp calendar_time(nil, _time_zone), do: nil
-
-  defp calendar_time(value, nil) do
-    %{"dateTime" => value}
-  end
-
-  defp calendar_time(value, time_zone) do
-    %{"dateTime" => value, "timeZone" => time_zone}
   end
 
   defp event_url(args) do

@@ -3,14 +3,18 @@ defmodule Fermix.CLI.PluginsCommand do
   `fermix plugins` — manage local Fermix plugins.
   """
 
+  alias Fermix.CLI.Daemon.Client, as: DaemonClient
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Auth
   alias FermixCore.Plugins.Config
+  alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Health
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Runtime
   alias FermixCore.Plugins.Status
+  alias FermixCore.Setup.ConfigStore
 
   @json_switches [json: :boolean]
   @login_switches [
@@ -35,7 +39,14 @@ defmodule Fermix.CLI.PluginsCommand do
   defp dispatch("disable", [name | rest]), do: disable(name, rest)
   defp dispatch("doctor", rest), do: doctor(rest)
   defp dispatch("reload", rest), do: reload(rest)
+  defp dispatch("install", [spec | rest]), do: install(spec, rest)
+  defp dispatch("installed", rest), do: installed(rest)
+  defp dispatch("uninstall", [name | rest]), do: uninstall(name, rest)
+  defp dispatch("upgrade", [name | rest]), do: upgrade(name, rest)
+  defp dispatch("pin", [spec | rest]), do: pin(spec, rest)
+  defp dispatch("gc", rest), do: gc(rest)
   defp dispatch("auth", rest), do: auth(rest)
+  defp dispatch("config", rest), do: config(rest)
   defp dispatch(_command, _rest), do: usage()
 
   defp list(argv) do
@@ -62,10 +73,13 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp enable(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @json_switches),
+         :ok <- ensure_available(name),
          {:ok, _snapshot} <- Config.enable(name) do
       print(%{enabled: name}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("enabled #{name}")
       end)
+
+      apply_to_daemon()
     else
       :error -> invalid_options("enable")
       {:error, reason} -> error(reason)
@@ -78,8 +92,89 @@ defmodule Fermix.CLI.PluginsCommand do
       print(%{disabled: name}, Keyword.get(opts, :json, false), fn _ ->
         IO.puts("disabled #{name}")
       end)
+
+      apply_to_daemon()
     else
       :error -> invalid_options("disable")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  # --- distribution verbs (§9: catalog index + signed install pipeline) ---
+
+  defp install(spec, argv) do
+    {name, version} = parse_spec(spec)
+
+    with {:ok, json?} <- parse_json(argv),
+         {:ok, status} <- DistInstaller.run_install(name, dist_opts(version_opts(version))) do
+      print(%{installed: name, status: status}, json?, fn _ ->
+        IO.puts(install_message(name, status))
+      end)
+
+      maybe_apply_to_daemon(name)
+    else
+      :error -> invalid_options("install")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp installed(argv) do
+    with {:ok, json?} <- parse_json(argv) do
+      rows = dist_root() |> DistStore.list() |> Enum.map(&installed_row/1)
+      print(%{installed: rows}, json?, &print_installed_rows/1)
+    else
+      :error -> invalid_options("installed")
+    end
+  end
+
+  defp uninstall(name, argv) do
+    with {:ok, json?} <- parse_json(argv),
+         :ok <- refuse_bundled_uninstall(name),
+         :ok <- maybe_disable(name),
+         :ok <- DistInstaller.run_uninstall(name, dist_opts()) do
+      print(%{uninstalled: name}, json?, fn _ -> IO.puts("uninstalled #{name}") end)
+      apply_to_daemon()
+    else
+      :error -> invalid_options("uninstall")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp upgrade(name, argv) do
+    with {:ok, json?} <- parse_json(argv),
+         {:ok, status} <- DistInstaller.run_install(name, dist_opts()) do
+      print(%{upgraded: name, status: status}, json?, fn _ ->
+        IO.puts(upgrade_message(name, status))
+      end)
+
+      maybe_apply_to_daemon(name)
+    else
+      :error -> invalid_options("upgrade")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp pin(spec, argv) do
+    with {:ok, json?} <- parse_json(argv),
+         {:ok, {name, version}} <- pin_spec(spec),
+         {:ok, _status} <- DistInstaller.run_install(name, dist_opts(version: version)) do
+      print(%{pinned: name, version: version}, json?, fn _ ->
+        IO.puts("pinned #{name} at #{version}")
+      end)
+
+      maybe_apply_to_daemon(name)
+    else
+      :error -> invalid_options("pin")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp gc(argv) do
+    with {:ok, json?} <- parse_json(argv),
+         :ok <- DistInstaller.run_gc(dist_opts()) do
+      print(%{gc: :ok}, json?, fn _ -> IO.puts("gc complete") end)
+    else
+      :error -> invalid_options("gc")
       {:error, reason} -> error(reason)
     end
   end
@@ -165,6 +260,156 @@ defmodule Fermix.CLI.PluginsCommand do
       :error -> invalid_options("auth status")
       {:error, reason} -> error(reason)
     end
+  end
+
+  # --- plugin config (M8.1 §4.4: manifest-declared, non-secret values) ---
+
+  defp config(["set", name, key, value | rest]), do: config_set(name, key, value, rest)
+  defp config(["set" | _rest]), do: usage()
+  defp config([name | rest]), do: config_show(name, rest)
+  defp config(_argv), do: usage()
+
+  defp config_set(name, key, value, argv) do
+    with {:ok, json?} <- parse_json(argv),
+         {:ok, _snapshot} <- Config.set_plugin_setting(name, key, value) do
+      print(%{plugin: name, key: key, value: value}, json?, fn _ ->
+        IO.puts("set #{name} #{key}")
+      end)
+
+      apply_to_daemon()
+    else
+      :error -> invalid_options("config set")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp config_show(name, argv) do
+    with {:ok, json?} <- parse_json(argv),
+         {:ok, [plugin]} <- selected_plugins(name) do
+      settings = Config.plugin_settings(name)
+      rows = Enum.map(plugin.config, &config_row(&1, settings))
+      print(%{plugin: name, config: rows}, json?, &print_config_rows/1)
+    else
+      :error -> invalid_options("config")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp config_row(entry, settings) do
+    %{
+      key: entry.key,
+      prompt: entry.prompt,
+      required: entry.required,
+      value: Map.get(settings, entry.key)
+    }
+  end
+
+  defp print_config_rows(%{config: []}), do: IO.puts("no config keys declared")
+
+  defp print_config_rows(%{config: rows}) do
+    Enum.each(rows, fn row ->
+      requirement = if row.required, do: "required", else: "optional"
+      IO.puts("#{row.key}\t#{row.value || "(unset)"}\t#{requirement}\t#{row.prompt}")
+    end)
+  end
+
+  # --- distribution helpers ---
+
+  # Test seam: `:plugins_dist_opts` injects fetcher/verifier/index/lock opts so
+  # CLI tests never touch the network or real cosign. Empty (the real
+  # pipeline) outside tests.
+  defp dist_opts(extra \\ []) do
+    :fermix_core
+    |> Application.get_env(:plugins_dist_opts, [])
+    |> Keyword.merge(extra)
+  end
+
+  defp dist_root do
+    Keyword.get(dist_opts(), :root) || ConfigStore.workspace_paths().plugins
+  end
+
+  defp parse_spec(spec) do
+    case String.split(spec, "@", parts: 2) do
+      [name] -> {name, :latest}
+      [name, version] -> {name, version}
+    end
+  end
+
+  defp version_opts(:latest), do: []
+  defp version_opts(version), do: [version: version]
+
+  defp pin_spec(spec) do
+    case parse_spec(spec) do
+      {_name, :latest} -> {:error, :pin_requires_version}
+      {name, version} -> {:ok, {name, version}}
+    end
+  end
+
+  defp install_message(name, :installed), do: "installed #{name}"
+  defp install_message(name, :already_installed), do: "#{name} already installed"
+
+  defp upgrade_message(name, :installed), do: "upgraded #{name}"
+  defp upgrade_message(name, :already_installed), do: "#{name} already up to date"
+
+  # `enable` on a not-yet-present name auto-installs it from the catalog index;
+  # bundled and already-installed names are found by the registry and skip this.
+  defp ensure_available(name) do
+    case Registry.find(name) do
+      {:ok, _plugin} -> :ok
+      :error -> install_missing(name)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp install_missing(name) do
+    IO.puts("#{name} is not installed — installing from the catalog")
+    with {:ok, _status} <- DistInstaller.run_install(name, dist_opts()), do: :ok
+  end
+
+  defp refuse_bundled_uninstall(name) do
+    with {:ok, names} <- Registry.bundled_names() do
+      if name in names, do: {:error, {:bundled_plugin, name}}, else: :ok
+    end
+  end
+
+  defp maybe_disable(name) do
+    if name in Config.enabled_plugins() do
+      with {:ok, _snapshot} <- Config.disable(name), do: :ok
+    else
+      :ok
+    end
+  end
+
+  defp maybe_apply_to_daemon(name) do
+    if name in Config.enabled_plugins(), do: apply_to_daemon(), else: 0
+  end
+
+  # Ask the running daemon to re-apply persisted config (§11: the CLI and the
+  # daemon are separate VMs). Loud when no daemon is up — the operator must
+  # know the change only lands on next start. Messages go to stderr so
+  # `--json` stdout stays parseable.
+  defp apply_to_daemon do
+    case DaemonClient.request("plugins_apply", []) do
+      {:ok, %{"status" => "ok"}} ->
+        IO.puts(:stderr, "daemon reloaded")
+        0
+
+      {:ok, %{"status" => "error", "reason" => reason}} ->
+        IO.puts(:stderr, "fermix plugins: daemon reload failed: #{reason}")
+        1
+
+      {:error, :not_running} ->
+        IO.puts(:stderr, "daemon not running — changes apply on next start")
+        0
+
+      {:error, reason} ->
+        IO.puts(:stderr, "fermix plugins: daemon reload failed: #{inspect(reason)}")
+        1
+    end
+  end
+
+  defp installed_row(entry) do
+    %{name: entry.name, version: entry.version, status: entry.status, reason: entry.reason}
   end
 
   defp plugin_row(plugin) do
@@ -278,6 +523,10 @@ defmodule Fermix.CLI.PluginsCommand do
     Enum.each(rows, &IO.puts("#{&1.name}\t#{&1.doctor}\t#{Map.get(&1, :error, "-")}"))
   end
 
+  defp print_installed_rows(%{installed: rows}) do
+    Enum.each(rows, &IO.puts("#{&1.name}\t#{&1.version || "-"}\t#{&1.status}"))
+  end
+
   defp print_auth_rows(%{plugins: rows}) do
     Enum.each(
       rows,
@@ -309,6 +558,30 @@ defmodule Fermix.CLI.PluginsCommand do
     2
   end
 
+  defp error({:bundled_plugin, name}) do
+    IO.puts(
+      :stderr,
+      "fermix plugins: #{name} is bundled with Fermix — use `fermix plugins disable #{name}` instead"
+    )
+
+    1
+  end
+
+  defp error(:pin_requires_version) do
+    IO.puts(:stderr, "fermix plugins: pin requires NAME@VERSION")
+    1
+  end
+
+  defp error({:unknown_config_key, key}) do
+    IO.puts(:stderr, "fermix plugins: the plugin does not declare a #{key} config key")
+    1
+  end
+
+  defp error({:blank_config_value, key}) do
+    IO.puts(:stderr, "fermix plugins: #{key} requires a non-empty value")
+    1
+  end
+
   defp error(reason) do
     IO.puts(:stderr, "fermix plugins: #{Redaction.format(reason)}")
     1
@@ -316,7 +589,10 @@ defmodule Fermix.CLI.PluginsCommand do
 
   defp usage do
     IO.puts(:stderr, """
-    usage: fermix plugins [list|catalog|enable NAME|disable NAME|doctor [NAME]|reload] [--json]
+    usage: fermix plugins [list|catalog|installed|enable NAME|disable NAME|doctor [NAME]|reload|gc] [--json]
+           fermix plugins [install NAME[@VERSION]|upgrade NAME|pin NAME@VERSION|uninstall NAME] [--json]
+           fermix plugins config NAME [--json]
+           fermix plugins config set NAME KEY VALUE [--json]
            fermix plugins auth [login|reauthorize|refresh|logout] NAME [--json]
            fermix plugins auth status [NAME] [--json]
     """)

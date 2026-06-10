@@ -72,6 +72,51 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  # Opik readiness is answered BY THE DAEMON over the control socket — the env
+  # var, loaded exporter, and attached reporter are the daemon's process state,
+  # not this CLI's. `:client` is injectable so each state is unit-testable.
+  @spec opik_readiness(keyword()) :: result()
+  def opik_readiness(opts \\ []) do
+    client = Keyword.get(opts, :client, &Client.request/1)
+
+    case client.("observability") do
+      {:ok, %{"status" => "ok", "observability" => obs}} ->
+        render_opik(obs)
+
+      {:error, :not_running} ->
+        warn("opik export", "daemon not running (start with `fermix start`)")
+
+      {:error, reason} ->
+        fail("opik export", inspect(reason))
+
+      {:ok, other} ->
+        warn("opik export", "unexpected reply: #{inspect(other)}")
+    end
+  end
+
+  defp render_opik(%{"status" => "disabled"}),
+    do: ok("opik export", "off — set FERMIX_OPIK_ENABLED in the daemon env to enable")
+
+  defp render_opik(%{"status" => "enabled_ready"} = obs),
+    do: ok("opik export", "on -> #{obs["base_url"]} (project #{obs["project"]})")
+
+  defp render_opik(%{"status" => "enabled_missing_app"}),
+    do:
+      fail(
+        "opik export",
+        "FERMIX_OPIK_ENABLED set but fermix_opik is not loaded — unexpected in a dev/prod build (it is bundled in-umbrella); likely a stripped or non-standard build"
+      )
+
+  defp render_opik(%{"status" => "enabled_not_attached"}),
+    do:
+      warn(
+        "opik export",
+        "FERMIX_OPIK_ENABLED set and app loaded, but the reporter is not attached — check daemon logs"
+      )
+
+  defp render_opik(other),
+    do: warn("opik export", "unexpected observability report: #{inspect(other)}")
+
   @spec service_unit() :: result()
   def service_unit do
     cond do

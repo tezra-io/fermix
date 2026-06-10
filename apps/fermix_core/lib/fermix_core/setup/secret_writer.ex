@@ -65,7 +65,7 @@ defmodule FermixCore.Setup.SecretWriter do
   end
 
   defp format_reason({:helper_failed, command, code, output}) do
-    "#{command} exited #{code}: #{output}"
+    "#{command} exited #{code}: #{String.trim_trailing(output)}"
   end
 
   defp format_reason(:unavailable), do: "no supported OS secret helper is available"

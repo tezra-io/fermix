@@ -4,7 +4,7 @@ defmodule FermixCore.Plugins.Auth do
   """
 
   alias FermixCore.Auth.OAuthFlow
-  alias FermixCore.Auth.OAuthProvider
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
@@ -20,7 +20,7 @@ defmodule FermixCore.Plugins.Auth do
     with {:ok, plugin} <- fetch_oauth_plugin(name),
          {:ok, provider} <- oauth_provider(plugin, opts),
          {:ok, tokens} <- OAuthFlow.start_loopback(provider, flow_opts(opts)),
-         entry <- entry_from_tokens(plugin, tokens),
+         entry <- entry_from_tokens(plugin, provider, tokens),
          :ok <- Store.write(Config.default_auth_profile(plugin), entry),
          {:ok, _snapshot} <- Config.enable(plugin.name) do
       reload_token_manager(plugin)
@@ -87,36 +87,21 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
-  defp oauth_provider(%Plugin{auth: %{provider: "google"}} = plugin, opts) do
-    config = Config.oauth_provider("google")
-    client_id = Keyword.get(config, :client_id)
-    client_secret = Keyword.get(config, :client_secret)
+  # Thin wrapper over the provider registry: the saved
+  # [fermix_core.oauth.<provider>] client config plus the plugin's manifest
+  # scopes and any caller port override.
+  defp oauth_provider(%Plugin{} = plugin, opts) do
+    provider = plugin.auth.provider
 
-    cond do
-      Keyword.get(config, :client_type, "desktop_public_pkce") != "desktop_public_pkce" ->
-        {:error, {:invalid_oauth_client_type, "google", Keyword.get(config, :client_type)}}
+    client_config =
+      provider
+      |> to_string()
+      |> Config.oauth_provider()
+      |> Keyword.put(:scopes, plugin.auth.scopes)
+      |> maybe_put(:redirect_port, Keyword.get(opts, :port))
 
-      present?(client_id) and present?(client_secret) ->
-        {:ok,
-         OAuthProvider.google(
-           client_id: client_id,
-           client_secret: client_secret,
-           redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
-           redirect_port: Keyword.get(opts, :port) || Keyword.get(config, :redirect_port, 1455),
-           scopes: plugin.auth.scopes
-         )}
-
-      true ->
-        {:error, :needs_client_config}
-    end
+    OAuthProviders.definition(provider, client_config)
   end
-
-  defp oauth_provider(%Plugin{} = plugin, _opts) do
-    {:error, {:unsupported_oauth_provider, plugin.auth.provider}}
-  end
-
-  defp present?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present?(_value), do: false
 
   defp flow_opts(opts) do
     []
@@ -141,18 +126,24 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
-  defp granted_scopes(%{scope: scope}, _requested) when is_binary(scope) and scope != "" do
-    String.split(scope, ~r/\s+/, trim: true)
+  defp granted_scopes(%{scope: scope}, provider, _requested)
+       when is_binary(scope) and scope != "" do
+    split_scopes(scope, provider.scope_delimiter)
   end
 
-  defp granted_scopes(_tokens, requested), do: requested
+  defp granted_scopes(_tokens, _provider, requested), do: requested
 
-  defp entry_from_tokens(plugin, tokens) do
+  defp split_scopes(scope, ","),
+    do: scope |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+
+  defp split_scopes(scope, " "), do: String.split(scope, ~r/\s+/, trim: true)
+
+  defp entry_from_tokens(plugin, provider, tokens) do
     %{
       auth_mode: "oauth2",
       provider: plugin.auth.provider,
       account: account_from_userinfo(Map.get(tokens, :userinfo)),
-      granted_scopes: granted_scopes(tokens, plugin.auth.scopes),
+      granted_scopes: granted_scopes(tokens, provider, plugin.auth.scopes),
       tokens: %{
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token

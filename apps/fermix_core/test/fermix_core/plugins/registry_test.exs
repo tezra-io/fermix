@@ -103,11 +103,153 @@ defmodule FermixCore.Plugins.RegistryTest do
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
   end
 
+  test "accepts oauth2 manifests with empty scopes (providers without a scope model)" do
+    tool = valid_tool("bad_plugin_read")
+
+    manifest =
+      valid_oauth_manifest("bad_plugin")
+      |> put_in(["auth", "scopes"], [])
+      |> Map.put("tools", [tool])
+
+    assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
+    assert plugin.auth.scopes == []
+  end
+
+  test "rejects tools requiring scopes on an empty-scope oauth2 plugin" do
+    tool = valid_tool("bad_plugin_read") |> Map.put("requires_scopes", ["repo"])
+
+    manifest =
+      valid_oauth_manifest("bad_plugin")
+      |> put_in(["auth", "scopes"], [])
+      |> Map.put("tools", [tool])
+
+    assert {:error, {:unknown_tool_scopes, "bad_plugin_read"}} =
+             Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
+  end
+
   test "rejects OAuth plugins without a health check" do
     manifest = valid_oauth_manifest("bad_plugin") |> Map.delete("health_check")
 
     assert {:error, {:missing_health_check, "bad_plugin"}} =
              Registry.decode_manifest(manifest, "/tmp/bad/plugin.json")
+  end
+
+  describe "schema_version 2 manifests" do
+    test "loads a v2 api_key plugin with an http-rail tool and the new fields" do
+      manifest =
+        v2_manifest("notion")
+        |> Map.merge(%{
+          "min_core_version" => "0.4.0",
+          "plugin_api" => 2,
+          "auth" => %{
+            "type" => "api_key",
+            "key_name" => "NOTION_TOKEN",
+            "header" => "Authorization: Bearer",
+            "prompt" => "Token"
+          },
+          "tools" => [http_tool("notion_search")]
+        })
+
+      assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+      assert plugin.schema_version == 2
+      assert plugin.min_core_version == "0.4.0"
+      assert plugin.plugin_api == 2
+      assert plugin.auth.type == :api_key
+      assert plugin.auth.key_name == "NOTION_TOKEN"
+    end
+
+    test "a declarative http tool with a request must declare parameters" do
+      no_params = Map.delete(http_tool("notion_search"), "parameters")
+      manifest = v2_manifest("notion") |> Map.put("tools", [no_params]) |> api_key_auth()
+
+      assert {:error, {:missing_tool_parameters, "notion_search"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "an http tool with no request is allowed (composite/hardcoded during migration)" do
+      hardcoded = http_tool("notion_search") |> Map.drop(["request", "parameters"])
+      manifest = v2_manifest("notion") |> Map.put("tools", [hardcoded]) |> api_key_auth()
+      assert {:ok, _plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "an http template with an undeclared placeholder is rejected at load" do
+      bad =
+        put_in(
+          http_tool("notion_search"),
+          ["request", "url"],
+          "https://api.notion.com/{undeclared}"
+        )
+
+      manifest = v2_manifest("notion") |> Map.put("tools", [bad]) |> api_key_auth()
+
+      assert {:error,
+              {:invalid_tool_template, "notion_search", {:undeclared_placeholder, "undeclared"}}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "an unknown rail is rejected" do
+      bad = Map.put(http_tool("notion_search"), "rail", "grpc")
+      manifest = v2_manifest("notion") |> Map.put("tools", [bad]) |> api_key_auth()
+
+      assert {:error, {:invalid_tool_rail, "notion_search", "grpc"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "an mcp-rail tool requires a runtime block" do
+      mcp_tool = %{
+        "name" => "obsidian_read",
+        "description" => "Read a note.",
+        "read_only" => true,
+        "rail" => "mcp"
+      }
+
+      manifest =
+        v2_manifest("obsidian")
+        |> Map.put("tools", [mcp_tool])
+        |> Map.put("auth", %{"type" => "none"})
+
+      assert {:error, {:invalid_runtime, nil}} =
+               Registry.decode_manifest(manifest, "/tmp/obsidian/plugin.json")
+
+      with_runtime = Map.put(manifest, "runtime", %{"kind" => "node", "command" => "server.mjs"})
+      assert {:ok, plugin} = Registry.decode_manifest(with_runtime, "/tmp/obsidian/plugin.json")
+      assert plugin.runtime["kind"] == "node"
+    end
+
+    test "api_key tools do not require requires_scopes" do
+      tool = http_tool("notion_search") |> Map.delete("requires_scopes")
+      manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
+      assert {:ok, _plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+  end
+
+  defp v2_manifest(name) do
+    valid_manifest(name)
+    |> Map.merge(%{"schema_version" => 2, "plugin_api" => 2, "min_core_version" => "0.1.0"})
+  end
+
+  defp api_key_auth(manifest) do
+    Map.put(manifest, "auth", %{
+      "type" => "api_key",
+      "key_name" => "TOKEN",
+      "header" => "Authorization: Bearer",
+      "prompt" => "Token"
+    })
+  end
+
+  defp http_tool(name) do
+    %{
+      "name" => name,
+      "description" => "An http tool.",
+      "read_only" => true,
+      "rail" => "http",
+      "parameters" => %{"type" => "object", "properties" => %{"query" => %{"type" => "string"}}},
+      "request" => %{
+        "method" => "GET",
+        "url" => "https://api.notion.com/v1/search",
+        "query" => %{"q" => "{query}"}
+      }
+    }
   end
 
   defp valid_manifest(name) do

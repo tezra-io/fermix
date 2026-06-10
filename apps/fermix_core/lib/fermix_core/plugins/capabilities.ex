@@ -11,14 +11,17 @@ defmodule FermixCore.Plugins.Capabilities do
   alias FermixCore.Plugins.Status
   alias FermixCore.Plugins.ToolExecutor
 
-  @spec reload(GenServer.server()) :: {:ok, %{registered: [String.t()]}} | {:error, term()}
-  def reload(server \\ CapabilityRegistry) do
+  @spec reload(GenServer.server(), keyword()) ::
+          {:ok, %{registered: [String.t()]}} | {:error, term()}
+  def reload(server \\ CapabilityRegistry, opts \\ []) when is_list(opts) do
+    status_opts = Keyword.get(opts, :status, [])
+
     with :ok <-
            CapabilityRegistry.unregister_kind(server, :builtin, metadata: %{plugin_owned?: true}),
          {:ok, plugins} <- Registry.list() do
       registered =
         plugins
-        |> Enum.filter(&Status.ready?/1)
+        |> Enum.filter(&(Status.status(&1, status_opts) == :ready))
         |> Enum.flat_map(&register_plugin(server, &1))
 
       {:ok, %{registered: registered}}
@@ -29,8 +32,13 @@ defmodule FermixCore.Plugins.Capabilities do
   # scope is enforced at call time (FermixCore.Plugins.ToolExecutor), so a tool
   # whose write scope wasn't granted surfaces a graceful "reauthorize" error
   # instead of silently vanishing from the agent's toolset.
+  #
+  # `mcp`-rail entries are previews — the authoritative tool set comes from
+  # MCP discovery at child spawn (M8 §8.2), so they never register here.
   defp register_plugin(server, %Plugin{} = plugin) do
-    Enum.flat_map(plugin.tools, fn tool ->
+    plugin.tools
+    |> Enum.reject(&(Map.get(&1, "rail") == "mcp"))
+    |> Enum.flat_map(fn tool ->
       capability = capability(plugin, tool)
 
       case CapabilityRegistry.register(server, capability) do
@@ -47,7 +55,7 @@ defmodule FermixCore.Plugins.Capabilities do
     Capability.new(%{
       name: name,
       description: tool_description(plugin, tool),
-      parameters: ToolExecutor.parameters(name),
+      parameters: tool_parameters(name, tool),
       kind: :builtin,
       executor: {ToolExecutor, :execute, [plugin.name, tool]},
       policy_class: :external_api,
@@ -63,6 +71,15 @@ defmodule FermixCore.Plugins.Capabilities do
         failure_modes: []
       }
     })
+  end
+
+  # A v2 declarative tool carries its JSON-Schema `parameters` in the manifest;
+  # a v1/hardcoded tool sources them from `ToolExecutor.parameters/1`.
+  defp tool_parameters(name, tool) do
+    case Map.get(tool, "parameters") do
+      schema when is_map(schema) -> schema
+      _ -> ToolExecutor.parameters(name)
+    end
   end
 
   defp tool_description(%Plugin{} = plugin, tool) do

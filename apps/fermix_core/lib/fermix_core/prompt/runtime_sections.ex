@@ -169,6 +169,13 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp format_plugin(entry) do
+    case Map.get(entry, :status, :ready) do
+      :ready -> format_ready_plugin(entry)
+      status -> format_status_plugin(entry, status)
+    end
+  end
+
+  defp format_ready_plugin(entry) do
     name = xml_escape(entry.name)
     tools = entry.tools |> Enum.join(", ") |> xml_escape()
 
@@ -180,6 +187,18 @@ defmodule FermixCore.Prompt.RuntimeSections do
         "  <plugin name=\"#{name}\" skill=\"#{skills |> Enum.join(", ") |> xml_escape()}\">#{tools}</plugin>"
     end
   end
+
+  # An enabled plugin that is not ready: no tools, one status line saying
+  # why and what fixes it — so the model can explain the absence.
+  defp format_status_plugin(entry, status) do
+    name = xml_escape(entry.name)
+    note = entry |> Map.get(:remediation) |> remediation_note()
+
+    "  <plugin name=\"#{name}\" status=\"#{status}\">#{note}</plugin>"
+  end
+
+  defp remediation_note(nil), do: ""
+  defp remediation_note(text) when is_binary(text), do: xml_escape(text)
 
   defp skill_catalog(_skills, :guest), do: "## Skill Catalog\n- none loaded"
   defp skill_catalog([], _trust), do: "## Skill Catalog\n- none loaded"

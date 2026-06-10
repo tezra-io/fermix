@@ -76,13 +76,29 @@ A subagent or scheduled job is a *run*. New run kinds (anything that calls
 3. route those events into the JSONL trace stream via
    `FermixCore.Trace.TelemetryHandler` (`event_definitions/0`).
 
+## Plugin distribution ops
+
+Plugin `install`/`uninstall`/`gc` emit `[:fermix, :plugin, :dist]`
+through `FermixCore.Plugins.Dist.Telemetry.emit/5` (op, plugin, version,
+result/reason + `duration_ms`) — never hand-roll the event. These ops run in
+the installer or a CLI VM with no agent session, so they carry no `session_id`:
+`Trace.TelemetryHandler` maps each to a `plugin_dist` row in `agent_event`,
+and the Opik exporter renders each op as its own self-closing `dist:<op>`
+trace.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and
-bound them with `FermixCore.Telemetry.preview/1`. Enabling the Opik exporter
-(`FERMIX_OPIK_ENABLED=1`) defaults content capture **on** (resolved in
-`config/runtime.exs`); `FERMIX_TRACE_CONTENT` is the explicit override. Off
-otherwise — bloat + privacy; bodies are only needed for eval/observing.
+shape them with `FermixCore.Telemetry.preview/1`. With capture **off** (the
+default), `preview/1` bounds everything (2k chars, default inspect limits);
+with capture **on** it passes content through whole — the operator opted into
+full-fidelity traces for debugging, and clipping would defeat the point.
+Capture-on also enriches some emitters: a failed browser action attaches the
+profile's recent console/JS-exception buffer to its error details. Enabling
+the Opik exporter (`FERMIX_OPIK_ENABLED=1`) defaults content capture **on**
+(resolved in `config/runtime.exs`); `FERMIX_TRACE_CONTENT` is the explicit
+override. Off otherwise — bloat + privacy; bodies are only needed for
+eval/observing.
 
 ---
 

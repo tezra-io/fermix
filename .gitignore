@@ -73,4 +73,8 @@ docs/design/
 #.agents
 .agents/skills/.venv/
 .agents/skills/bin/
-.agents/skills/reports/
+.agents/skills/reports/__pycache__/
+
+# Python bytecode (release scripts)
+__pycache__/
+*.pyc

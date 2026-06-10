@@ -180,7 +180,7 @@ defmodule FermixCore.Setup.SecretStore do
   defp resolve_secret_value(snapshot, secret, value, warn_plaintext?) do
     cond do
       value == SecretWriter.sentinel() ->
-        put_snapshot_value(snapshot, secret.path, SecretWriter.get!(secret.key))
+        resolve_keyring_secret(snapshot, secret, warn_plaintext?)
 
       plaintext_secret?(value) ->
         if warn_plaintext?, do: warn_plaintext_secret(secret)
@@ -191,9 +191,33 @@ defmodule FermixCore.Setup.SecretStore do
     end
   end
 
+  defp resolve_keyring_secret(snapshot, secret, warn?) do
+    case SecretWriter.get(secret.key) do
+      {:ok, value} -> put_snapshot_value(snapshot, secret.path, value)
+      {:error, reason} -> handle_keyring_resolution_error(snapshot, secret, reason, warn?)
+    end
+  end
+
+  defp handle_keyring_resolution_error(snapshot, %{optional?: true} = secret, reason, warn?) do
+    if warn?, do: warn_optional_secret(secret, reason)
+    snapshot
+  end
+
+  defp handle_keyring_resolution_error(_snapshot, secret, reason, _warn?) do
+    raise ArgumentError, SecretWriter.format_error(secret.key, reason)
+  end
+
   defp warn_plaintext_secret(secret) do
     Logger.warning(
       "#{ConfigStore.path()} contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
+    )
+  end
+
+  defp warn_optional_secret(secret, reason) do
+    Logger.warning(
+      "#{SecretWriter.format_error(secret.key, reason)} #{secret.functionality} will fail until " <>
+        "the secret is available. Run `fermix setup` to re-save it, or remove the stale " <>
+        "@keyring value from #{ConfigStore.path()} if you do not use that functionality."
     )
   end
 

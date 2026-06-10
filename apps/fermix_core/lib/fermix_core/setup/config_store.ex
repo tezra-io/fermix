@@ -877,15 +877,26 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_plugins(config) when is_map(config) or is_list(config) do
     enabled = normalize_string_list(lookup(config, "enabled", :enabled))
+    dev_local = normalize_string(lookup(config, "dev_local", :dev_local))
 
     entries =
       config
       |> lookup("entries", :entries)
       |> normalize_named_sections([])
-      |> Map.merge(normalize_named_sections(config, ["enabled", :enabled, "entries", :entries]))
+      |> Map.merge(
+        normalize_named_sections(config, [
+          "enabled",
+          :enabled,
+          "entries",
+          :entries,
+          "dev_local",
+          :dev_local
+        ])
+      )
 
     []
     |> put_if_present(:enabled, enabled)
+    |> put_if_present(:dev_local, dev_local)
     |> put_if_present(:entries, entries)
   end
 

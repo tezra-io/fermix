@@ -18,7 +18,7 @@ defmodule Fermix.CLI.Service.Templates do
   def render_darwin_plist(%{
         label: label,
         fermix_path: fermix_path,
-        fermix_home: fermix_home,
+        service_env: service_env,
         log_path: log_path
       }) do
     """
@@ -32,7 +32,7 @@ defmodule Fermix.CLI.Service.Templates do
       <key>ProcessType</key><string>Background</string>
       <key>EnvironmentVariables</key>
       <dict>
-        <key>FERMIX_HOME</key><string>#{fermix_home}</string>
+    #{render_plist_env(service_env)}
       </dict>
       <key>SoftResourceLimits</key>
       <dict>
@@ -58,7 +58,7 @@ defmodule Fermix.CLI.Service.Templates do
   def render_linux_unit(%{
         scope: scope,
         fermix_path: fermix_path,
-        fermix_home: fermix_home,
+        service_env: service_env,
         log_path: log_path
       }) do
     description = "Fermix multi-agent platform daemon (#{scope}-scope)"
@@ -71,7 +71,7 @@ defmodule Fermix.CLI.Service.Templates do
 
     [Service]
     Type=simple
-    Environment=FERMIX_HOME=#{fermix_home}
+    #{render_unit_env(service_env)}
     ExecStart=#{fermix_path} run
     Restart=on-failure
     RestartSec=5
@@ -82,6 +82,30 @@ defmodule Fermix.CLI.Service.Templates do
     [Install]
     WantedBy=#{install_target(scope)}
     """
+  end
+
+  # Sorted so generated files are stable across installs. Values are XML-escaped:
+  # an unescaped `&` (e.g. in an Opik base URL query) produces an invalid plist
+  # that launchd silently refuses to load.
+  defp render_plist_env(service_env) do
+    service_env
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_join("\n", fn {key, value} ->
+      "    <key>#{key}</key><string>#{xml_escape(value)}</string>"
+    end)
+  end
+
+  defp render_unit_env(service_env) do
+    service_env
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_join("\n", fn {key, value} -> "Environment=#{key}=#{value}" end)
+  end
+
+  defp xml_escape(value) do
+    value
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
   end
 
   defp install_target(:user), do: "default.target"

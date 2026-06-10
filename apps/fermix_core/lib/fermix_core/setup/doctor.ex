@@ -280,7 +280,7 @@ defmodule FermixCore.Setup.Doctor do
       when is_atom(adapter) and is_atom(key) and is_binary(name) and is_list(opts) do
     base = %{channel: key, name: name}
 
-    if function_exported?(adapter, :health_check, 1) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :health_check, 1) do
       adapter
       |> apply(:health_check, [opts])
       |> normalize_channel_probe(base)

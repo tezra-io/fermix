@@ -111,6 +111,71 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "opik_readiness/1" do
+    test "ok and off when the daemon reports disabled" do
+      client = fn "observability" ->
+        {:ok, %{"status" => "ok", "observability" => %{"status" => "disabled"}}}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.name == "opik export"
+      assert result.status == :ok
+      assert result.detail =~ "off"
+    end
+
+    test "ok with endpoint and project when enabled and ready" do
+      client = fn "observability" ->
+        {:ok,
+         %{
+           "status" => "ok",
+           "observability" => %{
+             "status" => "enabled_ready",
+             "base_url" => "http://localhost:5173/api",
+             "project" => "fermix"
+           }
+         }}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :ok
+      assert result.detail =~ "http://localhost:5173/api"
+      assert result.detail =~ "fermix"
+    end
+
+    test "fails when enabled but the exporter is missing from the build" do
+      client = fn "observability" ->
+        {:ok, %{"status" => "ok", "observability" => %{"status" => "enabled_missing_app"}}}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :fail
+      assert result.detail =~ "not loaded"
+    end
+
+    test "warns when enabled and loaded but the reporter is not attached" do
+      client = fn "observability" ->
+        {:ok, %{"status" => "ok", "observability" => %{"status" => "enabled_not_attached"}}}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "not attached"
+    end
+
+    test "warns when the daemon is not running" do
+      client = fn "observability" -> {:error, :not_running} end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "not running"
+    end
+  end
+
   describe "recent_log_activity/0" do
     test "returns a result map regardless of log presence" do
       result = Checks.recent_log_activity()

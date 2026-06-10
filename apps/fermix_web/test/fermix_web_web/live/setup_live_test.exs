@@ -5,9 +5,13 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Config, as: PluginConfig
+  alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
+  alias FermixTestSupport.DistFetcherStub
+  alias FermixTestSupport.DistFixtures
+  alias FermixTestSupport.DistVerifierStub
 
   # Hermetic Anthropic backend stub — writes the auth store (tmp FERMIX_HOME) but
   # never touches the real keychain / ~/.claude. Injected via :anthropic_login_impl.
@@ -43,6 +47,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     tools = Application.get_env(:fermix_core, :tools, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
+    plugins_dist_opts = Application.get_env(:fermix_core, :plugins_dist_opts)
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
     plugin_auth_url_timeout_ms = Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms)
@@ -64,6 +69,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :tools, [])
     Application.put_env(:fermix_core, :plugins, [])
+    Application.put_env(:fermix_core, :plugins_dist_opts, [])
     Application.put_env(:fermix_core, :oauth, %{})
     Application.delete_env(:fermix_web, :plugin_auth_runner)
     Application.delete_env(:fermix_web, :plugin_auth_url_timeout_ms)
@@ -79,6 +85,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_core, :secret_writer, secret_writer)
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :plugins, plugins)
+      restore_env(:fermix_core, :plugins_dist_opts, plugins_dist_opts)
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
       restore_env(:fermix_web, :plugin_auth_url_timeout_ms, plugin_auth_url_timeout_ms)
@@ -191,7 +198,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "data:image/"
       refute html =~ "Weather"
       assert html =~ "OAuth desktop client"
-      assert html =~ "coming later"
+      # The static catalog line replaced the old staleness line + refresh button.
+      assert html =~ "Plugin catalog ships with Fermix"
+      refute html =~ ~s(phx-click="catalog_refresh")
+      refute html =~ "coming later"
       refute html =~ "data-plugin-auth-trigger"
       refute html =~ "Installed skills"
     end
@@ -213,7 +223,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
         |> render_click()
 
-      assert html =~ "Save a Google OAuth desktop client first"
+      assert html =~ "Save a Google OAuth client first"
       refute_receive {:unexpected_plugin_auth, _name}, 50
       plugins = Application.get_env(:fermix_core, :plugins, [])
       refute "google_calendar" in Keyword.get(plugins, :enabled, [])
@@ -226,8 +236,8 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       html =
         view
-        |> form("form[phx-submit=\"save_google_oauth\"]",
-          google_oauth_form: %{client_id: "123.apps.googleusercontent.com", redirect_port: "1455"}
+        |> form("#oauth-client-form-google",
+          oauth_client_form: %{client_id: "123.apps.googleusercontent.com", redirect_port: "1455"}
         )
         |> render_submit()
 
@@ -256,8 +266,8 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       html =
         view
-        |> form("form[phx-submit=\"save_google_oauth\"]",
-          google_oauth_form: %{
+        |> form("#oauth-client-form-google",
+          oauth_client_form: %{
             client_id: "123.apps.googleusercontent.com",
             client_secret: "desktop-secret",
             redirect_port: "1455"
@@ -321,8 +331,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
 
       view
-      |> form("form[phx-submit=\"save_google_oauth\"]",
-        google_oauth_form: %{
+      |> form("#oauth-client-form-google",
+        oauth_client_form: %{
           client_id: "123.apps.googleusercontent.com",
           client_secret: "desktop-secret",
           redirect_port: "1455"
@@ -354,8 +364,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
 
       view
-      |> form("form[phx-submit=\"save_google_oauth\"]",
-        google_oauth_form: %{
+      |> form("#oauth-client-form-google",
+        oauth_client_form: %{
           client_id: "123.apps.googleusercontent.com",
           client_secret: "desktop-secret",
           redirect_port: "1455"
@@ -1261,15 +1271,15 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> element(~s|button[phx-click="plugin_enable"][phx-value-name="google_calendar"]|)
         |> render_click()
 
-      assert error_html =~ "Save a Google OAuth desktop client first"
+      assert error_html =~ "Save a Google OAuth client first"
       assert error_html =~ ~s(role="alert")
       assert error_html =~ "bg-error"
       assert error_html =~ "hero-x-circle"
 
       ok_html =
         view
-        |> form("form[phx-submit=\"save_google_oauth\"]",
-          google_oauth_form: %{
+        |> form("#oauth-client-form-google",
+          oauth_client_form: %{
             client_id: "123.apps.googleusercontent.com",
             client_secret: "desktop-secret",
             redirect_port: "1455"
@@ -1283,6 +1293,398 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert ok_html =~ "hero-check-circle"
       refute ok_html =~ "Changes need a restart to take effect"
     end
+  end
+
+  describe "plugin catalog" do
+    setup %{tmp_home: tmp_home} do
+      DistFetcherStub.init()
+      DistVerifierStub.init()
+
+      on_exit(fn ->
+        DistFetcherStub.cleanup()
+        DistVerifierStub.cleanup()
+      end)
+
+      %{fixtures: Path.join(tmp_home, "fixtures")}
+    end
+
+    test "renders available catalog plugins with branding and the static catalog line", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        fixtures
+        |> wire_catalog_plugin("hackerdemo", "1.0.0")
+        |> Map.merge(%{
+          "description" => "Demo news reader from the catalog",
+          "logo" => %{"mime" => "image/png", "data_base64" => Base.encode64("png-bytes")}
+        })
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-catalog-name="hackerdemo")
+      assert html =~ "Available"
+      assert html =~ "Demo news reader from the catalog"
+      assert html =~ "data:image/png;base64,#{Base.encode64("png-bytes")}"
+
+      assert html =~
+               "Plugin catalog ships with Fermix — new plugins arrive with `fermix upgrade`."
+
+      refute html =~ ~s(phx-click="catalog_refresh")
+      refute html =~ "coming later"
+    end
+
+    test "an empty catalog explains plugins arrive with Fermix releases", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      seed_catalog(tmp_home, [])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ "No catalog plugins published yet — new plugins arrive with Fermix releases."
+    end
+
+    test "enable on a catalog plugin installs from the index then enables", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry = wire_catalog_plugin(fixtures, "hackerdemo", "1.0.0")
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      html =
+        view
+        |> element(~s|button[phx-click="plugin_enable"][phx-value-name="hackerdemo"]|)
+        |> render_click()
+
+      assert html =~ "Installing hackerdemo"
+
+      html = render_until(view, "Plugin enabled.")
+      assert html =~ ~s(data-plugin-name="hackerdemo")
+      refute html =~ ~s(data-catalog-name="hackerdemo")
+
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      assert "hackerdemo" in Keyword.get(plugins, :enabled, [])
+    end
+
+    test "a download failure surfaces per-stage prose", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry = wire_catalog_plugin(fixtures, "hackerdemo", "1.0.0")
+      url = "https://example.com/hackerdemo-1.0.0.tar.gz"
+      DistFetcherStub.set(url, {:error, {:download_failed, :nxdomain, url}})
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="hackerdemo"]|)
+      |> render_click()
+
+      html = render_until(view, "download failed (network)")
+      assert html =~ "hackerdemo install failed"
+    end
+
+    test "a checksum mismatch refuses the install and never enables", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        wire_catalog_plugin(fixtures, "hackerdemo", "1.0.0", index_sha: String.duplicate("f", 64))
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="hackerdemo"]|)
+      |> render_click()
+
+      html = render_until(view, "checksum mismatch")
+      assert html =~ "refusing"
+      # Still a catalog card, never an installed one; nothing enabled.
+      assert html =~ ~s(data-catalog-name="hackerdemo")
+      refute html =~ ~s(data-plugin-name="hackerdemo")
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      refute "hackerdemo" in Keyword.get(plugins, :enabled, [])
+    end
+
+    test "an incompatible catalog plugin renders greyed without an enable action", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        fixtures
+        |> wire_catalog_plugin("needs_core", "1.0.0")
+        |> put_in(["versions", Access.at(0), "min_core_version"], "9.9.9")
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-catalog-name="needs_core")
+      assert html =~ "Incompatible"
+      assert html =~ "needs Fermix"
+      assert html =~ "9.9.9"
+
+      refute has_element?(
+               view,
+               ~s|button[phx-click="plugin_enable"][phx-value-name="needs_core"]|
+             )
+    end
+
+    test "installing a name missing from the catalog points at fermix upgrade", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      seed_catalog(tmp_home, [])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      render_click(view, "plugin_enable", %{"name" => "ghost"})
+
+      html = render_until(view, "ghost install failed")
+      assert html =~ "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
+    end
+
+    test "an installed github-provider plugin renders a GitHub client form that persists", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      install_github_plugin(tmp_home, fixtures)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-plugin-group="github")
+      assert html =~ ~s(id="oauth-client-form-github")
+      # github default redirect port pre-fills the form.
+      assert html =~ ~s(value="1457")
+
+      html =
+        view
+        |> form("#oauth-client-form-github",
+          oauth_client_form: %{client_id: "Iv1.github-client", client_secret: "gh-secret"}
+        )
+        |> render_submit()
+
+      assert html =~ "GitHub OAuth client saved."
+      github = PluginConfig.oauth_provider("github")
+      assert Keyword.get(github, :client_id) == "Iv1.github-client"
+      assert Keyword.get(github, :client_secret) == "gh-secret"
+    end
+
+    test "connect on a github plugin without a client names GitHub in the pre-flight", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      parent = self()
+
+      Application.put_env(:fermix_web, :plugin_auth_runner, fn name, _opts ->
+        send(parent, {:unexpected_plugin_auth, name})
+        {:error, :unexpected_auth_start}
+      end)
+
+      install_github_plugin(tmp_home, fixtures)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      html =
+        view
+        |> element(~s|button[phx-click="plugin_enable"][phx-value-name="github"]|)
+        |> render_click()
+
+      assert html =~ "Save a GitHub OAuth client first, then connect GitHub."
+      refute_receive {:unexpected_plugin_auth, _name}, 50
+    end
+
+    test "an installed version marked yanked warns loud on the card", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry = wire_catalog_plugin(fixtures, "demo", "1.0.0")
+      opts = seed_catalog(tmp_home, [entry])
+      assert {:ok, :installed} = DistInstaller.run_install("demo", opts)
+
+      seed_catalog(tmp_home, [Map.put(entry, "yanked", ["1.0.0"])])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-plugin-name="demo")
+      assert html =~ "was yanked"
+    end
+
+    test "an mcp catalog plugin renders enabled actions and the local-process line", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        fixtures
+        |> wire_catalog_plugin("obsidian", "1.0.0")
+        |> Map.put("rails", ["mcp"])
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      assert html =~ ~s(data-catalog-name="obsidian")
+      refute html =~ "MCP plugin support lands in a later Fermix"
+      assert html =~ "Runs a local process with direct access to the folders you configure."
+
+      assert has_element?(
+               view,
+               ~s|button[phx-click="plugin_enable"][phx-value-name="obsidian"]|
+             )
+    end
+
+    test "a plugin needing config renders the config form and saving clears it", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        wire_catalog_plugin(fixtures, "vaultdemo", "1.0.0",
+          manifest_extra: %{
+            "config" => [
+              %{"key" => "DEMO_VAULT_PATH", "prompt" => "Path to your vault", "required" => true}
+            ]
+          }
+        )
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="vaultdemo"]|)
+      |> render_click()
+
+      html = render_until(view, "Plugin enabled.")
+      assert html =~ ~s(data-plugin-name="vaultdemo")
+      assert html =~ "Needs config"
+      assert html =~ "Path to your vault"
+      assert html =~ ~s(id="plugin-config-form-vaultdemo")
+
+      html =
+        view
+        |> form("#plugin-config-form-vaultdemo",
+          plugin_config_form: %{"DEMO_VAULT_PATH" => "/tmp/demo-vault"}
+        )
+        |> render_submit()
+
+      assert html =~ "Plugin configuration saved."
+      refute html =~ ~s(id="plugin-config-form-vaultdemo")
+      refute html =~ "Needs config"
+
+      assert PluginConfig.plugin_settings("vaultdemo") == %{
+               "DEMO_VAULT_PATH" => "/tmp/demo-vault"
+             }
+    end
+
+    test "a blank config value fails loud and keeps the form", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry =
+        wire_catalog_plugin(fixtures, "vaultdemo", "1.0.0",
+          manifest_extra: %{
+            "config" => [
+              %{"key" => "DEMO_VAULT_PATH", "prompt" => "Path to your vault", "required" => true}
+            ]
+          }
+        )
+
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="vaultdemo"]|)
+      |> render_click()
+
+      render_until(view, "Plugin enabled.")
+
+      html =
+        view
+        |> form("#plugin-config-form-vaultdemo", plugin_config_form: %{"DEMO_VAULT_PATH" => " "})
+        |> render_submit()
+
+      assert html =~ "DEMO_VAULT_PATH requires a value."
+      assert html =~ ~s(id="plugin-config-form-vaultdemo")
+      assert PluginConfig.plugin_settings("vaultdemo") == %{}
+    end
+  end
+
+  # Build + wire a catalog plugin artifact behind the dist stubs; returns the
+  # index entry map. Verification is allowed by default (the stub default-denies).
+  defp wire_catalog_plugin(fixtures, name, version, opts \\ []) do
+    File.mkdir_p!(fixtures)
+    {build_opts, wire_opts} = Keyword.split(opts, [:manifest_extra])
+    {tgz, sha} = DistFixtures.build_tarball(fixtures, name, version, build_opts)
+    DistVerifierStub.allow(name, version)
+    DistFixtures.wire(fixtures, name, version, tgz, sha, wire_opts)
+  end
+
+  # Install an oauth2/github-provider plugin through the dist seam so the
+  # plugins pane renders it as an installed card in the GitHub group.
+  defp install_github_plugin(tmp_home, fixtures) do
+    entry =
+      wire_catalog_plugin(fixtures, "github", "1.0.0",
+        manifest_extra: %{
+          "display_name" => "GitHub",
+          "auth" => %{"type" => "oauth2", "provider" => "github", "scopes" => ["repo"]},
+          "health_check" => %{"kind" => "local_readiness", "requires_auth" => true}
+        }
+      )
+
+    opts = seed_catalog(tmp_home, [entry])
+    assert {:ok, :installed} = DistInstaller.run_install("github", opts)
+  end
+
+  # Write the seed index and point the :plugins_dist_opts seam at it. The seam
+  # root tmp_home/plugins equals ConfigStore.workspace_paths().plugins (FERMIX_HOME
+  # is tmp_home), so default-rooted paths inside the LiveView stay aligned.
+  defp seed_catalog(tmp_home, entries) do
+    seed = DistFixtures.write_index(Path.join(tmp_home, "fixtures/seed-index.json"), entries)
+    root = Path.join(tmp_home, "plugins")
+
+    dist_opts = [
+      root: root,
+      fetcher: DistFetcherStub,
+      verifier: DistVerifierStub,
+      index_opts: [seed_path: seed],
+      lock_opts: [attempts: 3, delay_ms: 10]
+    ]
+
+    Application.put_env(:fermix_core, :plugins_dist_opts, dist_opts)
+    dist_opts
   end
 
   defp write_ready_plugin_auth(name) do

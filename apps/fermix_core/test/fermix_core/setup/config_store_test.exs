@@ -1,6 +1,8 @@
 defmodule FermixCore.Setup.ConfigStoreTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.MCP.Inbound.Config, as: InboundConfig
   alias FermixCore.Setup.ConfigStore
 
@@ -325,6 +327,60 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(resolved_google, :client_secret) == "desktop-secret"
   end
 
+  test "load/save round-trips plugins dev_local as a top-level scalar" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["google_calendar"]
+    dev_local = "/tmp/x"
+
+    [fermix_core.plugins.google_calendar]
+    auth_profile = "google_calendar:primary"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    assert Keyword.get(plugins, :dev_local) == "/tmp/x"
+    assert Keyword.get(plugins, :enabled) == ["google_calendar"]
+
+    entries = Keyword.get(plugins, :entries, %{})
+    assert Map.keys(entries) == ["google_calendar"]
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(dev_local = "/tmp/x")
+    refute contents =~ "[fermix_core.plugins.dev_local]"
+  end
+
+  test "a non-string plugins dev_local is dropped like other bad config values" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["google_calendar"]
+    dev_local = 42
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    refute Keyword.has_key?(plugins, :dev_local)
+    assert Keyword.get(plugins, :entries, %{}) == %{}
+  end
+
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -343,6 +399,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     openai = loaded.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
     assert Keyword.get(openai, :api_key) == "sk-from-keyring"
+  end
+
+  test "load_runtime_config warns for missing optional web search keyring secrets" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.tools.web_search]
+    backend = "tavily"
+    tavily_api_key = "@keyring"
+    """)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, loaded} = ConfigStore.load_runtime_config()
+
+        web_search =
+          loaded.fermix_core
+          |> Keyword.get(:tools, [])
+          |> Keyword.get(:web_search, [])
+
+        assert Keyword.get(web_search, :backend) == :tavily
+        assert Keyword.get(web_search, :tavily_api_key) == "@keyring"
+      end)
+
+    assert log =~ "TAVILY_API_KEY"
+    assert log =~ "Tavily web_search backend"
+    assert log =~ "will fail"
+    assert log =~ "fermix setup"
   end
 
   test "save_snapshot preserves @keyring sentinels on disk" do

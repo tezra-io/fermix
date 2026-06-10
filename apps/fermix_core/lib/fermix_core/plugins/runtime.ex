@@ -5,16 +5,31 @@ defmodule FermixCore.Plugins.Runtime do
 
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Plugins.Capabilities
   alias FermixCore.Realtime.SessionSupervisor
+  alias FermixCore.Setup.ConfigStore
 
   @type reload_summary :: %{
           capabilities: map() | :skipped,
+          mcp: map() | :skipped,
           skills: map() | :handled_by_main_agent | :skipped,
           main_agent: map() | :skipped,
           realtime: map() | :skipped
         }
+
+  @doc """
+  Re-read persisted config (`config.toml`) into app env, then `reload/0`.
+
+  The daemon's `plugins_apply` entry point (§11 two-VM reality): a sibling CLI
+  VM mutates the persisted config/plugin store on disk, then asks the running
+  daemon to re-apply it from disk.
+  """
+  @spec apply_persisted() :: {:ok, reload_summary()} | {:error, term()}
+  def apply_persisted do
+    with :ok <- ConfigStore.bootstrap_runtime_config(), do: reload()
+  end
 
   @spec reload(keyword()) :: {:ok, reload_summary()} | {:error, term()}
   def reload(opts \\ []) when is_list(opts) do
@@ -22,14 +37,18 @@ defmodule FermixCore.Plugins.Runtime do
     skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
     main_agent = Keyword.get(opts, :main_agent, MainAgent)
     realtime_supervisor = Keyword.get(opts, :realtime_supervisor, SessionSupervisor)
+    mcp_supervisor = Keyword.get(opts, :mcp_supervisor, McpSupervisor)
 
     with {:ok, capabilities} <- reload_capabilities(capability_registry),
+         {:ok, mcp} <- reload_mcp(mcp_supervisor),
+         :ok <- invalidate_runtime_context(main_agent),
          {:ok, main_agent_summary} <- reload_main_agent(main_agent),
          {:ok, skills} <- reload_skills(skill_registry, main_agent_summary),
          {:ok, realtime} <- reload_realtime(realtime_supervisor) do
       {:ok,
        %{
          capabilities: capabilities,
+         mcp: mcp,
          skills: skills,
          main_agent: main_agent_summary,
          realtime: realtime
@@ -39,6 +58,25 @@ defmodule FermixCore.Plugins.Runtime do
 
   defp reload_capabilities(server) do
     if alive?(server), do: Capabilities.reload(server), else: {:ok, :skipped}
+  end
+
+  # Diff the running MCP children against the enabled set: enabling an mcp
+  # plugin starts its child, disabling stops it (M8.1 §4.5 gap 3). No-op
+  # when the MCP supervisor is not running (boot, CLI-only VM, tests).
+  defp reload_mcp(server) do
+    if alive?(server), do: McpSupervisor.reload(server, []), else: {:ok, :skipped}
+  end
+
+  # A plugin enable/disable/logout must reach the agent's very next turn:
+  # drop the MainAgent-cached RuntimeContext so it rebuilds its tool list
+  # from the registry. No-op when the MainAgent is not running (boot,
+  # CLI-only VM, tests).
+  defp invalidate_runtime_context(server) do
+    if alive?(server) do
+      MainAgent.invalidate_runtime_context(server, :plugins_changed)
+    else
+      :ok
+    end
   end
 
   defp reload_main_agent(server) do

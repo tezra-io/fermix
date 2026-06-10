@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "google_calendar",
   "display_name": "Google Calendar",
   "description": "Read schedules, find availability, and optionally create or update events.",
@@ -34,42 +34,284 @@
       "description": "Search Google Calendar events.",
       "policy_class": "external_api",
       "read_only": true,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.readonly"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Text query for events."
+          },
+          "calendar_id": {
+            "type": "string",
+            "default": "primary",
+            "description": "Calendar id, default primary."
+          },
+          "max_results": {
+            "type": "integer",
+            "default": 10,
+            "description": "Maximum events, default 10."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "request": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events",
+        "query": {
+          "q": "{query}",
+          "maxResults": "{max_results}",
+          "singleEvents": "true",
+          "orderBy": "startTime"
+        },
+        "success": [
+          200
+        ]
+      }
     },
     {
       "name": "google_calendar_create_event",
       "description": "Create a Google Calendar event.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "calendar_id": {
+            "type": "string",
+            "default": "primary",
+            "description": "Calendar id, default primary."
+          },
+          "start": {
+            "type": "string",
+            "description": "ISO8601 start date/time."
+          },
+          "end": {
+            "type": "string",
+            "description": "ISO8601 end date/time."
+          },
+          "time_zone": {
+            "type": "string",
+            "description": "IANA timezone."
+          }
+        },
+        "required": [
+          "summary",
+          "start",
+          "end"
+        ]
+      },
+      "request": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events",
+        "body": {
+          "summary": "{summary}",
+          "description": "{description}",
+          "start": {
+            "dateTime": "{start}",
+            "timeZone": "{time_zone}"
+          },
+          "end": {
+            "dateTime": "{end}",
+            "timeZone": "{time_zone}"
+          }
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     },
     {
       "name": "google_calendar_update_event",
       "description": "Update fields on an existing event (partial patch).",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "calendar_id": {
+            "type": "string",
+            "default": "primary",
+            "description": "Calendar id, default primary."
+          },
+          "summary": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "start": {
+            "type": "string",
+            "description": "ISO8601 start date/time."
+          },
+          "end": {
+            "type": "string",
+            "description": "ISO8601 end date/time."
+          },
+          "time_zone": {
+            "type": "string",
+            "description": "IANA timezone."
+          },
+          "send_updates": {
+            "type": "string",
+            "description": "all | externalOnly | none."
+          }
+        },
+        "required": [
+          "event_id"
+        ]
+      },
+      "request": {
+        "method": "PATCH",
+        "url": "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/{event_id}",
+        "query": {
+          "sendUpdates": "{send_updates}"
+        },
+        "body": {
+          "summary": "{summary}",
+          "description": "{description}",
+          "location": "{location}",
+          "start": {
+            "dateTime": "{start}",
+            "timeZone": "{time_zone}"
+          },
+          "end": {
+            "dateTime": "{end}",
+            "timeZone": "{time_zone}"
+          }
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     },
     {
       "name": "google_calendar_delete_event",
       "description": "Delete a calendar event.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "calendar_id": {
+            "type": "string",
+            "default": "primary",
+            "description": "Calendar id, default primary."
+          },
+          "send_updates": {
+            "type": "string",
+            "description": "all | externalOnly | none."
+          }
+        },
+        "required": [
+          "event_id"
+        ]
+      },
+      "request": {
+        "method": "DELETE",
+        "url": "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/{event_id}",
+        "query": {
+          "sendUpdates": "{send_updates}"
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     },
     {
       "name": "google_calendar_respond_to_event",
       "description": "RSVP to an invite (accepted, declined, tentative).",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ]
     },
     {
       "name": "google_calendar_move_event",
       "description": "Move an event to another calendar.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/calendar.events"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/calendar.events"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "destination_calendar_id": {
+            "type": "string",
+            "description": "Target calendar id."
+          },
+          "calendar_id": {
+            "type": "string",
+            "default": "primary",
+            "description": "Source calendar id, default primary."
+          },
+          "send_updates": {
+            "type": "string",
+            "description": "all | externalOnly | none."
+          }
+        },
+        "required": [
+          "event_id",
+          "destination_calendar_id"
+        ]
+      },
+      "request": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events/{event_id}/move",
+        "query": {
+          "destination": "{destination_calendar_id}",
+          "sendUpdates": "{send_updates}"
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     }
   ],
   "skills": [
@@ -81,5 +323,7 @@
   "health_check": {
     "kind": "local_readiness",
     "requires_auth": true
-  }
+  },
+  "plugin_api": 2,
+  "min_core_version": "0.4.0"
 }

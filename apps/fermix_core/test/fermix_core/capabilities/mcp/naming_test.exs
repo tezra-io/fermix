@@ -55,6 +55,26 @@ defmodule FermixCore.Capabilities.MCP.NamingTest do
     end
   end
 
+  describe "candidate/3 with an explicit prefix (plugin-owned servers)" do
+    test "uses the supplied prefix instead of mcp_<server>_" do
+      assert Naming.candidate("obsidian", "search_notes", prefix: "obsidian_") ==
+               "obsidian_search_notes"
+    end
+
+    test "a nil prefix keeps the operator-server default" do
+      assert Naming.candidate("github", "create_issue", prefix: nil) ==
+               "mcp_github_create_issue"
+    end
+
+    test "caps prefixed names at 64 bytes with a hash suffix" do
+      original = "search_pages_by_title_or_content_with_pagination_support_and_extras"
+      candidate = Naming.candidate("obsidian", original, prefix: "obsidian_")
+      assert byte_size(candidate) <= 64
+      assert String.starts_with?(candidate, "obsidian_search_pages")
+      assert String.match?(candidate, ~r/_[0-9a-f]{8}$/)
+    end
+  end
+
   describe "register/3 collision handling" do
     test "round-trips a single registration through lookup/1" do
       sanitized = Naming.candidate("github", "create_issue")

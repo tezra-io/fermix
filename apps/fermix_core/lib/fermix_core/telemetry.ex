@@ -57,15 +57,28 @@ defmodule FermixCore.Telemetry do
   end
 
   @doc """
-  A bounded, JSON-safe preview of a content value for traces.
+  A JSON-safe preview of a content value for traces.
 
-  Strings are truncated to #{@max_content_chars} characters; other terms are
-  inspected first. `nil` passes through so callers can drop empty fields.
+  When content capture is off, strings are truncated to #{@max_content_chars}
+  characters and other terms are inspected with default limits first. When
+  `capture_content?/0` is on the value passes through whole — the operator
+  opted into full-fidelity traces, and a clipped preview would defeat the
+  point of capturing. `nil` passes through so callers can drop empty fields.
   """
   @spec preview(term()) :: String.t() | nil
   def preview(nil), do: nil
-  def preview(value) when is_binary(value), do: truncate(value)
-  def preview(value), do: value |> inspect() |> truncate()
+
+  def preview(value) when is_binary(value) do
+    if capture_content?(), do: value, else: truncate(value)
+  end
+
+  def preview(value) do
+    if capture_content?() do
+      inspect(value, limit: :infinity, printable_limit: :infinity)
+    else
+      value |> inspect() |> truncate()
+    end
+  end
 
   defp truncate(string) when is_binary(string) do
     if String.length(string) <= @max_content_chars do
