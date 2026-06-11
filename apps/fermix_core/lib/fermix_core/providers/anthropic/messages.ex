@@ -340,7 +340,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # Maps the canonical effort level to Anthropic's `output_config.effort` wire
   # value (low/medium/high/xhigh/max — no `:none`, the floor is `:low`). nil =>
   # omit the field and let Anthropic apply its own default (high). Per-model
-  # support (e.g. xhigh is Opus-4.7/4.8-only) is enforced by the API's 400, not
+  # support (e.g. xhigh is Opus-only) is enforced by the API's 400, not
   # here (ReasoningEffort moduledoc).
   defp output_config(nil), do: nil
 

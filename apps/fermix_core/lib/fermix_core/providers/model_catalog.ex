@@ -32,14 +32,13 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   # Context windows are the API defaults the adapter actually gets (it does not
   # send the `context-1m` beta header, design doc §8) — compaction thresholds key
-  # off these. The 4.6+ generation (Opus 4.8/4.7, Sonnet 4.6) ships the full 1M
+  # off these. The 4.6+ generation (Opus 4.8, Sonnet 4.6) ships the full 1M
   # window by default at standard pricing; only Haiku 4.5 is 200k. (Older
   # Sonnet 4/4.5 still need the beta for 1M, but they are not in this catalog.)
   @anthropic [
     {"claude-sonnet-4-6", "Claude Sonnet 4.6 (recommended)", 1_000_000},
     {"claude-fable-5", "Claude Fable 5", 1_000_000},
     {"claude-opus-4-8", "Claude Opus 4.8 (best quality)", 1_000_000},
-    {"claude-opus-4-7", "Claude Opus 4.7", 1_000_000},
     {"claude-haiku-4-5", "Claude Haiku 4.5 (fastest)", 200_000}
   ]
 
@@ -51,7 +50,6 @@ defmodule FermixCore.Providers.ModelCatalog do
     "claude-sonnet-4-6" => 64_000,
     "claude-fable-5" => 64_000,
     "claude-opus-4-8" => 128_000,
-    "claude-opus-4-7" => 128_000,
     "claude-haiku-4-5" => 64_000
   }
   @default_max_output_tokens 8_192

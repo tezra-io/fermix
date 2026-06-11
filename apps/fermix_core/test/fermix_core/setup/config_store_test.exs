@@ -1062,7 +1062,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             fast: true,
             store: true
           ],
-          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-7"]
+          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-8"]
         ],
         agent: [name: "fermix", provider: :openai_codex]
       ],
@@ -1081,7 +1081,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ "fast = true"
     refute contents =~ "store ="
     assert contents =~ "[fermix_core.providers.anthropic]"
-    assert contents =~ ~s(default_model = "claude-opus-4-7")
+    assert contents =~ ~s(default_model = "claude-opus-4-8")
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     providers = Keyword.get(loaded.fermix_core, :providers, [])
@@ -1097,7 +1097,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute Keyword.has_key?(openai_codex, :store)
 
     anthropic = Keyword.get(providers, :anthropic, [])
-    assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
+    assert Keyword.get(anthropic, :default_model) == "claude-opus-4-8"
     assert Keyword.get(anthropic, :api_key) == "sk-ant"
   end
 
@@ -1111,7 +1111,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     snapshot = %{
       fermix_core: [
         providers: [
-          anthropic: [auth_mode: :oauth, default_model: "claude-opus-4-7"],
+          anthropic: [auth_mode: :oauth, default_model: "claude-opus-4-8"],
           xai: [auth_mode: :oauth, default_model: "grok-4.3"]
         ],
         agent: [name: "fermix", provider: :xai]
@@ -1166,7 +1166,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
         providers: [
           openai: [auth_mode: :api_key, api_key: "sk-x", default_model: "gpt-5.5"],
           openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high],
-          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-7"]
+          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-8"]
         ],
         agent: [name: "fermix", provider: :openai]
       ],

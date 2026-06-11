@@ -361,13 +361,13 @@ defmodule FermixCore.Setup.WizardTest do
     # Edit the fallback's model (the web pane sends :edit_provider, not :provider).
     assert {:ok, _} =
              Wizard.report().wizard
-             |> Wizard.save_answers(edit_provider: "anthropic", default_model: "claude-opus-4-7")
+             |> Wizard.save_answers(edit_provider: "anthropic", default_model: "claude-opus-4-8")
 
     assert {:ok, persisted} = ConfigStore.load_runtime_config()
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
     # Model landed on anthropic's block; primary did NOT move.
-    assert Keyword.get(providers[:anthropic], :default_model) == "claude-opus-4-7"
+    assert Keyword.get(providers[:anthropic], :default_model) == "claude-opus-4-8"
     assert Keyword.get(providers[:openai], :primary) == true
     refute Keyword.get(providers[:anthropic], :primary) == true
     refute Keyword.has_key?(providers[:openai], :default_model)
@@ -389,7 +389,7 @@ defmodule FermixCore.Setup.WizardTest do
              Wizard.report().wizard
              |> Wizard.save_answers(
                anthropic_api_key: "sk-ant",
-               default_model: "claude-opus-4-7",
+               default_model: "claude-opus-4-8",
                reasoning_effort: "high"
              )
 
@@ -397,7 +397,7 @@ defmodule FermixCore.Setup.WizardTest do
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
     assert Keyword.get(providers[:anthropic], :primary) == true
-    assert Keyword.get(providers[:anthropic], :default_model) == "claude-opus-4-7"
+    assert Keyword.get(providers[:anthropic], :default_model) == "claude-opus-4-8"
     assert Keyword.get(providers[:anthropic], :reasoning_effort) == :high
     refute Keyword.has_key?(providers[:openai] || [], :default_model)
   end
@@ -833,7 +833,7 @@ defmodule FermixCore.Setup.WizardTest do
     :ok =
       ConfigStore.save_snapshot(%{
         fermix_core: [
-          providers: [anthropic: [api_key: "sk-ant", default_model: "claude-opus-4-7"]],
+          providers: [anthropic: [api_key: "sk-ant", default_model: "claude-opus-4-8"]],
           agent: [name: "fermix", provider: :anthropic],
           personalization: [user_name: "Op", timezone: "UTC", communication_style: "concise"]
         ],
@@ -1415,13 +1415,13 @@ defmodule FermixCore.Setup.WizardTest do
 
       {:ok, _report} =
         Wizard.report().wizard
-        |> Wizard.save_answers(default_model: "claude-opus-4-7")
+        |> Wizard.save_answers(default_model: "claude-opus-4-8")
 
       {:ok, persisted} = ConfigStore.load_runtime_config()
       providers = Keyword.get(persisted.fermix_core, :providers, [])
       anthropic = Keyword.get(providers, :anthropic, [])
 
-      assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
+      assert Keyword.get(anthropic, :default_model) == "claude-opus-4-8"
     end
 
     test "writes anthropic api key to the anthropic provider block" do

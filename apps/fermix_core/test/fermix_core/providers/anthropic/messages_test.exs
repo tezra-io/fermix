@@ -389,14 +389,14 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
       Req.Test.stub(__MODULE__, fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
         refute Map.has_key?(Jason.decode!(body), "temperature")
-        Req.Test.json(conn, Map.put(text_response_body(), "model", "claude-opus-4-7"))
+        Req.Test.json(conn, Map.put(text_response_body(), "model", "claude-opus-4-8"))
       end)
 
       assert {:ok, _turn} =
                Messages.chat(
                  [%{role: "user", content: "hi"}],
                  [],
-                 chat_opts(model: "claude-opus-4-7", temperature: 0.2)
+                 chat_opts(model: "claude-opus-4-8", temperature: 0.2)
                )
     end
 
