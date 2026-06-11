@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-11T02:11:02Z",
+  "generated_at": "2026-06-11T02:47:19Z",
   "plugins": [
     {
       "name": "github",
@@ -19,9 +19,24 @@
       "rails": [
         "http"
       ],
-      "latest": "1.0.0",
+      "latest": "1.0.1",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.1",
+          "published_at": "2026-06-11T02:45:20Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/github/v1.0.1/github-1.0.1.tar.gz",
+              "sha256": "cf911458dcdc55c76b5cca3c87e16a165c2d9df3025a05b339060d9c44d7745a",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/github/v1.0.1/github-1.0.1.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/github/v1.0.1/github-1.0.1.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.0",
           "published_at": "2026-06-10T05:34:11Z",
@@ -56,9 +71,24 @@
       "rails": [
         "http"
       ],
-      "latest": "1.0.0",
+      "latest": "1.0.1",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.1",
+          "published_at": "2026-06-11T02:45:21Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/notion/v1.0.1/notion-1.0.1.tar.gz",
+              "sha256": "de3b492e7a37b7e91cc969c74e6e178bf1e402bd1c10624b9b12ee58aa01c016",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/notion/v1.0.1/notion-1.0.1.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/notion/v1.0.1/notion-1.0.1.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.0",
           "published_at": "2026-06-10T05:36:40Z",
@@ -93,9 +123,24 @@
       "rails": [
         "mcp"
       ],
-      "latest": "1.0.2",
+      "latest": "1.0.3",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.3",
+          "published_at": "2026-06-11T02:45:20Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.3/obsidian-1.0.3.tar.gz",
+              "sha256": "3dc7b91e77f83b1a30fdec5ec8ac7a0689a42219410158d65ac6cbe31712cf93",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.3/obsidian-1.0.3.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.3/obsidian-1.0.3.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.2",
           "published_at": "2026-06-11T02:09:23Z",
