@@ -221,6 +221,57 @@ defmodule FermixCore.Plugins.RegistryTest do
       manifest = v2_manifest("notion") |> Map.put("tools", [tool]) |> api_key_auth()
       assert {:ok, _plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
     end
+
+    test "an mcp-rail runtime command may not escape the bundled bin dir" do
+      base =
+        v2_manifest("obsidian")
+        |> Map.put("tools", [mcp_tool("obsidian_read")])
+        |> Map.put("auth", %{"type" => "none"})
+
+      for command <- ["../../../../bin/sh", "/bin/sh", "bin/server", "..", "."] do
+        manifest =
+          Map.put(base, "runtime", %{
+            "kind" => "node",
+            "command" => command,
+            "vendored" => true
+          })
+
+        assert {:error, {:invalid_runtime, _}} =
+                 Registry.decode_manifest(manifest, "/tmp/obsidian/plugin.json")
+      end
+
+      ok =
+        Map.put(base, "runtime", %{
+          "kind" => "node",
+          "command" => "server.mjs",
+          "vendored" => true
+        })
+
+      assert {:ok, _plugin} = Registry.decode_manifest(ok, "/tmp/obsidian/plugin.json")
+    end
+
+    test "an interface asset may not escape the plugin dir" do
+      plugin_root = FermixTestSupport.SafeRm.make_tmp_dir!("registry-asset")
+      manifest_path = Path.join([plugin_root, "evil", "plugin.json"])
+      File.mkdir_p!(Path.dirname(manifest_path))
+      # A real file one level above the plugin dir; `../secret.png` reaches it.
+      File.write!(Path.join(plugin_root, "secret.png"), "x")
+
+      escaping = Map.put(valid_manifest("evil"), "interface", %{"logo" => "../secret.png"})
+
+      assert {:error, {:asset_escapes_plugin_dir, "../secret.png"}} =
+               Registry.decode_manifest(escaping, manifest_path)
+
+      File.write!(Path.join([plugin_root, "evil", "logo.png"]), "x")
+      in_dir = Map.put(valid_manifest("evil"), "interface", %{"logo" => "logo.png"})
+      assert {:ok, _plugin} = Registry.decode_manifest(in_dir, manifest_path)
+
+      FermixTestSupport.SafeRm.rm_rf!(plugin_root)
+    end
+  end
+
+  defp mcp_tool(name) do
+    %{"name" => name, "description" => "An mcp tool.", "read_only" => true, "rail" => "mcp"}
   end
 
   defp v2_manifest(name) do

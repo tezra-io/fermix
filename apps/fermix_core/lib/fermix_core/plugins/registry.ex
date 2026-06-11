@@ -389,13 +389,22 @@ defmodule FermixCore.Plugins.Registry do
     args = Map.get(runtime, "args", [])
     vendored = Map.get(runtime, "vendored", false)
 
-    if not String.contains?(command, " ") and is_boolean(vendored) and
+    if bare_command?(command) and is_boolean(vendored) and
          is_list(args) and Enum.all?(args, &is_binary/1),
        do: :ok,
        else: {:error, {:invalid_runtime, runtime}}
   end
 
   defp validate_runtime_block(runtime), do: {:error, {:invalid_runtime, runtime}}
+
+  # `command` is one bare executable name: no whitespace (the stdio transport
+  # resolves it whole), and no `/` or `..` so a `vendored: true` command stays
+  # inside the artifact's `bin/<target>/` dir instead of escaping via `Path.join`
+  # to a host executable like `/bin/sh`.
+  defp bare_command?(command) do
+    not String.contains?(command, " ") and not String.contains?(command, "/") and
+      command not in ["..", "."]
+  end
 
   defp validate_oauth_health(%Plugin{name: name, auth: %{type: :oauth2}, health_check: nil}),
     do: {:error, {:missing_health_check, name}}
@@ -573,9 +582,18 @@ defmodule FermixCore.Plugins.Registry do
 
   defp validate_asset(_plugin_dir, nil), do: :ok
 
+  # The asset path comes from the (untrusted) manifest and is later read and
+  # inlined into the setup page. Bound it to the plugin dir so `../` can't escape
+  # to an arbitrary host file before the read.
   defp validate_asset(plugin_dir, rel_path) when is_binary(rel_path) do
-    path = Path.join(plugin_dir, rel_path)
-    if File.regular?(path), do: :ok, else: {:error, {:missing_asset, path}}
+    case Path.safe_relative(rel_path, plugin_dir) do
+      {:ok, safe} ->
+        path = Path.join(plugin_dir, safe)
+        if File.regular?(path), do: :ok, else: {:error, {:missing_asset, path}}
+
+      :error ->
+        {:error, {:asset_escapes_plugin_dir, rel_path}}
+    end
   end
 
   defp validate_name(name) when is_binary(name) do
