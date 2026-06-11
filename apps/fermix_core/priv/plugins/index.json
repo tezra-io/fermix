@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-11T04:01:22Z",
+  "generated_at": "2026-06-11T10:35:03Z",
   "plugins": [
     {
       "name": "github",
@@ -205,9 +205,24 @@
       "rails": [
         "http"
       ],
-      "latest": "1.0.0",
+      "latest": "1.0.1",
       "yanked": [],
       "versions": [
+        {
+          "version": "1.0.1",
+          "published_at": "2026-06-11T10:34:18Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.1/x-1.0.1.tar.gz",
+              "sha256": "0c28590906316eba719c3e586d7042404be0f18259ecf683443bdb43ee29b13f",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.1/x-1.0.1.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.1/x-1.0.1.tar.gz.pem"
+            }
+          ]
+        },
         {
           "version": "1.0.0",
           "published_at": "2026-06-11T03:59:03Z",
