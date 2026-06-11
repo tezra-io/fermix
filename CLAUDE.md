@@ -81,6 +81,7 @@ mix format --check-formatted
 - `docs/MILESTONE_9_2_FULL_DUPLEX_VOICE.md` — M9.2 design (draft reviewed) — full-duplex cleanup for macOS AEC, Realtime API shape, setup prompts, and removed legacy voice mode knobs
 - `docs/MILESTONE_9_3_PET_ANIMATION.md` — M9.3 design (draft) — pure-SwiftUI animation pass for FermixPet: `TimelineView` sine motion, PNG cache, expression cross-fade, audio-RMS speaking pulse, blink, one-shot event reactions
 - `docs/design/ANTHROPIC_XAI_PROVIDER_IMPLEMENTATION.md` — Anthropic + xAI provider design (draft) — API-key + OAuth auth modes (Claude Code / Grok subscription), Claude Code request emulation, provider touchpoint checklist
+- `docs/design/SUBAGENT_MODEL_SELECTION.md` — Sub-agent & cron model selection (implemented) — a smaller/cheaper model + thinking level for delegated `subagents` workers (config + wizard + web setup + on-the-fly `subagents` `model` arg) and unpinned cron jobs (`[fermix_core.routing]` `subagent_*`/`cron_*`, validated by `Providers.RoutingOverrides`); main agent never changes its own model. §15 = implementation log
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.
