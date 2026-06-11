@@ -8,7 +8,7 @@ defmodule FermixCore.Providers.ReasoningEffort do
   support it); a level *above* a provider's ceiling clamps to that ceiling
   (so `:max` on OpenAI -> `"xhigh"`, its highest); a level *below* a
   provider's floor (e.g. `:none` on Anthropic) is rejected as unsupported.
-  Per-*model* support (e.g. Anthropic `xhigh` is Opus-4.7-only, `max` is
+  Per-*model* support (e.g. Anthropic `xhigh` is Opus-only, `max` is
   4.6+) is intentionally NOT enforced here; the provider API's 400 is the
   source of truth, matching the prior OpenAI design.
 

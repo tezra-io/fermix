@@ -693,7 +693,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     setup do
       Application.put_env(:fermix_core, :providers,
         openai: [api_key: "sk-openai", primary: true, default_model: "gpt-5.5"],
-        anthropic: [api_key: "sk-ant", default_model: "claude-opus-4-7"]
+        anthropic: [api_key: "sk-ant", default_model: "claude-opus-4-8"]
       )
 
       # Persist to disk so the keys are real config, not env-only secrets that a

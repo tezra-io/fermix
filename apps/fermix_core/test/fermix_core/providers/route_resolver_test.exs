@@ -128,13 +128,13 @@ defmodule FermixCore.Providers.RouteResolverTest do
       {route_key, opts} =
         RouteResolver.resolve!(
           provider: :anthropic,
-          model: "claude-opus-4-7",
+          model: "claude-opus-4-8",
           base_url: "https://anthropic.example/v1"
         )
 
-      assert route_key.model == "claude-opus-4-7"
+      assert route_key.model == "claude-opus-4-8"
       assert route_key.base_url == "https://anthropic.example/v1"
-      assert opts[:model] == "claude-opus-4-7"
+      assert opts[:model] == "claude-opus-4-8"
       assert opts[:base_url] == "https://anthropic.example/v1"
     end
 

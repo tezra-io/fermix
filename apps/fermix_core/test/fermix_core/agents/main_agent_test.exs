@@ -1926,13 +1926,13 @@ defmodule FermixCore.Agents.MainAgentTest do
       {:ok, pid} =
         MainAgent.start_link(
           name: name,
-          adapter_overrides: [provider: :anthropic, model: "claude-opus-4-7"]
+          adapter_overrides: [provider: :anthropic, model: "claude-opus-4-8"]
         )
 
       state = :sys.get_state(pid)
 
       assert Keyword.get(state.adapter_overrides, :provider) == :anthropic
-      assert Keyword.get(state.adapter_overrides, :model) == "claude-opus-4-7"
+      assert Keyword.get(state.adapter_overrides, :model) == "claude-opus-4-8"
       # reasoning_effort from openai_codex config block must NOT leak into
       # the anthropic route — the Anthropic Messages API has no such field.
       refute Keyword.has_key?(state.adapter_overrides, :reasoning_effort)
