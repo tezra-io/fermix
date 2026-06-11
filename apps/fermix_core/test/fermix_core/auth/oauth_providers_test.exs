@@ -70,6 +70,27 @@ defmodule FermixCore.Auth.OAuthProvidersTest do
     end
   end
 
+  describe "definition/2 — x" do
+    test "builds the X provider (basic auth, fixed port, no userinfo)" do
+      assert {:ok, %OAuthProvider{} = provider} =
+               OAuthProviders.definition(
+                 "x",
+                 @client ++ [scopes: ["tweet.read", "users.read", "offline.access"]]
+               )
+
+      assert provider.id == :x
+      assert provider.authorize_url == "https://x.com/i/oauth2/authorize"
+      assert provider.token_url == "https://api.x.com/2/oauth2/token"
+      assert provider.userinfo_url == nil
+      assert provider.redirect_host == "127.0.0.1"
+      assert provider.redirect_port == 1459
+      assert provider.scopes == ["tweet.read", "users.read", "offline.access"]
+      assert provider.token_auth == :basic
+      assert provider.fixed_port? == true
+      assert provider.scope_delimiter == " "
+    end
+  end
+
   describe "definition/2 — validation" do
     test "unknown providers are refused" do
       assert {:error, {:unsupported_oauth_provider, "slack"}} =
@@ -102,6 +123,20 @@ defmodule FermixCore.Auth.OAuthProvidersTest do
 
       assert provider.redirect_host == "localhost"
       assert provider.redirect_port == 9999
+    end
+
+    test "default redirect host is per-provider: notion uses localhost, github/x use 127.0.0.1" do
+      # Notion forces https for IP-literal redirect URIs but allows http for the
+      # localhost hostname, so its loopback redirect must use localhost. X is the
+      # inverse — its portal accepts http://127.0.0.1 but not localhost.
+      assert {:ok, notion} = OAuthProviders.definition("notion", @client)
+      assert notion.redirect_host == "localhost"
+
+      assert {:ok, github} = OAuthProviders.definition("github", @client)
+      assert github.redirect_host == "127.0.0.1"
+
+      assert {:ok, x} = OAuthProviders.definition("x", @client)
+      assert x.redirect_host == "127.0.0.1"
     end
   end
 

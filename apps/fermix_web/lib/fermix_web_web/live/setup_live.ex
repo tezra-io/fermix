@@ -49,8 +49,8 @@ defmodule FermixWebWeb.SetupLive do
   @default_plugin_auth_url_timeout_ms 300_000
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
-  # notion 1458.
-  @oauth_client_providers ~w(google github notion)
+  # notion 1458, x 1459.
+  @oauth_client_providers ~w(google github notion x)
   @provider_restart_keys [
     :provider,
     :default_model,
@@ -650,10 +650,12 @@ defmodule FermixWebWeb.SetupLive do
   defp oauth_display_name("google"), do: "Google"
   defp oauth_display_name("github"), do: "GitHub"
   defp oauth_display_name("notion"), do: "Notion"
+  defp oauth_display_name("x"), do: "X"
 
   defp oauth_default_port("google"), do: 1455
   defp oauth_default_port("github"), do: 1457
   defp oauth_default_port("notion"), do: 1458
+  defp oauth_default_port("x"), do: 1459
 
   defp refresh_report(socket, message) do
     Wizard.report()

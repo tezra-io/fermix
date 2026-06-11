@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-11T02:47:19Z",
+  "generated_at": "2026-06-11T04:01:22Z",
   "plugins": [
     {
       "name": "github",
@@ -183,6 +183,43 @@
               "sha256": "35fe7d1037319d87f8704ea0e88750a6ced4f5362b539a702acb83d2cc5d9d6a",
               "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.0/obsidian-1.0.0.tar.gz.sig",
               "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.0/obsidian-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "x",
+      "display_name": "X",
+      "category": "productivity",
+      "description": "Post, reply, search, like, and read on X (Twitter).",
+      "short_description": "Post, search, and read on X (Twitter)",
+      "developer_name": "Fermix",
+      "brand_color": "#000000",
+      "logo": {
+        "mime": "image/svg+xml",
+        "data_base64": "PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CiAgPHJlY3Qgd2lkdGg9IjEwMCIgaGVpZ2h0PSIxMDAiIHJ4PSIyMiIgZmlsbD0iIzAwMCIvPgogIDxnIHRyYW5zZm9ybT0idHJhbnNsYXRlKDIzLjYgMjMpIHNjYWxlKDAuMDQ0KSI+CiAgICA8cGF0aCBkPSJNNzE0LjE2MyA1MTkuMjg0TDExNjAuODkgMEgxMDU1LjAzTDY2Ny4xMzcgNDUwLjg4N0wzNTcuMzI4IDBIMEw0NjguNDkyIDY4MS44MjFMMCAxMjI2LjM3SDEwNS44NjZMNTE1LjQ5MSA3NTAuMjE4TDg0Mi42NzIgMTIyNi4zN0gxMjAwTDcxNC4xMzcgNTE5LjI4NEg3MTQuMTYzWk01NjkuMTY1IDY4Ny44MjhMNTIxLjY5NyA2MTkuOTM0TDE0NC4wMTEgNzkuNjk0NEgzMDYuNjE1TDYxMS40MTIgNTE1LjY4NUw2NTguODggNTgzLjU3OUwxMDU1LjA4IDExNTAuM0g4OTIuNDc2TDU2OS4xNjUgNjg3Ljg1NFY2ODcuODI4WiIgZmlsbD0iI2ZmZiIvPgogIDwvZz4KPC9zdmc+Cg=="
+      },
+      "auth_type": "oauth2",
+      "auth_provider": "x",
+      "rails": [
+        "http"
+      ],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-06-11T03:59:03Z",
+          "min_core_version": "0.2.3",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.0/x-1.0.0.tar.gz",
+              "sha256": "6929a0dadc1ba47ef48a01004478efe6bd871a98e3856ca228532c4fdd25b9cf",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.0/x-1.0.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/x/v1.0.0/x-1.0.0.tar.gz.pem"
             }
           ]
         }

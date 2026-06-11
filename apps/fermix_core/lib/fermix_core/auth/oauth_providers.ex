@@ -12,7 +12,7 @@ defmodule FermixCore.Auth.OAuthProviders do
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Plugins.Config
 
-  @supported_providers ~w(google github notion)
+  @supported_providers ~w(google github notion x)
 
   @type error ::
           {:unsupported_oauth_provider, term()}
@@ -112,11 +112,40 @@ defmodule FermixCore.Auth.OAuthProviders do
       userinfo_url: nil,
       client_id: Keyword.fetch!(config, :client_id),
       client_secret: Keyword.get(config, :client_secret),
-      redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
+      # Notion forces https for IP-literal redirect URIs but allows http for the
+      # `localhost` hostname; the loopback listener still binds 127.0.0.1, which
+      # the browser reaches by resolving localhost.
+      redirect_host: Keyword.get(config, :redirect_host, "localhost"),
       redirect_port: Keyword.get(config, :redirect_port, 1458),
       redirect_path: "/auth/callback",
       scopes: Keyword.get(config, :scopes, []),
       extra_authorize_params: %{"owner" => "user"},
+      token_auth: :basic,
+      fixed_port?: true
+    }
+  end
+
+  # X (api.x.com) is a confidential client — the portal "Web App, Automated App
+  # or Bot" type — so the token endpoint takes HTTP Basic client auth (PKCE is
+  # still required). Redirect URIs are exact-match including port, and X's portal
+  # accepts `http://127.0.0.1` but rejects `localhost` — the inverse of Notion —
+  # so the host stays the IP literal with a fixed port. Refresh tokens are
+  # single-use and rotated on every refresh; the token managers already persist
+  # the rotated pair. /2/users/me returns a `{"data": ...}` envelope the engine's
+  # best-effort userinfo fetch does not parse, so it is skipped (the x_whoami
+  # tool covers identity).
+  defp build("x", config) do
+    %OAuthProvider{
+      id: :x,
+      authorize_url: "https://x.com/i/oauth2/authorize",
+      token_url: "https://api.x.com/2/oauth2/token",
+      userinfo_url: nil,
+      client_id: Keyword.fetch!(config, :client_id),
+      client_secret: Keyword.get(config, :client_secret),
+      redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
+      redirect_port: Keyword.get(config, :redirect_port, 1459),
+      redirect_path: "/auth/callback",
+      scopes: Keyword.get(config, :scopes, []),
       token_auth: :basic,
       fixed_port?: true
     }

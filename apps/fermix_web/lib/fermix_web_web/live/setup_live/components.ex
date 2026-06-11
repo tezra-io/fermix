@@ -1412,6 +1412,11 @@ defmodule FermixWebWeb.SetupLive.Components do
      "https://www.notion.so/my-integrations"}
   end
 
+  defp oauth_help_content("x") do
+    {"X Developer Portal → your app → User authentication settings: type \"Web App, Automated App or Bot\", callback URI http://127.0.0.1:1459/auth/callback exactly. Paste the OAuth 2.0 Client ID and secret. Note: X API usage is paid (pay-per-use credits).",
+     "https://developer.x.com/en/portal/dashboard"}
+  end
+
   defp oauth_help_content(provider) do
     {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
   end
