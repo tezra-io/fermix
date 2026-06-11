@@ -4,7 +4,7 @@ description: >
   Exercises Fermix's self-knowledge surface: explaining how a builtin tool works
   (its parameters, usage, failure modes) and reporting the model-routing
   configuration. "What parameters does the shell tool take / how does web_search
-  work" should route through tool_help. "What model are you using for coding /
+  work" should route through tool_help. "What model do my sub-agents use /
   show my routing" is graded tolerantly: the model may call model_routing_config
   to read config.toml, OR it may already know the routing and answer from context
   with a model name in the reply. Every case here is strictly READ/INSPECT only —
@@ -49,34 +49,25 @@ scenarios:
         rubric: "Surfaces memory_store's parameters, examples, and failure modes from its documentation."
 
   - id: report_model_routing
-    title: "Reports the model-routing config (read-only)"
+    title: "Reports the sub-agent model routing config (read-only)"
     severity: normal
     tags: [meta, routing, model_routing_config]
     cases:
-      - id: coding_model
-        query: "What model are you using for coding tasks right now?"
+      - id: subagent_model
+        query: "What model do my sub-agents run on right now?"
         expect:
           tools_any: [model_routing_config]
-          reply_matches: "(?i)gpt|model|coding|rout"
+          reply_matches: "(?i)sub-?agent|model|inherit|same|rout"
           tools_none: [shell]
           max_cost_usd: 0.5
           max_duration_ms: 90000
-        rubric: "Reports the coding model in use (a model name or the routing for coding), reading only — never changing it."
+        rubric: "Reports the sub-agent model (a model name, or that sub-agents inherit/match the main model), reading only — never changing it."
       - id: show_routing
         query: "Show me my current model routing configuration."
         expect:
           tools_any: [model_routing_config]
-          reply_matches: "(?i)model|rout|default|coding|research|review"
+          reply_matches: "(?i)sub-?agent|model|rout|inherit|default"
           reply_not_matches: "(?i)\\b(updated|changed|set to|now using|deleted)\\b"
           max_cost_usd: 0.5
           max_duration_ms: 90000
-        rubric: "Reports the current routing keys (default/coding/research/review) as a read, without mutating anything."
-      - id: which_model_overall
-        query: "Which model is Fermix configured to use by default? Just tell me, don't change anything."
-        expect:
-          tools_any: [model_routing_config]
-          reply_matches: "(?i)gpt|model|default|rout"
-          reply_not_matches: "(?i)\\b(updated|changed|set to|deleted|removed)\\b"
-          max_cost_usd: 0.5
-          max_duration_ms: 90000
-        rubric: "Names the default model or describes the default routing; answers from a read (tool or known context) without altering config."
+        rubric: "Reports the current routing keys (sub-agent model/provider/effort, or that none are set / sub-agents inherit the main model) as a read, without mutating anything."
