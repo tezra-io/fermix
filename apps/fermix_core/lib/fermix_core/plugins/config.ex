@@ -219,7 +219,7 @@ defmodule FermixCore.Plugins.Config do
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :oauth, updated))
   end
 
-  @registry_oauth_providers ~w(google github notion)
+  @registry_oauth_providers ~w(google github notion x)
 
   defp normalize_oauth_provider(provider, opts) when provider in @registry_oauth_providers do
     client_type = Keyword.get(opts, :client_type, "desktop_public_pkce")
@@ -250,7 +250,7 @@ defmodule FermixCore.Plugins.Config do
       client_type: client_type,
       client_id: Keyword.get(opts, :client_id),
       client_secret: Keyword.get(opts, :client_secret),
-      redirect_host: Keyword.get(opts, :redirect_host, "127.0.0.1"),
+      redirect_host: Keyword.get(opts, :redirect_host),
       redirect_port: Keyword.get(opts, :redirect_port)
     ]
     |> Enum.reject(fn {_key, value} -> blank?(value) end)

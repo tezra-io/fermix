@@ -80,7 +80,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Capabilities are available through the capability registry for built-in tools and MCP tools.
     - Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb.
     - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
-      - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
+      - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
       - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
       - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms). It is a first-class built-in, not a fallback.

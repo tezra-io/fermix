@@ -123,7 +123,7 @@ defmodule FermixCore.Plugins.ConfigTest do
              FermixTestSupport.SecretWriterStub.get(:google_oauth_client_secret)
   end
 
-  test "stores github and notion oauth client config like google", %{home: home} do
+  test "stores github, notion, and x oauth client config like google", %{home: home} do
     assert {:ok, _snapshot} =
              Config.set_oauth_provider("github",
                client_id: "gh-client-id",
@@ -136,24 +136,38 @@ defmodule FermixCore.Plugins.ConfigTest do
                client_secret: "n-client-secret"
              )
 
+    assert {:ok, _snapshot} =
+             Config.set_oauth_provider("x",
+               client_id: "x-client-id",
+               client_secret: "x-client-secret"
+             )
+
     oauth = Application.get_env(:fermix_core, :oauth)
     assert Keyword.get(Map.fetch!(oauth, "github"), :client_id) == "gh-client-id"
     assert Keyword.get(Map.fetch!(oauth, "notion"), :client_id) == "n-client-id"
+    assert Keyword.get(Map.fetch!(oauth, "x"), :client_id) == "x-client-id"
 
     contents = File.read!(Path.join(home, "config.toml"))
     refute contents =~ "gh-client-secret"
     refute contents =~ "n-client-secret"
+    refute contents =~ "x-client-secret"
 
     assert {:ok, "gh-client-secret"} =
              FermixTestSupport.SecretWriterStub.get(:github_oauth_client_secret)
 
     assert {:ok, "n-client-secret"} =
              FermixTestSupport.SecretWriterStub.get(:notion_oauth_client_secret)
+
+    assert {:ok, "x-client-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:x_oauth_client_secret)
   end
 
-  test "rejects github and notion oauth client config missing fields" do
+  test "rejects github, notion, and x oauth client config missing fields" do
     assert {:error, {:missing_oauth_client_field, "github", :client_secret}} =
              Config.set_oauth_provider("github", client_id: "gh-client-id")
+
+    assert {:error, {:missing_oauth_client_field, "x", :client_secret}} =
+             Config.set_oauth_provider("x", client_id: "x-client-id")
 
     assert {:error, {:missing_oauth_client_field, "notion", :client_id}} =
              Config.set_oauth_provider("notion", client_secret: "n-client-secret")

@@ -125,6 +125,11 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
           client_type: "desktop_public_pkce",
           client_id: "n-id",
           client_secret: "n-sec"
+        ],
+        "x" => [
+          client_type: "desktop_public_pkce",
+          client_id: "x-id",
+          client_secret: "x-sec"
         ]
       })
 
@@ -193,6 +198,38 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
       assert refreshed.tokens.refresh_token == "new_rt"
 
       assert_received {:refresh_request, params, headers}
+      refute Map.has_key?(params, "client_secret")
+      refute Map.has_key?(params, "client_id")
+      assert {"authorization", expected} in headers
+    end
+
+    test "refreshes an x entry with HTTP Basic auth and persists the rotated pair" do
+      # X rotates refresh tokens on every refresh — the old one is invalidated,
+      # so the new refresh_token from the response MUST land in the store or the
+      # next refresh fails. X is the first provider whose tokens die without it.
+      :ok = Store.write("x:primary", plugin_oauth_entry("x"))
+      {:ok, entry} = Store.read("x:primary")
+
+      parent = self()
+      expected = "Basic " <> Base.encode64("x-id:x-sec")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:refresh_request, URI.decode_query(body), conn.req_headers})
+        refresh_plug(conn)
+      end
+
+      assert {:ok, refreshed} = TokenSupervisor.refresh_entry("x:primary", entry, plug: plug)
+      assert refreshed.tokens.access_token == "new_at"
+      assert refreshed.tokens.refresh_token == "new_rt"
+
+      assert {:ok, stored} = Store.read("x:primary")
+      assert stored.tokens.access_token == "new_at"
+      assert stored.tokens.refresh_token == "new_rt"
+      assert stored.provider == "x"
+
+      assert_received {:refresh_request, params, headers}
+      assert params["grant_type"] == "refresh_token"
       refute Map.has_key?(params, "client_secret")
       refute Map.has_key?(params, "client_id")
       assert {"authorization", expected} in headers

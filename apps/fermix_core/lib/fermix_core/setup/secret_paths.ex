@@ -87,6 +87,11 @@ defmodule FermixCore.Setup.SecretPaths do
       path: [:fermix_core, :oauth, "notion", :client_secret]
     },
     %{
+      key: :x_oauth_client_secret,
+      env: "X_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "x", :client_secret]
+    },
+    %{
       key: :telegram_bot_token,
       env: "TELEGRAM_BOT_TOKEN",
       path: [:fermix_channels, :telegram, :bot_token]
