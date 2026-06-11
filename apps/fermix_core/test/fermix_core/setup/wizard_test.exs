@@ -232,8 +232,82 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(xai, :reasoning_effort) == :high
   end
 
-  test "a newly configured provider is auto-promoted and the old primary keeps its settings" do
-    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-promote")
+  test "save_answers persists a distinct subagent_model to [fermix_core.routing]" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-subagent-model")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               default_model: "gpt-5.5",
+               subagent_model: "gpt-5.4-mini"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    routing = Keyword.get(persisted.fermix_core, :routing, [])
+    assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
+  end
+
+  test "save_answers omits subagent_model when it equals the main model (inherit)" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-subagent-same")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               default_model: "gpt-5.5",
+               subagent_model: "gpt-5.5"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    routing = Keyword.get(persisted.fermix_core, :routing, [])
+    refute Keyword.has_key?(routing, :subagent_model)
+  end
+
+  test "a save that carries no subagent_model answer preserves the existing value" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-subagent-preserve")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openai",
+               openai_api_key: "sk-x",
+               default_model: "gpt-5.5",
+               subagent_model: "gpt-5.4-mini"
+             )
+
+    # A later save with NO subagent_model answer (another tab/provider) must NOT wipe it.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(anthropic_api_key: "sk-ant")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    routing = Keyword.get(persisted.fermix_core, :routing, [])
+    assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
+  end
+
+  test "a newly configured provider stays a fallback when a primary already exists" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-fallback")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
 
     System.put_env("FERMIX_HOME", tmp_home)
@@ -249,6 +323,8 @@ defmodule FermixCore.Setup.WizardTest do
                default_model: "claude-sonnet-4-6"
              )
 
+    # Configure xai while anthropic is already primary: xai is a FALLBACK, NOT
+    # auto-promoted — promotion is now an explicit "Set primary" action.
     assert {:ok, _} =
              Wizard.report().wizard
              |> Wizard.save_answers(xai_api_key: "xai-key")
@@ -256,10 +332,45 @@ defmodule FermixCore.Setup.WizardTest do
     assert {:ok, persisted} = ConfigStore.load_runtime_config()
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
-    assert Keyword.get(providers[:xai], :primary) == true
-    assert Keyword.get(providers[:anthropic], :primary) == false
+    assert Keyword.get(providers[:anthropic], :primary) == true
+    refute Keyword.get(providers[:xai], :primary) == true
+    assert Keyword.get(providers[:xai], :api_key) == "xai-key"
+    # The old primary keeps its settings.
     assert Keyword.get(providers[:anthropic], :api_key) == "sk-ant"
     assert Keyword.get(providers[:anthropic], :default_model) == "claude-sonnet-4-6"
+  end
+
+  test "editing a fallback provider's model writes to its block without stealing primary" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-edit-fallback")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    # openai primary, anthropic configured as a fallback.
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(provider: "openai", openai_api_key: "sk-x")
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(anthropic_api_key: "sk-ant")
+
+    # Edit the fallback's model (the web pane sends :edit_provider, not :provider).
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(edit_provider: "anthropic", default_model: "claude-opus-4-7")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    # Model landed on anthropic's block; primary did NOT move.
+    assert Keyword.get(providers[:anthropic], :default_model) == "claude-opus-4-7"
+    assert Keyword.get(providers[:openai], :primary) == true
+    refute Keyword.get(providers[:anthropic], :primary) == true
+    refute Keyword.has_key?(providers[:openai], :default_model)
   end
 
   test "an auto-promoted provider receives the same save's model/effort fields" do

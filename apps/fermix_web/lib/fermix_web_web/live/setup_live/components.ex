@@ -274,6 +274,41 @@ defmodule FermixWebWeb.SetupLive.Components do
                   </option>
                 </select>
               </label>
+              <%!-- Sub-agent model is a single GLOBAL setting (sub-agents run on the
+                    primary provider), so it is shown only on the primary's pane to avoid
+                    looking per-provider. Cross-provider sub-agents are a runtime/on-the-fly
+                    choice, not a setup one. --%>
+              <label
+                :if={editing_primary?(@provider_statuses, @provider_form.provider)}
+                class="form-control w-full"
+              >
+                <span class="label pb-1 text-sm font-medium">Sub-agent model</span>
+                <select
+                  name="provider_form[subagent_model]"
+                  class="select select-bordered w-full bg-base-100"
+                >
+                  <option value="" selected={@provider_form.subagent_model in [nil, ""]}>
+                    Same as main model (default)
+                  </option>
+                  <option
+                    :for={{id, label, ctx} <- @provider_models}
+                    value={id}
+                    selected={id == @provider_form.subagent_model}
+                  >
+                    {label} ({id} - {format_context(ctx)})
+                  </option>
+                  <%!-- A stored value not in this provider's catalog (e.g. set while
+                        another provider was primary) must still display + round-trip,
+                        otherwise saving this pane would reset it to "Same as main". --%>
+                  <option
+                    :if={subagent_model_custom?(@provider_form.subagent_model, @provider_models)}
+                    value={@provider_form.subagent_model}
+                    selected
+                  >
+                    {@provider_form.subagent_model} (current)
+                  </option>
+                </select>
+              </label>
             </div>
 
             <div :if={provider_connection?(@provider_form.provider)} class="space-y-3">
@@ -903,14 +938,10 @@ defmodule FermixWebWeb.SetupLive.Components do
       </div>
 
       <section :if={@plugin_summary.available} class="mt-5">
-        <h3 class="text-sm font-semibold">Available from the catalog</h3>
-        <p class="mt-1 text-xs text-base-content/55">
-          Plugin catalog ships with Fermix — new plugins arrive with `fermix upgrade`.
-        </p>
-        <p :if={@plugin_summary.index_error} class="mt-1 text-xs text-warning">
+        <p :if={@plugin_summary.index_error} class="text-xs text-warning">
           Catalog index unavailable: {@plugin_summary.index_error}. Installed plugins still work.
         </p>
-        <div :if={@plugin_summary.catalog != []} class="mt-3 flex flex-col gap-2">
+        <div :if={@plugin_summary.catalog != []} class="flex flex-col gap-2">
           <.catalog_card
             :for={entry <- @plugin_summary.catalog}
             entry={entry}
@@ -919,7 +950,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
         <p
           :if={@plugin_summary.catalog == [] && !@plugin_summary.index_error}
-          class="mt-2 text-xs text-base-content/55"
+          class="text-xs text-base-content/55"
         >
           No catalog plugins published yet — new plugins arrive with Fermix releases.
         </p>
@@ -1280,7 +1311,10 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 class="text-sm font-semibold">Google</h3>
+          <div class="flex items-center gap-1.5">
+            <h3 class="text-sm font-semibold">Google</h3>
+            <.oauth_help provider="google" />
+          </div>
           <p class="text-xs text-base-content/55">Calendar, Gmail, and Drive</p>
         </div>
         <span class="badge badge-ghost badge-sm">OAuth desktop client</span>
@@ -1315,7 +1349,10 @@ defmodule FermixWebWeb.SetupLive.Components do
       class="mt-5 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
     >
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <h3 class="text-sm font-semibold">{@oauth.display_name}</h3>
+        <div class="flex items-center gap-1.5">
+          <h3 class="text-sm font-semibold">{@oauth.display_name}</h3>
+          <.oauth_help provider={@oauth.provider} />
+        </div>
         <span class="badge badge-ghost badge-sm">OAuth client</span>
       </div>
 
@@ -1336,6 +1373,47 @@ defmodule FermixWebWeb.SetupLive.Components do
       </div>
     </section>
     """
+  end
+
+  # Info "i" next to a provider heading: hover shows where to create the OAuth
+  # client; clicking opens that provider's credentials page in a new tab.
+  attr :provider, :string, required: true
+
+  defp oauth_help(assigns) do
+    {desc, url} = oauth_help_content(assigns.provider)
+    assigns = assign(assigns, desc: desc, url: url)
+
+    ~H"""
+    <a
+      href={@url}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="tooltip tooltip-bottom z-10 text-base-content/45 hover:text-base-content"
+      data-tip={@desc}
+      aria-label={"How to get #{@provider} OAuth credentials"}
+    >
+      <.icon name="hero-information-circle" class="size-4" />
+    </a>
+    """
+  end
+
+  defp oauth_help_content("google") do
+    {"Google Cloud Console → APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app. Paste the Client ID and secret.",
+     "https://console.cloud.google.com/apis/credentials"}
+  end
+
+  defp oauth_help_content("github") do
+    {"GitHub → Settings → Developer settings → OAuth Apps → New. Set the callback to http://127.0.0.1/auth/callback, then paste the Client ID and secret.",
+     "https://github.com/settings/developers"}
+  end
+
+  defp oauth_help_content("notion") do
+    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1 — use localhost), then paste the OAuth Client ID and secret.",
+     "https://www.notion.so/my-integrations"}
+  end
+
+  defp oauth_help_content(provider) do
+    {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
   end
 
   # The per-provider OAuth-client form: client id/secret + redirect port,
@@ -2141,6 +2219,19 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp format_context(ctx) when is_integer(ctx) and ctx >= 1000, do: "#{div(ctx, 1000)}k ctx"
   defp format_context(ctx) when is_integer(ctx), do: "#{ctx} ctx"
   defp format_context(_), do: ""
+
+  # Is the pane currently being edited the primary provider? Used to scope the
+  # global sub-agent-model selector to a single pane.
+  defp editing_primary?(statuses, provider),
+    do: Enum.any?(statuses, fn s -> s.provider == provider and s.primary? end)
+
+  # A set sub-agent model that the shown catalog doesn't list (e.g. configured
+  # while a different provider was primary) — render it as a selectable option so
+  # saving the pane preserves it instead of resetting to "Same as main".
+  defp subagent_model_custom?(value, _models) when value in [nil, ""], do: false
+
+  defp subagent_model_custom?(value, models) when is_binary(value),
+    do: not Enum.any?(models, fn {id, _label, _ctx} -> id == value end)
 
   defp format_policy_counts(policy_counts) when map_size(policy_counts) == 0, do: "none"
 

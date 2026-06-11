@@ -70,6 +70,30 @@ defmodule FermixCore.Providers.ReasoningEffort do
   end
 
   @doc """
+  Clamps a canonical level into a provider's supported range: above the ceiling
+  clamps down to the ceiling, below the floor clamps up to the floor, a
+  supported level passes through unchanged. A range fit (never an error), used
+  to overlay one routing-level effort onto each route of a possibly
+  multi-provider chain without rejecting it. A provider with no known levels
+  returns the level unchanged.
+  """
+  @spec clamp(level(), provider()) :: level()
+  def clamp(level, provider) when level in @levels and is_atom(provider) do
+    case levels_for(provider) do
+      [] -> level
+      supported -> clamp_into(level, supported)
+    end
+  end
+
+  defp clamp_into(level, supported) do
+    cond do
+      level in supported -> level
+      rank(level) < rank(List.first(supported)) -> List.first(supported)
+      true -> List.last(supported)
+    end
+  end
+
+  @doc """
   Maps a canonical level to a provider's wire value.
 
     * `:omit` — send no reasoning/effort field (`:none` on a provider that supports it).

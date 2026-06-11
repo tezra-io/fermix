@@ -167,7 +167,10 @@ defmodule FermixWebWeb.SetupLive do
       :ok ->
         answers =
           []
-          |> maybe_put_string(:provider, params["provider"])
+          # :edit_provider (not :provider) — saving a provider's settings configures
+          # THAT provider's block without promoting it to primary. Primary is set
+          # only on initial setup (first provider) or via the "Set primary" action.
+          |> maybe_put_string(:edit_provider, params["provider"])
           |> maybe_put_string(:default_model, params["default_model"])
           |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
           |> maybe_put_string(:fast, params["fast"])
@@ -175,6 +178,7 @@ defmodule FermixWebWeb.SetupLive do
           |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
           |> maybe_put_string(:xai_api_key, params["xai_api_key"])
           |> put_auth_mode_answer(params["provider"], params["auth_mode"])
+          |> put_subagent_model_answer(params)
 
         {:noreply,
          save_answers(socket, answers, "Provider saved.", Map.get(root, "__nav"),
@@ -773,6 +777,8 @@ defmodule FermixWebWeb.SetupLive do
     %{
       provider: current.provider,
       default_model: present_or(Map.get(params, "default_model"), current.default_model),
+      # "" (same as main) is a meaningful selection — keep it, don't fall back.
+      subagent_model: Map.get(params, "subagent_model", current.subagent_model),
       reasoning_effort:
         parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
       fast: parse_fast_field(Map.get(params, "fast"), current.fast),
@@ -790,10 +796,19 @@ defmodule FermixWebWeb.SetupLive do
       provider: provider,
       default_model:
         Keyword.get(provider_block, :default_model) || ModelCatalog.default_model_for(provider),
+      subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
       fast: Keyword.get(provider_block, :fast, false),
       auth_mode: Keyword.get(provider_block, :auth_mode, :api_key)
     }
+  end
+
+  # nil = "same as main model"; lives in [fermix_core.routing], not the provider
+  # block (docs/design/SUBAGENT_MODEL_SELECTION.md §7c).
+  defp routing_subagent_model(snapshot) do
+    snapshot
+    |> get_fermix_core(:routing)
+    |> Keyword.get(:subagent_model)
   end
 
   defp build_provider_statuses(snapshot) do
@@ -1850,6 +1865,16 @@ defmodule FermixWebWeb.SetupLive do
       answers
     else
       [{key, value} | answers]
+    end
+  end
+
+  # The sub-agent model <select> always submits ("" = same as main). Pass it
+  # through even when blank so the wizard clears an existing pin
+  # (docs/design/SUBAGENT_MODEL_SELECTION.md §7a/§7c).
+  defp put_subagent_model_answer(answers, params) do
+    case Map.fetch(params, "subagent_model") do
+      {:ok, value} -> [{:subagent_model, value} | answers]
+      :error -> answers
     end
   end
 

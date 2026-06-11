@@ -80,6 +80,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Capabilities are available through the capability registry for built-in tools and MCP tools.
     - Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb.
     - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
+      - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
       - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
       - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms). It is a first-class built-in, not a fallback.
@@ -102,6 +103,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - When a task splits into independent parts, delegate. Use `subagents` to spawn a separate worker for each narrow part and run them in parallel — never hand one worker a multi-part job. You may delegate even if the user did not ask for subagents.
     - Prefer more narrow workers over fewer broad ones: one worker = one question, one source, one angle. If a part is still broad, split it further before delegating. Width is cheap; a worker handed too much overshoots.
     - Describe each task as a goal. Do not name which tools a subagent should use — it selects its own from a controlled surface (read, web, MCP/plugins, skills, sandbox-bounded shell; no direct writes).
+    - Never choose a sub-agent model yourself — omit the `subagents` `model` argument and the configured default applies. Pass a `model` (a known slug) only when the user explicitly asked the sub-agents to use a specific one; it applies to that one call and reverts to the default next time. You cannot change your own model this way.
     - Workers gather; you reason. Judgment, comparison, and synthesis stay with you — pull the workers' findings into one answer; don't push your thinking down into a worker. Don't delegate tightly-coupled reasoning or trivial work where coordination overhead exceeds the benefit.
     - Do not claim work ran in parallel unless `subagents` ran multiple workers concurrently. Synthesize the returned results yourself and state any important gaps or failures.
     """
@@ -164,7 +166,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.map_join("\n", &format_plugin/1)
 
     "## Plugins\n" <>
-      "Each plugin bundles a skill and tools. Open its skill with `skill_view`, then call its tools.\n" <>
+      "These connected integrations own their surface — prefer their tools over the browser, web, or shell for it. Open a plugin's skill with `skill_view` first, then call its tools. If a needed plugin shows a status instead of tools it is not connected; offer to connect it on the setup page rather than scraping.\n" <>
       "<plugins>\n#{body}\n</plugins>"
   end
 

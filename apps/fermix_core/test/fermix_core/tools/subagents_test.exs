@@ -14,19 +14,22 @@ defmodule FermixCore.Tools.SubagentsTest do
 
     @turns :subagents_mock_turns
     @caps :subagents_mock_caps
+    @models :subagents_mock_models
 
     def init do
       cleanup()
       {:ok, _} = Agent.start_link(fn -> [] end, name: @turns)
       {:ok, _} = Agent.start_link(fn -> [] end, name: @caps)
+      {:ok, _} = Agent.start_link(fn -> [] end, name: @models)
       :ok
     end
 
     def set_turns(turns), do: Agent.update(@turns, fn _ -> turns end)
     def captured_capabilities, do: Agent.get(@caps, & &1)
+    def captured_models, do: Agent.get(@models, & &1)
 
     def cleanup do
-      Enum.each([@turns, @caps], fn name ->
+      Enum.each([@turns, @caps, @models], fn name ->
         case Process.whereis(name) do
           nil -> :ok
           pid -> try_stop(pid)
@@ -41,8 +44,9 @@ defmodule FermixCore.Tools.SubagentsTest do
     end
 
     @impl true
-    def chat(messages, capabilities, _opts) do
+    def chat(messages, capabilities, opts) do
       Agent.update(@caps, fn prior -> prior ++ [Enum.map(capabilities, & &1.name)] end)
+      Agent.update(@models, fn prior -> prior ++ [opts[:model]] end)
       maybe_slow(messages)
       {:ok, build_turn(pop_turn(), messages, capabilities)}
     end
@@ -149,6 +153,13 @@ defmodule FermixCore.Tools.SubagentsTest do
 
   setup do
     :ok = MockAdapter.init()
+
+    # Reset [fermix_core.routing] so a leaked host config can't poison the
+    # inherit-default workers (known `mix test` host-config leak).
+    routing = Application.get_env(:fermix_core, :routing, [])
+    Application.put_env(:fermix_core, :routing, [])
+    on_exit(fn -> Application.put_env(:fermix_core, :routing, routing) end)
+
     suffix = System.unique_integer([:positive])
     registry = :"subagents_registry_#{suffix}"
     agent_supervisor = :"subagents_agent_sup_#{suffix}"
@@ -256,6 +267,84 @@ defmodule FermixCore.Tools.SubagentsTest do
 
     test "the arity-0 callback matches the regular schema" do
       assert Subagents.parameters() == Subagents.dynamic_parameters(%{})
+    end
+
+    test "advertises the optional per-call model/provider/effort override" do
+      props = Subagents.dynamic_parameters(%{}).properties
+      assert props.model.type == "string"
+      assert props.model.description =~ "Omit unless the user explicitly asked"
+      assert props.provider.enum == ["openai_codex", "openai", "anthropic", "xai"]
+      assert props.reasoning_effort.enum == ["none", "low", "medium", "high", "xhigh", "max"]
+    end
+  end
+
+  describe "subagent model override" do
+    test "a per-call model override runs the workers on that model", ctx do
+      MockAdapter.set_turns([text_turn("done")])
+      tasks = [%{"id" => "a", "task" => "do a"}]
+
+      _ =
+        Subagents.execute(%{"tasks" => tasks, "model" => "gpt-5.5"}, context(ctx))
+        |> decode_output()
+
+      assert "gpt-5.5" in MockAdapter.captured_models()
+    end
+
+    test "the per-call override also applies to ultra fan-out workers", ctx do
+      MockAdapter.set_turns([text_turn("done")])
+      tasks = [%{"id" => "a", "task" => "do a"}]
+
+      _ =
+        Subagents.execute(
+          %{"tasks" => tasks, "model" => "gpt-5.5"},
+          context(ctx, %{subagent_mode: :ultra})
+        )
+        |> decode_output()
+
+      assert "gpt-5.5" in MockAdapter.captured_models()
+    end
+
+    test "the configured subagent_model is used when no per-call model is given", ctx do
+      Application.put_env(:fermix_core, :routing, subagent_model: "gpt-5.4-mini")
+      MockAdapter.set_turns([text_turn("done")])
+      tasks = [%{"id" => "a", "task" => "do a"}]
+
+      _ = Subagents.execute(%{"tasks" => tasks}, context(ctx)) |> decode_output()
+
+      assert "gpt-5.4-mini" in MockAdapter.captured_models()
+    end
+
+    test "with no per-call arg and no config, workers keep the inherited default", ctx do
+      MockAdapter.set_turns([text_turn("done")])
+      tasks = [%{"id" => "a", "task" => "do a"}]
+
+      _ = Subagents.execute(%{"tasks" => tasks}, context(ctx)) |> decode_output()
+
+      # definition.model stays nil -> the adapter clause falls back to "mock-model".
+      assert "mock-model" in MockAdapter.captured_models()
+    end
+
+    test "an invalid per-call reasoning_effort fails the whole call before spawning", ctx do
+      tasks = [%{"id" => "a", "task" => "do a"}]
+
+      assert {:ok, %{success: false, error: error}} =
+               Subagents.execute(
+                 %{"tasks" => tasks, "reasoning_effort" => "bananas"},
+                 context(ctx)
+               )
+
+      assert error =~ "reasoning_effort"
+      assert MockAdapter.captured_models() == []
+    end
+
+    test "an invalid per-call provider fails the whole call before spawning", ctx do
+      tasks = [%{"id" => "a", "task" => "do a"}]
+
+      assert {:ok, %{success: false, error: error}} =
+               Subagents.execute(%{"tasks" => tasks, "provider" => "nonprovider"}, context(ctx))
+
+      assert error =~ "provider"
+      assert MockAdapter.captured_models() == []
     end
   end
 

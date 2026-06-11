@@ -10,6 +10,7 @@ defmodule FermixCore.Agents.AgentServer do
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Providers.RoutingOverrides
 
   @type run_context :: %{
           optional(:task_context) => String.t() | nil,
@@ -291,13 +292,19 @@ defmodule FermixCore.Agents.AgentServer do
   defp route_chain(definition, routing) do
     strict? = definition.provider != nil or definition.model != nil
 
-    case {strict?, routing.ordered_routes} do
-      {false, [_ | _] = inherited} ->
-        inherited
+    routes =
+      case {strict?, routing.ordered_routes} do
+        {false, [_ | _] = inherited} ->
+          inherited
 
-      _strict_or_uninherited ->
-        [RouteResolver.resolve!(definition_overrides(definition, routing))]
-    end
+        _strict_or_uninherited ->
+          [RouteResolver.resolve!(definition_overrides(definition, routing))]
+      end
+
+    # A definition-level effort (set from [fermix_core.routing]/per-call args)
+    # overlays each route's reasoning_effort, clamped per provider — so lowering
+    # the thinking level keeps the model and the failover chain (§5c).
+    RoutingOverrides.apply_effort(routes, definition.reasoning_effort)
   end
 
   defp definition_overrides(definition, routing) do

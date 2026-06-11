@@ -198,8 +198,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "data:image/"
       refute html =~ "Weather"
       assert html =~ "OAuth desktop client"
-      # The static catalog line replaced the old staleness line + refresh button.
-      assert html =~ "Plugin catalog ships with Fermix"
+      # Provider groups carry an info "i" linking to where to create the client.
+      assert html =~ "How to get google OAuth credentials"
+      refute html =~ "Available from the catalog"
+      refute html =~ "Plugin catalog ships with Fermix"
       refute html =~ ~s(phx-click="catalog_refresh")
       refute html =~ "coming later"
       refute html =~ "data-plugin-auth-trigger"
@@ -421,6 +423,65 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Reasoning effort"
       assert html =~ ~s(value="xhigh")
       refute html =~ ~s(value="minimal")
+    end
+
+    test "provider pane offers a Sub-agent model select that persists to routing", %{conn: conn} do
+      routing = Application.get_env(:fermix_core, :routing, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :routing, routing) end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai"})
+        |> render_change()
+
+      assert html =~ "Sub-agent model"
+      assert html =~ "Same as main model"
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai",
+          openai_api_key: "sk-x",
+          subagent_model: "gpt-5.4-mini"
+        }
+      )
+      |> render_submit()
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      routing_cfg = Keyword.get(persisted.fermix_core, :routing, [])
+      assert Keyword.get(routing_cfg, :subagent_model) == "gpt-5.4-mini"
+    end
+
+    test "the sub-agent model select renders a stored value not in the pane's catalog", %{
+      conn: conn
+    } do
+      routing = Application.get_env(:fermix_core, :routing, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :routing, routing) end)
+      # claude-haiku-4-5 is an Anthropic model; the default pane (openai) does not list it.
+      Application.put_env(:fermix_core, :routing, subagent_model: "claude-haiku-4-5")
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      # Rendered as a selectable "(current)" option so saving the pane preserves it
+      # instead of resetting to "Same as main".
+      assert render(view) =~ "claude-haiku-4-5 (current)"
+    end
+
+    test "the sub-agent model select appears only on the primary provider's pane", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      # The default pane is openai (the primary via agent.provider) -> select shown.
+      assert render(view) =~ "Sub-agent model"
+
+      # Switch to a non-primary provider pane -> the global select is hidden there.
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "anthropic"})
+        |> render_change()
+
+      refute html =~ "Sub-agent model"
     end
 
     test "selecting a new keyed backend persists its key", %{conn: conn, tmp_home: tmp_home} do
@@ -1331,9 +1392,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Demo news reader from the catalog"
       assert html =~ "data:image/png;base64,#{Base.encode64("png-bytes")}"
 
-      assert html =~
-               "Plugin catalog ships with Fermix — new plugins arrive with `fermix upgrade`."
-
+      refute html =~ "Available from the catalog"
+      refute html =~ "Plugin catalog ships with Fermix"
       refute html =~ ~s(phx-click="catalog_refresh")
       refute html =~ "coming later"
     end

@@ -1,5 +1,6 @@
 defmodule FermixCore.Jobs.RunnerTest do
-  use ExUnit.Case, async: true
+  # async: false — the cron-routing tests mutate the shared :routing app env.
+  use ExUnit.Case, async: false
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -91,7 +92,13 @@ defmodule FermixCore.Jobs.RunnerTest do
     start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
     start_supervised!({CapabilityRegistry, name: capability_registry})
 
+    # Reset [fermix_core.routing] so a leaked host cron_* config can't change
+    # which route an unpinned job resolves (known mix test host-config leak).
+    routing = Application.get_env(:fermix_core, :routing, [])
+    Application.put_env(:fermix_core, :routing, [])
+
     on_exit(fn ->
+      Application.put_env(:fermix_core, :routing, routing)
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
       FermixTestSupport.SafeRm.rm_rf!(output_base_dir)
     end)
@@ -660,6 +667,88 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert_raise ArgumentError, ~r/unsupported scheduled job provider/, fn ->
         Runner.provider_atom("gemini")
       end
+    end
+  end
+
+  describe "cron model routing" do
+    @script [
+      %{content: "done", usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}}
+    ]
+
+    test "an unpinned job resolves the configured cron_* default and records route_used", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      Application.put_env(:fermix_core, :routing,
+        cron_model: "claude-haiku-4-5",
+        cron_reasoning_effort: "low"
+      )
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Cron Default", task_prompt: "Run.")
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        script: @script
+      )
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      route_used = stored_run.job_config_snapshot["route_used"]
+      assert route_used["provider"] == "anthropic"
+      assert route_used["model"] == "claude-haiku-4-5"
+      assert route_used["reasoning_effort"] == "low"
+    end
+
+    test "a pinned job ignores the cron_* default", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      Application.put_env(:fermix_core, :routing, cron_model: "claude-haiku-4-5")
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Pinned",
+                 task_prompt: "Run.",
+                 provider: "xai",
+                 model: "grok-4.3"
+               )
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        script: @script
+      )
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      route_used = stored_run.job_config_snapshot["route_used"]
+      assert route_used["provider"] == "xai"
+      assert route_used["model"] == "grok-4.3"
+    end
+
+    test "an unpinned job with no cron config uses the primary chain", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      Application.put_env(:fermix_core, :routing, [])
+
+      assert {:ok, {job, run}} = create_claimed_job(repo, name: "No Cron", task_prompt: "Run.")
+
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        script: @script
+      )
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      # No cron override -> today's primary/fallback chain (default :openai in test env).
+      assert stored_run.job_config_snapshot["route_used"]["provider"] == "openai"
     end
   end
 end

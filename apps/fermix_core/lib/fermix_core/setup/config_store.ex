@@ -1089,27 +1089,34 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_routing(nil), do: []
 
+  # subagent_*/cron_* drive delegated-worker and scheduled-job model selection
+  # (docs/design/SUBAGENT_MODEL_SELECTION.md); kept lax strings here and
+  # validated at the consumption seam by FermixCore.Providers.RoutingOverrides.
   defp normalize_routing(config) do
     []
     |> put_if_present(
-      :default_provider,
-      normalize_string(lookup(config, "default_provider", :default_provider))
+      :subagent_provider,
+      normalize_string(lookup(config, "subagent_provider", :subagent_provider))
     )
     |> put_if_present(
-      :default_model,
-      normalize_string(lookup(config, "default_model", :default_model))
+      :subagent_model,
+      normalize_string(lookup(config, "subagent_model", :subagent_model))
     )
     |> put_if_present(
-      :coding_model,
-      normalize_string(lookup(config, "coding_model", :coding_model))
+      :subagent_reasoning_effort,
+      normalize_string(lookup(config, "subagent_reasoning_effort", :subagent_reasoning_effort))
     )
     |> put_if_present(
-      :research_model,
-      normalize_string(lookup(config, "research_model", :research_model))
+      :cron_provider,
+      normalize_string(lookup(config, "cron_provider", :cron_provider))
     )
     |> put_if_present(
-      :review_model,
-      normalize_string(lookup(config, "review_model", :review_model))
+      :cron_model,
+      normalize_string(lookup(config, "cron_model", :cron_model))
+    )
+    |> put_if_present(
+      :cron_reasoning_effort,
+      normalize_string(lookup(config, "cron_reasoning_effort", :cron_reasoning_effort))
     )
   end
 

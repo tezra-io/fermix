@@ -90,4 +90,26 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
                {:error, {:unsupported, :auto, :anthropic}}
     end
   end
+
+  describe "clamp/2" do
+    test "a supported level passes through unchanged" do
+      assert ReasoningEffort.clamp(:high, :openai) == :high
+      assert ReasoningEffort.clamp(:max, :anthropic) == :max
+      assert ReasoningEffort.clamp(:none, :xai) == :none
+    end
+
+    test "above the ceiling clamps down to the ceiling" do
+      assert ReasoningEffort.clamp(:max, :openai) == :xhigh
+      assert ReasoningEffort.clamp(:max, :xai) == :high
+      assert ReasoningEffort.clamp(:xhigh, :xai) == :high
+    end
+
+    test "below the floor clamps up to the floor (unlike to_provider, which rejects)" do
+      assert ReasoningEffort.clamp(:none, :anthropic) == :low
+    end
+
+    test "a provider with no known levels returns the level unchanged" do
+      assert ReasoningEffort.clamp(:high, :unknown) == :high
+    end
+  end
 end
