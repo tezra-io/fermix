@@ -20,6 +20,49 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "routing_overrides/0" do
+    setup do
+      original = Application.get_env(:fermix_core, :routing, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :routing, original) end)
+    end
+
+    test "ok when nothing is configured (inherit)" do
+      Application.put_env(:fermix_core, :routing, [])
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "subagent: inherits main"
+      assert result.detail =~ "cron: inherits main"
+    end
+
+    test "ok and summarizes valid subagent/cron overrides" do
+      Application.put_env(:fermix_core, :routing,
+        subagent_model: "gpt-5.4-mini",
+        cron_provider: "anthropic",
+        cron_reasoning_effort: "low"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "model=gpt-5.4-mini"
+      assert result.detail =~ "provider=anthropic"
+      assert result.detail =~ "effort=low"
+    end
+
+    test "fails on a typo'd cron provider" do
+      Application.put_env(:fermix_core, :routing, cron_provider: "anthropi")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "cron_provider"
+    end
+
+    test "fails on an invalid subagent effort" do
+      Application.put_env(:fermix_core, :routing, subagent_reasoning_effort: "turbo")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "subagent_reasoning_effort"
+    end
+  end
+
   describe "web_search/1" do
     setup do
       original = Application.get_env(:fermix_core, :tools, [])

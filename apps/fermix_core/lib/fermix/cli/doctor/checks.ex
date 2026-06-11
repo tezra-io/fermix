@@ -13,6 +13,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
@@ -641,6 +642,33 @@ defmodule Fermix.CLI.Doctor.Checks do
     else
       ok("auth perms", "no auth.json present")
     end
+  end
+
+  @doc """
+  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*` model-routing keys.
+  A typo'd provider/effort — especially in the UI-less `cron_*` keys — is caught
+  here at the operator's desk rather than at the next unattended job fire.
+  (Whether a routing provider is actually authed is the `auth_probe` check's job.)
+  """
+  @spec routing_overrides() :: result()
+  def routing_overrides do
+    subagent = RoutingOverrides.subagent()
+    cron = RoutingOverrides.cron()
+    ok("routing", "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}")
+  rescue
+    error in ArgumentError -> fail("routing", Exception.message(error))
+  end
+
+  defp describe_override(%{provider: nil, model: nil, reasoning_effort: nil}), do: "inherits main"
+
+  defp describe_override(override) do
+    [
+      override.provider && "provider=#{override.provider}",
+      override.model && "model=#{override.model}",
+      override.reasoning_effort && "effort=#{override.reasoning_effort}"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(", ")
   end
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}

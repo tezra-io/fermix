@@ -19,6 +19,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
   alias FermixCore.Setup.ConfigStore
 
@@ -527,17 +528,34 @@ defmodule FermixCore.Jobs.Runner do
   # primaries) raise here and fail the run loudly.
   defp job_routes(job) do
     case route_opts(job) do
-      [] ->
-        case Selection.ordered_routes() do
-          {:ok, routes} ->
-            routes
+      [] -> unpinned_routes()
+      explicit -> [RouteResolver.resolve!(explicit)]
+    end
+  end
 
-          {:error, reason} ->
-            raise ArgumentError, "scheduled job route selection failed: #{inspect(reason)}"
-        end
+  # An unpinned job uses the global [fermix_core.routing] cron_* default if set,
+  # else today's primary/fallback chain — with cron_reasoning_effort overlaid on
+  # whichever chain results (docs/design/SUBAGENT_MODEL_SELECTION.md §5d). An
+  # invalid cron_* value raises here and fails the run loudly, as before.
+  defp unpinned_routes do
+    override = RoutingOverrides.infer_provider(RoutingOverrides.cron())
 
-      explicit ->
-        [RouteResolver.resolve!(explicit)]
+    base =
+      case {override.provider, override.model} do
+        {nil, nil} -> primary_chain()
+        _pin -> [RouteResolver.resolve!(provider: override.provider, model: override.model)]
+      end
+
+    RoutingOverrides.apply_effort(base, override.reasoning_effort)
+  end
+
+  defp primary_chain do
+    case Selection.ordered_routes() do
+      {:ok, routes} ->
+        routes
+
+      {:error, reason} ->
+        raise ArgumentError, "scheduled job route selection failed: #{inspect(reason)}"
     end
   end
 
@@ -795,9 +813,30 @@ defmodule FermixCore.Jobs.Runner do
       "memory_read_scopes" => job.memory_read_scopes,
       "memory_write_scope" => job.memory_write_scope,
       "delivery_mode" => job.delivery_mode,
-      "delivery_target" => job.delivery_target
+      "delivery_target" => job.delivery_target,
+      # The route actually resolved for this run — for an unpinned job that used
+      # the global cron_* default, job.provider/job.model are nil while this
+      # records what ran (docs/design/SUBAGENT_MODEL_SELECTION.md §5d).
+      "route_used" => route_used(job)
     }
   end
+
+  defp route_used(job) do
+    case job_routes(job) do
+      [{route_key, adapter_opts} | _] ->
+        %{
+          "provider" => to_string(route_key.provider),
+          "model" => route_key.model,
+          "reasoning_effort" => stringify(adapter_opts[:reasoning_effort])
+        }
+
+      _empty ->
+        nil
+    end
+  end
+
+  defp stringify(nil), do: nil
+  defp stringify(value), do: to_string(value)
 
   defp capability_policy_snapshot(job) do
     %{

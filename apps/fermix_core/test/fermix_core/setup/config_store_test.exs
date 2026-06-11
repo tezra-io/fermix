@@ -255,6 +255,49 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
   end
 
+  test "save/load round-trips subagent/cron routing keys and drops the removed dormant keys" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        routing: [
+          # removed dormant keys (old config) — must degrade cleanly on next save
+          coding_model: "old-coding-model",
+          default_provider: "openai",
+          # live keys
+          subagent_provider: "openai",
+          subagent_model: "gpt-5.4-mini",
+          subagent_reasoning_effort: "low",
+          cron_model: "claude-haiku-4-5"
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.routing]"
+    assert contents =~ ~s(subagent_model = "gpt-5.4-mini")
+    refute contents =~ "coding_model"
+    refute contents =~ "default_provider"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    routing = Keyword.get(loaded.fermix_core, :routing, [])
+
+    assert Keyword.get(routing, :subagent_provider) == "openai"
+    assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
+    assert Keyword.get(routing, :subagent_reasoning_effort) == "low"
+    assert Keyword.get(routing, :cron_model) == "claude-haiku-4-5"
+    refute Keyword.has_key?(routing, :coding_model)
+    refute Keyword.has_key?(routing, :default_provider)
+  end
+
   test "save/load round-trips plugin and oauth provider config" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

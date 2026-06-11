@@ -551,6 +551,11 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
   def save_answers(%WizardState{} = state, answers) do
+    # Model/effort/fast writes target the provider being EDITED (the web pane's
+    # `:edit_provider`), not the primary — so editing a fallback's settings doesn't
+    # have to promote it. Falls back to the active/primary provider when unset (CLI).
+    target = edit_provider_target(answers)
+
     snapshot =
       state.config_snapshot
       |> drop_unanswered_env_only_secrets(answers)
@@ -565,9 +570,10 @@ defmodule FermixCore.Setup.Wizard do
         blank?(Keyword.get(answers, :provider)),
         promotion_excluded_providers(answers)
       )
-      |> put_default_model(Keyword.get(answers, :default_model))
-      |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
-      |> put_fast(Keyword.get(answers, :fast))
+      |> put_default_model(Keyword.get(answers, :default_model), target)
+      |> put_subagent_model(Keyword.get(answers, :subagent_model))
+      |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort), target)
+      |> put_fast(Keyword.get(answers, :fast), target)
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
@@ -678,11 +684,37 @@ defmodule FermixCore.Setup.Wizard do
   # snapshot); it becomes primary via the explicit provider answer.
   defp maybe_promote_newly_configured(snapshot, false, _excluded), do: snapshot
 
+  # Auto-promote ONLY during initial setup, i.e. when no primary has been chosen
+  # yet — the first provider configured becomes primary. Once a primary exists,
+  # a newly configured provider stays a FALLBACK; promotion is then an explicit
+  # "Set primary" action (which sends a :provider answer -> put_primary_selection).
   defp maybe_promote_newly_configured(snapshot, true, excluded) do
-    case newly_configured_providers(snapshot, excluded) do
-      [] -> snapshot
-      # Catalog order — deterministic when one save configures several.
-      [provider | _rest] -> mark_primary_provider(snapshot, provider)
+    if primary_established?(snapshot) do
+      snapshot
+    else
+      case newly_configured_providers(snapshot, excluded) do
+        [] -> snapshot
+        # Catalog order — deterministic when one save configures several.
+        [provider | _rest] -> mark_primary_provider(snapshot, provider)
+      end
+    end
+  end
+
+  # A primary counts as "established" only when the chosen provider (a primary
+  # flag, or the legacy `agent.provider`) is actually CONFIGURED. An unconfigured
+  # default — e.g. the compiled-in `agent.provider = :openai` on a fresh install —
+  # does not count, so the first provider the operator configures still becomes
+  # primary. Once a configured primary exists, newly configured providers stay
+  # fallbacks (promotion is then the explicit "Set primary" action).
+  defp primary_established?(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    providers = Keyword.get(fermix_core, :providers, [])
+    agent = Keyword.get(fermix_core, :agent, [])
+
+    case PrimaryConfig.chosen_in(providers, agent) do
+      {:ok, nil} -> false
+      {:ok, provider} -> Selection.configured?(provider, Keyword.get(providers, provider, []))
+      {:error, _multiple} -> true
     end
   end
 
@@ -939,16 +971,12 @@ defmodule FermixCore.Setup.Wizard do
     if is_nil(sentinel), do: snapshot, else: put_openai_secret(snapshot, sentinel)
   end
 
-  defp put_openai_secret(snapshot, sentinel) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
-
-    openai =
-      providers
-      |> Keyword.get(:openai, [])
-      |> Keyword.put(:api_key, sentinel)
-
-    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
-  end
+  # Delegate to the shared writer so other [fermix_core.*] sections (routing,
+  # personalization, agent, …) are preserved. The bespoke version replaced the
+  # whole :fermix_core with only :providers — wiping every sibling section on an
+  # openai-key-only save (this was the personalization-survival / subagent-model
+  # reset bug).
+  defp put_openai_secret(snapshot, sentinel), do: put_provider_secret(snapshot, :openai, sentinel)
 
   defp put_anthropic_api_key(snapshot, nil), do: snapshot
   defp put_anthropic_api_key(snapshot, ""), do: snapshot
@@ -1014,16 +1042,8 @@ defmodule FermixCore.Setup.Wizard do
     raise ArgumentError, "auth_mode must be :api_key or :oauth, got: #{inspect(other)}"
   end
 
-  defp put_anthropic_secret(snapshot, sentinel) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
-
-    anthropic =
-      providers
-      |> Keyword.get(:anthropic, [])
-      |> Keyword.put(:api_key, sentinel)
-
-    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :anthropic, anthropic))
-  end
+  defp put_anthropic_secret(snapshot, sentinel),
+    do: put_provider_secret(snapshot, :anthropic, sentinel)
 
   defp put_primary_selection(snapshot, nil), do: snapshot
   defp put_primary_selection(snapshot, ""), do: snapshot
@@ -1070,43 +1090,53 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp put_default_model(snapshot, nil), do: snapshot
-  defp put_default_model(snapshot, ""), do: snapshot
+  # `target` is the provider whose block receives the write — the edited provider
+  # (web pane), or the active/primary provider when unset (CLI). Decoupling this
+  # from the primary is what lets a fallback be edited without being promoted.
+  defp put_default_model(snapshot, nil, _target), do: snapshot
+  defp put_default_model(snapshot, "", _target), do: snapshot
 
-  defp put_default_model(snapshot, value) when is_binary(value) do
+  defp put_default_model(snapshot, value, target) when is_binary(value) do
     case String.trim(value) do
       "" -> raise ArgumentError, "default_model cannot be blank"
-      trimmed -> update_active_provider_block(snapshot, :default_model, trimmed)
+      trimmed -> update_provider_block(snapshot, target || active_provider(snapshot), :default_model, trimmed)
     end
   end
 
-  defp put_reasoning_effort(snapshot, nil), do: snapshot
-  defp put_reasoning_effort(snapshot, ""), do: snapshot
+  defp put_reasoning_effort(snapshot, nil, _target), do: snapshot
+  defp put_reasoning_effort(snapshot, "", _target), do: snapshot
 
-  defp put_reasoning_effort(snapshot, value) do
+  defp put_reasoning_effort(snapshot, value, target) do
     effort = parse_reasoning_effort!(value)
-    provider = active_provider(snapshot)
+    provider = target || active_provider(snapshot)
 
     if provider in [:openai, :openai_codex, :anthropic, :xai] do
-      update_active_provider_block(snapshot, :reasoning_effort, effort)
+      update_provider_block(snapshot, provider, :reasoning_effort, effort)
     else
       raise ArgumentError,
             "reasoning_effort applies to :openai, :openai_codex, :anthropic, or :xai providers only; selected provider is #{inspect(provider)}"
     end
   end
 
-  defp put_fast(snapshot, nil), do: snapshot
-  defp put_fast(snapshot, ""), do: snapshot
+  defp put_fast(snapshot, nil, _target), do: snapshot
+  defp put_fast(snapshot, "", _target), do: snapshot
 
-  defp put_fast(snapshot, value) do
+  defp put_fast(snapshot, value, target) do
     fast = parse_fast!(value)
-    provider = active_provider(snapshot)
+    provider = target || active_provider(snapshot)
 
     if provider == :openai_codex do
-      update_active_provider_block(snapshot, :fast, fast)
+      update_provider_block(snapshot, provider, :fast, fast)
     else
       raise ArgumentError,
             "fast mode applies to :openai_codex provider only; selected provider is #{inspect(provider)}"
+    end
+  end
+
+  defp edit_provider_target(answers) do
+    case Keyword.get(answers, :edit_provider) do
+      value when value in [nil, ""] -> nil
+      value -> parse_provider!(value)
     end
   end
 
@@ -1175,8 +1205,7 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp update_active_provider_block(snapshot, key, value) do
-    provider = active_provider(snapshot)
+  defp update_provider_block(snapshot, provider, key, value) when is_atom(provider) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     providers = Keyword.get(fermix_core, :providers, [])
     block = providers |> Keyword.get(provider, []) |> Keyword.put(key, value)
@@ -1186,6 +1215,64 @@ defmodule FermixCore.Setup.Wizard do
       :fermix_core,
       Keyword.put(fermix_core, :providers, Keyword.put(providers, provider, block))
     )
+  end
+
+  # "Same as main" (blank, or equal to the resolved main model) is encoded as the
+  # ABSENCE of the key — we DELETE rather than write it. This is deliberate, and
+  # the reason we don't just always-write `subagent_model` defaulting to the main
+  # model: "inherit" is not a model, it's "whatever the main agent actually
+  # resolves to at run time", which a stored string cannot represent. A written
+  # value is a frozen pin, so always-writing would (1) silently NOT follow a later
+  # main-model change (drift), (2) make workers resolve a strict single route and
+  # lose the main agent's inherited failover chain, and (3) diverge from an
+  # env-driven main model (FERMIX_DEFAULT_MODEL). Absence avoids all three — the
+  # worker inherits the live chain. Keeping it absent costs this one delete branch;
+  # an always-present key would cost sync-on-main-change logic instead. The UI
+  # still shows an explicit "Same as main model" default, so absence is invisible
+  # to the operator. (docs/design/SUBAGENT_MODEL_SELECTION.md §7a + §15 review.)
+  #
+  # Writes to [fermix_core.routing], never the provider block. `subagent_provider`
+  # is intentionally not written — resolve-time defaulting follows the live primary.
+  #
+  # An ABSENT answer (nil — the key wasn't part of this save) PRESERVES the existing
+  # value; only an explicit blank/main-model value means "inherit" (delete). Without
+  # this distinction, every save that doesn't carry a subagent_model answer (the CLI,
+  # a realtime-key save, a fallback-provider pane) would wipe the setting.
+  defp put_subagent_model(snapshot, nil), do: snapshot
+
+  defp put_subagent_model(snapshot, value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if trimmed == "" or trimmed == active_provider_default_model(snapshot) do
+      delete_routing_key(snapshot, :subagent_model)
+    else
+      put_routing_key(snapshot, :subagent_model, trimmed)
+    end
+  end
+
+  defp active_provider_default_model(snapshot) do
+    provider = active_provider(snapshot)
+
+    configured =
+      snapshot
+      |> Map.get(:fermix_core, [])
+      |> Keyword.get(:providers, [])
+      |> Keyword.get(provider, [])
+      |> Keyword.get(:default_model)
+
+    configured || ModelCatalog.default_model_for(provider)
+  end
+
+  defp put_routing_key(snapshot, key, value) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    routing = fermix_core |> Keyword.get(:routing, []) |> Keyword.put(key, value)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :routing, routing))
+  end
+
+  defp delete_routing_key(snapshot, key) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    routing = fermix_core |> Keyword.get(:routing, []) |> Keyword.delete(key)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :routing, routing))
   end
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot

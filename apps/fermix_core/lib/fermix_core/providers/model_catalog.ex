@@ -86,6 +86,17 @@ defmodule FermixCore.Providers.ModelCatalog do
     Enum.any?(models_for(provider), fn {model_id, _label, _ctx} -> model_id == id end)
   end
 
+  @doc """
+  The first catalog provider whose model list contains `id`, or `nil` if none
+  do. Catalog order (`providers/0`) breaks ties for a slug shared across
+  providers (an OpenAI/Codex model resolves to the earlier entry); callers that
+  know the active provider should prefer it before falling back here.
+  """
+  @spec provider_for_model(String.t()) :: provider() | nil
+  def provider_for_model(id) when is_binary(id) do
+    Enum.find(providers(), fn provider -> known_model?(provider, id) end)
+  end
+
   @spec context_window_for(atom(), String.t()) :: pos_integer()
   def context_window_for(provider, model_id) when is_binary(model_id) do
     provider

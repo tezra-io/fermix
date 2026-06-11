@@ -26,6 +26,7 @@ defmodule FermixCore.Agents.AgentDefinition do
           system_prompt: String.t(),
           model: String.t() | nil,
           provider: atom() | nil,
+          reasoning_effort: atom() | nil,
           temperature: float() | nil,
           capabilities: [String.t()],
           allowed_tools: [String.t()] | nil,
@@ -59,6 +60,9 @@ defmodule FermixCore.Agents.AgentDefinition do
     :system_prompt,
     :model,
     :provider,
+    # Set only by Tools.Subagents from [fermix_core.routing]/per-call args; NOT
+    # parsed from SKILL.md frontmatter (docs/design/SUBAGENT_MODEL_SELECTION.md §5a).
+    :reasoning_effort,
     :temperature,
     :capabilities,
     :allowed_tools,

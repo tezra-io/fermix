@@ -126,4 +126,20 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
     end
   end
+
+  describe "provider_for_model/1" do
+    test "resolves a provider-unique slug" do
+      assert ModelCatalog.provider_for_model("claude-opus-4-8") == :anthropic
+      assert ModelCatalog.provider_for_model("grok-4.3") == :xai
+    end
+
+    test "a slug shared across catalogs resolves to the first provider in catalog order" do
+      # gpt-5.5 is in both :openai_codex and :openai; providers/0 lists codex first.
+      assert ModelCatalog.provider_for_model("gpt-5.5") == :openai_codex
+    end
+
+    test "an unknown slug is nil" do
+      assert ModelCatalog.provider_for_model("definitely-not-a-real-model") == nil
+    end
+  end
 end
