@@ -4,7 +4,7 @@ Thanks for your interest in Fermix — an Elixir-native multi-agent AI platform.
 
 ## Prerequisites
 
-- Elixir `~> 1.19` and Erlang/OTP `28`
+- Elixir `~> 1.17` and Erlang/OTP `28` (matches the build constraint in every `mix.exs`)
 - Standard build tools (for precompiled native deps such as SQLite via `exqlite`)
 
 ## Getting started

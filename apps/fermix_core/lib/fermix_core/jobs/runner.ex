@@ -144,7 +144,7 @@ defmodule FermixCore.Jobs.Runner do
         status: "running",
         started_at: now,
         prompt_snapshot: loop_input.prompt_snapshot,
-        job_config_snapshot: job_config_snapshot(state.job),
+        job_config_snapshot: job_config_snapshot(state.job, loop_input),
         capability_policy_snapshot: capability_policy_snapshot(state.job),
         updated_at: now
       })
@@ -378,6 +378,7 @@ defmodule FermixCore.Jobs.Runner do
        %{
          messages: messages,
          prompt_snapshot: prompt_snapshot(messages),
+         route_used: resolved_route_used(loop_opts, state.job),
          loop_opts: Keyword.put(loop_opts, :messages, messages)
        }}
     end
@@ -393,6 +394,9 @@ defmodule FermixCore.Jobs.Runner do
     %{
       messages: messages,
       prompt_snapshot: prompt_snapshot(messages) <> "\n\nPrompt setup error: #{inspect(reason)}",
+      # Route resolution is what failed here — there is no route to record, and
+      # re-resolving for the snapshot would just raise the same error again.
+      route_used: nil,
       loop_opts: [messages: messages]
     }
   end
@@ -577,7 +581,16 @@ defmodule FermixCore.Jobs.Runner do
       raise ArgumentError, "unsupported scheduled job provider #{inspect(provider)}"
   end
 
-  def provider_atom(other) when is_atom(other), do: other
+  # Atoms get the same gate as strings — an unknown atom used to pass
+  # through and fail later in RouteResolver with a less specific message
+  # (M12 §2.3-6).
+  def provider_atom(other) when is_atom(other) do
+    if other in ModelCatalog.providers() do
+      other
+    else
+      raise ArgumentError, "unsupported scheduled job provider #{inspect(other)}"
+    end
+  end
 
   defp capability_policy([]), do: @default_capability_policy
   defp capability_policy(nil), do: @default_capability_policy
@@ -797,7 +810,7 @@ defmodule FermixCore.Jobs.Runner do
     |> String.trim()
   end
 
-  defp job_config_snapshot(job) do
+  defp job_config_snapshot(job, loop_input) do
     %{
       "job_id" => job.id,
       "name" => job.name,
@@ -817,22 +830,43 @@ defmodule FermixCore.Jobs.Runner do
       # The route actually resolved for this run — for an unpinned job that used
       # the global cron_* default, job.provider/job.model are nil while this
       # records what ran (docs/design/SUBAGENT_MODEL_SELECTION.md §5d).
-      "route_used" => route_used(job)
+      "route_used" => loop_input.route_used
     }
   end
 
-  defp route_used(job) do
+  # Resolved once, in `build_loop_input`'s success branch, so the `mark_running`
+  # snapshot never re-resolves. The old second resolution re-raised on the
+  # route-failure path — stranding the run mid-mark instead of recording a clean
+  # failure (the fallback input carries `route_used: nil`). When the loop got a
+  # resolved chain we reuse it directly; an injected adapter (tests) has no
+  # `:routes`, so we resolve the job's config route once to record what its
+  # config implies.
+  defp resolved_route_used(loop_opts, job) do
+    case Keyword.get(loop_opts, :routes) do
+      [{route_key, adapter_opts} | _] ->
+        route_used_map(route_key.provider, route_key.model, adapter_opts)
+
+      _no_routes ->
+        job_route_descriptor(job)
+    end
+  end
+
+  defp job_route_descriptor(job) do
     case job_routes(job) do
       [{route_key, adapter_opts} | _] ->
-        %{
-          "provider" => to_string(route_key.provider),
-          "model" => route_key.model,
-          "reasoning_effort" => stringify(adapter_opts[:reasoning_effort])
-        }
+        route_used_map(route_key.provider, route_key.model, adapter_opts)
 
       _empty ->
         nil
     end
+  end
+
+  defp route_used_map(provider, model, adapter_opts) do
+    %{
+      "provider" => stringify(provider),
+      "model" => model,
+      "reasoning_effort" => stringify(adapter_opts[:reasoning_effort])
+    }
   end
 
   defp stringify(nil), do: nil

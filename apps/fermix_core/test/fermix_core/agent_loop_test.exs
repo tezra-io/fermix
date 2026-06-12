@@ -9,6 +9,7 @@ defmodule FermixCore.AgentLoopTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.OpenAI.ChatCompletions
 
   # -- Mock adapter --
 
@@ -831,6 +832,182 @@ defmodule FermixCore.AgentLoopTest do
   end
 
   # -- Stream callback (channel streaming seam, docs/design/CHANNEL_STREAMING.md §5.1) --
+
+  describe "run/1 routed through ChatCompletions as OpenRouter (integration)" do
+    test "drives a two-round tool loop with attribution headers", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        send(test_pid, {:referer, Plug.Conn.get_req_header(conn, "http-referer")})
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        has_tool_result? = Enum.any?(decoded["messages"], &(&1["role"] == "tool"))
+
+        response =
+          if has_tool_result? do
+            %{
+              "model" => "anthropic/claude-sonnet-4.6",
+              "choices" => [
+                %{"message" => %{"role" => "assistant", "content" => "routed and done"}}
+              ],
+              "usage" => %{"prompt_tokens" => 9, "completion_tokens" => 4, "total_tokens" => 13}
+            }
+          else
+            %{
+              "model" => "anthropic/claude-sonnet-4.6",
+              "choices" => [
+                %{
+                  "message" => %{
+                    "role" => "assistant",
+                    "content" => nil,
+                    "tool_calls" => [
+                      %{
+                        "id" => "call_or_1",
+                        "type" => "function",
+                        "function" => %{"name" => "echo", "arguments" => ~s({"text":"hi"})}
+                      }
+                    ]
+                  }
+                }
+              ],
+              "usage" => %{"prompt_tokens" => 7, "completion_tokens" => 5, "total_tokens" => 12}
+            }
+          end
+
+        Req.Test.json(conn, response)
+      end)
+
+      route_key = %{
+        provider: :openrouter,
+        model: "anthropic/claude-sonnet-4.6",
+        auth_mode: :api_key,
+        base_url: "https://openrouter.ai/api/v1"
+      }
+
+      assert {:ok, result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "echo hi"}],
+                 routes: [
+                   {route_key,
+                    [
+                      api_key: "sk-or-test",
+                      provider: :openrouter,
+                      auth: :api_key,
+                      model: "anthropic/claude-sonnet-4.6",
+                      base_url: "https://openrouter.ai/api/v1",
+                      req_options: [plug: {Req.Test, __MODULE__}]
+                    ]}
+                 ],
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert result.response == "routed and done"
+      assert result.iterations == 2
+      assert_receive {:referer, ["https://fermix.sh"]}
+    end
+  end
+
+  describe "run/1 routed through ChatCompletions as Ollama (integration)" do
+    test "drives a keyless two-round tool loop plus a toolless compaction-shaped call", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool])
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        send(test_pid, {:auth, Plug.Conn.get_req_header(conn, "authorization")})
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        has_tool_result? = Enum.any?(decoded["messages"], &(&1["role"] == "tool"))
+
+        response =
+          if has_tool_result? do
+            %{
+              "model" => "qwen3:32b",
+              "choices" => [
+                %{"message" => %{"role" => "assistant", "content" => "local and done"}}
+              ],
+              "usage" => %{"prompt_tokens" => 9, "completion_tokens" => 4, "total_tokens" => 13}
+            }
+          else
+            %{
+              "model" => "qwen3:32b",
+              "choices" => [
+                %{
+                  "message" => %{
+                    "role" => "assistant",
+                    "content" => nil,
+                    "tool_calls" => [
+                      %{
+                        "id" => "call_ol_1",
+                        "type" => "function",
+                        "function" => %{"name" => "echo", "arguments" => ~s({"text":"hi"})}
+                      }
+                    ]
+                  }
+                }
+              ],
+              "usage" => %{"prompt_tokens" => 7, "completion_tokens" => 5, "total_tokens" => 12}
+            }
+          end
+
+        Req.Test.json(conn, response)
+      end)
+
+      adapter_opts = [
+        provider: :ollama,
+        auth: :none,
+        model: "qwen3:32b",
+        base_url: "http://localhost:11434/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      route_key = %{
+        provider: :ollama,
+        model: "qwen3:32b",
+        auth_mode: :none,
+        base_url: "http://localhost:11434/v1"
+      }
+
+      assert {:ok, result} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "echo hi"}],
+                 routes: [{route_key, adapter_opts}],
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert result.response == "local and done"
+      assert result.iterations == 2
+      assert_receive {:auth, []}
+
+      # Compaction/memory-review path: capabilities: [] must omit `tools`
+      # and still work keyless.
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "tools")
+
+        Req.Test.json(conn, %{
+          "model" => "qwen3:32b",
+          "choices" => [%{"message" => %{"role" => "assistant", "content" => "summary"}}],
+          "usage" => %{"prompt_tokens" => 3, "completion_tokens" => 1, "total_tokens" => 4}
+        })
+      end)
+
+      assert {:ok, turn} =
+               ChatCompletions.chat(
+                 [%{role: "user", content: "summarize"}],
+                 [],
+                 adapter_opts
+               )
+
+      assert turn.content == "summary"
+    end
+  end
 
   describe "run/1 with stream_callback" do
     test "emits session_started then iteration_started per provider call and injects the callback into adapter_opts",

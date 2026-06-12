@@ -292,6 +292,80 @@ defmodule FermixCore.Providers.RouteResolverTest do
       refute Keyword.has_key?(opts, :api_key)
     end
 
+    test "openrouter resolves via the generic descriptor resolver" do
+      {route_key, opts} =
+        RouteResolver.resolve!(provider: :openrouter, api_key: "sk-or-test")
+
+      assert route_key == %{
+               provider: :openrouter,
+               model: "anthropic/claude-sonnet-4.6",
+               auth_mode: :api_key,
+               base_url: "https://openrouter.ai/api/v1"
+             }
+
+      assert opts[:provider] == :openrouter
+      assert opts[:auth] == :api_key
+      assert opts[:api_key] == "sk-or-test"
+      assert opts[:model] == "anthropic/claude-sonnet-4.6"
+      # effort?: false providers never carry a reasoning_effort opt (M12 §5.2).
+      refute Keyword.has_key?(opts, :reasoning_effort)
+    end
+
+    test "openrouter honors config block model/base_url/api_key" do
+      original = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          openrouter: [
+            api_key: "sk-or-config",
+            base_url: "https://proxy.example/api/v1",
+            default_model: "z-ai/glm-5.1"
+          ]
+        )
+
+        {route_key, opts} = RouteResolver.resolve!(provider: :openrouter)
+
+        assert route_key.model == "z-ai/glm-5.1"
+        assert route_key.base_url == "https://proxy.example/api/v1"
+        assert opts[:api_key] == "sk-or-config"
+      after
+        Application.put_env(:fermix_core, :providers, original)
+      end
+    end
+
+    test "ollama resolves keyless with the descriptor timeout default" do
+      original = Application.get_env(:fermix_core, :providers, [])
+
+      try do
+        Application.put_env(:fermix_core, :providers,
+          ollama: [base_url: "http://tail.example:11434/v1"]
+        )
+
+        {route_key, opts} = RouteResolver.resolve!(provider: :ollama)
+
+        assert route_key == %{
+                 provider: :ollama,
+                 model: "qwen3:32b",
+                 auth_mode: :none,
+                 base_url: "http://tail.example:11434/v1"
+               }
+
+        assert opts[:provider] == :ollama
+        assert opts[:auth] == :none
+        refute Keyword.has_key?(opts, :api_key)
+        refute Keyword.has_key?(opts, :reasoning_effort)
+        # Descriptor default under explicit req_options (plain Keyword.merge).
+        assert opts[:req_options][:receive_timeout] == 300_000
+
+        {_route_key, opts} =
+          RouteResolver.resolve!(provider: :ollama, req_options: [receive_timeout: 5_000])
+
+        assert opts[:req_options][:receive_timeout] == 5_000
+      after
+        Application.put_env(:fermix_core, :providers, original)
+      end
+    end
+
     test "unknown provider raises ArgumentError" do
       assert_raise ArgumentError, ~r/no resolver for provider/, fn ->
         RouteResolver.resolve!(provider: :mystery)

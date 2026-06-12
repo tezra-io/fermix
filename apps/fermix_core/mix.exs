@@ -36,6 +36,9 @@ defmodule FermixCore.MixProject do
       {:finch, "~> 0.21"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
+      # Compile-time-embedded IANA tz database (no runtime network fetch, unlike
+      # :tzdata) so scheduled-job cron timezones resolve in the Burrito binary.
+      {:tz, "~> 0.28"},
       {:websockex, "~> 0.4"}
     ] ++ opik_dep()
   end

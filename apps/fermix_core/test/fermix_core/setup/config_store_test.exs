@@ -1220,7 +1220,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     File.write!(Path.join(tmp_home, "config.toml"), """
     [fermix_core.providers.openai]
-    auth_mode = "api_key"
     api_key = "sk-x"
     reasoning_effort = "absurd"
     """)
@@ -1236,7 +1235,83 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(openai, :api_key) == "sk-x"
   end
 
-  test "normalize_openai drops auth_mode from hand-edited TOML" do
+  test "openrouter and ollama blocks round-trip through dump -> parse -> normalize" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openrouter]
+    api_key = "sk-or-disk"
+    base_url = "https://proxy.example/api/v1"
+    default_model = "z-ai/glm-5.1"
+    primary = true
+
+    [fermix_core.providers.ollama]
+    base_url = "http://localhost:11434/v1"
+    default_model = "qwen3:32b"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:openrouter], :api_key) == "sk-or-disk"
+    assert Keyword.get(providers[:openrouter], :base_url) == "https://proxy.example/api/v1"
+    assert Keyword.get(providers[:openrouter], :primary) == true
+    assert Keyword.get(providers[:ollama], :base_url) == "http://localhost:11434/v1"
+    assert Keyword.get(providers[:ollama], :default_model) == "qwen3:32b"
+
+    # Idempotent round-trip: save the loaded snapshot and reload byte-stable
+    # provider blocks (secure_secrets: false keeps the plaintext fixture).
+    assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+    assert Keyword.get(reloaded.fermix_core, :providers) ==
+             Keyword.get(loaded.fermix_core, :providers)
+  end
+
+  test "rejects an api_key in the keyless ollama block from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.ollama]
+    api_key = "nonsense"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown key\(s\): api_key/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "rejects an unknown legacy agent provider from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.agent]
+    provider = "gemini"
+    """)
+
+    # M12 §2.3-1: an unknown provider used to silently normalize to nil and
+    # boot on the default provider — the worst silent failure on record.
+    assert_raise ArgumentError, ~r/provider = "gemini" is unknown/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "rejects unknown keys (auth_mode) in the openai block from hand-edited TOML" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
@@ -1250,15 +1325,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     api_key = "sk-x"
     """)
 
-    assert {:ok, loaded} = ConfigStore.load_runtime_config()
-
-    openai =
-      loaded.fermix_core
-      |> Keyword.get(:providers, [])
-      |> Keyword.get(:openai, [])
-
-    refute Keyword.has_key?(openai, :auth_mode)
-    assert Keyword.get(openai, :api_key) == "sk-x"
+    # M12 §4: user-authored keys outside the descriptor allowlist raise at
+    # the parse boundary instead of being silently dropped.
+    assert_raise ArgumentError, ~r/unknown key\(s\): auth_mode/, fn ->
+      ConfigStore.load_runtime_config()
+    end
   end
 
   test "load_runtime_config rejects invalid compaction values from hand-edited TOML" do

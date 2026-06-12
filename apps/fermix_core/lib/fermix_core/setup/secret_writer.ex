@@ -235,6 +235,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     path = Path.join(dir, "secret")
 
     with :ok <- File.mkdir(dir),
+         :ok <- File.chmod(dir, 0o700),
          :ok <- File.write(path, value, [:binary]),
          :ok <- File.chmod(path, 0o600) do
       {:ok, path}

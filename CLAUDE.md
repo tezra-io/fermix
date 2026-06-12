@@ -82,6 +82,7 @@ mix format --check-formatted
 - `docs/MILESTONE_9_3_PET_ANIMATION.md` — M9.3 design (draft) — pure-SwiftUI animation pass for FermixPet: `TimelineView` sine motion, PNG cache, expression cross-fade, audio-RMS speaking pulse, blink, one-shot event reactions
 - `docs/design/ANTHROPIC_XAI_PROVIDER_IMPLEMENTATION.md` — Anthropic + xAI provider design (draft) — API-key + OAuth auth modes (Claude Code / Grok subscription), Claude Code request emulation, provider touchpoint checklist
 - `docs/design/SUBAGENT_MODEL_SELECTION.md` — Sub-agent & cron model selection (implemented) — a smaller/cheaper model + thinking level for delegated `subagents` workers (config + wizard + web setup + on-the-fly `subagents` `model` arg) and unpinned cron jobs (`[fermix_core.routing]` `subagent_*`/`cron_*`, validated by `Providers.RoutingOverrides`); main agent never changes its own model. §15 = implementation log
+- `docs/design/MILESTONE_12_PROVIDER_EXPANSION.md` — M12 design (implemented) — OpenRouter + Ollama as first-class providers over the new `Providers.Descriptor` registry (replaces the ~25 hand-maintained provider lists), generic api-key/keyless resolver, `auth_mode :none`, ChatCompletions reuse + provider-attribution fix, fail-loud sweep for the silent unknown-provider traps; Gemini/Perplexity/Bedrock designed then descoped — §3.3 is the do-not-implement reference for a later wave. §16 = implementation log + deviations
 
 ## Known Pitfalls
 - Update this section every time the repo teaches you the same lesson twice.

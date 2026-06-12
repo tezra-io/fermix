@@ -512,7 +512,13 @@ defmodule FermixCore.AgentLoop do
         "Error executing tool: #{inspect(reason)}"
     end
   rescue
-    e -> "Error: tool raised #{Exception.message(e)}"
+    e ->
+      Logger.error(
+        "Tool execution raised: #{Exception.message(e)}\n" <>
+          Exception.format_stacktrace(__STACKTRACE__)
+      )
+
+      "Error: tool raised #{Exception.message(e)}"
   end
 
   defp parse_arguments(json) when is_binary(json) do

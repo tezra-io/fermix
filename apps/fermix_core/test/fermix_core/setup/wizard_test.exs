@@ -306,6 +306,51 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
   end
 
+  test "M12 provider fields persist: openrouter secret + ollama base_url (keyless)" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m12-fields")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "openrouter",
+               openrouter_api_key: "sk-or-key",
+               default_model: "z-ai/glm-5.1"
+             )
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               edit_provider: "ollama",
+               ollama_base_url: "http://tail.example:11434/v1"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    # Secret routes through the writer stub; the snapshot stores a sentinel.
+    assert Keyword.get(providers[:openrouter], :api_key) == "sk-or-key"
+    assert Keyword.get(providers[:openrouter], :primary) == true
+    assert Keyword.get(providers[:openrouter], :default_model) == "z-ai/glm-5.1"
+
+    assert {:ok, "sk-or-key"} = FermixTestSupport.SecretWriterStub.get(:openrouter_api_key)
+
+    # Plain field persists as-is; configuring ollama does not steal primary.
+    assert Keyword.get(providers[:ollama], :base_url) == "http://tail.example:11434/v1"
+    refute Keyword.get(providers[:ollama], :primary) == true
+
+    contents = File.read!(ConfigStore.path())
+    assert contents =~ "[fermix_core.providers.openrouter]"
+    assert contents =~ ~s(api_key = "@keyring")
+    assert contents =~ "[fermix_core.providers.ollama]"
+    assert contents =~ ~s(base_url = "http://tail.example:11434/v1")
+  end
+
   test "a newly configured provider stays a fallback when a primary already exists" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-fallback")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -1650,7 +1695,6 @@ defmodule FermixCore.Setup.WizardTest do
     test "moves already persisted API key to keyring on save", %{tmp_home: tmp_home} do
       File.write!(Path.join(tmp_home, "config.toml"), """
       [fermix_core.providers.openai]
-      auth_mode = "api_key"
       api_key = "sk-already-on-disk"
       """)
 

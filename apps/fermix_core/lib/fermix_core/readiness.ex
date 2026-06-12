@@ -13,9 +13,11 @@ defmodule FermixCore.Readiness do
   """
 
   alias FermixCore.Config
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
+  alias FermixCore.Setup.SecretPaths
 
   @typedoc """
   Public readiness state.
@@ -74,13 +76,28 @@ defmodule FermixCore.Readiness do
   # from PrimaryConfig (flag first, legacy agent.provider as migration input).
   defp provider_failure do
     case PrimaryConfig.primary() do
-      {:ok, provider} -> primary_provider_failure(known_provider(provider))
-      {:error, :multiple_primary} -> multiple_primary_action()
+      {:ok, provider} ->
+        if provider in Descriptor.ids() do
+          primary_provider_failure(provider)
+        else
+          unknown_provider_action(provider)
+        end
+
+      {:error, :multiple_primary} ->
+        multiple_primary_action()
     end
   end
 
-  defp known_provider(provider) do
-    if provider in [:openai, :openai_codex, :anthropic, :xai], do: provider, else: :openai
+  # An unknown configured provider is a visible setup failure, never a
+  # silent coercion to :openai (M12 §2.3-2 — same family as the
+  # ConfigStore unknown-provider raise).
+  defp unknown_provider_action(provider) do
+    %{
+      component: "provider:config",
+      action:
+        "Unknown provider #{inspect(provider)} configured — expected one of " <>
+          "#{Enum.map_join(Descriptor.ids(), ", ", &Atom.to_string/1)}."
+    }
   end
 
   defp primary_provider_failure(provider) do
@@ -123,15 +140,17 @@ defmodule FermixCore.Readiness do
     end
   end
 
-  defp invalid_auth_mode?(provider, block) when provider in [:anthropic, :xai] do
-    case Keyword.get(block, :auth_mode) do
-      nil -> false
-      mode when mode in [:oauth, "oauth", :api_key, "api_key"] -> false
-      _other -> true
+  defp invalid_auth_mode?(provider, block) do
+    if Descriptor.multi_auth_mode?(Descriptor.fetch!(provider)) do
+      case Keyword.get(block, :auth_mode) do
+        nil -> false
+        mode when mode in [:oauth, "oauth", :api_key, "api_key"] -> false
+        _other -> true
+      end
+    else
+      false
     end
   end
-
-  defp invalid_auth_mode?(_provider, _block), do: false
 
   defp missing_credentials_action(:openai, _block) do
     %{component: "provider:openai", action: "Set OPENAI_API_KEY."}
@@ -164,6 +183,21 @@ defmodule FermixCore.Readiness do
     else
       %{component: "provider:xai", action: "Set XAI_API_KEY."}
     end
+  end
+
+  # Descriptor providers without bespoke flows: the action names the
+  # secret's env var (api_key mode) or the missing base_url (keyless).
+  defp missing_credentials_action(provider, _block) do
+    descriptor = Descriptor.fetch!(provider)
+
+    action =
+      case {Descriptor.default_auth_mode(descriptor), descriptor.secrets} do
+        {:api_key, [secret | _rest]} -> "Set #{SecretPaths.fetch!(secret).env}."
+        {:none, _secrets} -> "Set [fermix_core.providers.#{provider}] base_url."
+        _other -> "Configure the #{descriptor.label} provider in `fermix setup`."
+      end
+
+    %{component: "provider:#{provider}", action: action}
   end
 
   defp oauth_mode?(block), do: Keyword.get(block, :auth_mode) in [:oauth, "oauth"]

@@ -6,6 +6,42 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added — Provider Expansion (M12)
+- OpenRouter (`openrouter`) and Ollama (`ollama`) as first-class LLM
+  providers: primary/fallback selection, sub-agent and cron routing, CLI
+  wizard + web setup panes, doctor probes, and telemetry/Opik attribution.
+  OpenRouter rides Chat Completions with vendor-prefixed model ids and
+  static app-attribution headers; Ollama is keyless against the local
+  OpenAI-compat endpoint (`base_url` presence marks it configured) with a
+  300s receive timeout and a doctor probe that checks the *served*
+  `num_ctx` against the catalog window via the native `/api/show`.
+- Setup-page live model discovery (`FermixCore.Providers.ModelListing`):
+  the Ollama pane probes the configured server URL and lists only the
+  locally installed models; the OpenRouter pane lists the live upstream
+  catalog (tool-capable, newest first). Fetch failures show loud guidance
+  plus a free-form model input. The "Model behavior" panel is hidden for
+  providers without effort/fast knobs.
+- `FermixCore.Providers.Descriptor`: a static provider registry (labels,
+  auth modes, setup fields, config-key allowlists, default base URLs) that
+  the provider lists across routing, selection, config, setup wizard, web
+  setup, doctor, readiness, and health now derive from.
+
+### Changed
+- Fail-loud config validation: unknown keys in a `[fermix_core.providers.*]`
+  TOML block and an unknown legacy `[fermix_core.agent] provider` now stop
+  boot with a clear message instead of being silently dropped; an unknown
+  readiness provider is a visible setup failure instead of silently
+  coercing to `openai`; scheduled-job provider *atoms* are validated like
+  strings.
+- `/health` reports one entry per configured provider (with the primary
+  flagged) instead of a hardcoded single `openai` card.
+- ChatCompletions error/telemetry attribution follows the routed provider
+  (OpenRouter/Ollama calls are no longer mislabeled `openai`).
+
+### Removed
+- `together`/`groq` accepted-but-unroutable provider strings (no resolver
+  ever existed; OpenRouter covers those vendors' models).
+
 ## [0.1.0] - 2026-05-30
 
 ### Added — Subagents Orchestration

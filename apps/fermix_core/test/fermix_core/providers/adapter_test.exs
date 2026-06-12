@@ -71,14 +71,36 @@ defmodule FermixCore.Providers.AdapterTest do
              }) == FermixCore.Providers.XAI.Responses
     end
 
-    for provider <- [:openrouter, :together, :groq] do
-      test "#{provider} routes to ChatCompletions" do
-        assert Adapter.for_route(%{
-                 provider: unquote(provider),
-                 model: "any-model",
-                 auth_mode: :api_key,
-                 base_url: "https://example.test/v1"
-               }) == ChatCompletions
+    test "ollama routes to ChatCompletions via its descriptor (keyless)" do
+      assert Adapter.for_route(%{
+               provider: :ollama,
+               model: "qwen3:32b",
+               auth_mode: :none,
+               base_url: "http://localhost:11434/v1"
+             }) == ChatCompletions
+    end
+
+    test "openrouter routes to ChatCompletions via its descriptor" do
+      assert Adapter.for_route(%{
+               provider: :openrouter,
+               model: "anthropic/claude-sonnet-4.6",
+               auth_mode: :api_key,
+               base_url: "https://openrouter.ai/api/v1"
+             }) == ChatCompletions
+    end
+
+    # together/groq were accepted-but-unroutable escape hatches (no resolver
+    # ever existed); M12 §2.3-8 removed the dead dispatch clause.
+    for provider <- [:together, :groq] do
+      test "#{provider} no longer has an adapter escape hatch" do
+        assert_raise ArgumentError, ~r/no adapter for/, fn ->
+          Adapter.for_route(%{
+            provider: unquote(provider),
+            model: "any-model",
+            auth_mode: :api_key,
+            base_url: "https://example.test/v1"
+          })
+        end
       end
     end
 

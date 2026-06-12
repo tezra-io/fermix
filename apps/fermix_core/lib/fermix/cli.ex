@@ -30,6 +30,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.UpgradeCommand
   alias Fermix.CLI.Version
   alias Fermix.CLI.VoiceCommand
+  alias FermixCore.Providers.ModelCatalog
 
   @doc """
   Dispatch entry point.
@@ -86,9 +87,9 @@ defmodule Fermix.CLI do
     Usage:
       fermix setup [--web|--cli|--terminal] [--no-browser] [--no-service] [--user|--system] [--rotate-token]
                    [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex]
-                   [--openai-api-key VALUE] [--anthropic-api-key VALUE]
-                   [--provider openai|openai_codex|anthropic]
-                   [--default-model VALUE] [--reasoning-effort none|minimal|low|medium|high|xhigh]
+                   [--openai-api-key VALUE] [--anthropic-api-key VALUE] [--xai-api-key VALUE]
+                   [--provider #{Enum.map_join(ModelCatalog.providers(), "|", &Atom.to_string/1)}]
+                   [--default-model VALUE] [--reasoning-effort none|low|medium|high|xhigh|max]
                    [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--telegram-bot-token VALUE] ...

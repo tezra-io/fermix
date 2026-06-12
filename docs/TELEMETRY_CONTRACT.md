@@ -5,8 +5,8 @@ logging. Every LLM/tool call is stamped with the `session_id` of the run that
 issued it, runs are bracketed by lifecycle events, and the JSONL trace stream is
 structured. That contract is what lets a turn — including the subagents it
 delegates to and the tools they call — be reassembled into one trace (greppable
-on its own, or rendered by the optional `fermix_opik` exporter in
-`projects/fermix-plugins`).
+on its own, or rendered by the optional in-umbrella `fermix_opik` exporter,
+`apps/fermix_opik`).
 
 **The rule:** new code must *join* this contract, not invent a parallel one.
 Concretely — never hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`;
@@ -102,9 +102,11 @@ eval/observing.
 
 ---
 
-## When does the `fermix_opik` plugin also need a change?
+## When does the `fermix_opik` exporter also need a change?
 
-The plugin is a **separate repo** (`projects/fermix-plugins`). The dividing line:
+The exporter lives **in-umbrella** (`apps/fermix_opik`, dev-only opt-in via
+`FERMIX_OPIK_ENABLED`), so its mapper/test changes land in the same diff and
+the same `mix test` gate as the provider work. The dividing line:
 
 | You added… | Plugin change needed? |
 |---|---|
@@ -120,5 +122,5 @@ Opik — the live JSONL is unaffected.
 
 - Write the telemetry assertion **red first, then green** — prove the event
   actually carries `session_id`/the fields you expect before trusting it.
-- New plugin handling: extend `aggregation_test.exs` (one trace, correct
-  nesting) and keep `fermix-plugins` green (`mix check`).
+- New exporter handling: extend `aggregation_test.exs` (one trace, correct
+  nesting) under `apps/fermix_opik`.

@@ -209,6 +209,11 @@ defmodule FermixOpik.Mapper do
   def provider_string(:openai_codex), do: "openai"
   def provider_string(:anthropic), do: "anthropic"
   def provider_string(:xai), do: "xai"
+  # Explicit clauses pin the Opik pricing tokens for the M12 providers —
+  # the catch-all would produce the same strings today, but the clause +
+  # test is the documented contract (provider playbook notes 2/34).
+  def provider_string(:openrouter), do: "openrouter"
+  def provider_string(:ollama), do: "ollama"
   def provider_string(other), do: to_string(other)
 
   defp provider_span_name(metadata) do

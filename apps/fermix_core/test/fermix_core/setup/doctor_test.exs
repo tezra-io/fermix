@@ -400,6 +400,123 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  describe "probe_provider/2 — :openrouter" do
+    test "sends a 1-token chat completion with attribution headers (mirrors the adapter)" do
+      put_provider(:openrouter, api_key: "sk-or-key", default_model: "z-ai/glm-5.1")
+
+      plug = fn conn ->
+        assert ["Bearer sk-or-key"] = Plug.Conn.get_req_header(conn, "authorization")
+        assert ["https://fermix.sh"] = Plug.Conn.get_req_header(conn, "http-referer")
+        assert ["Fermix"] = Plug.Conn.get_req_header(conn, "x-title")
+        assert conn.request_path == "/api/v1/chat/completions"
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"or-1"}))
+      end
+
+      assert {:ok, %{provider: :openrouter, model: "z-ai/glm-5.1"}} =
+               Doctor.probe_provider(:openrouter, req_options: [plug: plug])
+    end
+
+    test "classifies a 401 as auth_scope_mismatch with an OpenRouter hint" do
+      put_provider(:openrouter, api_key: "sk-or-bad")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, ~s({"error":"bad key"})) end
+
+      assert {:error, {:auth_scope_mismatch, "openrouter.ai API key", hint}} =
+               Doctor.probe_provider(:openrouter, req_options: [plug: plug])
+
+      assert hint =~ "OpenRouter API key rejected"
+    end
+
+    test "reports missing api_key as misconfigured" do
+      put_provider(:openrouter, [])
+
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:openrouter)
+      assert message =~ "openrouter provider has no api_key"
+    end
+  end
+
+  describe "probe_provider/2 — :ollama" do
+    test "probes /v1 keyless and accepts when /api/show reports a healthy num_ctx" do
+      put_provider(:ollama, base_url: "http://localhost:11434/v1", default_model: "qwen3:32b")
+
+      plug = fn conn ->
+        case conn.request_path do
+          "/v1/chat/completions" ->
+            assert [] = Plug.Conn.get_req_header(conn, "authorization")
+            Plug.Conn.send_resp(conn, 200, ~s({"id":"local"}))
+
+          "/api/show" ->
+            body =
+              Jason.encode!(%{
+                "parameters" => "num_ctx 131072",
+                "model_info" => %{"qwen3.context_length" => 131_072}
+              })
+
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.send_resp(200, body)
+        end
+      end
+
+      assert {:ok, %{provider: :ollama, model: "qwen3:32b"}} =
+               Doctor.probe_provider(:ollama, req_options: [plug: plug])
+    end
+
+    test "fails loud when the served num_ctx undercuts the catalog window" do
+      put_provider(:ollama, base_url: "http://localhost:11434/v1", default_model: "qwen3:32b")
+
+      plug = fn conn ->
+        case conn.request_path do
+          "/v1/chat/completions" ->
+            Plug.Conn.send_resp(conn, 200, ~s({"id":"local"}))
+
+          "/api/show" ->
+            conn
+            |> Plug.Conn.put_resp_header("content-type", "application/json")
+            |> Plug.Conn.send_resp(200, Jason.encode!(%{"parameters" => "num_ctx 4096"}))
+        end
+      end
+
+      assert {:error, {:misconfigured, message}} =
+               Doctor.probe_provider(:ollama, req_options: [plug: plug])
+
+      assert message =~ "num_ctx=4096"
+      assert message =~ "OLLAMA_CONTEXT_LENGTH"
+    end
+
+    test "an unreachable /api/show is inconclusive — the chat probe decides" do
+      put_provider(:ollama, base_url: "http://localhost:11434/v1", default_model: "qwen3:32b")
+
+      plug = fn conn ->
+        case conn.request_path do
+          "/v1/chat/completions" -> Plug.Conn.send_resp(conn, 200, ~s({"id":"local"}))
+          "/api/show" -> Plug.Conn.send_resp(conn, 404, "no native api")
+        end
+      end
+
+      assert {:ok, %{provider: :ollama}} =
+               Doctor.probe_provider(:ollama, req_options: [plug: plug])
+    end
+
+    test "maps a 404 model error to an `ollama pull` hint" do
+      put_provider(:ollama, base_url: "http://localhost:11434/v1", default_model: "missing:7b")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 404, ~s({"error":"model not found"})) end
+
+      assert {:error, {:misconfigured, message}} =
+               Doctor.probe_provider(:ollama, req_options: [plug: plug])
+
+      assert message =~ "ollama pull missing:7b"
+    end
+
+    test "reports a missing base_url as misconfigured (explicit opt-in)" do
+      put_provider(:ollama, [])
+
+      assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:ollama)
+      assert message =~ "no base_url configured"
+    end
+  end
+
   describe "probe_provider/2 — :openai_codex" do
     test "uses bearer token from Auth.Store without a running TokenManager" do
       dir = tmp_dir()

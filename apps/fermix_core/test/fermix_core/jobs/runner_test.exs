@@ -667,6 +667,12 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert_raise ArgumentError, ~r/unsupported scheduled job provider/, fn ->
         Runner.provider_atom("gemini")
       end
+
+      # M12 §2.3-6: unknown atoms get the same gate as strings instead of
+      # passing through to a later, less specific RouteResolver raise.
+      assert_raise ArgumentError, ~r/unsupported scheduled job provider/, fn ->
+        Runner.provider_atom(:gemini)
+      end
     end
   end
 

@@ -120,14 +120,25 @@ defmodule FermixCore.Providers.RoutingOverrides do
   Overlays `level` onto each `{route_key, adapter_opts}` route, clamped to that
   route's provider's supported range. `nil` leaves routes unchanged. Only the
   effort field is touched — model and failover chain are preserved.
+
+  Routes whose provider has no `ReasoningEffort` levels entry (effort-less
+  providers, e.g. ChatCompletions-only ones) are left untouched — stamping
+  an effort their adapter must ignore would make the telemetry/wire
+  contract accidental instead of explicit (M12 §5.2).
   """
   @spec apply_effort([{map(), keyword()}], ReasoningEffort.level() | nil) :: [{map(), keyword()}]
   def apply_effort(routes, nil), do: routes
 
   def apply_effort(routes, level) when is_list(routes) and is_atom(level) do
     Enum.map(routes, fn {%{provider: provider} = route_key, adapter_opts} ->
-      {route_key,
-       Keyword.put(adapter_opts, :reasoning_effort, ReasoningEffort.clamp(level, provider))}
+      case ReasoningEffort.levels_for(provider) do
+        [] ->
+          {route_key, adapter_opts}
+
+        _supported ->
+          {route_key,
+           Keyword.put(adapter_opts, :reasoning_effort, ReasoningEffort.clamp(level, provider))}
+      end
     end)
   end
 

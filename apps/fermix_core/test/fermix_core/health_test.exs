@@ -86,7 +86,8 @@ defmodule FermixCore.HealthTest do
              logs: Path.join(tmp_home, "logs")
            }
 
-    assert [%{name: "openai", status: :ready, auth_mode: :api_key}] = report.providers
+    assert [%{name: "openai", status: :ready, auth_mode: :api_key, primary: true}] =
+             report.providers
 
     assert Enum.any?(report.channels, fn channel ->
              channel.name == "telegram" and channel.status == :ready and
@@ -144,4 +145,38 @@ defmodule FermixCore.HealthTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  # M12 §2.3-9: one entry per configured provider (plus the primary), with
+  # honest auth modes — never a hardcoded single "openai" card.
+  test "reports every configured provider with the primary flagged" do
+    tmp_home = Path.join(System.tmp_dir!(), "fermix-health-#{System.unique_integer([:positive])}")
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [api_key: "sk-test-123"],
+      anthropic: [api_key: "sk-ant-test", primary: true]
+    )
+
+    Application.put_env(:fermix_core, :realtime, enabled: false)
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    Application.put_env(:fermix_channels, :whatsapp, enabled: false)
+    Application.put_env(:fermix_channels, :discord, enabled: false)
+    Application.put_env(:fermix_channels, :slack, enabled: false)
+    Application.put_env(:fermix_channels, :signal, enabled: false)
+
+    report =
+      Health.report(
+        boot_report: %{
+          status: :ready,
+          failures: [],
+          config_path: ConfigStore.path(),
+          restart_required?: false
+        }
+      )
+
+    assert [
+             %{name: "openai", auth_mode: :api_key, primary: false},
+             %{name: "anthropic", auth_mode: :api_key, primary: true}
+           ] = report.providers
+  end
 end
