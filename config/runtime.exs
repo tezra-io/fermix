@@ -70,36 +70,36 @@ existing_openai = Keyword.get(existing_providers, :openai, [])
 existing_openai_codex = Keyword.get(existing_providers, :openai_codex, [])
 existing_anthropic = Keyword.get(existing_providers, :anthropic, [])
 existing_xai = Keyword.get(existing_providers, :xai, [])
+existing_openrouter = Keyword.get(existing_providers, :openrouter, [])
+existing_ollama = Keyword.get(existing_providers, :ollama, [])
 existing_agent = Application.get_env(:fermix_core, :agent, [])
 
 openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
 
-# Keep in sync with FermixCore.Providers.ModelCatalog.providers/0 — config
-# files are evaluated before the app is guaranteed loaded, so the list is
-# spelled out here rather than derived.
-known_providers = ["openai", "openai_codex", "anthropic", "xai"]
+# Derived from the canonical provider registry so a new provider needs no edit
+# here. runtime.exs runs after compilation with the release's modules on the code
+# path, so this pure registry read is safe even though no application is started.
+known_providers = Enum.map(FermixCore.Providers.Descriptor.ids(), &Atom.to_string/1)
 
 # FERMIX_PROVIDER overlays the agent's provider selection. Invalid values
 # log a warning and fall through to whatever TOML / agent block already
 # carries. Env mistakes don't crash boot.
 selected_provider =
   case System.get_env("FERMIX_PROVIDER") do
-    nil ->
+    blank when blank in [nil, ""] ->
       Keyword.get(existing_agent, :provider)
-
-    "" ->
-      Keyword.get(existing_agent, :provider)
-
-    raw when raw in ["openai", "openai_codex", "anthropic", "xai"] ->
-      String.to_atom(raw)
 
     raw ->
-      IO.warn(
-        "FERMIX_PROVIDER=#{inspect(raw)} is not a known provider " <>
-          "(#{Enum.join(known_providers, " | ")}) — ignoring overlay"
-      )
+      if raw in known_providers do
+        String.to_atom(raw)
+      else
+        IO.warn(
+          "FERMIX_PROVIDER=#{inspect(raw)} is not a known provider " <>
+            "(#{Enum.join(known_providers, " | ")}) — ignoring overlay"
+        )
 
-      Keyword.get(existing_agent, :provider)
+        Keyword.get(existing_agent, :provider)
+      end
   end
 
 merged_agent =
@@ -203,12 +203,24 @@ merged_xai =
   |> put_env_overlay.(:auth_mode, "FERMIX_XAI_AUTH_MODE")
   |> then(&apply_provider_overlay.(:xai, &1))
 
+merged_openrouter =
+  existing_openrouter
+  |> put_env_overlay.(:api_key, "OPENROUTER_API_KEY")
+  |> then(&apply_provider_overlay.(:openrouter, &1))
+
+merged_ollama =
+  existing_ollama
+  |> put_env_overlay.(:base_url, "OLLAMA_BASE_URL")
+  |> then(&apply_provider_overlay.(:ollama, &1))
+
 merged_providers =
   existing_providers
   |> Keyword.put(:openai, merged_openai)
   |> Keyword.put(:openai_codex, merged_openai_codex)
   |> Keyword.put(:anthropic, merged_anthropic)
   |> Keyword.put(:xai, merged_xai)
+  |> Keyword.put(:openrouter, merged_openrouter)
+  |> Keyword.put(:ollama, merged_ollama)
 
 config :fermix_core, providers: merged_providers
 

@@ -9,7 +9,9 @@ defmodule FermixCore.Providers.ModelCatalog do
   typos are caught by the doctor probe at boot/wizard finalize.
   """
 
-  @type provider :: :openai | :openai_codex | :anthropic | :xai
+  alias FermixCore.Providers.Descriptor
+
+  @type provider :: :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama
   @type entry :: {id :: String.t(), label :: String.t(), context_window :: pos_integer()}
 
   @unknown_model_default_ctx 100_000
@@ -64,14 +66,43 @@ defmodule FermixCore.Providers.ModelCatalog do
     {"grok-code-fast-1", "Grok Code Fast (cheap, coding)", 256_000}
   ]
 
+  # The canonical ordered provider list lives in the Descriptor registry
+  # (order = fallback order + auto-promotion tie-break); the catalog
+  # delegates so the two can never drift.
   @spec providers() :: [provider()]
-  def providers, do: [:openai_codex, :openai, :anthropic, :xai]
+  def providers, do: Descriptor.ids()
+
+  # OpenRouter ids are vendor-prefixed and use dots where Anthropic-direct
+  # uses dashes; windows mirror the per-vendor catalogs above (M12 §3.1,
+  # [verify] ids/introduction dates at release time — wrong ids fail in the
+  # doctor probe, not the first turn). 2026-introduced models only — the
+  # web pane's live upstream catalog offers everything else newest-first,
+  # so this curated list stays current-generation.
+  @openrouter [
+    {"anthropic/claude-sonnet-4.6", "Claude Sonnet 4.6 via OpenRouter (default)", 1_000_000},
+    {"anthropic/claude-fable-5", "Claude Fable 5 via OpenRouter", 1_000_000},
+    {"anthropic/claude-opus-4.8", "Claude Opus 4.8 via OpenRouter", 1_000_000},
+    {"openai/gpt-5.5", "GPT-5.5 via OpenRouter", 1_050_000},
+    {"x-ai/grok-4.3", "Grok 4.3 via OpenRouter", 1_000_000}
+  ]
+
+  # Ollama windows are model CAPABILITY; the local server may serve far
+  # less (default num_ctx is small) and truncates silently — the doctor
+  # probe checks the served num_ctx against these (M12 §3.2, [verify]
+  # ids/windows against ollama.com/library tool-capable tags).
+  @ollama [
+    {"qwen3:32b", "Qwen3 32B (default; tools)", 128_000},
+    {"gpt-oss:20b", "GPT-OSS 20B (tools)", 128_000},
+    {"llama3.3:70b", "Llama 3.3 70B (tools)", 128_000}
+  ]
 
   @spec models_for(provider()) :: [entry()]
   def models_for(:openai_codex), do: @openai_codex
   def models_for(:openai), do: @openai
   def models_for(:anthropic), do: @anthropic
   def models_for(:xai), do: @xai
+  def models_for(:openrouter), do: @openrouter
+  def models_for(:ollama), do: @ollama
 
   @spec default_model_for(provider()) :: String.t()
   def default_model_for(provider) do
@@ -110,21 +141,18 @@ defmodule FermixCore.Providers.ModelCatalog do
     end
   end
 
-  @spec max_output_tokens_for(atom(), String.t()) :: pos_integer()
+  # Anthropic-only by design: it is the one provider whose API requires an
+  # explicit `max_tokens` on every request (the only caller is
+  # `Anthropic.Messages`). Asking for any other provider is a bug — fail loud
+  # (FunctionClauseError) rather than return a misleading default.
+  @spec max_output_tokens_for(:anthropic, String.t()) :: pos_integer()
   def max_output_tokens_for(:anthropic, model_id) when is_binary(model_id) do
     Map.get(@anthropic_max_output, model_id, @default_max_output_tokens)
   end
 
-  def max_output_tokens_for(provider, model_id) when is_atom(provider) and is_binary(model_id) do
-    @default_max_output_tokens
+  defp models_for_context_window(provider) do
+    if provider in Descriptor.ids(), do: models_for(provider), else: []
   end
-
-  defp models_for_context_window(provider)
-       when provider in [:openai, :openai_codex, :anthropic, :xai] do
-    models_for(provider)
-  end
-
-  defp models_for_context_window(_provider), do: []
 
   defp emit_unknown_model(provider, model_id) do
     :telemetry.execute(

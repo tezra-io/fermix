@@ -26,6 +26,7 @@ defmodule FermixCore.Providers.Selection do
 
   alias FermixCore.Auth.Store
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.RouteResolver
@@ -90,6 +91,30 @@ defmodule FermixCore.Providers.Selection do
   def configured?(:openai_codex, _block), do: codex_profile_usable?()
   def configured?(:anthropic, block), do: key_or_oauth_configured?(block, "anthropic_oauth")
   def configured?(:xai, block), do: key_or_oauth_configured?(block, "xai_oauth")
+
+  # Descriptor providers without bespoke OAuth handling: configured? keys on
+  # the credential their single auth mode needs — api_key presence for
+  # `:api_key`, an explicit base_url for keyless `:none` (M12 §5.3). Unknown
+  # atoms fail loud with a clear message instead of a FunctionClauseError.
+  def configured?(provider, block) when is_atom(provider) do
+    case Descriptor.fetch(provider) do
+      {:ok, descriptor} ->
+        descriptor_configured?(descriptor, block)
+
+      :error ->
+        raise ArgumentError,
+              "unknown provider #{inspect(provider)}; " <>
+                "expected one of #{Enum.map_join(Descriptor.ids(), ", ", &inspect/1)}"
+    end
+  end
+
+  defp descriptor_configured?(descriptor, block) do
+    case Descriptor.default_auth_mode(descriptor) do
+      :api_key -> present?(Keyword.get(block, :api_key))
+      :none -> present?(Keyword.get(block, :base_url))
+      :oauth -> false
+    end
+  end
 
   defp order(primary, fallbacks) do
     cond do
@@ -168,7 +193,7 @@ defmodule FermixCore.Providers.Selection do
     end
   end
 
-  defp present?(value) when is_binary(value), do: value != ""
+  defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(nil), do: false
   defp present?(_value), do: true
 end

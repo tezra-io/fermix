@@ -36,10 +36,24 @@ defmodule FermixCore.Jobs.Schedule do
   end
 
   defp parse_non_empty(expr, timezone, now) do
-    with {:error, :not_interval} <- parse_interval(expr, timezone, now),
+    with :ok <- validate_timezone(timezone, now),
+         {:error, :not_interval} <- parse_interval(expr, timezone, now),
          {:error, :not_once} <- parse_once(expr, timezone),
          {:error, :not_cron} <- parse_cron(expr, timezone, now) do
       {:error, {:invalid_schedule, expr}}
+    end
+  end
+
+  # A job's timezone only affects cron wall-clock matching, but an unresolvable
+  # zone is a config error for any schedule kind — reject it up front and loud
+  # rather than store a value that silently mis-fires later (UTC is always valid
+  # and needs no database lookup).
+  defp validate_timezone(timezone, _now) when timezone in ["UTC", "Etc/UTC"], do: :ok
+
+  defp validate_timezone(timezone, now) do
+    case DateTime.shift_zone(now, timezone) do
+      {:ok, _local} -> :ok
+      {:error, _reason} -> {:error, {:invalid_timezone, timezone}}
     end
   end
 
@@ -83,7 +97,7 @@ defmodule FermixCore.Jobs.Schedule do
     fields = String.split(expr, ~r/\s+/, trim: true)
 
     with true <- valid_cron_fields?(fields),
-         {:ok, next_run_at} <- next_cron_run(fields, now) do
+         {:ok, next_run_at} <- next_cron_run(fields, timezone, now) do
       {:ok,
        %{
          kind: "cron",
@@ -121,18 +135,40 @@ defmodule FermixCore.Jobs.Schedule do
     end
   end
 
-  defp next_cron_run(fields, now) do
+  # Candidates advance in UTC (one unambiguous instant per minute), but the cron
+  # fields are matched against the candidate's wall-clock *in the job's
+  # timezone* — so "0 9 * * *" fires at 09:00 local and tracks DST. The returned
+  # instant stays UTC (what the scheduler arms on). Bounded to one year of
+  # minutes; an unsatisfiable expression returns :no_future_run.
+  defp next_cron_run(fields, timezone, now) do
     start = now |> truncate_to_minute() |> DateTime.add(60, :second)
 
     Enum.reduce_while(0..525_600, {:error, :no_future_run}, fn offset, _acc ->
       candidate = DateTime.add(start, offset * 60, :second)
 
-      if cron_match?(fields, candidate) do
+      if cron_match?(fields, in_zone!(candidate, timezone)) do
         {:halt, {:ok, candidate}}
       else
         {:cont, {:error, :no_future_run}}
       end
     end)
+  end
+
+  # Converting a UTC instant to a zone's wall-clock is always unambiguous (the
+  # gap/overlap cases only arise the other direction), and the timezone was
+  # validated in `parse_non_empty`, so a failure here is a genuine invariant
+  # break — raise rather than silently fall back to UTC.
+  defp in_zone!(%DateTime{} = dt, timezone) when timezone in ["UTC", "Etc/UTC"], do: dt
+
+  defp in_zone!(%DateTime{} = dt, timezone) do
+    case DateTime.shift_zone(dt, timezone) do
+      {:ok, local} ->
+        local
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "cannot shift #{DateTime.to_iso8601(dt)} into #{inspect(timezone)}: #{inspect(reason)}"
+    end
   end
 
   defp truncate_to_minute(%DateTime{} = value) do

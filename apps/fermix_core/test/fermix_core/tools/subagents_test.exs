@@ -273,7 +273,10 @@ defmodule FermixCore.Tools.SubagentsTest do
       props = Subagents.dynamic_parameters(%{}).properties
       assert props.model.type == "string"
       assert props.model.description =~ "Omit unless the user explicitly asked"
-      assert props.provider.enum == ["openai_codex", "openai", "anthropic", "xai"]
+
+      assert props.provider.enum ==
+               ["openai_codex", "openai", "anthropic", "xai", "openrouter", "ollama"]
+
       assert props.reasoning_effort.enum == ["none", "low", "medium", "high", "xhigh", "max"]
     end
   end

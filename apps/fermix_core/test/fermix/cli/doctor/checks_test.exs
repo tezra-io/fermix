@@ -61,6 +61,26 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :fail
       assert result.detail =~ "subagent_reasoning_effort"
     end
+
+    test "fails on a subagent_model unknown to every provider (typo/removed)" do
+      Application.put_env(:fermix_core, :routing, subagent_model: "claude-opus-4-7")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "subagent_model"
+      assert result.detail =~ "not a known model for any provider"
+    end
+
+    test "fails when an explicit provider does not offer the pinned model" do
+      Application.put_env(:fermix_core, :routing,
+        cron_provider: "openai",
+        cron_model: "claude-haiku-4-5"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "cron_model"
+      assert result.detail =~ "not a model offered by provider :openai"
+    end
   end
 
   describe "web_search/1" do

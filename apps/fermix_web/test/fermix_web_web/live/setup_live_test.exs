@@ -720,7 +720,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "anthropic"})
         |> render_change()
 
-      assert html =~ "Configuring anthropic"
+      assert html =~ "Configuring Anthropic"
       assert html =~ ~s(name="provider_form[anthropic_api_key]")
     end
 
@@ -732,7 +732,227 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "xai"})
         |> render_change()
 
-      assert html =~ "Configuring xai"
+      assert html =~ "Configuring xAI"
+    end
+
+    test "ollama pane shows a keyless base_url field and saves it", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+        |> render_change()
+
+      assert html =~ "Configuring Ollama"
+      # Keyless: a base_url plain field, no secret input, no auth-mode picker.
+      assert html =~ ~s(name="provider_form[ollama_base_url]")
+      refute html =~ ~s(name="provider_form[ollama_api_key]")
+      refute html =~ ~s(name="provider_form[auth_mode]")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "ollama",
+          ollama_base_url: "http://tail.example:11434/v1",
+          default_model: "qwen3:32b"
+        }
+      )
+      |> render_submit()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+      assert Keyword.get(providers[:ollama], :base_url) == "http://tail.example:11434/v1"
+      assert Keyword.get(providers[:ollama], :default_model) == "qwen3:32b"
+      # Editing a non-primary pane never steals primary (openai stays).
+      assert Keyword.get(providers[:openai], :primary) == true
+    end
+
+    test "an in-place edit keeps the ollama base_url input populated", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+      |> render_change()
+
+      # Type a base_url AND change another field in the same change event: the
+      # in-place re-render must not blank out the base_url the user just typed.
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{
+            provider: "ollama",
+            ollama_base_url: "http://tail.example:11434/v1",
+            default_model: "gpt-oss:20b"
+          }
+        )
+        |> render_change()
+
+      assert html =~ ~s(value="http://tail.example:11434/v1")
+    end
+
+    test "openrouter pane saves its API key through the generic field plumbing", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openrouter"})
+        |> render_change()
+
+      assert html =~ "Configuring OpenRouter"
+      assert html =~ ~s(name="provider_form[openrouter_api_key]")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openrouter",
+          openrouter_api_key: "sk-or-live",
+          default_model: "openai/gpt-5.5"
+        }
+      )
+      |> render_submit()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+      assert Keyword.get(providers[:openrouter], :api_key) == "sk-or-live"
+      assert Keyword.get(providers[:openrouter], :default_model) == "openai/gpt-5.5"
+    end
+
+    test "Model behavior panel is hidden for effort-less providers", %{conn: conn} do
+      {:ok, view, html} = live(conn, "/setup?tab=provider")
+
+      # openai (effort-capable) shows the panel…
+      assert html =~ "Model behavior"
+
+      # …openrouter and ollama (no effort, no fast) hide it entirely.
+      for provider <- ["openrouter", "ollama"] do
+        html =
+          view
+          |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: provider})
+          |> render_change()
+
+        refute html =~ "Model behavior"
+        refute html =~ ~s(name="provider_form[reasoning_effort]")
+      end
+    end
+
+    test "ollama pane lists only the installed models and shows the detected banner", %{
+      conn: conn
+    } do
+      defmodule OllamaUpListing do
+        def live?(:ollama), do: true
+        def live?(_provider), do: false
+
+        def live_models(:ollama, _opts) do
+          {:ok,
+           [
+             %{id: "qwen3:32b", label: "qwen3:32b (32.8B)", context_window: 128_000},
+             %{id: "tinyllama:1b", label: "tinyllama:1b", context_window: nil}
+           ]}
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, OllamaUpListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+        |> render_change()
+
+      assert html =~ "Ollama server detected"
+      assert html =~ "2 installed model(s)"
+      assert html =~ "qwen3:32b (32.8B)"
+      assert html =~ "tinyllama:1b"
+      # Installed models only — no static catalog guesses.
+      refute html =~ "gpt-oss:20b"
+    end
+
+    test "unreachable ollama server renders install/serve guidance and a manual input", %{
+      conn: conn
+    } do
+      defmodule OllamaDownListing do
+        def live?(:ollama), do: true
+        def live?(_provider), do: false
+
+        def live_models(:ollama, _opts),
+          do: {:error, "connection refused at http://localhost:11434/api/tags"}
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, OllamaDownListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "ollama"})
+        |> render_change()
+
+      assert html =~ "No Ollama server responded"
+      assert html =~ "ollama serve"
+      assert html =~ "ollama.com"
+      assert html =~ "connection refused"
+      # Manual model input instead of a select of uninstalled guesses.
+      assert html =~ ~s(type="text" name="provider_form[default_model]")
+    end
+
+    test "openrouter pane lists the live upstream catalog", %{conn: conn} do
+      defmodule OpenRouterLiveListing do
+        def live?(:openrouter), do: true
+        def live?(_provider), do: false
+
+        def live_models(:openrouter, _opts) do
+          {:ok,
+           [
+             %{id: "vendor/brand-new", label: "Brand New", context_window: 2_000_000},
+             %{
+               id: "anthropic/claude-sonnet-4.6",
+               label: "Claude Sonnet 4.6",
+               context_window: 1_000_000
+             }
+           ]}
+        end
+      end
+
+      Application.put_env(:fermix_web, :model_listing_impl, OpenRouterLiveListing)
+
+      on_exit(fn ->
+        Application.put_env(
+          :fermix_web,
+          :model_listing_impl,
+          FermixWebWeb.TestSupport.StaticModelListing
+        )
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openrouter"})
+        |> render_change()
+
+      assert html =~ "vendor/brand-new"
+      assert html =~ "Brand New"
+      # The static curated entries are replaced by the live catalog.
+      refute html =~ "Kimi K2.6"
     end
 
     test "Set primary flips the flag to a configured fallback without re-entering creds", %{
@@ -1568,13 +1788,14 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      # Nothing installed: the provider group renders with just the client
-      # form + hint, and the plugin itself stays a catalog card.
+      # Nothing installed: the provider group renders the client form plus the
+      # plugin's Connect card together (the catalog card lives inside the group,
+      # not split off into the bottom catalog list).
       assert html =~ ~s(data-plugin-group="github")
       assert html =~ ~s(id="oauth-client-form-github")
-      assert html =~ "Used when connecting GitHub"
       assert html =~ ~s(data-catalog-name="github")
       refute html =~ ~s(data-plugin-name="github")
+      refute html =~ "Used when connecting GitHub"
 
       html =
         view

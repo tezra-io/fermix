@@ -144,6 +144,8 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.provider_string(:openai_codex) == "openai"
     assert Mapper.provider_string(:anthropic) == "anthropic"
     assert Mapper.provider_string(:xai) == "xai"
+    assert Mapper.provider_string(:openrouter) == "openrouter"
+    assert Mapper.provider_string(:ollama) == "ollama"
     assert Mapper.provider_string(nil) == nil
   end
 

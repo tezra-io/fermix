@@ -107,6 +107,20 @@ defmodule FermixCore.ReadinessTest do
              end)
     end
 
+    # M12 §2.3-2: an unknown configured provider used to be silently
+    # coerced to :openai; it is now a visible setup failure.
+    test "an unknown legacy agent provider is a visible failure, never coerced" do
+      Application.put_env(:fermix_core, :providers, [])
+      Application.put_env(:fermix_core, :agent, provider: :bogus_provider)
+
+      report = Readiness.report()
+
+      assert Enum.any?(report.failures, fn failure ->
+               failure.component == "provider:config" and
+                 failure.action =~ "Unknown provider :bogus_provider"
+             end)
+    end
+
     test "multiple primary flags are a configuration error, never silently resolved" do
       Application.put_env(:fermix_core, :providers,
         anthropic: [primary: true, api_key: "sk-ant"],

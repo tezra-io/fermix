@@ -4,8 +4,15 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   alias FermixCore.Providers.ModelCatalog
 
   describe "providers/0" do
-    test "lists the four providers" do
-      assert ModelCatalog.providers() == [:openai_codex, :openai, :anthropic, :xai]
+    test "lists the catalog providers in fallback order" do
+      assert ModelCatalog.providers() == [
+               :openai_codex,
+               :openai,
+               :anthropic,
+               :xai,
+               :openrouter,
+               :ollama
+             ]
     end
   end
 
@@ -105,9 +112,16 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-haiku-4-5") == 64_000
     end
 
-    test "returns the conservative default for unknown models and providers" do
+    test "falls back to the conservative default for unknown Anthropic models" do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-custom") == 8_192
-      assert ModelCatalog.max_output_tokens_for(:openai, "gpt-5.5") == 8_192
+    end
+
+    test "is Anthropic-only — other providers raise rather than return a default" do
+      # Dynamic dispatch so the type checker doesn't flag the deliberately
+      # off-contract provider at compile time; the fail-loud behavior is what we assert.
+      assert_raise FunctionClauseError, fn ->
+        apply(ModelCatalog, :max_output_tokens_for, [:openai, "gpt-5.5"])
+      end
     end
   end
 

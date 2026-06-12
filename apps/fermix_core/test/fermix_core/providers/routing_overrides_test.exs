@@ -132,6 +132,24 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
       assert Keyword.get(openai_opts, :model) == "gpt-5.5"
       assert Keyword.get(xai_opts, :reasoning_effort) == :high
     end
+
+    # M12 §5.2 effort contract: routes whose provider has no levels entry
+    # are left untouched — never stamped with an effort their adapter
+    # would have to ignore.
+    test "skips routes whose provider has no reasoning-effort levels" do
+      routes = [
+        {%{provider: :openai, model: "gpt-5.5"}, [model: "gpt-5.5"]},
+        {%{provider: :no_levels_provider, model: "some-model"}, [model: "some-model"]}
+      ]
+
+      assert [
+               {%{provider: :openai}, openai_opts},
+               {%{provider: :no_levels_provider}, bare_opts}
+             ] = RoutingOverrides.apply_effort(routes, :high)
+
+      assert Keyword.get(openai_opts, :reasoning_effort) == :high
+      refute Keyword.has_key?(bare_opts, :reasoning_effort)
+    end
   end
 
   describe "infer_provider/1 (reads primary)" do

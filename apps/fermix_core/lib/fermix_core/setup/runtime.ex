@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.TokenManager
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
@@ -21,36 +22,43 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.Wizard
 
-  @answer_keys [
-    :openai_api_key,
-    :anthropic_api_key,
-    :xai_api_key,
-    :provider,
-    :default_model,
-    :reasoning_effort,
-    :fast,
-    :realtime_enabled,
-    :realtime_api_key,
-    :realtime_voice,
-    :realtime_max_session_minutes,
-    :realtime_max_cost_cents,
-    :realtime_persist_transcripts,
-    :telegram_bot_token,
-    :telegram_owner_user_id,
-    :whatsapp_access_token,
-    :whatsapp_phone_number_id,
-    :whatsapp_verify_token,
-    :whatsapp_app_secret,
-    :whatsapp_owner_user_id,
-    :discord_bot_token,
-    :discord_bot_user_id,
-    :discord_owner_user_id,
-    :slack_bot_token,
-    :slack_signing_secret,
-    :slack_owner_user_id,
-    :signal_account,
-    :signal_owner_user_id
-  ]
+  # answer key -> owning provider, derived from the descriptor registry —
+  # drives both the provided-answer allowlist and prompt-relevance
+  # filtering (M12 §6.1).
+  @provider_field_owners FermixCore.Providers.Descriptor.all()
+                         |> Enum.flat_map(fn descriptor ->
+                           Enum.map(descriptor.setup_fields, &{&1.key, descriptor.id})
+                         end)
+                         |> Map.new()
+
+  @answer_keys Map.keys(@provider_field_owners) ++
+                 [
+                   :provider,
+                   :default_model,
+                   :reasoning_effort,
+                   :fast,
+                   :realtime_enabled,
+                   :realtime_api_key,
+                   :realtime_voice,
+                   :realtime_max_session_minutes,
+                   :realtime_max_cost_cents,
+                   :realtime_persist_transcripts,
+                   :telegram_bot_token,
+                   :telegram_owner_user_id,
+                   :whatsapp_access_token,
+                   :whatsapp_phone_number_id,
+                   :whatsapp_verify_token,
+                   :whatsapp_app_secret,
+                   :whatsapp_owner_user_id,
+                   :discord_bot_token,
+                   :discord_bot_user_id,
+                   :discord_owner_user_id,
+                   :slack_bot_token,
+                   :slack_signing_secret,
+                   :slack_owner_user_id,
+                   :signal_account,
+                   :signal_owner_user_id
+                 ]
 
   @type puts_fun :: (String.t() -> any())
   @type prompt_fun :: (String.t() -> String.t())
@@ -466,18 +474,6 @@ defmodule FermixCore.Setup.Runtime do
 
   defp answered?(answers, key), do: Keyword.get(answers, key) not in [nil, ""]
 
-  defp irrelevant_prompt?(%{key: :openai_api_key}, answers) do
-    selected_provider(answers) in [:openai_codex, :anthropic, :xai]
-  end
-
-  defp irrelevant_prompt?(%{key: :anthropic_api_key}, answers) do
-    selected_provider(answers) in [:openai, :openai_codex, :xai]
-  end
-
-  defp irrelevant_prompt?(%{key: :xai_api_key}, answers) do
-    selected_provider(answers) in [:openai, :openai_codex, :anthropic]
-  end
-
   defp irrelevant_prompt?(%{key: :reasoning_effort}, answers) do
     selected_provider(answers) == :anthropic
   end
@@ -500,16 +496,24 @@ defmodule FermixCore.Setup.Runtime do
     realtime_enabled_answer(answers) == false
   end
 
-  defp irrelevant_prompt?(_prompt, _answers), do: false
+  # A provider field prompt is relevant only while its provider is the
+  # selection (or no provider was chosen yet) — one clause instead of the
+  # old N×(N−1) exclusion matrix ("the eighth list", M12 §6.1).
+  defp irrelevant_prompt?(%{key: key}, answers) do
+    case Map.fetch(@provider_field_owners, key) do
+      {:ok, owner} -> selected_provider(answers) not in [nil, owner]
+      :error -> false
+    end
+  end
 
   defp prompt_for_answers(%{key: :default_model} = prompt_info, answers) do
     case selected_provider(answers) do
-      provider when provider in [:openai, :openai_codex, :anthropic, :xai] ->
+      nil ->
+        prompt_info
+
+      provider ->
         default = ModelCatalog.default_model_for(provider)
         %{prompt_info | label: "Default model (blank = #{default})", default: default}
-
-      _provider ->
-        prompt_info
     end
   end
 
@@ -517,12 +521,14 @@ defmodule FermixCore.Setup.Runtime do
 
   defp selected_provider(answers) do
     case Keyword.get(answers, :provider) do
-      provider when provider in [:openai, :openai_codex, :anthropic, :xai] -> provider
-      "openai" -> :openai
-      "openai_codex" -> :openai_codex
-      "anthropic" -> :anthropic
-      "xai" -> :xai
-      _value -> nil
+      provider when is_atom(provider) and not is_nil(provider) ->
+        if provider in Descriptor.ids(), do: provider
+
+      provider when is_binary(provider) ->
+        Enum.find(Descriptor.ids(), &(Atom.to_string(&1) == provider))
+
+      _value ->
+        nil
     end
   end
 

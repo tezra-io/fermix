@@ -378,8 +378,20 @@ defmodule FermixCore.Agents.TurnRunner do
       "`fermix auth login --provider xai` and retry."
   end
 
-  defp auth_reply({:provider_error, %{provider: provider}})
-       when provider in [:openai, :anthropic, :xai] do
+  # Codex is OAuth-only — "check the API key" advice would mislead.
+  defp auth_reply({:provider_error, %{provider: :openai_codex}}) do
+    "Authentication failed — run `fermix auth login` from the host and try again."
+  end
+
+  # Any other OAuth-tagged auth failure gets reconnect advice, never API-key
+  # advice (provider design §13 note 11 — dispatch on auth_mode, not a
+  # per-provider allowlist).
+  defp auth_reply({:provider_error, %{provider: provider, auth_mode: :oauth}}) do
+    "#{ProviderError.provider_label(provider)} authentication failed — reconnect with " <>
+      "`fermix auth login --provider #{provider}` and retry."
+  end
+
+  defp auth_reply({:provider_error, %{provider: provider}}) when is_atom(provider) do
     label = ProviderError.provider_label(provider)
     "#{label} authentication failed — check the #{label} API key in `fermix setup` and retry."
   end

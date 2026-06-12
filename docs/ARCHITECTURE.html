@@ -182,7 +182,7 @@
             fill="none" stroke="#ffffff" stroke-width="1.5"/>
       <text x="335" y="384" class="label-hero" text-anchor="middle">Main Agent</text>
       <text x="335" y="408" class="label-hero-sub" text-anchor="middle">GenServer  ·  :permanent  ·  single-flight</text>
-      <text x="335" y="428" class="label-sub" text-anchor="middle">+ Sub-agents (spawned for skills)</text>
+      <text x="335" y="428" class="label-sub" text-anchor="middle">+ Sub-agents (delegated work, own model)</text>
       <text x="335" y="443" class="label-sub" text-anchor="middle">LLM  →  parse tool calls  →  execute  →  loop</text>
 
       <rect x="570" y="348" width="410" height="100" rx="2"
@@ -221,7 +221,7 @@
 
       <!-- Quiet bottom strip — primitives that don't deserve their own boxes -->
       <text x="550" y="620" class="label-quiet" text-anchor="middle">Sandbox internals  ·  hardline  ·  path policy  ·  env passthrough  ·  decision telemetry</text>
-      <text x="550" y="640" class="label-quiet" text-anchor="middle">Jobs (cron)  ·  Trace (JSONL)  ·  fermix_nif (HMAC-SHA256, tiktoken)</text>
+      <text x="550" y="640" class="label-quiet" text-anchor="middle">Jobs (cron)  ·  Trace (JSONL)  ·  Opik export (opt-in)</text>
 
       <!-- ============================================================
            OUTBOUND — destinations the VM calls out to.
@@ -242,8 +242,8 @@
       <text x="80" y="748" class="label-eyebrow">LLM</text>
       <rect x="80" y="760" width="220" height="52" rx="2"
             fill="none" stroke="#6e6e6e" stroke-width="1"/>
-      <text x="190" y="785" class="label-row" text-anchor="middle">OpenAI  ·  Anthropic</text>
-      <text x="190" y="801" class="label-sub" text-anchor="middle">HTTPS  ·  Realtime WS  ·  Codex</text>
+      <text x="190" y="785" class="label-row" text-anchor="middle">OpenAI  ·  Codex  ·  Anthropic</text>
+      <text x="190" y="801" class="label-sub" text-anchor="middle">xAI  ·  OpenRouter  ·  Ollama  ·  primary + fallback</text>
 
       <text x="320" y="748" class="label-eyebrow">OS Keychain</text>
       <rect x="320" y="760" width="220" height="52" rx="2"
@@ -265,7 +265,7 @@
 
     </svg>
 
-    <p class="footer">Elixir · OTP · Phoenix · Rustler</p>
+    <p class="footer">Elixir · OTP · Phoenix · SQLite</p>
 
   </div>
 </body>

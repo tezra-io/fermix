@@ -1,14 +1,14 @@
-```text
-███████╗ ███████╗ ██████╗  ███╗   ███╗ ██╗ ██╗  ██╗
-██╔════╝ ██╔════╝ ██╔══██╗ ████╗ ████║ ██║ ╚██╗██╔╝
-█████╗   █████╗   ██████╔╝ ██╔████╔██║ ██║  ╚███╔╝
-██╔══╝   ██╔══╝   ██╔══██╗ ██║╚██╔╝██║ ██║  ██╔██╗
-██║      ███████╗ ██║  ██║ ██║ ╚═╝ ██║ ██║ ██╔╝ ██╗
-╚═╝      ╚══════╝ ╚═╝  ╚═╝ ╚═╝     ╚═╝ ╚═╝ ╚═╝  ╚═╝
-```
+<p align="center">
+  <img src="assets/fermix-mascot.png" alt="Fermix mascot" width="92" align="middle">&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/fermix-wordmark-dark.svg">
+    <img src="assets/fermix-wordmark-light.svg" alt="Fermix" width="300" align="middle">
+  </picture>
+</p>
 
 Elixir-native multi-agent AI platform that runs as a local daemon and reaches you through the chat channels you already use.
 
+[![CI](https://github.com/tezra-io/fermix/actions/workflows/ci.yml/badge.svg)](https://github.com/tezra-io/fermix/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Elixir](https://img.shields.io/badge/elixir-%E2%89%A5%201.17-purple)
 ![Erlang/OTP](https://img.shields.io/badge/otp-%E2%89%A5%2028-red)
@@ -17,7 +17,7 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 
 ## What is Fermix
 
-Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. Today the runtime drives OpenAI API-key models and the separate `openai_codex` provider with Codex OAuth tokens; additional providers are on the roadmap. Fermix also runs scheduled background jobs for digests, watchers, reminders, and checks; each run is isolated, bounded, stored durably, and delivered through the configured channel layer. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
+Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. The runtime drives six providers — OpenAI (API key), `openai_codex` (Codex OAuth), Anthropic (API key or Claude subscription OAuth), xAI (API key or Grok OAuth), OpenRouter, and a keyless local Ollama — selected as a primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own (typically smaller, cheaper) model. Fermix also runs scheduled background jobs for digests, watchers, reminders, and checks; each run is isolated, bounded, stored durably, and delivered through the configured channel layer. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
 
 ## Quick start
 
@@ -32,7 +32,7 @@ Confirm the daemon is up:
 
 ```bash
 $ fermix status
-fermix: running (pid 12345, version 0.2.0, up 4s)
+fermix: running (pid 12345, version 0.2.3, up 4s)
 ```
 
 ## Install
@@ -281,6 +281,11 @@ Plain-text commands work in every channel through the shared dispatcher, and loc
 | `/clear` | Alias for `/new` |
 | `/help` | List available commands |
 | `/whoami` | Show the stable channel user id used for command authorization |
+| `/background` | Run the current request as a durable background job (`/tasks` to check, `/stop` to cancel) |
+| `/tasks` | List in-flight background tasks for this channel |
+| `/stop` | Cancel a running background task |
+| `/ultra` | Run the next turn in exhaustive multi-agent (ultra) mode |
+| `/sandbox` | Inspect and adjust the workspace sandbox (env allow/deny/set, command presets, path grants) |
 
 Outside the local CLI, mutating commands require a per-channel owner. For a
 single-user channel, `owner_user_id` is enough; it also becomes the default
@@ -329,7 +334,7 @@ channel adapter → FermixChannels.Dispatcher → FermixCore.Agents.MainAgent
   → capability execution → provider → LLM → reply
 ```
 
-The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a hard cap of 25 iterations. Built-in tools are capabilities, and installed skills are registered as capabilities as well.
+The agent loop calls the provider, parses tool calls, executes them through the registered `FermixCore.Capabilities.Registry`, and recurses up to a bounded per-loop iteration cap (default 100 for interactive turns, sub-agents, and scheduled jobs; tunable via `[fermix_core.iteration_limits]`). Built-in tools are capabilities, and installed skills are registered as capabilities as well.
 
 Built-in tools ship inside Fermix. They are always available when registered; users do not install or remove them. Skills are different: they live under the Fermix skills directories (`priv/skills`, `~/.fermix/skills`, and plugin roots), and each skill carries its own instructions and allowed-tool boundary.
 
@@ -350,6 +355,8 @@ The current built-in capability set is:
 | `subagents` | Run one or more temporary subagents for delegated work, concurrently up to a cap |
 | `skill_create` | Scaffold a local skill with starter eval cases |
 | `skill_list` | List installed skills available to run via `skill_run` |
+| `skill_run` | Run an installed skill by name |
+| `skill_view` | Show an installed skill's instructions and metadata |
 | `model_routing_config` | Read or update local model-routing config |
 | `tool_help` | Return full docs for one registered capability |
 | `memory_store` | Store key-value facts |
@@ -358,9 +365,11 @@ The current built-in capability set is:
 | `browser` | Drive a browser via the `agent-browser` CLI (snapshot, navigate, click, fill, screenshot) |
 | `schedule_job` | Create a durable scheduled job and memory source, with optional expiry |
 | `list_jobs` | List scheduled jobs |
+| `update_job` | Update a scheduled job's schedule, prompt, or config |
 | `pause_job` | Pause a scheduled job |
 | `resume_job` | Resume a paused scheduled job |
 | `remove_job` | Remove a scheduled job |
+| `send_attachment` | Send a file attachment back through the active channel |
 
 Observability:
 
@@ -469,7 +478,10 @@ Use `--scope <conversation-key>` for checkpoint resources. Checkpoint rollback i
 
 ## Documentation
 
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — supervision tree, agent loop, providers, channels, and observability
 - [`CHANGELOG.md`](CHANGELOG.md) — release history (Keep a Changelog format, semver)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow, quality gates, and PR process
+- [`SECURITY.md`](SECURITY.md) — supported versions and vulnerability reporting
 
 ## License
 

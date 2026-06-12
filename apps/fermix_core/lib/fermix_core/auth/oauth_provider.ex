@@ -32,6 +32,9 @@ defmodule FermixCore.Auth.OAuthProvider do
     :redirect_path,
     :scopes
   ]
+  # Keep the OAuth client secret out of any inspect()/log output — one stray
+  # `inspect(provider)` in an error path would otherwise leak it in plaintext.
+  @derive {Inspect, except: [:client_secret]}
   defstruct [
     :id,
     :authorize_url,

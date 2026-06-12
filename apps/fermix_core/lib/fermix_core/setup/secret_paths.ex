@@ -32,6 +32,12 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :openrouter_api_key,
+      env: "OPENROUTER_API_KEY",
+      path: [:fermix_core, :providers, :openrouter, :api_key],
+      sandbox_env: true
+    },
+    %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :tavily_api_key],

@@ -13,6 +13,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -654,9 +655,55 @@ defmodule Fermix.CLI.Doctor.Checks do
   def routing_overrides do
     subagent = RoutingOverrides.subagent()
     cron = RoutingOverrides.cron()
-    ok("routing", "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}")
+
+    case validate_routing_models([{"subagent_model", subagent}, {"cron_model", cron}]) do
+      :ok ->
+        ok(
+          "routing",
+          "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}"
+        )
+
+      {:error, message} ->
+        fail("routing", message)
+    end
   rescue
     error in ArgumentError -> fail("routing", Exception.message(error))
+  end
+
+  # Parsing only proves the provider/effort *atoms* are known. A model slug is
+  # free-form, so a typo or a model removed from the catalog (or left pointing at
+  # the wrong provider after a primary switch — design §9) passes parsing and
+  # then fails at the next job/subagent spawn. Catch it here at the operator's
+  # desk: an explicit provider must actually offer the model; an inferred one
+  # must resolve to some catalog provider.
+  defp validate_routing_models(entries) do
+    Enum.reduce_while(entries, :ok, fn {label, override}, :ok ->
+      case validate_routing_model(override) do
+        :ok -> {:cont, :ok}
+        {:error, detail} -> {:halt, {:error, "[fermix_core.routing] #{label} #{detail}"}}
+      end
+    end)
+  end
+
+  defp validate_routing_model(%{model: nil}), do: :ok
+
+  defp validate_routing_model(%{provider: provider, model: model})
+       when is_atom(provider) and not is_nil(provider) and is_binary(model) do
+    if ModelCatalog.known_model?(provider, model) do
+      :ok
+    else
+      {:error, "= #{inspect(model)} is not a model offered by provider #{inspect(provider)}"}
+    end
+  end
+
+  defp validate_routing_model(%{provider: nil, model: model}) when is_binary(model) do
+    if ModelCatalog.provider_for_model(model) do
+      :ok
+    else
+      {:error,
+       "= #{inspect(model)} is not a known model for any provider " <>
+         "(stale or typo'd — e.g. left over after a primary switch)"}
+    end
   end
 
   defp describe_override(%{provider: nil, model: nil, reasoning_effort: nil}), do: "inherits main"

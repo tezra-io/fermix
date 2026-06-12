@@ -1,5 +1,10 @@
 import Config
 
+# Named-timezone resolution for scheduled-job cron evaluation. `:tz` embeds the
+# IANA database at compile time (no runtime updater), so the default
+# UTC-only database is replaced without a network dependency.
+config :elixir, :time_zone_database, Tz.TimeZoneDatabase
+
 config :fermix_web,
   generators: [timestamp_type: :utc_datetime]
 

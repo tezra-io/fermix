@@ -2,6 +2,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
 
   @channels [
@@ -28,6 +29,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
+  attr :live_models, :any, default: nil
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :installing_plugins, :list, default: []
@@ -90,6 +92,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               personalization_form={@personalization_form}
               provider_form={@provider_form}
               provider_models={@provider_models}
+              live_models={@live_models}
               provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
@@ -169,7 +172,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
         <div class="mt-3 px-1 text-xs text-base-content/55">
           <p class="truncate">
-            {Atom.to_string(@provider_form.provider)} · {@provider_form.default_model}
+            {provider_label(@provider_form.provider)} · {@provider_form.default_model}
           </p>
           <code class="mt-1 block truncate font-mono text-[11px] text-base-content/45">
             {@report.config_path}
@@ -210,6 +213,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
+  attr :live_models, :any, default: nil
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
   attr :installing_plugins, :list, default: []
@@ -254,25 +258,18 @@ defmodule FermixWebWeb.SetupLive.Components do
         </section>
 
         <h3 class="mb-4 mt-6 text-sm font-semibold">
-          Configuring {Atom.to_string(@provider_form.provider)}
+          Configuring {provider_label(@provider_form.provider)}
         </h3>
         <div class={provider_grid_class(@provider_form.provider)}>
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
               <label class="form-control w-full">
                 <span class="label pb-1 text-sm font-medium">Default model</span>
-                <select
-                  name="provider_form[default_model]"
-                  class="select select-bordered w-full bg-base-100"
-                >
-                  <option
-                    :for={{id, label, ctx} <- @provider_models}
-                    value={id}
-                    selected={id == @provider_form.default_model}
-                  >
-                    {label} ({id} - {format_context(ctx)})
-                  </option>
-                </select>
+                <.default_model_input
+                  provider_form={@provider_form}
+                  provider_models={@provider_models}
+                  live_models={@live_models}
+                />
               </label>
               <%!-- Sub-agent model is a single GLOBAL setting (sub-agents run on the
                     primary provider), so it is shown only on the primary's pane to avoid
@@ -314,7 +311,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             <div :if={provider_connection?(@provider_form.provider)} class="space-y-3">
               <h3 class="text-sm font-semibold">Connection</h3>
               <.auth_mode_field
-                :if={@provider_form.provider in [:anthropic, :xai]}
+                :if={multi_auth_mode?(@provider_form.provider)}
                 provider_form={@provider_form}
               />
               <.provider_secret_field
@@ -322,6 +319,11 @@ defmodule FermixWebWeb.SetupLive.Components do
                 provider_form={@provider_form}
                 report={@report}
               />
+              <.ollama_status_banner
+                :if={@provider_form.provider == :ollama}
+                live_models={@live_models}
+              />
+              <.provider_plain_fields provider_form={@provider_form} />
               <.codex_auth_field
                 provider_form={@provider_form}
                 codex_auth={@codex_auth}
@@ -377,7 +379,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           />
           <div class="min-w-0">
             <div class="flex items-center gap-2">
-              <span class="font-medium">{Atom.to_string(status.provider)}</span>
+              <span class="font-medium">{provider_label(status.provider)}</span>
               <span class={provider_badge_class(status)}>{provider_badge_label(status)}</span>
             </div>
             <p :if={status.configured?} class="truncate text-xs text-base-content/60">
@@ -421,12 +423,24 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp provider_badge_label(%{configured?: true}), do: "Fallback"
   defp provider_badge_label(_status), do: "Not configured"
 
-  defp api_key_mode?(%{provider: :openai}), do: true
+  # Single-mode providers show the secret field iff their mode is api_key;
+  # multi-mode providers follow the radio selection (M12 §6.2).
+  defp api_key_mode?(%{provider: provider, auth_mode: mode}) do
+    descriptor = Descriptor.fetch!(provider)
 
-  defp api_key_mode?(%{provider: provider, auth_mode: mode}),
-    do: provider in [:anthropic, :xai] and mode == :api_key
+    if Descriptor.multi_auth_mode?(descriptor) do
+      mode == :api_key
+    else
+      Descriptor.default_auth_mode(descriptor) == :api_key
+    end
+  end
 
   defp api_key_mode?(_form), do: false
+
+  defp provider_label(provider), do: Descriptor.fetch!(provider).label
+
+  defp multi_auth_mode?(provider),
+    do: Descriptor.multi_auth_mode?(Descriptor.fetch!(provider))
 
   defp provider_grid_class(provider) do
     [
@@ -435,10 +449,155 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
-  defp provider_connection?(provider),
-    do: provider in [:openai, :openai_codex, :anthropic, :xai]
+  defp provider_connection?(provider), do: provider in Descriptor.ids()
 
-  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex, :anthropic, :xai]
+  # Hide the "Model behavior" panel when the provider has no behavior
+  # knobs (no reasoning effort; the codex fast toggle rides effort? too).
+  defp provider_behavior?(provider), do: Descriptor.fetch!(provider).effort?
+
+  attr :provider_form, :map, required: true
+  attr :provider_models, :list, required: true
+  attr :live_models, :any, default: nil
+
+  # Which options the default-model picker shows: the static catalog for
+  # most providers; the LIVE source for providers that have one (installed
+  # Ollama models, the upstream OpenRouter catalog). A failed live fetch
+  # renders a free-form input plus a loud warning — never a silent
+  # fall-back to catalog guesses the server may not serve.
+  defp default_model_input(%{live_models: nil} = assigns) do
+    ~H"""
+    <select name="provider_form[default_model]" class="select select-bordered w-full bg-base-100">
+      <option
+        :for={{id, label, ctx} <- @provider_models}
+        value={id}
+        selected={id == @provider_form.default_model}
+      >
+        {label} ({id} - {format_context(ctx)})
+      </option>
+    </select>
+    """
+  end
+
+  defp default_model_input(%{live_models: {:ok, [_ | _] = models}} = assigns) do
+    assigns = assign(assigns, :models, models)
+
+    ~H"""
+    <select name="provider_form[default_model]" class="select select-bordered w-full bg-base-100">
+      <option
+        :for={model <- @models}
+        value={model.id}
+        selected={model.id == @provider_form.default_model}
+      >
+        {live_model_option(model)}
+      </option>
+      <option
+        :if={not Enum.any?(@models, &(&1.id == @provider_form.default_model))}
+        value={@provider_form.default_model}
+        selected
+      >
+        {@provider_form.default_model} (current)
+      </option>
+    </select>
+    """
+  end
+
+  defp default_model_input(%{live_models: {:ok, []}} = assigns) do
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <p class="text-xs text-warning">
+        No models installed on this server — run <code>ollama pull &lt;model&gt;</code>.
+      </p>
+    </div>
+    """
+  end
+
+  defp default_model_input(%{live_models: {:error, reason}} = assigns) do
+    assigns = assign(assigns, :reason, reason)
+
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <p class="text-xs text-warning">
+        Couldn't fetch the live model list ({@reason}) — enter a model id manually.
+      </p>
+    </div>
+    """
+  end
+
+  defp live_model_option(%{label: label, id: id, context_window: nil}) when label == id, do: id
+
+  defp live_model_option(%{label: label, id: id, context_window: nil}), do: "#{label} (#{id})"
+
+  defp live_model_option(%{label: label, id: id, context_window: ctx}) when label == id do
+    "#{id} - #{format_context(ctx)}"
+  end
+
+  defp live_model_option(%{label: label, id: id, context_window: ctx}) do
+    "#{label} (#{id} - #{format_context(ctx)})"
+  end
+
+  attr :live_models, :any, default: nil
+
+  # Server detection for the Ollama pane — one signal: the configured URL
+  # either serves a model list or it doesn't. No host binary sniffing.
+  defp ollama_status_banner(%{live_models: {:ok, models}} = assigns) do
+    assigns = assign(assigns, :count, length(models))
+
+    ~H"""
+    <p class="rounded-field border border-success/40 bg-success/10 p-3 text-xs">
+      Ollama server detected — {@count} installed model(s) listed below.
+    </p>
+    """
+  end
+
+  defp ollama_status_banner(%{live_models: {:error, reason}} = assigns) do
+    assigns = assign(assigns, :reason, reason)
+
+    ~H"""
+    <p class="rounded-field border border-warning/40 bg-warning/10 p-3 text-xs">
+      No Ollama server responded ({@reason}). Start one with <code>ollama serve</code>
+      (install from <a href="https://ollama.com" target="_blank" class="link">ollama.com</a>
+      if needed), or point the base URL at a remote server.
+    </p>
+    """
+  end
+
+  defp ollama_status_banner(assigns), do: ~H""
+
+  attr :provider_form, :map, required: true
+
+  # Non-secret descriptor setup fields (e.g. Ollama's base_url) render as
+  # plain text inputs prefilled with the saved value or descriptor default.
+  defp provider_plain_fields(assigns) do
+    assigns = assign(assigns, :plain_fields, plain_field_specs(assigns.provider_form.provider))
+
+    ~H"""
+    <label :for={field <- @plain_fields} class="form-control w-full">
+      <span class="label pb-1 text-sm font-medium">{field.label}</span>
+      <input
+        type="text"
+        name={"provider_form[#{field.key}]"}
+        value={Map.get(@provider_form.field_values || %{}, field.key)}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+    </label>
+    """
+  end
+
+  defp plain_field_specs(provider) do
+    Enum.reject(Descriptor.fetch!(provider).setup_fields, & &1.secret?)
+  end
 
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
@@ -469,15 +628,26 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp provider_secret_label(:openai), do: "OpenAI API key"
-  defp provider_secret_label(:anthropic), do: "Anthropic API key"
-  defp provider_secret_label(:xai), do: "xAI API key"
-  defp provider_secret_label(_provider), do: nil
+  # The web label stays short ("<Provider> API key") — the descriptor's
+  # field label carries CLI-only hints (e.g. the xAI OAuth pointer) that
+  # the web pane expresses through the auth-mode picker instead.
+  defp provider_secret_field_spec(provider) do
+    Descriptor.fetch!(provider).setup_fields |> Enum.find(& &1.secret?)
+  end
 
-  defp provider_secret_name(:openai), do: "provider_form[openai_api_key]"
-  defp provider_secret_name(:anthropic), do: "provider_form[anthropic_api_key]"
-  defp provider_secret_name(:xai), do: "provider_form[xai_api_key]"
-  defp provider_secret_name(_provider), do: nil
+  defp provider_secret_label(provider) do
+    case provider_secret_field_spec(provider) do
+      nil -> nil
+      _field -> "#{provider_label(provider)} API key"
+    end
+  end
+
+  defp provider_secret_name(provider) do
+    case provider_secret_field_spec(provider) do
+      nil -> nil
+      field -> "provider_form[#{field.key}]"
+    end
+  end
 
   attr :provider_form, :map, required: true
   attr :codex_auth, :map, required: true
@@ -698,11 +868,14 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <div class="flex items-center justify-between gap-3">
         <h3 class="text-sm font-semibold">Model behavior</h3>
-        <span class="badge badge-ghost badge-sm">{Atom.to_string(@provider_form.provider)}</span>
+        <span class="badge badge-ghost badge-sm">{provider_label(@provider_form.provider)}</span>
       </div>
 
       <div class="mt-4 space-y-4">
-        <.reasoning_effort_field provider_form={@provider_form} />
+        <.reasoning_effort_field
+          :if={effort_provider?(@provider_form.provider)}
+          provider_form={@provider_form}
+        />
         <.codex_fast_field provider_form={@provider_form} />
       </div>
     </section>
@@ -736,6 +909,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     </fieldset>
     """
   end
+
+  defp effort_provider?(provider), do: Descriptor.fetch!(provider).effort?
 
   defp effort_levels(provider) do
     provider |> ReasoningEffort.levels_for() |> Enum.map(&Atom.to_string/1)
@@ -927,6 +1102,8 @@ defmodule FermixWebWeb.SetupLive.Components do
         :for={group <- oauth_provider_groups(@plugin_summary)}
         oauth={group.oauth}
         plugins={group.plugins}
+        catalog={group.catalog}
+        installing_plugins={@installing_plugins}
         plugin_auth_url={@plugin_auth_url}
       />
 
@@ -941,9 +1118,9 @@ defmodule FermixWebWeb.SetupLive.Components do
         <p :if={@plugin_summary.index_error} class="text-xs text-warning">
           Catalog index unavailable: {@plugin_summary.index_error}. Installed plugins still work.
         </p>
-        <div :if={@plugin_summary.catalog != []} class="flex flex-col gap-2">
+        <div :if={ungrouped_catalog(@plugin_summary) != []} class="flex flex-col gap-2">
           <.catalog_card
-            :for={entry <- @plugin_summary.catalog}
+            :for={entry <- ungrouped_catalog(@plugin_summary)}
             entry={entry}
             installing?={entry.name in @installing_plugins}
           />
@@ -1336,10 +1513,13 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  # A non-Google oauth2 provider group: one client form plus the installed
-  # plugin cards that authenticate against it (mirrors the Google group).
+  # A non-Google oauth2 provider group: one client form plus the cards that
+  # authenticate against it — installed cards and the not-yet-installed catalog
+  # card alike — so the form and its Connect card stay together (mirrors Google).
   attr :oauth, :map, required: true
   attr :plugins, :list, required: true
+  attr :catalog, :list, default: []
+  attr :installing_plugins, :list, default: []
   attr :plugin_auth_url, :map, default: nil
 
   defp provider_plugin_group(assigns) do
@@ -1358,17 +1538,22 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <.oauth_client_form oauth={@oauth} />
 
-      <p :if={@plugins == []} class="mt-2 text-xs text-base-content/55">
-        Used when connecting {@oauth.display_name} from the catalog below.
+      <p :if={@plugins == [] and @catalog == []} class="mt-2 text-xs text-base-content/55">
+        Used when connecting {@oauth.display_name} from the catalog.
       </p>
 
       <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
 
-      <div :if={@plugins != []} class="mt-3 flex flex-col gap-2">
+      <div :if={@plugins != [] or @catalog != []} class="mt-3 flex flex-col gap-2">
         <.plugin_card
           :for={plugin <- @plugins}
           plugin={plugin}
           auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+        />
+        <.catalog_card
+          :for={entry <- @catalog}
+          entry={entry}
+          installing?={entry.name in @installing_plugins}
         />
       </div>
     </section>
@@ -2189,22 +2374,35 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # Every non-Google provider with a client form gets one group; the form set
   # (summary.oauth_clients) is the single source of which providers qualify.
-  # A catalog-only provider renders with the form alone — the client must be
-  # savable before its plugin is installed.
-  defp oauth_provider_groups(%{plugins: plugins, oauth_clients: oauth_clients}) do
+  # The group carries both the installed cards and the not-yet-installed catalog
+  # cards for that provider, so the client form and its Connect card stay
+  # together instead of being split across the bottom catalog list.
+  defp oauth_provider_groups(%{plugins: plugins, catalog: catalog, oauth_clients: oauth_clients}) do
     by_provider = Enum.group_by(plugins, & &1.provider)
+    catalog_by_provider = Enum.group_by(catalog, & &1.provider)
 
     oauth_clients
     |> Map.delete("google")
     |> Enum.sort()
     |> Enum.map(fn {provider, oauth} ->
-      %{oauth: oauth, plugins: Map.get(by_provider, provider, [])}
+      %{
+        oauth: oauth,
+        plugins: Map.get(by_provider, provider, []),
+        catalog: Map.get(catalog_by_provider, provider, [])
+      }
     end)
   end
 
   # Installed plugins outside every provider group (no oauth2 client form).
   defp ungrouped_plugins(%{plugins: plugins, oauth_clients: oauth_clients}) do
     Enum.reject(plugins, &Map.has_key?(oauth_clients, &1.provider))
+  end
+
+  # Catalog entries outside every provider group — e.g. an MCP plugin like
+  # Obsidian (no oauth2 client form). The grouped ones render inside their
+  # provider group beside the client form, not here.
+  defp ungrouped_catalog(%{catalog: catalog, oauth_clients: oauth_clients}) do
+    Enum.reject(catalog, &Map.has_key?(oauth_clients, &1.provider))
   end
 
   defp oauth_client_configured?(%{client_id: client_id, client_secret_set: true}) do

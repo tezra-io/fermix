@@ -8,6 +8,19 @@ defmodule FermixCore.Auth.OAuthProvidersTest do
 
   @client [client_id: "cid", client_secret: "sec"]
 
+  describe "secret redaction" do
+    test "inspect/1 never renders the OAuth client_secret in plaintext" do
+      {:ok, provider} = OAuthProviders.definition("google", @client ++ [scopes: ["openid"]])
+
+      dumped = inspect(provider)
+      # `@derive {Inspect, except: [:client_secret]}` omits the field entirely
+      # (collapsed into the trailing `...`), so neither the name nor the value shows.
+      refute dumped =~ "client_secret"
+      refute dumped =~ "sec"
+      assert dumped =~ "client_id: \"cid\""
+    end
+  end
+
   describe "definition/2 — google" do
     test "builds the Google provider (endpoints, offline consent, defaults)" do
       assert {:ok, %OAuthProvider{} = provider} =

@@ -18,7 +18,9 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Plugins.Health, as: PluginHealth
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.ModelListing
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.Selection
@@ -51,17 +53,16 @@ defmodule FermixWebWeb.SetupLive do
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
   # notion 1458, x 1459.
   @oauth_client_providers ~w(google github notion x)
-  @provider_restart_keys [
-    :provider,
-    :default_model,
-    :reasoning_effort,
-    :fast,
-    :openai_api_key,
-    :anthropic_api_key,
-    :xai_api_key,
-    :anthropic_auth_mode,
-    :xai_auth_mode
-  ]
+  # Derived from the descriptor registry: every provider setup field plus
+  # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
+  @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
+                           Enum.flat_map(
+                             FermixCore.Providers.Descriptor.all(),
+                             fn descriptor -> Enum.map(descriptor.setup_fields, & &1.key) end
+                           ) ++
+                           (FermixCore.Providers.Descriptor.all()
+                            |> Enum.filter(&FermixCore.Providers.Descriptor.multi_auth_mode?/1)
+                            |> Enum.map(&:"#{&1.id}_auth_mode"))
   @realtime_restart_keys [
     :realtime_enabled,
     :realtime_api_key,
@@ -159,7 +160,7 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply,
      socket
      |> assign(:provider_form, form)
-     |> assign(:provider_models, models_for_safe(provider))}
+     |> assign_model_sources(form)}
   end
 
   def handle_event("save_provider", %{"provider_form" => params} = root, socket) do
@@ -174,9 +175,7 @@ defmodule FermixWebWeb.SetupLive do
           |> maybe_put_string(:default_model, params["default_model"])
           |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
           |> maybe_put_string(:fast, params["fast"])
-          |> maybe_put_string(:openai_api_key, params["openai_api_key"])
-          |> maybe_put_string(:anthropic_api_key, params["anthropic_api_key"])
-          |> maybe_put_string(:xai_api_key, params["xai_api_key"])
+          |> put_provider_field_answers(params)
           |> put_auth_mode_answer(params["provider"], params["auth_mode"])
           |> put_subagent_model_answer(params)
 
@@ -551,6 +550,7 @@ defmodule FermixWebWeb.SetupLive do
       doctor_probe_running?={@doctor_probe_running?}
       provider_form={@provider_form}
       provider_models={@provider_models}
+      live_models={@live_models}
       provider_statuses={@provider_statuses}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
@@ -571,12 +571,13 @@ defmodule FermixWebWeb.SetupLive do
 
   defp assign_report(socket, report) do
     snapshot = report.wizard.config_snapshot
+    provider_form = build_provider_form(snapshot)
 
     socket
     |> assign(:report, report)
     |> assign(:tabs, @tabs)
-    |> assign(:provider_form, build_provider_form(snapshot))
-    |> assign(:provider_models, models_for_safe(current_provider(snapshot)))
+    |> assign(:provider_form, provider_form)
+    |> assign_model_sources(provider_form)
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
     |> assign(:codex_auth, codex_auth_summary())
     |> assign(:xai_auth, xai_auth_summary())
@@ -784,8 +785,18 @@ defmodule FermixWebWeb.SetupLive do
       reasoning_effort:
         parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
       fast: parse_fast_field(Map.get(params, "fast"), current.fast),
-      auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode)
+      auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode),
+      # Carry the plain setup fields (e.g. Ollama's base_url) across an in-place
+      # edit; without this the re-render drops them and the input blanks out,
+      # risking a saved value being wiped on the next submit (M12 §6.2).
+      field_values: edited_field_values(current, params)
     }
+  end
+
+  defp edited_field_values(current, params) do
+    Map.new(current.field_values || %{}, fn {key, prior} ->
+      {key, present_or(Map.get(params, Atom.to_string(key)), prior)}
+    end)
   end
 
   defp build_provider_form(snapshot),
@@ -801,8 +812,17 @@ defmodule FermixWebWeb.SetupLive do
       subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
       fast: Keyword.get(provider_block, :fast, false),
-      auth_mode: Keyword.get(provider_block, :auth_mode, :api_key)
+      auth_mode: Keyword.get(provider_block, :auth_mode, :api_key),
+      field_values: plain_field_values(provider, provider_block)
     }
+  end
+
+  # Saved values (or descriptor defaults) for the provider's non-secret
+  # setup fields — e.g. Ollama's base_url (M12 §6.2).
+  defp plain_field_values(provider, provider_block) do
+    for field <- Descriptor.fetch!(provider).setup_fields, not field.secret?, into: %{} do
+      {field.key, Keyword.get(provider_block, field.config_key) || field.default}
+    end
   end
 
   # nil = "same as main model"; lives in [fermix_core.routing], not the provider
@@ -1506,7 +1526,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> refresh_report(message)
     |> assign(:provider_form, provider_form)
-    |> assign(:provider_models, models_for_safe(provider_form.provider))
+    |> assign_model_sources(provider_form)
   end
 
   defp codex_auth_running?(tasks), do: map_size(tasks) > 0
@@ -1692,15 +1712,30 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_auth_mode_field("oauth", _default), do: :oauth
   defp parse_auth_mode_field(_other, default), do: default
 
-  # The radio submits one `auth_mode` for the currently selected provider; route
-  # it to the per-provider answer key (only anthropic/xai expose the picker).
-  defp put_auth_mode_answer(answers, "anthropic", mode),
-    do: maybe_put_string(answers, :anthropic_auth_mode, mode)
+  # Every descriptor setup field (secrets and plain fields alike) submits
+  # under its answer-key name; blank values are dropped (keep-existing).
+  defp put_provider_field_answers(answers, params) do
+    Enum.reduce(Descriptor.all(), answers, fn descriptor, acc ->
+      Enum.reduce(descriptor.setup_fields, acc, fn field, inner ->
+        maybe_put_string(inner, field.key, params[Atom.to_string(field.key)])
+      end)
+    end)
+  end
 
-  defp put_auth_mode_answer(answers, "xai", mode),
-    do: maybe_put_string(answers, :xai_auth_mode, mode)
+  # The radio submits one `auth_mode` for the currently selected provider;
+  # route it to the per-provider answer key (only multi-auth-mode
+  # descriptors expose the picker). Compile-time map — no runtime atom
+  # creation from user input.
+  @auth_mode_answer_keys FermixCore.Providers.Descriptor.all()
+                         |> Enum.filter(&FermixCore.Providers.Descriptor.multi_auth_mode?/1)
+                         |> Map.new(&{Atom.to_string(&1.id), :"#{&1.id}_auth_mode"})
 
-  defp put_auth_mode_answer(answers, _provider, _mode), do: answers
+  defp put_auth_mode_answer(answers, provider, mode) do
+    case Map.fetch(@auth_mode_answer_keys, provider) do
+      {:ok, answer_key} -> maybe_put_string(answers, answer_key, mode)
+      :error -> answers
+    end
+  end
 
   # A pasted Anthropic setup token is stored to the auth store as part of "Save
   # provider" (no separate button); blank keeps the existing token. The radio
@@ -1747,23 +1782,21 @@ defmodule FermixWebWeb.SetupLive do
     snapshot |> Map.get(:fermix_core, []) |> Keyword.get(key, [])
   end
 
-  defp normalize_provider(nil), do: :openai
+  defp normalize_provider(provider) when is_atom(provider) and not is_nil(provider) do
+    if provider in Descriptor.ids(), do: provider, else: :openai
+  end
 
-  defp normalize_provider(provider)
-       when provider in [:openai, :openai_codex, :anthropic, :xai],
-       do: provider
+  defp normalize_provider(provider) when is_binary(provider) do
+    Enum.find(Descriptor.ids(), :openai, &(Atom.to_string(&1) == provider))
+  end
 
-  defp normalize_provider("openai"), do: :openai
-  defp normalize_provider("openai_codex"), do: :openai_codex
-  defp normalize_provider("anthropic"), do: :anthropic
-  defp normalize_provider("xai"), do: :xai
   defp normalize_provider(_provider), do: :openai
 
-  defp parse_provider_field("openai", _default), do: :openai
-  defp parse_provider_field("openai_codex", _default), do: :openai_codex
-  defp parse_provider_field("anthropic", _default), do: :anthropic
-  defp parse_provider_field("xai", _default), do: :xai
-  defp parse_provider_field(_, default), do: default
+  defp parse_provider_field(value, default) when is_binary(value) do
+    Enum.find(Descriptor.ids(), default, &(Atom.to_string(&1) == value))
+  end
+
+  defp parse_provider_field(_value, default), do: default
 
   defp parse_channel_field("telegram", _default), do: :telegram
   defp parse_channel_field("whatsapp", _default), do: :whatsapp
@@ -1835,11 +1868,51 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(provider, [])
   end
 
-  defp models_for_safe(provider) when provider in [:openai, :openai_codex, :anthropic, :xai] do
-    ModelCatalog.models_for(provider)
+  # Static catalog options always; live listing (installed Ollama models /
+  # the upstream OpenRouter catalog) layered on for the providers that
+  # have one. Synchronous with a tight timeout — setup page only.
+  defp assign_model_sources(socket, provider_form) do
+    provider = provider_form.provider
+
+    socket
+    |> assign(:provider_models, models_for_safe(provider))
+    |> assign_live_listing(provider, provider_form)
   end
 
-  defp models_for_safe(_), do: ModelCatalog.models_for(:openai)
+  defp assign_live_listing(socket, provider, provider_form) do
+    impl = model_listing_impl()
+
+    if impl.live?(provider) do
+      assign(
+        socket,
+        :live_models,
+        impl.live_models(provider, listing_opts(provider, provider_form))
+      )
+    else
+      assign(socket, :live_models, nil)
+    end
+  end
+
+  defp listing_opts(:ollama, provider_form) do
+    case Map.get(provider_form.field_values || %{}, :ollama_base_url) do
+      url when is_binary(url) and url != "" -> [base_url: url]
+      _absent -> []
+    end
+  end
+
+  defp listing_opts(_provider, _provider_form), do: []
+
+  defp model_listing_impl do
+    Application.get_env(:fermix_web, :model_listing_impl, ModelListing)
+  end
+
+  defp models_for_safe(provider) do
+    if provider in Descriptor.ids() do
+      ModelCatalog.models_for(provider)
+    else
+      ModelCatalog.models_for(:openai)
+    end
+  end
 
   defp api_key_configured?(snapshot) do
     snapshot
