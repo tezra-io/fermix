@@ -86,6 +86,24 @@ the installer or a CLI VM with no agent session, so they carry no `session_id`:
 and the Opik exporter renders each op as its own self-closing `dist:<op>`
 trace.
 
+## Background memory writes
+
+The background memory **reviewer** persists facts outside the turn that
+triggered them (a detached, gated, LLM-judged run). Each durable write emits
+`[:fermix, :memory, :write]` (measurements `%{count: 1}`; metadata `tool:
+"memory_write"`, `action`, `category`, `key`, `scope_type`, `memory_id`, plus
+attribution `session_id` + the conversation `channel`/`chat_id` and optional
+`parent_session`). This makes a reviewer-driven persist an **observable span**
+so "no `memory_store` tool span" is no longer indistinguishable from a no-op.
+`Trace.TelemetryHandler` records it as a `tool_exec` row (`tool: memory_write`);
+`FermixOpik` renders it via `Mapper.memory_write_span` as a `tool` span nested
+under the reviewer's run. The reviewer fires **after** the turn's trace closes,
+so it cannot nest into that trace — it correlates to the conversation by
+`thread_id` (`channel:chat_id`), which `Aggregation.place_under` backfills onto
+the reviewer's root trace from this event. The synchronous `memory_store` tool
+keeps its own `[:fermix, :tool, :exec]` span — this event is only the reviewer's
+otherwise-invisible write path.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

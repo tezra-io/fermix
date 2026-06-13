@@ -55,6 +55,15 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.tool_span(meta, meas, &1))
   end
 
+  # One durable memory write by the background reviewer — child of the
+  # reviewer's run via the shared session_id, so a reviewer-driven persist is
+  # an observable span. The event carries channel/chat_id, so place_under sets
+  # the reviewer trace's thread_id to the conversation (the reviewer runs after
+  # the turn closed and cannot nest into it; thread_id is how it correlates).
+  def apply_event(state, [:fermix, :memory, :write], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.memory_write_span(meta, meas, &1))
+  end
+
   def apply_event(state, [:fermix, :skill, :invoke], meas, meta, at) do
     # A skill invocation is a point event; model it as a tool-like span under the
     # invoking run (parent_session), named for the skill.
@@ -306,6 +315,7 @@ defmodule FermixOpik.Aggregation do
     }
 
     {state, ref} = ensure_session(state, session_id, ctx)
+    state = maybe_set_thread(state, ref.trace_id, thread_id(meta))
 
     span =
       span_fun.(
@@ -316,6 +326,19 @@ defmodule FermixOpik.Aggregation do
       )
 
     {touch(state, ref.trace_id, at.mono, fn acc -> %{acc | spans: [span | acc.spans]} end), []}
+  end
+
+  # Backfill a trace's thread_id from a child event that carries channel/chat_id
+  # (only if not already set). Lets a background run whose root trace opened
+  # without a thread (e.g. the memory reviewer, first seen via a provider/memory
+  # event) still group into the conversation thread. Main turns are unaffected:
+  # their child events carry no chat_id, so thread_id stays set at close_root.
+  defp maybe_set_thread(state, _trace_id, nil), do: state
+
+  defp maybe_set_thread(state, trace_id, thread) do
+    update_trace(state, trace_id, fn acc ->
+      if acc.thread_id, do: acc, else: %{acc | thread_id: thread}
+    end)
   end
 
   defp ensure_session(state, session_id, ctx) do

@@ -377,4 +377,65 @@ defmodule FermixOpik.AggregationTest do
     assert trace.metadata.result == "error"
     assert trace.metadata.reason == "{:verification_failed, :untrusted}"
   end
+
+  test "a memory:write event becomes a tool span and the reviewer trace gets the conversation thread_id" do
+    sid = "memory_review:main:cli:e2e-x:owner:42"
+
+    {state, _closed} =
+      run([
+        # The reviewer's provider call carries NO chat_id (it opens the trace
+        # with a nil thread); the memory:write event is what backfills the
+        # conversation thread_id — exactly the live path.
+        {[:fermix, :provider, :call], %{duration_ms: 800},
+         %{
+           provider: :anthropic,
+           model: "claude-opus-4-8",
+           status: :ok,
+           session_id: sid,
+           agent: "memory_reviewer"
+         }},
+        {[:fermix, :memory, :write], %{count: 1},
+         %{
+           session_id: sid,
+           agent: "memory_reviewer",
+           channel: "cli",
+           chat_id: "e2e-x",
+           action: :added,
+           category: "preference",
+           key: "review_preference_abc_1",
+           scope_type: "owner",
+           memory_id: 7,
+           tool: "memory_write"
+         }}
+      ])
+
+    # Reviewer runs after the turn closed, so it is its own root trace — but it
+    # must carry the conversation thread_id so it groups with the turn, and the
+    # write must be an observable span (not invisible like the old behavior).
+    {_state, drained} = Aggregation.drain(state)
+    assert [%{trace: trace, spans: spans}] = drained
+    assert trace.name == "subagent:memory_reviewer"
+    assert trace.thread_id == "cli:e2e-x"
+
+    write = span_named(spans, "memory_write")
+    assert write.type == "tool"
+    assert write.metadata.action == :added
+    assert write.metadata.category == "preference"
+    assert write.metadata.memory_id == 7
+
+    wrapper = span_named(spans, "subagent:memory_reviewer")
+    assert write.parent_span_id == wrapper.id
+  end
+
+  test "a child-span event without a chat_id does not invent a thread_id" do
+    {state, _closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 100},
+         %{provider: :anthropic, model: "claude-opus-4-8", status: :ok, session_id: "main-9"}}
+      ])
+
+    {_state, drained} = Aggregation.drain(state)
+    assert [%{trace: trace}] = drained
+    refute Map.has_key?(trace, :thread_id)
+  end
 end

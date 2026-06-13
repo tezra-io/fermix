@@ -45,6 +45,44 @@ defmodule FermixCore.Memory.ReviewerTest do
     end
   end
 
+  # The real-world "nothing to save" shapes: reasoning models narrate around the
+  # verdict, so the reply is never the bare sentinel the old exact-match wanted.
+  defmodule ProseNothingProvider do
+    def chat(_messages, _opts) do
+      {:ok,
+       %{
+         content:
+           "Nothing to save.\n\nThis is a transient task request (look up an X " <>
+             "account's numeric id) with no durable, reusable facts.",
+         tool_calls: [],
+         usage: %{}
+       }}
+    end
+  end
+
+  defmodule PreambleNothingProvider do
+    def chat(_messages, _opts) do
+      {:ok,
+       %{
+         content:
+           "I'll review these excerpts for durable facts.\n\nThe messages are " <>
+             "transient one-off requests already covered by existing memory.\n\n" <>
+             "Nothing to save.",
+         tool_calls: [],
+         usage: %{}
+       }}
+    end
+  end
+
+  # A genuine structured-output attempt that is malformed must still fail loudly
+  # (and be retried), not be silently swallowed as a no-op.
+  defmodule BrokenJsonProvider do
+    def chat(_messages, _opts) do
+      {:ok,
+       %{content: ~s({"operations": [{"action": "add", "target":), tool_calls: [], usage: %{}}}
+    end
+  end
+
   setup do
     Process.put(:test_pid, self())
     unique = System.unique_integer([:positive])
@@ -88,6 +126,18 @@ defmodule FermixCore.Memory.ReviewerTest do
     selector = conversation_selector()
     insert_user_message(repo, "Please keep answers terse.")
 
+    test_pid = self()
+    handler_id = "reviewer-memory-write-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :memory, :write],
+      fn _e, meas, meta, _c -> send(test_pid, {:memory_write, meas, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
     assert {:ok, result} =
              Reviewer.review_now(
                provider: FakeProvider,
@@ -99,6 +149,15 @@ defmodule FermixCore.Memory.ReviewerTest do
 
     assert result.status == :ok
     assert result.ops_added == 1
+
+    # The durable write is observable + conversation-attributed end to end.
+    assert_receive {:memory_write, %{count: 1}, meta}
+    assert meta.tool == "memory_write"
+    assert meta.action == :added
+    assert meta.channel == "telegram"
+    assert meta.chat_id == "chat-1"
+    assert meta.agent == "memory_reviewer"
+    assert String.starts_with?(meta.session_id, "memory_review:main:telegram:chat-1:")
     assert_receive {:review_prompt, messages}
     prompt_text = Enum.map_join(messages, "\n", & &1.content)
     assert prompt_text =~ "Please keep answers terse"
@@ -155,6 +214,52 @@ defmodule FermixCore.Memory.ReviewerTest do
     assert_receive {:route_chat, :fallback, "gpt-x"}
   end
 
+  defmodule TagFailAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(Process.get(:test_pid), {:tagged, :primary, opts[:agent], opts[:session_id]})
+      {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
+  defmodule TagOkAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(Process.get(:test_pid), {:tagged, :fallback, opts[:agent], opts[:session_id]})
+      {:ok, %{content: "Nothing to save.", tool_calls: [], usage: %{}}}
+    end
+  end
+
+  test "reviewer tags its provider call with agent + per-run session_id, surviving failover", %{
+    repo: repo
+  } do
+    message = insert_user_message(repo, "hello")
+
+    # No `adapter:`/`provider:` pin — the reviewer consumes the route chain
+    # (active primary, then fallback) and must attribute every attempt so the
+    # llm_call trace no longer surfaces as `agent: unknown`.
+    routes = [
+      {%{provider: :anthropic, model: "claude-x", auth_mode: :api_key, base_url: "https://a/v1"},
+       [adapter: TagFailAdapter, model: "claude-x"]},
+      {%{provider: :openai, model: "gpt-x", auth_mode: :api_key, base_url: "https://o/v1"},
+       [adapter: TagOkAdapter, model: "gpt-x"]}
+    ]
+
+    assert {:ok, result} =
+             Reviewer.review_now(
+               routes: routes,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert result.status == :nothing_to_save
+
+    expected_session = "memory_review:main:telegram:chat-1:root:#{message.id}"
+
+    assert_receive {:tagged, :primary, "memory_reviewer", ^expected_session}
+    assert_receive {:tagged, :fallback, "memory_reviewer", ^expected_session}
+  end
+
   test "nothing to save advances the reviewed pointer without rebuilding", %{repo: repo} do
     insert_user_message(repo, "hello")
 
@@ -169,6 +274,62 @@ defmodule FermixCore.Memory.ReviewerTest do
 
     assert result.status == :nothing_to_save
     assert {:ok, %{user: nil, memory: nil}} = PromptFiles.load("main")
+  end
+
+  test "a prose 'nothing to save' reply is a clean no-op, not a parse failure", %{repo: repo} do
+    selector = conversation_selector()
+    message = insert_user_message(repo, "what's my X username?")
+
+    assert {:ok, result} =
+             Reviewer.review_now(
+               provider: ProseNothingProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert result.status == :nothing_to_save
+
+    # The pointer advances so the same transient messages are not re-reviewed,
+    # and no failure/backoff is recorded.
+    assert {:ok, state} = Repo.get_memory_review_state(selector, server: repo)
+    assert state.last_reviewed_message_id == message.id
+    assert state.failure_count == 0
+    assert state.last_review_failed_at == nil
+  end
+
+  test "a reasoning preamble ending in the sentinel is also a no-op", %{repo: repo} do
+    insert_user_message(repo, "list open issues in elixir-lang/elixir")
+
+    assert {:ok, result} =
+             Reviewer.review_now(
+               provider: PreambleNothingProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert result.status == :nothing_to_save
+  end
+
+  test "malformed structured output still fails loudly and leaves the pointer", %{repo: repo} do
+    selector = conversation_selector()
+    insert_user_message(repo, "remember I prefer dark mode")
+
+    assert {:error, {:invalid_review_json, _reason}} =
+             Reviewer.review_now(
+               provider: BrokenJsonProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert {:ok, state} = Repo.get_memory_review_state(selector, server: repo)
+    assert state.last_reviewed_message_id == nil
+    assert state.failure_count == 1
   end
 
   test "manual review respects the max message cap", %{repo: repo} do
