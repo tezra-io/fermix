@@ -4,6 +4,12 @@
 /burrito_out/
 # No lock file exclusion — mix.lock must be committed for reproducible builds
 
+# Mix release runtime templates (rel/*.eex): unmodified `mix release.init`
+# scaffold. `mix release` falls back to identical built-in defaults when absent,
+# so they change nothing in the build. Regenerate with `mix release.init` if VM
+# boot ever needs customizing (e.g. heart/daemon auto-restart in env.sh.eex).
+/rel/
+
 # Umbrella apps
 /apps/*/deps/
 /apps/*/_build/
