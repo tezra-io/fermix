@@ -26,6 +26,11 @@ defaults:
   judge: true
   expect:
     status: ok
+    # A wide /ultra fan-out legitimately runs many minutes (observed 5-17 min);
+    # override the global 240s budget so normal runs aren't failed on time. This
+    # is a real ceiling (30 min) — still well under the 45-min timeout — to flag a
+    # pathological hang. Quality/refusal is graded by the rubric, not a regex.
+    max_duration_ms: 1800000
 
 scenarios:
   - id: comparative_research_recommend
@@ -44,7 +49,6 @@ scenarios:
           tools_any: [subagents]
           min_subagent_spawns: 3
           reply_matches: "(?i)postgres"
-          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
           max_cost_usd: 120
         rubric: >
           Covers all three databases (PostgreSQL, Cassandra, ClickHouse) across
@@ -62,7 +66,6 @@ scenarios:
           tools_any: [subagents]
           min_subagent_spawns: 3
           reply_matches: "(?i)\\baws\\b|amazon"
-          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
           max_cost_usd: 120
         rubric: >
           Compares AWS, Google Cloud, and Azure across the requested dimensions
@@ -87,7 +90,6 @@ scenarios:
           tools_any: [subagents]
           min_subagent_spawns: 3
           reply_matches: "(?i)pricing"
-          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
           max_cost_usd: 120
         rubric: >
           Addresses all four requested areas (market/positioning, tiered pricing,
@@ -106,7 +108,6 @@ scenarios:
           tools_any: [subagents]
           min_subagent_spawns: 3
           reply_matches: "(?i)roadmap|phase"
-          reply_not_matches: "(?i)\\b(i can't|i cannot|unable to help)\\b"
           max_cost_usd: 120
         rubric: >
           Covers all four requested dimensions (what to extract first, data
