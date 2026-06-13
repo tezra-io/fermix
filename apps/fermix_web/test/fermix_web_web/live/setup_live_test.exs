@@ -236,6 +236,10 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
 
+      view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+      |> render_click()
+
       html =
         view
         |> form("#oauth-client-form-google",
@@ -265,6 +269,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
 
       view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+      |> render_click()
 
       html =
         view
@@ -333,6 +341,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
 
       view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+      |> render_click()
+
+      view
       |> form("#oauth-client-form-google",
         oauth_client_form: %{
           client_id: "123.apps.googleusercontent.com",
@@ -366,6 +378,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
 
       view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+      |> render_click()
+
+      view
       |> form("#oauth-client-form-google",
         oauth_client_form: %{
           client_id: "123.apps.googleusercontent.com",
@@ -384,6 +400,71 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       Process.sleep(60)
       refute render(view) =~ "https://auth.example/google_calendar"
+    end
+
+    test "the OAuth client modal stays closed until Connect, then opens on credentials", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      # The compact row replaces the always-visible client form; the form only
+      # exists once the modal is opened.
+      refute html =~ ~s(id="oauth-client-form-google")
+      assert html =~ "Not set up — required to connect"
+
+      modal_html =
+        view
+        |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+        |> render_click()
+
+      assert modal_html =~ ~s(role="dialog")
+      assert modal_html =~ "Connect Google"
+      assert modal_html =~ ~s(id="oauth-client-form-google")
+    end
+
+    test "saving the OAuth client advances the modal to the sign-in confirmation step", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+      |> render_click()
+
+      html =
+        view
+        |> form("#oauth-client-form-google",
+          oauth_client_form: %{
+            client_id: "123.apps.googleusercontent.com",
+            client_secret: "desktop-secret",
+            redirect_port: "1455"
+          }
+        )
+        |> render_submit()
+
+      # The modal stays open on its confirmation step and the plugin cards now
+      # carry the popup pre-open trigger (client configured).
+      assert html =~ "Google OAuth client saved."
+      assert html =~ "Connect each Google integration"
+      assert html =~ ~s(phx-click="close_oauth_modal")
+      assert html =~ ~s(data-plugin-auth-trigger="true")
+    end
+
+    test "closing the OAuth client modal removes the credentials form", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      opened =
+        view
+        |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+        |> render_click()
+
+      assert opened =~ ~s(id="oauth-client-form-google")
+
+      closed = render_click(view, "close_oauth_modal", %{})
+      refute closed =~ ~s(id="oauth-client-form-google")
     end
 
     test "doctor pane keeps read-only skill count", %{conn: conn} do
@@ -975,6 +1056,65 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(providers[:anthropic], :api_key) == "sk-ant"
     end
 
+    test "Set primary resets the sub-agent model pin to same-as-main", %{conn: conn} do
+      # A sub-agent model pinned while the old provider was primary (e.g. a Codex
+      # model) must not linger on the new primary's pane.
+      prior_routing = Application.get_env(:fermix_core, :routing)
+
+      on_exit(fn ->
+        if prior_routing,
+          do: Application.put_env(:fermix_core, :routing, prior_routing),
+          else: Application.delete_env(:fermix_core, :routing)
+      end)
+
+      Application.put_env(:fermix_core, :routing, subagent_model: "gpt-5.4-mini")
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      view
+      |> element(~s(button[phx-click="set_primary"][phx-value-provider="anthropic"]))
+      |> render_click()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      routing = Keyword.get(persisted.fermix_core, :routing, [])
+      refute Keyword.has_key?(routing, :subagent_model)
+
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      assert Keyword.get(providers[:anthropic], :primary) == true
+    end
+
+    test "Set primary applies to configured OpenRouter (keyed) and Ollama (keyless) too", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-openai", primary: true, default_model: "gpt-5.5"],
+        openrouter: [api_key: "sk-or", default_model: "anthropic/claude-sonnet-4.6"],
+        ollama: [base_url: "http://localhost:11434/v1", default_model: "llama3.1"]
+      )
+
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      # Both a keyed and a keyless configured fallback expose Set primary.
+      assert has_element?(
+               view,
+               ~s(button[phx-click="set_primary"][phx-value-provider="openrouter"])
+             )
+
+      assert has_element?(view, ~s(button[phx-click="set_primary"][phx-value-provider="ollama"]))
+
+      view
+      |> element(~s(button[phx-click="set_primary"][phx-value-provider="ollama"]))
+      |> render_click()
+
+      {:ok, persisted} = ConfigStore.load_runtime_config()
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      assert Keyword.get(providers[:ollama], :primary) == true
+      refute Keyword.get(providers[:openai], :primary) == true
+    end
+
     test "the primary provider and unconfigured providers expose no Set primary button", %{
       conn: conn
     } do
@@ -1557,6 +1697,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert error_html =~ "bg-error"
       assert error_html =~ "hero-x-circle"
 
+      view
+      |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="google"]|)
+      |> render_click()
+
       ok_html =
         view
         |> form("#oauth-client-form-google",
@@ -1616,18 +1760,6 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ "Plugin catalog ships with Fermix"
       refute html =~ ~s(phx-click="catalog_refresh")
       refute html =~ "coming later"
-    end
-
-    test "an empty catalog explains plugins arrive with Fermix releases", %{
-      conn: conn,
-      tmp_home: tmp_home
-    } do
-      seed_catalog(tmp_home, [])
-
-      {:ok, view, _html} = live(conn, "/setup")
-      html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
-
-      assert html =~ "No catalog plugins published yet — new plugins arrive with Fermix releases."
     end
 
     test "enable on a catalog plugin installs from the index then enables", %{
@@ -1755,9 +1887,15 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
       assert html =~ ~s(data-plugin-group="github")
-      assert html =~ ~s(id="oauth-client-form-github")
+
+      modal_html =
+        view
+        |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="github"]|)
+        |> render_click()
+
+      assert modal_html =~ ~s(id="oauth-client-form-github")
       # github default redirect port pre-fills the form.
-      assert html =~ ~s(value="1457")
+      assert modal_html =~ ~s(value="1457")
 
       html =
         view
@@ -1792,10 +1930,16 @@ defmodule FermixWebWeb.SetupLiveTest do
       # plugin's Connect card together (the catalog card lives inside the group,
       # not split off into the bottom catalog list).
       assert html =~ ~s(data-plugin-group="github")
-      assert html =~ ~s(id="oauth-client-form-github")
       assert html =~ ~s(data-catalog-name="github")
       refute html =~ ~s(data-plugin-name="github")
       refute html =~ "Used when connecting GitHub"
+
+      modal_html =
+        view
+        |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="github"]|)
+        |> render_click()
+
+      assert modal_html =~ ~s(id="oauth-client-form-github")
 
       html =
         view
@@ -1810,11 +1954,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(github, :client_secret) == "gh-secret"
     end
 
-    test "connect on a github plugin without a client names GitHub in the pre-flight", %{
-      conn: conn,
-      tmp_home: tmp_home,
-      fixtures: fixtures
-    } do
+    test "an unconfigured github card routes Connect to the modal and still guards direct auth",
+         %{
+           conn: conn,
+           tmp_home: tmp_home,
+           fixtures: fixtures
+         } do
       parent = self()
 
       Application.put_env(:fermix_web, :plugin_auth_runner, fn name, _opts ->
@@ -1827,12 +1972,19 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, view, _html} = live(conn, "/setup")
       view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
 
-      html =
+      # The single github card folds in the OAuth client: Connect opens the modal
+      # rather than starting auth against a not-yet-configured client.
+      modal_html =
         view
-        |> element(~s|button[phx-click="plugin_enable"][phx-value-name="github"]|)
+        |> element(~s|button[phx-click="open_oauth_modal"][phx-value-provider="github"]|)
         |> render_click()
 
-      assert html =~ "Save a GitHub OAuth client first, then connect GitHub."
+      assert modal_html =~ "Connect GitHub"
+      assert modal_html =~ ~s(id="oauth-client-form-github")
+
+      # The server-side pre-flight still refuses a direct enable without a client.
+      guard_html = render_click(view, "plugin_enable", %{"name" => "github"})
+      assert guard_html =~ "Save a GitHub OAuth client first, then connect GitHub."
       refute_receive {:unexpected_plugin_auth, _name}, 50
     end
 
