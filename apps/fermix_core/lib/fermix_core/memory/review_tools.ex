@@ -23,7 +23,8 @@ defmodule FermixCore.Memory.ReviewTools do
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
           required(:repo) => GenServer.server(),
-          optional(:source_trust) => atom()
+          optional(:source_trust) => atom(),
+          optional(:telemetry) => map()
         }
 
   @type stats :: %{
@@ -40,12 +41,48 @@ defmodule FermixCore.Memory.ReviewTools do
 
     Enum.reduce_while(operations, {:ok, initial}, fn operation, {:ok, stats} ->
       case apply_operation(operation, ctx) do
-        {:ok, kind, memory} -> {:cont, {:ok, record_success(stats, kind, memory.id)}}
-        {:skip, reason} -> {:cont, {:ok, record_skip(stats, reason)}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, kind, memory} ->
+          emit_write(ctx, kind, memory)
+          {:cont, {:ok, record_success(stats, kind, memory.id)}}
+
+        {:skip, reason} ->
+          {:cont, {:ok, record_skip(stats, reason)}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
+
+  # A durable reviewer write becomes an observable `[:fermix, :memory, :write]`
+  # span ONLY when the caller threads telemetry attribution (session_id + the
+  # conversation channel/chat_id, optional parent_session). Without it (legacy /
+  # test callers) the write stays silent — backward compatible. `tool:
+  # "memory_write"` makes it a tool-shaped span so it surfaces alongside tool
+  # spans and lands in the JSONL tool-exec stream. This is the reviewer's
+  # write-visibility seam; the `memory_store` tool already spans on its own path.
+  defp emit_write(%{telemetry: %{} = tel}, kind, memory) do
+    :telemetry.execute(
+      [:fermix, :memory, :write],
+      %{count: 1},
+      %{
+        tool: "memory_write",
+        action: kind,
+        category: memory.category,
+        key: memory.key,
+        scope_type: memory.scope_type,
+        memory_id: memory.id,
+        agent: Map.get(tel, :agent),
+        owner: Map.get(tel, :owner),
+        session_id: Map.get(tel, :session_id),
+        parent_session: Map.get(tel, :parent_session),
+        channel: Map.get(tel, :channel),
+        chat_id: Map.get(tel, :chat_id)
+      }
+    )
+  end
+
+  defp emit_write(_ctx, _kind, _memory), do: :ok
 
   defp apply_operation(%{"action" => "add"} = op, ctx), do: add_memory(op, ctx)
   defp apply_operation(%{action: "add"} = op, ctx), do: add_memory(op, ctx)

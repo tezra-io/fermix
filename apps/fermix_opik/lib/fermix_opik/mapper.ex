@@ -152,6 +152,36 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  Build a `tool` span from a `[:fermix, :memory, :write]` event — one durable
+  memory write by the background reviewer. Makes a reviewer-driven persist
+  observable: the old behavior emitted no span, so a real durable write was
+  indistinguishable from a no-op under the turn that triggered it. Point event
+  (no duration); `:tool` type + `memory_write` name so it surfaces alongside
+  tool spans.
+  """
+  @spec memory_write_span(map(), map(), keyword()) :: map()
+  def memory_write_span(metadata, _measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: to_string(Map.get(metadata, :tool, "memory_write")),
+      type: "tool",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(
+          Map.take(metadata, [:action, :category, :key, :scope_type, :memory_id, :agent, :owner])
+        )
+    }
+    |> drop_nil()
+  end
+
+  @doc """
   Build a realtime-lifecycle span from a `[:fermix, :realtime, <phase>]` event.
 
   The model turn and tool calls reuse `llm_span`/`tool_span`; these point spans

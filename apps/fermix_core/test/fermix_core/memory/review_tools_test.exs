@@ -181,6 +181,82 @@ defmodule FermixCore.Memory.ReviewToolsTest do
     assert stats.skipped == 1
   end
 
+  test "emits a [:fermix, :memory, :write] event per successful op when telemetry ctx is present",
+       %{ctx: ctx} do
+    attach_memory_write_handler()
+
+    tel = %{
+      session_id: "memory_review:main:cli:c1:owner:42",
+      channel: "cli",
+      chat_id: "c1",
+      parent_session: nil
+    }
+
+    assert {:ok, stats} =
+             ReviewTools.apply_operations(
+               [
+                 %{
+                   "action" => "add",
+                   "target" => "user",
+                   "category" => "preference",
+                   "value" => "User prefers concise answers"
+                 }
+               ],
+               Map.put(ctx, :telemetry, tel)
+             )
+
+    assert stats.added == 1
+
+    assert_receive {:memory_write, measurements, metadata}
+    assert measurements.count == 1
+    assert metadata.action == :added
+    assert metadata.category == "preference"
+    assert metadata.scope_type == "owner"
+    assert metadata.session_id == "memory_review:main:cli:c1:owner:42"
+    assert metadata.channel == "cli"
+    assert metadata.chat_id == "c1"
+    assert metadata.tool == "memory_write"
+    assert is_integer(metadata.memory_id)
+  end
+
+  test "does not emit memory:write when telemetry ctx is absent (backward compatible)", %{
+    ctx: ctx
+  } do
+    attach_memory_write_handler()
+
+    assert {:ok, stats} =
+             ReviewTools.apply_operations(
+               [
+                 %{
+                   "action" => "add",
+                   "target" => "user",
+                   "category" => "preference",
+                   "value" => "User prefers concise answers"
+                 }
+               ],
+               ctx
+             )
+
+    assert stats.added == 1
+    refute_receive {:memory_write, _measurements, _metadata}, 100
+  end
+
+  defp attach_memory_write_handler do
+    test_pid = self()
+    handler_id = "memory-write-test-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :memory, :write],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:memory_write, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
   defp insert_memory(repo, overrides) do
     attrs =
       Map.merge(

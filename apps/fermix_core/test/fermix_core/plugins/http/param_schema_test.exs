@@ -78,4 +78,51 @@ defmodule FermixCore.Plugins.Http.ParamSchemaTest do
       assert {:ok, %{"filter" => ^nested}} = ParamSchema.validate(s, %{"filter" => nested})
     end
   end
+
+  # Models routinely stringify a freeform `{"type":"object"}`/`array` param that
+  # carries no inner schema to guide them (provider-wide). The validator decodes
+  # that encoding to the native shape so the request body gets a real object —
+  # without weakening the type check for malformed input.
+  describe "validate/2 structured-param coercion" do
+    test "coerces a JSON-encoded string for a declared object param into a map" do
+      s = schema(%{"parent" => %{"type" => "object"}}, ["parent"])
+
+      assert {:ok, %{"parent" => %{"page_id" => "abc"}}} =
+               ParamSchema.validate(s, %{"parent" => ~s({"page_id":"abc"})})
+    end
+
+    test "coerces a JSON-encoded string for a declared array param into a list" do
+      s = schema(%{"children" => %{"type" => "array"}})
+
+      assert {:ok, %{"children" => [%{"type" => "paragraph"}]}} =
+               ParamSchema.validate(s, %{"children" => ~s([{"type":"paragraph"}])})
+    end
+
+    test "leaves a native object/array untouched" do
+      s = schema(%{"o" => %{"type" => "object"}, "a" => %{"type" => "array"}})
+      args = %{"o" => %{"k" => 1}, "a" => [1, 2]}
+      assert {:ok, ^args} = ParamSchema.validate(s, args)
+    end
+
+    test "a string that decodes to the wrong structured type still fails loud" do
+      s = schema(%{"parent" => %{"type" => "object"}})
+
+      assert {:error, {:invalid_param, "parent", {:expected_type, "object", "[1,2,3]"}}} =
+               ParamSchema.validate(s, %{"parent" => "[1,2,3]"})
+    end
+
+    test "a non-JSON string for a structured param still fails loud" do
+      s = schema(%{"parent" => %{"type" => "object"}})
+
+      assert {:error, {:invalid_param, "parent", {:expected_type, "object", "not json"}}} =
+               ParamSchema.validate(s, %{"parent" => "not json"})
+    end
+
+    test "does not coerce scalar params from strings (object/array only)" do
+      s = schema(%{"n" => %{"type" => "integer"}})
+
+      assert {:error, {:invalid_param, "n", {:expected_type, "integer", "5"}}} =
+               ParamSchema.validate(s, %{"n" => "5"})
+    end
+  end
 end

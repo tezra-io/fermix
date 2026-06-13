@@ -17,6 +17,7 @@ defmodule FermixCore.Memory.Reviewer do
   alias FermixCore.Providers.Selection
 
   @nothing_to_save "Nothing to save."
+  @reviewer_agent "memory_reviewer"
 
   @spec start_background(keyword()) :: :ok | {:error, term()}
   def start_background(opts) when is_list(opts) do
@@ -66,6 +67,11 @@ defmodule FermixCore.Memory.Reviewer do
       owner_id: Keyword.get(opts, :owner_id, Config.owner_id(opts)),
       conversation_key: Keyword.get(opts, :conversation_key),
       source_trust: Keyword.get(opts, :source_trust),
+      # The originating turn's session_id when a caller has it (spawned-run rule).
+      # The turn-runner path can't supply it (the per-turn id is loop-local and the
+      # review fires after the turn's trace closes), so the reviewer correlates by
+      # conversation thread_id instead — see apply_operations/4.
+      parent_session: Keyword.get(opts, :parent_session),
       memory_enabled?: Config.enabled?(opts),
       interval_hours: Config.review_interval_hours(opts),
       max_messages: Config.review_max_messages(opts),
@@ -163,8 +169,9 @@ defmodule FermixCore.Memory.Reviewer do
 
     result =
       with {:ok, input} <- build_input(ctx, selector, state, preview),
-           {:ok, operations} <- call_reviewer(ctx, input),
-           {:ok, stats} <- apply_operations(ctx, operations),
+           call_ctx = tag_provider_call(ctx, selector, input),
+           {:ok, operations} <- call_reviewer(call_ctx, input),
+           {:ok, stats} <- apply_operations(ctx, selector, input, operations),
            {:ok, status} <- finish_review(ctx, selector, input, stats) do
         {:ok, review_result(status, stats, input)}
       end
@@ -349,6 +356,27 @@ defmodule FermixCore.Memory.Reviewer do
     end
   end
 
+  # Make the review's provider call attributable in `[:fermix, :provider, :call]`
+  # telemetry. Without this the call surfaces as `agent: unknown` with no
+  # session_id (the reviewer is a detached background run, not a turn), so traces
+  # and Opik cannot tell which model ran the review or correlate its cost. The
+  # tag is threaded through `ctx.adapter_opts` — the single seam the direct
+  # adapter and route-chain paths both read via `adapter_opts/1` — so it reaches
+  # whichever provider the active-primary+fallback chain lands on.
+  defp tag_provider_call(ctx, selector, input) do
+    adapter_opts =
+      ctx.adapter_opts
+      |> Keyword.put(:agent, @reviewer_agent)
+      |> Keyword.put(:session_id, review_session_id(selector, input))
+
+    %{ctx | adapter_opts: adapter_opts}
+  end
+
+  defp review_session_id(selector, input) do
+    "memory_review:#{selector.agent_id}:#{selector.channel}:#{selector.chat_id}:" <>
+      "#{selector.thread_scope}:#{input.max_message_id}"
+  end
+
   defp provider_turn(%{adapter: adapter} = ctx, messages) when not is_nil(adapter) do
     case adapter.chat(messages, review_capabilities(), adapter_opts(ctx)) do
       {:ok, turn} -> {:ok, turn}
@@ -402,7 +430,7 @@ defmodule FermixCore.Memory.Reviewer do
     end
 
     Failover.run_chain(routes, attempt,
-      telemetry: %{agent: "memory_reviewer", surface: :memory_review}
+      telemetry: %{agent: @reviewer_agent, surface: :memory_review}
     )
   end
 
@@ -438,14 +466,28 @@ defmodule FermixCore.Memory.Reviewer do
     |> parse_content_operations()
   end
 
-  defp parse_content_operations(@nothing_to_save), do: {:ok, []}
-
+  # Reasoning models narrate their verdict: a "nothing to save" decision arrives
+  # as prose (often with the sentinel buried in a paragraph), which is a valid
+  # no-op — not a parse error. Classify by shape instead of exact string. A
+  # structured-output attempt (JSON, optionally fenced) is decoded strictly, so
+  # a genuine malformation still fails loudly and is retried; any other
+  # natural-language reply means no operations.
   defp parse_content_operations(content) do
+    if structured_output?(content) do
+      decode_operations(content)
+    else
+      {:ok, []}
+    end
+  end
+
+  defp structured_output?(content), do: String.starts_with?(content, ["{", "[", "```"])
+
+  defp decode_operations(content) do
     case Jason.decode(content) do
       {:ok, %{"operations" => operations}} -> normalize_operations(operations)
       {:ok, operations} when is_list(operations) -> normalize_operations(operations)
-      {:error, reason} -> {:error, {:invalid_review_json, reason}}
       {:ok, _other} -> {:error, :invalid_review_payload}
+      {:error, reason} -> {:error, {:invalid_review_json, reason}}
     end
   end
 
@@ -481,15 +523,25 @@ defmodule FermixCore.Memory.Reviewer do
   defp tool_action("memory_review_archive"), do: "archive"
   defp tool_action(name), do: name
 
-  defp apply_operations(_ctx, []),
+  defp apply_operations(_ctx, _selector, _input, []),
     do: {:ok, %{added: 0, replaced: 0, archived: 0, skipped: 0, memory_ids: []}}
 
-  defp apply_operations(ctx, operations) do
+  defp apply_operations(ctx, selector, input, operations) do
     ctx.review_tools.apply_operations(operations, %{
       agent_id: ctx.agent_id,
       owner_id: ctx.owner_id,
       repo: ctx.repo,
-      source_trust: ctx.source_trust
+      source_trust: ctx.source_trust,
+      # Attribution so each durable write emits an observable, conversation-
+      # correlated `[:fermix, :memory, :write]` span (§ telemetry contract).
+      telemetry: %{
+        agent: @reviewer_agent,
+        owner: ctx.owner_id,
+        session_id: review_session_id(selector, input),
+        parent_session: ctx.parent_session,
+        channel: selector.channel,
+        chat_id: selector.chat_id
+      }
     })
   end
 

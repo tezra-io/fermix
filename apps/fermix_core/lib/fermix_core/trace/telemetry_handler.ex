@@ -22,6 +22,10 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_event: "provider_failover"
     },
     %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent},
+    # A background-reviewer durable memory write — recorded as a tool_exec row
+    # (tool: "memory_write") so it is visible in the JSONL trace alongside tool
+    # spans, mirroring the Opik mapping.
+    %{event: [:fermix, :memory, :write], trace_type: :tool_exec, agent_field: :agent},
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
     %{
       event: [:fermix, :agent, :message],
@@ -66,6 +70,14 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :op,
       trace_event: "plugin_dist"
+    },
+    # Tool-search bridge queries (M10): the search-miss rate (match_count == 0)
+    # is the primary soak-health metric for tool-schema deferral.
+    %{
+      event: [:fermix, :tool_search, :query],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "tool_search_query"
     }
   ]
 
