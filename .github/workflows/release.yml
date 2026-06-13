@@ -89,6 +89,10 @@ jobs:
           fail_on_unmatched_files: true
           generate_release_notes: true
           append_body: true
+          # Pre-release tags (those carrying a SemVer pre-release segment, e.g.
+          # v0.3.0-beta) publish as a GitHub pre-release so they are never marked
+          # "Latest". Stable tags (v0.3.0) have no '-' and publish normally.
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             ### Verifying signatures
 
@@ -109,6 +113,9 @@ jobs:
             burrito_out/releases.json
 
       - name: Bump Homebrew tap
+        # Only stable releases bump the tap. A pre-release tag (v*-beta/-rc/...)
+        # must never promote itself to the formula that all `brew` users install.
+        if: ${{ !contains(github.ref_name, '-') }}
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}
