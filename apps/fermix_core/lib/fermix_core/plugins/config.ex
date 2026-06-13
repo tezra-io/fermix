@@ -277,13 +277,20 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
+  # The config change is already persisted; the live reload is best-effort, so a
+  # reload failure does not fail the save. But it is surfaced loudly (not a quiet
+  # warning) because a failed reload means the running agent will not reflect the
+  # change until the daemon restarts — the operator needs to know.
   defp reload_runtime do
     case Runtime.reload() do
       {:ok, _summary} ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("Plugin runtime reload failed after config change: #{inspect(reason)}")
+        Logger.error(
+          "Plugin runtime reload failed after config change: #{inspect(reason)}. " <>
+            "The change is saved but the running agent will not reflect it until restart."
+        )
     end
 
     :ok

@@ -12,7 +12,9 @@ defmodule FermixCore.Tools.SupportTest do
       :telemetry.attach(
         handler_id,
         [:fermix, :tool, :exec],
-        fn _event, _measurements, metadata, _config -> send(test_pid, {:trace, metadata}) end,
+        fn _event, _measurements, metadata, _config ->
+          if metadata.tool == "real_tool", do: send(test_pid, {:trace, metadata})
+        end,
         nil
       )
 
@@ -46,7 +48,9 @@ defmodule FermixCore.Tools.SupportTest do
       :telemetry.attach(
         handler_id,
         [:fermix, :tool, :exec],
-        fn _event, _measurements, metadata, _config -> send(test_pid, {:trace, metadata}) end,
+        fn _event, _measurements, metadata, _config ->
+          if metadata.tool == "tool_a", do: send(test_pid, {:trace, metadata})
+        end,
         nil
       )
 

@@ -512,6 +512,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
+      render_section(
+        ["fermix_core", "tools", "tool_search"],
+        Keyword.get(tools, :tool_search, [])
+      ),
       render_plugins(plugins),
       render_oauth(oauth),
       render_sandbox(sandbox),
@@ -844,9 +848,29 @@ defmodule FermixCore.Setup.ConfigStore do
       :web_search,
       normalize_web_search_tool(lookup(config, "web_search", :web_search))
     )
+    |> put_if_present(
+      :tool_search,
+      normalize_tool_search(lookup(config, "tool_search", :tool_search))
+    )
   end
 
   defp normalize_tools(_config), do: []
+
+  # Tool-schema deferral flag (M10). `enabled` round-trips as a boolean; any
+  # other shape is left for FermixCore.Capabilities.Deferral to reject loudly
+  # at read time (config errors are boot errors).
+  defp normalize_tool_search(nil), do: []
+
+  defp normalize_tool_search(config) when is_map(config) or is_list(config) do
+    put_if_present([], :enabled, normalize_boolean(lookup(config, "enabled", :enabled)))
+  end
+
+  defp normalize_tool_search(_config), do: []
+
+  defp normalize_boolean(value) when is_boolean(value), do: value
+  defp normalize_boolean("true"), do: true
+  defp normalize_boolean("false"), do: false
+  defp normalize_boolean(_other), do: nil
 
   defp normalize_plugins(nil), do: []
 

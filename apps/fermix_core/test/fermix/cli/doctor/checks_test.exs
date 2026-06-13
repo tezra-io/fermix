@@ -20,6 +20,65 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "bootstrap_template_drift/1" do
+    alias FermixCore.Memory.Repo, as: MemoryRepo
+    alias FermixCore.Prompt.TemplateRenderer
+    alias FermixCore.Resource.Registry, as: ResourceRegistry
+
+    setup do
+      unique = System.unique_integer([:positive])
+      db_dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-drift-#{unique}")
+      repo_name = :"drift_repo_#{unique}"
+
+      start_supervised!(
+        {MemoryRepo,
+         name: repo_name, enabled: true, database_path: Path.join(db_dir, "memory.db")}
+      )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(db_dir) end)
+      %{repo: repo_name}
+    end
+
+    defp commit_seed(repo, type, content) do
+      {:ok, _revision} =
+        ResourceRegistry.commit("main", type, "global", content,
+          mutation_source: :seed,
+          repo: repo
+        )
+    end
+
+    test "ok when seeds match the current shipped templates", %{repo: repo} do
+      for {name, type} <- [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md] do
+        {:ok, current} = TemplateRenderer.render(name, %{})
+        commit_seed(repo, type, current)
+      end
+
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :ok
+      assert result.detail =~ "current shipped templates"
+    end
+
+    test "warns when a shipped template changed since seed", %{repo: repo} do
+      {:ok, current_soul} = TemplateRenderer.render(:soul, %{})
+      {:ok, current_realtime} = TemplateRenderer.render(:realtime, %{})
+
+      commit_seed(repo, :fermix_md, "an older fermix template render")
+      commit_seed(repo, :soul_md, current_soul)
+      commit_seed(repo, :realtime_md, current_realtime)
+
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :warn
+      assert result.detail =~ "fermix.md"
+      refute result.detail =~ "soul.md"
+    end
+
+    test "reports unknown for installs seeded before revision tracking", %{repo: repo} do
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :ok
+      assert result.detail =~ "no seed record"
+    end
+  end
+
   describe "routing_overrides/0" do
     setup do
       original = Application.get_env(:fermix_core, :routing, [])

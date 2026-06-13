@@ -35,7 +35,9 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     %{agent_id: "main"}
   end
 
-  test "compose/1 returns system messages in documented order", %{agent_id: agent_id} do
+  test "compose/1 returns system messages in documented order (stable first, memory last)", %{
+    agent_id: agent_id
+  } do
     write_bootstrap(agent_id, "IDENTITY.md", "identity content")
     write_bootstrap(agent_id, "SOUL.md", "soul content")
     write_bootstrap(agent_id, "FERMIX.md", "agents content")
@@ -46,14 +48,17 @@ defmodule FermixCore.Prompt.PromptComposerTest do
 
     assert Enum.map(messages, & &1.role) == List.duplicate("system", 5)
 
-    memory_context = Enum.at(messages, 3).content
+    # Cache stratification (M10 P1): volatile memory exports AFTER every stable
+    # part (bootstrap files and the generated runtime section), so memory
+    # rebuilds never bust the provider prompt-cache for the stable sections.
+    memory_context = Enum.at(messages, 4).content
 
     assert Enum.map(messages, & &1.content) == [
              "identity content",
              "soul content",
              "agents content",
-             memory_context,
-             RuntimeSections.build([])
+             RuntimeSections.build([]),
+             memory_context
            ]
 
     assert memory_context =~ "<memory-context>"
@@ -63,6 +68,24 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert memory_context =~ "MEMORY (agent's working notes)"
     assert memory_context =~ "memory content"
     assert memory_context =~ "</memory-context>"
+  end
+
+  test "export_split/1 partitions parts into stable and volatile tiers", %{agent_id: agent_id} do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    write_memory(agent_id, "MEMORY.md", "memory content")
+
+    assert {:ok, base} = PromptComposer.compose_base_with_metadata(agent_id: agent_id)
+
+    split = PromptComposer.export_split(base.parts)
+
+    assert [%{content: "identity content"} | _] = split.stable
+    refute Enum.any?(split.stable, &String.contains?(&1.content, "<memory-context>"))
+    assert [%{content: volatile_content}] = split.volatile
+    assert volatile_content =~ "<memory-context>"
+    assert volatile_content =~ "memory content"
+
+    # Every part declares its tier — the contributor contract.
+    assert Enum.all?(base.parts, &(&1.tier in [:stable, :volatile]))
   end
 
   test "compose_with_metadata/1 adds REALTIME.md only for realtime sessions", %{
@@ -93,13 +116,16 @@ defmodule FermixCore.Prompt.PromptComposerTest do
              :runtime
            ]
 
+    # Stable parts (bootstrap + runtime) export first; volatile memory last.
     assert Enum.map(realtime.messages, & &1.content) == [
              "identity content",
              "agents content",
-             Enum.at(realtime.messages, 2).content,
              "realtime voice rules",
-             RuntimeSections.build([])
+             RuntimeSections.build([]),
+             Enum.at(realtime.messages, 4).content
            ]
+
+    assert Enum.at(realtime.messages, 4).content =~ "<memory-context>"
   end
 
   test "compose/1 falls back to defaults for IDENTITY/FERMIX when bootstrap is missing", %{

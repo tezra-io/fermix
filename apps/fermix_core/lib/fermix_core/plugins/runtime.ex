@@ -39,20 +39,40 @@ defmodule FermixCore.Plugins.Runtime do
     realtime_supervisor = Keyword.get(opts, :realtime_supervisor, SessionSupervisor)
     mcp_supervisor = Keyword.get(opts, :mcp_supervisor, McpSupervisor)
 
-    with {:ok, capabilities} <- reload_capabilities(capability_registry),
-         {:ok, mcp} <- reload_mcp(mcp_supervisor),
-         :ok <- invalidate_runtime_context(main_agent),
-         {:ok, main_agent_summary} <- reload_main_agent(main_agent),
-         {:ok, skills} <- reload_skills(skill_registry, main_agent_summary),
-         {:ok, realtime} <- reload_realtime(realtime_supervisor) do
-      {:ok,
-       %{
-         capabilities: capabilities,
-         mcp: mcp,
-         skills: skills,
-         main_agent: main_agent_summary,
-         realtime: realtime
-       }}
+    # Each surface refreshes independently. The agent-facing refresh — drop the
+    # MainAgent's cached prompt — runs FIRST and unconditionally, so a failure
+    # reconciling capabilities/MCP/skills can never leave the agent's prompt
+    # staler than the registry. We then run every remaining step regardless of
+    # the others' outcome (no short-circuit) and surface any failure in the
+    # return value, instead of silently dropping it. A failed main-agent skill
+    # reload falls back to a direct skill-registry reload.
+    invalidate_runtime_context(main_agent)
+
+    main_agent_outcome = reload_main_agent(main_agent)
+
+    [
+      capabilities: reload_capabilities(capability_registry),
+      mcp: reload_mcp(mcp_supervisor),
+      main_agent: main_agent_outcome,
+      skills: reload_skills(skill_registry, ok_value(main_agent_outcome)),
+      realtime: reload_realtime(realtime_supervisor)
+    ]
+    |> finalize_reload()
+  end
+
+  # Unwrap a step's `{:ok, value}` for the summary and for feeding the skill
+  # reload; any non-ok outcome collapses to `:skipped` so the skill reload
+  # falls back to a direct skill-registry reload rather than propagating nil.
+  defp ok_value({:ok, value}), do: value
+  defp ok_value(_other), do: :skipped
+
+  defp finalize_reload(outcomes) do
+    summary = Map.new(outcomes, fn {key, outcome} -> {key, ok_value(outcome)} end)
+    failures = for {key, {:error, reason}} <- outcomes, do: {key, reason}
+
+    case failures do
+      [] -> {:ok, summary}
+      failures -> {:error, {:reload_incomplete, failures}}
     end
   end
 

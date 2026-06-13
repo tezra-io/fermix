@@ -32,6 +32,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
@@ -56,7 +57,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     url = Keyword.get(opts, :base_url, @default_url)
 
     {instructions, input} = ResponsesShared.build_input(messages)
-    resolved_instructions = instructions || @default_instructions
+
+    # Codex/GPT-5 family behavior contract (M10 P3): appended at the END of
+    # instructions, so the composed prefix stays byte-stable for caching.
+    resolved_instructions = ModelOverlays.apply_codex(instructions || @default_instructions)
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
 

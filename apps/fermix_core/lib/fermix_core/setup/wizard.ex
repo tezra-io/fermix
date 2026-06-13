@@ -1221,9 +1221,8 @@ defmodule FermixCore.Setup.Wizard do
   # model: "inherit" is not a model, it's "whatever the main agent actually
   # resolves to at run time", which a stored string cannot represent. A written
   # value is a frozen pin, so always-writing would (1) silently NOT follow a later
-  # main-model change (drift), (2) make workers resolve a strict single route and
-  # lose the main agent's inherited failover chain, and (3) diverge from an
-  # env-driven main model (FERMIX_DEFAULT_MODEL). Absence avoids all three — the
+  # main-model change (drift) and (2) make workers resolve a strict single route
+  # and lose the main agent's inherited failover chain. Absence avoids both — the
   # worker inherits the live chain. Keeping it absent costs this one delete branch;
   # an always-present key would cost sync-on-main-change logic instead. The UI
   # still shows an explicit "Same as main model" default, so absence is invisible

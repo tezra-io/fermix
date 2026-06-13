@@ -498,7 +498,10 @@ defmodule FermixCore.Realtime.SessionServer do
          available_skills: available_skills,
          context: context,
          profile: profile,
-         capabilities: profile.capabilities
+         # Realtime has no tool_call bridge-unwrap path, so it advertises the
+         # FULL dispatchable surface to the OpenAI Realtime API (no deferral
+         # for voice) — deferred plugin/MCP tools stay invokable (M10 P2 fix).
+         capabilities: Map.get(profile, :dispatchable, profile.capabilities)
        }}
     end
   end

@@ -219,6 +219,7 @@ defmodule FermixCore.Agents.TurnRunner do
         build_loop_runtime(state, messages, context,
           source_trust: source_trust,
           capabilities: profile.capabilities,
+          dispatchable_capabilities: Map.get(profile, :dispatchable, profile.capabilities),
           stream_callback: stream_callback
         )
       end)
@@ -477,6 +478,7 @@ defmodule FermixCore.Agents.TurnRunner do
       ]
       |> maybe_put_trust(Keyword.get(opts, :source_trust))
       |> maybe_put_capabilities(Keyword.get(opts, :capabilities))
+      |> maybe_put_dispatchable(Keyword.get(opts, :dispatchable_capabilities))
       |> maybe_put_stream_callback(Keyword.get(opts, :stream_callback))
 
     case resolve_loop_adapter(state) do
@@ -507,6 +509,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp maybe_put_capabilities(opts, capabilities) when is_list(capabilities),
     do: Keyword.put(opts, :capabilities, capabilities)
+
+  defp maybe_put_dispatchable(opts, nil), do: opts
+
+  defp maybe_put_dispatchable(opts, capabilities) when is_list(capabilities),
+    do: Keyword.put(opts, :dispatchable_capabilities, capabilities)
 
   defp maybe_put_stream_callback(opts, nil), do: opts
 

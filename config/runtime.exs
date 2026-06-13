@@ -72,113 +72,20 @@ existing_anthropic = Keyword.get(existing_providers, :anthropic, [])
 existing_xai = Keyword.get(existing_providers, :xai, [])
 existing_openrouter = Keyword.get(existing_providers, :openrouter, [])
 existing_ollama = Keyword.get(existing_providers, :ollama, [])
-existing_agent = Application.get_env(:fermix_core, :agent, [])
 
 openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
 
-# Derived from the canonical provider registry so a new provider needs no edit
-# here. runtime.exs runs after compilation with the release's modules on the code
-# path, so this pure registry read is safe even though no application is started.
-known_providers = Enum.map(FermixCore.Providers.Descriptor.ids(), &Atom.to_string/1)
-
-# FERMIX_PROVIDER overlays the agent's provider selection. Invalid values
-# log a warning and fall through to whatever TOML / agent block already
-# carries. Env mistakes don't crash boot.
-selected_provider =
-  case System.get_env("FERMIX_PROVIDER") do
-    blank when blank in [nil, ""] ->
-      Keyword.get(existing_agent, :provider)
-
-    raw ->
-      if raw in known_providers do
-        String.to_atom(raw)
-      else
-        IO.warn(
-          "FERMIX_PROVIDER=#{inspect(raw)} is not a known provider " <>
-            "(#{Enum.join(known_providers, " | ")}) — ignoring overlay"
-        )
-
-        Keyword.get(existing_agent, :provider)
-      end
-  end
-
-merged_agent =
-  if selected_provider do
-    Keyword.put(existing_agent, :provider, selected_provider)
-  else
-    existing_agent
-  end
-
-config :fermix_core, :agent, merged_agent
-
-# FERMIX_REASONING_EFFORT validates against the canonical enum; invalid
-# values log and fall back. Same pattern as FERMIX_PROVIDER above.
-valid_efforts = ~w(none minimal low medium high xhigh)a
-
-reasoning_effort_overlay =
-  case System.get_env("FERMIX_REASONING_EFFORT") do
-    nil ->
-      :__unset__
-
-    "" ->
-      :__unset__
-
-    raw ->
-      atom = Enum.find(valid_efforts, fn a -> Atom.to_string(a) == raw end)
-
-      case atom do
-        nil ->
-          IO.warn(
-            "FERMIX_REASONING_EFFORT=#{inspect(raw)} is not a valid effort " <>
-              "(#{Enum.map_join(valid_efforts, " | ", &Atom.to_string/1)}) — ignoring overlay"
-          )
-
-          :__unset__
-
-        atom ->
-          atom
-      end
-  end
-
-default_model_overlay =
-  case System.get_env("FERMIX_DEFAULT_MODEL") do
-    nil -> :__unset__
-    "" -> :__unset__
-    model -> model
-  end
-
-# Apply default_model + reasoning_effort to the active provider's block
-# (env > TOML). FERMIX_PROVIDER wins when present; otherwise use the
-# provider already hydrated from FERMIX_HOME/config.toml.
-overlay_target = selected_provider || Keyword.get(merged_agent, :provider) || :openai
-
-apply_provider_overlay = fn provider, base ->
-  if provider == overlay_target do
-    base
-    |> then(fn cfg ->
-      case default_model_overlay do
-        :__unset__ -> cfg
-        model -> Keyword.put(cfg, :default_model, model)
-      end
-    end)
-    |> then(fn cfg ->
-      case reasoning_effort_overlay do
-        :__unset__ -> cfg
-        atom -> Keyword.put(cfg, :reasoning_effort, atom)
-      end
-    end)
-  else
-    base
-  end
-end
-
+# Provider, model, and reasoning effort are config-only (set via the wizard /
+# web setup), never env overlays. An env var that silently re-points the active
+# provider could desync it from its model, and an env-set primary would fight the
+# `primary = true` flag that PrimaryConfig actually routes on. Only credentials
+# (API keys, auth modes) are read from the environment below.
 merged_openai =
   existing_openai
   |> Keyword.delete(:auth_mode)
   |> Keyword.merge(api_key: openai_api_key)
-  |> then(&apply_provider_overlay.(:openai, &1))
 
-merged_openai_codex = apply_provider_overlay.(:openai_codex, existing_openai_codex)
+merged_openai_codex = existing_openai_codex
 
 # Optional env overlays for API keys and auth modes; empty/absent vars
 # leave the TOML-hydrated values untouched.
@@ -194,24 +101,20 @@ merged_anthropic =
   existing_anthropic
   |> put_env_overlay.(:api_key, "ANTHROPIC_API_KEY")
   |> put_env_overlay.(:auth_mode, "FERMIX_ANTHROPIC_AUTH_MODE")
-  |> then(&apply_provider_overlay.(:anthropic, &1))
 
 merged_xai =
   existing_xai
   |> put_env_overlay.(:api_key, "XAI_API_KEY")
   |> put_env_overlay.(:base_url, "XAI_BASE_URL")
   |> put_env_overlay.(:auth_mode, "FERMIX_XAI_AUTH_MODE")
-  |> then(&apply_provider_overlay.(:xai, &1))
 
 merged_openrouter =
   existing_openrouter
   |> put_env_overlay.(:api_key, "OPENROUTER_API_KEY")
-  |> then(&apply_provider_overlay.(:openrouter, &1))
 
 merged_ollama =
   existing_ollama
   |> put_env_overlay.(:base_url, "OLLAMA_BASE_URL")
-  |> then(&apply_provider_overlay.(:ollama, &1))
 
 merged_providers =
   existing_providers

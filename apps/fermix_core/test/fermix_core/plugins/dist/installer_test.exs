@@ -70,6 +70,7 @@ defmodule FermixCore.Plugins.Dist.InstallerTest do
       assert entry["sha256"] == sha
       assert is_binary(entry["h1"]) and byte_size(entry["h1"]) == 64
       assert entry["plugin_api"] == 2
+      assert entry["min_core_version"] == "0.1.0"
     end
 
     test "a second install of the same version is a no-op (already_installed)", ctx do

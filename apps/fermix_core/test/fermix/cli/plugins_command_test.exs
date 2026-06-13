@@ -232,6 +232,27 @@ defmodule Fermix.CLI.PluginsCommandTest do
       assert "github" in Keyword.get(Application.get_env(:fermix_core, :plugins), :enabled)
     end
 
+    test "enable --json keeps stdout JSON-only during auto-install", ctx do
+      wire_index(ctx, "github", "1.2.0")
+      DistVerifierStub.allow("github", "1.2.0")
+
+      stderr =
+        capture_io(:stderr, fn ->
+          output =
+            capture_io(fn ->
+              assert PluginsCommand.run(["enable", "github", "--json"]) == 0
+            end)
+
+          assert Jason.decode!(output) == %{"enabled" => "github"}
+        end)
+
+      assert stderr =~ "daemon not running — changes apply on next start"
+      # The auto-install notice belongs on stderr (not the JSON stdout asserted
+      # above) — that relocation is the whole point of this path.
+      assert stderr =~ "github is not installed — installing from the catalog"
+      assert DistStore.active_version(ctx.plugins_root, "github") == "1.2.0"
+    end
+
     test "uninstall disables an enabled plugin and clears the store", ctx do
       wire_index(ctx, "github", "1.2.0")
       DistVerifierStub.allow("github", "1.2.0")

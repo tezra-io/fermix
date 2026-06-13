@@ -4,6 +4,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.OpenAI.Codex
 
   defmodule StubTokenServer do
@@ -158,7 +159,8 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert measurements.duration_ms >= 0
       assert metadata.input_items == 1
       assert metadata.input_bytes > 0
-      assert metadata.instructions_bytes == byte_size("be terse")
+      # Instructions = composed system run + the codex family overlay (M10 P3).
+      assert metadata.instructions_bytes == byte_size(ModelOverlays.apply_codex("be terse"))
       assert metadata.tools_count == 1
       assert metadata.tools_bytes > 0
       assert metadata.capabilities_count == 1
@@ -877,7 +879,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, test_id}]
         )
 
-      assert turn.provider_state.instructions == "stay terse"
+      # provider_state stores the overlay-applied instructions (M10 P3), so
+      # continue/3 re-sends them byte-identical — cache-stable per session.
+      assert turn.provider_state.instructions == ModelOverlays.apply_codex("stay terse")
+      assert String.starts_with?(turn.provider_state.instructions, "stay terse")
     end
 
     test "chat/3 stores @default_instructions when no system message is present" do

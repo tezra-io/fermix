@@ -335,7 +335,10 @@ defmodule FermixCore.Plugins.Dist.Installer do
       "version" => version,
       "sha256" => artifact.sha256,
       "h1" => h1,
-      "plugin_api" => Map.get(version_entry, :plugin_api),
+      "plugin_api" => Map.get(version_entry, :plugin_api) || Map.get(version_entry, "plugin_api"),
+      "min_core_version" =>
+        Map.get(version_entry, :min_core_version) ||
+          Map.get(version_entry, "min_core_version"),
       "verified_at" => DateTime.utc_now() |> DateTime.to_iso8601()
     })
     |> case do

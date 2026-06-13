@@ -13,9 +13,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
+  alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
@@ -252,6 +254,69 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   rescue
     error in ArgumentError -> fail("compaction", Exception.message(error))
+  end
+
+  @doc """
+  Bootstrap template drift (M10 P5): compares the CURRENT shipped template
+  render against the content the `:seed` revision recorded at install time.
+  A mismatch means the shipped template gained changes after this install
+  was seeded — the operator's file may lag and deserves a manual diff.
+  Variable-free templates only (fermix/soul/realtime); IDENTITY.md embeds
+  the agent name, so a render comparison cannot distinguish template drift
+  from a rename. Installs seeded before revision tracking report unknown.
+  """
+  @spec bootstrap_template_drift(keyword()) :: result()
+  def bootstrap_template_drift(opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id, "main")
+
+    {drifted, unknown} =
+      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md]
+      |> Enum.reduce({[], []}, fn {name, type}, {drifted, unknown} ->
+        case template_drift_state(agent_id, name, type, opts) do
+          :current -> {drifted, unknown}
+          :drifted -> {[name | drifted], unknown}
+          :unknown -> {drifted, [name | unknown]}
+        end
+      end)
+
+    cond do
+      drifted != [] ->
+        warn(
+          "bootstrap templates",
+          "shipped template(s) changed since this install was seeded: " <>
+            "#{drifted |> Enum.reverse() |> Enum.map_join(", ", &"#{&1}.md")} — " <>
+            "diff your bootstrap file(s) against the current template for missed improvements"
+        )
+
+      unknown != [] ->
+        ok(
+          "bootstrap templates",
+          "no seed record for #{unknown |> Enum.reverse() |> Enum.map_join(", ", &"#{&1}.md")} " <>
+            "(seeded before revision tracking); others match the shipped templates"
+        )
+
+      true ->
+        ok("bootstrap templates", "seeded from the current shipped templates")
+    end
+  catch
+    # Doctor must not crash when the memory repo is unavailable in this VM;
+    # report the honest skip instead.
+    :exit, _reason -> ok("bootstrap templates", "skipped (memory repo unavailable)")
+  end
+
+  defp template_drift_state(agent_id, name, type, opts) do
+    registry_opts = Keyword.take(opts, [:repo])
+
+    with {:ok, revisions} <-
+           ResourceRegistry.list_revisions(agent_id, type, "global", registry_opts),
+         %{content: seeded} <- Enum.find(revisions, &(&1.mutation_source == "seed")),
+         {:ok, current} <- TemplateRenderer.render(name, %{}) do
+      if String.trim_trailing(seeded) == String.trim_trailing(current),
+        do: :current,
+        else: :drifted
+    else
+      _no_seed_record -> :unknown
+    end
   end
 
   @spec web_search(boolean()) :: result()
