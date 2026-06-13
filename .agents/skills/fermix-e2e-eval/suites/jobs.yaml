@@ -47,7 +47,7 @@ scenarios:
           deletion at the end. No leftover job should remain.
       - id: hourly_water_reminder
         turns:
-          - query: "Set up a job that pings me every hour to drink water during the workday."
+          - query: "Set up a job that pings me every hour from 9am to 5pm, Mon–Fri, to drink water."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)water|hour|remind|scheduled|set up|every"
@@ -63,8 +63,8 @@ scenarios:
           max_cost_usd: 1.5
           max_duration_ms: 180000
         rubric: >
-          Creates an hourly water-reminder job, lists it back, and then removes
-          it, confirming the removal. Ends with no leftover job.
+          Creates an hourly 9–5 Mon–Fri water-reminder job, lists it back, and
+          then removes it, confirming the removal. Ends with no leftover job.
 
   - id: pause_resume_lifecycle
     title: "Schedule, pause, resume, then remove a job"

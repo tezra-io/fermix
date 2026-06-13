@@ -65,12 +65,12 @@ scenarios:
         query: "List the Elixir test files in the project — anything matching apps/**/test/**/*_test.exs would do."
         expect:
           tools_any: [glob_search, content_search, file_read]
-          reply_matches: "(?i)_test\\.exs|/test/|apps/|no (match|result|file)|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
+          reply_matches: "(?i)_test\\.exs|/test/|apps/|\\d+ test|no (match|result|file)|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
           max_cost_usd: 1.0
           max_duration_ms: 120000
         rubric: "Lists one or more *_test.exs files under apps/**/test, or reports no matches / that the glob was not permitted. Does not fabricate file names."
       - id: find_markdown_docs
-        query: "Glob for the milestone design docs in the repo — the markdown files under docs that start with MILESTONE. What do you find?"
+        query: "What milestone design docs do we have? I'm after the markdown files under docs that start with MILESTONE — list what you find."
         expect:
           tools_any: [glob_search, content_search, file_read]
           reply_matches: "(?i)milestone|\\.md|docs/|no (match|result|file)|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
@@ -92,7 +92,7 @@ scenarios:
           max_duration_ms: 120000
         rubric: "Reports the files/locations where 'hardline' appears (e.g. the sandbox blocklist code/docs), or states no matches were found / the search was denied. Does not invent locations."
       - id: telemetry_execute_calls
-        query: "Where in the codebase do we call :telemetry.execute with the [:fermix, :tool, :exec] event? Grep for it and point me at the files."
+        query: "Where in the codebase do we call :telemetry.execute with the [:fermix, :tool, :exec] event? Point me at the files."
         expect:
           tools_any: [content_search, glob_search, file_read]
           reply_matches: "(?i)telemetry|:fermix|:exec|\\.ex|no (match|result|occurrence)|not found|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"
@@ -100,7 +100,7 @@ scenarios:
           max_duration_ms: 120000
         rubric: "Identifies the file(s) where the [:fermix, :tool, :exec] telemetry event is emitted, or reports no matches / a denied search. Does not fabricate call sites."
       - id: count_saferm_mentions
-        query: "How many places mention SafeRm across the repo? Do a content search and summarize where it shows up."
+        query: "How many places mention SafeRm across the repo, and where does it show up?"
         expect:
           tools_any: [content_search, glob_search, file_read]
           reply_matches: "(?i)saferm|test|rm_rf|sandbox|no (match|result|occurrence)|not found|denied|cannot (search|access)|not (allowed|permitted)|outside.*sandbox"

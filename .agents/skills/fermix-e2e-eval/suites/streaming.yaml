@@ -44,7 +44,7 @@ scenarios:
           tools_none: ["stream:open", "stream:seal", "stream:discard"]
           reply_matches: "(?i)erlang|virtual machine|vm"
       - id: tool_ask_no_stream
-        query: "Run `echo stream-check-ok` in the shell and tell me exactly what it printed."
+        query: "Print 'stream-check-ok' for me and tell me exactly what it output."
         expect:
           tools_any: [shell]
           tools_none: ["stream:open", "stream:seal", "stream:discard"]

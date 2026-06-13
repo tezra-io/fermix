@@ -105,6 +105,8 @@ spans have `metadata.status`).
 | `min_subagent_spawns` | int | ≥ N nested `subagent:<id>` worker spans (fan-out breadth) |
 | `reply_matches` | regex | trace `output.text` matches (Python `re.search`) |
 | `reply_not_matches` | regex | trace `output.text` does NOT match |
+| `main_model_matches` | regex | every main-turn llm span's `model` matches (the default model is used); needs ≥1 main llm span |
+| `subagent_model_matches` | regex | every nested subagent-worker llm span's `model` matches AND ≥1 worker span exists (fails loud if fan-out didn't nest into the trace) |
 | `status` | `ok`/`error` | trace status equals it |
 | `no_tool_errors` | bool | no tool span has `error_info` (when true) |
 | `llm_status_ok` | bool | every llm span `metadata.status == "ok"` (when true) |
@@ -118,6 +120,18 @@ spans have `metadata.status`).
 Tool-name matching is exact against the span `name`. Tool spans for builtins are
 the tool name (`memory_store`, `web_search`, `shell`, `skill_view`, …). MCP
 (`kind: :mcp`) calls do **not** emit tool spans — don't assert them via `tools_*`.
+
+**Tool-schema deferral (M10) and bridge spans.** When the daemon runs with
+`[fermix_core.tools.tool_search] enabled = true`, three bridge tools exist and
+emit spans: `tool_search` and `tool_describe` appear under their own names;
+`tool_call` is **unwrapped before telemetry**, so its span carries the
+underlying tool's name — existing `tools_any`/`tools_none` gates on task tools
+keep working unchanged in both modes. Authoring rules for deferral-tolerant
+suites: (1) cases using `min_tool_calls`/`max_tool_calls` must budget for
+legitimate `tool_search`/`tool_describe` calls in flag-on runs; (2) never gate
+`tools_none: [tool_search]` in a generic suite — that belongs only to explicit
+discovery-path scenarios (see `tool_search.yaml`, which requires a flag-on
+daemon).
 
 Channel streaming lifecycle phases also export as tool-type spans —
 `stream:open`, `stream:block` (block mode, one per sent chunk), `stream:seal`,

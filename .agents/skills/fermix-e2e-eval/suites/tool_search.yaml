@@ -1,0 +1,137 @@
+# Tool-schema deferral (M10) — real-user routing through deferred plugin tools.
+#
+# PHILOSOPHY: a real user never says "use tool_search" or "call tool_describe".
+# They state intent ("how many followers does @X have?") and the MODEL decides
+# whether it needs to discover a tool (tool_search), learn its parameters
+# (tool_describe), or just call it. So — except for one explicit sanity smoke
+# test — every query here is phrased like a real user, and the gates are
+# route-tolerant: we assert the end tool fired and the task was answered, NOT
+# which bridge the model took to get there. The model's routing is observed in
+# the trace, not dictated by the prompt.
+#
+# The one routing constraint we DO assert is a safety gate: for an obvious
+# identity/connection check, tool_search must NOT fire — deferral may never turn
+# a one-line answer into a reflexive search hop.
+#
+# PRECONDITION: the dev daemon must run with tool-schema deferral ON
+# ([fermix_core.tools.tool_search] enabled = true) and the x, notion, and github
+# plugins connected. With the flag off the bridges are not registered and the
+# sanity scenario fails loudly — that is the signal you are testing the wrong
+# daemon, not a bug. Deferred-tool spans carry the UNDERLYING name (tool_call is
+# unwrapped before telemetry), so tools_any/tools_none on x_*/notion_*/github_*
+# work directly.
+#
+# This suite is EXCLUDED from G0/G2 baseline A/B runs — it tests deferral
+# routing, not parity. Run it explicitly:
+#   uv run bin/run_eval.py --suite tool_search
+#
+# COST NOTE: the X cases spend real pay-per-use credits (small: one identity,
+# two lookups, one recent-post search).
+suite: tool_search
+title: "Tool-schema deferral — real-user routing + no reflexive search"
+description: >
+  Verifies M10 tool-schema deferral through real-user requests: deferred plugin
+  tools stay reachable end-to-end whatever route the model chooses (call direct,
+  tool_describe for parameters, or tool_search to discover), and an obvious
+  request never triggers a reflexive tool_search. One explicit scenario is a
+  deterministic sanity smoke test that the bridges themselves work.
+defaults:
+  timeout_ms: 180000
+  judge: false
+  expect:
+    status: ok
+
+scenarios:
+  # ---- SANITY (explicit, deterministic) -------------------------------------
+  # The one place we instruct the bridges by name — a smoke test that they exist
+  # and chain correctly. Not representative of real use; the scenarios below are.
+  - id: bridge_sanity
+    title: "Bridges work when explicitly invoked (smoke test)"
+    severity: normal
+    tags: [tool_search, deferral, sanity]
+    cases:
+      - id: search_then_call
+        query: "Use tool_search to find the tool that looks up an X user by handle, then call it for @XDevelopers and tell me the account's numeric id."
+        expect:
+          tools_in_order: [tool_search, x_get_user]
+          reply_matches: "(?i)\\d{6,}|id"
+          reply_not_matches: "(?i)\\b(no such tool|couldn'?t find a tool|not available)\\b"
+      - id: describe_then_report
+        query: "Use tool_describe on notion_search and tell me which parameter is required — don't run a search."
+        expect:
+          tools_any: [tool_describe]
+          tools_none: [notion_search]
+          reply_matches: "(?i)quer(y|ies)|required"
+
+  # ---- SAFETY: no reflexive search ------------------------------------------
+  # Real-user identity/connection checks. The tool is obvious and listed; the
+  # model must answer through it WITHOUT a reflexive tool_search toll-gate.
+  - id: no_reflexive_search
+    title: "Obvious requests answer directly — search is not a toll gate"
+    severity: critical
+    tags: [tool_search, deferral, safety]
+    cases:
+      - id: x_username
+        query: "What's my X username?"
+        expect:
+          tools_any: [x_whoami]
+          tools_none: [tool_search]
+          reply_matches: "(?i)@|username|handle"
+      - id: github_username
+        query: "What's my GitHub username?"
+        expect:
+          tools_any: [github_get_me]
+          tools_none: [tool_search]
+          reply_matches: "(?i)github|username|@|login|account"
+      - id: notion_live
+        query: "Can you double-check my Notion connection is actually live right now?"
+        expect:
+          tools_any: [notion_get_me]
+          tools_none: [tool_search]
+          reply_matches: "(?i)notion|connect|live|bot|workspace|yes"
+
+  # ---- REAL USER: capability requests, route-tolerant -----------------------
+  # The model decides how to reach the right plugin tool. We assert the end tool
+  # fired and the task was answered — never the route. tool_search/tool_describe
+  # are allowed but not required; the trace records whichever the model chose.
+  - id: natural_plugin_routing
+    title: "Real-user requests route to the right deferred tool, any path"
+    severity: normal
+    tags: [tool_search, deferral, core]
+    cases:
+      - id: x_followers
+        query: "How many followers does @XDevelopers have on X right now?"
+        expect:
+          tools_any: [x_get_user]
+          reply_matches: "(?i)follow|\\d"
+      - id: notion_find_page
+        query: "Search my Notion for any pages that mention 'notes' and tell me what you find."
+        expect:
+          tools_any: [notion_search]
+          reply_matches: "(?i)notion|page|note|found|result|nothing|no (pages|results)|don'?t"
+      - id: github_my_issues
+        query: "Do I have any open GitHub issues assigned to me?"
+        expect:
+          tools_any: [github_search_issues, github_list_issues]
+          reply_matches: "(?i)issue|github|pull request|none|no (open|issues|results)|don'?t have"
+
+  # ---- REAL USER: capability with no obvious tool name ----------------------
+  # The user describes an outcome without naming a tool, across a plugin with
+  # many tools — the natural moment for the model to discover. Still graded on
+  # OUTCOME (the right end tool fired + answered); discovery is observed, not
+  # forced, so a capable model that goes straight to the tool also passes.
+  - id: discovery_when_unobvious
+    title: "Vague capability resolves to the right tool (discovery observed)"
+    severity: normal
+    tags: [tool_search, deferral, core]
+    cases:
+      - id: github_popular_repos
+        query: "I'm looking for popular open-source machine-learning projects on GitHub — can you surface a few of the top repositories?"
+        expect:
+          tools_any: [github_search_repos]
+          reply_matches: "(?i)repo|github|star|popular|\\d"
+      - id: x_topic_buzz
+        query: "What are people on X saying about Claude this week?"
+        expect:
+          tools_any: [x_search_posts]
+          reply_matches: "(?i)post|x\\b|recent|claude|saying|found|nothing|no (posts|results)"
