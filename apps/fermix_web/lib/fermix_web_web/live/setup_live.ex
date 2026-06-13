@@ -122,6 +122,7 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
+      |> assign(:oauth_modal, nil)
       |> assign_report(report)
 
     {:ok, socket}
@@ -199,7 +200,11 @@ defmodule FermixWebWeb.SetupLive do
       {:noreply,
        save_answers(
          socket,
-         [provider: provider_string],
+         # Flipping primary resets the sub-agent model to "same as main": a pin
+         # chosen for the old primary (e.g. a Codex model) is not meaningful for
+         # the new one, and the picker is scoped to the primary's pane. "" clears
+         # the [fermix_core.routing] override (Wizard.put_subagent_model).
+         [provider: provider_string, subagent_model: ""],
          "Primary provider set to #{provider}.",
          nil,
          restart_required?: true
@@ -323,7 +328,7 @@ defmodule FermixWebWeb.SetupLive do
 
     result = PluginConfig.set_oauth_provider(provider, opts)
     message = "#{oauth_display_name(provider)} OAuth client saved."
-    {:noreply, save_config_result(result, socket, message)}
+    {:noreply, save_oauth_client_result(result, socket, provider, message)}
   end
 
   # An unknown name is a not-yet-installed catalog plugin: pull it from the
@@ -388,6 +393,17 @@ defmodule FermixWebWeb.SetupLive do
       {:error, reason} ->
         {:noreply, flash_error(socket, "Plugin check failed: #{Redaction.format(reason)}")}
     end
+  end
+
+  # Open the OAuth-client modal on the credentials step (Connect on an
+  # unconfigured provider, or Edit on a configured one — both land on :creds).
+  def handle_event("open_oauth_modal", %{"provider" => provider}, socket)
+      when provider in @oauth_client_providers do
+    {:noreply, assign(socket, :oauth_modal, %{provider: provider, step: :creds})}
+  end
+
+  def handle_event("close_oauth_modal", _params, socket) do
+    {:noreply, assign(socket, :oauth_modal, nil)}
   end
 
   def handle_event("save_memory", %{"memory_form" => params} = root, socket) do
@@ -554,6 +570,7 @@ defmodule FermixWebWeb.SetupLive do
       provider_statuses={@provider_statuses}
       plugin_auth_url={@plugin_auth_url}
       plugin_summary={@plugin_summary}
+      oauth_modal={@oauth_modal}
       installing_plugins={plugin_install_names(@plugin_install_tasks)}
       realtime_form={@realtime_form}
       report={@report}
@@ -618,6 +635,19 @@ defmodule FermixWebWeb.SetupLive do
 
   defp save_config_result({:error, reason}, socket, _message) do
     flash_error(socket, "Save failed: #{format_config_error(reason)}")
+  end
+
+  # save_oauth_client's own {:ok}/{:error} handling, kept out of the shared
+  # save_config_result/3: on success advance the open modal to its sign-in
+  # confirmation step (modal stays open); on failure leave it on :creds.
+  defp save_oauth_client_result({:ok, _snapshot} = result, socket, provider, message) do
+    socket
+    |> assign(:oauth_modal, %{provider: provider, step: :signin})
+    |> then(&save_config_result(result, &1, message))
+  end
+
+  defp save_oauth_client_result({:error, _reason} = result, socket, _provider, message) do
+    save_config_result(result, socket, message)
   end
 
   defp format_config_error({:missing_oauth_client_field, provider, :client_id})

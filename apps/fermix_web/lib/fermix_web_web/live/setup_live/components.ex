@@ -32,6 +32,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :live_models, :any, default: nil
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
+  attr :oauth_modal, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -74,7 +75,23 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.flash_banner flash={@saved_flash} />
           </div>
 
-          <div class="rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8">
+          <div
+            id={"setup-pane-#{@active_tab}"}
+            phx-hook="UnsavedHint"
+            class="relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+          >
+            <%!-- Client-only dirty hint: the hook reveals this badge on the first
+                  input edit and clears it on submit. The ignore island keeps
+                  morphdom from resetting it on phx-change re-renders; the active_tab
+                  in the id remounts (and clears) it when you switch panes. --%>
+            <div :if={form_pane?(@active_tab)} id={"unsaved-#{@active_tab}"} phx-update="ignore">
+              <span
+                data-unsaved-badge
+                class="absolute right-4 top-4 z-10 hidden items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning"
+              >
+                <span class="size-1.5 rounded-full bg-current"></span> Unsaved changes
+              </span>
+            </div>
             <.active_pane
               active_tab={@active_tab}
               channels_form={@channels_form}
@@ -96,6 +113,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
+              oauth_modal={@oauth_modal}
               installing_plugins={@installing_plugins}
               realtime_form={@realtime_form}
               report={@report}
@@ -113,6 +131,57 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  # The Fermix wordmark, inlined so the letters render in currentColor and track
+  # base-content across light/dark/system (a two-file <img> swap keyed on
+  # [data-theme=dark] would mis-render in System mode, where daisyUI flips dark
+  # via prefers-color-scheme and no data-theme attribute is set). The blue
+  # eye-dots on the "i" are the brand's one intentional accent.
+  attr :class, :string, default: nil
+
+  defp fermix_wordmark(assigns) do
+    ~H"""
+    <svg
+      class={@class}
+      role="img"
+      aria-label="Fermix"
+      viewBox="-6 -8 396 116"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <g fill="currentColor" fill-rule="evenodd">
+        <g transform="translate(0 0)">
+          <path d="M9,0 H17 V100 H0 V9 Z" />
+          <path d="M17,0 H56 V9 L48,17 H17 Z" />
+          <path d="M17,41 H48 V50 L40,58 H17 Z" />
+        </g>
+        <g transform="translate(69 0)">
+          <path d="M9,0 H17 V100 H0 V9 Z" />
+          <path d="M17,0 H56 V9 L48,17 H17 Z" />
+          <path d="M17,41 H48 V50 L40,58 H17 Z" />
+          <path d="M17,83 H56 V100 H17 Z" />
+        </g>
+        <g transform="translate(138 0)">
+          <path d="M9,0 H17 V100 H0 V9 Z M17,0 H44 Q58,0 58,18 V34 Q58,52 44,52 H30 L46,52 L58,100 H41 L30,52 H17 Z M17,17 H38 Q41,17 41,20 V32 Q41,35 38,35 H17 Z" />
+        </g>
+        <g transform="translate(209 0)">
+          <path d="M0,100 V0 H18 L36,47 L54,0 H72 V100 H55 V34 L41,70 H31 L17,34 V100 Z" />
+        </g>
+        <g transform="translate(294 0)">
+          <path d="M0,40 H17 V100 H0 Z" />
+        </g>
+        <g transform="translate(324 0)">
+          <path d="M0,0 H17 L60,100 H43 Z" />
+          <path d="M43,0 H60 L17,100 H0 Z" />
+        </g>
+      </g>
+      <g transform="translate(294 0)">
+        <circle cx="2" cy="21" r="4.7" fill="#2b5cff" />
+        <circle cx="15" cy="21" r="4.7" fill="#2b5cff" />
+      </g>
+    </svg>
+    """
+  end
+
   attr :active_tab, :string, required: true
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
@@ -122,11 +191,17 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <aside class="lg:sticky lg:top-6">
       <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-        <div class="flex items-center gap-3 px-1">
-          <img src={~p"/images/logo.svg"} width="36" height="36" alt="Fermix" class="size-9 shrink-0" />
+        <div class="flex items-center gap-2.5 px-1">
+          <img
+            src={~p"/images/fermix-mascot.png"}
+            alt=""
+            class="size-9 shrink-0 [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.28))]"
+          />
           <div class="min-w-0">
-            <p class="truncate text-sm font-semibold leading-tight">Fermix setup</p>
-            <p class="truncate text-xs text-base-content/55">Guided onboarding</p>
+            <.fermix_wordmark class="h-5 w-auto text-base-content" />
+            <p class="mt-1 truncate text-[11px] uppercase tracking-wide text-base-content/45">
+              Guided onboarding
+            </p>
           </div>
         </div>
 
@@ -216,6 +291,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :live_models, :any, default: nil
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
+  attr :oauth_modal, :map, default: nil
   attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
@@ -1125,17 +1201,13 @@ defmodule FermixWebWeb.SetupLive.Components do
             installing?={entry.name in @installing_plugins}
           />
         </div>
-        <p
-          :if={@plugin_summary.catalog == [] && !@plugin_summary.index_error}
-          class="text-xs text-base-content/55"
-        >
-          No catalog plugins published yet — new plugins arrive with Fermix releases.
-        </p>
       </section>
 
       <.info_panel :if={!@plugin_summary.available} class="mt-5">
         <p>Plugin catalog unavailable: {@plugin_summary.error}</p>
       </.info_panel>
+
+      <.oauth_client_modal oauth_modal={@oauth_modal} plugin_summary={@plugin_summary} />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
@@ -1497,7 +1569,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <span class="badge badge-ghost badge-sm">OAuth desktop client</span>
       </div>
 
-      <.oauth_client_form oauth={@oauth} />
+      <.oauth_client_row oauth={@oauth} />
 
       <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
 
@@ -1513,9 +1585,11 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  # A non-Google oauth2 provider group: one client form plus the cards that
-  # authenticate against it — installed cards and the not-yet-installed catalog
-  # card alike — so the form and its Connect card stay together (mirrors Google).
+  # A non-Google oauth2 provider group. A single-plugin provider (GitHub, Notion,
+  # X) renders as one bare card — like an ungrouped plugin — with the OAuth
+  # client Connect/Edit folded into that card, so there is no redundant client
+  # row. Only a multi-plugin provider (or one with a client but no card yet) gets
+  # the shared client row in a titled section, the way Google does.
   attr :oauth, :map, required: true
   attr :plugins, :list, required: true
   attr :catalog, :list, default: []
@@ -1523,8 +1597,31 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin_auth_url, :map, default: nil
 
   defp provider_plugin_group(assigns) do
+    assigns = assign(assigns, :card_count, length(assigns.plugins) + length(assigns.catalog))
+
     ~H"""
+    <div
+      :if={@card_count == 1}
+      data-plugin-group={@oauth.provider}
+      class="mt-5 flex flex-col gap-2"
+    >
+      <.plugin_card
+        :for={plugin <- @plugins}
+        plugin={plugin}
+        oauth={@oauth}
+        auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+      />
+      <.catalog_card
+        :for={entry <- @catalog}
+        entry={entry}
+        oauth={@oauth}
+        installing?={entry.name in @installing_plugins}
+      />
+      <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
+    </div>
+
     <section
+      :if={@card_count != 1}
       data-plugin-group={@oauth.provider}
       class="mt-5 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
     >
@@ -1536,7 +1633,7 @@ defmodule FermixWebWeb.SetupLive.Components do
         <span class="badge badge-ghost badge-sm">OAuth client</span>
       </div>
 
-      <.oauth_client_form oauth={@oauth} />
+      <.oauth_client_row oauth={@oauth} />
 
       <p :if={@plugins == [] and @catalog == []} class="mt-2 text-xs text-base-content/55">
         Used when connecting {@oauth.display_name} from the catalog.
@@ -1606,8 +1703,123 @@ defmodule FermixWebWeb.SetupLive.Components do
     {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
   end
 
-  # The per-provider OAuth-client form: client id/secret + redirect port,
-  # submitting to "save_oauth_client" with the provider as a hidden field.
+  # Compact one-line replacement for the always-visible client form: it states
+  # whether the provider's OAuth client is set up and opens the modal to enter
+  # (Connect) or change (Edit) the credentials. The actual sign-in stays on the
+  # plugin cards below, so the popup-blocker click chain is untouched.
+  attr :oauth, :map, required: true
+
+  defp oauth_client_row(assigns) do
+    assigns = assign(assigns, :configured?, oauth_client_configured?(assigns.oauth))
+
+    ~H"""
+    <div class="mt-3 flex items-center justify-between gap-3 rounded-field border border-base-300 bg-base-200/40 px-3 py-2">
+      <div class="min-w-0">
+        <p class="text-xs font-medium">OAuth client</p>
+        <p class="truncate text-xs text-base-content/55">
+          {if @configured?,
+            do: "Configured — credentials stored",
+            else: "Not set up — required to connect"}
+        </p>
+      </div>
+      <button
+        type="button"
+        class={["btn btn-xs", (@configured? && "btn-ghost") || "btn-primary"]}
+        phx-click="open_oauth_modal"
+        phx-value-provider={@oauth.provider}
+      >
+        <.icon name={if @configured?, do: "hero-pencil-square", else: "hero-key"} class="size-3.5" />
+        {if @configured?, do: "Edit", else: "Connect"}
+      </button>
+    </div>
+    """
+  end
+
+  # One shared modal (rendered once per pane, parameterized by the open
+  # provider) holding the relocated client form. Server-owned open/close via the
+  # :oauth_modal assign — same overlay pattern as the "Restarting…" scrim, so no
+  # JS hook and no popup-chain involvement. Step :creds collects credentials;
+  # save advances to :signin, a confirmation pointing at the cards below.
+  attr :oauth_modal, :map, default: nil
+  attr :plugin_summary, :map, required: true
+
+  defp oauth_client_modal(%{oauth_modal: nil} = assigns), do: ~H""
+
+  defp oauth_client_modal(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :oauth,
+        Map.fetch!(assigns.plugin_summary.oauth_clients, assigns.oauth_modal.provider)
+      )
+
+    ~H"""
+    <div
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_oauth_modal"
+      phx-key="Escape"
+    >
+      <div
+        class="w-full max-w-md rounded-box border border-base-300 bg-base-100 p-5 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label={"#{@oauth.display_name} OAuth client"}
+        phx-click-away="close_oauth_modal"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-1.5">
+            <h3 class="text-base font-semibold">Connect {@oauth.display_name}</h3>
+            <.oauth_help provider={@oauth.provider} />
+          </div>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_oauth_modal"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+
+        <div :if={@oauth_modal.step == :creds}>
+          <p class="mt-1 text-sm text-base-content/65">
+            Paste the desktop OAuth client you created for {@oauth.display_name}. The secret is
+            stored in your OS keychain, never shown here.
+          </p>
+          <.oauth_client_form oauth={@oauth} />
+        </div>
+
+        <div :if={@oauth_modal.step == :signin}>
+          <div class="mt-3 flex items-start gap-2 rounded-field border border-success/30 bg-success/10 px-3 py-2 text-sm">
+            <.icon name="hero-check-circle" class="size-5 shrink-0 text-success" />
+            <span>
+              {@oauth.display_name} OAuth client saved. Connect each {@oauth.display_name} integration
+              from the list below — re-open this anytime with <span class="font-medium">Edit</span>.
+            </span>
+          </div>
+          <div class="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              phx-click="open_oauth_modal"
+              phx-value-provider={@oauth.provider}
+            >
+              <.icon name="hero-pencil-square" class="size-4" /> Edit
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" phx-click="close_oauth_modal">
+              <.icon name="hero-check" class="size-4" /> Done
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # The relocated client form (now stacked for the modal): client id/secret +
+  # redirect port, submitting to "save_oauth_client" with the provider hidden
+  # field. The id and event name are unchanged so existing flows/tests hold.
   attr :oauth, :map, required: true
 
   defp oauth_client_form(assigns) do
@@ -1615,37 +1827,28 @@ defmodule FermixWebWeb.SetupLive.Components do
     <form
       id={"oauth-client-form-#{@oauth.provider}"}
       phx-submit="save_oauth_client"
-      class="mt-3 rounded-field bg-base-200/50 p-3"
+      class="mt-4 space-y-3"
     >
       <input type="hidden" name="provider" value={@oauth.provider} />
-      <div class="grid items-end gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_8rem_auto]">
-        <.text_input
-          label="Client ID (required)"
-          name="oauth_client_form[client_id]"
-          value={@oauth.client_id}
-        />
-        <.secret_input
-          label="Client secret (required)"
-          name="oauth_client_form[client_secret]"
-          set={@oauth.client_secret_set}
-        />
-        <.number_field
-          label="Port"
-          name="oauth_client_form[redirect_port]"
-          value={@oauth.redirect_port}
-        />
-        <button type="submit" class="btn btn-outline btn-sm">
-          <.icon name="hero-key" class="size-4" /> Save
-        </button>
-      </div>
+      <.text_input
+        label="Client ID (required)"
+        name="oauth_client_form[client_id]"
+        value={@oauth.client_id}
+      />
+      <.secret_input
+        label="Client secret (required)"
+        name="oauth_client_form[client_secret]"
+        set={@oauth.client_secret_set}
+      />
+      <.number_field
+        label="Redirect port"
+        name="oauth_client_form[redirect_port]"
+        value={@oauth.redirect_port}
+      />
+      <button type="submit" class="btn btn-primary btn-sm w-full">
+        <.icon name="hero-key" class="size-4" /> Save client
+      </button>
     </form>
-
-    <p
-      :if={!oauth_client_configured?(@oauth)}
-      class="mt-3 rounded-field border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-base-content/80"
-    >
-      Add your Client ID and Client secret above, then Save before connecting these integrations.
-    </p>
     """
   end
 
@@ -1682,8 +1885,19 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :plugin, :map, required: true
   attr :label, :string, default: nil
   attr :auth_preopen?, :boolean, default: false
+  # When set, this card is the sole card of an OAuth provider group: it folds the
+  # client Connect/Edit in. Until the client is configured, configuring it is the
+  # only action (the plugin can't sign in without it).
+  attr :oauth, :map, default: nil
 
   defp plugin_card(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :oauth_unset?,
+        assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
+      )
+
     ~H"""
     <section
       data-plugin-name={@plugin.name}
@@ -1730,7 +1944,16 @@ defmodule FermixWebWeb.SetupLive.Components do
 
       <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
         <button
-          :if={!@plugin.enabled?}
+          :if={@oauth_unset?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+        >
+          <.icon name="hero-key" class="size-3.5" /> Connect
+        </button>
+        <button
+          :if={!@oauth_unset? && !@plugin.enabled?}
           type="button"
           class="btn btn-primary btn-xs"
           phx-click="plugin_enable"
@@ -1740,7 +1963,10 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-plus" class="size-3.5" /> {plugin_primary_action(@plugin)}
         </button>
         <button
-          :if={@plugin.enabled? && @plugin.auth_type == :oauth2 && @plugin.status != :ready}
+          :if={
+            !@oauth_unset? && @plugin.enabled? && @plugin.auth_type == :oauth2 &&
+              @plugin.status != :ready
+          }
           type="button"
           class="btn btn-outline btn-xs"
           phx-click="plugin_connect"
@@ -1750,7 +1976,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           {plugin_action_label(@plugin.status)}
         </button>
         <button
-          :if={@plugin.enabled? && @plugin.status == :ready}
+          :if={!@oauth_unset? && @plugin.enabled? && @plugin.status == :ready}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_check"
@@ -1759,7 +1985,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-check-circle" class="size-3.5" /> Check
         </button>
         <button
-          :if={@plugin.enabled? && @plugin.account}
+          :if={!@oauth_unset? && @plugin.enabled? && @plugin.account}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_disconnect"
@@ -1768,13 +1994,23 @@ defmodule FermixWebWeb.SetupLive.Components do
           Disconnect
         </button>
         <button
-          :if={@plugin.enabled?}
+          :if={!@oauth_unset? && @plugin.enabled?}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_disable"
           phx-value-name={@plugin.name}
         >
           Disable
+        </button>
+        <button
+          :if={@oauth != nil && !@oauth_unset?}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+          title="Edit OAuth client"
+        >
+          <.icon name="hero-pencil-square" class="size-3.5" /> Edit
         </button>
       </div>
     </section>
@@ -1785,9 +2021,18 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Incompatible pill, and an Enable/Connect action that triggers install-first.
   attr :entry, :map, required: true
   attr :installing?, :boolean, default: false
+  # As in plugin_card: when this is the sole card of an OAuth provider group,
+  # the client Connect/Edit folds in and gates install until it is configured.
+  attr :oauth, :map, default: nil
 
   defp catalog_card(assigns) do
-    assigns = assign(assigns, :blocked_reason, catalog_blocked_reason(assigns.entry))
+    assigns =
+      assigns
+      |> assign(:blocked_reason, catalog_blocked_reason(assigns.entry))
+      |> assign(
+        :oauth_unset?,
+        assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
+      )
 
     ~H"""
     <section
@@ -1822,7 +2067,16 @@ defmodule FermixWebWeb.SetupLive.Components do
       <div class="flex shrink-0 items-center gap-1.5">
         <span :if={@installing?} class="loading loading-spinner loading-xs text-primary" />
         <button
-          :if={!@blocked_reason && !@installing?}
+          :if={@oauth_unset? && !@blocked_reason && !@installing?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+        >
+          <.icon name="hero-key" class="size-3.5" /> Connect
+        </button>
+        <button
+          :if={!@oauth_unset? && !@blocked_reason && !@installing?}
           type="button"
           class="btn btn-primary btn-xs"
           phx-click="plugin_enable"
@@ -1830,6 +2084,16 @@ defmodule FermixWebWeb.SetupLive.Components do
         >
           <.icon name="hero-arrow-down-tray" class="size-3.5" />
           {if @entry.auth_type == :oauth2, do: "Connect", else: "Enable"}
+        </button>
+        <button
+          :if={@oauth != nil && !@oauth_unset? && !@installing?}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+          title="Edit OAuth client"
+        >
+          <.icon name="hero-pencil-square" class="size-3.5" /> Edit
         </button>
       </div>
     </section>
@@ -2017,8 +2281,12 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp flash_banner_class(:error), do: "border-error/40 bg-error/10 text-error-content"
-  defp flash_banner_class(:info), do: "border-success/40 bg-success/10 text-success-content"
+  # Text uses the semantic token (not `*-content`, which is the on-solid color):
+  # the banner background is a faint `/10` tint, so the text must read against
+  # the base surface in both light and dark, which `text-error`/`text-success`
+  # do (the token itself flips per theme).
+  defp flash_banner_class(:error), do: "border-error/40 bg-error/10 text-error"
+  defp flash_banner_class(:info), do: "border-success/40 bg-success/10 text-success"
 
   defp flash_icon(:error), do: "hero-x-circle"
   defp flash_icon(:info), do: "hero-check-circle"
@@ -2252,6 +2520,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp setup_progress(tab_id, tabs), do: current_step_number(tab_id, tabs) / length(tabs) * 100
   defp first_step?(tab_id, tabs), do: current_step_number(tab_id, tabs) == 1
   defp last_step?(tab_id, tabs), do: current_step_number(tab_id, tabs) == length(tabs)
+
+  # Panes that persist via a single "Save" button — these get the unsaved-edits
+  # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
+  defp form_pane?(tab_id),
+    do: tab_id in ~w(provider realtime channels search sandbox memory personalization)
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")

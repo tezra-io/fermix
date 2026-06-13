@@ -25,15 +25,37 @@ import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/fermix_web"
 import topbar from "../vendor/topbar"
 
+// Reveals an "Unsaved changes" badge on the first edit within a setup pane and
+// clears it on submit. Switching panes remounts the hook (the active_tab is in
+// the element id), so the hint resets per pane. The badge lives in a
+// phx-update="ignore" island so phx-change re-renders don't reset it mid-edit.
+const UnsavedHint = {
+  mounted() {
+    this.badge = this.el.querySelector("[data-unsaved-badge]")
+    const toggle = on => this.badge && this.badge.classList.toggle("hidden", !on)
+    this.markDirty = () => toggle(true)
+    this.markClean = () => toggle(false)
+    this.el.addEventListener("input", this.markDirty)
+    this.el.addEventListener("change", this.markDirty)
+    this.el.addEventListener("submit", this.markClean, true)
+    this.markClean()
+  },
+  destroyed() {
+    this.el.removeEventListener("input", this.markDirty)
+    this.el.removeEventListener("change", this.markDirty)
+    this.el.removeEventListener("submit", this.markClean, true)
+  },
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, UnsavedHint},
 })
 
 // Show progress bar on live navigation and form submits
-topbar.config({barColors: {0: "#29d"}, shadowColor: "rgba(0, 0, 0, .3)"})
+topbar.config({barColors: {0: "#2b5cff"}, shadowColor: "rgba(0, 0, 0, .3)"})
 window.addEventListener("phx:page-loading-start", _info => topbar.show(300))
 window.addEventListener("phx:page-loading-stop", _info => topbar.hide())
 
