@@ -131,57 +131,6 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  # The Fermix wordmark, inlined so the letters render in currentColor and track
-  # base-content across light/dark/system (a two-file <img> swap keyed on
-  # [data-theme=dark] would mis-render in System mode, where daisyUI flips dark
-  # via prefers-color-scheme and no data-theme attribute is set). The blue
-  # eye-dots on the "i" are the brand's one intentional accent.
-  attr :class, :string, default: nil
-
-  defp fermix_wordmark(assigns) do
-    ~H"""
-    <svg
-      class={@class}
-      role="img"
-      aria-label="Fermix"
-      viewBox="-6 -8 396 116"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <g fill="currentColor" fill-rule="evenodd">
-        <g transform="translate(0 0)">
-          <path d="M9,0 H17 V100 H0 V9 Z" />
-          <path d="M17,0 H56 V9 L48,17 H17 Z" />
-          <path d="M17,41 H48 V50 L40,58 H17 Z" />
-        </g>
-        <g transform="translate(69 0)">
-          <path d="M9,0 H17 V100 H0 V9 Z" />
-          <path d="M17,0 H56 V9 L48,17 H17 Z" />
-          <path d="M17,41 H48 V50 L40,58 H17 Z" />
-          <path d="M17,83 H56 V100 H17 Z" />
-        </g>
-        <g transform="translate(138 0)">
-          <path d="M9,0 H17 V100 H0 V9 Z M17,0 H44 Q58,0 58,18 V34 Q58,52 44,52 H30 L46,52 L58,100 H41 L30,52 H17 Z M17,17 H38 Q41,17 41,20 V32 Q41,35 38,35 H17 Z" />
-        </g>
-        <g transform="translate(209 0)">
-          <path d="M0,100 V0 H18 L36,47 L54,0 H72 V100 H55 V34 L41,70 H31 L17,34 V100 Z" />
-        </g>
-        <g transform="translate(294 0)">
-          <path d="M0,40 H17 V100 H0 Z" />
-        </g>
-        <g transform="translate(324 0)">
-          <path d="M0,0 H17 L60,100 H43 Z" />
-          <path d="M43,0 H60 L17,100 H0 Z" />
-        </g>
-      </g>
-      <g transform="translate(294 0)">
-        <circle cx="2" cy="21" r="4.7" fill="#2b5cff" />
-        <circle cx="15" cy="21" r="4.7" fill="#2b5cff" />
-      </g>
-    </svg>
-    """
-  end
-
   attr :active_tab, :string, required: true
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
@@ -197,12 +146,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             alt=""
             class="size-9 shrink-0 [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.28))]"
           />
-          <div class="min-w-0">
-            <.fermix_wordmark class="h-5 w-auto text-base-content" />
-            <p class="mt-1 truncate text-[11px] uppercase tracking-wide text-base-content/45">
-              Guided onboarding
-            </p>
-          </div>
+          <.fermix_wordmark class="h-5 w-auto text-base-content" />
         </div>
 
         <div class="mt-4 px-1">
@@ -1824,28 +1768,26 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp oauth_client_form(assigns) do
     ~H"""
-    <form
-      id={"oauth-client-form-#{@oauth.provider}"}
-      phx-submit="save_oauth_client"
-      class="mt-4 space-y-3"
-    >
+    <form id={"oauth-client-form-#{@oauth.provider}"} phx-submit="save_oauth_client" class="mt-4">
       <input type="hidden" name="provider" value={@oauth.provider} />
-      <.text_input
-        label="Client ID (required)"
-        name="oauth_client_form[client_id]"
-        value={@oauth.client_id}
-      />
-      <.secret_input
-        label="Client secret (required)"
-        name="oauth_client_form[client_secret]"
-        set={@oauth.client_secret_set}
-      />
-      <.number_field
-        label="Redirect port"
-        name="oauth_client_form[redirect_port]"
-        value={@oauth.redirect_port}
-      />
-      <button type="submit" class="btn btn-primary btn-sm w-full">
+      <div class="space-y-3">
+        <.text_input
+          label="Client ID (required)"
+          name="oauth_client_form[client_id]"
+          value={@oauth.client_id}
+        />
+        <.secret_input
+          label="Client secret (required)"
+          name="oauth_client_form[client_secret]"
+          set={@oauth.client_secret_set}
+        />
+        <.number_field
+          label="Redirect port"
+          name="oauth_client_form[redirect_port]"
+          value={@oauth.redirect_port}
+        />
+      </div>
+      <button type="submit" class="btn btn-primary btn-sm mt-4 w-full">
         <.icon name="hero-key" class="size-4" /> Save client
       </button>
     </form>

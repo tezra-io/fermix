@@ -26,9 +26,9 @@
   default: false;
   prefersdark: true;
   color-scheme: "dark";
-  --color-base-100: oklch(14% 0 0);
-  --color-base-200: oklch(18% 0 0);
-  --color-base-300: oklch(27% 0 0);
+  --color-base-100: oklch(9% 0 0);
+  --color-base-200: oklch(12% 0 0);
+  --color-base-300: oklch(22% 0 0);
   --color-base-content: oklch(96% 0 0);
   --color-primary: #2b5cff; /* Fermix blue (logo accent) */
   --color-primary-content: oklch(99% 0 0);
