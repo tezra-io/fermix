@@ -7,6 +7,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   """
 
   alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
   @type skill :: AgentDefinition.t()
@@ -77,13 +78,12 @@ defmodule FermixCore.Prompt.RuntimeSections do
   defp runtime_contract do
     """
     ## Runtime Contract
-    - Capabilities are available through the capability registry for built-in tools and MCP tools.
-    - Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb.
+    #{deferred_tools_contract()}- Prefer direct Fermix built-ins over shell, curl, grep, computer-use, or external automation when a built-in owns the verb.
     - Web routing — pick ONE and commit; switch only on a new reason, never rotate through tools for the same goal:
       - If a connected plugin owns the surface (e.g. `github_*` for GitHub, `notion_*` for Notion, `obsidian_*` for the vault, `x_*` for X/Twitter, the Google tools for mail/calendar/drive) use its tools — they hit the real API directly; do NOT open the browser or `web_search` for that surface. Any such plugin is listed under Plugins below.
       - `web_search` for static facts with no known URL (hours, prices, schedules, addresses, lookups).
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
-      - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms). It is a first-class built-in, not a fallback.
+      - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
     - For reminders, recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks, use `schedule_job`.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
@@ -95,6 +95,18 @@ defmodule FermixCore.Prompt.RuntimeSections do
     - Use `skill_run` when a specialized skill should execute as a delegated sub-agent.
     """
     |> String.trim()
+  end
+
+  # M10 §3.4: rendered only when tool-schema deferral is on — the off-path
+  # prompt stays byte-identical to the inline design.
+  defp deferred_tools_contract do
+    if Deferral.enabled?() do
+      "- Plugin and MCP tool schemas load on demand: call the tool directly if its " <>
+        "name is listed under Plugins (its skill documents the arguments), " <>
+        "`tool_describe` when unsure of parameters, `tool_search` to discover by capability.\n"
+    else
+      ""
+    end
   end
 
   defp sub_agent_orchestration do
@@ -166,7 +178,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.map_join("\n", &format_plugin/1)
 
     "## Plugins\n" <>
-      "These connected integrations own their surface — prefer their tools over the browser, web, or shell for it. Open a plugin's skill with `skill_view` first, then call its tools. If a needed plugin shows a status instead of tools it is not connected; offer to connect it on the setup page rather than scraping.\n" <>
+      "These connected integrations own their surface — prefer their tools (listed by name below) over the browser, web, or shell. Open a plugin's skill with `skill_view` when you need its workflow or argument conventions — not as a step before every tool call. A plugin showing a status instead of tools is not connected; offer to connect it on the setup page rather than scraping.\n" <>
       "<plugins>\n#{body}\n</plugins>"
   end
 

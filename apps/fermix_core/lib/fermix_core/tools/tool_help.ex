@@ -52,10 +52,22 @@ defmodule FermixCore.Tools.ToolHelp do
   defp do_execute(args, context) do
     with {:ok, cap_name} <- Support.required_string(args, "name"),
          registry = Map.get(context, :capability_registry, Registry),
-         {:ok, capability} <- find_capability(registry, cap_name) do
-      {:ok, Tool.success(format_capability(capability))}
+         {:ok, rendered} <- render(registry, cap_name) do
+      {:ok, Tool.success(rendered)}
     else
       {:error, reason} -> Support.error(reason)
+    end
+  end
+
+  @doc """
+  Render one capability's full docs (description, parameters, examples,
+  failure modes) as markdown. Shared renderer for `tool_help` and the
+  `tool_describe` bridge (M10) — one renderer, two agent-facing names.
+  """
+  @spec render(GenServer.server(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def render(registry, cap_name) when is_binary(cap_name) do
+    with {:ok, capability} <- find_capability(registry, cap_name) do
+      {:ok, format_capability(capability)}
     end
   end
 

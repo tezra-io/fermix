@@ -1005,15 +1005,17 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert_receive {:reply, "Prompt memory loaded"}, 5_000
 
       [{messages, _opts}] = MockProvider.get_calls()
-      [identity, fermix, memory_context, runtime, datetime, user] = messages
+      # Stable parts (bootstrap, runtime contract) precede the volatile
+      # memory context (M10 P1 cache stratification).
+      [identity, fermix, runtime, memory_context, datetime, user] = messages
       assert identity.role == "system"
       assert fermix.role == "system"
+      assert runtime.content =~ "## Runtime Contract"
       assert memory_context.content =~ "<memory-context>"
       assert memory_context.content =~ "USER PROFILE (who the user is)"
       assert memory_context.content =~ "## Preferences\n- editor: vim"
       assert memory_context.content =~ "MEMORY (agent's working notes)"
       assert memory_context.content =~ "## Working Rules\n- warnings are errors"
-      assert runtime.content =~ "## Runtime Contract"
       assert datetime.content =~ "Current date:"
       assert user.content == "Hello with prompt memory"
     end
@@ -1047,15 +1049,16 @@ defmodule FermixCore.Agents.MainAgentTest do
                "user"
              ]
 
-      memory_context = Enum.at(messages, 3).content
+      memory_context = Enum.at(messages, 4).content
       datetime = Enum.at(messages, 5).content
 
+      # Stable bootstrap + runtime precede volatile memory (M10 P1).
       assert Enum.map(messages, & &1.content) == [
                "IDENTITY bootstrap",
                "SOUL bootstrap",
                "AGENTS bootstrap",
-               memory_context,
                runtime_message(messages).content,
+               memory_context,
                datetime,
                "Hello with bootstrap"
              ]
@@ -1425,7 +1428,11 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert "skill_view" in names
       assert "skill_run" in names
       refute "coding-skill" in names
-      assert "mcp_demo_tool" in names
+      # Tool-schema deferral is default-on (M10): the MCP tool defers off the
+      # WIRE (advertised set), while its name stays in the runtime prose so the
+      # operator can still discover and call it. Guest (below) loses it entirely
+      # to trust filtering — the prose distinguishes the two surfaces.
+      refute "mcp_demo_tool" in names
       assert runtime.content =~ "coding-skill"
       assert runtime.content =~ "mcp_demo_tool"
     end

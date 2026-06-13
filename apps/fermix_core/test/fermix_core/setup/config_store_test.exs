@@ -255,6 +255,37 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
   end
 
+  test "save/load round-trip preserves the tool_search deferral flag (M10)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [tools: [tool_search: [enabled: false]]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.tools.tool_search]"
+    assert contents =~ "enabled = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    tool_search =
+      loaded.fermix_core
+      |> Keyword.get(:tools, [])
+      |> Keyword.get(:tool_search, [])
+
+    # The explicit kill-switch survives the round-trip — it is not dropped on
+    # the way to Application.get_env, so Deferral.enabled?/0 can read it.
+    assert Keyword.get(tool_search, :enabled) == false
+  end
+
   test "save/load round-trips subagent/cron routing keys and drops the removed dormant keys" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

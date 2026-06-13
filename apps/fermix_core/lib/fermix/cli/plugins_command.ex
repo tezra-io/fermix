@@ -362,7 +362,7 @@ defmodule Fermix.CLI.PluginsCommand do
   end
 
   defp install_missing(name) do
-    IO.puts("#{name} is not installed — installing from the catalog")
+    IO.puts(:stderr, "#{name} is not installed — installing from the catalog")
     with {:ok, _status} <- DistInstaller.run_install(name, dist_opts()), do: :ok
   end
 

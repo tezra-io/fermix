@@ -475,7 +475,16 @@ defmodule FermixCore.Setup.Runtime do
   defp answered?(answers, key), do: Keyword.get(answers, key) not in [nil, ""]
 
   defp irrelevant_prompt?(%{key: :reasoning_effort}, answers) do
-    selected_provider(answers) == :anthropic
+    case selected_provider(answers) do
+      nil ->
+        false
+
+      provider ->
+        case Descriptor.fetch(provider) do
+          {:ok, descriptor} -> descriptor.effort? == false
+          :error -> false
+        end
+    end
   end
 
   defp irrelevant_prompt?(%{key: :fast}, answers) do

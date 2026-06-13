@@ -179,6 +179,8 @@ defmodule FermixCore.Agents.TurnRunnerUltraTest do
       agent_id: "main",
       built_at_ms: 0,
       base_messages: [%{role: "system", content: "base prompt"}],
+      stable_messages: [%{role: "system", content: "base prompt"}],
+      volatile_messages: [],
       base_accounting: [],
       available_skills: [],
       operator_profile: runtime_profile(:operator),

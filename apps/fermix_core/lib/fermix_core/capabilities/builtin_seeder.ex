@@ -13,6 +13,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
 
   alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
   require Logger
@@ -79,15 +80,30 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     :ignore
   end
 
+  # The M10 bridge tools: seeded only when tool-schema deferral is enabled
+  # (off = zero residue — absent from registry, prompt, and wire).
+  @bridge_tool_modules [
+    FermixCore.Tools.ToolSearch,
+    FermixCore.Tools.ToolDescribe,
+    FermixCore.Tools.ToolCall
+  ]
+
   @doc """
   The built-in tool modules seeded into the capability registry at boot.
   Exposed for the classification guard test that asserts every built-in has an
   explicit `policy_class` (see `FermixCore.Capabilities.Builtin`).
   """
   @spec builtin_tool_modules() :: [module()]
-  def builtin_tool_modules, do: @builtin_tool_modules
+  def builtin_tool_modules, do: @builtin_tool_modules ++ @bridge_tool_modules
 
   defp builtin_modules(opts) do
-    Keyword.get(opts, :tool_modules, @builtin_tool_modules)
+    case Keyword.fetch(opts, :tool_modules) do
+      {:ok, modules} -> modules
+      :error -> @builtin_tool_modules ++ bridge_modules()
+    end
+  end
+
+  defp bridge_modules do
+    if Deferral.enabled?(), do: @bridge_tool_modules, else: []
   end
 end

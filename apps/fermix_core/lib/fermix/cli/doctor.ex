@@ -41,6 +41,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.opik_readiness(),
       Checks.recent_log_activity(),
       Checks.compaction_config(),
+      Checks.bootstrap_template_drift(),
       Checks.routing_overrides(),
       Checks.command_owner_config(),
       Checks.streaming_config(),
