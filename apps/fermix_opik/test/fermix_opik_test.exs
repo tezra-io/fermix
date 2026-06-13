@@ -16,15 +16,22 @@ defmodule FermixOpikTest do
   defp restore(name, nil), do: System.delete_env(name)
   defp restore(name, value), do: System.put_env(name, value)
 
-  test "enabled? honors the env var over config" do
-    System.delete_env("FERMIX_OPIK_ENABLED")
+  test "enabled? is force-off under :test even when the flag is set" do
+    # The dev/prod environment gate must win over the flag so a developer's
+    # exported FERMIX_OPIK_ENABLED=1 never exports test telemetry to Opik.
+    System.put_env("FERMIX_OPIK_ENABLED", "1")
     refute FermixOpik.enabled?()
+  end
+
+  test "enabled_by_flag? honors the env var over config" do
+    System.delete_env("FERMIX_OPIK_ENABLED")
+    refute FermixOpik.enabled_by_flag?()
 
     System.put_env("FERMIX_OPIK_ENABLED", "1")
-    assert FermixOpik.enabled?()
+    assert FermixOpik.enabled_by_flag?()
 
     System.put_env("FERMIX_OPIK_ENABLED", "false")
-    refute FermixOpik.enabled?()
+    refute FermixOpik.enabled_by_flag?()
   end
 
   test "client_config takes base_url from the env" do
