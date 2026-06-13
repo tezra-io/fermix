@@ -111,7 +111,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Fermix setup"
       assert html =~ "Step 1 of"
-      assert html =~ "Guided onboarding"
+      assert html =~ ~s(aria-label="Fermix")
       assert html =~ ConfigStore.path()
     end
 
