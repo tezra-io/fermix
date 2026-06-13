@@ -19,9 +19,32 @@ defmodule FermixOpik do
   # only Fermix's does. Reading env here keeps it switchable with nothing more
   # than `FERMIX_OPIK_ENABLED=1`, no edit to Fermix's config needed.
 
-  @doc "Whether the exporter is enabled (env `FERMIX_OPIK_ENABLED`, else config)."
+  # Opik export is a dev/prod observability surface — it must never run under
+  # :test. In the umbrella, `mix test` boots `fermix_opik` as a sibling app, so
+  # without this gate a developer with `FERMIX_OPIK_ENABLED=1` exported in their
+  # shell (for the dev daemon / eval skill) would attach the global telemetry
+  # reporter during the test run and POST every test's telemetry to Opik as
+  # empty traces. This is the runtime half of the `only: [:dev, :prod]` dep
+  # gating in fermix_core/mix.exs; the flag alone must not switch export on in
+  # test. Captured at compile time so it stays release-safe (Mix is unavailable
+  # at runtime in a release).
+  @compiled_env Mix.env()
+
+  @doc """
+  Whether the exporter should run: the dev/prod environment gate AND the flag.
+
+  Always `false` under `:test`, regardless of `FERMIX_OPIK_ENABLED` — use
+  `enabled_by_flag?/0` to inspect the flag itself.
+  """
   @spec enabled?() :: boolean()
-  def enabled? do
+  def enabled?, do: @compiled_env != :test and enabled_by_flag?()
+
+  @doc """
+  The env-var-over-config switch (env `FERMIX_OPIK_ENABLED`, else the `:enabled`
+  config). Not gated by environment — `enabled?/0` is the real run decision.
+  """
+  @spec enabled_by_flag?() :: boolean()
+  def enabled_by_flag? do
     case System.get_env("FERMIX_OPIK_ENABLED") do
       truthy when truthy in ["1", "true", "TRUE", "yes", "y"] -> true
       falsy when falsy in ["0", "false", "FALSE", "no", "n"] -> false
