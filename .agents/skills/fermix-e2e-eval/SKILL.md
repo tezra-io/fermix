@@ -116,8 +116,11 @@ with `--judge`, one judge turn per case (`cli:e2e-judge-…`). To manage the clu
   `none` in `config.yaml` to keep judging off the daemon entirely.
 - **Purge the skill's traces:** `uv run bin/run_eval.py --purge` deletes only the
   `e2e-*` threads it created — never your Telegram/job/test traces.
-- **Stop test pollution:** run `mix test` with `FERMIX_OPIK_ENABLED` unset so test
-  fixtures (bench/channel/job tests) don't export to your live project.
+- **Test pollution is hard-gated off:** `FermixOpik.enabled?/0` returns `false`
+  under `:test` regardless of `FERMIX_OPIK_ENABLED`, so `mix test` no longer
+  exports fixture telemetry even with the flag exported in your shell — you don't
+  need to unset it. (Pre-`8bc080f` you did; the flag alone used to switch the
+  sibling `fermix_opik` app on during the umbrella test run.)
 
 ## Cost & latency (warn the user before `--all`)
 
