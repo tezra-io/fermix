@@ -832,8 +832,8 @@ defmodule FermixCore.Setup.Doctor do
 
   defp catalog_windows do
     for provider <- ModelCatalog.providers(),
-        {model, _label, context_window} <- ModelCatalog.models_for(provider) do
-      %{provider: provider, model: model, context_window: context_window}
+        entry <- ModelCatalog.models_for(provider) do
+      %{provider: provider, model: entry.id, context_window: entry.context_window}
     end
   end
 

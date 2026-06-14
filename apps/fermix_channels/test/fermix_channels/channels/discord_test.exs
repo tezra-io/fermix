@@ -20,9 +20,6 @@ defmodule FermixChannels.Channels.DiscordTest do
     @impl FermixCore.Providers.Provider
     def chat(_messages, _opts), do: {:ok, response()}
 
-    @impl FermixCore.Providers.Provider
-    def models, do: {:ok, ["mock-model"]}
-
     @impl FermixCore.Providers.Adapter
     def chat(_messages, _capabilities, _opts), do: {:ok, turn()}
 

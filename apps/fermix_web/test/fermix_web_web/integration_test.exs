@@ -23,9 +23,6 @@ defmodule FermixWebWeb.IntegrationTest do
     @impl FermixCore.Providers.Provider
     def chat(_messages, _opts), do: {:ok, response()}
 
-    @impl FermixCore.Providers.Provider
-    def models, do: {:ok, ["mock-model"]}
-
     @impl FermixCore.Providers.Adapter
     def chat(_messages, _capabilities, _opts), do: {:ok, turn()}
 
@@ -74,9 +71,6 @@ defmodule FermixWebWeb.IntegrationTest do
       has_tool_result = Enum.any?(messages, &(&1.role == "tool" || &1[:role] == "tool"))
       {:ok, legacy_response(has_tool_result)}
     end
-
-    @impl FermixCore.Providers.Provider
-    def models, do: {:ok, ["mock-model"]}
 
     @impl FermixCore.Providers.Adapter
     def chat(_messages, capabilities, _opts) do
