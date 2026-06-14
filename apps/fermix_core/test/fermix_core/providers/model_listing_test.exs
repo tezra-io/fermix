@@ -53,33 +53,40 @@ defmodule FermixCore.Providers.ModelListingTest do
   end
 
   describe "live_models/2 — :openrouter" do
-    test "filters to tool-capable models and sorts newest first" do
+    test "filters to tool-capable models and sorts by id so vendors cluster" do
       Req.Test.stub(__MODULE__, fn conn ->
         assert conn.request_path == "/api/v1/models"
 
         Req.Test.json(conn, %{
           "data" => [
             %{
-              "id" => "old/tooler",
-              "name" => "Old Tooler",
+              "id" => "openai/gpt-x",
+              "name" => "GPT X",
               "context_length" => 100_000,
-              "created" => 100,
+              "created" => 300,
               "supported_parameters" => ["tools"]
             },
             %{
-              "id" => "new/tooler",
-              "name" => "New Tooler",
+              "id" => "anthropic/opus",
+              "name" => "Opus",
+              "context_length" => 200_000,
+              "created" => 100,
+              "supported_parameters" => ["tools", "reasoning"]
+            },
+            %{
+              "id" => "anthropic/sonnet",
+              "name" => "Sonnet",
               "context_length" => 200_000,
               "created" => 200,
-              "supported_parameters" => ["tools", "reasoning"]
+              "supported_parameters" => ["tools"]
             },
             %{
               "id" => "chat/only",
               "name" => "Chat Only",
-              "created" => 300,
+              "created" => 400,
               "supported_parameters" => ["temperature"]
             },
-            %{"id" => "no/params-field", "created" => 50}
+            %{"id" => "openai/no-params", "created" => 50}
           ]
         })
       end)
@@ -89,8 +96,16 @@ defmodule FermixCore.Providers.ModelListingTest do
                  req_options: [plug: {Req.Test, __MODULE__}]
                )
 
-      assert Enum.map(models, & &1.id) == ["new/tooler", "old/tooler", "no/params-field"]
-      assert [%{label: "New Tooler", context_window: 200_000} | _rest] = models
+      # Sorted by id (NOT by `created`): anthropic/* cluster, then openai/*;
+      # the non-tool-capable "chat/only" is filtered out.
+      assert Enum.map(models, & &1.id) == [
+               "anthropic/opus",
+               "anthropic/sonnet",
+               "openai/gpt-x",
+               "openai/no-params"
+             ]
+
+      assert [%{label: "Opus", context_window: 200_000} | _rest] = models
     end
 
     test "reports non-200 upstream answers as a readable error" do

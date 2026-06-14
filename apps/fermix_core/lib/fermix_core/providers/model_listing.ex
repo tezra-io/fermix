@@ -96,15 +96,17 @@ defmodule FermixCore.Providers.ModelListing do
   end
 
   # Tool-capable only (the agent loop is tool-driven); permissive when the
-  # field is absent. Newest first — "all the latest models".
+  # field is absent. Sorted by id so same-vendor models cluster together
+  # (anthropic/*, openai/*, x-ai/*, …) — that ordering makes the long upstream
+  # catalog navigable in the setup picker, where the user filters by typing.
   defp openrouter_entries(models) do
     models
     |> Enum.filter(&openrouter_tool_capable?/1)
-    |> Enum.sort_by(&Map.get(&1, "created", 0), :desc)
     |> Enum.flat_map(fn
       %{"id" => id} = model when is_binary(id) -> [openrouter_entry(id, model)]
       _malformed -> []
     end)
+    |> Enum.sort_by(& &1.id)
   end
 
   defp openrouter_tool_capable?(%{"supported_parameters" => parameters})

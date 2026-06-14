@@ -1034,6 +1034,9 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Brand New"
       # The static curated entries are replaced by the live catalog.
       refute html =~ "Kimi K2.6"
+      # Searchable: a free-text model field backed by a <datalist> of live ids.
+      assert html =~ ~s(name="provider_form[default_model]")
+      assert html =~ "<datalist"
     end
 
     test "Set primary flips the flag to a configured fallback without re-entering creds", %{
