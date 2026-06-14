@@ -17,9 +17,6 @@ defmodule FermixCore.Memory.ExtractorTest do
       send(self(), {:extractor_provider_called, messages, opts})
       Process.get({__MODULE__, :response}, {:error, :missing_response})
     end
-
-    @impl true
-    def models, do: {:ok, ["mock-model"]}
   end
 
   defmodule StaticAdapter do

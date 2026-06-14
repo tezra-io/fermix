@@ -150,7 +150,7 @@ defmodule FermixCore.Tools.Subagents do
   defp model_slugs_hint do
     ModelCatalog.providers()
     |> Enum.flat_map(&ModelCatalog.models_for/1)
-    |> Enum.map(fn {id, _label, _ctx} -> id end)
+    |> Enum.map(& &1.id)
     |> Enum.uniq()
     |> Enum.join(", ")
   end

@@ -2,6 +2,12 @@ defmodule FermixCore.Providers.ModelCatalog do
   @moduledoc """
   Static per-provider model lists for the setup wizard.
 
+  Each model is one `Entry` record carrying everything Fermix needs to know
+  about it: the slug, the wizard label, the context window, and the two
+  provider-specific capability fields. One record per model is the whole point
+  — these capability flags used to live in separate per-slug tables that drift
+  silently when a model is added; co-locating them makes that drift impossible.
+
   The first entry in each list is the wizard default for that provider.
   Catalog updates ship in code, not config — see
   `docs/MILESTONE_4_10_CODEX_PARITY.md` §4.7. The wizard offers a
@@ -10,26 +16,28 @@ defmodule FermixCore.Providers.ModelCatalog do
   """
 
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog.Entry
 
   @type provider :: :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama
-  @type entry :: {id :: String.t(), label :: String.t(), context_window :: pos_integer()}
+  @type entry :: Entry.t()
 
   @unknown_model_default_ctx 100_000
+  @default_max_output_tokens 8_192
 
   # Same models, two access routes with different effective windows: the Codex
   # (ChatGPT subscription / OAuth) path caps the shared models at 400k, while the
   # OpenAI direct API (api key) serves the full window. Keyed per provider so the
   # window follows the auth path automatically (see models_for/1).
   @openai_codex [
-    {"gpt-5.5", "GPT-5.5 (default, latest)", 400_000},
-    {"gpt-5.4", "GPT-5.4", 400_000},
-    {"gpt-5.4-mini", "GPT-5.4 mini (faster, cheaper)", 400_000}
+    %Entry{id: "gpt-5.5", label: "GPT-5.5 (default, latest)", context_window: 400_000},
+    %Entry{id: "gpt-5.4", label: "GPT-5.4", context_window: 400_000},
+    %Entry{id: "gpt-5.4-mini", label: "GPT-5.4 mini (faster, cheaper)", context_window: 400_000}
   ]
 
   @openai [
-    {"gpt-5.5", "GPT-5.5 (default, recommended)", 1_050_000},
-    {"gpt-5.4", "GPT-5.4", 1_050_000},
-    {"gpt-5.4-mini", "GPT-5.4 mini", 400_000}
+    %Entry{id: "gpt-5.5", label: "GPT-5.5 (default, recommended)", context_window: 1_050_000},
+    %Entry{id: "gpt-5.4", label: "GPT-5.4", context_window: 1_050_000},
+    %Entry{id: "gpt-5.4-mini", label: "GPT-5.4 mini", context_window: 400_000}
   ]
 
   # Context windows are the API defaults the adapter actually gets (it does not
@@ -37,40 +45,64 @@ defmodule FermixCore.Providers.ModelCatalog do
   # off these. The 4.6+ generation (Opus 4.8, Sonnet 4.6) ships the full 1M
   # window by default at standard pricing; only Haiku 4.5 is 200k. (Older
   # Sonnet 4/4.5 still need the beta for 1M, but they are not in this catalog.)
+  #
+  # max_output_tokens are the per-model output ceilings Anthropic requires on
+  # every request (Hermes reference values — verify against current Anthropic
+  # docs before the SSE follow-up raises the adapter's non-streaming cap above
+  # them).
   @anthropic [
-    {"claude-sonnet-4-6", "Claude Sonnet 4.6 (recommended)", 1_000_000},
-    {"claude-fable-5", "Claude Fable 5", 1_000_000},
-    {"claude-opus-4-8", "Claude Opus 4.8 (best quality)", 1_000_000},
-    {"claude-haiku-4-5", "Claude Haiku 4.5 (fastest)", 200_000}
+    %Entry{
+      id: "claude-sonnet-4-6",
+      label: "Claude Sonnet 4.6 (recommended)",
+      context_window: 1_000_000,
+      max_output_tokens: 64_000
+    },
+    %Entry{
+      id: "claude-fable-5",
+      label: "Claude Fable 5",
+      context_window: 1_000_000,
+      max_output_tokens: 64_000
+    },
+    %Entry{
+      id: "claude-opus-4-8",
+      label: "Claude Opus 4.8 (best quality)",
+      context_window: 1_000_000,
+      max_output_tokens: 128_000
+    },
+    %Entry{
+      id: "claude-haiku-4-5",
+      label: "Claude Haiku 4.5 (fastest)",
+      context_window: 200_000,
+      max_output_tokens: 64_000
+    }
   ]
-
-  # Anthropic requires `max_tokens` on every request; these are the
-  # per-model output ceilings (Hermes reference values — verify against
-  # current Anthropic docs before the SSE follow-up raises the adapter's
-  # non-streaming cap above them).
-  @anthropic_max_output %{
-    "claude-sonnet-4-6" => 64_000,
-    "claude-fable-5" => 64_000,
-    "claude-opus-4-8" => 128_000,
-    "claude-haiku-4-5" => 64_000
-  }
-  @default_max_output_tokens 8_192
 
   # xAI model names are volatile (design doc §8) — stale ids fail in the
   # doctor probe, not the first user turn. Windows from current xAI docs:
   # Grok 4.3 = 1M, Grok 4.20 = 256k (same window as Grok 4), code-fast = 256k.
+  # `reasoning_effort?: false` marks the models that reject `reasoning.effort`
+  # (design doc §6.2) — re-verify against current xAI docs when adding models.
   @xai [
-    {"grok-4.3", "Grok 4.3 (recommended)", 1_000_000},
-    {"grok-4.20-0309-reasoning", "Grok 4.20 reasoning", 256_000},
-    {"grok-4.20-0309-non-reasoning", "Grok 4.20 non-reasoning", 256_000},
-    {"grok-code-fast-1", "Grok Code Fast (cheap, coding)", 256_000}
+    %Entry{id: "grok-4.3", label: "Grok 4.3 (recommended)", context_window: 1_000_000},
+    %Entry{
+      id: "grok-4.20-0309-reasoning",
+      label: "Grok 4.20 reasoning",
+      context_window: 256_000,
+      reasoning_effort?: false
+    },
+    %Entry{
+      id: "grok-4.20-0309-non-reasoning",
+      label: "Grok 4.20 non-reasoning",
+      context_window: 256_000,
+      reasoning_effort?: false
+    },
+    %Entry{
+      id: "grok-code-fast-1",
+      label: "Grok Code Fast (cheap, coding)",
+      context_window: 256_000,
+      reasoning_effort?: false
+    }
   ]
-
-  # The canonical ordered provider list lives in the Descriptor registry
-  # (order = fallback order + auto-promotion tie-break); the catalog
-  # delegates so the two can never drift.
-  @spec providers() :: [provider()]
-  def providers, do: Descriptor.ids()
 
   # OpenRouter ids are vendor-prefixed and use dots where Anthropic-direct
   # uses dashes; windows mirror the per-vendor catalogs above (M12 §3.1,
@@ -79,11 +111,23 @@ defmodule FermixCore.Providers.ModelCatalog do
   # web pane's live upstream catalog offers everything else newest-first,
   # so this curated list stays current-generation.
   @openrouter [
-    {"anthropic/claude-sonnet-4.6", "Claude Sonnet 4.6 via OpenRouter (default)", 1_000_000},
-    {"anthropic/claude-fable-5", "Claude Fable 5 via OpenRouter", 1_000_000},
-    {"anthropic/claude-opus-4.8", "Claude Opus 4.8 via OpenRouter", 1_000_000},
-    {"openai/gpt-5.5", "GPT-5.5 via OpenRouter", 1_050_000},
-    {"x-ai/grok-4.3", "Grok 4.3 via OpenRouter", 1_000_000}
+    %Entry{
+      id: "anthropic/claude-sonnet-4.6",
+      label: "Claude Sonnet 4.6 via OpenRouter (default)",
+      context_window: 1_000_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5",
+      label: "Claude Fable 5 via OpenRouter",
+      context_window: 1_000_000
+    },
+    %Entry{
+      id: "anthropic/claude-opus-4.8",
+      label: "Claude Opus 4.8 via OpenRouter",
+      context_window: 1_000_000
+    },
+    %Entry{id: "openai/gpt-5.5", label: "GPT-5.5 via OpenRouter", context_window: 1_050_000},
+    %Entry{id: "x-ai/grok-4.3", label: "Grok 4.3 via OpenRouter", context_window: 1_000_000}
   ]
 
   # Ollama windows are model CAPABILITY; the local server may serve far
@@ -91,10 +135,16 @@ defmodule FermixCore.Providers.ModelCatalog do
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
   # ids/windows against ollama.com/library tool-capable tags).
   @ollama [
-    {"qwen3:32b", "Qwen3 32B (default; tools)", 128_000},
-    {"gpt-oss:20b", "GPT-OSS 20B (tools)", 128_000},
-    {"llama3.3:70b", "Llama 3.3 70B (tools)", 128_000}
+    %Entry{id: "qwen3:32b", label: "Qwen3 32B (default; tools)", context_window: 128_000},
+    %Entry{id: "gpt-oss:20b", label: "GPT-OSS 20B (tools)", context_window: 128_000},
+    %Entry{id: "llama3.3:70b", label: "Llama 3.3 70B (tools)", context_window: 128_000}
   ]
+
+  # The canonical ordered provider list lives in the Descriptor registry
+  # (order = fallback order + auto-promotion tie-break); the catalog
+  # delegates so the two can never drift.
+  @spec providers() :: [provider()]
+  def providers, do: Descriptor.ids()
 
   @spec models_for(provider()) :: [entry()]
   def models_for(:openai_codex), do: @openai_codex
@@ -106,13 +156,13 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   @spec default_model_for(provider()) :: String.t()
   def default_model_for(provider) do
-    [{id, _label, _ctx} | _] = models_for(provider)
+    [%Entry{id: id} | _] = models_for(provider)
     id
   end
 
   @spec known_model?(provider(), String.t()) :: boolean()
   def known_model?(provider, id) when is_binary(id) do
-    Enum.any?(models_for(provider), fn {model_id, _label, _ctx} -> model_id == id end)
+    Enum.any?(models_for(provider), &(&1.id == id))
   end
 
   @doc """
@@ -128,11 +178,8 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   @spec context_window_for(atom(), String.t()) :: pos_integer()
   def context_window_for(provider, model_id) when is_binary(model_id) do
-    provider
-    |> models_for_context_window()
-    |> Enum.find(fn {id, _label, _ctx} -> id == model_id end)
-    |> case do
-      {_id, _label, ctx} when is_integer(ctx) and ctx > 0 ->
+    case find_entry(provider, model_id) do
+      %Entry{context_window: ctx} when is_integer(ctx) and ctx > 0 ->
         ctx
 
       nil ->
@@ -147,11 +194,35 @@ defmodule FermixCore.Providers.ModelCatalog do
   # (FunctionClauseError) rather than return a misleading default.
   @spec max_output_tokens_for(:anthropic, String.t()) :: pos_integer()
   def max_output_tokens_for(:anthropic, model_id) when is_binary(model_id) do
-    Map.get(@anthropic_max_output, model_id, @default_max_output_tokens)
+    case find_entry(:anthropic, model_id) do
+      %Entry{max_output_tokens: tokens} when is_integer(tokens) and tokens > 0 -> tokens
+      _absent -> @default_max_output_tokens
+    end
   end
 
-  defp models_for_context_window(provider) do
-    if provider in Descriptor.ids(), do: models_for(provider), else: []
+  @doc """
+  Whether `model_id` accepts the `reasoning.effort` request field. xAI-only in
+  practice — the xAI Responses adapter is the sole caller; unknown ids and every
+  non-xAI provider default to `true` (they never gate on it).
+  """
+  @spec reasoning_effort?(provider(), String.t()) :: boolean()
+  def reasoning_effort?(provider, model_id) when is_binary(model_id) do
+    case find_entry(provider, model_id) do
+      %Entry{reasoning_effort?: value} -> value
+      nil -> true
+    end
+  end
+
+  # Quiet lookup — no unknown_model telemetry. Callers that need that signal
+  # use context_window_for/2, which wraps this and emits on a miss. Returns nil
+  # for providers outside the catalog (e.g. direct-adapter `:mock`) so callers
+  # degrade to their default instead of raising on models_for/1.
+  defp find_entry(provider, model_id) do
+    if provider in Descriptor.ids() do
+      Enum.find(models_for(provider), &(&1.id == model_id))
+    else
+      nil
+    end
   end
 
   defp emit_unknown_model(provider, model_id) do

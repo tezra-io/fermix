@@ -308,11 +308,11 @@ defmodule FermixWebWeb.SetupLive.Components do
                     Same as main model (default)
                   </option>
                   <option
-                    :for={{id, label, ctx} <- @provider_models}
-                    value={id}
-                    selected={id == @provider_form.subagent_model}
+                    :for={entry <- @provider_models}
+                    value={entry.id}
+                    selected={entry.id == @provider_form.subagent_model}
                   >
-                    {label} ({id} - {format_context(ctx)})
+                    {entry.label} ({entry.id} - {format_context(entry.context_window)})
                   </option>
                   <%!-- A stored value not in this provider's catalog (e.g. set while
                         another provider was primary) must still display + round-trip,
@@ -488,11 +488,11 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <select name="provider_form[default_model]" class="select select-bordered w-full bg-base-100">
       <option
-        :for={{id, label, ctx} <- @provider_models}
-        value={id}
-        selected={id == @provider_form.default_model}
+        :for={entry <- @provider_models}
+        value={entry.id}
+        selected={entry.id == @provider_form.default_model}
       >
-        {label} ({id} - {format_context(ctx)})
+        {entry.label} ({entry.id} - {format_context(entry.context_window)})
       </option>
     </select>
     """
@@ -2649,7 +2649,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp subagent_model_custom?(value, _models) when value in [nil, ""], do: false
 
   defp subagent_model_custom?(value, models) when is_binary(value),
-    do: not Enum.any?(models, fn {id, _label, _ctx} -> id == value end)
+    do: not Enum.any?(models, &(&1.id == value))
 
   defp format_policy_counts(policy_counts) when map_size(policy_counts) == 0, do: "none"
 

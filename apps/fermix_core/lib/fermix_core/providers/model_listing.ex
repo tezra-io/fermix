@@ -126,7 +126,7 @@ defmodule FermixCore.Providers.ModelListing do
   # telemetry, which a setup-page render must not spam.
   defp catalog_window(provider, id) do
     ModelCatalog.models_for(provider)
-    |> Enum.find_value(fn {model_id, _label, ctx} -> if model_id == id, do: ctx end)
+    |> Enum.find_value(fn entry -> if entry.id == id, do: entry.context_window end)
   end
 
   defp get_json(url, opts) do

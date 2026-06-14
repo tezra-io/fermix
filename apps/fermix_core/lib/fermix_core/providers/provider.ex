@@ -29,7 +29,4 @@ defmodule FermixCore.Providers.Provider do
 
   @doc "Send a chat request and get a response."
   @callback chat([chat_message()], chat_opts()) :: {:ok, response()} | {:error, term()}
-
-  @doc "List available models."
-  @callback models() :: {:ok, [String.t()]} | {:error, term()}
 end
