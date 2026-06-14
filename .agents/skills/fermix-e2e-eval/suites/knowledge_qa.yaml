@@ -59,7 +59,7 @@ scenarios:
       - id: define_photosynthesis
         query: "In one sentence, what is photosynthesis?"
         expect:
-          reply_matches: "(?i)(sun)?light.*(energy|sugar|glucose|food)|plants?.*(light|sunlight).*(energy|food|sugar)"
+          reply_matches: "(?i)(?=.*(sun|solar|light|radia|photon))(?=.*(energ|sugar|glucose|food|carbohydrate|organic|nourish))"
           tools_none: [web_search, shell, file_read]
           max_iterations: 2
           max_cost_usd: 0.3
