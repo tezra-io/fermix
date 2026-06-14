@@ -143,10 +143,21 @@ defmodule FermixCore.Memory.PromptFiles do
         {section, item}
       end
 
+    kept = fitting_item_count(flat_items, token_cap, section_titles(kind))
+    warn_if_truncated(kind, kept, length(flat_items), token_cap)
+
     flat_items
-    |> fitting_item_count(token_cap, section_titles(kind))
-    |> then(&Enum.take(flat_items, &1))
+    |> Enum.take(kept)
     |> compose_document(section_titles(kind))
+  end
+
+  defp warn_if_truncated(_kind, kept, total, _token_cap) when kept >= total, do: :ok
+
+  defp warn_if_truncated(kind, kept, total, token_cap) do
+    Logger.warning(
+      "memory prompt #{kind} truncated: kept #{kept}/#{total} rows, " <>
+        "dropped #{total - kept} to fit #{token_cap}-token cap"
+    )
   end
 
   defp fitting_item_count(flat_items, token_cap, _section_order) do

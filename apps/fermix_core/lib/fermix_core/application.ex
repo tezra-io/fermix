@@ -22,7 +22,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
-  alias FermixCore.Memory.Scheduler, as: MemoryScheduler
   alias FermixCore.Memory.Store
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
@@ -132,7 +131,6 @@ defmodule FermixCore.Application do
         Repo,
         ConversationStore,
         Store,
-        MemoryScheduler,
         BootReport,
         AgentSupervisor,
         MainAgent,
