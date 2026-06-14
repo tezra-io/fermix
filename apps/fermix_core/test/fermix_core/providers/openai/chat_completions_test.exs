@@ -458,6 +458,55 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
       assert turn.content == "Hi there"
     end
+
+    # Mistral's strict validator 422s on an assistant message that carries
+    # empty-string `content` alongside `tool_calls`; the cross-ecosystem fix
+    # (langchain #21196, litellm #13355, vllm #38738) is to omit the `content`
+    # key entirely in that case. OpenAI/OpenRouter/Ollama tolerate the
+    # omission, so one wire shape stays valid on every ChatCompletions provider.
+    test "omits content from assistant messages carrying tool_calls" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assistant = Enum.find(decoded["messages"], &(&1["role"] == "assistant"))
+        send(test_pid, {:assistant_message, assistant})
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        messages: [%{role: "user", content: "Hi"}],
+        assistant: %{
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            %{
+              "id" => "abc123def",
+              "type" => "function",
+              "function" => %{"name" => "echo", "arguments" => "{}"}
+            }
+          ]
+        },
+        capabilities: [capability()]
+      }
+
+      tool_results = [%{call_id: "abc123def", output: "echoed"}]
+
+      {:ok, _turn} =
+        ChatCompletions.continue(provider_state, tool_results,
+          api_key: "key",
+          provider: :mistral,
+          model: "mistral-large-latest",
+          base_url: "https://api.mistral.ai/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:assistant_message, assistant}
+      refute Map.has_key?(assistant, "content")
+      assert [%{"id" => "abc123def"}] = assistant["tool_calls"]
+    end
   end
 
   describe "supports_streaming?/0" do

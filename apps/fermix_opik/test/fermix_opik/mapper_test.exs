@@ -146,6 +146,7 @@ defmodule FermixOpik.MapperTest do
     assert Mapper.provider_string(:xai) == "xai"
     assert Mapper.provider_string(:openrouter) == "openrouter"
     assert Mapper.provider_string(:ollama) == "ollama"
+    assert Mapper.provider_string(:mistral) == "mistral"
     assert Mapper.provider_string(nil) == nil
   end
 

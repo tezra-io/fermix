@@ -11,6 +11,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                :anthropic,
                :xai,
                :openrouter,
+               :mistral,
                :ollama
              ]
     end
