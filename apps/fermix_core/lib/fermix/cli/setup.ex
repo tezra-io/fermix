@@ -17,6 +17,7 @@ defmodule Fermix.CLI.Setup do
     anthropic_api_key: :string,
     xai_api_key: :string,
     openrouter_api_key: :string,
+    mistral_api_key: :string,
     ollama_base_url: :string,
     provider: :string,
     default_model: :string,

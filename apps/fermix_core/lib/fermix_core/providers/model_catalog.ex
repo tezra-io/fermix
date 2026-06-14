@@ -18,7 +18,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog.Entry
 
-  @type provider :: :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama
+  @type provider ::
+          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
   @type entry :: Entry.t()
 
   @unknown_model_default_ctx 100_000
@@ -130,6 +131,25 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{id: "x-ai/grok-4.3", label: "Grok 4.3 via OpenRouter", context_window: 1_000_000}
   ]
 
+  # Mistral ships rolling `-latest` aliases that always resolve to the current
+  # build of each tier, so the slugs stay correct without catalog churn (a
+  # stale id would fail in the doctor probe, not the first turn). All three
+  # serve a 128k context window ([verify] against docs.mistral.ai/models when
+  # adding tiers); `reasoning_effort` is omitted (see the descriptor entry).
+  @mistral [
+    %Entry{
+      id: "mistral-large-latest",
+      label: "Mistral Large (recommended)",
+      context_window: 128_000
+    },
+    %Entry{id: "mistral-medium-latest", label: "Mistral Medium", context_window: 128_000},
+    %Entry{
+      id: "mistral-small-latest",
+      label: "Mistral Small (fast, cheap)",
+      context_window: 128_000
+    }
+  ]
+
   # Ollama windows are model CAPABILITY; the local server may serve far
   # less (default num_ctx is small) and truncates silently — the doctor
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
@@ -152,6 +172,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:anthropic), do: @anthropic
   def models_for(:xai), do: @xai
   def models_for(:openrouter), do: @openrouter
+  def models_for(:mistral), do: @mistral
   def models_for(:ollama), do: @ollama
 
   @spec default_model_for(provider()) :: String.t()
