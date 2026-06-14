@@ -327,7 +327,7 @@ defmodule FermixCore.Memory.Reviewer do
         #{Enum.join(entries.memory.lines, "\n")}
         </memory_md>
 
-        New conversation excerpts since the last review:
+        New messages the user sent since the last review (your own replies are not shown):
         #{Enum.map_join(messages, "\n", & &1.content)}
         """
       }
@@ -338,7 +338,8 @@ defmodule FermixCore.Memory.Reviewer do
     """
     You maintain #{ctx.agent_id}'s long-term memory from recent conversation excerpts.
     Use only durable, reusable facts. Do not save secrets or transient task details.
-    Evolve memory instead of accumulating duplicates.
+    Write each value as a declarative fact about the user or their work, not as an instruction to yourself.
+    When a new message updates or contradicts something already in Current memory, replace or archive that row by its id instead of adding a new one; the most recent statement wins.
 
     Return either "#{@nothing_to_save}" or strict JSON:
     {"operations":[{"action":"add","target":"user|memory","category":"...","value":"..."},
