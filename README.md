@@ -102,10 +102,11 @@ chat_id = "8217352118"
 
 ### Environment variables
 
+> **The credential variables are optional.** Running `fermix setup` (CLI wizard or web setup) collects your provider API keys and channel tokens and stores the secrets in your OS keychain, so a configured install needs **none** of the API-key/token variables below. Set them only for headless or container deployments that inject secrets through the environment — the **Required** column assumes that env-only style of configuration. (The `FERMIX_*` runtime/Realtime rows are environment-only operational knobs, unrelated to secret storage.)
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | Yes when provider is `openai` | OpenAI API key |
-| `TELEGRAM_BOT_TOKEN` | If Telegram is enabled | Telegram Bot API token |
 | `WHATSAPP_ACCESS_TOKEN` | If WhatsApp is enabled | WhatsApp Cloud API access token |
 | `WHATSAPP_PHONE_NUMBER_ID` | If WhatsApp is enabled | WhatsApp phone number ID |
 | `WHATSAPP_VERIFY_TOKEN` | If WhatsApp is enabled | WhatsApp webhook verification token |
@@ -422,7 +423,7 @@ Fermix dev daemon online
 
 If a channel or Realtime is not configured, the banner shows the reason instead of crashing — the daemon still comes up so the rest of the stack is testable.
 
-Running two BEAM nodes against the same `TELEGRAM_BOT_TOKEN` (e.g. an older split workflow with `mix phx.server` next to a separate Realtime daemon) causes the two pollers to race on `getUpdates`. Keep the dev stack on one node — `mix fermix.dev`. The Phoenix port preflight will refuse to start a second instance when port `4030` is already bound.
+Two Fermix instances polling the **same** Telegram bot token race on `getUpdates`, and Telegram returns `409 Conflict` ("terminated by other getUpdates request"). The bot token is read **only** from each `FERMIX_HOME`'s `config.toml` (set via `fermix setup`), never from the environment — so give your dev (`~/.fermix-dev`) and prod (`~/.fermix`) instances **distinct** bot tokens. If you store secrets in the OS keychain, also set a distinct `[fermix_core] profile` (e.g. `profile = "dev"`) in the non-default install so its keychain entries are namespaced (`fermix:dev:TELEGRAM_BOT_TOKEN`) instead of overwriting the default `general` entries (`fermix:TELEGRAM_BOT_TOKEN`). Set the profile **before** running `fermix setup`; there is no migration when it changes, so flipping it on a populated install orphans the old keychain entries (re-run `fermix setup` to re-write them). (The dev `mix fermix.dev` port-`4030` preflight only guards the Phoenix port, not the poller, so it is not a substitute for separate tokens.)
 
 ### Smoke-testing against the running daemon
 
