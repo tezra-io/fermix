@@ -233,14 +233,16 @@ defmodule FermixCore.Readiness do
           true ->
             %{
               component: "channel:telegram",
-              action: "Set TELEGRAM_BOT_TOKEN."
+              action:
+                "Set the Telegram bot token: run `fermix setup` or set bot_token in config.toml."
             }
         end
 
       _ ->
         %{
           component: "channel:telegram",
-          action: "Set TELEGRAM_BOT_TOKEN."
+          action:
+            "Set the Telegram bot token: run `fermix setup` or set bot_token in config.toml."
         }
     end
   end
