@@ -47,6 +47,11 @@ defmodule FermixCore.Net.HttpClient do
 
   @retry_reasons [:closed, :econnrefused]
 
+  # Substring of the RuntimeError Finch reraises on a pool-checkout queue
+  # timeout ("Finch was unable to provide a connection within the timeout due
+  # to excess queuing for connections").
+  @connection_unavailable_marker "unable to provide a connection"
+
   @spec request(Req.Request.t(), String.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
   def request(%Req.Request{} = req, label) when is_binary(label) do
     req = Req.merge(req, finch: FermixCore.Finch)
@@ -73,4 +78,23 @@ defmodule FermixCore.Net.HttpClient do
       Logger.warning("#{label} HTTP request failed: #{Exception.message(exception)}")
       {:error, exception}
   end
+
+  @doc """
+  True when `exception` is the Finch pool-checkout queue timeout returned by
+  `request/2` — the daemon could not obtain *any* connection before the
+  checkout timed out.
+
+  This is the wake-from-sleep signature: just after the host resumes, the
+  network is not ready, connects stall, and checkouts queue past their timeout.
+  Callers (e.g. the Codex adapter) use it to mint a typed
+  `:connection_unavailable` transport error so transient-infrastructure
+  recovery can key on the contract instead of a message string. Every other
+  `RuntimeError` is a genuine bug and returns `false`.
+  """
+  @spec connection_unavailable?(Exception.t() | term()) :: boolean()
+  def connection_unavailable?(%RuntimeError{message: message}) when is_binary(message) do
+    String.contains?(message, @connection_unavailable_marker)
+  end
+
+  def connection_unavailable?(_other), do: false
 end

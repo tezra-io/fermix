@@ -1133,6 +1133,10 @@ defmodule FermixCore.Setup.ConfigStore do
         lookup(config, "default_delivery_target", :default_delivery_target)
       )
     )
+    |> put_if_present(
+      :network_readiness_enabled,
+      normalize_boolean(lookup(config, "network_readiness_enabled", :network_readiness_enabled))
+    )
   end
 
   defp normalize_routing(nil), do: []

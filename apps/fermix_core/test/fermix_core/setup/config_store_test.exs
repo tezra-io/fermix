@@ -928,6 +928,34 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            ]
   end
 
+  test "save/load round-trips the network readiness job flag" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        agent: [name: "fermix"],
+        jobs: [network_readiness_enabled: false]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "network_readiness_enabled = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    jobs = Keyword.get(loaded.fermix_core, :jobs, [])
+
+    assert Keyword.get(jobs, :network_readiness_enabled) == false
+  end
+
   test "save/load round-trips per-channel command authorization config" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

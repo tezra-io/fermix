@@ -177,4 +177,26 @@ defmodule FermixCore.Net.HttpClientTest do
     assert_received :attempt
     refute_received :attempt
   end
+
+  describe "connection_unavailable?/1" do
+    test "classifies the Finch pool-checkout timeout RuntimeError" do
+      # The exact raise Finch reraises when a checkout exceeds the pool queue
+      # timeout — the wake-from-sleep signature, when the host network is not
+      # ready so connects stall and checkouts queue past their timeout.
+      exception =
+        RuntimeError.exception(
+          "Finch was unable to provide a connection within the timeout due to " <>
+            "excess queuing for connections."
+        )
+
+      assert HttpClient.connection_unavailable?(exception)
+    end
+
+    test "does not classify unrelated RuntimeErrors or non-exceptions" do
+      refute HttpClient.connection_unavailable?(RuntimeError.exception("something else broke"))
+      refute HttpClient.connection_unavailable?(%ArgumentError{message: "bad arg"})
+      refute HttpClient.connection_unavailable?(:closed)
+      refute HttpClient.connection_unavailable?("a string")
+    end
+  end
 end
