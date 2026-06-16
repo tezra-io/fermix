@@ -88,6 +88,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       schedule_kind: job.schedule_kind,
       schedule_expr: job.schedule_expr,
       timezone: job.timezone,
+      skill_name: job.skill_name,
       next_run_at: timestamp(job.next_run_at),
       expires_at: timestamp(job.expires_at),
       memory_source_id: job.memory_source_id,
@@ -98,10 +99,44 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       timeout_seconds: job.timeout_seconds,
       inactivity_timeout_seconds: job.inactivity_timeout_seconds,
       delivery_mode: job.delivery_mode,
+      delivery_target: job.delivery_target,
       last_run_at: timestamp(job.last_run_at),
       last_status: job.last_status,
       last_error: job.last_error
     }
+  end
+
+  def job_run_summary(run) do
+    %{
+      id: run.id,
+      job_id: run.job_id,
+      session_id: run.session_id,
+      trigger: run.trigger,
+      status: run.status,
+      claimed_at: timestamp(run.claimed_at),
+      started_at: timestamp(run.started_at),
+      completed_at: timestamp(run.completed_at),
+      final_response: run.final_response,
+      error: run.error,
+      delivery_status: run.delivery_status,
+      delivery_error: run.delivery_error,
+      iterations: run.iterations,
+      created_at: timestamp(run.created_at)
+    }
+  end
+
+  def job_run_payload(run) do
+    run
+    |> job_run_summary()
+    |> Map.merge(%{
+      prompt_snapshot: run.prompt_snapshot,
+      job_config_snapshot: run.job_config_snapshot,
+      capability_policy_snapshot: run.capability_policy_snapshot,
+      output_ref: run.output_ref,
+      token_usage: run.token_usage,
+      latency: run.latency,
+      updated_at: timestamp(run.updated_at)
+    })
   end
 
   def source_payload(source) do
@@ -142,6 +177,12 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   defp format_error({:expired_job, id}), do: "Job expired: #{id}"
   defp format_error({:invalid_delivery_target, message}), do: message
   defp format_error({:invalid_delivery_mode, mode}), do: "Invalid delivery_mode: #{inspect(mode)}"
+  defp format_error(:already_running), do: "Job already has an active run"
+
+  defp format_error(:not_runnable),
+    do: "Job is not runnable (paused, disabled, or already completed)"
+
+  defp format_error(:expired), do: "Job has expired"
   defp format_error(:not_found), do: "Not found"
   defp format_error(reason), do: inspect(reason)
 end

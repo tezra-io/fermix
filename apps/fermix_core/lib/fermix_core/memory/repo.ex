@@ -825,6 +825,13 @@ defmodule FermixCore.Memory.Repo do
     call({:claim_due_job, id, job_attrs, run_attrs, now}, opts)
   end
 
+  @spec claim_job_now(String.t(), scheduled_job_attrs(), job_run_attrs(), keyword()) ::
+          {:ok, {scheduled_job_row(), job_run_row()}} | {:error, term()}
+  def claim_job_now(id, job_attrs, run_attrs, opts \\ [])
+      when is_binary(id) and is_map(job_attrs) and is_map(run_attrs) do
+    call({:claim_job_now, id, job_attrs, run_attrs}, opts)
+  end
+
   @spec upsert_scheduled_job(scheduled_job_attrs(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, term()}
   def upsert_scheduled_job(attrs, opts \\ []) when is_map(attrs) do
@@ -1107,6 +1114,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:claim_due_job, id, job_attrs, run_attrs, now}, _from, state) do
     reply = with_connection(state, &claim_due_job_tx(&1, id, job_attrs, run_attrs, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:claim_job_now, id, job_attrs, run_attrs}, _from, state) do
+    reply = with_connection(state, &claim_job_now_tx(&1, id, job_attrs, run_attrs))
     {:reply, reply, state}
   end
 
@@ -2138,8 +2150,22 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp claim_due_job_tx(conn, id, job_attrs, run_attrs, now) do
+    transact_claim(conn, fn ->
+      claim_in_tx(conn, id, job_attrs, run_attrs, fetch_claimable_due_job(conn, id, now))
+    end)
+  end
+
+  # A manual ("run now") claim is identical to a due claim except it skips the
+  # due-time gate — the same single-flight guard and atomic upserts still apply.
+  defp claim_job_now_tx(conn, id, job_attrs, run_attrs) do
+    transact_claim(conn, fn ->
+      claim_in_tx(conn, id, job_attrs, run_attrs, fetch_claimable_job(conn, id))
+    end)
+  end
+
+  defp transact_claim(conn, claim_fun) do
     with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
-         result <- claim_due_job_in_tx(conn, id, job_attrs, run_attrs, now),
+         result <- claim_fun.(),
          :ok <- finish_job_claim(conn, result) do
       result
     else
@@ -2148,10 +2174,10 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  defp claim_due_job_in_tx(conn, id, job_attrs, run_attrs, now) do
-    with {:ok, due_job} <- fetch_claimable_due_job(conn, id, now),
+  defp claim_in_tx(conn, id, job_attrs, run_attrs, fetch_result) do
+    with {:ok, job} <- fetch_result,
          :ok <- ensure_no_active_job_run(conn, id),
-         {:ok, claimed_job} <- upsert_scheduled_job_row(conn, Map.merge(due_job, job_attrs)),
+         {:ok, claimed_job} <- upsert_scheduled_job_row(conn, Map.merge(job, job_attrs)),
          {:ok, run} <- upsert_job_run_row(conn, run_attrs) do
       {:ok, {claimed_job, run}}
     end
@@ -2178,6 +2204,27 @@ defmodule FermixCore.Memory.Repo do
       case rows do
         [row] -> {:ok, scheduled_job_row(row)}
         [] -> {:error, :not_due}
+      end
+    end
+  end
+
+  defp fetch_claimable_job(conn, id) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM scheduled_jobs
+             WHERE id = ?
+               AND enabled = 1
+               AND state = 'scheduled'
+             LIMIT 1
+             """,
+             [id]
+           ) do
+      case rows do
+        [row] -> {:ok, scheduled_job_row(row)}
+        [] -> {:error, :not_runnable}
       end
     end
   end

@@ -2,6 +2,8 @@ defmodule FermixCore.Tools.JobsTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Memory.Repo
+  alias FermixCore.Tools.GetJobRun
+  alias FermixCore.Tools.ListJobRuns
   alias FermixCore.Tools.ListJobs
   alias FermixCore.Tools.MemorySourcesList
   alias FermixCore.Tools.PauseJob
@@ -631,4 +633,88 @@ defmodule FermixCore.Tools.JobsTest do
     assert job.skill_name == nil
   end
 
+  test "list_job_runs returns a job's run history newest-first", %{context: context} do
+    job_id = seed_job(context, "History")
+
+    seed_run(context, job_id, "run_old", "ok", ~U[2026-06-01 08:00:00Z])
+    seed_run(context, job_id, "run_new", "error", ~U[2026-06-02 08:00:00Z])
+
+    assert {:ok, listed} = ListJobRuns.execute(%{"job_id" => job_id}, context)
+    assert listed.success == true
+    assert %{"runs" => [first, second]} = Jason.decode!(listed.output)
+    assert first["id"] == "run_new"
+    assert second["id"] == "run_old"
+    assert first["status"] == "error"
+  end
+
+  test "list_job_runs filters by status", %{context: context} do
+    job_id = seed_job(context, "Filtered")
+
+    seed_run(context, job_id, "run_ok", "ok", ~U[2026-06-01 08:00:00Z])
+    seed_run(context, job_id, "run_err", "error", ~U[2026-06-02 08:00:00Z])
+
+    assert {:ok, listed} =
+             ListJobRuns.execute(%{"job_id" => job_id, "status" => "error"}, context)
+
+    assert %{"runs" => [only]} = Jason.decode!(listed.output)
+    assert only["id"] == "run_err"
+  end
+
+  test "list_job_runs requires a job_id", %{context: context} do
+    assert {:ok, result} = ListJobRuns.execute(%{}, context)
+    assert result.success == false
+  end
+
+  test "get_job_run returns the full run record", %{context: context} do
+    job_id = seed_job(context, "Detailed")
+    seed_run(context, job_id, "run_detail", "ok", ~U[2026-06-01 08:00:00Z])
+
+    assert {:ok, fetched} = GetJobRun.execute(%{"run_id" => "run_detail"}, context)
+    assert fetched.success == true
+    payload = Jason.decode!(fetched.output)
+    assert payload["id"] == "run_detail"
+    assert payload["job_id"] == job_id
+    assert payload["status"] == "ok"
+    assert payload["final_response"] == "done"
+    assert Map.has_key?(payload, "prompt_snapshot")
+    assert Map.has_key?(payload, "token_usage")
+  end
+
+  test "get_job_run reports a missing run", %{context: context} do
+    assert {:ok, result} = GetJobRun.execute(%{"run_id" => "nope"}, context)
+    assert result.success == false
+    assert result.error =~ "Not found"
+  end
+
+  defp seed_job(context, name) do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => name, "schedule" => "every 15 minutes", "task" => "Report."},
+               context
+             )
+
+    Jason.decode!(created.output)["id"]
+  end
+
+  defp seed_run(context, job_id, run_id, status, at) do
+    {:ok, _run} =
+      Repo.upsert_job_run(
+        %{
+          id: run_id,
+          job_id: job_id,
+          session_id: "cron_#{job_id}_#{run_id}",
+          trigger: "schedule",
+          status: status,
+          claimed_at: at,
+          started_at: at,
+          completed_at: at,
+          prompt_snapshot: "do the thing",
+          final_response: "done",
+          token_usage: %{"total" => 10},
+          created_at: at,
+          updated_at: at
+        },
+        server: context.memory_repo
+      )
+  end
 end
