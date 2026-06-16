@@ -20,6 +20,12 @@ defmodule FermixCore.Jobs.Scheduler do
   @default_due_limit 20
   @default_run_freshness_window_seconds 3600
 
+  # Wake-time burst smoothing: each newly started run is told to wait this much
+  # per run already active before its first network call, capped, so a batch of
+  # jobs due at the same minute doesn't slam the HTTP pool simultaneously.
+  @runner_stagger_ms 250
+  @max_startup_stagger_ms 5_000
+
   @type state :: %{
           enabled?: boolean(),
           timer_enabled?: boolean(),
@@ -425,6 +431,15 @@ defmodule FermixCore.Jobs.Scheduler do
     }
   end
 
+  # Per-run startup delay = how many runs are already active × the stagger step,
+  # capped. Read at start time, so a batch fired back-to-back spreads out (run 1
+  # waits 0, run 2 one step, …) without the scheduler ever blocking — the runner
+  # does the waiting before its first network call.
+  defp startup_stagger_ms(state) do
+    active = DynamicSupervisor.count_children(state.runner_supervisor).active
+    min(active * @runner_stagger_ms, @max_startup_stagger_ms)
+  end
+
   defp start_runner(job, run, state) do
     case RunnerSupervisor.start_run(state.runner_supervisor,
            runner_module: state.runner_module,
@@ -443,7 +458,7 @@ defmodule FermixCore.Jobs.Scheduler do
            timeout_ms: state.timeout_ms,
            inactivity_timeout_ms: state.inactivity_timeout_ms,
            notify: state.runner_notify,
-           delay_ms: state.runner_delay_ms
+           start_delay_ms: startup_stagger_ms(state)
          ) do
       {:ok, pid} when is_pid(pid) -> {:ok, pid}
       {:ok, pid, _info} when is_pid(pid) -> {:ok, pid}

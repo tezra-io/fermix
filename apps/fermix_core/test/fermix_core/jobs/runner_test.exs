@@ -129,9 +129,14 @@ defmodule FermixCore.Jobs.RunnerTest do
       send(parent, {:transient_chat, n})
 
       cond do
-        n <= Keyword.get(opts, :fail_until, 0) -> connection_unavailable_error()
-        error = Keyword.get(opts, :fail_with) -> {:error, error}
-        true -> success_turn(n)
+        n <= Keyword.get(opts, :fail_until, 0) ->
+          Keyword.get(opts, :transient_error, connection_unavailable_error())
+
+        error = Keyword.get(opts, :fail_with) ->
+          {:error, error}
+
+        true ->
+          success_turn(n)
       end
     end
 
@@ -1151,6 +1156,79 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "ok"
       assert stored_run.final_response == "recovered after 2 transient retries"
+    end
+
+    test "retries a bare connection-unavailable RuntimeError (non-Codex provider) and recovers",
+         %{
+           repo: repo,
+           capability_registry: capability_registry,
+           output_base_dir: output_base_dir
+         } do
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Wake Race Recover Bare", task_prompt: "Run.")
+
+      # Non-Codex adapters return the Finch pool-checkout timeout as a bare
+      # %RuntimeError{}, not the typed transport error Codex mints. The runner
+      # must still treat it as transient and retry — provider-agnostic recovery.
+      bare =
+        {:error,
+         %RuntimeError{
+           message:
+             "Finch was unable to provide a connection within the timeout due to excess " <>
+               "queuing for connections."
+         }}
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        adapter_opts: [counter: counter, fail_until: 2, transient_error: bare]
+      )
+
+      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:transient_chat, 2}, 1_000
+      assert_receive {:transient_chat, 3}, 1_000
+      refute_receive {:transient_chat, 4}, 100
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.final_response == "recovered after 2 transient retries"
+    end
+
+    test "waits the assigned startup delay before its first network call (burst stagger)", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = start_counter()
+      parent = self()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Stagger", task_prompt: "Run.")
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: parent,
+          capability_registry: capability_registry,
+          adapter: TransientAdapter,
+          adapter_opts: [test_pid: parent, counter: counter, fail_until: 0],
+          output_base_dir: output_base_dir,
+          network_readiness_enabled: false,
+          start_delay_ms: 750,
+          delay_fn: fn ms -> send(parent, {:delay, ms}) end
+        )
+
+      ref = Process.monitor(pid)
+
+      # The startup stagger is slept (via delay_fn) BEFORE the first chat call.
+      assert_receive {:delay, 750}, 1_000
+      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
 
     test "fails the run after the bounded retry ceiling without looping forever", %{
