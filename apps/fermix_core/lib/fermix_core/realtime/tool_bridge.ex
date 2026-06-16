@@ -42,11 +42,28 @@ defmodule FermixCore.Realtime.ToolBridge do
     with {:ok, capability} <- fetch_capability(bridge, name),
          {:ok, args} <- decode_arguments(call),
          {:ok, result} <- execute_capability(capability, args, bridge.context) do
-      {:ok, %{call_id: call_id, output: Jason.encode!(result)}}
+      {:ok, %{call_id: call_id, output: Jason.encode!(sanitize_result(result))}}
     else
       {:error, reason} -> {:error, %{call_id: call_id, reason: reason}}
     end
   end
+
+  # Capability output can carry bytes that are not valid UTF-8 — a Latin-1 file
+  # read, raw command bytes, a stray byte in an HTTP body. Jason raises on
+  # invalid UTF-8, which would crash the realtime session as the result is
+  # encoded onto the wire. Scrub every binary leaf before encoding — the same
+  # guarantee AgentLoop.sanitize_tool_output/1 gives the text path, adapted to
+  # the bridge encoding the whole result map rather than a pre-extracted string.
+  # The scrub must precede Jason.encode!: it raises before producing a string,
+  # so scrubbing its output would be too late.
+  defp sanitize_result(value) when is_binary(value), do: String.replace_invalid(value)
+  defp sanitize_result(value) when is_list(value), do: Enum.map(value, &sanitize_result/1)
+  defp sanitize_result(%_{} = value), do: value
+
+  defp sanitize_result(value) when is_map(value),
+    do: Map.new(value, fn {key, val} -> {key, sanitize_result(val)} end)
+
+  defp sanitize_result(value), do: value
 
   defp fetch_capability(%__MODULE__{} = bridge, name) when is_binary(name) do
     case Map.fetch(bridge.capabilities, name) do
