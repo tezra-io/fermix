@@ -16,8 +16,6 @@ defmodule FermixCore.Memory.ReviewTools do
   alias FermixCore.Memory.Repo
 
   @archive_actor "memory_reviewer"
-  @user_categories ~w(identity preference goal)
-  @memory_categories ~w(project environment instruction)
 
   @type context :: %{
           required(:agent_id) => String.t(),
@@ -161,38 +159,35 @@ defmodule FermixCore.Memory.ReviewTools do
     end
   end
 
-  defp add_attrs("user", category, value, ctx) when category in @user_categories do
-    {:ok,
-     %{
-       agent_id: ctx.agent_id,
-       owner_id: ctx.owner_id,
-       scope_type: "owner",
-       scope_id: ctx.owner_id,
-       category: category,
-       key: fresh_key(category, value),
-       value: value,
-       confidence: 1.0,
-       promote_target: Admission.prompt_target(%{category: category, scope_type: "owner"})
-     }}
+  defp add_attrs("user", category, value, ctx) do
+    promoted_attrs(:user, "owner", ctx.owner_id, category, value, ctx)
   end
 
-  defp add_attrs("memory", category, value, ctx) when category in @memory_categories do
-    {:ok,
-     %{
-       agent_id: ctx.agent_id,
-       owner_id: ctx.owner_id,
-       scope_type: "agent",
-       scope_id: ctx.agent_id,
-       category: category,
-       key: fresh_key(category, value),
-       value: value,
-       confidence: 1.0,
-       promote_target: Admission.prompt_target(%{category: category, scope_type: "agent"})
-     }}
+  defp add_attrs("memory", category, value, ctx) do
+    promoted_attrs(:memory, "agent", ctx.agent_id, category, value, ctx)
   end
 
   defp add_attrs(target, category, _value, _ctx) do
     {:skip, {:invalid_add_target_category, target, category}}
+  end
+
+  defp promoted_attrs(bucket, scope_type, scope_id, category, value, ctx) do
+    if Admission.promotable_category?(bucket, category) do
+      {:ok,
+       %{
+         agent_id: ctx.agent_id,
+         owner_id: ctx.owner_id,
+         scope_type: scope_type,
+         scope_id: scope_id,
+         category: category,
+         key: fresh_key(category, value),
+         value: value,
+         confidence: 1.0,
+         promote_target: Admission.prompt_target(%{category: category, scope_type: scope_type})
+       }}
+    else
+      {:skip, {:invalid_add_target_category, Atom.to_string(bucket), category}}
+    end
   end
 
   defp get_owned_memory(id, ctx) do

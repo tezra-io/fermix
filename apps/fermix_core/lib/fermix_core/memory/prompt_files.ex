@@ -17,8 +17,25 @@ defmodule FermixCore.Memory.PromptFiles do
 
   @type memory_row :: Repo.memory_row()
 
-  @user_sections ["Identity", "Preferences", "Ongoing Goals", "Additional Context"]
-  @memory_sections ["Environment", "Project Context", "Working Rules", "Additional Context"]
+  @user_sections ["Identity", "Preferences", "Interests", "Goals"]
+  @memory_sections ["Context", "Working Rules"]
+
+  # Per-section row caps keep any one section from crowding the file out (the
+  # primary verbosity governor); the per-file token cap is the backstop. Caps
+  # keep the most recently updated rows — rows arrive newest-first from the repo.
+  @section_caps %{
+    "Identity" => 6,
+    "Preferences" => 6,
+    "Interests" => 6,
+    "Goals" => 5,
+    "Context" => 12,
+    "Working Rules" => 8
+  }
+
+  # Hard backstop on a single rendered fact. The reviewer is instructed to write
+  # one short clause per value; this caps a legacy or runaway row so it cannot
+  # bloat the file on its own.
+  @max_value_chars 200
 
   @spec user_path(String.t()) :: String.t()
   def user_path(agent_id) when is_binary(agent_id) do
@@ -117,11 +134,33 @@ defmodule FermixCore.Memory.PromptFiles do
   defp sectioned_items(rows, kind) do
     rows
     |> Enum.reduce(empty_sections(kind), fn row, acc ->
-      section = section_name(kind, row.category)
-      item = format_item(row)
-      Map.update!(acc, section, fn items -> [item | items] end)
+      case section_name(kind, row.category) do
+        nil -> acc
+        section -> Map.update!(acc, section, fn items -> [format_item(row) | items] end)
+      end
     end)
     |> ordered_sections(kind)
+    |> cap_sections(kind)
+  end
+
+  # Items arrive newest-first here (repo order is updated_at DESC); keep the
+  # newest up to the section cap and warn when older rows are dropped.
+  defp cap_sections(sections, kind) do
+    Enum.map(sections, fn {title, items} ->
+      cap = Map.fetch!(@section_caps, title)
+      kept = Enum.take(items, cap)
+      warn_if_section_capped(kind, title, length(kept), length(items), cap)
+      {title, kept}
+    end)
+  end
+
+  defp warn_if_section_capped(_kind, _title, kept, total, _cap) when kept >= total, do: :ok
+
+  defp warn_if_section_capped(kind, title, kept, total, cap) do
+    Logger.warning(
+      "memory prompt #{kind} section #{title} capped: kept #{kept}/#{total} rows " <>
+        "to fit the #{cap}-row section cap"
+    )
   end
 
   defp empty_sections(:user), do: Map.new(@user_sections, &{&1, []})
@@ -222,19 +261,29 @@ defmodule FermixCore.Memory.PromptFiles do
 
   defp section_name(:user, "identity"), do: "Identity"
   defp section_name(:user, "preference"), do: "Preferences"
-  defp section_name(:user, "goal"), do: "Ongoing Goals"
-  defp section_name(:user, _category), do: "Additional Context"
+  defp section_name(:user, "interest"), do: "Interests"
+  defp section_name(:user, "goal"), do: "Goals"
+  defp section_name(:user, _category), do: nil
 
-  defp section_name(:memory, "environment"), do: "Environment"
-  defp section_name(:memory, "project"), do: "Project Context"
-  defp section_name(:memory, "goal"), do: "Project Context"
-  defp section_name(:memory, "instruction"), do: "Working Rules"
-  defp section_name(:memory, "correction"), do: "Working Rules"
-  defp section_name(:memory, "preference"), do: "Working Rules"
-  defp section_name(:memory, _category), do: "Additional Context"
+  defp section_name(:memory, "context"), do: "Context"
+  defp section_name(:memory, "directive"), do: "Working Rules"
+  defp section_name(:memory, _category), do: nil
 
+  # Render the fact itself, not the internal dedup key (reviewer keys are
+  # opaque hashes). Values are self-contained declarative clauses; a runaway
+  # row is hard-capped so it cannot bloat the file.
   defp format_item(row) do
-    "#{normalize_inline(row.key)}: #{normalize_inline(row.value)}"
+    row.value
+    |> normalize_inline()
+    |> truncate_value()
+  end
+
+  defp truncate_value(text) do
+    if String.length(text) <= @max_value_chars do
+      text
+    else
+      String.slice(text, 0, @max_value_chars - 1) <> "…"
+    end
   end
 
   defp normalize_inline(text) do
