@@ -129,7 +129,7 @@ defmodule FermixCore.Memory.PromptFilesTest do
       owner_id: owner_id,
       scope_type: "agent",
       scope_id: agent_id,
-      category: "project",
+      category: "context",
       key: "current_repo",
       value: String.duplicate("fermix umbrella app ", 4),
       promote_target: "memory_md"
@@ -140,7 +140,7 @@ defmodule FermixCore.Memory.PromptFilesTest do
       owner_id: owner_id,
       scope_type: "agent",
       scope_id: agent_id,
-      category: "instruction",
+      category: "directive",
       key: "repo_rule",
       value: String.duplicate("warnings are errors ", 4),
       promote_target: "memory_md"
@@ -156,11 +156,12 @@ defmodule FermixCore.Memory.PromptFilesTest do
     refute user_text =~ "STALE"
     refute memory_text =~ "STALE"
     assert user_text =~ "## Preferences"
-    assert memory_text =~ "## Project Context"
+    assert memory_text =~ "## Context"
     assert estimated_tokens(user_text) <= 32
     assert estimated_tokens(memory_text) <= 36
-    refute user_text =~ "active project"
-    refute memory_text =~ "repo rule"
+    # The lower-priority second row in each file is dropped under the byte cap.
+    refute user_text =~ "ship durable"
+    refute memory_text =~ "warnings are errors"
     assert File.exists?(PromptFiles.user_path(agent_id))
     assert File.exists?(PromptFiles.memory_path(agent_id))
 
@@ -200,10 +201,12 @@ defmodule FermixCore.Memory.PromptFilesTest do
     assert user_text == File.read!(PromptFiles.user_path(agent_id))
     assert File.read!(PromptFiles.memory_path(agent_id)) == ""
 
+    # Values render alone (newest-updated first); the internal dedup key is
+    # never surfaced.
     assert user_text == """
            ## Preferences
-           - second pref: beta
-           - first pref: alpha\
+           - beta
+           - alpha\
            """
   end
 
@@ -306,7 +309,7 @@ defmodule FermixCore.Memory.PromptFilesTest do
     assert {:ok, %{user: user_text, memory: nil}} =
              PromptFiles.rebuild(agent_id, owner_id, :event, provenance: provenance)
 
-    assert user_text =~ "preferred editor: helix"
+    assert user_text =~ "helix"
     assert File.read!(PromptFiles.user_path(agent_id)) == user_text
     assert File.read!(PromptFiles.memory_path(agent_id)) == ""
 
@@ -338,14 +341,14 @@ defmodule FermixCore.Memory.PromptFilesTest do
       owner_id: owner_id,
       scope_type: "agent",
       scope_id: agent_id,
-      category: "environment",
+      category: "context",
       key: "runtime",
       value: "elixir",
       promote_target: "memory_md"
     })
 
     assert {:ok, %{memory: memory_text}} = PromptFiles.rebuild(agent_id, owner_id, :periodic, [])
-    assert memory_text =~ "runtime: elixir"
+    assert memory_text =~ "elixir"
 
     assert {:ok, [revision]} =
              Registry.list_revisions(agent_id, :memory_md, "global", repo: repo)

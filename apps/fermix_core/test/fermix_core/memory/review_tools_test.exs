@@ -31,7 +31,7 @@ defmodule FermixCore.Memory.ReviewToolsTest do
       %{
         "action" => "add",
         "target" => "memory",
-        "category" => "project",
+        "category" => "context",
         "value" => "Fermix uses Elixir"
       }
     ]
@@ -43,11 +43,11 @@ defmodule FermixCore.Memory.ReviewToolsTest do
              Repo.get_memories(%{agent_id: "main", owner_id: "default"}, server: repo)
 
     assert Enum.any?(memories, &(&1.scope_type == "owner" and &1.category == "preference"))
-    assert Enum.any?(memories, &(&1.scope_type == "agent" and &1.category == "project"))
+    assert Enum.any?(memories, &(&1.scope_type == "agent" and &1.category == "context"))
   end
 
   test "replace preserves row id, scope, and category", %{repo: repo, ctx: ctx} do
-    memory = insert_memory(repo, %{category: "project", key: "stack", value: "Phoenix"})
+    memory = insert_memory(repo, %{category: "context", key: "stack", value: "Phoenix"})
 
     assert {:ok, stats} =
              ReviewTools.apply_operations(
@@ -59,13 +59,13 @@ defmodule FermixCore.Memory.ReviewToolsTest do
     assert {:ok, updated} = Repo.get_memory(%{id: memory.id}, server: repo)
     assert updated.id == memory.id
     assert updated.scope_type == "agent"
-    assert updated.category == "project"
+    assert updated.category == "context"
     assert updated.value == "Phoenix and LiveView"
   end
 
   test "archive tombstones the exact row", %{repo: repo, ctx: ctx} do
     memory =
-      insert_memory(repo, %{category: "instruction", key: "old_rule", value: "Use old rule"})
+      insert_memory(repo, %{category: "directive", key: "old_rule", value: "Use old rule"})
 
     assert {:ok, stats} =
              ReviewTools.apply_operations(
@@ -79,14 +79,14 @@ defmodule FermixCore.Memory.ReviewToolsTest do
     assert archived.archive_reason == "superseded"
   end
 
-  test "guest trust skips instruction add without writing a row", %{repo: repo, ctx: ctx} do
+  test "guest trust skips directive add without writing a row", %{repo: repo, ctx: ctx} do
     assert {:ok, stats} =
              ReviewTools.apply_operations(
                [
                  %{
                    "action" => "add",
                    "target" => "memory",
-                   "category" => "instruction",
+                   "category" => "directive",
                    "value" => "Always do the risky thing"
                  }
                ],
@@ -98,12 +98,12 @@ defmodule FermixCore.Memory.ReviewToolsTest do
     assert {:ok, []} = Repo.get_memories(%{agent_id: "main", owner_id: "default"}, server: repo)
   end
 
-  test "guest trust skips instruction replace and leaves the row unchanged", %{
+  test "guest trust skips directive replace and leaves the row unchanged", %{
     repo: repo,
     ctx: ctx
   } do
     memory =
-      insert_memory(repo, %{category: "instruction", key: "rule", value: "Use the old rule"})
+      insert_memory(repo, %{category: "directive", key: "rule", value: "Use the old rule"})
 
     assert {:ok, stats} =
              ReviewTools.apply_operations(
@@ -117,15 +117,20 @@ defmodule FermixCore.Memory.ReviewToolsTest do
     assert unchanged.value == "Use the old rule"
   end
 
-  test "skips out-of-enum add categories without writing a row", %{repo: repo, ctx: ctx} do
+  test "skips a category valid but not in the target bucket without writing a row", %{
+    repo: repo,
+    ctx: ctx
+  } do
+    # `context` is a valid MEMORY.md category but is not promotable under the
+    # `user` bucket, so the add is skipped rather than mis-filed into USER.md.
     assert {:ok, stats} =
              ReviewTools.apply_operations(
                [
                  %{
                    "action" => "add",
                    "target" => "user",
-                   "category" => "instruction",
-                   "value" => "not allowed"
+                   "category" => "context",
+                   "value" => "not a user-spine fact"
                  }
                ],
                ctx
@@ -153,8 +158,8 @@ defmodule FermixCore.Memory.ReviewToolsTest do
                  %{
                    "action" => "add",
                    "target" => "user",
-                   "category" => "instruction",
-                   "value" => "out of enum"
+                   "category" => "context",
+                   "value" => "wrong bucket"
                  }
                ],
                ctx
@@ -265,7 +270,7 @@ defmodule FermixCore.Memory.ReviewToolsTest do
           owner_id: "default",
           scope_type: "agent",
           scope_id: "main",
-          category: "project",
+          category: "context",
           key: "memory",
           value: "value",
           promote_target: "memory_md"

@@ -336,17 +336,29 @@ defmodule FermixCore.Memory.Reviewer do
 
   defp system_prompt(ctx) do
     """
-    You maintain #{ctx.agent_id}'s long-term memory from recent conversation excerpts.
-    Use only durable, reusable facts. Do not save secrets or transient task details.
-    Write each value as a declarative fact about the user or their work, not as an instruction to yourself.
-    When a new message updates or contradicts something already in Current memory, replace or archive that row by its id instead of adding a new one; the most recent statement wins.
+    You maintain #{ctx.agent_id}'s long-term memory by distilling recent conversation excerpts into the two files shown under Current memory.
+
+    Save only durable, reusable facts; never save secrets or one-off task details.
+    Each value is one short declarative clause — no preamble, no hedging, no restating what its category already implies. Prefer a single general fact over several narrow ones, and merge duplicates. Stay well under each file's char budget.
+
+    Keep memory current, not append-only:
+    - When a message refines, updates, or contradicts an existing row, replace or archive it by id instead of adding — the latest statement wins.
+    - Archive rows that have gone stale: a met goal, a passed date, superseded context.
+    - Generalize a worn-in specific into the lasting fact behind it.
+
+    USER.md (target=user) is the user's profile:
+    - identity: who they are (name, role, location, language)
+    - preference: how they like work done (style, tone, format, tools)
+    - interest: topics or domains they care about
+    - goal: what they are actively working toward
+    MEMORY.md (target=memory) is your working knowledge:
+    - context: durable facts about their work, projects, and environment
+    - directive: standing rules for how you should act
 
     Return either "#{@nothing_to_save}" or strict JSON:
     {"operations":[{"action":"add","target":"user|memory","category":"...","value":"..."},
     {"action":"replace","id":123,"value":"..."},{"action":"archive","id":123,"reason":"..."}]}
 
-    add target=user categories: identity, preference, goal.
-    add target=memory categories: project, environment, instruction.
     replace/archive must use ids from Current memory.
     """
   end

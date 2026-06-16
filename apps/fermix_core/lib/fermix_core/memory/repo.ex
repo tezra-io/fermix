@@ -19,6 +19,7 @@ defmodule FermixCore.Memory.Repo do
   @trust_rename_migration_version 7
   @fermix_md_rename_migration_version 8
   @memory_review_migration_version 9
+  @taxonomy_migration_version 10
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -281,6 +282,28 @@ defmodule FermixCore.Memory.Repo do
   UPDATE resources
     SET resource_path = substr(resource_path, 1, length(resource_path) - 9) || 'FERMIX.md'
     WHERE resource_type = 'fermix_md' AND resource_path LIKE '%/AGENTS.md';
+  """
+
+  # Memory taxonomy redesign: the category vocabulary moved to a general-assistant
+  # spine. Existing rows are rewritten in place — `project`/`environment` fold
+  # into `context`, `instruction`/`correction` fold into `directive` — preserving
+  # each row's promote_target (both predecessor and successor resolve to the same
+  # prompt file). `episode` is retired: those rows are tombstoned rather than
+  # deleted, so a misclassification can still be restored. The UPDATE triggers
+  # keep the FTS mirror consistent; `key`/scope are untouched, so the
+  # scope-key UNIQUE index is never violated. Conversation-cache `fact` rows are
+  # a separate namespace and intentionally left alone.
+  @taxonomy_schema_sql """
+  UPDATE memories SET category = 'context'
+    WHERE category IN ('project', 'environment');
+  UPDATE memories SET category = 'directive'
+    WHERE category IN ('instruction', 'correction');
+  UPDATE memories
+    SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        archived_by = 'taxonomy_migration',
+        archive_reason = 'retired_category:episode',
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE category = 'episode' AND archived_at IS NULL;
   """
 
   @memory_review_schema_sql """
@@ -1227,7 +1250,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_creator_trust_migration(conn, versions),
          :ok <- apply_trust_rename_migration(conn, versions),
          :ok <- apply_fermix_md_rename_migration(conn, versions),
-         :ok <- apply_memory_review_migration(conn, versions) do
+         :ok <- apply_memory_review_migration(conn, versions),
+         :ok <- apply_taxonomy_migration(conn, versions) do
       :ok
     end
   end
@@ -1389,6 +1413,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@memory_review_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@memory_review_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_taxonomy_migration(conn, versions) do
+    if Enum.member?(versions, @taxonomy_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@taxonomy_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@taxonomy_migration_version});
         COMMIT;
         """
       )
