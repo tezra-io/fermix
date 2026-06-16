@@ -383,6 +383,139 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert completed_job.next_run_at == nil
   end
 
+  test "a stale recurring job is skipped and its schedule advanced without a run", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Stale Check",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Check after a long sleep."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert job.next_run_at == ~U[2026-05-02 14:15:00Z]
+
+    scheduler =
+      start_scheduler(repo, runner_supervisor,
+        runner_delay_ms: 1,
+        run_freshness_window_seconds: 3600
+      )
+
+    # The daemon "wakes" two hours late; the 14:15 occurrence is 105 min stale
+    # (> the 1h window) so it is skipped, not fired, and the schedule advances.
+    assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 16:00:00Z])
+    refute_receive {:job_runner, :started, _run_id, _job_id}, 100
+
+    assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
+
+    assert {:ok, advanced} = Registry.get_job(job.id, repo: repo)
+    assert advanced.state == "scheduled"
+    assert advanced.enabled? == true
+    assert advanced.next_run_at == ~U[2026-05-02 16:15:00Z]
+    assert advanced.last_status == job.last_status
+  end
+
+  test "a recurring job within the freshness window still runs to catch up", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Recent Check",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Check shortly after the due time."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    scheduler =
+      start_scheduler(repo, runner_supervisor,
+        runner_delay_ms: 1,
+        run_freshness_window_seconds: 3600
+      )
+
+    job_id = job.id
+
+    # Five minutes late is inside the 1h window, so the missed occurrence runs.
+    assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:20:00Z])
+    assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+  end
+
+  test "a stale job past its expiry expires rather than being skipped", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Stale Temporary Check",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Check until expiry.",
+                 expires_at: ~U[2026-05-02 14:30:00Z]
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    scheduler =
+      start_scheduler(repo, runner_supervisor,
+        runner_delay_ms: 1,
+        run_freshness_window_seconds: 3600
+      )
+
+    # Stale and past expiry at once: expiry wins over the freshness skip.
+    assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 18:00:00Z])
+    refute_receive {:job_runner, :started, _run_id, _job_id}, 100
+
+    assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
+
+    assert {:ok, expired_job} = Registry.get_job(job.id, repo: repo)
+    assert expired_job.state == "completed"
+    assert expired_job.enabled? == false
+    assert expired_job.next_run_at == nil
+    assert expired_job.last_status == "expired"
+  end
+
+  test "a stale one-off job still runs late rather than being skipped", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Late One-off",
+                 schedule: DateTime.to_iso8601(~U[2026-05-02 14:00:00Z]),
+                 task_prompt: "Fire even if the daemon was asleep."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 13:00:00Z]
+             )
+
+    assert job.schedule_kind == "once"
+
+    scheduler =
+      start_scheduler(repo, runner_supervisor,
+        runner_delay_ms: 1,
+        run_freshness_window_seconds: 3600
+      )
+
+    job_id = job.id
+
+    # Three hours past the window — but a one-off has no next occurrence, so it
+    # runs late instead of being silently dropped.
+    assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 17:00:00Z])
+    assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+  end
+
   defp start_scheduler(repo, runner_supervisor, opts) do
     name = :"jobs_scheduler_#{System.unique_integer([:positive])}"
 
@@ -394,6 +527,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
          runner_supervisor: runner_supervisor,
          scheduler_enabled: true,
          timer_enabled: Keyword.get(opts, :timer_enabled, false),
+         run_freshness_window_seconds: Keyword.get(opts, :run_freshness_window_seconds, 3600),
          reconciliation_interval_ms: Keyword.get(opts, :reconciliation_interval_ms, 60_000),
          runner_module: Keyword.get(opts, :runner_module, FermixCore.Jobs.Runner),
          adapter: Keyword.get(opts, :adapter, TerminalAdapter),

@@ -112,6 +112,7 @@ config :fermix_core, :iteration_limits,
 config :fermix_core, :jobs,
   scheduler_enabled: true,
   reconciliation_interval_ms: 60_000,
+  run_freshness_window_seconds: 3600,
   default_timeout_ms: 1_800_000,
   delivery_timeout_ms: 60_000,
   delivery_channels: %{
