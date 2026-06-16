@@ -875,6 +875,7 @@ defmodule FermixCore.Jobs.Runner do
     %{
       "job_id" => job.id,
       "name" => job.name,
+      "task_prompt" => job.task_prompt,
       "schedule_kind" => job.schedule_kind,
       "schedule_expr" => job.schedule_expr,
       "timezone" => job.timezone,

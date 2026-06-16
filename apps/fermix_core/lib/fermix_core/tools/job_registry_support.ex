@@ -85,6 +85,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       id: job.id,
       name: job.name,
       description: job.description,
+      task_prompt: job.task_prompt,
       schedule_kind: job.schedule_kind,
       schedule_expr: job.schedule_expr,
       timezone: job.timezone,
@@ -129,6 +130,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     run
     |> job_run_summary()
     |> Map.merge(%{
+      task_prompt: run_task_prompt(run),
       prompt_snapshot: run.prompt_snapshot,
       job_config_snapshot: run.job_config_snapshot,
       capability_policy_snapshot: run.capability_policy_snapshot,
@@ -155,6 +157,14 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       metadata: source.metadata
     }
   end
+
+  # The exact task_prompt this run executed, captured in its job-config
+  # snapshot. Runs recorded before task_prompt was snapshotted return nil —
+  # their instructions remain visible verbatim inside prompt_snapshot.
+  defp run_task_prompt(%{job_config_snapshot: snapshot}) when is_map(snapshot),
+    do: Map.get(snapshot, "task_prompt")
+
+  defp run_task_prompt(_run), do: nil
 
   defp timestamp(nil), do: nil
   defp timestamp(%DateTime{} = value), do: DateTime.to_iso8601(value)

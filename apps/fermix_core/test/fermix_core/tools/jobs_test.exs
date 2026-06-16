@@ -94,6 +94,7 @@ defmodule FermixCore.Tools.JobsTest do
     assert {:ok, listed} = ListJobs.execute(%{}, context)
     assert %{"jobs" => [listed_job]} = Jason.decode!(listed.output)
     assert listed_job["id"] == job_id
+    assert listed_job["task_prompt"] == "Summarize what changed."
 
     assert {:ok, paused} = PauseJob.execute(%{"job_id" => job_id}, context)
     assert %{"enabled" => false, "state" => "paused"} = Jason.decode!(paused.output)
@@ -676,6 +677,7 @@ defmodule FermixCore.Tools.JobsTest do
     assert payload["job_id"] == job_id
     assert payload["status"] == "ok"
     assert payload["final_response"] == "done"
+    assert payload["task_prompt"] == "Report."
     assert Map.has_key?(payload, "prompt_snapshot")
     assert Map.has_key?(payload, "token_usage")
   end
@@ -709,6 +711,7 @@ defmodule FermixCore.Tools.JobsTest do
           started_at: at,
           completed_at: at,
           prompt_snapshot: "do the thing",
+          job_config_snapshot: %{"task_prompt" => "Report."},
           final_response: "done",
           token_usage: %{"total" => 10},
           created_at: at,
