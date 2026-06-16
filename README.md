@@ -1,7 +1,7 @@
 <p align="center">
   <img src="assets/fermix-mascot.png" alt="Fermix mascot" width="92" align="middle">&nbsp;&nbsp;
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/fermix-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/fermix-wordmark-dark.png">
     <img src="assets/fermix-wordmark-light.svg" alt="Fermix" width="300" align="middle">
   </picture>
 </p>
