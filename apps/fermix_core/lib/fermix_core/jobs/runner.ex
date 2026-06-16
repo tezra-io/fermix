@@ -16,6 +16,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Net.HttpClient
   alias FermixCore.Net.Readiness
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
@@ -109,6 +110,7 @@ defmodule FermixCore.Jobs.Runner do
           :inactivity_timeout_seconds
         ),
       delay_fn: Keyword.get(opts, :delay_fn, &Process.sleep/1),
+      start_delay_ms: Keyword.get(opts, :start_delay_ms, 0),
       max_transient_attempts:
         Keyword.get(opts, :max_transient_attempts, @default_max_transient_attempts),
       transient_backoff_ms:
@@ -149,6 +151,7 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp execute_and_finalize(state, loop_input) do
+    stagger_start(state)
     await_network_ready(loop_input.loop_opts, state)
 
     case run_agent_loop_with_retry(loop_input.loop_opts, state) do
@@ -728,6 +731,18 @@ defmodule FermixCore.Jobs.Runner do
   # proceeds regardless — the transient-backoff retry below stays the floor.
   # Skipped when disabled, or when no route host is known (an injected adapter
   # in tests carries no `:routes`).
+  # Spread a wake-time burst: when the scheduler fires many due jobs at once,
+  # each runner waits a short, capped delay (assigned by the scheduler from how
+  # many runs are already active) before its first network call, so they don't
+  # all check out HTTP connections at the same instant — when the pool is least
+  # ready, just after wake-from-sleep. Zero for a lone run. Uses delay_fn so
+  # tests don't actually sleep.
+  defp stagger_start(%{start_delay_ms: ms} = state) when is_integer(ms) and ms > 0 do
+    state.delay_fn.(ms)
+  end
+
+  defp stagger_start(_state), do: :ok
+
   defp await_network_ready(_loop_opts, %{readiness_enabled: false}), do: :ok
 
   defp await_network_ready(loop_opts, state) do
@@ -818,15 +833,19 @@ defmodule FermixCore.Jobs.Runner do
     run_agent_loop_with_retry(loop_opts, state, attempt + 1, elapsed_ms + delay_ms)
   end
 
-  # The single transient-infrastructure signature the runner recovers from:
-  # pool-checkout exhaustion (`:connection_unavailable`), which Failover treats
-  # as terminal so it arrives here as the bare reason. Every other error —
-  # auth, provider 5xx, an exhausted failover chain, deterministic bugs — fails
-  # the run as before; no blind retry.
+  # The single transient-infrastructure signature the runner recovers from: HTTP
+  # pool-checkout exhaustion. Failover treats it as terminal (every route shares
+  # the one dead local network), so it reaches the runner unfailed-over — either
+  # as the typed `:connection_unavailable` transport error (Codex mints it) or as
+  # the bare Finch %RuntimeError{} the other providers return. Recognizing both
+  # keeps recovery provider-agnostic. Every other error — auth, provider 5xx, an
+  # exhausted failover chain, deterministic bugs — fails the run as before.
   defp transient_infra?({:provider_transport_error, %{kind: :connection_unavailable}}), do: true
+  defp transient_infra?(%RuntimeError{} = reason), do: HttpClient.connection_unavailable?(reason)
   defp transient_infra?(_reason), do: false
 
   defp transient_reason_kind({:provider_transport_error, %{kind: kind}}), do: kind
+  defp transient_reason_kind(%RuntimeError{}), do: :connection_unavailable
   defp transient_reason_kind(_reason), do: :unknown
 
   # Exponential backoff, capped per step at the cumulative ceiling so a single
