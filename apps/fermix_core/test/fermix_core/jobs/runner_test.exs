@@ -898,6 +898,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.job_config_snapshot["task_prompt"] == "Run."
       route_used = stored_run.job_config_snapshot["route_used"]
       assert route_used["provider"] == "anthropic"
       assert route_used["model"] == "claude-haiku-4-5"
