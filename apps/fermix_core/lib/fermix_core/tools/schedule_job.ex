@@ -34,7 +34,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         schedule: %{
           type: "string",
           description:
-            "Natural or cron-style schedule expression, such as every 15 minutes, daily at 8am, or 0 8 * * *."
+            "Schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO8601 UTC timestamp for a one-off run. Cron fields support *, lists (1,15), ranges (9-17), and steps (*/15)."
         },
         task: %{
           type: "string",
@@ -91,7 +91,7 @@ defmodule FermixCore.Tools.ScheduleJob do
       %{
         args: %{
           "name" => "daily_digest",
-          "schedule" => "daily at 8am",
+          "schedule" => "0 8 * * *",
           "task" => "Send a digest."
         },
         note: "schedule recurring Fermix work"

@@ -171,7 +171,8 @@ defmodule FermixCore.Tools.JobsTest do
     assert ScheduleJob.description() =~ "cron-style recurring work"
     assert ScheduleJob.description() =~ "expires_at"
     assert ScheduleJob.description() =~ "instead of shell, browser, computer-use"
-    assert params.properties.schedule.description =~ "cron-style schedule expression"
+    assert params.properties.schedule.description =~ "5-field cron"
+    assert params.properties.schedule.description =~ "steps (*/15)"
     assert params.properties.task.description =~ "Do not execute the task now"
 
     assert params.properties.task.description =~
