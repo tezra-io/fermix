@@ -5,6 +5,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Scheduler
   alias FermixCore.Memory.Repo
+  alias FermixCore.Tools.RunJobNow
 
   defmodule TerminalAdapter do
     @behaviour FermixCore.Providers.Adapter
@@ -514,6 +515,170 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 17:00:00Z])
     assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
     assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+  end
+
+  test "run_now claims an out-of-band manual run without advancing the schedule", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "On Demand",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run when asked."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert job.next_run_at == ~U[2026-05-02 14:15:00Z]
+
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+    job_id = job.id
+
+    assert {:ok, run} = Scheduler.run_now(scheduler, job_id, now: ~U[2026-05-02 14:03:00Z])
+    assert run.trigger == "manual"
+
+    assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+    assert run_id == run.id
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+
+    assert {:ok, [stored]} = Repo.list_job_runs(%{job_id: job_id}, server: repo)
+    assert stored.id == run_id
+    assert stored.trigger == "manual"
+    assert stored.status == "ok"
+
+    # The timed cadence is undisturbed by a manual run.
+    assert {:ok, updated_job} = Registry.get_job(job_id, repo: repo)
+    assert updated_job.next_run_at == ~U[2026-05-02 14:15:00Z]
+    assert updated_job.state == "scheduled"
+  end
+
+  test "run_now rejects a job that already has an active run", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Busy Job",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run slowly."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 200)
+    job_id = job.id
+
+    assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+    assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+
+    assert {:error, :already_running} = Scheduler.run_now(scheduler, job_id)
+
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+  end
+
+  test "run_now rejects a paused job", %{repo: repo, runner_supervisor: runner_supervisor} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Paused Job",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Should not run while paused."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    assert {:ok, _paused} = Registry.pause_job(job.id, repo: repo)
+
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+
+    assert {:error, :not_runnable} = Scheduler.run_now(scheduler, job.id)
+    refute_receive {:job_runner, :started, _run_id, _job_id}, 100
+    assert {:ok, []} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
+  end
+
+  test "run_now rejects an expired job", %{repo: repo, runner_supervisor: runner_supervisor} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Expired Job",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Should not run past expiry.",
+                 expires_at: ~U[2026-05-02 14:30:00Z]
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+
+    assert {:error, :expired} =
+             Scheduler.run_now(scheduler, job.id, now: ~U[2026-05-02 15:00:00Z])
+
+    refute_receive {:job_runner, :started, _run_id, _job_id}, 100
+  end
+
+  test "run_now reports a missing job", %{repo: repo, runner_supervisor: runner_supervisor} do
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+    assert {:error, :not_found} = Scheduler.run_now(scheduler, "ghost_job")
+  end
+
+  test "run_job_now tool triggers a manual run through the scheduler", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Tool Triggered",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run from the tool."
+               },
+               repo: repo,
+               now: ~U[2026-05-02 14:00:00Z]
+             )
+
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+    job_id = job.id
+
+    context = %{
+      agent_name: "test_agent",
+      memory_repo: repo,
+      session_id: "telegram:chat-1:root",
+      scheduler: scheduler
+    }
+
+    assert {:ok, result} = RunJobNow.execute(%{"job_id" => job_id}, context)
+    assert result.success == true
+    payload = Jason.decode!(result.output)
+    assert payload["job_id"] == job_id
+    assert payload["trigger"] == "manual"
+
+    assert_receive {:job_runner, :started, run_id, ^job_id}, 1_000
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, 1_000
+  end
+
+  test "run_job_now tool reports a missing job", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+
+    context = %{
+      agent_name: "test_agent",
+      memory_repo: repo,
+      session_id: "telegram:chat-1:root",
+      scheduler: scheduler
+    }
+
+    assert {:ok, result} = RunJobNow.execute(%{"job_id" => "ghost_job"}, context)
+    assert result.success == false
+    assert result.error =~ "Not found"
   end
 
   defp start_scheduler(repo, runner_supervisor, opts) do

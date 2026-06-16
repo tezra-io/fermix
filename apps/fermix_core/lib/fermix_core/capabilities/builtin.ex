@@ -22,6 +22,7 @@ defmodule FermixCore.Capabilities.Builtin do
     "web_fetch" => %{policy_class: :network, hidden_from_agent?: false},
     "web_search" => %{policy_class: :network, hidden_from_agent?: false},
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false},
+    "skill_reload" => %{policy_class: :read_write, hidden_from_agent?: false},
     "skill_view" => %{policy_class: :exec, hidden_from_agent?: false},
     "skill_run" => %{policy_class: :exec, hidden_from_agent?: false},
     "skill_list" => %{policy_class: :read_only, hidden_from_agent?: false},
@@ -39,6 +40,9 @@ defmodule FermixCore.Capabilities.Builtin do
     "pause_job" => %{policy_class: :read_write, hidden_from_agent?: false},
     "resume_job" => %{policy_class: :read_write, hidden_from_agent?: false},
     "remove_job" => %{policy_class: :read_write, hidden_from_agent?: false},
+    "run_job_now" => %{policy_class: :read_write, hidden_from_agent?: false},
+    "list_job_runs" => %{policy_class: :read_only, hidden_from_agent?: false},
+    "get_job_run" => %{policy_class: :read_only, hidden_from_agent?: false},
     "memory_sources_list" => %{policy_class: :read_only, hidden_from_agent?: false},
     "browser" => %{policy_class: :network, hidden_from_agent?: false},
     "send_attachment" => %{policy_class: :read_only, hidden_from_agent?: false}

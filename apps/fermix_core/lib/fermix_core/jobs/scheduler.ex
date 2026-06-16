@@ -66,6 +66,20 @@ defmodule FermixCore.Jobs.Scheduler do
     :exit, {:noproc, _call} -> :ok
   end
 
+  @doc """
+  Claim and start an out-of-band ("run now") execution of a scheduled job.
+
+  Reuses the same atomic claim, runner dispatch, and monitoring as the timed
+  path; only the trigger is `"manual"` and the schedule's `next_run_at` is left
+  untouched (the natural cadence continues). Returns the created run on success.
+  """
+  @spec run_now(GenServer.server(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def run_now(server \\ __MODULE__, job_id, opts \\ []) when is_binary(job_id) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    GenServer.call(server, {:run_now, job_id, now})
+  end
+
   @impl true
   def init(opts) do
     state = %{
@@ -123,6 +137,11 @@ defmodule FermixCore.Jobs.Scheduler do
       |> schedule_due_timer()
 
     {:reply, :ok, state}
+  end
+
+  def handle_call({:run_now, job_id, %DateTime{} = now}, _from, state) do
+    {reply, state} = manual_run(job_id, now, state)
+    {:reply, reply, schedule_due_timer(state)}
   end
 
   @impl true
@@ -282,6 +301,45 @@ defmodule FermixCore.Jobs.Scheduler do
       {:error, reason} ->
         Logger.error("Scheduled job #{job.id} claim patch failed: #{inspect(reason)}")
         state
+    end
+  end
+
+  # Out-of-band manual run: claim immediately regardless of the schedule, but
+  # keep next_run_at so the timed cadence is undisturbed, and tag the run
+  # `trigger: "manual"`. The runner dispatch and monitoring are the same as the
+  # timed path — no second execution path.
+  defp manual_run(job_id, now, state) do
+    case Repo.get_scheduled_job(job_id, server: state.repo) do
+      {:ok, job} -> manual_run_job(job, now, state)
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  # Classify the already-fetched job for a precise error. The state is the
+  # authoritative signal: a job mid-run carries state "running" (the claim sets
+  # it atomically), so "already running" is reported distinctly from a paused,
+  # disabled, or completed job. The in-transaction `ensure_no_active_job_run`
+  # guard (shared with the due path) remains the atomic race-stop underneath.
+  defp manual_run_job(job, now, state) do
+    cond do
+      expired?(job, now) -> {{:error, :expired}, state}
+      not job.enabled? -> {{:error, :not_runnable}, state}
+      job.state == "running" -> {{:error, :already_running}, state}
+      job.state != "scheduled" -> {{:error, :not_runnable}, state}
+      true -> claim_manual_run(job, now, state)
+    end
+  end
+
+  defp claim_manual_run(job, now, state) do
+    run_attrs = job |> run_attrs(now) |> Map.put(:trigger, "manual")
+    job_patch = %{state: "running", updated_at: now}
+
+    case Repo.claim_job_now(job.id, job_patch, run_attrs, server: state.repo) do
+      {:ok, {claimed_job, run}} ->
+        {{:ok, run}, start_or_mark_failed(claimed_job, run, state)}
+
+      {:error, reason} ->
+        {{:error, reason}, state}
     end
   end
 
