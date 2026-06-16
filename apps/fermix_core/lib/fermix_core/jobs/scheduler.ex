@@ -18,6 +18,7 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @default_reconciliation_interval_ms 60_000
   @default_due_limit 20
+  @default_run_freshness_window_seconds 3600
 
   @type state :: %{
           enabled?: boolean(),
@@ -39,6 +40,7 @@ defmodule FermixCore.Jobs.Scheduler do
           runner_notify: pid() | nil,
           runner_delay_ms: non_neg_integer(),
           reconciliation_interval_ms: pos_integer(),
+          run_freshness_window_seconds: pos_integer() | nil,
           due_limit: pos_integer(),
           due_timer: reference() | nil,
           reconciliation_timer: reference() | nil,
@@ -92,6 +94,12 @@ defmodule FermixCore.Jobs.Scheduler do
           opts,
           :reconciliation_interval_ms,
           jobs_config(:reconciliation_interval_ms, @default_reconciliation_interval_ms)
+        ),
+      run_freshness_window_seconds:
+        Keyword.get(
+          opts,
+          :run_freshness_window_seconds,
+          jobs_config(:run_freshness_window_seconds, @default_run_freshness_window_seconds)
         ),
       due_limit: Keyword.get(opts, :due_limit, @default_due_limit),
       due_timer: nil,
@@ -170,10 +178,86 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp claim_and_start(job, now, state) do
-    if expired?(job, now) do
-      expire_job(job.id, now, state)
-    else
-      claim_and_start_due_job(job, now, state)
+    cond do
+      expired?(job, now) -> expire_job(job.id, now, state)
+      stale?(job, now, state.run_freshness_window_seconds) -> skip_stale_job(job, now, state)
+      true -> claim_and_start_due_job(job, now, state)
+    end
+  end
+
+  # When the daemon is down across a recurring job's fire time, its next_run_at
+  # is left far in the past. Firing it now would run the job with a wall-clock
+  # far from the one it was scheduled for, so a due time older than the freshness
+  # window is skipped and the schedule advances to the next future occurrence.
+  # A one-off `once` job has no next occurrence to advance to — dropping it would
+  # silently lose a one-time request — so it runs late instead, never stale.
+  defp stale?(_job, _now, nil), do: false
+  defp stale?(%{schedule_kind: "once"}, _now, _window), do: false
+
+  defp stale?(%{next_run_at: %DateTime{} = next_run_at}, now, window) when is_integer(window) do
+    DateTime.diff(now, next_run_at, :second) > window
+  end
+
+  defp stale?(_job, _now, _window), do: false
+
+  defp skip_stale_job(job, now, state) do
+    case advance_schedule(job, now) do
+      {:ok, next_run_at} ->
+        advance_stale_job(job, next_run_at, now, state)
+
+      {:error, reason} ->
+        Logger.error(
+          "Scheduled job #{job.id} stale-skip schedule recompute failed: #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp advance_schedule(job, now) do
+    case Schedule.parse(job.schedule_expr, timezone: job.timezone, now: now) do
+      {:ok, %{next_run_at: %DateTime{} = next_run_at}} -> {:ok, next_run_at}
+      {:ok, _parsed} -> {:error, :no_future_run}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Re-fetch and guard on the live state (mirrors expiry) so an edit/pause that
+  # lands between the due scan and here is not clobbered. Only next_run_at moves;
+  # last_status/last_run_at stay untouched because no run actually happened.
+  defp advance_stale_job(job, next_run_at, now, state) do
+    case Repo.get_scheduled_job(job.id, server: state.repo) do
+      {:ok, %{enabled?: true, state: "scheduled"} = current} ->
+        Logger.info(
+          "Scheduled job #{job.id} skipped a stale run due at " <>
+            "#{DateTime.to_iso8601(job.next_run_at)}; next run at #{DateTime.to_iso8601(next_run_at)}"
+        )
+
+        store_advanced_run_at(current, next_run_at, now, state.repo)
+
+      {:ok, _job} ->
+        :ok
+
+      {:error, :not_found} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} stale-skip lookup failed: #{inspect(reason)}")
+    end
+
+    state
+  end
+
+  defp store_advanced_run_at(job, next_run_at, now, repo) do
+    job
+    |> Map.merge(%{next_run_at: next_run_at, updated_at: now})
+    |> Repo.upsert_scheduled_job(server: repo)
+    |> case do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} stale-skip advance failed: #{inspect(reason)}")
     end
   end
 
