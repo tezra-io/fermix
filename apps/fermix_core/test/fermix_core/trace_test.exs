@@ -93,6 +93,44 @@ defmodule FermixCore.TraceTest do
     assert entry["tokens_out"] == 200
   end
 
+  test "scrubs invalid UTF-8 in a value and records it instead of crashing", %{
+    dir: dir,
+    server: server
+  } do
+    # A tool output carrying a non-UTF-8 byte (e.g. a Latin-1 source file) must
+    # not raise Jason.EncodeError inside the Trace GenServer — Trace is a
+    # rest_for_one ancestor of the agent and job supervisors, so a crash here
+    # cascade-restarts them. The bad bytes are scrubbed and the entry recorded.
+    poisoned = "before " <> <<0xF3>> <> " after"
+    Trace.record(:tool_exec, "main", %{output: poisoned}, server: server)
+    sync(server)
+
+    [entry] = read_entries(dir, :tool_exec)
+    assert entry["output"] =~ "before"
+    assert entry["output"] =~ "after"
+  end
+
+  test "drops a non-encodable value without crashing Trace", %{dir: dir, server: server} do
+    # A PID has no Jason.Encoder, so encoding raises Protocol.UndefinedError /
+    # UndefinedFunctionError — NOT Jason.EncodeError. Scrubbing can't fix it, so
+    # the entry is dropped, but Trace (a rest_for_one cascade root) must keep
+    # running and continue recording subsequent entries on the same process.
+    pid = Process.whereis(server)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Trace.record(:tool_exec, "main", %{handle: self()}, server: server)
+        Trace.record(:tool_exec, "main", %{ok: true}, server: server)
+        sync(server)
+      end)
+
+    assert Process.whereis(server) == pid,
+           "Trace crashed — it must never bring down its supervisees"
+
+    assert log =~ "Trace dropped"
+    assert [%{"ok" => true}] = read_entries(dir, :tool_exec)
+  end
+
   test "rejects invalid trace types" do
     assert_raise FunctionClauseError, fn ->
       Trace.record(:invalid_type, "main", %{})
