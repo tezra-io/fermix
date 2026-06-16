@@ -62,6 +62,14 @@ defmodule FermixCore.Providers.FailoverTest do
       refute Failover.eligible?({:error, :anything})
       refute Failover.eligible?(Error.api(:openai, OpenAI, 400, %{}))
     end
+
+    test "a connection-unavailable transport error is terminal for failover" do
+      # Pool-checkout exhaustion means the host could not get *any* connection,
+      # which on a wake-from-sleep race is true for every provider at once.
+      # Sweeping the chain would burn ~20s of doomed attempts; failover stays
+      # out of it and the runner's transient backoff owns recovery instead.
+      refute Failover.eligible?(Error.transport(:openai_codex, :codex, :connection_unavailable))
+    end
   end
 
   describe "run_chain/3" do

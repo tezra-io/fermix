@@ -1010,6 +1010,47 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       refute error.message =~ "Lower reasoning_effort"
     end
 
+    test "a Finch pool-checkout timeout is classified as a connection-unavailable error" do
+      # Finch reraises a RuntimeError ("unable to provide a connection ... excess
+      # queuing") when a checkout exceeds the pool queue timeout — the
+      # wake-from-sleep signature when the host network is not ready yet. Codex
+      # must mint a typed transport error so the scheduled-job runner can retry
+      # it with backoff (not a bare RuntimeError that strands the run).
+      message =
+        "Finch was unable to provide a connection within the timeout due to " <>
+          "excess queuing for connections."
+
+      Req.Test.stub(__MODULE__, fn _conn -> raise RuntimeError, message end)
+
+      assert {:error, {:provider_transport_error, error}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert error.kind == :connection_unavailable
+      assert error.reason == :connection_unavailable
+      assert error.stage == :before_response
+      assert error.message =~ "could not obtain an HTTP connection"
+      assert error.message =~ "transient"
+    end
+
+    test "an unrelated RuntimeError is left bare, not classified as transport" do
+      # Only the pool-checkout signature is transient infrastructure; every
+      # other RuntimeError (a real bug) must surface unchanged and fail loud.
+      Req.Test.stub(__MODULE__, fn _conn -> raise RuntimeError, "genuine programming bug" end)
+
+      assert {:error, %RuntimeError{message: "genuine programming bug"}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+    end
+
     test ":closed retries once and succeeds on the second attempt (stale-pool recovery)" do
       test_id = :"codex_stale_pool_#{System.unique_integer([:positive])}"
       {:ok, counter} = Agent.start_link(fn -> 0 end)
