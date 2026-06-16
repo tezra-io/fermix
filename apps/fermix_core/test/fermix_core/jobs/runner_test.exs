@@ -2,6 +2,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   # async: false — the cron-routing tests mutate the shared :routing app env.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Registry
@@ -61,6 +62,33 @@ defmodule FermixCore.Jobs.RunnerTest do
     end
 
     defp next_turn([], _opts), do: {:error, "No mock responses left"}
+  end
+
+  defmodule SkillRegistryStub do
+    @moduledoc false
+    # Minimal stand-in for FermixCore.Agents.SkillRegistry: the Runner only
+    # ever calls `GenServer.call(registry, {:load, name})`, so a tiny map-backed
+    # GenServer keeps the skill-confinement tests hermetic (no fixture files,
+    # no default-skill seeding).
+    use GenServer
+
+    def start_link(skills) when is_map(skills) do
+      GenServer.start_link(__MODULE__, skills)
+    end
+
+    @impl true
+    def init(skills), do: {:ok, skills}
+
+    @impl true
+    def handle_call({:load, name}, _from, skills) do
+      reply =
+        case Map.fetch(skills, name) do
+          {:ok, definition} -> {:ok, definition}
+          :error -> {:error, {:unknown_skill, name}}
+        end
+
+      {:reply, reply, skills}
+    end
   end
 
   defmodule RecordingDelivery do
@@ -406,6 +434,156 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert "owner_external" in tool_names
   end
 
+  test "a scheduled job inherits its skill's tool allowlist", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("skill_read"))
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("skill_blocked"))
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "research" => skill_definition("research", allowed_tools: ["skill_read"])
+      })
+
+    # Operator job, no own allowlist -> full operator surface absent a skill.
+    # Naming a skill that allowlists only skill_read must confine the run.
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Skill Allowlist",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as the research skill.",
+               created_by_trust: "operator",
+               skill_name: "research"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, ["skill_read"]}, 1_000
+  end
+
+  test "a scheduled job inherits its skill's capability policy", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("policy_read"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, test_capability("policy_exec", :exec))
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "reader" => skill_definition("reader", policy: ["read_only"])
+      })
+
+    # Operator job, no own allowlist or policy -> full operator surface absent a
+    # skill. A skill declaring read_only policy must drop the exec capability.
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Skill Policy",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as the reader skill.",
+               created_by_trust: "operator",
+               skill_name: "reader"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, ["policy_read"]}, 1_000
+  end
+
+  test "a skill narrows a guest job below its own trust default", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("guest_read"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, test_capability("guest_net", :network))
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "narrow" => skill_definition("narrow", policy: ["read_only"])
+      })
+
+    # A guest job runs with the scheduled-job default policy ([:read_only,
+    # :network]) absent a skill. Naming a read_only-only skill must drop the
+    # network capability — the skill narrows further than the job would alone.
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Guest Narrow",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as the narrow skill.",
+               created_by_trust: "guest",
+               skill_name: "narrow"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, ["guest_read"]}, 1_000
+  end
+
+  test "a guest job naming a skill that demands only forbidden classes fails loudly", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "exec_only" => skill_definition("exec_only", policy: ["exec"])
+      })
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Forbidden Skill",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as an exec-only skill.",
+               created_by_trust: "guest",
+               skill_name: "exec_only"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "unreachable"}]
+    )
+
+    assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
+    assert failed_run.status == "error"
+    assert failed_run.error =~ "grants no"
+  end
+
   test "delivers successful channel output after persisting the run", %{
     repo: repo,
     capability_registry: capability_registry,
@@ -588,6 +766,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         run: run,
         notify: parent,
         capability_registry: Keyword.fetch!(opts, :capability_registry),
+        skill_registry: Keyword.get(opts, :skill_registry),
         adapter: RecordingAdapter,
         adapter_opts: Keyword.merge([test_pid: parent, script: script], adapter_opts),
         output_base_dir: Keyword.fetch!(opts, :output_base_dir),
@@ -641,6 +820,23 @@ defmodule FermixCore.Jobs.RunnerTest do
       {:ok, {claimed_job, run}}
     end
   end
+
+  defp skill_definition(name, opts) do
+    attrs =
+      %{
+        "name" => name,
+        "description" => "Test skill #{name}",
+        "system_prompt" => "You are the #{name} skill."
+      }
+      |> maybe_put_attr("allowed_tools", Keyword.get(opts, :allowed_tools))
+      |> maybe_put_attr("policy", Keyword.get(opts, :policy))
+
+    {:ok, definition} = AgentDefinition.new(attrs)
+    AgentDefinition.with_trust(definition, :operator)
+  end
+
+  defp maybe_put_attr(attrs, _key, nil), do: attrs
+  defp maybe_put_attr(attrs, key, value), do: Map.put(attrs, key, value)
 
   defp test_capability(name, policy_class \\ :read_only) do
     Capability.new(%{

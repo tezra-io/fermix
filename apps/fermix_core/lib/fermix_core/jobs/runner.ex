@@ -469,8 +469,8 @@ defmodule FermixCore.Jobs.Runner do
     base = [
       context: loop_context(state, skill),
       capability_registry: state.capability_registry,
-      allowed_tools: narrow_allowed_tools(state.job.allowed_tools),
-      policy: scheduled_policy(state.job.capability_policy, trust),
+      allowed_tools: effective_allowed_tools(state.job, skill),
+      policy: effective_policy(state.job, trust, skill),
       trust: trust,
       max_iterations: state.job.max_iterations
     ]
@@ -488,6 +488,45 @@ defmodule FermixCore.Jobs.Runner do
   defp scheduled_policy(_explicit, :operator), do: nil
   defp scheduled_policy(explicit, _trust), do: capability_policy(explicit)
 
+  # A named skill's declared `policy` narrows the run further, clamped to the
+  # classes the job's own trust actually grants — so naming an operator skill
+  # from a guest job can never widen the run past guest. A skill with no policy
+  # (or `policy: []`, which `Registry.resolve_policy/2` reads as "use the trust
+  # default") leaves the job's trust-derived policy untouched. An empty clamp
+  # means the skill demanded only classes the trust forbids: fail the run loudly
+  # rather than silently leak back to the trust default.
+  defp effective_policy(job, trust, skill) do
+    base = scheduled_policy(job.capability_policy, trust)
+
+    case skill_policy(skill) do
+      nil -> base
+      skill_classes -> clamp_skill_policy(base, skill_classes, trust, skill)
+    end
+  end
+
+  defp skill_policy(nil), do: nil
+  defp skill_policy(%{policy: classes}) when is_list(classes) and classes != [], do: classes
+  defp skill_policy(_skill), do: nil
+
+  defp clamp_skill_policy(base, skill_classes, trust, skill) do
+    granted = job_policy_classes(base, trust)
+
+    case Enum.filter(skill_classes, &(&1 in granted)) do
+      [] ->
+        raise ArgumentError,
+              "skill #{inspect(skill.name)} policy #{inspect(skill_classes)} grants no " <>
+                "capability classes under job trust #{inspect(trust)}"
+
+      classes ->
+        classes
+    end
+  end
+
+  # The concrete class set the job runs with absent a skill: the explicit
+  # scheduled-job policy when set, else the trust's registry default.
+  defp job_policy_classes(base, _trust) when is_list(base), do: base
+  defp job_policy_classes(nil, trust), do: CapabilityRegistry.default_policy_classes(trust)
+
   # Audit F-08 follow-up. AgentLoop's `capability_allowed?/2` treats
   # `nil` as "no narrowing" and a list as an exact allowlist. An empty
   # list therefore means "deny every tool", which is the wrong default
@@ -498,6 +537,28 @@ defmodule FermixCore.Jobs.Runner do
   defp narrow_allowed_tools([]), do: nil
   defp narrow_allowed_tools(nil), do: nil
   defp narrow_allowed_tools(list) when is_list(list), do: list
+
+  # A job that names a skill must run inside that skill's declared tool
+  # confinement — otherwise the run "cosplays" as the skill (its prompt)
+  # while wielding the creator's full tool surface. The effective allowlist
+  # is the intersection of the job's caller-scoped allowlist (the ceiling
+  # its creator could reach) and the skill's declared allowlist. `nil` on
+  # either side means "no narrowing from that source"; an empty intersection
+  # denies every tool (AgentLoop reads `[]` as deny-all).
+  defp effective_allowed_tools(job, skill) do
+    intersect_allowlist(narrow_allowed_tools(job.allowed_tools), skill_allowed_tools(skill))
+  end
+
+  defp skill_allowed_tools(nil), do: nil
+  defp skill_allowed_tools(%{allowed_tools: allowed_tools}), do: allowed_tools
+
+  defp intersect_allowlist(nil, other), do: other
+  defp intersect_allowlist(other, nil), do: other
+
+  defp intersect_allowlist(job_list, skill_list)
+       when is_list(job_list) and is_list(skill_list) do
+    Enum.filter(job_list, &(&1 in skill_list))
+  end
 
   # Audit F-08 step 2 — intersection at run time.
   #

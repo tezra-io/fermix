@@ -10,6 +10,34 @@ defmodule FermixCore.Tools.JobsTest do
   alias FermixCore.Tools.ScheduleJob
   alias FermixCore.Tools.UpdateJob
 
+  defmodule SkillRegistryStub do
+    @moduledoc false
+    # Minimal stand-in for FermixCore.Agents.SkillRegistry. schedule_job's
+    # create-time validation only ever calls `SkillRegistry.load(registry,
+    # name)`, so a map-backed GenServer keeps the binding tests hermetic — no
+    # fixture skill files, no default-skill seeding.
+    use GenServer
+
+    def start_link(skills) when is_list(skills) do
+      GenServer.start_link(__MODULE__, MapSet.new(skills))
+    end
+
+    @impl true
+    def init(skills), do: {:ok, skills}
+
+    @impl true
+    def handle_call({:load, name}, _from, skills) do
+      reply =
+        if MapSet.member?(skills, name) do
+          {:ok, %{name: name}}
+        else
+          {:error, {:unknown_skill, name}}
+        end
+
+      {:reply, reply, skills}
+    end
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-job-tools-#{unique}.db")
@@ -132,7 +160,7 @@ defmodule FermixCore.Tools.JobsTest do
 
     assert {:ok, result} = UpdateJob.execute(%{"job_id" => job_id}, context)
     assert result.success == false
-    assert result.error =~ "at least one of task, schedule, or description"
+    assert result.error =~ "at least one of task, schedule, description, skill_name, or delivery"
   end
 
   test "schedule_job exposes and persists runner timeout controls", %{context: context} do
@@ -411,4 +439,195 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.success == false
     assert result.error =~ ~s(delivery_mode "origin" requires a conversation context)
   end
+
+  test "schedule_job exposes the skill_name binding parameter" do
+    params = ScheduleJob.parameters()
+    assert Map.has_key?(params.properties, :skill_name)
+    assert params.properties.skill_name.description =~ "confinement"
+  end
+
+  test "schedule_job binds a job to an existing skill and surfaces it", %{context: context} do
+    {:ok, skill_registry} = SkillRegistryStub.start_link(["weather"])
+    context = Map.put(context, :skill_registry, skill_registry)
+
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Weather Watcher",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Check the forecast.",
+                 "skill_name" => "weather"
+               },
+               context
+             )
+
+    assert created.success == true
+    created_payload = Jason.decode!(created.output)
+    assert created_payload["skill_name"] == "weather"
+
+    assert {:ok, job} = Repo.get_scheduled_job(created_payload["id"], server: context.memory_repo)
+    assert job.skill_name == "weather"
+  end
+
+  test "schedule_job rejects an unknown skill_name at create time", %{context: context} do
+    {:ok, skill_registry} = SkillRegistryStub.start_link(["weather"])
+    context = Map.put(context, :skill_registry, skill_registry)
+
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Ghost Skill Job",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Run inside a skill that does not exist.",
+                 "skill_name" => "nonexistent"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "unknown_skill: nonexistent"
+
+    assert {:ok, %{"jobs" => []}} =
+             Jason.decode(elem(ListJobs.execute(%{}, context), 1).output)
+  end
+
+  test "update_job exposes delivery and skill_name parameters" do
+    params = UpdateJob.parameters()
+    assert Map.has_key?(params.properties, :skill_name)
+    assert Map.has_key?(params.properties, :delivery_mode)
+    assert Map.has_key?(params.properties, :delivery_target)
+    assert params.properties.delivery_mode.enum == ["none", "origin", "channel", "local"]
+  end
+
+  test "update_job changes delivery mode and target in place", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Redirect Digest",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report.",
+                 "delivery_mode" => "local"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(
+               %{
+                 "job_id" => job_id,
+                 "delivery_mode" => "channel",
+                 "delivery_target" => %{"platform" => "telegram", "chat_id" => "987"}
+               },
+               context
+             )
+
+    assert updated.success == true
+    payload = Jason.decode!(updated.output)
+    assert payload["delivery_mode"] == "channel"
+    assert payload["delivery_target"] == %{"platform" => "telegram", "chat_id" => "987"}
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.delivery_mode == "channel"
+    assert job.delivery_target == %{"platform" => "telegram", "chat_id" => "987"}
+  end
+
+  test "update_job leaves delivery untouched when delivery fields are omitted", %{
+    context: context
+  } do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Keep Delivery",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report.",
+                 "delivery_mode" => "origin"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+    assert {:ok, before} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "task" => "Report something else."}, context)
+
+    assert updated.success == true
+    assert {:ok, after_job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert after_job.task_prompt == "Report something else."
+    assert after_job.delivery_mode == before.delivery_mode
+    assert after_job.delivery_target == before.delivery_target
+  end
+
+  test "update_job switching to local clears a stale delivery target", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Silence Digest",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report.",
+                 "delivery_mode" => "channel",
+                 "delivery_target" => %{"platform" => "telegram", "chat_id" => "55"}
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "delivery_mode" => "local"}, context)
+
+    assert updated.success == true
+    assert Jason.decode!(updated.output)["delivery_target"] == nil
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.delivery_mode == "local"
+    assert job.delivery_target == nil
+  end
+
+  test "update_job rebinds a job to an existing skill", %{context: context} do
+    {:ok, skill_registry} = SkillRegistryStub.start_link(["weather"])
+    context = Map.put(context, :skill_registry, skill_registry)
+
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "Unbound", "schedule" => "every 15 minutes", "task" => "Report."},
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "skill_name" => "weather"}, context)
+
+    assert updated.success == true
+    assert Jason.decode!(updated.output)["skill_name"] == "weather"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.skill_name == "weather"
+  end
+
+  test "update_job rejects rebinding to an unknown skill", %{context: context} do
+    {:ok, skill_registry} = SkillRegistryStub.start_link(["weather"])
+    context = Map.put(context, :skill_registry, skill_registry)
+
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "Stay Unbound", "schedule" => "every 15 minutes", "task" => "Report."},
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, result} =
+             UpdateJob.execute(%{"job_id" => job_id, "skill_name" => "ghost"}, context)
+
+    assert result.success == false
+    assert result.error =~ "unknown_skill: ghost"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.skill_name == nil
+  end
+
 end
