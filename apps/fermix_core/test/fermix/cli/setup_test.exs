@@ -192,11 +192,16 @@ defmodule Fermix.CLI.SetupTest do
 
   defp fake_service(parent, opts) do
     installed? = Keyword.fetch!(opts, :installed?)
+    drifted? = Keyword.get(opts, :drifted?, false)
 
     %{
       installed?: fn scope, service_opts ->
         send(parent, {:service, :installed?, scope, service_opts})
         installed?
+      end,
+      drifted?: fn scope, service_opts ->
+        send(parent, {:service, :drifted?, scope, service_opts})
+        drifted?
       end,
       install: fn scope, service_opts ->
         send(parent, {:service, :install, scope, service_opts})

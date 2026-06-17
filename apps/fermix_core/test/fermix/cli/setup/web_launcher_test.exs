@@ -163,9 +163,11 @@ defmodule Fermix.CLI.Setup.WebLauncherTest do
 
   defp fake_service(opts) do
     installed? = Keyword.fetch!(opts, :installed?)
+    drifted? = Keyword.get(opts, :drifted?, false)
 
     %{
       installed?: fn _scope, _opts -> installed? end,
+      drifted?: fn _scope, _opts -> drifted? end,
       install: fn _scope, _opts -> :ok end,
       start: fn _scope, _opts -> :ok end,
       restart: fn _scope, _opts -> :ok end
