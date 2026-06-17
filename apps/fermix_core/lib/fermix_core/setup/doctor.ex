@@ -26,7 +26,8 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Tools.WebSearch
 
-  @type provider :: :openai | :openai_codex | :anthropic | :xai
+  @type provider ::
+          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
   @type channel_probe :: %{
           required(:channel) => atom(),
@@ -79,6 +80,8 @@ defmodule FermixCore.Setup.Doctor do
   # runtime does. Codex/OpenAI/Anthropic keep full default URLs because their
   # blocks don't persist a base_url through setup.
   @xai_default_base_url "https://api.x.ai/v1"
+  @openrouter_default_base_url "https://openrouter.ai/api/v1"
+  @mistral_default_base_url "https://api.mistral.ai/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
   @web_search_probe_query "fermix web search health check"
   @default_probe_timeout_ms 5_000
@@ -89,10 +92,14 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:openai_codex, opts), do: probe_codex(opts)
   def probe_provider(:anthropic, opts), do: probe_anthropic(opts)
   def probe_provider(:xai, opts), do: probe_xai(opts)
+  def probe_provider(:openrouter, opts), do: probe_openrouter(opts)
+  def probe_provider(:ollama, opts), do: probe_ollama(opts)
+  def probe_provider(:mistral, opts), do: probe_mistral(opts)
 
   def probe_provider(other, _opts) do
     raise ArgumentError,
-          "unknown provider #{inspect(other)}; expected one of :openai, :openai_codex, :anthropic"
+          "unknown provider #{inspect(other)}; expected one of " <>
+            Enum.map_join(ModelCatalog.providers(), ", ", &inspect/1)
   end
 
   @spec probe_active(keyword()) :: {:ok, probe_ok()} | {:error, probe_error()}
@@ -280,7 +287,7 @@ defmodule FermixCore.Setup.Doctor do
       when is_atom(adapter) and is_atom(key) and is_binary(name) and is_list(opts) do
     base = %{channel: key, name: name}
 
-    if function_exported?(adapter, :health_check, 1) do
+    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :health_check, 1) do
       adapter
       |> apply(:health_check, [opts])
       |> normalize_channel_probe(base)
@@ -325,18 +332,23 @@ defmodule FermixCore.Setup.Doctor do
   @spec active_provider() :: provider()
   def active_provider do
     case PrimaryConfig.primary() do
-      {:ok, provider} when provider in [:openai, :openai_codex, :anthropic, :xai] ->
-        provider
-
-      {:ok, other} ->
-        raise ArgumentError,
-              "unknown provider #{inspect(other)} in :fermix_core, :agent, :provider; " <>
-                "expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &inspect/1)}"
+      {:ok, provider} ->
+        validate_active_provider!(provider)
 
       {:error, :multiple_primary} ->
         raise ArgumentError,
               "more than one provider has primary = true in config.toml; " <>
                 "mark exactly one provider primary"
+    end
+  end
+
+  defp validate_active_provider!(provider) do
+    if provider in ModelCatalog.providers() do
+      provider
+    else
+      raise ArgumentError,
+            "unknown provider #{inspect(provider)} in :fermix_core, :agent, :provider; " <>
+              "expected one of #{Enum.map_join(ModelCatalog.providers(), ", ", &inspect/1)}"
     end
   end
 
@@ -456,6 +468,194 @@ defmodule FermixCore.Setup.Doctor do
     case Keyword.get(config, :api_key) do
       value when value in [nil, ""] ->
         {:error, {:misconfigured, "xai provider has no api_key configured"}}
+
+      value ->
+        {:ok, value}
+    end
+  end
+
+  # Mirrors the runtime adapter shape: a 1-token chat completion through
+  # the same URL join ChatCompletions uses (probe-green => runtime-green).
+  defp probe_openrouter(opts) do
+    config = provider_config(:openrouter)
+
+    case chat_completions_bearer(config, :openrouter) do
+      {:error, _} = err ->
+        err
+
+      {:ok, bearer} ->
+        url = "#{base_url(config, :openrouter, @openrouter_default_base_url)}/chat/completions"
+        model = effective_model(config, :openrouter)
+
+        body = %{
+          model: model,
+          messages: [%{role: "user", content: "."}],
+          max_tokens: 1
+        }
+
+        headers = [
+          {"authorization", "Bearer #{bearer}"},
+          {"http-referer", "https://fermix.sh"},
+          {"x-title", "Fermix"},
+          {"content-type", "application/json"}
+        ]
+
+        do_post(:openrouter, url, body, headers, model, "openrouter.ai API key", opts)
+    end
+  end
+
+  # Mirrors the runtime adapter shape (probe-green => runtime-green for the
+  # request path). Mistral is a plain Bearer Chat Completions provider — no
+  # attribution headers — and uses `max_tokens` (not `max_completion_tokens`).
+  defp probe_mistral(opts) do
+    config = provider_config(:mistral)
+
+    case chat_completions_bearer(config, :mistral) do
+      {:error, _} = err ->
+        err
+
+      {:ok, bearer} ->
+        url = "#{base_url(config, :mistral, @mistral_default_base_url)}/chat/completions"
+        model = effective_model(config, :mistral)
+
+        body = %{
+          model: model,
+          messages: [%{role: "user", content: "."}],
+          max_tokens: 1
+        }
+
+        headers = [
+          {"authorization", "Bearer #{bearer}"},
+          {"content-type", "application/json"}
+        ]
+
+        do_post(:mistral, url, body, headers, model, "mistral.ai API key", opts)
+    end
+  end
+
+  # Keyless local provider: 1-token chat completion through the same /v1
+  # path the adapter uses, then a native /api/show check that the SERVED
+  # context window is not silently below the catalog window (Ollama
+  # truncates instead of erroring — M12 §3.2). A missing/odd /api/show
+  # response is inconclusive and does not fail the probe: the chat call
+  # already proved the serving path (e.g. proxies exposing only /v1).
+  defp probe_ollama(opts) do
+    config = provider_config(:ollama)
+
+    case Keyword.get(config, :base_url) do
+      value when value in [nil, ""] ->
+        {:error,
+         {:misconfigured,
+          "ollama provider has no base_url configured; set [fermix_core.providers.ollama] base_url"}}
+
+      base_url ->
+        model = effective_model(config, :ollama)
+        probe_ollama_chat(base_url, model, opts)
+    end
+  end
+
+  defp probe_ollama_chat(base_url, model, opts) do
+    body = %{model: model, messages: [%{role: "user", content: "."}], max_tokens: 1}
+    headers = [{"content-type", "application/json"}]
+
+    :ollama
+    |> do_post("#{base_url}/chat/completions", body, headers, model, "local Ollama server", opts)
+    |> classify_ollama_probe(base_url, model, opts)
+  end
+
+  defp classify_ollama_probe({:ok, probe}, base_url, model, opts) do
+    check_ollama_num_ctx(probe, base_url, model, opts)
+  end
+
+  defp classify_ollama_probe({:error, {:server_error, 404, _body}}, _base_url, model, _opts) do
+    {:error, {:misconfigured, "model #{inspect(model)} not found — run `ollama pull #{model}`"}}
+  end
+
+  defp classify_ollama_probe(
+         {:error, {:network, %Req.TransportError{reason: :econnrefused}}},
+         base_url,
+         _model,
+         _opts
+       ) do
+    {:error,
+     {:misconfigured, "no Ollama server at #{base_url} — is it running? (`ollama serve`)"}}
+  end
+
+  defp classify_ollama_probe(result, _base_url, _model, _opts), do: result
+
+  defp check_ollama_num_ctx(probe, base_url, model, opts) do
+    native_root = String.trim_trailing(base_url, "/v1")
+
+    case fetch_ollama_num_ctx(native_root, model, opts) do
+      {:ok, num_ctx} ->
+        compare_ollama_window(probe, model, num_ctx)
+
+      :inconclusive ->
+        {:ok, probe}
+    end
+  end
+
+  defp compare_ollama_window(probe, model, num_ctx) do
+    catalog_window = ModelCatalog.context_window_for(:ollama, model)
+
+    if num_ctx < catalog_window do
+      {:error,
+       {:misconfigured,
+        "Ollama serves #{model} with num_ctx=#{num_ctx} but Fermix budgets " <>
+          "#{catalog_window} tokens — context would truncate silently. Raise it via " <>
+          "OLLAMA_CONTEXT_LENGTH or a Modelfile `num_ctx` parameter."}}
+    else
+      {:ok, probe}
+    end
+  end
+
+  defp fetch_ollama_num_ctx(native_root, model, opts) do
+    Req.new(url: "#{native_root}/api/show", method: :post, json: %{model: model}, retry: false)
+    |> Req.merge(probe_req_options(opts))
+    |> Req.request()
+    |> case do
+      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
+        parse_ollama_num_ctx(body)
+
+      _unreachable_or_error ->
+        :inconclusive
+    end
+  end
+
+  # Modelfile `num_ctx` parameter wins; else the GGUF context_length from
+  # model_info; else inconclusive (mirrors the Hermes resolution order).
+  defp parse_ollama_num_ctx(body) do
+    with :inconclusive <- parse_ollama_parameters(Map.get(body, "parameters")) do
+      parse_ollama_model_info(Map.get(body, "model_info"))
+    end
+  end
+
+  defp parse_ollama_parameters(parameters) when is_binary(parameters) do
+    case Regex.run(~r/num_ctx\s+(\d+)/, parameters) do
+      [_match, digits] -> {:ok, String.to_integer(digits)}
+      nil -> :inconclusive
+    end
+  end
+
+  defp parse_ollama_parameters(_parameters), do: :inconclusive
+
+  defp parse_ollama_model_info(model_info) when is_map(model_info) do
+    model_info
+    |> Enum.find_value(fn {key, value} ->
+      if String.ends_with?(key, ".context_length") and is_integer(value), do: value
+    end)
+    |> case do
+      nil -> :inconclusive
+      context_length -> {:ok, context_length}
+    end
+  end
+
+  defp parse_ollama_model_info(_model_info), do: :inconclusive
+
+  defp chat_completions_bearer(config, provider) do
+    case Keyword.get(config, :api_key) do
+      value when value in [nil, ""] ->
+        {:error, {:misconfigured, "#{provider} provider has no api_key configured"}}
 
       value ->
         {:ok, value}
@@ -632,30 +832,27 @@ defmodule FermixCore.Setup.Doctor do
     {:error, {:network, reason}}
   end
 
+  # Ordered: first matching surface substring wins ("Grok subscription"
+  # must shadow the generic "subscription" entry).
+  @auth_hints [
+    {"api.openai.com", "API key is missing the api.responses.write scope or has been revoked"},
+    {"Codex", "Codex OAuth token rejected — re-import via `fermix setup --import-codex`"},
+    {"Grok subscription",
+     "xAI subscription token rejected — reconnect via `fermix auth login --provider xai` " <>
+       "(a 403 can mean the Grok plan lacks API access)"},
+    {"subscription",
+     "Claude subscription token rejected — reconnect via `fermix auth login --provider anthropic`"},
+    {"anthropic", "Anthropic API key rejected — verify it in the Anthropic console"},
+    {"api.x.ai", "xAI API key rejected — verify it in the xAI console"},
+    {"openrouter.ai", "OpenRouter API key rejected — verify it at openrouter.ai/settings/keys"},
+    {"mistral.ai", "Mistral API key rejected — verify it at console.mistral.ai/api-keys"},
+    {"Ollama", "the Ollama server rejected the request — check its auth/proxy configuration"}
+  ]
+
   defp hint_for(surface) do
-    cond do
-      String.contains?(surface, "api.openai.com") ->
-        "API key is missing the api.responses.write scope or has been revoked"
-
-      String.contains?(surface, "Codex") ->
-        "Codex OAuth token rejected — re-import via `fermix setup --import-codex`"
-
-      String.contains?(surface, "Grok subscription") ->
-        "xAI subscription token rejected — reconnect via `fermix auth login --provider xai` " <>
-          "(a 403 can mean the Grok plan lacks API access)"
-
-      String.contains?(surface, "subscription") ->
-        "Claude subscription token rejected — reconnect via `fermix auth login --provider anthropic`"
-
-      String.contains?(surface, "anthropic") ->
-        "Anthropic API key rejected — verify it in the Anthropic console"
-
-      String.contains?(surface, "api.x.ai") ->
-        "xAI API key rejected — verify it in the xAI console"
-
-      true ->
-        "auth rejected"
-    end
+    Enum.find_value(@auth_hints, "auth rejected", fn {marker, hint} ->
+      if String.contains?(surface, marker), do: hint
+    end)
   end
 
   defp provider_config(provider) do
@@ -668,8 +865,8 @@ defmodule FermixCore.Setup.Doctor do
 
   defp catalog_windows do
     for provider <- ModelCatalog.providers(),
-        {model, _label, context_window} <- ModelCatalog.models_for(provider) do
-      %{provider: provider, model: model, context_window: context_window}
+        entry <- ModelCatalog.models_for(provider) do
+      %{provider: provider, model: entry.id, context_window: entry.context_window}
     end
   end
 

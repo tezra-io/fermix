@@ -33,10 +33,16 @@ defmodule FermixCore.Capabilities.MCP.Naming do
   @doc """
   Build a sanitized capability name for the given server + tool. Does not
   touch the reverse map; call `register/3` to publish the mapping.
+
+  Operator-configured servers get the default `mcp_<server>_` prefix;
+  plugin-owned servers pass `prefix: "<plugin>_"` so their discovered tools
+  stay continuous with the `http` rail's namespace (M8 §8.2). `prefix: nil`
+  means the default.
   """
-  @spec candidate(String.t(), String.t()) :: String.t()
-  def candidate(server, original) when is_binary(server) and is_binary(original) do
-    prefix = "mcp_" <> sanitize_segment(server) <> "_"
+  @spec candidate(String.t(), String.t(), keyword()) :: String.t()
+  def candidate(server, original, opts \\ [])
+      when is_binary(server) and is_binary(original) and is_list(opts) do
+    prefix = prefix_for(server, Keyword.get(opts, :prefix))
     tool_part = sanitize_segment(original)
 
     if tool_part == "" do
@@ -45,6 +51,10 @@ defmodule FermixCore.Capabilities.MCP.Naming do
 
     cap_length(prefix, tool_part, original)
   end
+
+  defp prefix_for(server, nil), do: "mcp_" <> sanitize_segment(server) <> "_"
+
+  defp prefix_for(_server, prefix) when is_binary(prefix) and prefix != "", do: prefix
 
   @doc """
   Register a sanitized name. Detects collisions against the existing

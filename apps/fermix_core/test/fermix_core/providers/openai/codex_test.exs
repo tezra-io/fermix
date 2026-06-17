@@ -4,6 +4,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.OpenAI.Codex
 
   defmodule StubTokenServer do
@@ -158,7 +159,8 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert measurements.duration_ms >= 0
       assert metadata.input_items == 1
       assert metadata.input_bytes > 0
-      assert metadata.instructions_bytes == byte_size("be terse")
+      # Instructions = composed system run + the codex family overlay (M10 P3).
+      assert metadata.instructions_bytes == byte_size(ModelOverlays.apply_codex("be terse"))
       assert metadata.tools_count == 1
       assert metadata.tools_bytes > 0
       assert metadata.capabilities_count == 1
@@ -877,7 +879,10 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, test_id}]
         )
 
-      assert turn.provider_state.instructions == "stay terse"
+      # provider_state stores the overlay-applied instructions (M10 P3), so
+      # continue/3 re-sends them byte-identical — cache-stable per session.
+      assert turn.provider_state.instructions == ModelOverlays.apply_codex("stay terse")
+      assert String.starts_with?(turn.provider_state.instructions, "stay terse")
     end
 
     test "chat/3 stores @default_instructions when no system message is present" do
@@ -1003,6 +1008,47 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert error.message =~ "no data for"
       assert error.message =~ "receive_timeout"
       refute error.message =~ "Lower reasoning_effort"
+    end
+
+    test "a Finch pool-checkout timeout is classified as a connection-unavailable error" do
+      # Finch reraises a RuntimeError ("unable to provide a connection ... excess
+      # queuing") when a checkout exceeds the pool queue timeout — the
+      # wake-from-sleep signature when the host network is not ready yet. Codex
+      # must mint a typed transport error so the scheduled-job runner can retry
+      # it with backoff (not a bare RuntimeError that strands the run).
+      message =
+        "Finch was unable to provide a connection within the timeout due to " <>
+          "excess queuing for connections."
+
+      Req.Test.stub(__MODULE__, fn _conn -> raise RuntimeError, message end)
+
+      assert {:error, {:provider_transport_error, error}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert error.kind == :connection_unavailable
+      assert error.reason == :connection_unavailable
+      assert error.stage == :before_response
+      assert error.message =~ "could not obtain an HTTP connection"
+      assert error.message =~ "transient"
+    end
+
+    test "an unrelated RuntimeError is left bare, not classified as transport" do
+      # Only the pool-checkout signature is transient infrastructure; every
+      # other RuntimeError (a real bug) must surface unchanged and fail loud.
+      Req.Test.stub(__MODULE__, fn _conn -> raise RuntimeError, "genuine programming bug" end)
+
+      assert {:error, %RuntimeError{message: "genuine programming bug"}} =
+               Codex.chat([%{role: "user", content: "x"}], [],
+                 access_token: @jwt_with_sub,
+                 model: "gpt-5",
+                 base_url: "https://chatgpt.test/codex/responses",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
     end
 
     test ":closed retries once and succeeds on the second attempt (stale-pool recovery)" do

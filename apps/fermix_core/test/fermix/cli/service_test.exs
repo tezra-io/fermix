@@ -59,6 +59,75 @@ defmodule Fermix.CLI.ServiceTest do
     end
   end
 
+  describe "spec/2 service_env" do
+    test "includes allowlisted observability vars from explicit env, FERMIX_HOME baseline" do
+      tmp = mkdir!()
+
+      opts =
+        Keyword.put(fixture_opts(:linux, tmp), :env, %{
+          "FERMIX_OPIK_ENABLED" => "1",
+          "FERMIX_OPIK_BASE_URL" => "http://localhost:5173/api",
+          "FERMIX_OPIK_PROJECT" => "fermix",
+          "FERMIX_TRACE_CONTENT" => "1"
+        })
+
+      {:ok, spec} = Service.spec(:user, opts)
+
+      assert spec.service_env["FERMIX_HOME"] == tmp
+      assert spec.service_env["FERMIX_OPIK_ENABLED"] == "1"
+      assert spec.service_env["FERMIX_OPIK_BASE_URL"] == "http://localhost:5173/api"
+      assert spec.service_env["FERMIX_OPIK_PROJECT"] == "fermix"
+      assert spec.service_env["FERMIX_TRACE_CONTENT"] == "1"
+    end
+
+    test "never persists FERMIX_OPIK_API_KEY even when present in env" do
+      tmp = mkdir!()
+
+      opts =
+        Keyword.put(fixture_opts(:linux, tmp), :env, %{
+          "FERMIX_OPIK_ENABLED" => "1",
+          "FERMIX_OPIK_API_KEY" => "sk-secret"
+        })
+
+      {:ok, spec} = Service.spec(:user, opts)
+
+      refute Map.has_key?(spec.service_env, "FERMIX_OPIK_API_KEY")
+      assert spec.service_env["FERMIX_OPIK_ENABLED"] == "1"
+    end
+
+    test "filters non-allowlisted env keys, keeping only the FERMIX_HOME baseline" do
+      tmp = mkdir!()
+      opts = Keyword.put(fixture_opts(:linux, tmp), :env, %{"PATH" => "/x", "FOO" => "bar"})
+      {:ok, spec} = Service.spec(:user, opts)
+
+      assert Map.keys(spec.service_env) == ["FERMIX_HOME"]
+    end
+
+    test "drops blank observability values" do
+      tmp = mkdir!()
+      opts = Keyword.put(fixture_opts(:linux, tmp), :env, %{"FERMIX_OPIK_ENABLED" => ""})
+      {:ok, spec} = Service.spec(:user, opts)
+
+      refute Map.has_key?(spec.service_env, "FERMIX_OPIK_ENABLED")
+    end
+
+    test "render_unit carries allowlisted env and omits the api key (darwin)" do
+      tmp = mkdir!()
+
+      opts =
+        Keyword.put(fixture_opts(:darwin, tmp), :env, %{
+          "FERMIX_OPIK_ENABLED" => "1",
+          "FERMIX_OPIK_API_KEY" => "sk-secret"
+        })
+
+      {:ok, body} = Service.render_unit(:user, opts)
+
+      assert body =~ "<key>FERMIX_OPIK_ENABLED</key><string>1</string>"
+      refute body =~ "FERMIX_OPIK_API_KEY"
+      refute body =~ "sk-secret"
+    end
+  end
+
   describe "installed?/2" do
     test "false when unit-path file is absent" do
       tmp = mkdir!()
@@ -113,12 +182,16 @@ defmodule Fermix.CLI.ServiceTest do
     end
   end
 
+  # Explicit empty `:env` keeps tests hermetic — the spec snapshots the process
+  # env only when `:env` is absent, and a dev shell already exports
+  # FERMIX_OPIK_ENABLED. Tests that exercise env propagation pass `:env` directly.
   defp fixture_opts(os, tmp) do
     [
       os: os,
       fermix_path: Path.join(tmp, "fermix"),
       fermix_home: tmp,
-      log_path: Path.join(tmp, "logs/fermix.log")
+      log_path: Path.join(tmp, "logs/fermix.log"),
+      env: %{}
     ]
   end
 

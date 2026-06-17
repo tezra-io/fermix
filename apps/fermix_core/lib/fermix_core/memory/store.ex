@@ -79,12 +79,6 @@ defmodule FermixCore.Memory.Store do
     GenServer.call(server, {:delete, scope, key})
   end
 
-  @spec remember(map(), keyword()) :: :ok | {:error, term()}
-  def remember(attrs, opts \\ []) when is_map(attrs) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:remember, attrs})
-  end
-
   # --- GenServer Callbacks ---
 
   @impl true
@@ -125,25 +119,6 @@ defmodule FermixCore.Memory.Store do
     delete_memory!(state, scope_ref, key)
     delete_cached_memory(state.table, scope_ref, key)
     {:reply, :ok, state}
-  end
-
-  def handle_call({:remember, attrs}, _from, state) do
-    scope_ref = scope_ref_from_memory_attrs!(attrs)
-
-    case persist_full_memory(state, attrs) do
-      :ok ->
-        put_cached_memory(
-          state.table,
-          scope_ref,
-          Map.fetch!(attrs, :key),
-          Map.fetch!(attrs, :value)
-        )
-
-        {:reply, :ok, state}
-
-      {:error, reason} ->
-        {:reply, {:error, reason}, state}
-    end
   end
 
   defp recall_value(state, scope_ref, key) do
@@ -355,20 +330,6 @@ defmodule FermixCore.Memory.Store do
     :ets.insert(table, {cache_key(scope_ref, key), value, DateTime.utc_now()})
   end
 
-  defp persist_full_memory(state, attrs) do
-    case repo_server(state.repo) do
-      nil ->
-        :ok
-
-      repo ->
-        case Repo.upsert_memory(attrs, server: repo) do
-          {:ok, _memory} -> :ok
-          {:error, :disabled} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
-    end
-  end
-
   defp delete_cached_memory(table, scope_ref, key) do
     :ets.delete(table, cache_key(scope_ref, key))
   end
@@ -379,16 +340,6 @@ defmodule FermixCore.Memory.Store do
       owner_id: owner_id,
       scope_type: "conversation",
       scope_id: Scope.conversation_scope_id(channel, chat_id, :root),
-      fallback_scope_ref: nil
-    }
-  end
-
-  defp scope_ref_from_memory_attrs!(attrs) do
-    %{
-      agent_id: fetch_string!(attrs, :agent_id),
-      owner_id: fetch_string!(attrs, :owner_id),
-      scope_type: fetch_string!(attrs, :scope_type),
-      scope_id: fetch_string!(attrs, :scope_id),
       fallback_scope_ref: nil
     }
   end
@@ -476,15 +427,5 @@ defmodule FermixCore.Memory.Store do
   defp assert_scope!({channel, chat_id, _thread_scope})
        when is_binary(channel) and is_binary(chat_id) do
     :ok
-  end
-
-  defp fetch_string!(attrs, key) do
-    case Map.get(attrs, key) do
-      value when is_binary(value) ->
-        value
-
-      value ->
-        raise ArgumentError, "expected #{inspect(key)} to be a string, got: #{inspect(value)}"
-    end
   end
 end

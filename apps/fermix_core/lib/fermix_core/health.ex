@@ -7,6 +7,9 @@ defmodule FermixCore.Health do
   alias FermixCore.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Store
+  alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionSupervisor
@@ -78,20 +81,40 @@ defmodule FermixCore.Health do
     }
   end
 
+  # One entry per provider that matters: the configured primary (even when
+  # its credentials are missing — that failure is the report's point) plus
+  # every configured provider. Previously this hardcoded a single "openai"
+  # entry regardless of the active provider (M12 §2.3-9).
   defp provider_statuses(failures) do
-    openai_config =
-      case Config.provider(:openai) do
+    primary = health_primary()
+
+    Descriptor.ids()
+    |> Enum.filter(fn provider -> provider == primary or Selection.configured?(provider) end)
+    |> Enum.map(fn provider -> provider_status(provider, primary, failures) end)
+  end
+
+  defp provider_status(provider, primary, failures) do
+    block =
+      case Config.provider(provider) do
         {:ok, config} -> config
         _ -> []
       end
 
-    [
-      %{
-        name: "openai",
-        status: failure_status(failures, "provider:openai") || :ready,
-        auth_mode: Keyword.get(openai_config, :auth_mode, :api_key)
-      }
-    ]
+    descriptor = Descriptor.fetch!(provider)
+
+    %{
+      name: Atom.to_string(provider),
+      status: failure_status(failures, "provider:#{provider}") || :ready,
+      auth_mode: Keyword.get(block, :auth_mode, Descriptor.default_auth_mode(descriptor)),
+      primary: provider == primary
+    }
+  end
+
+  defp health_primary do
+    case PrimaryConfig.primary() do
+      {:ok, provider} -> provider
+      {:error, :multiple_primary} -> nil
+    end
   end
 
   defp channel_statuses(failures, process_resolver) do

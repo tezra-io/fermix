@@ -18,9 +18,10 @@ defmodule FermixCore.Setup.SecretStore do
   @spec secure_snapshot(snapshot(), keyword()) :: {:ok, snapshot()} | {:error, String.t()}
   def secure_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
     previous = Keyword.get(opts, :previous)
+    profile = profile_of(snapshot)
 
     Enum.reduce_while(SecretPaths.all(), {:ok, snapshot}, fn secret, {:ok, acc} ->
-      case secure_secret(acc, previous, secret) do
+      case secure_secret(acc, previous, secret, profile) do
         {:ok, updated} -> {:cont, {:ok, updated}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -30,10 +31,11 @@ defmodule FermixCore.Setup.SecretStore do
   @spec resolve_sentinels(snapshot(), keyword()) :: snapshot()
   def resolve_sentinels(snapshot, opts) when is_map(snapshot) and is_list(opts) do
     warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
+    profile = profile_of(snapshot)
 
     Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
       value = get_snapshot_value(acc, secret.path)
-      resolve_secret_value(acc, secret, value, warn_plaintext?)
+      resolve_secret_value(acc, secret, value, warn_plaintext?, profile)
     end)
   end
 
@@ -113,7 +115,7 @@ defmodule FermixCore.Setup.SecretStore do
   # Shape mismatch: nothing at this path to delete.
   def delete_snapshot_value(value, _path), do: value
 
-  defp secure_secret(snapshot, previous, secret) do
+  defp secure_secret(snapshot, previous, secret, profile) do
     value = get_snapshot_value(snapshot, secret.path)
     old_value = previous_value(previous, secret.path)
 
@@ -122,10 +124,10 @@ defmodule FermixCore.Setup.SecretStore do
         {:ok, snapshot}
 
       old_value == SecretWriter.sentinel() ->
-        keep_or_rotate(snapshot, secret, value)
+        keep_or_rotate(snapshot, secret, value, profile)
 
       SecretWriter.available?() ->
-        write_secret(snapshot, secret, value)
+        write_secret(snapshot, secret, value, profile)
 
       # No OS secret writer, but this exact plaintext is already what's on
       # disk: keep it rather than failing an unrelated save (the load-time
@@ -152,10 +154,10 @@ defmodule FermixCore.Setup.SecretStore do
   #                   A real rotation is re-detected on the next save once the
   #                   keychain is reachable. Only a positively-confirmed different
   #                   stored value triggers a write.
-  defp keep_or_rotate(snapshot, secret, value) do
-    case SecretWriter.get(secret.key) do
+  defp keep_or_rotate(snapshot, secret, value, profile) do
+    case SecretWriter.get(secret.key, profile: profile) do
       {:ok, ^value} -> {:ok, keep_sentinel(snapshot, secret)}
-      {:ok, _other} -> write_secret(snapshot, secret, value)
+      {:ok, _other} -> write_secret(snapshot, secret, value, profile)
       {:error, _reason} -> {:ok, keep_sentinel(snapshot, secret)}
     end
   end
@@ -164,8 +166,8 @@ defmodule FermixCore.Setup.SecretStore do
     put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())
   end
 
-  defp write_secret(snapshot, secret, value) do
-    case SecretWriter.put(secret.key, value) do
+  defp write_secret(snapshot, secret, value, profile) do
+    case SecretWriter.put(secret.key, value, profile: profile) do
       :ok ->
         {:ok, put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())}
 
@@ -177,10 +179,21 @@ defmodule FermixCore.Setup.SecretStore do
   defp previous_value(%{} = previous, path), do: get_snapshot_value(previous, path)
   defp previous_value(_previous, _path), do: nil
 
-  defp resolve_secret_value(snapshot, secret, value, warn_plaintext?) do
+  # The snapshot's profile names the keychain namespace its secrets resolve
+  # from. Read it here (not from app env) so each snapshot resolves against its
+  # own profile — at boot, app env is not yet populated. Default/blank →
+  # "general" (the legacy bare `fermix:<ENV>` coordinate).
+  defp profile_of(snapshot) do
+    case get_snapshot_value(snapshot, [:fermix_core, :profile]) do
+      name when is_binary(name) and name != "" -> name
+      _ -> SecretWriter.default_profile()
+    end
+  end
+
+  defp resolve_secret_value(snapshot, secret, value, warn_plaintext?, profile) do
     cond do
       value == SecretWriter.sentinel() ->
-        put_snapshot_value(snapshot, secret.path, SecretWriter.get!(secret.key))
+        resolve_keyring_secret(snapshot, secret, warn_plaintext?, profile)
 
       plaintext_secret?(value) ->
         if warn_plaintext?, do: warn_plaintext_secret(secret)
@@ -191,9 +204,33 @@ defmodule FermixCore.Setup.SecretStore do
     end
   end
 
+  defp resolve_keyring_secret(snapshot, secret, warn?, profile) do
+    case SecretWriter.get(secret.key, profile: profile) do
+      {:ok, value} -> put_snapshot_value(snapshot, secret.path, value)
+      {:error, reason} -> handle_keyring_resolution_error(snapshot, secret, reason, warn?)
+    end
+  end
+
+  defp handle_keyring_resolution_error(snapshot, %{optional?: true} = secret, reason, warn?) do
+    if warn?, do: warn_optional_secret(secret, reason)
+    snapshot
+  end
+
+  defp handle_keyring_resolution_error(_snapshot, secret, reason, _warn?) do
+    raise ArgumentError, SecretWriter.format_error(secret.key, reason)
+  end
+
   defp warn_plaintext_secret(secret) do
     Logger.warning(
       "#{ConfigStore.path()} contains plaintext #{secret.env}; run `fermix setup --migrate-secrets`"
+    )
+  end
+
+  defp warn_optional_secret(secret, reason) do
+    Logger.warning(
+      "#{SecretWriter.format_error(secret.key, reason)} #{secret.functionality} will fail until " <>
+        "the secret is available. Run `fermix setup` to re-save it, or remove the stale " <>
+        "@keyring value from #{ConfigStore.path()} if you do not use that functionality."
     )
   end
 

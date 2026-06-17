@@ -153,6 +153,27 @@ defmodule FermixCore.Providers.SelectionTest do
       assert Selection.configured?(:openai_codex, [])
     end
 
+    test "openrouter needs an api key (generic descriptor rule)" do
+      assert Selection.configured?(:openrouter, api_key: "sk-or")
+      refute Selection.configured?(:openrouter, [])
+    end
+
+    test "ollama is configured by an explicit base_url (keyless)" do
+      assert Selection.configured?(:ollama, base_url: "http://localhost:11434/v1")
+      refute Selection.configured?(:ollama, [])
+    end
+
+    test "a whitespace-only base_url is not configured" do
+      refute Selection.configured?(:ollama, base_url: "   ")
+      refute Selection.configured?(:openai, api_key: "  \t\n  ")
+    end
+
+    test "an unknown provider atom raises with a clear message" do
+      assert_raise ArgumentError, ~r/unknown provider :mystery/, fn ->
+        Selection.configured?(:mystery, [])
+      end
+    end
+
     test "an invalid auth_mode is not configured" do
       refute Selection.configured?(:xai, auth_mode: "oauthh", api_key: "xai-x")
     end

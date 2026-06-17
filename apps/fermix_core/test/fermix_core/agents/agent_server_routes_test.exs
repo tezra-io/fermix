@@ -28,6 +28,21 @@ defmodule FermixCore.Agents.AgentServerRoutesTest do
     end
   end
 
+  defmodule EffortAdapter do
+    def chat(_messages, _capabilities, opts) do
+      send(opts[:test_pid], {:chat, :effort, opts[:model], opts[:reasoning_effort]})
+
+      {:ok,
+       %{
+         content: "from effort route",
+         tool_calls: [],
+         provider_state: nil,
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: opts[:model]
+       }}
+    end
+  end
+
   setup do
     registry = :"agent_server_routes_registry_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: registry})
@@ -124,5 +139,40 @@ defmodule FermixCore.Agents.AgentServerRoutesTest do
              AgentServer.run_task(pid, "do it")
 
     refute_received {:chat, :inherited, _model}
+  end
+
+  test "an effort-only override overlays the inherited route — model kept, effort clamped", %{
+    registry: registry
+  } do
+    pid =
+      start_worker(definition(reasoning_effort: :max),
+        capability_registry: registry,
+        provider: nil,
+        ordered_routes: [route(:xai, "grok-4.3", EffortAdapter)]
+      )
+
+    assert {:ok, _} = AgentServer.run_task(pid, "do it")
+    # Inherited model preserved; :max clamps down to xAI's ceiling :high.
+    assert_received {:chat, :effort, "grok-4.3", :high}
+  end
+
+  test "an effort-only override keeps the inherited fallback chain (failover preserved)", %{
+    registry: registry
+  } do
+    pid =
+      start_worker(definition(reasoning_effort: :max),
+        capability_registry: registry,
+        provider: nil,
+        ordered_routes: [
+          route(:xai, "grok-x", FlakyAdapter),
+          route(:openai, "gpt-x", EffortAdapter)
+        ]
+      )
+
+    assert {:ok, _} = AgentServer.run_task(pid, "do it")
+    assert_received {:chat, :flaky}
+    # Second route still reached (effort-only did NOT collapse to one route);
+    # :max clamps to OpenAI's ceiling :xhigh.
+    assert_received {:chat, :effort, "gpt-x", :xhigh}
   end
 end

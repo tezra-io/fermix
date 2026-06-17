@@ -20,6 +20,7 @@ defmodule FermixCore.Providers.RouteResolver do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
@@ -40,7 +41,76 @@ defmodule FermixCore.Providers.RouteResolver do
       :openai_codex -> resolve_codex!(opts)
       :anthropic -> resolve_anthropic!(opts)
       :xai -> resolve_xai!(opts)
-      other -> raise ArgumentError, "no resolver for provider #{inspect(other)}"
+      other -> resolve_descriptor!(other, opts)
+    end
+  end
+
+  # Generic resolver for descriptor providers without bespoke handling
+  # (M12 §5.2): single auth mode, no OAuth branches. Unknown atoms keep
+  # the loud gate. Effort is resolved only for `effort?` descriptors —
+  # effort-less providers never carry :reasoning_effort in adapter_opts.
+  defp resolve_descriptor!(provider, opts) do
+    case Descriptor.fetch(provider) do
+      {:ok, descriptor} -> resolve_from_descriptor(descriptor, opts)
+      :error -> raise ArgumentError, "no resolver for provider #{inspect(provider)}"
+    end
+  end
+
+  defp resolve_from_descriptor(descriptor, opts) do
+    config = descriptor_config(descriptor.id)
+    auth_mode = Descriptor.default_auth_mode(descriptor)
+
+    model =
+      Keyword.get(opts, :model) ||
+        Keyword.get(config, :default_model, ModelCatalog.default_model_for(descriptor.id))
+
+    base_url =
+      Keyword.get(opts, :base_url) ||
+        Keyword.get(config, :base_url, descriptor.default_base_url)
+
+    route_key = %{provider: descriptor.id, model: model, auth_mode: auth_mode, base_url: base_url}
+
+    adapter_opts =
+      [model: model, base_url: base_url, provider: descriptor.id, auth: auth_mode]
+      |> maybe_put_descriptor_api_key(descriptor, auth_mode, opts, config)
+      |> maybe_put(:temperature, Keyword.get(opts, :temperature))
+      |> maybe_put_descriptor_effort(descriptor, opts)
+      |> put_descriptor_req_options(descriptor, opts)
+
+    {route_key, adapter_opts}
+  end
+
+  defp descriptor_config(provider) do
+    case Config.provider(provider) do
+      {:ok, config} -> config
+      {:error, :not_configured} -> []
+    end
+  end
+
+  defp maybe_put_descriptor_api_key(adapter_opts, _descriptor, :api_key, opts, config) do
+    maybe_put(
+      adapter_opts,
+      :api_key,
+      Keyword.get(opts, :api_key) || Keyword.get(config, :api_key)
+    )
+  end
+
+  defp maybe_put_descriptor_api_key(adapter_opts, _descriptor, _auth_mode, _opts, _config) do
+    adapter_opts
+  end
+
+  defp maybe_put_descriptor_effort(adapter_opts, %{effort?: true} = descriptor, opts) do
+    maybe_put(adapter_opts, :reasoning_effort, resolve_reasoning_effort(descriptor.id, opts))
+  end
+
+  defp maybe_put_descriptor_effort(adapter_opts, _descriptor, _opts), do: adapter_opts
+
+  # Descriptor defaults under explicit per-route req_options — a plain
+  # keyword merge here; Req.merge/2 applies the result in the adapter.
+  defp put_descriptor_req_options(adapter_opts, descriptor, opts) do
+    case Keyword.merge(descriptor.default_req_options, Keyword.get(opts, :req_options, [])) do
+      [] -> adapter_opts
+      merged -> Keyword.put(adapter_opts, :req_options, merged)
     end
   end
 
@@ -126,7 +196,7 @@ defmodule FermixCore.Providers.RouteResolver do
     }
 
     adapter_opts =
-      [model: model, base_url: base_url, api_key: api_key]
+      [model: model, base_url: base_url, api_key: api_key, provider: :openai]
       |> maybe_put(:temperature, Keyword.get(opts, :temperature))
       |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:openai, opts))
       |> maybe_put(:req_options, Keyword.get(opts, :req_options))

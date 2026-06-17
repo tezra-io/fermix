@@ -4,7 +4,7 @@ defmodule FermixCore.MixProject do
   def project do
     [
       app: :fermix_core,
-      version: "0.2.3",
+      version: "0.3.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
@@ -36,31 +36,24 @@ defmodule FermixCore.MixProject do
       {:finch, "~> 0.21"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
+      # Compile-time-embedded IANA tz database (no runtime network fetch, unlike
+      # :tzdata) so scheduled-job cron timezones resolve in the Burrito binary.
+      {:tz, "~> 0.28"},
       {:websockex, "~> 0.4"}
     ] ++ opik_dep()
   end
 
-  # Dev-only, opt-in observability exporter. It lives in the SIBLING `fermix-plugins`
-  # repo, so its `path:` resolves only on a dev machine that has that repo checked
-  # out — an unconditional dep would break every standalone/CI/public build.
+  # Observability exporter (Opik) — an in-repo umbrella app (`apps/fermix_opik`),
+  # compiled into every dev/prod build (so a `brew`-installed binary carries it),
+  # INERT until `FERMIX_OPIK_ENABLED` is set in the daemon env: `FermixOpik.enabled?`
+  # gates startup (empty supervisor, no telemetry handler attached, zero overhead
+  # when off). `only: [:dev, :prod]` keeps `fermix_core`'s recursive test run from
+  # loading it, so `mix test` can never ship fixture traces to Opik.
   #
-  # ONE switch: `FERMIX_OPIK_ENABLED`. Export it (e.g. in your dev shell) and rebuild
-  # → the plugin is bundled here, and at boot the plugin attaches itself (it reads
-  # the SAME env in `FermixOpik.enabled?`). Unset (the default) → not bundled, so
-  # default builds stay clean. The truthy set mirrors the plugin's so build (bundle)
-  # and runtime (attach) never disagree.
-  #
-  # Future: pull plugins from the plugins repo at setup time instead of a local path.
-  # See docs/TELEMETRY_CONTRACT.md and projects/fermix-plugins.
+  # It lives in core because it is BEAM code (a telemetry handler in this VM) — it
+  # must be compiled in and cannot be a pull-on-enable plugin (runtime BEAM loading
+  # is unsupported; MILESTONE_8 §4/§14.3: an Elixir "plugin" belongs in core).
   defp opik_dep do
-    if System.get_env("FERMIX_OPIK_ENABLED") in ["1", "true", "TRUE", "yes", "y"] do
-      # `only: [:dev, :prod]` — never bundle the exporter into the TEST build, so
-      # `mix test` cannot ship test-fixture traces (bench/channel/job tests) to a
-      # live Opik project even when FERMIX_OPIK_ENABLED is exported globally
-      # (e.g. from ~/.zshrc). The daemon still exports in :dev / :prod.
-      [{:fermix_opik, path: "../../../fermix-plugins/apps/fermix_opik", only: [:dev, :prod]}]
-    else
-      []
-    end
+    [{:fermix_opik, in_umbrella: true, only: [:dev, :prod]}]
   end
 end

@@ -117,7 +117,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
   defp resolve_parts(current, [], _hops_left), do: {:ok, current}
 
   defp resolve_parts(current, [part | rest], hops_left) do
-    next = join_part(current, part)
+    next = join_part(current, real_case(current, part))
 
     case File.lstat(next) do
       {:ok, %{type: :symlink}} -> resolve_symlink(next, rest, hops_left)
@@ -142,6 +142,29 @@ defmodule FermixCore.Sandbox.PathPolicy do
   defp append_parts(path, parts), do: Enum.reduce(parts, path, &Path.join(&2, &1))
   defp join_part("/", part), do: "/" <> part
   defp join_part(path, part), do: Path.join(path, part)
+
+  # On case-insensitive filesystems (macOS APFS/HFS+) `File.lstat` succeeds for a
+  # case-variant of a real entry, but the resolved string would keep the caller's
+  # casing — letting `~/.SSH` slip past the case-sensitive protected-path check
+  # while still landing on the real `~/.ssh` inode. Fold each existing component
+  # to its true on-disk name so the path we check is the path we touch. An exact
+  # match always wins, so genuinely distinct names on a case-sensitive FS are
+  # left untouched.
+  defp real_case(dir, part) do
+    case File.ls(dir) do
+      {:ok, entries} -> pick_case(entries, part)
+      {:error, _reason} -> part
+    end
+  end
+
+  defp pick_case(entries, part) do
+    if part in entries do
+      part
+    else
+      folded = String.downcase(part)
+      Enum.find(entries, part, &(String.downcase(&1) == folded))
+    end
+  end
 
   defp protected_path?(path, config) do
     Enum.any?(protected_paths(config), &inside_or_equal?(path, &1))

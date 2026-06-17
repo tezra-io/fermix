@@ -5,6 +5,7 @@ defmodule FermixCore.Setup.Wizard do
 
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.ReasoningEffort
@@ -29,6 +30,9 @@ defmodule FermixCore.Setup.Wizard do
           {:openai_api_key, String.t()}
           | {:anthropic_api_key, String.t()}
           | {:xai_api_key, String.t()}
+          | {:openrouter_api_key, String.t()}
+          | {:mistral_api_key, String.t()}
+          | {:ollama_base_url, String.t()}
           | {:anthropic_auth_mode, auth_mode() | String.t()}
           | {:xai_auth_mode, auth_mode() | String.t()}
           | {:provider, provider() | String.t()}
@@ -69,6 +73,12 @@ defmodule FermixCore.Setup.Wizard do
           | {:communication_style, String.t()}
 
   @setup_secret_paths SecretPaths.by_answer_key()
+
+  # Providers exposing an auth-mode choice get an `<id>_auth_mode` answer
+  # key; single-mode providers have none (M12 §6.1).
+  @provider_auth_mode_keys FermixCore.Providers.Descriptor.all()
+                           |> Enum.filter(&FermixCore.Providers.Descriptor.multi_auth_mode?/1)
+                           |> Enum.map(&{&1.id, :"#{&1.id}_auth_mode"})
 
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
@@ -168,10 +178,13 @@ defmodule FermixCore.Setup.Wizard do
     |> Enum.map(&Map.put(&1, :required?, true))
   end
 
-  # reasoning_effort is wired for OpenAI/Codex/xAI/Anthropic (each adapter sends
-  # its provider-specific field). Only offer it on reconfigure for those.
+  # reasoning_effort is offered only for providers whose descriptor says
+  # the adapter sends an effort field (M12 §5.2 effort contract).
   defp reconfigure_offered?(%{key: :reasoning_effort}, persisted) do
-    chosen_provider(persisted) in [:openai, :openai_codex, :anthropic, :xai]
+    case chosen_provider(persisted) do
+      nil -> false
+      provider -> Descriptor.fetch!(provider).effort?
+    end
   end
 
   defp reconfigure_offered?(%{key: :fast}, persisted) do
@@ -208,11 +221,12 @@ defmodule FermixCore.Setup.Wizard do
     model_unset? = provider_unset? or blank?(Keyword.get(provider_block, :default_model))
     effort_unset? = provider_unset? or blank?(Keyword.get(provider_block, :reasoning_effort))
     fast_unset? = prompt_provider == :openai_codex and not Keyword.has_key?(provider_block, :fast)
-    openai_api_key_unset? = openai_api_key_unpersisted?(persisted, persisted_provider)
-    anthropic_api_key_unset? = anthropic_api_key_unpersisted?(persisted, persisted_provider)
-    xai_api_key_unset? = xai_api_key_unpersisted?(persisted, persisted_provider)
-    realtime_api_key_unset? = canonical_openai_api_key_unpersisted?(persisted)
-    default_model = ModelCatalog.default_model_for(prompt_provider)
+
+    field_unset =
+      for descriptor <- Descriptor.all(), field <- descriptor.setup_fields, into: %{} do
+        {field.key,
+         provider_field_unpersisted?(persisted, descriptor.id, persisted_provider, field)}
+      end
 
     %{
       state: state,
@@ -222,12 +236,10 @@ defmodule FermixCore.Setup.Wizard do
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
       fast_unset?: fast_unset?,
-      openai_api_key_unset?: openai_api_key_unset?,
-      anthropic_api_key_unset?: anthropic_api_key_unset?,
-      xai_api_key_unset?: xai_api_key_unset?,
-      realtime_api_key_unset?: realtime_api_key_unset?,
+      field_unset: field_unset,
+      realtime_api_key_unset?: canonical_openai_api_key_unpersisted?(persisted),
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
-      default_model: default_model
+      default_model: ModelCatalog.default_model_for(prompt_provider)
     }
   end
 
@@ -239,59 +251,59 @@ defmodule FermixCore.Setup.Wizard do
           "Provider (#{Enum.map_join(ModelCatalog.providers(), "/", &Atom.to_string/1)}; blank = #{context.prompt_provider})",
         default: context.prompt_provider,
         required?: context.provider_unset?
-      },
-      provider_key_prompt(
-        context,
-        :openai_api_key,
-        "OpenAI API key",
-        "provider:openai",
-        context.openai_api_key_unset?
-      ),
-      provider_key_prompt(
-        context,
-        :anthropic_api_key,
-        "Anthropic API key",
-        "provider:anthropic",
-        context.anthropic_api_key_unset?
-      ),
-      provider_key_prompt(
-        context,
-        :xai_api_key,
-        "xAI API key (or connect OAuth later: fermix auth login --provider xai)",
-        "provider:xai",
-        context.xai_api_key_unset?
-      ),
-      %{
-        key: :default_model,
-        label: "Default model (blank = #{context.default_model})",
-        default: context.default_model,
-        required?: context.model_unset?
-      },
-      %{
-        key: :reasoning_effort,
-        label:
-          "Reasoning effort (#{Enum.map_join(ReasoningEffort.levels_for(context.prompt_provider), "/", &Atom.to_string/1)}; blank = high)",
-        default: :high,
-        required?:
-          (context.provider_unset? or
-             context.prompt_provider in [:openai, :openai_codex, :anthropic, :xai]) and
-            context.effort_unset?
-      },
-      %{
-        key: :fast,
-        label: "Codex fast mode? (yes/no; blank = no)",
-        default: false,
-        required?: context.provider_unset? or context.fast_unset?
       }
-    ]
+    ] ++
+      provider_field_prompts(context) ++
+      [
+        %{
+          key: :default_model,
+          label: "Default model (blank = #{context.default_model})",
+          default: context.default_model,
+          required?: context.model_unset?
+        },
+        %{
+          key: :reasoning_effort,
+          label:
+            "Reasoning effort (#{Enum.map_join(ReasoningEffort.levels_for(context.prompt_provider), "/", &Atom.to_string/1)}; blank = high)",
+          default: :high,
+          required?:
+            (context.provider_unset? or Descriptor.fetch!(context.prompt_provider).effort?) and
+              context.effort_unset?
+        },
+        %{
+          key: :fast,
+          label: "Codex fast mode? (yes/no; blank = no)",
+          default: false,
+          required?: context.provider_unset? or context.fast_unset?
+        }
+      ]
   end
 
-  defp provider_key_prompt(context, key, label, component, unset?) do
-    %{
-      key: key,
-      label: label,
-      required?: context.provider_unset? or missing_component?(context.state, component) or unset?
+  # One prompt per descriptor setup field — credential prompts (and plain
+  # fields like a keyless provider's base_url) are registry data, not
+  # hand-written clauses (M12 §6.1).
+  defp provider_field_prompts(context) do
+    for descriptor <- Descriptor.all(), field <- descriptor.setup_fields do
+      provider_field_prompt(context, descriptor, field)
+    end
+  end
+
+  defp provider_field_prompt(context, descriptor, field) do
+    prompt = %{
+      key: field.key,
+      label: field.label,
+      required?:
+        context.provider_unset? or
+          missing_component?(context.state, "provider:#{descriptor.id}") or
+          Map.fetch!(context.field_unset, field.key)
     }
+
+    if field.default, do: Map.put(prompt, :default, field.default), else: prompt
+  end
+
+  defp provider_field_unpersisted?(persisted, provider, persisted_provider, field) do
+    persisted_provider == provider and
+      persisted |> provider_config(provider) |> Keyword.get(field.config_key) |> blank?()
   end
 
   defp channel_prompts(%{persisted: persisted}) do
@@ -551,23 +563,26 @@ defmodule FermixCore.Setup.Wizard do
 
   @spec save_answers(WizardState.t(), [answer()]) :: {:ok, report()} | {:error, term()}
   def save_answers(%WizardState{} = state, answers) do
+    # Model/effort/fast writes target the provider being EDITED (the web pane's
+    # `:edit_provider`), not the primary — so editing a fallback's settings doesn't
+    # have to promote it. Falls back to the active/primary provider when unset (CLI).
+    target = edit_provider_target(answers)
+
     snapshot =
       state.config_snapshot
       |> drop_unanswered_env_only_secrets(answers)
-      |> put_openai_api_key(Keyword.get(answers, :openai_api_key))
-      |> put_anthropic_api_key(Keyword.get(answers, :anthropic_api_key))
-      |> put_xai_api_key(Keyword.get(answers, :xai_api_key))
-      |> put_provider_auth_mode(:anthropic, Keyword.get(answers, :anthropic_auth_mode))
-      |> put_provider_auth_mode(:xai, Keyword.get(answers, :xai_auth_mode))
+      |> put_provider_field_answers(answers)
+      |> put_provider_auth_mode_answers(answers)
       |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_primary_selection(Keyword.get(answers, :provider))
       |> maybe_promote_newly_configured(
         blank?(Keyword.get(answers, :provider)),
         promotion_excluded_providers(answers)
       )
-      |> put_default_model(Keyword.get(answers, :default_model))
-      |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort))
-      |> put_fast(Keyword.get(answers, :fast))
+      |> put_default_model(Keyword.get(answers, :default_model), target)
+      |> put_subagent_model(Keyword.get(answers, :subagent_model))
+      |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort), target)
+      |> put_fast(Keyword.get(answers, :fast), target)
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
@@ -633,7 +648,12 @@ defmodule FermixCore.Setup.Wizard do
   """
   @spec set_provider_auth_mode(provider(), auth_mode() | String.t()) ::
           {:ok, report()} | {:error, term()}
-  def set_provider_auth_mode(provider, mode) when provider in [:anthropic, :xai] do
+  def set_provider_auth_mode(provider, mode) when is_atom(provider) do
+    if not Descriptor.multi_auth_mode?(Descriptor.fetch!(provider)) do
+      raise ArgumentError,
+            "provider #{inspect(provider)} has a fixed auth mode; auth_mode is not configurable"
+    end
+
     ConfigStore.current_snapshot()
     |> put_provider_auth_mode(provider, mode)
     |> drop_unanswered_env_only_secrets([])
@@ -651,9 +671,9 @@ defmodule FermixCore.Setup.Wizard do
   through the same save → apply → seed → report cycle as `save_answers/2`.
   """
   @spec mark_primary(provider()) :: {:ok, report()} | {:error, term()}
-  def mark_primary(provider) when provider in [:openai, :openai_codex, :anthropic, :xai] do
+  def mark_primary(provider) when is_atom(provider) do
     ConfigStore.current_snapshot()
-    |> mark_primary_provider(provider)
+    |> mark_primary_provider(parse_provider!(provider))
     |> drop_unanswered_env_only_secrets([])
     |> commit_snapshot()
   end
@@ -678,11 +698,37 @@ defmodule FermixCore.Setup.Wizard do
   # snapshot); it becomes primary via the explicit provider answer.
   defp maybe_promote_newly_configured(snapshot, false, _excluded), do: snapshot
 
+  # Auto-promote ONLY during initial setup, i.e. when no primary has been chosen
+  # yet — the first provider configured becomes primary. Once a primary exists,
+  # a newly configured provider stays a FALLBACK; promotion is then an explicit
+  # "Set primary" action (which sends a :provider answer -> put_primary_selection).
   defp maybe_promote_newly_configured(snapshot, true, excluded) do
-    case newly_configured_providers(snapshot, excluded) do
-      [] -> snapshot
-      # Catalog order — deterministic when one save configures several.
-      [provider | _rest] -> mark_primary_provider(snapshot, provider)
+    if primary_established?(snapshot) do
+      snapshot
+    else
+      case newly_configured_providers(snapshot, excluded) do
+        [] -> snapshot
+        # Catalog order — deterministic when one save configures several.
+        [provider | _rest] -> mark_primary_provider(snapshot, provider)
+      end
+    end
+  end
+
+  # A primary counts as "established" only when the chosen provider (a primary
+  # flag, or the legacy `agent.provider`) is actually CONFIGURED. An unconfigured
+  # default — e.g. the compiled-in `agent.provider = :openai` on a fresh install —
+  # does not count, so the first provider the operator configures still becomes
+  # primary. Once a configured primary exists, newly configured providers stay
+  # fallbacks (promotion is then the explicit "Set primary" action).
+  defp primary_established?(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    providers = Keyword.get(fermix_core, :providers, [])
+    agent = Keyword.get(fermix_core, :agent, [])
+
+    case PrimaryConfig.chosen_in(providers, agent) do
+      {:ok, nil} -> false
+      {:ok, provider} -> Selection.configured?(provider, Keyword.get(providers, provider, []))
+      {:error, _multiple} -> true
     end
   end
 
@@ -833,33 +879,6 @@ defmodule FermixCore.Setup.Wizard do
     |> Keyword.get(provider, [])
   end
 
-  defp openai_api_key_unpersisted?(persisted, :openai) do
-    persisted
-    |> provider_config(:openai)
-    |> Keyword.get(:api_key)
-    |> blank?()
-  end
-
-  defp openai_api_key_unpersisted?(_persisted, _provider), do: false
-
-  defp anthropic_api_key_unpersisted?(persisted, :anthropic) do
-    persisted
-    |> provider_config(:anthropic)
-    |> Keyword.get(:api_key)
-    |> blank?()
-  end
-
-  defp anthropic_api_key_unpersisted?(_persisted, _provider), do: false
-
-  defp xai_api_key_unpersisted?(persisted, :xai) do
-    persisted
-    |> provider_config(:xai)
-    |> Keyword.get(:api_key)
-    |> blank?()
-  end
-
-  defp xai_api_key_unpersisted?(_persisted, _provider), do: false
-
   defp canonical_openai_api_key_unpersisted?(persisted) do
     persisted
     |> provider_config(:openai)
@@ -931,58 +950,56 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp put_openai_api_key(snapshot, nil), do: snapshot
-  defp put_openai_api_key(snapshot, ""), do: snapshot
+  # One writer per descriptor setup field: secrets route through the
+  # OS keyring (sentinel in the snapshot), plain fields persist trimmed.
+  # Writes go through update_provider_block so sibling [fermix_core.*]
+  # sections (routing, personalization, agent, …) are preserved.
+  defp put_provider_field_answers(snapshot, answers) do
+    Enum.reduce(Descriptor.all(), snapshot, fn descriptor, acc ->
+      Enum.reduce(descriptor.setup_fields, acc, fn field, inner ->
+        put_provider_field_answer(inner, descriptor.id, field, Keyword.get(answers, field.key))
+      end)
+    end)
+  end
+
+  defp put_provider_field_answer(snapshot, _provider, _field, value) when value in [nil, ""],
+    do: snapshot
+
+  defp put_provider_field_answer(snapshot, provider, %{secret?: true} = field, value) do
+    sentinel = secret_snapshot_value(field.key, value)
+
+    if is_nil(sentinel) do
+      snapshot
+    else
+      update_provider_block(snapshot, provider, field.config_key, sentinel)
+    end
+  end
+
+  defp put_provider_field_answer(snapshot, provider, field, value) do
+    case String.trim(to_string(value)) do
+      "" -> snapshot
+      trimmed -> update_provider_block(snapshot, provider, field.config_key, trimmed)
+    end
+  end
+
+  defp put_provider_auth_mode_answers(snapshot, answers) do
+    Enum.reduce(@provider_auth_mode_keys, snapshot, fn {provider, answer_key}, acc ->
+      put_provider_auth_mode(acc, provider, Keyword.get(answers, answer_key))
+    end)
+  end
+
+  # The Realtime key shares the OpenAI provider api_key slot
+  # (docs/MILESTONE_9_1_REALTIME_VOICE.md — Realtime V1 is OpenAI-only).
+  defp put_openai_api_key(snapshot, value) when value in [nil, ""], do: snapshot
 
   defp put_openai_api_key(snapshot, api_key) do
     sentinel = secret_snapshot_value(:openai_api_key, api_key)
-    if is_nil(sentinel), do: snapshot, else: put_openai_secret(snapshot, sentinel)
-  end
 
-  defp put_openai_secret(snapshot, sentinel) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
-
-    openai =
-      providers
-      |> Keyword.get(:openai, [])
-      |> Keyword.put(:api_key, sentinel)
-
-    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :openai, openai))
-  end
-
-  defp put_anthropic_api_key(snapshot, nil), do: snapshot
-  defp put_anthropic_api_key(snapshot, ""), do: snapshot
-
-  defp put_anthropic_api_key(snapshot, api_key) do
-    sentinel = secret_snapshot_value(:anthropic_api_key, api_key)
-    if is_nil(sentinel), do: snapshot, else: put_anthropic_secret(snapshot, sentinel)
-  end
-
-  defp put_xai_api_key(snapshot, nil), do: snapshot
-  defp put_xai_api_key(snapshot, ""), do: snapshot
-
-  defp put_xai_api_key(snapshot, api_key) do
-    sentinel = secret_snapshot_value(:xai_api_key, api_key)
-    if is_nil(sentinel), do: snapshot, else: put_provider_secret(snapshot, :xai, sentinel)
-  end
-
-  defp put_provider_secret(snapshot, provider, sentinel) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
-
-    block =
-      providers
-      |> Keyword.get(provider, [])
-      |> Keyword.put(:api_key, sentinel)
-
-    Map.put(
-      snapshot,
-      :fermix_core,
-      Keyword.put(
-        Map.get(snapshot, :fermix_core, []),
-        :providers,
-        Keyword.put(providers, provider, block)
-      )
-    )
+    if is_nil(sentinel) do
+      snapshot
+    else
+      update_provider_block(snapshot, :openai, :api_key, sentinel)
+    end
   end
 
   # blank/nil → no-op; an invalid value raises rather than silently dropping
@@ -1012,17 +1029,6 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_auth_mode!(other) do
     raise ArgumentError, "auth_mode must be :api_key or :oauth, got: #{inspect(other)}"
-  end
-
-  defp put_anthropic_secret(snapshot, sentinel) do
-    providers = snapshot |> Map.get(:fermix_core, []) |> Keyword.get(:providers, [])
-
-    anthropic =
-      providers
-      |> Keyword.get(:anthropic, [])
-      |> Keyword.put(:api_key, sentinel)
-
-    Map.put(snapshot, :fermix_core, providers: Keyword.put(providers, :anthropic, anthropic))
   end
 
   defp put_primary_selection(snapshot, nil), do: snapshot
@@ -1070,43 +1076,66 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp put_default_model(snapshot, nil), do: snapshot
-  defp put_default_model(snapshot, ""), do: snapshot
+  # `target` is the provider whose block receives the write — the edited provider
+  # (web pane), or the active/primary provider when unset (CLI). Decoupling this
+  # from the primary is what lets a fallback be edited without being promoted.
+  defp put_default_model(snapshot, nil, _target), do: snapshot
+  defp put_default_model(snapshot, "", _target), do: snapshot
 
-  defp put_default_model(snapshot, value) when is_binary(value) do
+  defp put_default_model(snapshot, value, target) when is_binary(value) do
     case String.trim(value) do
-      "" -> raise ArgumentError, "default_model cannot be blank"
-      trimmed -> update_active_provider_block(snapshot, :default_model, trimmed)
+      "" ->
+        raise ArgumentError, "default_model cannot be blank"
+
+      trimmed ->
+        update_provider_block(
+          snapshot,
+          target || active_provider(snapshot),
+          :default_model,
+          trimmed
+        )
     end
   end
 
-  defp put_reasoning_effort(snapshot, nil), do: snapshot
-  defp put_reasoning_effort(snapshot, ""), do: snapshot
+  defp put_reasoning_effort(snapshot, nil, _target), do: snapshot
+  defp put_reasoning_effort(snapshot, "", _target), do: snapshot
 
-  defp put_reasoning_effort(snapshot, value) do
+  defp put_reasoning_effort(snapshot, value, target) do
     effort = parse_reasoning_effort!(value)
-    provider = active_provider(snapshot)
+    provider = target || active_provider(snapshot)
 
-    if provider in [:openai, :openai_codex, :anthropic, :xai] do
-      update_active_provider_block(snapshot, :reasoning_effort, effort)
+    if Descriptor.fetch!(provider).effort? do
+      update_provider_block(snapshot, provider, :reasoning_effort, effort)
     else
       raise ArgumentError,
-            "reasoning_effort applies to :openai, :openai_codex, :anthropic, or :xai providers only; selected provider is #{inspect(provider)}"
+            "provider #{inspect(provider)} does not support reasoning_effort " <>
+              "(effort-capable providers: #{Enum.map_join(effort_providers(), ", ", &Atom.to_string/1)})"
     end
   end
 
-  defp put_fast(snapshot, nil), do: snapshot
-  defp put_fast(snapshot, ""), do: snapshot
+  defp effort_providers do
+    for descriptor <- Descriptor.all(), descriptor.effort?, do: descriptor.id
+  end
 
-  defp put_fast(snapshot, value) do
+  defp put_fast(snapshot, nil, _target), do: snapshot
+  defp put_fast(snapshot, "", _target), do: snapshot
+
+  defp put_fast(snapshot, value, target) do
     fast = parse_fast!(value)
-    provider = active_provider(snapshot)
+    provider = target || active_provider(snapshot)
 
     if provider == :openai_codex do
-      update_active_provider_block(snapshot, :fast, fast)
+      update_provider_block(snapshot, provider, :fast, fast)
     else
       raise ArgumentError,
             "fast mode applies to :openai_codex provider only; selected provider is #{inspect(provider)}"
+    end
+  end
+
+  defp edit_provider_target(answers) do
+    case Keyword.get(answers, :edit_provider) do
+      value when value in [nil, ""] -> nil
+      value -> parse_provider!(value)
     end
   end
 
@@ -1175,8 +1204,7 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp update_active_provider_block(snapshot, key, value) do
-    provider = active_provider(snapshot)
+  defp update_provider_block(snapshot, provider, key, value) when is_atom(provider) do
     fermix_core = Map.get(snapshot, :fermix_core, [])
     providers = Keyword.get(fermix_core, :providers, [])
     block = providers |> Keyword.get(provider, []) |> Keyword.put(key, value)
@@ -1186,6 +1214,63 @@ defmodule FermixCore.Setup.Wizard do
       :fermix_core,
       Keyword.put(fermix_core, :providers, Keyword.put(providers, provider, block))
     )
+  end
+
+  # "Same as main" (blank, or equal to the resolved main model) is encoded as the
+  # ABSENCE of the key — we DELETE rather than write it. This is deliberate, and
+  # the reason we don't just always-write `subagent_model` defaulting to the main
+  # model: "inherit" is not a model, it's "whatever the main agent actually
+  # resolves to at run time", which a stored string cannot represent. A written
+  # value is a frozen pin, so always-writing would (1) silently NOT follow a later
+  # main-model change (drift) and (2) make workers resolve a strict single route
+  # and lose the main agent's inherited failover chain. Absence avoids both — the
+  # worker inherits the live chain. Keeping it absent costs this one delete branch;
+  # an always-present key would cost sync-on-main-change logic instead. The UI
+  # still shows an explicit "Same as main model" default, so absence is invisible
+  # to the operator. (docs/design/SUBAGENT_MODEL_SELECTION.md §7a + §15 review.)
+  #
+  # Writes to [fermix_core.routing], never the provider block. `subagent_provider`
+  # is intentionally not written — resolve-time defaulting follows the live primary.
+  #
+  # An ABSENT answer (nil — the key wasn't part of this save) PRESERVES the existing
+  # value; only an explicit blank/main-model value means "inherit" (delete). Without
+  # this distinction, every save that doesn't carry a subagent_model answer (the CLI,
+  # a realtime-key save, a fallback-provider pane) would wipe the setting.
+  defp put_subagent_model(snapshot, nil), do: snapshot
+
+  defp put_subagent_model(snapshot, value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    if trimmed == "" or trimmed == active_provider_default_model(snapshot) do
+      delete_routing_key(snapshot, :subagent_model)
+    else
+      put_routing_key(snapshot, :subagent_model, trimmed)
+    end
+  end
+
+  defp active_provider_default_model(snapshot) do
+    provider = active_provider(snapshot)
+
+    configured =
+      snapshot
+      |> Map.get(:fermix_core, [])
+      |> Keyword.get(:providers, [])
+      |> Keyword.get(provider, [])
+      |> Keyword.get(:default_model)
+
+    configured || ModelCatalog.default_model_for(provider)
+  end
+
+  defp put_routing_key(snapshot, key, value) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    routing = fermix_core |> Keyword.get(:routing, []) |> Keyword.put(key, value)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :routing, routing))
+  end
+
+  defp delete_routing_key(snapshot, key) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    routing = fermix_core |> Keyword.get(:routing, []) |> Keyword.delete(key)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :routing, routing))
   end
 
   defp put_telegram_bot_token(snapshot, nil), do: snapshot

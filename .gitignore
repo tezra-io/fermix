@@ -4,6 +4,12 @@
 /burrito_out/
 # No lock file exclusion — mix.lock must be committed for reproducible builds
 
+# Mix release runtime templates (rel/*.eex): unmodified `mix release.init`
+# scaffold. `mix release` falls back to identical built-in defaults when absent,
+# so they change nothing in the build. Regenerate with `mix release.init` if VM
+# boot ever needs customizing (e.g. heart/daemon auto-restart in env.sh.eex).
+/rel/
+
 # Umbrella apps
 /apps/*/deps/
 /apps/*/_build/
@@ -38,6 +44,9 @@ auth.json
 *.sqlite3
 *.log
 
+# Local keychain-migration helper (machine-specific; not part of the repo)
+/scripts/migrate-keychain-scope.sh
+
 # IDE
 .elixir_ls/
 .vscode/
@@ -59,6 +68,8 @@ erl_crash.dump
 !/docs/*.png
 /docs/superpowers/
 docs/design/
+# Release film working files (brief, mascot/wordmark assets, motion proof, Figma exports)
+/docs/release-film/
 
 # Claude Code local worktrees
 /.claude/worktrees/
@@ -73,4 +84,8 @@ docs/design/
 #.agents
 .agents/skills/.venv/
 .agents/skills/bin/
-.agents/skills/reports/
+.agents/skills/reports/__pycache__/
+
+# Python bytecode (release scripts)
+__pycache__/
+*.pyc

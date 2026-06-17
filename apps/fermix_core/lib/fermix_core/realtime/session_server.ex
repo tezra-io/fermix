@@ -9,10 +9,12 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.CostTracker
   alias FermixCore.Realtime.OpenAIClient
+  alias FermixCore.Realtime.Telemetry, as: RealtimeTelemetry
   alias FermixCore.Realtime.ToolBridge
 
   require Logger
@@ -83,12 +85,14 @@ defmodule FermixCore.Realtime.SessionServer do
     capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
     skill_registry = Keyword.get(opts, :skill_registry, SkillRegistry)
     device_id = Keyword.get(opts, :device_id, "unknown")
+    session_scope = Keyword.get(opts, :session_scope, :root)
 
     context =
       opts
       |> Keyword.get_lazy(:context, fn -> default_context(device_id) end)
       |> Map.put_new(:capability_registry, capability_registry)
       |> Map.put_new(:skill_registry, skill_registry)
+      |> Map.put_new(:session_id, to_string(session_scope))
 
     prompt_loader = Keyword.get(opts, :prompt_loader)
 
@@ -101,7 +105,7 @@ defmodule FermixCore.Realtime.SessionServer do
            companion: Keyword.fetch!(opts, :companion),
            config: config,
            device_id: device_id,
-           session_scope: Keyword.get(opts, :session_scope, :root),
+           session_scope: session_scope,
            openai_client: Keyword.get(opts, :openai_client, OpenAIClient),
            openai_pid: nil,
            api_key: Keyword.get(opts, :api_key),
@@ -129,7 +133,8 @@ defmodule FermixCore.Realtime.SessionServer do
            reconnect_timer: nil,
            session_update_event: nil,
            provider_ready?: false,
-           current_item_id: nil
+           current_item_id: nil,
+           response_started_ms: nil
          }}
 
       {:error, reason} ->
@@ -143,6 +148,8 @@ defmodule FermixCore.Realtime.SessionServer do
          {:ok, event} <- build_session_update_event(state) do
       case send_provider_event(state.openai_client, openai_pid, event) do
         :ok ->
+          RealtimeTelemetry.call_start(telemetry_meta(state))
+
           state =
             %{state | openai_pid: openai_pid, session_update_event: event, provider_ready?: false}
 
@@ -236,6 +243,7 @@ defmodule FermixCore.Realtime.SessionServer do
 
   def handle_call(:call_stop, _from, state) do
     notify(state.companion, %{type: "state", state: "idle"})
+    RealtimeTelemetry.call_stop(telemetry_meta(state), usage_measurements(state.usage))
     {:reply, :ok, drop_session(state)}
   end
 
@@ -404,6 +412,7 @@ defmodule FermixCore.Realtime.SessionServer do
         :exhausted
 
       delay when is_integer(delay) and delay >= 0 ->
+        RealtimeTelemetry.reconnect(telemetry_meta(state), state.reconnect_attempts)
         notify(state.companion, %{type: "state", state: "reconnecting"})
         timer = Process.send_after(self(), :reconnect_attempt, delay)
 
@@ -489,7 +498,10 @@ defmodule FermixCore.Realtime.SessionServer do
          available_skills: available_skills,
          context: context,
          profile: profile,
-         capabilities: profile.capabilities
+         # Realtime has no tool_call bridge-unwrap path, so it advertises the
+         # FULL dispatchable surface to the OpenAI Realtime API (no deferral
+         # for voice) — deferred plugin/MCP tools stay invokable (M10 P2 fix).
+         capabilities: Map.get(profile, :dispatchable, profile.capabilities)
        }}
     end
   end
@@ -551,7 +563,10 @@ defmodule FermixCore.Realtime.SessionServer do
     %{state | user_transcript: text}
   end
 
-  defp handle_provider_event_internal({:session_created, _event}, state), do: state
+  defp handle_provider_event_internal({:session_created, _event}, state) do
+    RealtimeTelemetry.session_created(telemetry_meta(state))
+    state
+  end
 
   defp handle_provider_event_internal(
          {:session_updated, _event},
@@ -560,6 +575,8 @@ defmodule FermixCore.Realtime.SessionServer do
        do: state
 
   defp handle_provider_event_internal({:session_updated, _event}, state) do
+    RealtimeTelemetry.session_updated(telemetry_meta(state))
+
     state
     |> Map.put(:provider_ready?, true)
     |> start_timers()
@@ -619,10 +636,13 @@ defmodule FermixCore.Realtime.SessionServer do
     state
   end
 
-  defp handle_provider_event_internal({:response_created, _event}, state), do: state
+  defp handle_provider_event_internal({:response_created, _event}, state) do
+    %{state | response_started_ms: System.monotonic_time(:millisecond)}
+  end
 
   defp handle_provider_event_internal({:response_done, response}, state) do
     state
+    |> maybe_emit_provider_call(response)
     |> maybe_notify_cancelled_response(response)
     |> Map.put(:current_item_id, nil)
     |> notify_listening_state()
@@ -635,6 +655,7 @@ defmodule FermixCore.Realtime.SessionServer do
       handle_active_response_race(error, state)
     else
       Logger.warning("OpenAI Realtime error: #{inspect(error)}")
+      RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
       notify(state.companion, %{type: "error", reason: reason_to_string(error)})
       drop_session(state)
     end
@@ -749,6 +770,77 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp maybe_apply_reported_usage(state, _response), do: state
+
+  # The realtime model turn has no provider adapter, so emit it once through the
+  # shared provider emitter when usage is present: one provider.call per
+  # response.done → llm_call JSONL → Opik LLM span. The real model id lets Opik
+  # price it; tool calls already self-emit via the tool emitter on the same
+  # session_id (no wrapper here — that would double-emit).
+  defp maybe_emit_provider_call(state, %{"usage" => usage})
+       when is_map(usage) and map_size(usage) > 0 do
+    ProviderTelemetry.emit_call(
+      %{
+        provider: :openai,
+        model: state.config.model,
+        status: :ok,
+        agent: "realtime",
+        tokens: tokens_from_usage(usage)
+      },
+      response_duration_ms(state),
+      session_id: to_string(state.session_scope),
+      input: transcript_or_nil(state.user_transcript),
+      output: transcript_or_nil(state.assistant_transcript)
+    )
+
+    %{state | response_started_ms: nil}
+  end
+
+  defp maybe_emit_provider_call(state, _response), do: state
+
+  # The realtime turn's transcripts are the LLM span's input/output. emit_call
+  # gates them behind `capture_content?/0`; an empty transcript becomes nil so a
+  # blank preview never rides the event. Emitted before `maybe_record_exchange`
+  # clears the transcripts (see the response_done pipeline).
+  defp transcript_or_nil(""), do: nil
+  defp transcript_or_nil(text) when is_binary(text), do: text
+
+  defp tokens_from_usage(usage) do
+    prompt = non_neg_int(Map.get(usage, "input_tokens"))
+    completion = non_neg_int(Map.get(usage, "output_tokens"))
+    %{prompt: prompt, completion: completion, total: prompt + completion}
+  end
+
+  defp non_neg_int(value) when is_integer(value) and value >= 0, do: value
+  defp non_neg_int(_value), do: 0
+
+  defp response_duration_ms(%{response_started_ms: started}) when is_integer(started) do
+    max(0, System.monotonic_time(:millisecond) - started)
+  end
+
+  defp response_duration_ms(_state), do: 0
+
+  defp telemetry_meta(state) do
+    %{
+      session_id: to_string(state.session_scope),
+      device_id: state.device_id,
+      model: state.config.model,
+      voice: state.config.voice,
+      session_scope: to_string(state.session_scope)
+    }
+  end
+
+  # The call's accumulated usage, carried on the `call_stop` lifecycle event so
+  # the trace keeps the session's audio footprint instead of dropping it at
+  # teardown. Measurements are numeric only (telemetry contract), so cost rides
+  # as cents floats; Opik still auto-prices the per-turn LLM spans separately.
+  defp usage_measurements(%CostTracker{estimated: estimated, reported: reported}) do
+    %{
+      input_audio_ms: estimated.input_audio_ms,
+      input_audio_tokens: estimated.input_audio_tokens,
+      estimated_cost_cents: estimated.cost_cents,
+      reported_cost_cents: reported.cost_cents
+    }
+  end
 
   defp start_timers(state) do
     state

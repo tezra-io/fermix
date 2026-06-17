@@ -2,6 +2,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   use FermixWebWeb, :html
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
 
   @channels [
@@ -28,8 +29,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
+  attr :live_models, :any, default: nil
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
+  attr :oauth_modal, :map, default: nil
+  attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
   attr :restart_pending?, :boolean, default: false
@@ -71,7 +75,23 @@ defmodule FermixWebWeb.SetupLive.Components do
             <.flash_banner flash={@saved_flash} />
           </div>
 
-          <div class="rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8">
+          <div
+            id={"setup-pane-#{@active_tab}"}
+            phx-hook="UnsavedHint"
+            class="relative rounded-box border border-base-300 bg-base-100 p-6 shadow-sm sm:p-8"
+          >
+            <%!-- Client-only dirty hint: the hook reveals this badge on the first
+                  input edit and clears it on submit. The ignore island keeps
+                  morphdom from resetting it on phx-change re-renders; the active_tab
+                  in the id remounts (and clears) it when you switch panes. --%>
+            <div :if={form_pane?(@active_tab)} id={"unsaved-#{@active_tab}"} phx-update="ignore">
+              <span
+                data-unsaved-badge
+                class="absolute right-4 top-4 z-10 hidden items-center gap-1.5 rounded-full border border-warning/40 bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning"
+              >
+                <span class="size-1.5 rounded-full bg-current"></span> Unsaved changes
+              </span>
+            </div>
             <.active_pane
               active_tab={@active_tab}
               channels_form={@channels_form}
@@ -89,9 +109,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               personalization_form={@personalization_form}
               provider_form={@provider_form}
               provider_models={@provider_models}
+              live_models={@live_models}
               provider_statuses={@provider_statuses}
               plugin_auth_url={@plugin_auth_url}
               plugin_summary={@plugin_summary}
+              oauth_modal={@oauth_modal}
+              installing_plugins={@installing_plugins}
               realtime_form={@realtime_form}
               report={@report}
               restart_pending?={@restart_pending?}
@@ -117,12 +140,13 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <aside class="lg:sticky lg:top-6">
       <div class="rounded-box border border-base-300 bg-base-100 p-4 shadow-sm">
-        <div class="flex items-center gap-3 px-1">
-          <img src={~p"/images/logo.svg"} width="36" height="36" alt="Fermix" class="size-9 shrink-0" />
-          <div class="min-w-0">
-            <p class="truncate text-sm font-semibold leading-tight">Fermix setup</p>
-            <p class="truncate text-xs text-base-content/55">Guided onboarding</p>
-          </div>
+        <div class="flex items-center gap-2.5 px-1">
+          <img
+            src={~p"/images/fermix-mascot.png"}
+            alt=""
+            class="size-9 shrink-0 [filter:drop-shadow(0_0_1px_rgba(0,0,0,0.28))]"
+          />
+          <.fermix_wordmark class="h-5 w-auto text-base-content" />
         </div>
 
         <div class="mt-4 px-1">
@@ -167,7 +191,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
         <div class="mt-3 px-1 text-xs text-base-content/55">
           <p class="truncate">
-            {Atom.to_string(@provider_form.provider)} · {@provider_form.default_model}
+            {provider_label(@provider_form.provider)} · {@provider_form.default_model}
           </p>
           <code class="mt-1 block truncate font-mono text-[11px] text-base-content/45">
             {@report.config_path}
@@ -208,8 +232,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :personalization_form, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
+  attr :live_models, :any, default: nil
   attr :plugin_auth_url, :map, default: nil
   attr :plugin_summary, :map, required: true
+  attr :oauth_modal, :map, default: nil
+  attr :installing_plugins, :list, default: []
   attr :realtime_form, :map, required: true
   attr :report, :map, required: true
   attr :restart_pending?, :boolean, default: false
@@ -251,23 +278,51 @@ defmodule FermixWebWeb.SetupLive.Components do
         </section>
 
         <h3 class="mb-4 mt-6 text-sm font-semibold">
-          Configuring {Atom.to_string(@provider_form.provider)}
+          Configuring {provider_label(@provider_form.provider)}
         </h3>
         <div class={provider_grid_class(@provider_form.provider)}>
           <section class="min-w-0 space-y-5">
             <div class="grid gap-4 lg:grid-cols-2">
               <label class="form-control w-full">
                 <span class="label pb-1 text-sm font-medium">Default model</span>
+                <.default_model_input
+                  provider_form={@provider_form}
+                  provider_models={@provider_models}
+                  live_models={@live_models}
+                />
+              </label>
+              <%!-- Sub-agent model is a single GLOBAL setting (sub-agents run on the
+                    primary provider), so it is shown only on the primary's pane to avoid
+                    looking per-provider. Cross-provider sub-agents are a runtime/on-the-fly
+                    choice, not a setup one. --%>
+              <label
+                :if={editing_primary?(@provider_statuses, @provider_form.provider)}
+                class="form-control w-full"
+              >
+                <span class="label pb-1 text-sm font-medium">Sub-agent model</span>
                 <select
-                  name="provider_form[default_model]"
+                  name="provider_form[subagent_model]"
                   class="select select-bordered w-full bg-base-100"
                 >
+                  <option value="" selected={@provider_form.subagent_model in [nil, ""]}>
+                    Same as main model (default)
+                  </option>
                   <option
-                    :for={{id, label, ctx} <- @provider_models}
-                    value={id}
-                    selected={id == @provider_form.default_model}
+                    :for={entry <- @provider_models}
+                    value={entry.id}
+                    selected={entry.id == @provider_form.subagent_model}
                   >
-                    {label} ({id} - {format_context(ctx)})
+                    {entry.label} ({entry.id} - {format_context(entry.context_window)})
+                  </option>
+                  <%!-- A stored value not in this provider's catalog (e.g. set while
+                        another provider was primary) must still display + round-trip,
+                        otherwise saving this pane would reset it to "Same as main". --%>
+                  <option
+                    :if={subagent_model_custom?(@provider_form.subagent_model, @provider_models)}
+                    value={@provider_form.subagent_model}
+                    selected
+                  >
+                    {@provider_form.subagent_model} (current)
                   </option>
                 </select>
               </label>
@@ -276,7 +331,7 @@ defmodule FermixWebWeb.SetupLive.Components do
             <div :if={provider_connection?(@provider_form.provider)} class="space-y-3">
               <h3 class="text-sm font-semibold">Connection</h3>
               <.auth_mode_field
-                :if={@provider_form.provider in [:anthropic, :xai]}
+                :if={multi_auth_mode?(@provider_form.provider)}
                 provider_form={@provider_form}
               />
               <.provider_secret_field
@@ -284,6 +339,11 @@ defmodule FermixWebWeb.SetupLive.Components do
                 provider_form={@provider_form}
                 report={@report}
               />
+              <.ollama_status_banner
+                :if={@provider_form.provider == :ollama}
+                live_models={@live_models}
+              />
+              <.provider_plain_fields provider_form={@provider_form} />
               <.codex_auth_field
                 provider_form={@provider_form}
                 codex_auth={@codex_auth}
@@ -339,7 +399,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           />
           <div class="min-w-0">
             <div class="flex items-center gap-2">
-              <span class="font-medium">{Atom.to_string(status.provider)}</span>
+              <span class="font-medium">{provider_label(status.provider)}</span>
               <span class={provider_badge_class(status)}>{provider_badge_label(status)}</span>
             </div>
             <p :if={status.configured?} class="truncate text-xs text-base-content/60">
@@ -383,12 +443,24 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp provider_badge_label(%{configured?: true}), do: "Fallback"
   defp provider_badge_label(_status), do: "Not configured"
 
-  defp api_key_mode?(%{provider: :openai}), do: true
+  # Single-mode providers show the secret field iff their mode is api_key;
+  # multi-mode providers follow the radio selection (M12 §6.2).
+  defp api_key_mode?(%{provider: provider, auth_mode: mode}) do
+    descriptor = Descriptor.fetch!(provider)
 
-  defp api_key_mode?(%{provider: provider, auth_mode: mode}),
-    do: provider in [:anthropic, :xai] and mode == :api_key
+    if Descriptor.multi_auth_mode?(descriptor) do
+      mode == :api_key
+    else
+      Descriptor.default_auth_mode(descriptor) == :api_key
+    end
+  end
 
   defp api_key_mode?(_form), do: false
+
+  defp provider_label(provider), do: Descriptor.fetch!(provider).label
+
+  defp multi_auth_mode?(provider),
+    do: Descriptor.multi_auth_mode?(Descriptor.fetch!(provider))
 
   defp provider_grid_class(provider) do
     [
@@ -397,10 +469,164 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
-  defp provider_connection?(provider),
-    do: provider in [:openai, :openai_codex, :anthropic, :xai]
+  defp provider_connection?(provider), do: provider in Descriptor.ids()
 
-  defp provider_behavior?(provider), do: provider in [:openai, :openai_codex, :anthropic, :xai]
+  # Hide the "Model behavior" panel when the provider has no behavior
+  # knobs (no reasoning effort; the codex fast toggle rides effort? too).
+  defp provider_behavior?(provider), do: Descriptor.fetch!(provider).effort?
+
+  attr :provider_form, :map, required: true
+  attr :provider_models, :list, required: true
+  attr :live_models, :any, default: nil
+
+  # Which options the default-model picker shows: the static catalog for
+  # most providers; the LIVE source for providers that have one (installed
+  # Ollama models, the upstream OpenRouter catalog). A failed live fetch
+  # renders a free-form input plus a loud warning — never a silent
+  # fall-back to catalog guesses the server may not serve.
+  defp default_model_input(%{live_models: nil} = assigns) do
+    ~H"""
+    <select name="provider_form[default_model]" class="select select-bordered w-full bg-base-100">
+      <option
+        :for={entry <- @provider_models}
+        value={entry.id}
+        selected={entry.id == @provider_form.default_model}
+      >
+        {entry.label} ({entry.id} - {format_context(entry.context_window)})
+      </option>
+    </select>
+    """
+  end
+
+  # Live list (e.g. the upstream OpenRouter catalog) can run to hundreds of
+  # entries, so a plain <select> is unnavigable. A free-text <input> backed by
+  # a <datalist> lets the user type to filter (matching id or label) and still
+  # enter any custom slug. phx-debounce="blur" keeps keystrokes client-side —
+  # the form's phx-change only fires once the field loses focus, not per letter.
+  defp default_model_input(%{live_models: {:ok, [_ | _] = models}} = assigns) do
+    assigns =
+      assigns
+      |> assign(:models, models)
+      |> assign(:list_id, "model-options-#{assigns.provider_form.provider}")
+
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        list={@list_id}
+        phx-debounce="blur"
+        placeholder="Search or type a model id…"
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <datalist id={@list_id}>
+        <option :for={model <- @models} value={model.id} label={live_model_option(model)} />
+      </datalist>
+      <p class="text-xs text-base-content/55">
+        Type to filter {length(@models)} models, or enter any model id.
+      </p>
+    </div>
+    """
+  end
+
+  defp default_model_input(%{live_models: {:ok, []}} = assigns) do
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <p class="text-xs text-warning">
+        No models installed on this server — run <code>ollama pull &lt;model&gt;</code>.
+      </p>
+    </div>
+    """
+  end
+
+  defp default_model_input(%{live_models: {:error, reason}} = assigns) do
+    assigns = assign(assigns, :reason, reason)
+
+    ~H"""
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
+        value={@provider_form.default_model}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <p class="text-xs text-warning">
+        Couldn't fetch the live model list ({@reason}) — enter a model id manually.
+      </p>
+    </div>
+    """
+  end
+
+  defp live_model_option(%{label: label, id: id, context_window: nil}) when label == id, do: id
+
+  defp live_model_option(%{label: label, id: id, context_window: nil}), do: "#{label} (#{id})"
+
+  defp live_model_option(%{label: label, id: id, context_window: ctx}) when label == id do
+    "#{id} - #{format_context(ctx)}"
+  end
+
+  defp live_model_option(%{label: label, id: id, context_window: ctx}) do
+    "#{label} (#{id} - #{format_context(ctx)})"
+  end
+
+  attr :live_models, :any, default: nil
+
+  # Server detection for the Ollama pane — one signal: the configured URL
+  # either serves a model list or it doesn't. No host binary sniffing.
+  defp ollama_status_banner(%{live_models: {:ok, models}} = assigns) do
+    assigns = assign(assigns, :count, length(models))
+
+    ~H"""
+    <p class="rounded-field border border-success/40 bg-success/10 p-3 text-xs">
+      Ollama server detected — {@count} installed model(s) listed below.
+    </p>
+    """
+  end
+
+  defp ollama_status_banner(%{live_models: {:error, reason}} = assigns) do
+    assigns = assign(assigns, :reason, reason)
+
+    ~H"""
+    <p class="rounded-field border border-warning/40 bg-warning/10 p-3 text-xs">
+      No Ollama server responded ({@reason}). Start one with <code>ollama serve</code>
+      (install from <a href="https://ollama.com" target="_blank" class="link">ollama.com</a>
+      if needed), or point the base URL at a remote server.
+    </p>
+    """
+  end
+
+  defp ollama_status_banner(assigns), do: ~H""
+
+  attr :provider_form, :map, required: true
+
+  # Non-secret descriptor setup fields (e.g. Ollama's base_url) render as
+  # plain text inputs prefilled with the saved value or descriptor default.
+  defp provider_plain_fields(assigns) do
+    assigns = assign(assigns, :plain_fields, plain_field_specs(assigns.provider_form.provider))
+
+    ~H"""
+    <label :for={field <- @plain_fields} class="form-control w-full">
+      <span class="label pb-1 text-sm font-medium">{field.label}</span>
+      <input
+        type="text"
+        name={"provider_form[#{field.key}]"}
+        value={Map.get(@provider_form.field_values || %{}, field.key)}
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+    </label>
+    """
+  end
+
+  defp plain_field_specs(provider) do
+    Enum.reject(Descriptor.fetch!(provider).setup_fields, & &1.secret?)
+  end
 
   attr :provider_form, :map, required: true
   attr :report, :map, required: true
@@ -431,15 +657,26 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp provider_secret_label(:openai), do: "OpenAI API key"
-  defp provider_secret_label(:anthropic), do: "Anthropic API key"
-  defp provider_secret_label(:xai), do: "xAI API key"
-  defp provider_secret_label(_provider), do: nil
+  # The web label stays short ("<Provider> API key") — the descriptor's
+  # field label carries CLI-only hints (e.g. the xAI OAuth pointer) that
+  # the web pane expresses through the auth-mode picker instead.
+  defp provider_secret_field_spec(provider) do
+    Descriptor.fetch!(provider).setup_fields |> Enum.find(& &1.secret?)
+  end
 
-  defp provider_secret_name(:openai), do: "provider_form[openai_api_key]"
-  defp provider_secret_name(:anthropic), do: "provider_form[anthropic_api_key]"
-  defp provider_secret_name(:xai), do: "provider_form[xai_api_key]"
-  defp provider_secret_name(_provider), do: nil
+  defp provider_secret_label(provider) do
+    case provider_secret_field_spec(provider) do
+      nil -> nil
+      _field -> "#{provider_label(provider)} API key"
+    end
+  end
+
+  defp provider_secret_name(provider) do
+    case provider_secret_field_spec(provider) do
+      nil -> nil
+      field -> "provider_form[#{field.key}]"
+    end
+  end
 
   attr :provider_form, :map, required: true
   attr :codex_auth, :map, required: true
@@ -660,11 +897,14 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <div class="flex items-center justify-between gap-3">
         <h3 class="text-sm font-semibold">Model behavior</h3>
-        <span class="badge badge-ghost badge-sm">{Atom.to_string(@provider_form.provider)}</span>
+        <span class="badge badge-ghost badge-sm">{provider_label(@provider_form.provider)}</span>
       </div>
 
       <div class="mt-4 space-y-4">
-        <.reasoning_effort_field provider_form={@provider_form} />
+        <.reasoning_effort_field
+          :if={effort_provider?(@provider_form.provider)}
+          provider_form={@provider_form}
+        />
         <.codex_fast_field provider_form={@provider_form} />
       </div>
     </section>
@@ -698,6 +938,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     </fieldset>
     """
   end
+
+  defp effort_provider?(provider), do: Descriptor.fetch!(provider).effort?
 
   defp effort_levels(provider) do
     provider |> ReasoningEffort.levels_for() |> Enum.map(&Atom.to_string/1)
@@ -885,21 +1127,40 @@ defmodule FermixWebWeb.SetupLive.Components do
         plugin_auth_url={@plugin_auth_url}
       />
 
+      <.provider_plugin_group
+        :for={group <- oauth_provider_groups(@plugin_summary)}
+        oauth={group.oauth}
+        plugins={group.plugins}
+        catalog={group.catalog}
+        installing_plugins={@installing_plugins}
+        plugin_auth_url={@plugin_auth_url}
+      />
+
       <div
-        :if={@plugin_summary.available && non_google_plugins(@plugin_summary.plugins) != []}
+        :if={@plugin_summary.available && ungrouped_plugins(@plugin_summary) != []}
         class="mt-5 flex flex-col gap-2"
       >
-        <.plugin_card :for={plugin <- non_google_plugins(@plugin_summary.plugins)} plugin={plugin} />
+        <.plugin_card :for={plugin <- ungrouped_plugins(@plugin_summary)} plugin={plugin} />
       </div>
 
-      <.info_panel class="mt-5">
-        <p :if={@plugin_summary.available}>
-          coming later: {Enum.join(@plugin_summary.later, ", ")}.
+      <section :if={@plugin_summary.available} class="mt-5">
+        <p :if={@plugin_summary.index_error} class="text-xs text-warning">
+          Catalog index unavailable: {@plugin_summary.index_error}. Installed plugins still work.
         </p>
-        <p :if={!@plugin_summary.available}>
-          Plugin catalog unavailable: {@plugin_summary.error}
-        </p>
+        <div :if={ungrouped_catalog(@plugin_summary) != []} class="flex flex-col gap-2">
+          <.catalog_card
+            :for={entry <- ungrouped_catalog(@plugin_summary)}
+            entry={entry}
+            installing?={entry.name in @installing_plugins}
+          />
+        </div>
+      </section>
+
+      <.info_panel :if={!@plugin_summary.available} class="mt-5">
+        <p>Plugin catalog unavailable: {@plugin_summary.error}</p>
       </.info_panel>
+
+      <.oauth_client_modal oauth_modal={@oauth_modal} plugin_summary={@plugin_summary} />
 
       <.step_actions active_tab={@active_tab} tabs={@tabs} />
     </div>
@@ -1241,11 +1502,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp google_plugin_group(assigns) do
     assigns =
-      assign(
-        assigns,
-        :google_oauth_configured?,
-        google_oauth_configured?(assigns.plugin_summary.google_oauth)
-      )
+      assigns
+      |> assign(:oauth, Map.fetch!(assigns.plugin_summary.oauth_clients, "google"))
+      |> assign(:plugins, google_plugins(assigns.plugin_summary.plugins))
 
     ~H"""
     <section
@@ -1254,77 +1513,342 @@ defmodule FermixWebWeb.SetupLive.Components do
     >
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 class="text-sm font-semibold">Google</h3>
+          <div class="flex items-center gap-1.5">
+            <h3 class="text-sm font-semibold">Google</h3>
+            <.oauth_help provider="google" />
+          </div>
           <p class="text-xs text-base-content/55">Calendar, Gmail, and Drive</p>
         </div>
         <span class="badge badge-ghost badge-sm">OAuth desktop client</span>
       </div>
 
-      <form phx-submit="save_google_oauth" class="mt-3 rounded-field bg-base-200/50 p-3">
-        <div class="grid items-end gap-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_8rem_auto]">
-          <.text_input
-            label="Client ID (required)"
-            name="google_oauth_form[client_id]"
-            value={@plugin_summary.google_oauth.client_id}
-          />
-          <.secret_input
-            label="Client secret (required)"
-            name="google_oauth_form[client_secret]"
-            set={@plugin_summary.google_oauth.client_secret_set}
-          />
-          <.number_field
-            label="Port"
-            name="google_oauth_form[redirect_port]"
-            value={@plugin_summary.google_oauth.redirect_port}
-          />
-          <button type="submit" class="btn btn-outline btn-sm">
-            <.icon name="hero-key" class="size-4" /> Save
-          </button>
-        </div>
-      </form>
+      <.oauth_client_row oauth={@oauth} />
 
-      <p
-        :if={
-          @plugin_summary.google_oauth.client_id in [nil, ""] ||
-            !@plugin_summary.google_oauth.client_secret_set
-        }
-        class="mt-3 rounded-field border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-base-content/80"
-      >
-        Add your Client ID and Client secret above, then Save before connecting these integrations.
-      </p>
-
-      <div
-        :if={@plugin_auth_url}
-        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-200/50 px-3 py-2 text-xs text-base-content/65"
-      >
-        <span>If the {@plugin_auth_url.display_name} tab did not open, use the fallback link.</span>
-        <a
-          class="link link-primary font-medium"
-          href={@plugin_auth_url.url}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open sign-in
-        </a>
-      </div>
+      <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
 
       <div class="mt-3 flex flex-col gap-2">
         <.plugin_card
-          :for={plugin <- google_plugins(@plugin_summary.plugins)}
+          :for={plugin <- @plugins}
           plugin={plugin}
           label={strip_google_prefix(plugin.display_name)}
-          auth_preopen?={@google_oauth_configured? && plugin.auth_type == :oauth2}
+          auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
         />
       </div>
     </section>
     """
   end
 
+  # A non-Google oauth2 provider group. A single-plugin provider (GitHub, Notion,
+  # X) renders as one bare card — like an ungrouped plugin — with the OAuth
+  # client Connect/Edit folded into that card, so there is no redundant client
+  # row. Only a multi-plugin provider (or one with a client but no card yet) gets
+  # the shared client row in a titled section, the way Google does.
+  attr :oauth, :map, required: true
+  attr :plugins, :list, required: true
+  attr :catalog, :list, default: []
+  attr :installing_plugins, :list, default: []
+  attr :plugin_auth_url, :map, default: nil
+
+  defp provider_plugin_group(assigns) do
+    assigns = assign(assigns, :card_count, length(assigns.plugins) + length(assigns.catalog))
+
+    ~H"""
+    <div
+      :if={@card_count == 1}
+      data-plugin-group={@oauth.provider}
+      class="mt-5 flex flex-col gap-2"
+    >
+      <.plugin_card
+        :for={plugin <- @plugins}
+        plugin={plugin}
+        oauth={@oauth}
+        auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+      />
+      <.catalog_card
+        :for={entry <- @catalog}
+        entry={entry}
+        oauth={@oauth}
+        installing?={entry.name in @installing_plugins}
+      />
+      <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
+    </div>
+
+    <section
+      :if={@card_count != 1}
+      data-plugin-group={@oauth.provider}
+      class="mt-5 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center gap-1.5">
+          <h3 class="text-sm font-semibold">{@oauth.display_name}</h3>
+          <.oauth_help provider={@oauth.provider} />
+        </div>
+        <span class="badge badge-ghost badge-sm">OAuth client</span>
+      </div>
+
+      <.oauth_client_row oauth={@oauth} />
+
+      <p :if={@plugins == [] and @catalog == []} class="mt-2 text-xs text-base-content/55">
+        Used when connecting {@oauth.display_name} from the catalog.
+      </p>
+
+      <.auth_fallback_link plugin_auth_url={@plugin_auth_url} plugins={@plugins} />
+
+      <div :if={@plugins != [] or @catalog != []} class="mt-3 flex flex-col gap-2">
+        <.plugin_card
+          :for={plugin <- @plugins}
+          plugin={plugin}
+          auth_preopen?={oauth_client_configured?(@oauth) && plugin.auth_type == :oauth2}
+        />
+        <.catalog_card
+          :for={entry <- @catalog}
+          entry={entry}
+          installing?={entry.name in @installing_plugins}
+        />
+      </div>
+    </section>
+    """
+  end
+
+  # Info "i" next to a provider heading: hover shows where to create the OAuth
+  # client; clicking opens that provider's credentials page in a new tab.
+  attr :provider, :string, required: true
+
+  defp oauth_help(assigns) do
+    {desc, url} = oauth_help_content(assigns.provider)
+    assigns = assign(assigns, desc: desc, url: url)
+
+    ~H"""
+    <a
+      href={@url}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="tooltip tooltip-bottom z-10 text-base-content/45 hover:text-base-content"
+      data-tip={@desc}
+      aria-label={"How to get #{@provider} OAuth credentials"}
+    >
+      <.icon name="hero-information-circle" class="size-4" />
+    </a>
+    """
+  end
+
+  defp oauth_help_content("google") do
+    {"Google Cloud Console → APIs & Services → Credentials → Create credentials → OAuth client ID → Desktop app. Paste the Client ID and secret.",
+     "https://console.cloud.google.com/apis/credentials"}
+  end
+
+  defp oauth_help_content("github") do
+    {"GitHub → Settings → Developer settings → OAuth Apps → New. Set the callback to http://127.0.0.1/auth/callback, then paste the Client ID and secret.",
+     "https://github.com/settings/developers"}
+  end
+
+  defp oauth_help_content("notion") do
+    {"Notion → my integrations → New integration → Public. Set the redirect URI to http://localhost:1458/auth/callback (Notion forces https for 127.0.0.1 — use localhost), then paste the OAuth Client ID and secret.",
+     "https://www.notion.so/my-integrations"}
+  end
+
+  defp oauth_help_content("x") do
+    {"X Developer Portal → your app → User authentication settings: type \"Web App, Automated App or Bot\", callback URI http://127.0.0.1:1459/auth/callback exactly. Paste the OAuth 2.0 Client ID and secret. Note: X API usage is paid (pay-per-use credits).",
+     "https://developer.x.com/en/portal/dashboard"}
+  end
+
+  defp oauth_help_content(provider) do
+    {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
+  end
+
+  # Compact one-line replacement for the always-visible client form: it states
+  # whether the provider's OAuth client is set up and opens the modal to enter
+  # (Connect) or change (Edit) the credentials. The actual sign-in stays on the
+  # plugin cards below, so the popup-blocker click chain is untouched.
+  attr :oauth, :map, required: true
+
+  defp oauth_client_row(assigns) do
+    assigns = assign(assigns, :configured?, oauth_client_configured?(assigns.oauth))
+
+    ~H"""
+    <div class="mt-3 flex items-center justify-between gap-3 rounded-field border border-base-300 bg-base-200/40 px-3 py-2">
+      <div class="min-w-0">
+        <p class="text-xs font-medium">OAuth client</p>
+        <p class="truncate text-xs text-base-content/55">
+          {if @configured?,
+            do: "Configured — credentials stored",
+            else: "Not set up — required to connect"}
+        </p>
+      </div>
+      <button
+        type="button"
+        class={["btn btn-xs", (@configured? && "btn-ghost") || "btn-primary"]}
+        phx-click="open_oauth_modal"
+        phx-value-provider={@oauth.provider}
+      >
+        <.icon name={if @configured?, do: "hero-pencil-square", else: "hero-key"} class="size-3.5" />
+        {if @configured?, do: "Edit", else: "Connect"}
+      </button>
+    </div>
+    """
+  end
+
+  # One shared modal (rendered once per pane, parameterized by the open
+  # provider) holding the relocated client form. Server-owned open/close via the
+  # :oauth_modal assign — same overlay pattern as the "Restarting…" scrim, so no
+  # JS hook and no popup-chain involvement. Step :creds collects credentials;
+  # save advances to :signin, a confirmation pointing at the cards below.
+  attr :oauth_modal, :map, default: nil
+  attr :plugin_summary, :map, required: true
+
+  defp oauth_client_modal(%{oauth_modal: nil} = assigns), do: ~H""
+
+  defp oauth_client_modal(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :oauth,
+        Map.fetch!(assigns.plugin_summary.oauth_clients, assigns.oauth_modal.provider)
+      )
+
+    ~H"""
+    <div
+      class="fixed inset-0 z-50 grid place-items-center bg-base-300/70 p-4 backdrop-blur-sm"
+      phx-window-keydown="close_oauth_modal"
+      phx-key="Escape"
+    >
+      <div
+        class="w-full max-w-md rounded-box border border-base-300 bg-base-100 p-5 shadow-lg"
+        role="dialog"
+        aria-modal="true"
+        aria-label={"#{@oauth.display_name} OAuth client"}
+        phx-click-away="close_oauth_modal"
+        phx-mounted={JS.focus_first()}
+      >
+        <div class="flex items-center justify-between gap-3">
+          <div class="flex items-center gap-1.5">
+            <h3 class="text-base font-semibold">Connect {@oauth.display_name}</h3>
+            <.oauth_help provider={@oauth.provider} />
+          </div>
+          <button
+            type="button"
+            class="btn btn-ghost btn-xs btn-circle"
+            phx-click="close_oauth_modal"
+            aria-label="Close"
+          >
+            <.icon name="hero-x-mark" class="size-4" />
+          </button>
+        </div>
+
+        <div :if={@oauth_modal.step == :creds}>
+          <p class="mt-1 text-sm text-base-content/65">
+            Paste the desktop OAuth client you created for {@oauth.display_name}. The secret is
+            stored in your OS keychain, never shown here.
+          </p>
+          <.oauth_client_form oauth={@oauth} />
+        </div>
+
+        <div :if={@oauth_modal.step == :signin}>
+          <div class="mt-3 flex items-start gap-2 rounded-field border border-success/30 bg-success/10 px-3 py-2 text-sm">
+            <.icon name="hero-check-circle" class="size-5 shrink-0 text-success" />
+            <span>
+              {@oauth.display_name} OAuth client saved. Connect each {@oauth.display_name} integration
+              from the list below — re-open this anytime with <span class="font-medium">Edit</span>.
+            </span>
+          </div>
+          <div class="mt-4 flex justify-end gap-2">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              phx-click="open_oauth_modal"
+              phx-value-provider={@oauth.provider}
+            >
+              <.icon name="hero-pencil-square" class="size-4" /> Edit
+            </button>
+            <button type="button" class="btn btn-primary btn-sm" phx-click="close_oauth_modal">
+              <.icon name="hero-check" class="size-4" /> Done
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  # The relocated client form (now stacked for the modal): client id/secret +
+  # redirect port, submitting to "save_oauth_client" with the provider hidden
+  # field. The id and event name are unchanged so existing flows/tests hold.
+  attr :oauth, :map, required: true
+
+  defp oauth_client_form(assigns) do
+    ~H"""
+    <form id={"oauth-client-form-#{@oauth.provider}"} phx-submit="save_oauth_client" class="mt-4">
+      <input type="hidden" name="provider" value={@oauth.provider} />
+      <div class="space-y-3">
+        <.text_input
+          label="Client ID (required)"
+          name="oauth_client_form[client_id]"
+          value={@oauth.client_id}
+        />
+        <.secret_input
+          label="Client secret (required)"
+          name="oauth_client_form[client_secret]"
+          set={@oauth.client_secret_set}
+        />
+        <.number_field
+          label="Redirect port"
+          name="oauth_client_form[redirect_port]"
+          value={@oauth.redirect_port}
+        />
+      </div>
+      <button type="submit" class="btn btn-primary btn-sm mt-4 w-full">
+        <.icon name="hero-key" class="size-4" /> Save client
+      </button>
+    </form>
+    """
+  end
+
+  attr :plugin_auth_url, :map, default: nil
+  attr :plugins, :list, required: true
+
+  defp auth_fallback_link(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :show?,
+        assigns.plugin_auth_url != nil &&
+          Enum.any?(assigns.plugins, &(&1.name == assigns.plugin_auth_url.name))
+      )
+
+    ~H"""
+    <div
+      :if={@show?}
+      class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-200/50 px-3 py-2 text-xs text-base-content/65"
+    >
+      <span>If the {@plugin_auth_url.display_name} tab did not open, use the fallback link.</span>
+      <a
+        class="link link-primary font-medium"
+        href={@plugin_auth_url.url}
+        target="_blank"
+        rel="noreferrer"
+      >
+        Open sign-in
+      </a>
+    </div>
+    """
+  end
+
   attr :plugin, :map, required: true
   attr :label, :string, default: nil
   attr :auth_preopen?, :boolean, default: false
+  # When set, this card is the sole card of an OAuth provider group: it folds the
+  # client Connect/Edit in. Until the client is configured, configuring it is the
+  # only action (the plugin can't sign in without it).
+  attr :oauth, :map, default: nil
 
   defp plugin_card(assigns) do
+    assigns =
+      assign(
+        assigns,
+        :oauth_unset?,
+        assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
+      )
+
     ~H"""
     <section
       data-plugin-name={@plugin.name}
@@ -1349,11 +1873,38 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.status_pill :if={@plugin.status != :not_configured} status={@plugin.status} />
         </div>
         <p :if={@plugin.account} class="truncate text-xs text-base-content/55">{@plugin.account}</p>
+        <p :if={@plugin.yanked_version} class="text-xs text-error">
+          Version {@plugin.yanked_version} was yanked — run `fermix plugins upgrade {@plugin.name}`.
+        </p>
+        <form
+          :if={@plugin.status == :needs_config && @plugin.missing_config != []}
+          id={"plugin-config-form-#{@plugin.name}"}
+          phx-submit="save_plugin_config"
+          class="mt-2 flex flex-wrap items-end gap-2"
+        >
+          <input type="hidden" name="name" value={@plugin.name} />
+          <.text_input
+            :for={entry <- @plugin.missing_config}
+            label={entry.prompt}
+            name={"plugin_config_form[#{entry.key}]"}
+            value=""
+          />
+          <button type="submit" class="btn btn-outline btn-sm">Save</button>
+        </form>
       </div>
 
       <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
         <button
-          :if={!@plugin.enabled?}
+          :if={@oauth_unset?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+        >
+          <.icon name="hero-key" class="size-3.5" /> Connect
+        </button>
+        <button
+          :if={!@oauth_unset? && !@plugin.enabled?}
           type="button"
           class="btn btn-primary btn-xs"
           phx-click="plugin_enable"
@@ -1363,7 +1914,10 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-plus" class="size-3.5" /> {plugin_primary_action(@plugin)}
         </button>
         <button
-          :if={@plugin.enabled? && @plugin.auth_type == :oauth2 && @plugin.status != :ready}
+          :if={
+            !@oauth_unset? && @plugin.enabled? && @plugin.auth_type == :oauth2 &&
+              @plugin.status != :ready
+          }
           type="button"
           class="btn btn-outline btn-xs"
           phx-click="plugin_connect"
@@ -1373,7 +1927,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           {plugin_action_label(@plugin.status)}
         </button>
         <button
-          :if={@plugin.enabled? && @plugin.status == :ready}
+          :if={!@oauth_unset? && @plugin.enabled? && @plugin.status == :ready}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_check"
@@ -1382,7 +1936,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-check-circle" class="size-3.5" /> Check
         </button>
         <button
-          :if={@plugin.enabled? && @plugin.account}
+          :if={!@oauth_unset? && @plugin.enabled? && @plugin.account}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_disconnect"
@@ -1391,13 +1945,106 @@ defmodule FermixWebWeb.SetupLive.Components do
           Disconnect
         </button>
         <button
-          :if={@plugin.enabled?}
+          :if={!@oauth_unset? && @plugin.enabled?}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_disable"
           phx-value-name={@plugin.name}
         >
           Disable
+        </button>
+        <button
+          :if={@oauth != nil && !@oauth_unset?}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+          title="Edit OAuth client"
+        >
+          <.icon name="hero-pencil-square" class="size-3.5" /> Edit
+        </button>
+      </div>
+    </section>
+    """
+  end
+
+  # A not-yet-installed catalog entry (§6): index branding, Available/Installing/
+  # Incompatible pill, and an Enable/Connect action that triggers install-first.
+  attr :entry, :map, required: true
+  attr :installing?, :boolean, default: false
+  # As in plugin_card: when this is the sole card of an OAuth provider group,
+  # the client Connect/Edit folds in and gates install until it is configured.
+  attr :oauth, :map, default: nil
+
+  defp catalog_card(assigns) do
+    assigns =
+      assigns
+      |> assign(:blocked_reason, catalog_blocked_reason(assigns.entry))
+      |> assign(
+        :oauth_unset?,
+        assigns.oauth != nil and not oauth_client_configured?(assigns.oauth)
+      )
+
+    ~H"""
+    <section
+      data-catalog-name={@entry.name}
+      class={[
+        "flex w-full items-center gap-3 rounded-box border border-base-300 bg-base-100/80 p-3 shadow-sm",
+        @blocked_reason && "opacity-60"
+      ]}
+    >
+      <div class="grid size-9 shrink-0 place-items-center overflow-hidden rounded-field border border-base-300 bg-base-100">
+        <img :if={@entry.logo} src={@entry.logo} alt="" class="size-7 object-contain" loading="lazy" />
+        <span :if={!@entry.logo} class="text-sm font-semibold">
+          {String.first(@entry.display_name)}
+        </span>
+      </div>
+
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <h3 class="truncate text-sm font-semibold">{@entry.display_name}</h3>
+          <.status_pill status={catalog_status(@entry, @installing?)} />
+          <span :if={@entry.latest} class="text-xs text-base-content/45">v{@entry.latest}</span>
+        </div>
+        <p :if={@entry.description} class="truncate text-xs text-base-content/55">
+          {@entry.description}
+        </p>
+        <p :if={@entry.mcp?} class="text-xs text-base-content/55">
+          Runs a local process with direct access to the folders you configure.
+        </p>
+        <p :if={@blocked_reason} class="text-xs text-warning">{@blocked_reason}</p>
+      </div>
+
+      <div class="flex shrink-0 items-center gap-1.5">
+        <span :if={@installing?} class="loading loading-spinner loading-xs text-primary" />
+        <button
+          :if={@oauth_unset? && !@blocked_reason && !@installing?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+        >
+          <.icon name="hero-key" class="size-3.5" /> Connect
+        </button>
+        <button
+          :if={!@oauth_unset? && !@blocked_reason && !@installing?}
+          type="button"
+          class="btn btn-primary btn-xs"
+          phx-click="plugin_enable"
+          phx-value-name={@entry.name}
+        >
+          <.icon name="hero-arrow-down-tray" class="size-3.5" />
+          {if @entry.auth_type == :oauth2, do: "Connect", else: "Enable"}
+        </button>
+        <button
+          :if={@oauth != nil && !@oauth_unset? && !@installing?}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="open_oauth_modal"
+          phx-value-provider={@oauth.provider}
+          title="Edit OAuth client"
+        >
+          <.icon name="hero-pencil-square" class="size-3.5" /> Edit
         </button>
       </div>
     </section>
@@ -1585,8 +2232,12 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  defp flash_banner_class(:error), do: "border-error/40 bg-error/10 text-error-content"
-  defp flash_banner_class(:info), do: "border-success/40 bg-success/10 text-success-content"
+  # Text uses the semantic token (not `*-content`, which is the on-solid color):
+  # the banner background is a faint `/10` tint, so the text must read against
+  # the base surface in both light and dark, which `text-error`/`text-success`
+  # do (the token itself flips per theme).
+  defp flash_banner_class(:error), do: "border-error/40 bg-error/10 text-error"
+  defp flash_banner_class(:info), do: "border-success/40 bg-success/10 text-success"
 
   defp flash_icon(:error), do: "hero-x-circle"
   defp flash_icon(:info), do: "hero-check-circle"
@@ -1821,6 +2472,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp first_step?(tab_id, tabs), do: current_step_number(tab_id, tabs) == 1
   defp last_step?(tab_id, tabs), do: current_step_number(tab_id, tabs) == length(tabs)
 
+  # Panes that persist via a single "Save" button — these get the unsaved-edits
+  # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
+  defp form_pane?(tab_id),
+    do: tab_id in ~w(provider realtime channels search sandbox memory personalization)
+
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")
   defp tab_status(%{component: "channel:*"}, report), do: status_by_prefix(report, "channel:")
@@ -1882,18 +2538,26 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp status_pill_class(:partial), do: "badge badge-warning badge-sm"
   defp status_pill_class(:needs_auth), do: "badge badge-warning badge-sm"
   defp status_pill_class(:needs_client_config), do: "badge badge-warning badge-sm"
+  defp status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
   defp status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
   defp status_pill_class(:error), do: "badge badge-error badge-sm"
   defp status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
+  defp status_pill_class(:available), do: "badge badge-ghost badge-sm"
+  defp status_pill_class(:installing), do: "badge badge-info badge-sm"
+  defp status_pill_class(:incompatible), do: "badge badge-ghost badge-sm"
   defp status_pill_class(_), do: "badge badge-ghost badge-sm"
 
   defp status_pill_label(:ready), do: "Ready"
   defp status_pill_label(:partial), do: "Needs setup"
   defp status_pill_label(:needs_auth), do: "Needs auth"
   defp status_pill_label(:needs_client_config), do: "needs client config"
+  defp status_pill_label(:needs_config), do: "Needs config"
   defp status_pill_label(:reauthorization_required), do: "Reauthorize"
   defp status_pill_label(:error), do: "Error"
   defp status_pill_label(:not_configured), do: "Not configured"
+  defp status_pill_label(:available), do: "Available"
+  defp status_pill_label(:installing), do: "Installing"
+  defp status_pill_label(:incompatible), do: "Incompatible"
   defp status_pill_label(_), do: "Unknown"
 
   defp plugin_primary_action(%{auth_type: :oauth2}), do: "Connect"
@@ -1905,17 +2569,71 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp plugin_action_label(:ready), do: "Check"
   defp plugin_action_label(_status), do: "Enable"
 
+  defp catalog_status(_entry, true), do: :installing
+  defp catalog_status(%{compat: {:error, _reason}}, _installing?), do: :incompatible
+  defp catalog_status(_entry, _installing?), do: :available
+
+  # Pre-fetch blockers (§13): an incompatible/yanked/absent latest greys the
+  # card before any artifact download.
+  defp catalog_blocked_reason(%{compat: {:error, reason}}), do: compat_message(reason)
+  defp catalog_blocked_reason(_entry), do: nil
+
+  defp compat_message({:needs_newer_core, :min_core_version, floor}),
+    do: "needs Fermix ≥ #{floor} — run `fermix upgrade`."
+
+  defp compat_message({:needs_newer_core, :plugin_api, api}),
+    do: "needs a newer Fermix (plugin API #{api}) — run `fermix upgrade`."
+
+  defp compat_message({:plugin_too_old, :plugin_api, _api}),
+    do: "built for an older Fermix — awaiting a plugin update."
+
+  defp compat_message({:yanked, _name, version}), do: "version #{version} was yanked."
+  defp compat_message({:version_not_found, _name, _version}), do: "no installable version yet."
+  defp compat_message(other), do: Redaction.format(other)
+
   defp strip_google_prefix("Google " <> rest), do: rest
   defp strip_google_prefix(name), do: name
 
   defp google_plugins(plugins), do: Enum.filter(plugins, &(&1.provider == "google"))
-  defp non_google_plugins(plugins), do: Enum.reject(plugins, &(&1.provider == "google"))
 
-  defp google_oauth_configured?(%{client_id: client_id, client_secret_set: true}) do
+  # Every non-Google provider with a client form gets one group; the form set
+  # (summary.oauth_clients) is the single source of which providers qualify.
+  # The group carries both the installed cards and the not-yet-installed catalog
+  # cards for that provider, so the client form and its Connect card stay
+  # together instead of being split across the bottom catalog list.
+  defp oauth_provider_groups(%{plugins: plugins, catalog: catalog, oauth_clients: oauth_clients}) do
+    by_provider = Enum.group_by(plugins, & &1.provider)
+    catalog_by_provider = Enum.group_by(catalog, & &1.provider)
+
+    oauth_clients
+    |> Map.delete("google")
+    |> Enum.sort()
+    |> Enum.map(fn {provider, oauth} ->
+      %{
+        oauth: oauth,
+        plugins: Map.get(by_provider, provider, []),
+        catalog: Map.get(catalog_by_provider, provider, [])
+      }
+    end)
+  end
+
+  # Installed plugins outside every provider group (no oauth2 client form).
+  defp ungrouped_plugins(%{plugins: plugins, oauth_clients: oauth_clients}) do
+    Enum.reject(plugins, &Map.has_key?(oauth_clients, &1.provider))
+  end
+
+  # Catalog entries outside every provider group — e.g. an MCP plugin like
+  # Obsidian (no oauth2 client form). The grouped ones render inside their
+  # provider group beside the client form, not here.
+  defp ungrouped_catalog(%{catalog: catalog, oauth_clients: oauth_clients}) do
+    Enum.reject(catalog, &Map.has_key?(oauth_clients, &1.provider))
+  end
+
+  defp oauth_client_configured?(%{client_id: client_id, client_secret_set: true}) do
     present?(client_id)
   end
 
-  defp google_oauth_configured?(_oauth), do: false
+  defp oauth_client_configured?(_oauth), do: false
 
   defp status_badge_class(:ready), do: "badge badge-success badge-sm font-medium"
   defp status_badge_class(:setup_required), do: "badge badge-warning badge-sm font-medium"
@@ -1928,6 +2646,19 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp format_context(ctx) when is_integer(ctx) and ctx >= 1000, do: "#{div(ctx, 1000)}k ctx"
   defp format_context(ctx) when is_integer(ctx), do: "#{ctx} ctx"
   defp format_context(_), do: ""
+
+  # Is the pane currently being edited the primary provider? Used to scope the
+  # global sub-agent-model selector to a single pane.
+  defp editing_primary?(statuses, provider),
+    do: Enum.any?(statuses, fn s -> s.provider == provider and s.primary? end)
+
+  # A set sub-agent model that the shown catalog doesn't list (e.g. configured
+  # while a different provider was primary) — render it as a selectable option so
+  # saving the pane preserves it instead of resetting to "Same as main".
+  defp subagent_model_custom?(value, _models) when value in [nil, ""], do: false
+
+  defp subagent_model_custom?(value, models) when is_binary(value),
+    do: not Enum.any?(models, &(&1.id == value))
 
   defp format_policy_counts(policy_counts) when map_size(policy_counts) == 0, do: "none"
 

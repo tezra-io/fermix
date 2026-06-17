@@ -8,8 +8,8 @@ defmodule FermixCore.Memory.Config do
   @type options :: keyword()
   @type repo_server :: pid() | atom()
 
-  @prompt_user_token_cap 800
-  @prompt_memory_token_cap 1600
+  @prompt_user_token_cap 1500
+  @prompt_memory_token_cap 2000
   @extraction_timeout_ms 90_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75

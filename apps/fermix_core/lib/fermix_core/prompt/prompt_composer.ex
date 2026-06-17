@@ -17,6 +17,7 @@ defmodule FermixCore.Prompt.PromptComposer do
   @type prompt_part :: %{
           name: :identity | :soul | :fermix | :user | :memory | :realtime | :runtime,
           kind: :bootstrap | :prompt_memory | :generated,
+          tier: :stable | :volatile,
           source_path: String.t() | nil,
           content: String.t(),
           exported_role: String.t()
@@ -74,9 +75,27 @@ defmodule FermixCore.Prompt.PromptComposer do
 
   Exposed so callers that hold a cached base composition can rebuild the
   full message list (base + runtime section) without re-running scans.
+  Stable-tier parts export before volatile-tier parts (cache stratification:
+  a volatile rebuild must never bust the provider prompt-cache for the
+  stable sections).
   """
   @spec export_parts([prompt_part()]) :: [message()]
-  def export_parts(parts) when is_list(parts), do: export_messages(parts)
+  def export_parts(parts) when is_list(parts) do
+    split = export_split(parts)
+    split.stable ++ split.volatile
+  end
+
+  @doc """
+  Export prompt parts split by cache tier, preserving relative order within
+  each tier. Every part declares its tier at construction — the contributor
+  contract: new prompt parts must state which side of the cache boundary
+  they land on.
+  """
+  @spec export_split([prompt_part()]) :: %{stable: [message()], volatile: [message()]}
+  def export_split(parts) when is_list(parts) do
+    {volatile, stable} = Enum.split_with(parts, &(&1.tier == :volatile))
+    %{stable: export_messages(stable), volatile: export_messages(volatile)}
+  end
 
   @spec compose_with_metadata(keyword()) :: {:ok, composition()} | {:error, term()}
   def compose_with_metadata(opts) when is_list(opts) do
@@ -89,7 +108,7 @@ defmodule FermixCore.Prompt.PromptComposer do
 
       {:ok,
        %{
-         messages: export_messages(parts),
+         messages: export_parts(parts),
          parts: parts,
          accounting: base.accounting ++ [accounting_entry(runtime)]
        }}
@@ -133,15 +152,21 @@ defmodule FermixCore.Prompt.PromptComposer do
     )
   end
 
+  # Tier declaration (M10 P1): prompt-memory parts are volatile (rebuilt by the
+  # memory scheduler); bootstrap and generated parts are stable per session.
   defp part(name, kind, source_path, content) do
     %{
       name: name,
       kind: kind,
+      tier: tier_for(kind),
       source_path: source_path,
       content: content,
       exported_role: "system"
     }
   end
+
+  defp tier_for(:prompt_memory), do: :volatile
+  defp tier_for(_kind), do: :stable
 
   defp scan_parts(parts) do
     Enum.reduce(parts, [], fn part, acc ->

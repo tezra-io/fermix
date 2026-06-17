@@ -44,12 +44,6 @@ defmodule FermixCore.Providers.OpenAI do
     end
   end
 
-  @impl true
-  @spec models() :: {:ok, [String.t()]}
-  def models do
-    {:ok, ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"]}
-  end
-
   # --- Chat Completions (api_key mode) ---
 
   defp do_completions_chat(messages, key, opts, req_options) do

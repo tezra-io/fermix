@@ -1,5 +1,9 @@
 import Config
 
+# SetupLive model-listing seam: never reach Ollama/OpenRouter from tests
+# (hermetic rule); live-UI tests swap in their own stub per test.
+config :fermix_web, :model_listing_impl, FermixWebWeb.TestSupport.StaticModelListing
+
 config :fermix_web, FermixWebWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "IDEc2P19ECF1+hwm0K0GriUalzvJ87GqV3JBCplMvtFgX1lnZw5n3iimO0n2KpXd",
@@ -74,3 +78,8 @@ config :phoenix,
 # override with FermixTestSupport.UnavailableSecretWriter. The module lives in
 # test/support and is loaded by each app's test_helper.exs.
 config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub
+
+# Hermetic default: tests must never resolve host runtimes or spawn real
+# `--version` processes. The mcp host-runtime probe (RuntimeProbe) denies by
+# default; tests stub success per-call via :find_executable / :version_fetch.
+config :fermix_core, :runtime_probe_host, FermixTestSupport.HostRuntimeStub

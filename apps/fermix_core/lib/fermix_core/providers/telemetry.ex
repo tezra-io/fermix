@@ -7,7 +7,7 @@ defmodule FermixCore.Providers.Telemetry do
   (`:provider`, `:model`, `:status`, `:tokens`, `:agent`, ...); this module folds
   in correlation identifiers (`session_id`, `parent_session`) from the adapter
   opts so the call can be attributed to its run, and — when content capture is
-  enabled — a bounded preview of the response `:output` plus `:tool_calls`.
+  enabled — a bounded preview of the call's `:input`/`:output` plus `:tool_calls`.
 
   Downstream, `:provider` + `:model` + `:tokens` are exactly what Opik needs to
   auto-compute USD cost, so no cost is calculated here.
@@ -18,6 +18,7 @@ defmodule FermixCore.Providers.Telemetry do
   @type opt ::
           {:session_id, String.t() | nil}
           | {:parent_session, String.t() | nil}
+          | {:input, term()}
           | {:output, term()}
           | {:tool_calls, [term()] | nil}
 
@@ -46,6 +47,7 @@ defmodule FermixCore.Providers.Telemetry do
   defp maybe_put_content(metadata, opts) do
     if Telemetry.capture_content?() do
       metadata
+      |> put_preview(:input, Keyword.get(opts, :input))
       |> put_preview(:output, Keyword.get(opts, :output))
       |> put_tool_calls(Keyword.get(opts, :tool_calls))
     else

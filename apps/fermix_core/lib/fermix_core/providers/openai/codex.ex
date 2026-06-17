@@ -32,6 +32,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
@@ -56,7 +57,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     url = Keyword.get(opts, :base_url, @default_url)
 
     {instructions, input} = ResponsesShared.build_input(messages)
-    resolved_instructions = instructions || @default_instructions
+
+    # Codex/GPT-5 family behavior contract (M10 P3): appended at the END of
+    # instructions, so the composed prefix stays byte-stable for caching.
+    resolved_instructions = ModelOverlays.apply_codex(instructions || @default_instructions)
     tools = ResponsesShared.to_provider_tools(capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
 
@@ -376,6 +380,27 @@ defmodule FermixCore.Providers.OpenAI.Codex do
      )}
   end
 
+  # A Finch pool-checkout queue timeout comes back from HttpClient as a bare
+  # RuntimeError (not a transport tuple). The wake-from-sleep variant — no
+  # connection could be obtained at all — is minted as a typed
+  # `:connection_unavailable` transport error so the scheduled-job runner can
+  # retry it with backoff. Every other RuntimeError is a genuine bug and stays
+  # bare so it fails loud.
+  defp handle_response({:error, %RuntimeError{} = reason}, _turn_state) do
+    if HttpClient.connection_unavailable?(reason) do
+      Logger.warning("Codex connection unavailable (pool checkout): #{Exception.message(reason)}")
+
+      {:error,
+       ProviderError.transport(:openai_codex, :codex, :connection_unavailable,
+         stage: :before_response,
+         message: transport_error_message(:connection_unavailable, :before_response)
+       )}
+    else
+      Logger.error("Codex request failed: #{inspect(reason)}")
+      {:error, reason}
+    end
+  end
+
   defp handle_response({:error, reason}, _turn_state) do
     Logger.error("Codex request failed: #{inspect(reason)}")
     {:error, reason}
@@ -410,6 +435,13 @@ defmodule FermixCore.Providers.OpenAI.Codex do
 
   def transport_error_message(:econnrefused, _stage) do
     "Codex endpoint refused the connection (chatgpt.com unreachable from this host)."
+  end
+
+  def transport_error_message(:connection_unavailable, _stage) do
+    "Codex could not obtain an HTTP connection from the pool before the checkout " <>
+      "timeout — the host network was not ready, typically just after the machine " <>
+      "woke from sleep. Fermix treats this as a transient infrastructure failure; " <>
+      "scheduled runs retry it with backoff."
   end
 
   def transport_error_message(reason, _stage), do: "Codex transport error: #{inspect(reason)}"

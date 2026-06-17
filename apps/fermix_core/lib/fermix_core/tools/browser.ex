@@ -6,7 +6,12 @@ defmodule FermixCore.Tools.Browser do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Telemetry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
+
+  require Logger
+
+  @log_summary_max 200
 
   @impl true
   @spec name() :: String.t()
@@ -175,14 +180,19 @@ defmodule FermixCore.Tools.Browser do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    result = do_execute(args, context)
+    outcome = FermixCore.Browser.execute(args, context)
     duration = System.monotonic_time(:millisecond) - start
+    result = to_tool_result(outcome)
     success = match?({:ok, %{success: true}}, result)
+    metadata = safe_metadata(args, outcome)
 
-    # Record the action (and act-kind) so per-verb latency is visible in
-    # tool_exec traces — the handler passes all metadata through.
+    log_failure(success, metadata)
+
+    # Safe metadata (action/kind/profile/url/target/selector + error code &
+    # summary on failure) is always recorded; raw `input`/`output` bodies stay
+    # gated behind `capture_content?/0`.
     ToolTelemetry.exec("browser", context, success, duration,
-      metadata: %{action: Map.get(args, "action"), kind: Map.get(args, "kind")},
+      metadata: metadata,
       input: args,
       result: result
     )
@@ -190,12 +200,65 @@ defmodule FermixCore.Tools.Browser do
     result
   end
 
-  defp do_execute(args, context) do
-    case FermixCore.Browser.execute(args, context) do
-      {:ok, output} -> {:ok, Tool.success(output)}
-      {:error, error} -> {:ok, Tool.error(error_text(error))}
+  defp to_tool_result({:ok, output}), do: {:ok, Tool.success(output)}
+  defp to_tool_result({:error, error}), do: {:ok, Tool.error(error_text(error))}
+
+  # Always-on, body-free trace fields: structural identifiers plus a bounded
+  # error code/summary on failure. URLs are reduced to scheme+host+path so query
+  # tokens and userinfo never reach an ungated field; raw args/output ride the
+  # gated `:input`/`:result` instead.
+  defp safe_metadata(args, outcome) do
+    %{
+      action: Map.get(args, "action"),
+      kind: Map.get(args, "kind"),
+      profile: Map.get(args, "profile"),
+      url: sanitize_url(Map.get(args, "url")),
+      target_ref: Map.get(args, "target"),
+      selector: Map.get(args, "selector")
+    }
+    |> reject_nil()
+    |> put_error(outcome)
+  end
+
+  defp put_error(metadata, {:error, %{code: code, message: message}}) do
+    metadata
+    |> Map.put(:error_code, to_string(code))
+    |> Map.put(:error_summary, Telemetry.preview(message))
+  end
+
+  defp put_error(metadata, _outcome), do: metadata
+
+  @doc false
+  # Public only for unit tests. Reduce a URL to `scheme://host/path`; drop query,
+  # fragment, userinfo, and any URL without a network host (file:/data:/about:/
+  # relative) so the always-on trace never carries secrets or local paths.
+  @spec sanitize_url(term()) :: String.t() | nil
+  def sanitize_url(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, path: path}
+      when is_binary(scheme) and is_binary(host) and host != "" ->
+        "#{scheme}://#{host}#{path || ""}"
+
+      _other ->
+        nil
     end
   end
+
+  def sanitize_url(_url), do: nil
+
+  defp log_failure(true, _metadata), do: :ok
+
+  defp log_failure(false, metadata) do
+    Logger.warning(
+      "browser action failed: action=#{metadata[:action]} profile=#{metadata[:profile]} " <>
+        "code=#{metadata[:error_code]} #{short(metadata[:error_summary])}"
+    )
+  end
+
+  defp short(nil), do: ""
+  defp short(text) when is_binary(text), do: String.slice(text, 0, @log_summary_max)
+
+  defp reject_nil(map), do: Map.reject(map, fn {_key, value} -> is_nil(value) end)
 
   # Surface the structured error (code + details) to the agent, not just the
   # message — details like Chrome's stderr on a launch failure or the blocked

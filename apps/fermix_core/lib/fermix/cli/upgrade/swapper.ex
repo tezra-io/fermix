@@ -12,6 +12,7 @@ defmodule Fermix.CLI.Upgrade.Swapper do
   """
 
   alias Fermix.CLI.Upgrade.Cosign
+  alias FermixCore.Net.StreamDownload
 
   @type staged :: %{
           blob_path: Path.t(),
@@ -30,10 +31,10 @@ defmodule Fermix.CLI.Upgrade.Swapper do
     sig_path = Path.join(staging_dir, "fermix.upgrade.sig")
     cert_path = Path.join(staging_dir, "fermix.upgrade.pem")
 
-    with :ok <- download(artifact.url, blob_path, req_options),
-         :ok <- download(artifact.sig_url, sig_path, req_options),
-         :ok <- download(artifact.cert_url, cert_path, req_options),
-         :ok <- check_sha256(blob_path, artifact.sha256) do
+    with :ok <- StreamDownload.download(artifact.url, blob_path, req_options),
+         :ok <- StreamDownload.download(artifact.sig_url, sig_path, req_options),
+         :ok <- StreamDownload.download(artifact.cert_url, cert_path, req_options),
+         :ok <- StreamDownload.check_sha256(blob_path, artifact.sha256) do
       File.chmod!(blob_path, 0o755)
 
       {:ok,
@@ -84,29 +85,6 @@ defmodule Fermix.CLI.Upgrade.Swapper do
 
   defp default_fermix_home do
     System.get_env("FERMIX_HOME") || Path.join(System.user_home!(), ".fermix")
-  end
-
-  defp download(url, path, req_options) do
-    case Req.get(url, [raw: true, into: File.stream!(path)] ++ req_options) do
-      {:ok, %Req.Response{status: 200}} -> :ok
-      {:ok, %Req.Response{status: status}} -> {:error, {:download_status, status, url}}
-      {:error, reason} -> {:error, {:download_failed, reason, url}}
-    end
-  end
-
-  defp check_sha256(path, expected_hex) do
-    actual = path |> File.stream!([], 64 * 1024) |> hash_stream() |> Base.encode16(case: :lower)
-
-    if actual == String.downcase(expected_hex) do
-      :ok
-    else
-      {:error, {:sha256_mismatch, expected: expected_hex, actual: actual}}
-    end
-  end
-
-  defp hash_stream(stream) do
-    Enum.reduce(stream, :crypto.hash_init(:sha256), &:crypto.hash_update(&2, &1))
-    |> :crypto.hash_final()
   end
 
   defp snapshot_previous(installed_path, previous_path) do

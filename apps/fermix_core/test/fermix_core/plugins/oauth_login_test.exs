@@ -2,10 +2,11 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Auth.OAuthFlow
-  alias FermixCore.Auth.OAuthProvider
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Auth
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
 
   setup do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("plugin-oauth")
@@ -195,8 +196,8 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     port = pick_free_port()
     parent = self()
 
-    provider =
-      OAuthProvider.google(
+    {:ok, provider} =
+      OAuthProviders.definition("google",
         client_id: "123.apps.googleusercontent.com",
         client_secret: "desktop-secret",
         redirect_port: port,
@@ -256,8 +257,8 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
 
     parent = self()
 
-    provider =
-      OAuthProvider.google(
+    {:ok, provider} =
+      OAuthProviders.definition("google",
         client_id: "123.apps.googleusercontent.com",
         client_secret: "desktop-secret",
         redirect_port: preferred_port,
@@ -311,6 +312,135 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     assert actual_port != preferred_port
 
     :gen_tcp.close(blocker)
+  end
+
+  test "GitHub login splits the comma-separated granted scopes" do
+    install_github_fixture()
+    TokenSupervisor.stop_profile("github:primary")
+    on_exit(fn -> TokenSupervisor.stop_profile("github:primary") end)
+
+    Application.put_env(:fermix_core, :oauth, %{
+      "github" => [
+        client_type: "desktop_public_pkce",
+        client_id: "gh-client-id",
+        client_secret: "gh-client-secret"
+      ]
+    })
+
+    port = pick_free_port()
+    parent = self()
+
+    token_plug = fn conn ->
+      send(parent, {:accept_header, Plug.Conn.get_req_header(conn, "accept")})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(
+        200,
+        Jason.encode!(%{"access_token" => "gh_at", "scope" => "repo,read:user"})
+      )
+    end
+
+    userinfo_plug = fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, Jason.encode!(%{"name" => "Suj"}))
+    end
+
+    opener = fn url ->
+      Task.start(fn ->
+        state =
+          url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query() |> Map.fetch!("state")
+
+        deliver_callback(port, "/auth/callback?code=AUTHCODE&state=#{state}")
+      end)
+
+      :ok
+    end
+
+    assert {:ok, entry} =
+             Auth.login("github",
+               port: port,
+               opener: opener,
+               timeout_ms: 5_000,
+               req_options: [plug: token_plug],
+               userinfo_req_options: [plug: userinfo_plug],
+               puts: fn _ -> :ok end
+             )
+
+    assert entry.provider == "github"
+    assert entry.granted_scopes == ["repo", "read:user"]
+
+    assert {:ok, stored} = Store.read("github:primary")
+    assert stored.tokens.access_token == "gh_at"
+    assert stored.granted_scopes == ["repo", "read:user"]
+
+    assert_received {:accept_header, ["application/json"]}
+  end
+
+  test "Notion's fixed redirect port fails loud when the port is taken" do
+    port = pick_free_port()
+    {:ok, blocker} = :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}])
+
+    {:ok, provider} =
+      OAuthProviders.definition("notion",
+        client_id: "n-id",
+        client_secret: "n-sec",
+        redirect_port: port,
+        scopes: []
+      )
+
+    assert {:error, {:port_in_use, ^port}} =
+             OAuthFlow.start_loopback(provider,
+               opener: fn _url -> :ok end,
+               timeout_ms: 1_000,
+               puts: fn _ -> :ok end
+             )
+
+    :gen_tcp.close(blocker)
+  end
+
+  # A ready installed plugin under FERMIX_HOME/plugins — the exact tree
+  # Installer.run_install/2 leaves behind (registry_union_test pattern).
+  defp install_github_fixture do
+    root = Path.join(System.fetch_env!("FERMIX_HOME"), "plugins")
+    DistStore.ensure!(root)
+    dir = DistStore.version_dir(root, "github", "1.0.0")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(github_manifest()))
+    :ok = DistStore.activate(root, "github", "1.0.0")
+
+    :ok =
+      DistStore.record(root, "github", %{
+        "version" => "1.0.0",
+        "sha256" => String.duplicate("0", 64),
+        "h1" => String.duplicate("0", 64),
+        "plugin_api" => 2,
+        "min_core_version" => "0.1.0"
+      })
+  end
+
+  defp github_manifest do
+    %{
+      "schema_version" => 2,
+      "name" => "github",
+      "display_name" => "GitHub",
+      "description" => "GitHub issues and pull requests",
+      "category" => "developer",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{
+        "type" => "oauth2",
+        "provider" => "github",
+        "profile_key" => "github",
+        "account_mode" => "single",
+        "scopes" => ["read:user", "repo"]
+      },
+      "health_check" => %{"kind" => "local_readiness", "requires_auth" => true},
+      "tools" => [],
+      "skills" => []
+    }
   end
 
   defp pick_free_port do

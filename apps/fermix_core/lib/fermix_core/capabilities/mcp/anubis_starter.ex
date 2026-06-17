@@ -44,6 +44,7 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarter.Default do
       [command: command]
       |> add_optional(:args, Map.get(server, :args))
       |> add_optional(:env, Map.get(server, :env))
+      |> add_optional(:cwd, Map.get(server, :cwd))
 
     client_spec =
       Supervisor.child_spec(

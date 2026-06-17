@@ -65,7 +65,7 @@ defmodule FermixCore.Tools.AdminToolsTest do
   test "model_routing_config reads and updates the routing TOML section" do
     assert {:ok, set_result} =
              ModelRoutingConfig.execute(
-               %{"action" => "set", "key" => "coding_model", "value" => "gpt-5.4-mini"},
+               %{"action" => "set", "key" => "subagent_model", "value" => "gpt-5.4-mini"},
                @context
              )
 
@@ -75,7 +75,28 @@ defmodule FermixCore.Tools.AdminToolsTest do
              ModelRoutingConfig.execute(%{"action" => "read"}, @context)
 
     assert read_result.success == true
-    assert Jason.decode!(read_result.output)["coding_model"] == "gpt-5.4-mini"
+    assert Jason.decode!(read_result.output)["subagent_model"] == "gpt-5.4-mini"
+  end
+
+  test "model_routing_config rejects an invalid effort at write time and unknown keys" do
+    assert {:ok, bad_effort} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_reasoning_effort", "value" => "bananas"},
+               @context
+             )
+
+    assert bad_effort.success == false
+    assert bad_effort.error =~ "subagent_reasoning_effort"
+
+    # cron_* keys are an unadvertised, config.toml-only provision — not settable here.
+    assert {:ok, cron_rejected} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "cron_model", "value" => "gpt-5.4-mini"},
+               @context
+             )
+
+    assert cron_rejected.success == false
+    assert cron_rejected.error =~ "invalid_key"
   end
 
   test "model_routing_config read normalizes config load failures", %{home: home} do

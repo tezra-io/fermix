@@ -21,6 +21,7 @@ defmodule FermixCore.Agents.RuntimeContext do
 
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Plugins.PromptCatalog
   alias FermixCore.Prompt.Accounting
@@ -32,6 +33,7 @@ defmodule FermixCore.Agents.RuntimeContext do
   @type profile :: %{
           trust: :operator | :guest,
           capabilities: [Capability.t()],
+          dispatchable: [Capability.t()],
           runtime_message: message(),
           runtime_accounting: Accounting.entry()
         }
@@ -40,6 +42,8 @@ defmodule FermixCore.Agents.RuntimeContext do
           agent_id: String.t(),
           built_at_ms: integer(),
           base_messages: [message()],
+          stable_messages: [message()],
+          volatile_messages: [message()],
           base_accounting: [Accounting.entry()],
           available_skills: [AgentDefinition.t()],
           operator_profile: profile(),
@@ -50,6 +54,8 @@ defmodule FermixCore.Agents.RuntimeContext do
     :agent_id,
     :built_at_ms,
     :base_messages,
+    :stable_messages,
+    :volatile_messages,
     :base_accounting,
     :available_skills,
     :operator_profile,
@@ -75,7 +81,7 @@ defmodule FermixCore.Agents.RuntimeContext do
     capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
 
     with {:ok, base} <- PromptComposer.compose_base_with_metadata(opts) do
-      base_messages = PromptComposer.export_parts(base.parts)
+      split = PromptComposer.export_split(base.parts)
       operator_profile = build_profile(:operator, available_skills, capability_registry)
       guest_profile = build_profile(:guest, available_skills, capability_registry)
 
@@ -83,7 +89,9 @@ defmodule FermixCore.Agents.RuntimeContext do
        %__MODULE__{
          agent_id: agent_id,
          built_at_ms: System.system_time(:millisecond),
-         base_messages: base_messages,
+         base_messages: split.stable ++ split.volatile,
+         stable_messages: split.stable,
+         volatile_messages: split.volatile,
          base_accounting: base.accounting,
          available_skills: available_skills,
          operator_profile: operator_profile,
@@ -111,6 +119,13 @@ defmodule FermixCore.Agents.RuntimeContext do
 
     capabilities = CapabilityRegistry.list_for(capability_registry, filter)
 
+    # M10 §3.2 partition: the wire advertises only the non-deferred schemas;
+    # the dispatchable surface keeps everything (advertised ∪ deferred), both
+    # derived from the same trust-filtered list. The prompt prose (capability
+    # catalog + plugin index) is built from the FULL list — names stay visible,
+    # only schemas defer.
+    %{advertised: advertised} = Deferral.partition(capabilities)
+
     runtime_content =
       RuntimeSections.build(available_skills,
         capabilities: capabilities,
@@ -120,7 +135,8 @@ defmodule FermixCore.Agents.RuntimeContext do
 
     %{
       trust: trust,
-      capabilities: capabilities,
+      capabilities: advertised,
+      dispatchable: capabilities,
       runtime_message: %{role: "system", content: runtime_content},
       runtime_accounting: Accounting.entry(:runtime, nil, runtime_content)
     }
@@ -136,8 +152,9 @@ defmodule FermixCore.Agents.RuntimeContext do
   def profile_for(%__MODULE__{guest_profile: guest}, :guest, _registry, _opts), do: guest
 
   @doc """
-  Assemble the full message list for a turn:
-  `base ++ profile.runtime_message ++ history ++ [user_message]`.
+  Assemble the full message list for a turn, stable tier first
+  (cache stratification — M10 P1):
+  `stable ++ profile.runtime_message ++ volatile ++ history ++ [user_message]`.
   """
   @spec messages_for(t(), profile(), [map()], message()) :: [message()]
   def messages_for(
@@ -147,7 +164,8 @@ defmodule FermixCore.Agents.RuntimeContext do
         user_message
       )
       when is_list(history) and is_map(user_message) do
-    ctx.base_messages ++ [runtime_message] ++ history ++ [user_message]
+    ctx.stable_messages ++
+      [runtime_message] ++ ctx.volatile_messages ++ history ++ [user_message]
   end
 
   @doc """

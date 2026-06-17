@@ -43,6 +43,23 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
+  @doc """
+  Persist one manifest-declared config value (M8.1 §4.4) under
+  `[fermix_core.plugins.<name>]`. The key must be declared in the plugin's
+  manifest `config` block; the commit reloads the runtime so an `mcp` child
+  restarts with the new env.
+  """
+  @spec set_plugin_setting(String.t(), String.t(), String.t()) :: snapshot_result()
+  def set_plugin_setting(name, key, value)
+      when is_binary(name) and is_binary(key) and is_binary(value) do
+    with {:ok, plugin} <- fetch_plugin(name),
+         :ok <- validate_plugin_setting(plugin, key, value) do
+      ConfigStore.current_snapshot()
+      |> update_plugins(fn plugins -> put_plugin_setting(plugins, plugin, key, value) end)
+      |> commit()
+    end
+  end
+
   @spec auth_profile(Plugin.t()) :: String.t()
   def auth_profile(%Plugin{} = plugin) do
     plugin
@@ -56,6 +73,34 @@ defmodule FermixCore.Plugins.Config do
     |> Keyword.get(:enabled, [])
     |> Enum.filter(&is_binary/1)
   end
+
+  @upper_snake_regex ~r/^[A-Z][A-Z0-9_]*$/
+
+  @doc """
+  The UPPER_SNAKE config values persisted under `[fermix_core.plugins.<name>]`
+  (e.g. `OBSIDIAN_VAULT_PATH`). This is the env-injection seam for `mcp`-rail
+  plugins: `Dist.McpSource` merges these into the child process environment,
+  and `Status` checks the manifest's required keys against them. Lowercase
+  entry keys (`auth_profile`, `enabled`) are plumbing, never env.
+  """
+  @spec plugin_settings(String.t()) :: %{String.t() => String.t()}
+  def plugin_settings(name) when is_binary(name) do
+    Application.get_env(:fermix_core, :plugins, [])
+    |> Keyword.get(:entries, %{})
+    |> Map.get(name, [])
+    |> Enum.reduce(%{}, &collect_setting/2)
+  end
+
+  defp collect_setting({key, value}, acc) do
+    key = to_string(key)
+    value = to_string(value)
+
+    if Regex.match?(@upper_snake_regex, key) and String.trim(value) != "",
+      do: Map.put(acc, key, value),
+      else: acc
+  end
+
+  defp collect_setting(_other, acc), do: acc
 
   @spec oauth_provider(String.t()) :: keyword()
   def oauth_provider(provider) when is_binary(provider) do
@@ -86,13 +131,18 @@ defmodule FermixCore.Plugins.Config do
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :plugins, plugins))
   end
 
+  # Read-modify-write, like disable_plugin: drop the `enabled: false` marker,
+  # claim only the keys enable owns (auth_profile), preserve everything else —
+  # saved settings (e.g. OBSIDIAN_VAULT_PATH) survive disable → enable.
   defp enable_plugin(plugins, plugin) do
-    enabled = plugins |> Keyword.get(:enabled, []) |> add_enabled(plugin.name)
+    entry =
+      plugin
+      |> plugin_entry(plugins)
+      |> Keyword.delete(:enabled)
+      |> Keyword.put_new(:auth_profile, default_auth_profile(plugin))
 
-    entries =
-      plugins
-      |> Keyword.get(:entries, %{})
-      |> Map.put(plugin.name, plugin_config(plugin))
+    enabled = plugins |> Keyword.get(:enabled, []) |> add_enabled(plugin.name)
+    entries = plugins |> Keyword.get(:entries, %{}) |> Map.put(plugin.name, entry)
 
     plugins
     |> Keyword.put(:enabled, enabled)
@@ -118,10 +168,28 @@ defmodule FermixCore.Plugins.Config do
     |> Keyword.put(:entries, entries)
   end
 
-  defp plugin_config(%Plugin{auth: %{type: :none}}), do: []
+  # The declared-key check subsumes the UPPER_SNAKE shape: manifest config
+  # keys already passed the registry's key regex at decode.
+  defp validate_plugin_setting(%Plugin{config: entries}, key, value) do
+    cond do
+      not Enum.any?(entries, &(&1.key == key)) -> {:error, {:unknown_config_key, key}}
+      String.trim(value) == "" -> {:error, {:blank_config_value, key}}
+      true -> :ok
+    end
+  end
 
-  defp plugin_config(%Plugin{} = plugin) do
-    [auth_profile: default_auth_profile(plugin)]
+  # TOML-loaded entries carry UPPER_SNAKE keys as strings (lowercase plumbing
+  # keys normalize to atoms); replace by string identity so an overwrite never
+  # leaves a stale duplicate behind.
+  defp put_plugin_setting(plugins, plugin, key, value) do
+    entry =
+      plugin
+      |> plugin_entry(plugins)
+      |> Enum.reject(fn {entry_key, _value} -> to_string(entry_key) == key end)
+      |> Kernel.++([{key, value}])
+
+    entries = plugins |> Keyword.get(:entries, %{}) |> Map.put(plugin.name, entry)
+    Keyword.put(plugins, :entries, entries)
   end
 
   defp add_enabled(enabled, name) do
@@ -151,7 +219,9 @@ defmodule FermixCore.Plugins.Config do
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :oauth, updated))
   end
 
-  defp normalize_oauth_provider("google" = provider, opts) do
+  @registry_oauth_providers ~w(google github notion x)
+
+  defp normalize_oauth_provider(provider, opts) when provider in @registry_oauth_providers do
     client_type = Keyword.get(opts, :client_type, "desktop_public_pkce")
 
     cond do
@@ -173,13 +243,15 @@ defmodule FermixCore.Plugins.Config do
     {:ok, normalized_oauth_provider(opts, Keyword.get(opts, :client_type))}
   end
 
+  # The redirect port is persisted only when the operator chose one — the
+  # per-provider defaults live in FermixCore.Auth.OAuthProviders.
   defp normalized_oauth_provider(opts, client_type) do
     [
       client_type: client_type,
       client_id: Keyword.get(opts, :client_id),
       client_secret: Keyword.get(opts, :client_secret),
-      redirect_host: Keyword.get(opts, :redirect_host, "127.0.0.1"),
-      redirect_port: Keyword.get(opts, :redirect_port, 1455)
+      redirect_host: Keyword.get(opts, :redirect_host),
+      redirect_port: Keyword.get(opts, :redirect_port)
     ]
     |> Enum.reject(fn {_key, value} -> blank?(value) end)
   end
@@ -205,13 +277,20 @@ defmodule FermixCore.Plugins.Config do
     end
   end
 
+  # The config change is already persisted; the live reload is best-effort, so a
+  # reload failure does not fail the save. But it is surfaced loudly (not a quiet
+  # warning) because a failed reload means the running agent will not reflect the
+  # change until the daemon restarts — the operator needs to know.
   defp reload_runtime do
     case Runtime.reload() do
       {:ok, _summary} ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("Plugin runtime reload failed after config change: #{inspect(reason)}")
+        Logger.error(
+          "Plugin runtime reload failed after config change: #{inspect(reason)}. " <>
+            "The change is saved but the running agent will not reflect it until restart."
+        )
     end
 
     :ok

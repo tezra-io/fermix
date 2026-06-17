@@ -13,7 +13,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Prompt.TemplateRenderer
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
+  alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
   alias FermixCore.Setup.ConfigStore
@@ -71,6 +75,51 @@ defmodule Fermix.CLI.Doctor.Checks do
         fail("daemon socket", inspect(reason))
     end
   end
+
+  # Opik readiness is answered BY THE DAEMON over the control socket — the env
+  # var, loaded exporter, and attached reporter are the daemon's process state,
+  # not this CLI's. `:client` is injectable so each state is unit-testable.
+  @spec opik_readiness(keyword()) :: result()
+  def opik_readiness(opts \\ []) do
+    client = Keyword.get(opts, :client, &Client.request/1)
+
+    case client.("observability") do
+      {:ok, %{"status" => "ok", "observability" => obs}} ->
+        render_opik(obs)
+
+      {:error, :not_running} ->
+        warn("opik export", "daemon not running (start with `fermix start`)")
+
+      {:error, reason} ->
+        fail("opik export", inspect(reason))
+
+      {:ok, other} ->
+        warn("opik export", "unexpected reply: #{inspect(other)}")
+    end
+  end
+
+  defp render_opik(%{"status" => "disabled"}),
+    do: ok("opik export", "off — set FERMIX_OPIK_ENABLED in the daemon env to enable")
+
+  defp render_opik(%{"status" => "enabled_ready"} = obs),
+    do: ok("opik export", "on -> #{obs["base_url"]} (project #{obs["project"]})")
+
+  defp render_opik(%{"status" => "enabled_missing_app"}),
+    do:
+      fail(
+        "opik export",
+        "FERMIX_OPIK_ENABLED set but fermix_opik is not loaded — unexpected in a dev/prod build (it is bundled in-umbrella); likely a stripped or non-standard build"
+      )
+
+  defp render_opik(%{"status" => "enabled_not_attached"}),
+    do:
+      warn(
+        "opik export",
+        "FERMIX_OPIK_ENABLED set and app loaded, but the reporter is not attached — check daemon logs"
+      )
+
+  defp render_opik(other),
+    do: warn("opik export", "unexpected observability report: #{inspect(other)}")
 
   @spec service_unit() :: result()
   def service_unit do
@@ -205,6 +254,69 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   rescue
     error in ArgumentError -> fail("compaction", Exception.message(error))
+  end
+
+  @doc """
+  Bootstrap template drift (M10 P5): compares the CURRENT shipped template
+  render against the content the `:seed` revision recorded at install time.
+  A mismatch means the shipped template gained changes after this install
+  was seeded — the operator's file may lag and deserves a manual diff.
+  Variable-free templates only (fermix/soul/realtime); IDENTITY.md embeds
+  the agent name, so a render comparison cannot distinguish template drift
+  from a rename. Installs seeded before revision tracking report unknown.
+  """
+  @spec bootstrap_template_drift(keyword()) :: result()
+  def bootstrap_template_drift(opts \\ []) do
+    agent_id = Keyword.get(opts, :agent_id, "main")
+
+    {drifted, unknown} =
+      [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md]
+      |> Enum.reduce({[], []}, fn {name, type}, {drifted, unknown} ->
+        case template_drift_state(agent_id, name, type, opts) do
+          :current -> {drifted, unknown}
+          :drifted -> {[name | drifted], unknown}
+          :unknown -> {drifted, [name | unknown]}
+        end
+      end)
+
+    cond do
+      drifted != [] ->
+        warn(
+          "bootstrap templates",
+          "shipped template(s) changed since this install was seeded: " <>
+            "#{drifted |> Enum.reverse() |> Enum.map_join(", ", &"#{&1}.md")} — " <>
+            "diff your bootstrap file(s) against the current template for missed improvements"
+        )
+
+      unknown != [] ->
+        ok(
+          "bootstrap templates",
+          "no seed record for #{unknown |> Enum.reverse() |> Enum.map_join(", ", &"#{&1}.md")} " <>
+            "(seeded before revision tracking); others match the shipped templates"
+        )
+
+      true ->
+        ok("bootstrap templates", "seeded from the current shipped templates")
+    end
+  catch
+    # Doctor must not crash when the memory repo is unavailable in this VM;
+    # report the honest skip instead.
+    :exit, _reason -> ok("bootstrap templates", "skipped (memory repo unavailable)")
+  end
+
+  defp template_drift_state(agent_id, name, type, opts) do
+    registry_opts = Keyword.take(opts, [:repo])
+
+    with {:ok, revisions} <-
+           ResourceRegistry.list_revisions(agent_id, type, "global", registry_opts),
+         %{content: seeded} <- Enum.find(revisions, &(&1.mutation_source == "seed")),
+         {:ok, current} <- TemplateRenderer.render(name, %{}) do
+      if String.trim_trailing(seeded) == String.trim_trailing(current),
+        do: :current,
+        else: :drifted
+    else
+      _no_seed_record -> :unknown
+    end
   end
 
   @spec web_search(boolean()) :: result()
@@ -596,6 +708,79 @@ defmodule Fermix.CLI.Doctor.Checks do
     else
       ok("auth perms", "no auth.json present")
     end
+  end
+
+  @doc """
+  Validates the `[fermix_core.routing]` `subagent_*`/`cron_*` model-routing keys.
+  A typo'd provider/effort — especially in the UI-less `cron_*` keys — is caught
+  here at the operator's desk rather than at the next unattended job fire.
+  (Whether a routing provider is actually authed is the `auth_probe` check's job.)
+  """
+  @spec routing_overrides() :: result()
+  def routing_overrides do
+    subagent = RoutingOverrides.subagent()
+    cron = RoutingOverrides.cron()
+
+    case validate_routing_models([{"subagent_model", subagent}, {"cron_model", cron}]) do
+      :ok ->
+        ok(
+          "routing",
+          "subagent: #{describe_override(subagent)}; cron: #{describe_override(cron)}"
+        )
+
+      {:error, message} ->
+        fail("routing", message)
+    end
+  rescue
+    error in ArgumentError -> fail("routing", Exception.message(error))
+  end
+
+  # Parsing only proves the provider/effort *atoms* are known. A model slug is
+  # free-form, so a typo or a model removed from the catalog (or left pointing at
+  # the wrong provider after a primary switch — design §9) passes parsing and
+  # then fails at the next job/subagent spawn. Catch it here at the operator's
+  # desk: an explicit provider must actually offer the model; an inferred one
+  # must resolve to some catalog provider.
+  defp validate_routing_models(entries) do
+    Enum.reduce_while(entries, :ok, fn {label, override}, :ok ->
+      case validate_routing_model(override) do
+        :ok -> {:cont, :ok}
+        {:error, detail} -> {:halt, {:error, "[fermix_core.routing] #{label} #{detail}"}}
+      end
+    end)
+  end
+
+  defp validate_routing_model(%{model: nil}), do: :ok
+
+  defp validate_routing_model(%{provider: provider, model: model})
+       when is_atom(provider) and not is_nil(provider) and is_binary(model) do
+    if ModelCatalog.known_model?(provider, model) do
+      :ok
+    else
+      {:error, "= #{inspect(model)} is not a model offered by provider #{inspect(provider)}"}
+    end
+  end
+
+  defp validate_routing_model(%{provider: nil, model: model}) when is_binary(model) do
+    if ModelCatalog.provider_for_model(model) do
+      :ok
+    else
+      {:error,
+       "= #{inspect(model)} is not a known model for any provider " <>
+         "(stale or typo'd — e.g. left over after a primary switch)"}
+    end
+  end
+
+  defp describe_override(%{provider: nil, model: nil, reasoning_effort: nil}), do: "inherits main"
+
+  defp describe_override(override) do
+    [
+      override.provider && "provider=#{override.provider}",
+      override.model && "model=#{override.model}",
+      override.reasoning_effort && "effort=#{override.reasoning_effort}"
+    ]
+    |> Enum.filter(& &1)
+    |> Enum.join(", ")
   end
 
   defp ok(name, detail), do: %{name: name, status: :ok, detail: detail}

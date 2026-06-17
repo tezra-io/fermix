@@ -70,115 +70,23 @@ existing_openai = Keyword.get(existing_providers, :openai, [])
 existing_openai_codex = Keyword.get(existing_providers, :openai_codex, [])
 existing_anthropic = Keyword.get(existing_providers, :anthropic, [])
 existing_xai = Keyword.get(existing_providers, :xai, [])
-existing_agent = Application.get_env(:fermix_core, :agent, [])
+existing_openrouter = Keyword.get(existing_providers, :openrouter, [])
+existing_ollama = Keyword.get(existing_providers, :ollama, [])
+existing_mistral = Keyword.get(existing_providers, :mistral, [])
 
 openai_api_key = System.get_env("OPENAI_API_KEY") || Keyword.get(existing_openai, :api_key, "")
 
-# Keep in sync with FermixCore.Providers.ModelCatalog.providers/0 — config
-# files are evaluated before the app is guaranteed loaded, so the list is
-# spelled out here rather than derived.
-known_providers = ["openai", "openai_codex", "anthropic", "xai"]
-
-# FERMIX_PROVIDER overlays the agent's provider selection. Invalid values
-# log a warning and fall through to whatever TOML / agent block already
-# carries. Env mistakes don't crash boot.
-selected_provider =
-  case System.get_env("FERMIX_PROVIDER") do
-    nil ->
-      Keyword.get(existing_agent, :provider)
-
-    "" ->
-      Keyword.get(existing_agent, :provider)
-
-    raw when raw in ["openai", "openai_codex", "anthropic", "xai"] ->
-      String.to_atom(raw)
-
-    raw ->
-      IO.warn(
-        "FERMIX_PROVIDER=#{inspect(raw)} is not a known provider " <>
-          "(#{Enum.join(known_providers, " | ")}) — ignoring overlay"
-      )
-
-      Keyword.get(existing_agent, :provider)
-  end
-
-merged_agent =
-  if selected_provider do
-    Keyword.put(existing_agent, :provider, selected_provider)
-  else
-    existing_agent
-  end
-
-config :fermix_core, :agent, merged_agent
-
-# FERMIX_REASONING_EFFORT validates against the canonical enum; invalid
-# values log and fall back. Same pattern as FERMIX_PROVIDER above.
-valid_efforts = ~w(none minimal low medium high xhigh)a
-
-reasoning_effort_overlay =
-  case System.get_env("FERMIX_REASONING_EFFORT") do
-    nil ->
-      :__unset__
-
-    "" ->
-      :__unset__
-
-    raw ->
-      atom = Enum.find(valid_efforts, fn a -> Atom.to_string(a) == raw end)
-
-      case atom do
-        nil ->
-          IO.warn(
-            "FERMIX_REASONING_EFFORT=#{inspect(raw)} is not a valid effort " <>
-              "(#{Enum.map_join(valid_efforts, " | ", &Atom.to_string/1)}) — ignoring overlay"
-          )
-
-          :__unset__
-
-        atom ->
-          atom
-      end
-  end
-
-default_model_overlay =
-  case System.get_env("FERMIX_DEFAULT_MODEL") do
-    nil -> :__unset__
-    "" -> :__unset__
-    model -> model
-  end
-
-# Apply default_model + reasoning_effort to the active provider's block
-# (env > TOML). FERMIX_PROVIDER wins when present; otherwise use the
-# provider already hydrated from FERMIX_HOME/config.toml.
-overlay_target = selected_provider || Keyword.get(merged_agent, :provider) || :openai
-
-apply_provider_overlay = fn provider, base ->
-  if provider == overlay_target do
-    base
-    |> then(fn cfg ->
-      case default_model_overlay do
-        :__unset__ -> cfg
-        model -> Keyword.put(cfg, :default_model, model)
-      end
-    end)
-    |> then(fn cfg ->
-      case reasoning_effort_overlay do
-        :__unset__ -> cfg
-        atom -> Keyword.put(cfg, :reasoning_effort, atom)
-      end
-    end)
-  else
-    base
-  end
-end
-
+# Provider, model, and reasoning effort are config-only (set via the wizard /
+# web setup), never env overlays. An env var that silently re-points the active
+# provider could desync it from its model, and an env-set primary would fight the
+# `primary = true` flag that PrimaryConfig actually routes on. Only credentials
+# (API keys, auth modes) are read from the environment below.
 merged_openai =
   existing_openai
   |> Keyword.delete(:auth_mode)
   |> Keyword.merge(api_key: openai_api_key)
-  |> then(&apply_provider_overlay.(:openai, &1))
 
-merged_openai_codex = apply_provider_overlay.(:openai_codex, existing_openai_codex)
+merged_openai_codex = existing_openai_codex
 
 # Optional env overlays for API keys and auth modes; empty/absent vars
 # leave the TOML-hydrated values untouched.
@@ -194,14 +102,24 @@ merged_anthropic =
   existing_anthropic
   |> put_env_overlay.(:api_key, "ANTHROPIC_API_KEY")
   |> put_env_overlay.(:auth_mode, "FERMIX_ANTHROPIC_AUTH_MODE")
-  |> then(&apply_provider_overlay.(:anthropic, &1))
 
 merged_xai =
   existing_xai
   |> put_env_overlay.(:api_key, "XAI_API_KEY")
   |> put_env_overlay.(:base_url, "XAI_BASE_URL")
   |> put_env_overlay.(:auth_mode, "FERMIX_XAI_AUTH_MODE")
-  |> then(&apply_provider_overlay.(:xai, &1))
+
+merged_openrouter =
+  existing_openrouter
+  |> put_env_overlay.(:api_key, "OPENROUTER_API_KEY")
+
+merged_ollama =
+  existing_ollama
+  |> put_env_overlay.(:base_url, "OLLAMA_BASE_URL")
+
+merged_mistral =
+  existing_mistral
+  |> put_env_overlay.(:api_key, "MISTRAL_API_KEY")
 
 merged_providers =
   existing_providers
@@ -209,6 +127,9 @@ merged_providers =
   |> Keyword.put(:openai_codex, merged_openai_codex)
   |> Keyword.put(:anthropic, merged_anthropic)
   |> Keyword.put(:xai, merged_xai)
+  |> Keyword.put(:openrouter, merged_openrouter)
+  |> Keyword.put(:ollama, merged_ollama)
+  |> Keyword.put(:mistral, merged_mistral)
 
 config :fermix_core, providers: merged_providers
 
@@ -348,25 +269,25 @@ config :fermix_core,
 
 existing_telegram = Application.get_env(:fermix_channels, :telegram, [])
 
-telegram_overrides = [
-  bot_token:
-    System.get_env("TELEGRAM_BOT_TOKEN") || Keyword.get(existing_telegram, :bot_token, "")
-]
-
+# The bot token is a secret OWNED by each FERMIX_HOME's config.toml (resolved
+# from the keychain / plaintext / `source = "command"` at boot by ConfigStore).
+# It is deliberately NOT read from the environment: a single exported
+# TELEGRAM_BOT_TOKEN would shadow every instance's per-home config and collapse
+# dev + prod onto one token, so both pollers race on getUpdates and Telegram
+# 409s. Config is the single source of truth — no env overlay.
 telegram_overrides =
   case System.get_env("TELEGRAM_ALLOWED_USER_IDS") do
     nil ->
-      telegram_overrides
+      []
 
     "" ->
-      Keyword.put(telegram_overrides, :allowed_user_ids, [])
+      [allowed_user_ids: []]
 
     ids ->
-      Keyword.put(
-        telegram_overrides,
-        :allowed_user_ids,
-        ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
-      )
+      [
+        allowed_user_ids:
+          ids |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.map(&String.to_integer/1)
+      ]
   end
 
 merged_telegram = Keyword.merge(existing_telegram, telegram_overrides)

@@ -18,6 +18,13 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @default_reconciliation_interval_ms 60_000
   @default_due_limit 20
+  @default_run_freshness_window_seconds 3600
+
+  # Wake-time burst smoothing: each newly started run is told to wait this much
+  # per run already active before its first network call, capped, so a batch of
+  # jobs due at the same minute doesn't slam the HTTP pool simultaneously.
+  @runner_stagger_ms 250
+  @max_startup_stagger_ms 5_000
 
   @type state :: %{
           enabled?: boolean(),
@@ -39,6 +46,7 @@ defmodule FermixCore.Jobs.Scheduler do
           runner_notify: pid() | nil,
           runner_delay_ms: non_neg_integer(),
           reconciliation_interval_ms: pos_integer(),
+          run_freshness_window_seconds: pos_integer() | nil,
           due_limit: pos_integer(),
           due_timer: reference() | nil,
           reconciliation_timer: reference() | nil,
@@ -62,6 +70,20 @@ defmodule FermixCore.Jobs.Scheduler do
     GenServer.cast(server, :job_changed)
   catch
     :exit, {:noproc, _call} -> :ok
+  end
+
+  @doc """
+  Claim and start an out-of-band ("run now") execution of a scheduled job.
+
+  Reuses the same atomic claim, runner dispatch, and monitoring as the timed
+  path; only the trigger is `"manual"` and the schedule's `next_run_at` is left
+  untouched (the natural cadence continues). Returns the created run on success.
+  """
+  @spec run_now(GenServer.server(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def run_now(server \\ __MODULE__, job_id, opts \\ []) when is_binary(job_id) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    GenServer.call(server, {:run_now, job_id, now})
   end
 
   @impl true
@@ -93,6 +115,12 @@ defmodule FermixCore.Jobs.Scheduler do
           :reconciliation_interval_ms,
           jobs_config(:reconciliation_interval_ms, @default_reconciliation_interval_ms)
         ),
+      run_freshness_window_seconds:
+        Keyword.get(
+          opts,
+          :run_freshness_window_seconds,
+          jobs_config(:run_freshness_window_seconds, @default_run_freshness_window_seconds)
+        ),
       due_limit: Keyword.get(opts, :due_limit, @default_due_limit),
       due_timer: nil,
       reconciliation_timer: nil,
@@ -115,6 +143,11 @@ defmodule FermixCore.Jobs.Scheduler do
       |> schedule_due_timer()
 
     {:reply, :ok, state}
+  end
+
+  def handle_call({:run_now, job_id, %DateTime{} = now}, _from, state) do
+    {reply, state} = manual_run(job_id, now, state)
+    {:reply, reply, schedule_due_timer(state)}
   end
 
   @impl true
@@ -170,10 +203,86 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp claim_and_start(job, now, state) do
-    if expired?(job, now) do
-      expire_job(job.id, now, state)
-    else
-      claim_and_start_due_job(job, now, state)
+    cond do
+      expired?(job, now) -> expire_job(job.id, now, state)
+      stale?(job, now, state.run_freshness_window_seconds) -> skip_stale_job(job, now, state)
+      true -> claim_and_start_due_job(job, now, state)
+    end
+  end
+
+  # When the daemon is down across a recurring job's fire time, its next_run_at
+  # is left far in the past. Firing it now would run the job with a wall-clock
+  # far from the one it was scheduled for, so a due time older than the freshness
+  # window is skipped and the schedule advances to the next future occurrence.
+  # A one-off `once` job has no next occurrence to advance to — dropping it would
+  # silently lose a one-time request — so it runs late instead, never stale.
+  defp stale?(_job, _now, nil), do: false
+  defp stale?(%{schedule_kind: "once"}, _now, _window), do: false
+
+  defp stale?(%{next_run_at: %DateTime{} = next_run_at}, now, window) when is_integer(window) do
+    DateTime.diff(now, next_run_at, :second) > window
+  end
+
+  defp stale?(_job, _now, _window), do: false
+
+  defp skip_stale_job(job, now, state) do
+    case advance_schedule(job, now) do
+      {:ok, next_run_at} ->
+        advance_stale_job(job, next_run_at, now, state)
+
+      {:error, reason} ->
+        Logger.error(
+          "Scheduled job #{job.id} stale-skip schedule recompute failed: #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp advance_schedule(job, now) do
+    case Schedule.parse(job.schedule_expr, timezone: job.timezone, now: now) do
+      {:ok, %{next_run_at: %DateTime{} = next_run_at}} -> {:ok, next_run_at}
+      {:ok, _parsed} -> {:error, :no_future_run}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Re-fetch and guard on the live state (mirrors expiry) so an edit/pause that
+  # lands between the due scan and here is not clobbered. Only next_run_at moves;
+  # last_status/last_run_at stay untouched because no run actually happened.
+  defp advance_stale_job(job, next_run_at, now, state) do
+    case Repo.get_scheduled_job(job.id, server: state.repo) do
+      {:ok, %{enabled?: true, state: "scheduled"} = current} ->
+        Logger.info(
+          "Scheduled job #{job.id} skipped a stale run due at " <>
+            "#{DateTime.to_iso8601(job.next_run_at)}; next run at #{DateTime.to_iso8601(next_run_at)}"
+        )
+
+        store_advanced_run_at(current, next_run_at, now, state.repo)
+
+      {:ok, _job} ->
+        :ok
+
+      {:error, :not_found} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} stale-skip lookup failed: #{inspect(reason)}")
+    end
+
+    state
+  end
+
+  defp store_advanced_run_at(job, next_run_at, now, repo) do
+    job
+    |> Map.merge(%{next_run_at: next_run_at, updated_at: now})
+    |> Repo.upsert_scheduled_job(server: repo)
+    |> case do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} stale-skip advance failed: #{inspect(reason)}")
     end
   end
 
@@ -198,6 +307,45 @@ defmodule FermixCore.Jobs.Scheduler do
       {:error, reason} ->
         Logger.error("Scheduled job #{job.id} claim patch failed: #{inspect(reason)}")
         state
+    end
+  end
+
+  # Out-of-band manual run: claim immediately regardless of the schedule, but
+  # keep next_run_at so the timed cadence is undisturbed, and tag the run
+  # `trigger: "manual"`. The runner dispatch and monitoring are the same as the
+  # timed path — no second execution path.
+  defp manual_run(job_id, now, state) do
+    case Repo.get_scheduled_job(job_id, server: state.repo) do
+      {:ok, job} -> manual_run_job(job, now, state)
+      {:error, reason} -> {{:error, reason}, state}
+    end
+  end
+
+  # Classify the already-fetched job for a precise error. The state is the
+  # authoritative signal: a job mid-run carries state "running" (the claim sets
+  # it atomically), so "already running" is reported distinctly from a paused,
+  # disabled, or completed job. The in-transaction `ensure_no_active_job_run`
+  # guard (shared with the due path) remains the atomic race-stop underneath.
+  defp manual_run_job(job, now, state) do
+    cond do
+      expired?(job, now) -> {{:error, :expired}, state}
+      not job.enabled? -> {{:error, :not_runnable}, state}
+      job.state == "running" -> {{:error, :already_running}, state}
+      job.state != "scheduled" -> {{:error, :not_runnable}, state}
+      true -> claim_manual_run(job, now, state)
+    end
+  end
+
+  defp claim_manual_run(job, now, state) do
+    run_attrs = job |> run_attrs(now) |> Map.put(:trigger, "manual")
+    job_patch = %{state: "running", updated_at: now}
+
+    case Repo.claim_job_now(job.id, job_patch, run_attrs, server: state.repo) do
+      {:ok, {claimed_job, run}} ->
+        {{:ok, run}, start_or_mark_failed(claimed_job, run, state)}
+
+      {:error, reason} ->
+        {{:error, reason}, state}
     end
   end
 
@@ -283,6 +431,15 @@ defmodule FermixCore.Jobs.Scheduler do
     }
   end
 
+  # Per-run startup delay = how many runs are already active × the stagger step,
+  # capped. Read at start time, so a batch fired back-to-back spreads out (run 1
+  # waits 0, run 2 one step, …) without the scheduler ever blocking — the runner
+  # does the waiting before its first network call.
+  defp startup_stagger_ms(state) do
+    active = DynamicSupervisor.count_children(state.runner_supervisor).active
+    min(active * @runner_stagger_ms, @max_startup_stagger_ms)
+  end
+
   defp start_runner(job, run, state) do
     case RunnerSupervisor.start_run(state.runner_supervisor,
            runner_module: state.runner_module,
@@ -301,7 +458,7 @@ defmodule FermixCore.Jobs.Scheduler do
            timeout_ms: state.timeout_ms,
            inactivity_timeout_ms: state.inactivity_timeout_ms,
            notify: state.runner_notify,
-           delay_ms: state.runner_delay_ms
+           start_delay_ms: startup_stagger_ms(state)
          ) do
       {:ok, pid} when is_pid(pid) -> {:ok, pid}
       {:ok, pid, _info} when is_pid(pid) -> {:ok, pid}

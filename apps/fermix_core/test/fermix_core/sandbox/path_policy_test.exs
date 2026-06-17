@@ -57,6 +57,29 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     FermixTestSupport.SafeRm.rm_rf!(root)
   end
 
+  test "folds a path component to its real on-disk case" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-case")
+    File.mkdir_p!(Path.join(root, ".ssh"))
+
+    # A case-variant of the real `.ssh` dir must resolve to the real entry, so
+    # the case-sensitive containment checks still recognise it.
+    assert PathPolicy.canonical_path(Path.join(root, ".SSH/authorized_keys")) ==
+             PathPolicy.canonical_path(Path.join(root, ".ssh/authorized_keys"))
+
+    FermixTestSupport.SafeRm.rm_rf!(root)
+  end
+
+  test "blocks a case-variant of a protected home dir" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-home")
+    File.mkdir_p!(Path.join(home, ".ssh"))
+    config = Config.normalize(mode: :open, home: home, workspace_root: home)
+
+    assert {:error, {:protected_path, _path}} =
+             PathPolicy.allowed_path?(Path.join(home, ".SSH/evil_key"), config)
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
   test "protects macOS private etc alias when present" do
     if File.exists?("/private/etc") do
       root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-private")

@@ -115,4 +115,62 @@ defmodule FermixCore.Plugins.CapabilityTest do
     assert {:ok, %{registered: []}} = Capabilities.reload(registry)
     assert :error = CapabilityRegistry.find(registry, "google_calendar_search_events")
   end
+
+  test "mcp-rail tools never register as builtin capabilities", %{registry: registry} do
+    checkout = FermixTestSupport.SafeRm.make_tmp_dir!("plugin-caps-devlocal")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(checkout) end)
+
+    dir = Path.join(checkout, "vaultkit")
+    File.mkdir_p!(dir)
+
+    manifest = %{
+      "schema_version" => 2,
+      "name" => "vaultkit",
+      "display_name" => "Vaultkit",
+      "description" => "Vault tools",
+      "category" => "productivity",
+      "version" => "1.0.0",
+      "plugin_api" => 2,
+      "auth" => %{"type" => "none"},
+      "runtime" => %{
+        "kind" => "node",
+        "min_version" => "20",
+        "command" => "node",
+        "args" => ["src/index.js"],
+        "vendored" => false
+      },
+      "tools" => [
+        %{
+          "name" => "vaultkit_list",
+          "description" => "List vault entries",
+          "rail" => "http",
+          "parameters" => %{"type" => "object", "properties" => %{}},
+          "request" => %{"method" => "GET", "url" => "https://example.com/list"}
+        },
+        %{
+          "name" => "vaultkit_search",
+          "description" => "Search the vault",
+          "rail" => "mcp"
+        }
+      ]
+    }
+
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+
+    Application.put_env(:fermix_core, :plugins,
+      enabled: ["vaultkit"],
+      dev_local: checkout,
+      entries: %{}
+    )
+
+    probe = [
+      find_executable: fn _cmd -> "/usr/bin/node" end,
+      version_fetch: fn _cmd -> {:ok, "v20.11.1\n"} end
+    ]
+
+    assert {:ok, %{registered: names}} = Capabilities.reload(registry, status: [probe: probe])
+    assert "vaultkit_list" in names
+    refute "vaultkit_search" in names
+    assert :error = CapabilityRegistry.find(registry, "vaultkit_search")
+  end
 end

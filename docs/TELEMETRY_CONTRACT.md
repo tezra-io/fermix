@@ -5,8 +5,8 @@ logging. Every LLM/tool call is stamped with the `session_id` of the run that
 issued it, runs are bracketed by lifecycle events, and the JSONL trace stream is
 structured. That contract is what lets a turn — including the subagents it
 delegates to and the tools they call — be reassembled into one trace (greppable
-on its own, or rendered by the optional `fermix_opik` exporter in
-`projects/fermix-plugins`).
+on its own, or rendered by the optional in-umbrella `fermix_opik` exporter,
+`apps/fermix_opik`).
 
 **The rule:** new code must *join* this contract, not invent a parallel one.
 Concretely — never hand-roll `:telemetry.execute([:fermix, :tool|provider, ...])`;
@@ -76,19 +76,55 @@ A subagent or scheduled job is a *run*. New run kinds (anything that calls
 3. route those events into the JSONL trace stream via
    `FermixCore.Trace.TelemetryHandler` (`event_definitions/0`).
 
+## Plugin distribution ops
+
+Plugin `install`/`uninstall`/`gc` emit `[:fermix, :plugin, :dist]`
+through `FermixCore.Plugins.Dist.Telemetry.emit/5` (op, plugin, version,
+result/reason + `duration_ms`) — never hand-roll the event. These ops run in
+the installer or a CLI VM with no agent session, so they carry no `session_id`:
+`Trace.TelemetryHandler` maps each to a `plugin_dist` row in `agent_event`,
+and the Opik exporter renders each op as its own self-closing `dist:<op>`
+trace.
+
+## Background memory writes
+
+The background memory **reviewer** persists facts outside the turn that
+triggered them (a detached, gated, LLM-judged run). Each durable write emits
+`[:fermix, :memory, :write]` (measurements `%{count: 1}`; metadata `tool:
+"memory_write"`, `action`, `category`, `key`, `scope_type`, `memory_id`, plus
+attribution `session_id` + the conversation `channel`/`chat_id` and optional
+`parent_session`). This makes a reviewer-driven persist an **observable span**
+so "no `memory_store` tool span" is no longer indistinguishable from a no-op.
+`Trace.TelemetryHandler` records it as a `tool_exec` row (`tool: memory_write`);
+`FermixOpik` renders it via `Mapper.memory_write_span` as a `tool` span nested
+under the reviewer's run. The reviewer fires **after** the turn's trace closes,
+so it cannot nest into that trace — it correlates to the conversation by
+`thread_id` (`channel:chat_id`), which `Aggregation.place_under` backfills onto
+the reviewer's root trace from this event. The synchronous `memory_store` tool
+keeps its own `[:fermix, :tool, :exec]` span — this event is only the reviewer's
+otherwise-invisible write path.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and
-bound them with `FermixCore.Telemetry.preview/1`. Enabling the Opik exporter
-(`FERMIX_OPIK_ENABLED=1`) defaults content capture **on** (resolved in
-`config/runtime.exs`); `FERMIX_TRACE_CONTENT` is the explicit override. Off
-otherwise — bloat + privacy; bodies are only needed for eval/observing.
+shape them with `FermixCore.Telemetry.preview/1`. With capture **off** (the
+default), `preview/1` bounds everything (2k chars, default inspect limits);
+with capture **on** it passes content through whole — the operator opted into
+full-fidelity traces for debugging, and clipping would defeat the point.
+Capture-on also enriches some emitters: a failed browser action attaches the
+profile's recent console/JS-exception buffer to its error details. Enabling
+the Opik exporter (`FERMIX_OPIK_ENABLED=1`) defaults content capture **on**
+(resolved in `config/runtime.exs`); `FERMIX_TRACE_CONTENT` is the explicit
+override. Off otherwise — bloat + privacy; bodies are only needed for
+eval/observing.
 
 ---
 
-## When does the `fermix_opik` plugin also need a change?
+## When does the `fermix_opik` exporter also need a change?
 
-The plugin is a **separate repo** (`projects/fermix-plugins`). The dividing line:
+The exporter lives **in-umbrella** (`apps/fermix_opik`, dev-only opt-in via
+`FERMIX_OPIK_ENABLED`), so its mapper/test changes land in the same diff and
+the same `mix test` gate as the provider work. The dividing line:
 
 | You added… | Plugin change needed? |
 |---|---|
@@ -104,5 +140,5 @@ Opik — the live JSONL is unaffected.
 
 - Write the telemetry assertion **red first, then green** — prove the event
   actually carries `session_id`/the fields you expect before trusting it.
-- New plugin handling: extend `aggregation_test.exs` (one trace, correct
-  nesting) and keep `fermix-plugins` green (`mix check`).
+- New exporter handling: extend `aggregation_test.exs` (one trace, correct
+  nesting) under `apps/fermix_opik`.

@@ -95,7 +95,7 @@ defmodule FermixCore.Auth.OAuthFlow do
 
     pkce = generate_pkce()
 
-    case listen_with_fallback(port, Keyword.get(opts, :port_fallbacks, 5)) do
+    case listen_for(provider, port, opts) do
       {:ok, listener} ->
         {:ok, actual_port} = :inet.port(listener)
         redirect_uri = redirect_uri(provider, actual_port)
@@ -216,11 +216,10 @@ defmodule FermixCore.Auth.OAuthFlow do
       %{
         "grant_type" => "authorization_code",
         "code" => code,
-        "client_id" => provider.client_id,
         "redirect_uri" => redirect_uri,
         "code_verifier" => code_verifier
       }
-      |> maybe_put_param("client_secret", provider.client_secret)
+      |> Map.merge(OAuthProvider.body_credentials(provider))
       |> maybe_echo_code_challenge(provider, code_verifier)
       |> URI.encode_query()
 
@@ -229,7 +228,7 @@ defmodule FermixCore.Auth.OAuthFlow do
         url: provider.token_url,
         method: :post,
         body: body,
-        headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        headers: OAuthProvider.token_request_headers(provider)
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
@@ -308,6 +307,31 @@ defmodule FermixCore.Auth.OAuthFlow do
     end
   end
 
+  # Providers with exact-match registered redirect URIs (fixed_port?) get one
+  # bind attempt — falling back to another port would redirect to an
+  # unregistered URI, so a taken port fails loud instead.
+  defp listen_for(%OAuthProvider{fixed_port?: true} = provider, port, _opts) do
+    case listen(port) do
+      {:ok, listener} ->
+        {:ok, listener}
+
+      {:error, {:listen_failed, ^port, :eaddrinuse}} ->
+        Logger.error(
+          "OAuthFlow: redirect port #{port} is in use and #{provider.id} requires the exact " <>
+            "registered redirect URI — free the port and retry."
+        )
+
+        {:error, {:port_in_use, port}}
+
+      {:error, _reason} = err ->
+        err
+    end
+  end
+
+  defp listen_for(%OAuthProvider{} = _provider, port, opts) do
+    listen_with_fallback(port, Keyword.get(opts, :port_fallbacks, 5))
+  end
+
   defp listen_with_fallback(0, _fallbacks), do: listen(0)
 
   defp listen_with_fallback(port, fallbacks)
@@ -342,10 +366,6 @@ defmodule FermixCore.Auth.OAuthFlow do
   defp redirect_uri(%OAuthProvider{} = provider, port) do
     "http://#{provider.redirect_host}:#{port}#{provider.redirect_path}"
   end
-
-  defp maybe_put_param(params, _key, nil), do: params
-  defp maybe_put_param(params, _key, ""), do: params
-  defp maybe_put_param(params, key, value), do: Map.put(params, key, value)
 
   defp announce_and_open(puts, nil, url) do
     puts.("Open this URL in your browser to sign in:\n  #{url}")

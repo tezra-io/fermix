@@ -1,6 +1,8 @@
 defmodule FermixCore.Setup.ConfigStoreTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.MCP.Inbound.Config, as: InboundConfig
   alias FermixCore.Setup.ConfigStore
 
@@ -253,6 +255,80 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
   end
 
+  test "save/load round-trip preserves the tool_search deferral flag (M10)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [tools: [tool_search: [enabled: false]]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.tools.tool_search]"
+    assert contents =~ "enabled = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    tool_search =
+      loaded.fermix_core
+      |> Keyword.get(:tools, [])
+      |> Keyword.get(:tool_search, [])
+
+    # The explicit kill-switch survives the round-trip — it is not dropped on
+    # the way to Application.get_env, so Deferral.enabled?/0 can read it.
+    assert Keyword.get(tool_search, :enabled) == false
+  end
+
+  test "save/load round-trips subagent/cron routing keys and drops the removed dormant keys" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        routing: [
+          # removed dormant keys (old config) — must degrade cleanly on next save
+          coding_model: "old-coding-model",
+          default_provider: "openai",
+          # live keys
+          subagent_provider: "openai",
+          subagent_model: "gpt-5.4-mini",
+          subagent_reasoning_effort: "low",
+          cron_model: "claude-haiku-4-5"
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.routing]"
+    assert contents =~ ~s(subagent_model = "gpt-5.4-mini")
+    refute contents =~ "coding_model"
+    refute contents =~ "default_provider"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    routing = Keyword.get(loaded.fermix_core, :routing, [])
+
+    assert Keyword.get(routing, :subagent_provider) == "openai"
+    assert Keyword.get(routing, :subagent_model) == "gpt-5.4-mini"
+    assert Keyword.get(routing, :subagent_reasoning_effort) == "low"
+    assert Keyword.get(routing, :cron_model) == "claude-haiku-4-5"
+    refute Keyword.has_key?(routing, :coding_model)
+    refute Keyword.has_key?(routing, :default_provider)
+  end
+
   test "save/load round-trips plugin and oauth provider config" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -325,6 +401,60 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(resolved_google, :client_secret) == "desktop-secret"
   end
 
+  test "load/save round-trips plugins dev_local as a top-level scalar" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["google_calendar"]
+    dev_local = "/tmp/x"
+
+    [fermix_core.plugins.google_calendar]
+    auth_profile = "google_calendar:primary"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    assert Keyword.get(plugins, :dev_local) == "/tmp/x"
+    assert Keyword.get(plugins, :enabled) == ["google_calendar"]
+
+    entries = Keyword.get(plugins, :entries, %{})
+    assert Map.keys(entries) == ["google_calendar"]
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(dev_local = "/tmp/x")
+    refute contents =~ "[fermix_core.plugins.dev_local]"
+  end
+
+  test "a non-string plugins dev_local is dropped like other bad config values" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.plugins]
+    enabled = ["google_calendar"]
+    dev_local = 42
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    plugins = Keyword.get(loaded.fermix_core, :plugins, [])
+
+    refute Keyword.has_key?(plugins, :dev_local)
+    assert Keyword.get(plugins, :entries, %{}) == %{}
+  end
+
   test "load_runtime_config resolves @keyring sentinels through SecretWriter" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -343,6 +473,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     openai = loaded.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:openai, [])
     assert Keyword.get(openai, :api_key) == "sk-from-keyring"
+  end
+
+  test "load_runtime_config warns for missing optional web search keyring secrets" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.tools.web_search]
+    backend = "tavily"
+    tavily_api_key = "@keyring"
+    """)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, loaded} = ConfigStore.load_runtime_config()
+
+        web_search =
+          loaded.fermix_core
+          |> Keyword.get(:tools, [])
+          |> Keyword.get(:web_search, [])
+
+        assert Keyword.get(web_search, :backend) == :tavily
+        assert Keyword.get(web_search, :tavily_api_key) == "@keyring"
+      end)
+
+    assert log =~ "TAVILY_API_KEY"
+    assert log =~ "Tavily web_search backend"
+    assert log =~ "will fail"
+    assert log =~ "fermix setup"
   end
 
   test "save_snapshot preserves @keyring sentinels on disk" do
@@ -765,6 +928,34 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            ]
   end
 
+  test "save/load round-trips the network readiness job flag" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        agent: [name: "fermix"],
+        jobs: [network_readiness_enabled: false]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "network_readiness_enabled = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    jobs = Keyword.get(loaded.fermix_core, :jobs, [])
+
+    assert Keyword.get(jobs, :network_readiness_enabled) == false
+  end
+
   test "save/load round-trips per-channel command authorization config" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -930,7 +1121,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             fast: true,
             store: true
           ],
-          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-7"]
+          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-8"]
         ],
         agent: [name: "fermix", provider: :openai_codex]
       ],
@@ -949,7 +1140,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ "fast = true"
     refute contents =~ "store ="
     assert contents =~ "[fermix_core.providers.anthropic]"
-    assert contents =~ ~s(default_model = "claude-opus-4-7")
+    assert contents =~ ~s(default_model = "claude-opus-4-8")
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     providers = Keyword.get(loaded.fermix_core, :providers, [])
@@ -965,7 +1156,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute Keyword.has_key?(openai_codex, :store)
 
     anthropic = Keyword.get(providers, :anthropic, [])
-    assert Keyword.get(anthropic, :default_model) == "claude-opus-4-7"
+    assert Keyword.get(anthropic, :default_model) == "claude-opus-4-8"
     assert Keyword.get(anthropic, :api_key) == "sk-ant"
   end
 
@@ -979,7 +1170,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     snapshot = %{
       fermix_core: [
         providers: [
-          anthropic: [auth_mode: :oauth, default_model: "claude-opus-4-7"],
+          anthropic: [auth_mode: :oauth, default_model: "claude-opus-4-8"],
           xai: [auth_mode: :oauth, default_model: "grok-4.3"]
         ],
         agent: [name: "fermix", provider: :xai]
@@ -1034,7 +1225,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
         providers: [
           openai: [auth_mode: :api_key, api_key: "sk-x", default_model: "gpt-5.5"],
           openai_codex: [default_model: "gpt-5.5", reasoning_effort: :high],
-          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-7"]
+          anthropic: [auth_mode: :api_key, api_key: "sk-ant", default_model: "claude-opus-4-8"]
         ],
         agent: [name: "fermix", provider: :openai]
       ],
@@ -1088,7 +1279,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     File.write!(Path.join(tmp_home, "config.toml"), """
     [fermix_core.providers.openai]
-    auth_mode = "api_key"
     api_key = "sk-x"
     reasoning_effort = "absurd"
     """)
@@ -1104,7 +1294,83 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(openai, :api_key) == "sk-x"
   end
 
-  test "normalize_openai drops auth_mode from hand-edited TOML" do
+  test "openrouter and ollama blocks round-trip through dump -> parse -> normalize" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.openrouter]
+    api_key = "sk-or-disk"
+    base_url = "https://proxy.example/api/v1"
+    default_model = "z-ai/glm-5.1"
+    primary = true
+
+    [fermix_core.providers.ollama]
+    base_url = "http://localhost:11434/v1"
+    default_model = "qwen3:32b"
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(loaded.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:openrouter], :api_key) == "sk-or-disk"
+    assert Keyword.get(providers[:openrouter], :base_url) == "https://proxy.example/api/v1"
+    assert Keyword.get(providers[:openrouter], :primary) == true
+    assert Keyword.get(providers[:ollama], :base_url) == "http://localhost:11434/v1"
+    assert Keyword.get(providers[:ollama], :default_model) == "qwen3:32b"
+
+    # Idempotent round-trip: save the loaded snapshot and reload byte-stable
+    # provider blocks (secure_secrets: false keeps the plaintext fixture).
+    assert :ok = ConfigStore.save_snapshot(loaded, secure_secrets: false)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+    assert Keyword.get(reloaded.fermix_core, :providers) ==
+             Keyword.get(loaded.fermix_core, :providers)
+  end
+
+  test "rejects an api_key in the keyless ollama block from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.providers.ollama]
+    api_key = "nonsense"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown key\(s\): api_key/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "rejects an unknown legacy agent provider from hand-edited TOML" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.agent]
+    provider = "gemini"
+    """)
+
+    # M12 §2.3-1: an unknown provider used to silently normalize to nil and
+    # boot on the default provider — the worst silent failure on record.
+    assert_raise ArgumentError, ~r/provider = "gemini" is unknown/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "rejects unknown keys (auth_mode) in the openai block from hand-edited TOML" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
@@ -1118,15 +1384,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     api_key = "sk-x"
     """)
 
-    assert {:ok, loaded} = ConfigStore.load_runtime_config()
-
-    openai =
-      loaded.fermix_core
-      |> Keyword.get(:providers, [])
-      |> Keyword.get(:openai, [])
-
-    refute Keyword.has_key?(openai, :auth_mode)
-    assert Keyword.get(openai, :api_key) == "sk-x"
+    # M12 §4: user-authored keys outside the descriptor allowlist raise at
+    # the parse boundary instead of being silently dropped.
+    assert_raise ArgumentError, ~r/unknown key\(s\): auth_mode/, fn ->
+      ConfigStore.load_runtime_config()
+    end
   end
 
   test "load_runtime_config rejects invalid compaction values from hand-edited TOML" do

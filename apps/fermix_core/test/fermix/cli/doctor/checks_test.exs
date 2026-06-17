@@ -20,6 +20,128 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "bootstrap_template_drift/1" do
+    alias FermixCore.Memory.Repo, as: MemoryRepo
+    alias FermixCore.Prompt.TemplateRenderer
+    alias FermixCore.Resource.Registry, as: ResourceRegistry
+
+    setup do
+      unique = System.unique_integer([:positive])
+      db_dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-drift-#{unique}")
+      repo_name = :"drift_repo_#{unique}"
+
+      start_supervised!(
+        {MemoryRepo,
+         name: repo_name, enabled: true, database_path: Path.join(db_dir, "memory.db")}
+      )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(db_dir) end)
+      %{repo: repo_name}
+    end
+
+    defp commit_seed(repo, type, content) do
+      {:ok, _revision} =
+        ResourceRegistry.commit("main", type, "global", content,
+          mutation_source: :seed,
+          repo: repo
+        )
+    end
+
+    test "ok when seeds match the current shipped templates", %{repo: repo} do
+      for {name, type} <- [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md] do
+        {:ok, current} = TemplateRenderer.render(name, %{})
+        commit_seed(repo, type, current)
+      end
+
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :ok
+      assert result.detail =~ "current shipped templates"
+    end
+
+    test "warns when a shipped template changed since seed", %{repo: repo} do
+      {:ok, current_soul} = TemplateRenderer.render(:soul, %{})
+      {:ok, current_realtime} = TemplateRenderer.render(:realtime, %{})
+
+      commit_seed(repo, :fermix_md, "an older fermix template render")
+      commit_seed(repo, :soul_md, current_soul)
+      commit_seed(repo, :realtime_md, current_realtime)
+
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :warn
+      assert result.detail =~ "fermix.md"
+      refute result.detail =~ "soul.md"
+    end
+
+    test "reports unknown for installs seeded before revision tracking", %{repo: repo} do
+      result = Checks.bootstrap_template_drift(repo: repo)
+      assert result.status == :ok
+      assert result.detail =~ "no seed record"
+    end
+  end
+
+  describe "routing_overrides/0" do
+    setup do
+      original = Application.get_env(:fermix_core, :routing, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :routing, original) end)
+    end
+
+    test "ok when nothing is configured (inherit)" do
+      Application.put_env(:fermix_core, :routing, [])
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "subagent: inherits main"
+      assert result.detail =~ "cron: inherits main"
+    end
+
+    test "ok and summarizes valid subagent/cron overrides" do
+      Application.put_env(:fermix_core, :routing,
+        subagent_model: "gpt-5.4-mini",
+        cron_provider: "anthropic",
+        cron_reasoning_effort: "low"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "model=gpt-5.4-mini"
+      assert result.detail =~ "provider=anthropic"
+      assert result.detail =~ "effort=low"
+    end
+
+    test "fails on a typo'd cron provider" do
+      Application.put_env(:fermix_core, :routing, cron_provider: "anthropi")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "cron_provider"
+    end
+
+    test "fails on an invalid subagent effort" do
+      Application.put_env(:fermix_core, :routing, subagent_reasoning_effort: "turbo")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "subagent_reasoning_effort"
+    end
+
+    test "fails on a subagent_model unknown to every provider (typo/removed)" do
+      Application.put_env(:fermix_core, :routing, subagent_model: "claude-opus-4-7")
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "subagent_model"
+      assert result.detail =~ "not a known model for any provider"
+    end
+
+    test "fails when an explicit provider does not offer the pinned model" do
+      Application.put_env(:fermix_core, :routing,
+        cron_provider: "openai",
+        cron_model: "claude-haiku-4-5"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :fail
+      assert result.detail =~ "cron_model"
+      assert result.detail =~ "not a model offered by provider :openai"
+    end
+  end
+
   describe "web_search/1" do
     setup do
       original = Application.get_env(:fermix_core, :tools, [])
@@ -108,6 +230,71 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.daemon_socket()
       assert result.name == "daemon socket"
       assert result.status in [:ok, :warn, :fail]
+    end
+  end
+
+  describe "opik_readiness/1" do
+    test "ok and off when the daemon reports disabled" do
+      client = fn "observability" ->
+        {:ok, %{"status" => "ok", "observability" => %{"status" => "disabled"}}}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.name == "opik export"
+      assert result.status == :ok
+      assert result.detail =~ "off"
+    end
+
+    test "ok with endpoint and project when enabled and ready" do
+      client = fn "observability" ->
+        {:ok,
+         %{
+           "status" => "ok",
+           "observability" => %{
+             "status" => "enabled_ready",
+             "base_url" => "http://localhost:5173/api",
+             "project" => "fermix"
+           }
+         }}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :ok
+      assert result.detail =~ "http://localhost:5173/api"
+      assert result.detail =~ "fermix"
+    end
+
+    test "fails when enabled but the exporter is missing from the build" do
+      client = fn "observability" ->
+        {:ok, %{"status" => "ok", "observability" => %{"status" => "enabled_missing_app"}}}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :fail
+      assert result.detail =~ "not loaded"
+    end
+
+    test "warns when enabled and loaded but the reporter is not attached" do
+      client = fn "observability" ->
+        {:ok, %{"status" => "ok", "observability" => %{"status" => "enabled_not_attached"}}}
+      end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "not attached"
+    end
+
+    test "warns when the daemon is not running" do
+      client = fn "observability" -> {:error, :not_running} end
+
+      result = Checks.opik_readiness(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "not running"
     end
   end
 

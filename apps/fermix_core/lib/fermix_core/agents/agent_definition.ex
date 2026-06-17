@@ -26,6 +26,7 @@ defmodule FermixCore.Agents.AgentDefinition do
           system_prompt: String.t(),
           model: String.t() | nil,
           provider: atom() | nil,
+          reasoning_effort: atom() | nil,
           temperature: float() | nil,
           capabilities: [String.t()],
           allowed_tools: [String.t()] | nil,
@@ -59,6 +60,9 @@ defmodule FermixCore.Agents.AgentDefinition do
     :system_prompt,
     :model,
     :provider,
+    # Set only by Tools.Subagents from [fermix_core.routing]/per-call args; NOT
+    # parsed from SKILL.md frontmatter (docs/design/SUBAGENT_MODEL_SELECTION.md §5a).
+    :reasoning_effort,
     :temperature,
     :capabilities,
     :allowed_tools,
@@ -73,7 +77,13 @@ defmodule FermixCore.Agents.AgentDefinition do
 
   @absent_sentinel :__absent__
   @valid_policy_strings ~w(read_only read_write exec network external_api)
-  @valid_provider_strings ~w(openai openai_codex anthropic xai openrouter together groq)
+  # Derived from the Descriptor registry — accepted strings and routable
+  # providers can no longer diverge. `together`/`groq` were removed: they
+  # were accepted-but-unroutable (no resolver ever existed; M12 §2.3-8).
+  @valid_provider_strings Enum.map(
+                            FermixCore.Providers.Descriptor.ids(),
+                            &Atom.to_string/1
+                          )
 
   @spec new(map()) :: {:ok, t()} | {:error, term()}
   def new(attrs) when is_map(attrs) do
