@@ -33,6 +33,26 @@ jobs:
           fi
           echo "Releasing v$mix_version"
 
+      - name: Assemble release notes from CHANGELOG
+        # Curated notes come from the version's CHANGELOG.md section, not from
+        # auto-generated commit/PR titles. Runs before the build so a missing
+        # CHANGELOG entry fails fast (extract_changelog.sh exits non-zero) rather
+        # than after a 10-minute build.
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          {
+            printf '## What'\''s new in %s\n\n' "$TAG_NAME"
+            ./scripts/release/extract_changelog.sh "$version" CHANGELOG.md
+            printf '\n'
+            sed "s|__REPO__|${REPO}|g" scripts/release/signing_footer.md
+          } > RELEASE_NOTES.md
+          echo '----- assembled RELEASE_NOTES.md -----'
+          cat RELEASE_NOTES.md
+
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{ env.OTP_VERSION }}
@@ -87,28 +107,20 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           fail_on_unmatched_files: true
-          generate_release_notes: true
-          append_body: true
-          body: |
-            ### Verifying signatures
-
-            Each binary is signed with [cosign](https://docs.sigstore.dev/cosign/overview/) using GitHub Actions OIDC keyless signing. Verify a download with:
-
-            ```bash
-            cosign verify-blob \
-              --certificate fermix_<target>.pem \
-              --signature  fermix_<target>.sig \
-              --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*" \
-              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              fermix_<target>
-            ```
-
-            The `releases.json` artifact lists every binary's URL, sha256, and signature URLs.
+          # Pre-release tags (those carrying a SemVer pre-release segment, e.g.
+          # v0.3.0-beta) publish as a GitHub pre-release so they are never marked
+          # "Latest". Stable tags (v0.3.0) have no '-' and publish normally.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # Curated notes assembled from the CHANGELOG section + signing footer.
+          body_path: RELEASE_NOTES.md
           files: |
             burrito_out/fermix_*
             burrito_out/releases.json
 
       - name: Bump Homebrew tap
+        # Only stable releases bump the tap. A pre-release tag (v*-beta/-rc/...)
+        # must never promote itself to the formula that all `brew` users install.
+        if: ${{ !contains(github.ref_name, '-') }}
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ github.ref_name }}

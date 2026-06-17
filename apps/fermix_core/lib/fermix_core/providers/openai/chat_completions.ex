@@ -270,11 +270,25 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
   defp format_messages(messages) do
     Enum.map(messages, fn msg ->
-      %{role: msg.role, content: msg.content || ""}
+      tool_calls = Map.get(msg, :tool_calls)
+
+      %{role: msg.role}
+      |> put_content(Map.get(msg, :content), tool_calls)
       |> maybe_put_field(:tool_call_id, Map.get(msg, :tool_call_id))
-      |> maybe_put_tool_calls(Map.get(msg, :tool_calls))
+      |> maybe_put_tool_calls(tool_calls)
     end)
   end
+
+  # Mistral's strict validator 422s on empty-string `content` sent alongside
+  # `tool_calls`; the cross-ecosystem fix (langchain #21196, litellm #13355,
+  # vllm #38738) is to omit the `content` key in exactly that case. A real
+  # preamble (non-empty content + tool_calls) is kept, and OpenAI/OpenRouter/
+  # Ollama tolerate the omission — one wire shape valid on every provider.
+  defp put_content(map, content, calls)
+       when is_list(calls) and calls != [] and content in [nil, ""],
+       do: map
+
+  defp put_content(map, content, _calls), do: Map.put(map, :content, content || "")
 
   defp maybe_put_field(map, _key, nil), do: map
   defp maybe_put_field(map, key, value), do: Map.put(map, key, value)

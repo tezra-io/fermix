@@ -85,7 +85,8 @@ defmodule FermixWebWeb.HealthControllerTest do
 
       assert Enum.any?(body["failures"], fn failure ->
                failure["component"] == "channel:telegram" and
-                 failure["action"] == "Set TELEGRAM_BOT_TOKEN."
+                 failure["action"] ==
+                   "Set the Telegram bot token: run `fermix setup` or set bot_token in config.toml."
              end)
 
       assert Enum.any?(body["providers"], fn provider ->

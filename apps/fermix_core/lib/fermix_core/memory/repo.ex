@@ -19,6 +19,7 @@ defmodule FermixCore.Memory.Repo do
   @trust_rename_migration_version 7
   @fermix_md_rename_migration_version 8
   @memory_review_migration_version 9
+  @taxonomy_migration_version 10
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -281,6 +282,28 @@ defmodule FermixCore.Memory.Repo do
   UPDATE resources
     SET resource_path = substr(resource_path, 1, length(resource_path) - 9) || 'FERMIX.md'
     WHERE resource_type = 'fermix_md' AND resource_path LIKE '%/AGENTS.md';
+  """
+
+  # Memory taxonomy redesign: the category vocabulary moved to a general-assistant
+  # spine. Existing rows are rewritten in place — `project`/`environment` fold
+  # into `context`, `instruction`/`correction` fold into `directive` — preserving
+  # each row's promote_target (both predecessor and successor resolve to the same
+  # prompt file). `episode` is retired: those rows are tombstoned rather than
+  # deleted, so a misclassification can still be restored. The UPDATE triggers
+  # keep the FTS mirror consistent; `key`/scope are untouched, so the
+  # scope-key UNIQUE index is never violated. Conversation-cache `fact` rows are
+  # a separate namespace and intentionally left alone.
+  @taxonomy_schema_sql """
+  UPDATE memories SET category = 'context'
+    WHERE category IN ('project', 'environment');
+  UPDATE memories SET category = 'directive'
+    WHERE category IN ('instruction', 'correction');
+  UPDATE memories
+    SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+        archived_by = 'taxonomy_migration',
+        archive_reason = 'retired_category:episode',
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    WHERE category = 'episode' AND archived_at IS NULL;
   """
 
   @memory_review_schema_sql """
@@ -825,6 +848,13 @@ defmodule FermixCore.Memory.Repo do
     call({:claim_due_job, id, job_attrs, run_attrs, now}, opts)
   end
 
+  @spec claim_job_now(String.t(), scheduled_job_attrs(), job_run_attrs(), keyword()) ::
+          {:ok, {scheduled_job_row(), job_run_row()}} | {:error, term()}
+  def claim_job_now(id, job_attrs, run_attrs, opts \\ [])
+      when is_binary(id) and is_map(job_attrs) and is_map(run_attrs) do
+    call({:claim_job_now, id, job_attrs, run_attrs}, opts)
+  end
+
   @spec upsert_scheduled_job(scheduled_job_attrs(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, term()}
   def upsert_scheduled_job(attrs, opts \\ []) when is_map(attrs) do
@@ -1110,6 +1140,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:claim_job_now, id, job_attrs, run_attrs}, _from, state) do
+    reply = with_connection(state, &claim_job_now_tx(&1, id, job_attrs, run_attrs))
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_scheduled_job, attrs}, _from, state) do
     reply = with_connection(state, &upsert_scheduled_job_row(&1, attrs))
     {:reply, reply, state}
@@ -1215,7 +1250,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_creator_trust_migration(conn, versions),
          :ok <- apply_trust_rename_migration(conn, versions),
          :ok <- apply_fermix_md_rename_migration(conn, versions),
-         :ok <- apply_memory_review_migration(conn, versions) do
+         :ok <- apply_memory_review_migration(conn, versions),
+         :ok <- apply_taxonomy_migration(conn, versions) do
       :ok
     end
   end
@@ -1377,6 +1413,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{@memory_review_schema_sql}
         INSERT INTO schema_migrations(version) VALUES (#{@memory_review_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_taxonomy_migration(conn, versions) do
+    if Enum.member?(versions, @taxonomy_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@taxonomy_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@taxonomy_migration_version});
         COMMIT;
         """
       )
@@ -2138,8 +2190,22 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp claim_due_job_tx(conn, id, job_attrs, run_attrs, now) do
+    transact_claim(conn, fn ->
+      claim_in_tx(conn, id, job_attrs, run_attrs, fetch_claimable_due_job(conn, id, now))
+    end)
+  end
+
+  # A manual ("run now") claim is identical to a due claim except it skips the
+  # due-time gate — the same single-flight guard and atomic upserts still apply.
+  defp claim_job_now_tx(conn, id, job_attrs, run_attrs) do
+    transact_claim(conn, fn ->
+      claim_in_tx(conn, id, job_attrs, run_attrs, fetch_claimable_job(conn, id))
+    end)
+  end
+
+  defp transact_claim(conn, claim_fun) do
     with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
-         result <- claim_due_job_in_tx(conn, id, job_attrs, run_attrs, now),
+         result <- claim_fun.(),
          :ok <- finish_job_claim(conn, result) do
       result
     else
@@ -2148,10 +2214,10 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  defp claim_due_job_in_tx(conn, id, job_attrs, run_attrs, now) do
-    with {:ok, due_job} <- fetch_claimable_due_job(conn, id, now),
+  defp claim_in_tx(conn, id, job_attrs, run_attrs, fetch_result) do
+    with {:ok, job} <- fetch_result,
          :ok <- ensure_no_active_job_run(conn, id),
-         {:ok, claimed_job} <- upsert_scheduled_job_row(conn, Map.merge(due_job, job_attrs)),
+         {:ok, claimed_job} <- upsert_scheduled_job_row(conn, Map.merge(job, job_attrs)),
          {:ok, run} <- upsert_job_run_row(conn, run_attrs) do
       {:ok, {claimed_job, run}}
     end
@@ -2178,6 +2244,27 @@ defmodule FermixCore.Memory.Repo do
       case rows do
         [row] -> {:ok, scheduled_job_row(row)}
         [] -> {:error, :not_due}
+      end
+    end
+  end
+
+  defp fetch_claimable_job(conn, id) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM scheduled_jobs
+             WHERE id = ?
+               AND enabled = 1
+               AND state = 'scheduled'
+             LIMIT 1
+             """,
+             [id]
+           ) do
+      case rows do
+        [row] -> {:ok, scheduled_job_row(row)}
+        [] -> {:error, :not_runnable}
       end
     end
   end

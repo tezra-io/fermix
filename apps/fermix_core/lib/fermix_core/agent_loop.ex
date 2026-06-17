@@ -473,13 +473,22 @@ defmodule FermixCore.AgentLoop do
     with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
       results =
         Enum.map(tool_calls, fn tool_call ->
-          output = run_tool_call(tool_call, state)
+          output = tool_call |> run_tool_call(state) |> sanitize_tool_output()
           %{call_id: tool_call.call_id, output: output}
         end)
 
       {:ok, results}
     end
   end
+
+  # Tool output can carry bytes that are not valid UTF-8 — a file read of a
+  # source saved in Latin-1, raw command bytes, an HTTP body with a stray byte.
+  # Jason rejects invalid UTF-8 and raises when a provider encodes the request
+  # body, which crashes the whole run (and is invisible until that turn fires).
+  # Replace invalid bytes with the Unicode replacement character at this single
+  # seam so every tool result reaching every provider is encodable.
+  defp sanitize_tool_output(output) when is_binary(output), do: String.replace_invalid(output)
+  defp sanitize_tool_output(output), do: output
 
   defp enforce_channel_side_effect_bound(tool_calls, state) do
     count = Enum.count(tool_calls, &channel_side_effect_call?(&1, state))

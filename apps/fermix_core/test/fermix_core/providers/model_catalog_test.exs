@@ -11,6 +11,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
                :anthropic,
                :xai,
                :openrouter,
+               :mistral,
                :ollama
              ]
     end
@@ -23,7 +24,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
         assert is_list(models) and models != []
 
         Enum.each(models, fn entry ->
-          assert {id, label, context_window} = entry
+          assert %ModelCatalog.Entry{id: id, label: label, context_window: context_window} = entry
           assert is_binary(id) and id != ""
           assert is_binary(label) and label != ""
           assert is_integer(context_window) and context_window > 0
@@ -41,7 +42,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   describe "default_model_for/1" do
     test "returns the first model id in the per-provider list" do
       for provider <- ModelCatalog.providers() do
-        [{first_id, _label, _ctx} | _] = ModelCatalog.models_for(provider)
+        [%ModelCatalog.Entry{id: first_id} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.default_model_for(provider) == first_id
       end
     end
@@ -125,10 +126,24 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
   end
 
+  describe "reasoning_effort?/2" do
+    test "flags the xAI models that reject the reasoning.effort field" do
+      assert ModelCatalog.reasoning_effort?(:xai, "grok-4.3")
+      refute ModelCatalog.reasoning_effort?(:xai, "grok-4.20-0309-reasoning")
+      refute ModelCatalog.reasoning_effort?(:xai, "grok-4.20-0309-non-reasoning")
+      refute ModelCatalog.reasoning_effort?(:xai, "grok-code-fast-1")
+    end
+
+    test "defaults to true for unknown models and non-xAI providers" do
+      assert ModelCatalog.reasoning_effort?(:xai, "grok-future-unlisted")
+      assert ModelCatalog.reasoning_effort?(:anthropic, "claude-opus-4-8")
+    end
+  end
+
   describe "known_model?/2" do
     test "matches catalog entries and rejects unknowns" do
       for provider <- ModelCatalog.providers() do
-        [{first_id, _, _ctx} | _] = ModelCatalog.models_for(provider)
+        [%ModelCatalog.Entry{id: first_id} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.known_model?(provider, first_id)
       end
 

@@ -128,6 +128,22 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  defmodule InvalidUtf8Tool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "invalid_utf8"
+    @impl true
+    def description, do: "Returns output carrying a byte that is not valid UTF-8"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    # 0xF3 is a UTF-8 lead byte with no continuation bytes — invalid on its own,
+    # the same shape that crashed a real cron run reading a Latin-1 source file.
+    @impl true
+    def execute(_args, _ctx), do: {:ok, Tool.success(<<"risk: ", 0xF3, " exposure">>)}
+  end
+
   # -- Helpers --
 
   defp turn(content, opts \\ []) do
@@ -242,6 +258,32 @@ defmodule FermixCore.AgentLoopTest do
 
       assert {:ok, result} = run_loop(capability_registry: registry)
       assert result.context_tokens == 1234
+    end
+  end
+
+  # -- Tool output that is not valid UTF-8 --
+
+  describe "run/1 with tool output that is not valid UTF-8" do
+    test "scrubs invalid bytes so the conversation stays JSON-encodable", %{registry: registry} do
+      register_caps(registry, [InvalidUtf8Tool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "invalid_utf8", %{})]),
+        turn("Done!")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry)
+
+      # The tool result handed to the provider must be valid UTF-8: an invalid
+      # byte here makes Jason raise when the request body is encoded, which
+      # crashes the whole run.
+      assert [{_state, [%{output: output}], _opts}] = mock_continues()
+      assert String.valid?(output)
+      # The bad byte is replaced, surrounding content preserved.
+      assert output =~ "risk:"
+      assert output =~ "exposure"
+      # Proven encodable at the actual crash site.
+      assert is_binary(Jason.encode!(%{output: output}))
     end
   end
 

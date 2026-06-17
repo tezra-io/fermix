@@ -30,6 +30,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.WebFetch,
     FermixCore.Tools.WebSearch,
     FermixCore.Tools.SkillCreate,
+    FermixCore.Tools.SkillReload,
     FermixCore.Tools.SkillView,
     FermixCore.Tools.SkillRun,
     FermixCore.Tools.SkillList,
@@ -44,6 +45,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.PauseJob,
     FermixCore.Tools.ResumeJob,
     FermixCore.Tools.RemoveJob,
+    FermixCore.Tools.RunJobNow,
+    FermixCore.Tools.ListJobRuns,
+    FermixCore.Tools.GetJobRun,
     FermixCore.Tools.MemorySourcesList,
     FermixCore.Tools.Browser,
     FermixCore.Tools.SendAttachment

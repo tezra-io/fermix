@@ -1,7 +1,7 @@
 <p align="center">
   <img src="assets/fermix-mascot.png" alt="Fermix mascot" width="92" align="middle">&nbsp;&nbsp;
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/fermix-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/fermix-wordmark-dark.png">
     <img src="assets/fermix-wordmark-light.svg" alt="Fermix" width="300" align="middle">
   </picture>
 </p>
@@ -17,7 +17,7 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 
 ## What is Fermix
 
-Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. The runtime drives six providers — OpenAI (API key), `openai_codex` (Codex OAuth), Anthropic (API key or Claude subscription OAuth), xAI (API key or Grok OAuth), OpenRouter, and a keyless local Ollama — selected as a primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own (typically smaller, cheaper) model. Fermix also runs scheduled background jobs for digests, watchers, reminders, and checks; each run is isolated, bounded, stored durably, and delivered through the configured channel layer. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
+Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. The runtime drives seven providers — OpenAI (API key), `openai_codex` (Codex OAuth), Anthropic (API key or Claude subscription OAuth), xAI (API key or Grok OAuth), OpenRouter, Mistral (API key), and a keyless local Ollama — selected as a primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own (typically smaller, cheaper) model. Fermix also runs scheduled background jobs for digests, watchers, reminders, and checks; each run is isolated, bounded, stored durably, and delivered through the configured channel layer. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
 
 ## Quick start
 
@@ -42,6 +42,8 @@ fermix: running (pid 12345, version 0.2.3, up 4s)
 ```bash
 brew install tezra-io/tap/fermix
 ```
+
+> **Installing plugins requires [`cosign`](https://github.com/sigstore/cosign).** Fermix verifies each plugin's signature before activating it and refuses unsigned or tampered artifacts, so the daemon needs `cosign` on its `PATH`. Install it with `brew install cosign` (macOS/Linux).
 
 ### Build from source
 
@@ -102,10 +104,11 @@ chat_id = "8217352118"
 
 ### Environment variables
 
+> **The credential variables are optional.** Running `fermix setup` (CLI wizard or web setup) collects your provider API keys and channel tokens and stores the secrets in your OS keychain, so a configured install needs **none** of the API-key/token variables below. Set them only for headless or container deployments that inject secrets through the environment — the **Required** column assumes that env-only style of configuration. (The `FERMIX_*` runtime/Realtime rows are environment-only operational knobs, unrelated to secret storage.)
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | Yes when provider is `openai` | OpenAI API key |
-| `TELEGRAM_BOT_TOKEN` | If Telegram is enabled | Telegram Bot API token |
 | `WHATSAPP_ACCESS_TOKEN` | If WhatsApp is enabled | WhatsApp Cloud API access token |
 | `WHATSAPP_PHONE_NUMBER_ID` | If WhatsApp is enabled | WhatsApp phone number ID |
 | `WHATSAPP_VERIFY_TOKEN` | If WhatsApp is enabled | WhatsApp webhook verification token |
@@ -268,7 +271,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix version` | Print the release version |
 | `fermix help` | Show usage |
 
-`fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails.
+`fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails. After a package-manager upgrade, re-run `fermix setup`: it reconciles the service unit when the new binary would write a different one (e.g. an updated `PATH` or template), so the running daemon picks up the change without a manual `fermix service install`.
 
 ## Channel command reference
 
@@ -422,7 +425,7 @@ Fermix dev daemon online
 
 If a channel or Realtime is not configured, the banner shows the reason instead of crashing — the daemon still comes up so the rest of the stack is testable.
 
-Running two BEAM nodes against the same `TELEGRAM_BOT_TOKEN` (e.g. an older split workflow with `mix phx.server` next to a separate Realtime daemon) causes the two pollers to race on `getUpdates`. Keep the dev stack on one node — `mix fermix.dev`. The Phoenix port preflight will refuse to start a second instance when port `4030` is already bound.
+Two Fermix instances polling the **same** Telegram bot token race on `getUpdates`, and Telegram returns `409 Conflict` ("terminated by other getUpdates request"). The bot token is read **only** from each `FERMIX_HOME`'s `config.toml` (set via `fermix setup`), never from the environment — so give your dev (`~/.fermix-dev`) and prod (`~/.fermix`) instances **distinct** bot tokens. If you store secrets in the OS keychain, also set a distinct `[fermix_core] profile` (e.g. `profile = "dev"`) in the non-default install so its keychain entries are namespaced (`fermix:dev:TELEGRAM_BOT_TOKEN`) instead of overwriting the default `general` entries (`fermix:TELEGRAM_BOT_TOKEN`). Set the profile **before** running `fermix setup`; there is no migration when it changes, so flipping it on a populated install orphans the old keychain entries (re-run `fermix setup` to re-write them). (The dev `mix fermix.dev` port-`4030` preflight only guards the Phoenix port, not the poller, so it is not a substitute for separate tokens.)
 
 ### Smoke-testing against the running daemon
 

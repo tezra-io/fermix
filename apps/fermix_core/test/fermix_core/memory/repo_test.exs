@@ -39,7 +39,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]} = Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -52,10 +52,10 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]} = Repo.migration_versions(server: repo)
   end
 
   test "fermix_md migration rewrites resource_path so rollback targets FERMIX.md", %{
@@ -90,6 +90,59 @@ defmodule FermixCore.Memory.RepoTest do
 
     assert File.read!(fermix_path) == "rev-one"
     refute File.exists?(legacy_path)
+  end
+
+  test "taxonomy migration folds retired categories and tombstones episodes", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    scope = %{agent_id: "main", owner_id: "default", scope_type: "owner", scope_id: "default"}
+
+    seed = fn category, key, value ->
+      {:ok, _} =
+        Repo.upsert_memory(Map.merge(scope, %{category: category, key: key, value: value}),
+          server: repo
+        )
+    end
+
+    # Pre-taxonomy rows planted after v10 already ran at startup; drop the marker
+    # so the next migrate re-applies the rewrite against these legacy categories.
+    seed.("project", "stack", "elixir umbrella")
+    seed.("environment", "os", "macos")
+    seed.("instruction", "tone", "be terse")
+    seed.("correction", "naming", "prefer flat names")
+    seed.("episode", "last_run", "shipped the parser")
+
+    drop_migration_version(db_path, 10)
+    assert :ok = Repo.migrate(server: repo)
+
+    live_keys = fn category ->
+      {:ok, rows} =
+        Repo.get_memories(Map.merge(scope, %{category: category, archived?: false}), server: repo)
+
+      rows |> Enum.map(& &1.key) |> Enum.sort()
+    end
+
+    # project + environment fold into context; instruction + correction into directive.
+    assert ["os", "stack"] = live_keys.("context")
+    assert ["naming", "tone"] = live_keys.("directive")
+
+    # The retired categories no longer name any live row.
+    assert [] = live_keys.("project")
+    assert [] = live_keys.("environment")
+    assert [] = live_keys.("instruction")
+    assert [] = live_keys.("correction")
+
+    # episode is tombstoned, not deleted, and stamped by the migration.
+    assert {:ok, [episode]} =
+             Repo.get_memories(Map.merge(scope, %{category: "episode", archived?: true}),
+               server: repo
+             )
+
+    assert episode.key == "last_run"
+    assert episode.archived_by == "taxonomy_migration"
+    assert episode.archive_reason == "retired_category:episode"
+    refute is_nil(episode.archived_at)
   end
 
   test "resource migration creates required tables and indexes", %{db_path: db_path, repo: repo} do

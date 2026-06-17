@@ -8,7 +8,15 @@ defmodule FermixCore.Providers.DescriptorTest do
 
   # Order is load-bearing: fallback order + auto-promotion tie-break.
   test "ids/0 returns the canonical ordered provider list" do
-    assert Descriptor.ids() == [:openai_codex, :openai, :anthropic, :xai, :openrouter, :ollama]
+    assert Descriptor.ids() == [
+             :openai_codex,
+             :openai,
+             :anthropic,
+             :xai,
+             :openrouter,
+             :mistral,
+             :ollama
+           ]
   end
 
   test "ModelCatalog.providers/0 delegates to the registry" do

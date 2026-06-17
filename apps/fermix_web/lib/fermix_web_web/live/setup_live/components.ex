@@ -308,11 +308,11 @@ defmodule FermixWebWeb.SetupLive.Components do
                     Same as main model (default)
                   </option>
                   <option
-                    :for={{id, label, ctx} <- @provider_models}
-                    value={id}
-                    selected={id == @provider_form.subagent_model}
+                    :for={entry <- @provider_models}
+                    value={entry.id}
+                    selected={entry.id == @provider_form.subagent_model}
                   >
-                    {label} ({id} - {format_context(ctx)})
+                    {entry.label} ({entry.id} - {format_context(entry.context_window)})
                   </option>
                   <%!-- A stored value not in this provider's catalog (e.g. set while
                         another provider was primary) must still display + round-trip,
@@ -488,36 +488,45 @@ defmodule FermixWebWeb.SetupLive.Components do
     ~H"""
     <select name="provider_form[default_model]" class="select select-bordered w-full bg-base-100">
       <option
-        :for={{id, label, ctx} <- @provider_models}
-        value={id}
-        selected={id == @provider_form.default_model}
+        :for={entry <- @provider_models}
+        value={entry.id}
+        selected={entry.id == @provider_form.default_model}
       >
-        {label} ({id} - {format_context(ctx)})
+        {entry.label} ({entry.id} - {format_context(entry.context_window)})
       </option>
     </select>
     """
   end
 
+  # Live list (e.g. the upstream OpenRouter catalog) can run to hundreds of
+  # entries, so a plain <select> is unnavigable. A free-text <input> backed by
+  # a <datalist> lets the user type to filter (matching id or label) and still
+  # enter any custom slug. phx-debounce="blur" keeps keystrokes client-side —
+  # the form's phx-change only fires once the field loses focus, not per letter.
   defp default_model_input(%{live_models: {:ok, [_ | _] = models}} = assigns) do
-    assigns = assign(assigns, :models, models)
+    assigns =
+      assigns
+      |> assign(:models, models)
+      |> assign(:list_id, "model-options-#{assigns.provider_form.provider}")
 
     ~H"""
-    <select name="provider_form[default_model]" class="select select-bordered w-full bg-base-100">
-      <option
-        :for={model <- @models}
-        value={model.id}
-        selected={model.id == @provider_form.default_model}
-      >
-        {live_model_option(model)}
-      </option>
-      <option
-        :if={not Enum.any?(@models, &(&1.id == @provider_form.default_model))}
+    <div class="space-y-1">
+      <input
+        type="text"
+        name="provider_form[default_model]"
         value={@provider_form.default_model}
-        selected
-      >
-        {@provider_form.default_model} (current)
-      </option>
-    </select>
+        list={@list_id}
+        phx-debounce="blur"
+        placeholder="Search or type a model id…"
+        class="input input-bordered w-full bg-base-100 font-mono"
+      />
+      <datalist id={@list_id}>
+        <option :for={model <- @models} value={model.id} label={live_model_option(model)} />
+      </datalist>
+      <p class="text-xs text-base-content/55">
+        Type to filter {length(@models)} models, or enter any model id.
+      </p>
+    </div>
     """
   end
 
@@ -2649,7 +2658,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp subagent_model_custom?(value, _models) when value in [nil, ""], do: false
 
   defp subagent_model_custom?(value, models) when is_binary(value),
-    do: not Enum.any?(models, fn {id, _label, _ctx} -> id == value end)
+    do: not Enum.any?(models, &(&1.id == value))
 
   defp format_policy_counts(policy_counts) when map_size(policy_counts) == 0, do: "none"
 

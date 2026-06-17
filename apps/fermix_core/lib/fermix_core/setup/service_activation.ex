@@ -17,11 +17,17 @@ defmodule FermixCore.Setup.ServiceActivation do
       not standalone?(opts) ->
         {:skipped, :not_standalone}
 
-      installed?(scope, opts) ->
-        restart(scope, opts)
+      not installed?(scope, opts) ->
+        install_and_start(scope, opts)
+
+      # A unit exists but no longer matches what this binary would write (e.g.
+      # an upgrade changed the template or the daemon PATH): rewrite + reload so
+      # the fix reaches an existing install without a manual `service install`.
+      drifted?(scope, opts) ->
+        reconcile(scope, opts)
 
       true ->
-        install_and_start(scope, opts)
+        restart(scope, opts)
     end
   end
 
@@ -33,6 +39,10 @@ defmodule FermixCore.Setup.ServiceActivation do
 
   defp installed?(scope, opts) do
     service(opts).installed?.(scope, service_opts(opts))
+  end
+
+  defp drifted?(scope, opts) do
+    service(opts).drifted?.(scope, service_opts(opts))
   end
 
   defp restart(scope, opts) do
@@ -49,10 +59,16 @@ defmodule FermixCore.Setup.ServiceActivation do
     end
   end
 
-  defp install_and_start(scope, opts) do
+  defp install_and_start(scope, opts), do: install_then_start(scope, opts, :installed_started)
+
+  # Drifted unit: same install+start, tagged distinctly so the action is
+  # observable (a reconcile rewrote a stale unit, not a fresh first install).
+  defp reconcile(scope, opts), do: install_then_start(scope, opts, :reconciled)
+
+  defp install_then_start(scope, opts, action) do
     with :ok <- install(scope, opts),
          :ok <- start(scope, opts) do
-      {:ok, %{scope: scope, action: :installed_started}}
+      {:ok, %{scope: scope, action: action}}
     end
   end
 
@@ -73,6 +89,7 @@ defmodule FermixCore.Setup.ServiceActivation do
   defp service(opts) do
     Keyword.get(opts, :service, %{
       installed?: &Service.installed?/2,
+      drifted?: &Service.drifted?/2,
       install: &Service.install/2,
       start: &Service.start/2,
       restart: &Service.restart/2

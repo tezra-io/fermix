@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 20 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 21 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -130,6 +130,9 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_core.providers.openrouter]
     api_key = "openrouter-old"
 
+    [fermix_core.providers.mistral]
+    api_key = "mistral-old"
+
     [fermix_core.tools.web_search]
     tavily_api_key = "tavily-old"
     exa_api_key = "exa-old"
@@ -181,6 +184,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       anthropic_api_key: "sk-ant-old",
       xai_api_key: "xai-old",
       openrouter_api_key: "openrouter-old",
+      mistral_api_key: "mistral-old",
       tavily_api_key: "tavily-old",
       exa_api_key: "exa-old",
       parallel_api_key: "parallel-old",
