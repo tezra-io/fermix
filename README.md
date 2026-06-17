@@ -43,6 +43,8 @@ fermix: running (pid 12345, version 0.2.3, up 4s)
 brew install tezra-io/tap/fermix
 ```
 
+> **Installing plugins requires [`cosign`](https://github.com/sigstore/cosign).** Fermix verifies each plugin's signature before activating it and refuses unsigned or tampered artifacts, so the daemon needs `cosign` on its `PATH`. Install it with `brew install cosign` (macOS/Linux).
+
 ### Build from source
 
 Requires Elixir ≥ 1.19, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
