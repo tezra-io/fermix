@@ -125,16 +125,38 @@ defmodule Fermix.CLI.Service do
     with {:ok, spec} <- spec(scope, opts), do: {:ok, render(spec)}
   end
 
+  @doc """
+  True when the installed unit file no longer matches what `install/2` would
+  write for `scope` now — e.g. a binary upgrade changed the template or the
+  computed `PATH`. `fermix setup` uses this to *reconcile* a drifted unit
+  (rewrite + reload) instead of merely restarting a stale one, so unit changes
+  reach an already-installed daemon without a manual `fermix service install`.
+  False when the on-disk unit matches. An unreadable/absent unit counts as
+  drift: rewriting it is the safe convergent action (callers gate on
+  `installed?/2`, so this is the file-vanished/unreadable edge, not the steady
+  state).
+  """
+  @spec drifted?(scope(), keyword()) :: boolean()
+  def drifted?(scope \\ :user, opts \\ []) when scope in [:user, :system] do
+    with {:ok, spec} <- spec(scope, opts),
+         {:ok, on_disk} <- File.read(spec.unit_path) do
+      on_disk != render(spec)
+    else
+      _ -> true
+    end
+  end
+
   defp build_spec(os, scope, opts) do
     home = fermix_home(opts)
+    fermix_path = fermix_path(opts)
 
     %{
       os: os,
       scope: scope,
       unit_path: unit_path(os, scope, opts),
-      fermix_path: fermix_path(opts),
+      fermix_path: fermix_path,
       fermix_home: home,
-      service_env: service_env(opts, home),
+      service_env: service_env(opts, home, service_path(os, fermix_path)),
       log_path: log_path(opts),
       label: @label,
       linux_unit: @linux_unit
@@ -208,18 +230,42 @@ defmodule Fermix.CLI.Service do
   # unset) rather than re-deriving it here.
   defp default_fermix_home, do: ConfigStore.fermix_home()
 
-  # The env map written into the unit file: the FERMIX_HOME baseline plus any
-  # set, allowlisted observability vars. The source is the install-time process
-  # env by default; callers (and tests) inject an explicit `:env` map to snapshot
-  # deterministically. It is a snapshot — changing the env later needs a reinstall.
-  defp service_env(opts, fermix_home) do
+  # The env map written into the unit file: the FERMIX_HOME + PATH baseline plus
+  # any set, allowlisted observability vars. The source is the install-time
+  # process env by default; callers (and tests) inject an explicit `:env` map to
+  # snapshot deterministically. It is a snapshot — changing the env later needs a
+  # reinstall. PATH is *computed* (see `service_path/2`), never copied from the
+  # source env — the install-time shell PATH is irrelevant to the daemon.
+  defp service_env(opts, fermix_home, service_path) do
     source = Keyword.get(opts, :env) || system_observability_env()
 
     source
     |> Map.take(@observability_env)
     |> Map.reject(fn {_key, value} -> blank?(value) end)
     |> Map.put("FERMIX_HOME", fermix_home)
+    |> Map.put("PATH", service_path)
   end
+
+  # launchd and systemd hand a spawned daemon a bare PATH (roughly
+  # `/usr/bin:/bin:/usr/sbin:/sbin`) that omits the Homebrew prefix where
+  # `cosign` (plugin-signature verification) and brew-installed `node`/`python`
+  # (MCP-plugin runtimes) live. With no PATH in the unit file the daemon's
+  # `System.find_executable/1` returns nil and plugin installs fail as if the
+  # signature were bad. Pin a PATH that leads with the directory fermix itself
+  # was installed into — its siblings include `cosign` on a Homebrew install —
+  # then the standard system locations. `Enum.uniq` collapses the common case
+  # where that directory already is a standard bin dir (Homebrew = `…/bin`).
+  defp service_path(os, fermix_path) do
+    [Path.dirname(fermix_path) | standard_bindirs(os)]
+    |> Enum.uniq()
+    |> Enum.join(":")
+  end
+
+  defp standard_bindirs(:darwin),
+    do: ~w(/opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin)
+
+  defp standard_bindirs(:linux),
+    do: ~w(/usr/local/bin /usr/bin /bin /usr/sbin /sbin)
 
   defp system_observability_env do
     Map.new(@observability_env, fn key -> {key, System.get_env(key)} end)

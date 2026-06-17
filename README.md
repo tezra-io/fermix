@@ -269,7 +269,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix version` | Print the release version |
 | `fermix help` | Show usage |
 
-`fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails.
+`fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails. After a package-manager upgrade, re-run `fermix setup`: it reconciles the service unit when the new binary would write a different one (e.g. an updated `PATH` or template), so the running daemon picks up the change without a manual `fermix service install`.
 
 ## Channel command reference
 
