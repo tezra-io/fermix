@@ -12,12 +12,19 @@ defmodule FermixTestSupport.SafeRm do
     suffix =
       "#{System.system_time(:nanosecond)}-#{System.unique_integer([:positive, :monotonic])}"
 
+    # Nest under a fixed "fermix-test" component so the returned dir is deep
+    # enough that paths created under it clear the strictest SafeRm floor on
+    # every host. Linux CI's System.tmp_dir!() is /tmp, so without this the dir
+    # is 3 segments and a path one level under it (e.g. <dir>/<plugin>) is only
+    # 4 — below FermixCore.Plugins.Dist.SafeRm's @min_segments (5). That guard
+    # is green on macOS's deep /var/folders tmp and red on Linux CI.
     dir =
       System.tmp_dir!()
+      |> Path.join("fermix-test")
       |> Path.join(safe_prefix(prefix) <> "-#{suffix}")
       |> Path.expand()
 
-    File.mkdir!(dir)
+    File.mkdir_p!(dir)
     mark!(dir)
     dir
   end

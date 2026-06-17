@@ -345,6 +345,15 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert run.delivery_status == "failed"
     assert run.delivery_error =~ "runner crashed"
 
+    # The reaper writes the run's failed delivery and then the job's reset
+    # (running -> scheduled) as two separate Repo writes; the delivery wait
+    # above only gates on the first. Wait for the job write too, or this races
+    # and reads "running" on a slow runner.
+    assert eventually(fn ->
+             {:ok, current} = Registry.get_job(job.id, repo: repo)
+             current.state == "scheduled"
+           end)
+
     assert {:ok, updated_job} = Registry.get_job(job.id, repo: repo)
     assert updated_job.state == "scheduled"
     assert updated_job.last_status == "ok"
