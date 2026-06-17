@@ -5,6 +5,7 @@ defmodule FermixCore.Tools.ScheduleJob do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.DeliveryDefaults
@@ -33,7 +34,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         schedule: %{
           type: "string",
           description:
-            "Natural or cron-style schedule expression, such as every 15 minutes, daily at 8am, or 0 8 * * *."
+            "Schedule expression: an interval like every 15 minutes, a 5-field cron like 0 8 * * * (8am daily), or an ISO8601 UTC timestamp for a one-off run. Cron fields support *, lists (1,15), ranges (9-17), and steps (*/15)."
         },
         task: %{
           type: "string",
@@ -52,6 +53,11 @@ defmodule FermixCore.Tools.ScheduleJob do
           items: %{type: "string"},
           description:
             "Optional narrowing list of tool names the future run may call. Names must be a subset of the tools available to the caller now; unknown names are rejected. Capability policy is derived from the caller — the model cannot widen the future run's policy class."
+        },
+        skill_name: %{
+          type: "string",
+          description:
+            "Optional name of an existing skill to bind the run to. The scheduled run then executes inside that skill's confinement — its allowed_tools and capability policy are intersected with the job's, never widened. Unknown skill names are rejected."
         },
         timeout_seconds: %{
           type: "integer",
@@ -85,7 +91,7 @@ defmodule FermixCore.Tools.ScheduleJob do
       %{
         args: %{
           "name" => "daily_digest",
-          "schedule" => "daily at 8am",
+          "schedule" => "0 8 * * *",
           "task" => "Send a digest."
         },
         note: "schedule recurring Fermix work"
@@ -122,11 +128,13 @@ defmodule FermixCore.Tools.ScheduleJob do
            Support.optional_positive_integer(args, "inactivity_timeout_seconds"),
          {:ok, expires_at} <- Support.optional_datetime(args, "expires_at"),
          {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context),
-         {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context) do
+         {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context),
+         {:ok, skill_name} <- validate_skill_name(args, context) do
       attrs = %{
         name: name,
         schedule: schedule,
         task_prompt: task,
+        skill_name: skill_name,
         description: Support.optional_string(args, "description"),
         timezone: Support.optional_string(args, "timezone", "UTC"),
         allowed_tools: allowed_tools,
@@ -168,6 +176,26 @@ defmodule FermixCore.Tools.ScheduleJob do
         unknown -> {:error, "tools not available to the caller: #{Enum.join(unknown, ", ")}"}
       end
     end
+  end
+
+  # A job may name a skill so the future run executes inside the skill's
+  # tool/policy confinement (enforced in Jobs.Runner). Reject unknown skills at
+  # create time so the binding can never reference a skill that does not exist.
+  defp validate_skill_name(args, context) do
+    case Support.optional_string(args, "skill_name") do
+      nil ->
+        {:ok, nil}
+
+      name ->
+        registry = Map.get(context, :skill_registry, SkillRegistry)
+
+        case SkillRegistry.load(registry, name) do
+          {:ok, _definition} -> {:ok, name}
+          {:error, {:unknown_skill, _}} -> {:error, "unknown_skill: #{name}"}
+        end
+    end
+  catch
+    :exit, reason -> {:error, "skill_registry_unavailable: #{inspect(reason)}"}
   end
 
   defp caller_visible_tool_names(context) do

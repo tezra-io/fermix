@@ -29,23 +29,72 @@ defmodule FermixCore.Net.HttpClient do
   recovering every wake-from-sleep failure transparently — the duplicate
   case is rare and the alternative is requiring per-caller bookkeeping for
   a single shared concern.
+
+  Finch does NOT return an error tuple when a connection-pool checkout exceeds
+  its queue timeout: it `reraise`s a `RuntimeError` ("Finch was unable to
+  provide a connection within the timeout due to excess queuing for
+  connections") in the caller. Unwrapped, that raise crashes the caller — a
+  starved `api.telegram.org` pool once aborted an entire agent turn through the
+  cosmetic typing indicator, surfacing only as the generic "I encountered an
+  error" reply. `run/2` catches that raise and returns it as the
+  `{:error, Exception.t()}` this function already promises, so a transient pool
+  exhaustion fails the one request instead of the calling process. Programming
+  errors (ArgumentError, FunctionClauseError, …) are not `RuntimeError`s and
+  still crash loud.
   """
 
   require Logger
 
   @retry_reasons [:closed, :econnrefused]
 
+  # Substring of the RuntimeError Finch reraises on a pool-checkout queue
+  # timeout ("Finch was unable to provide a connection within the timeout due
+  # to excess queuing for connections").
+  @connection_unavailable_marker "unable to provide a connection"
+
   @spec request(Req.Request.t(), String.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
   def request(%Req.Request{} = req, label) when is_binary(label) do
     req = Req.merge(req, finch: FermixCore.Finch)
 
-    case Req.request(req) do
+    case run(req, label) do
       {:error, %Req.TransportError{reason: reason}} when reason in @retry_reasons ->
         Logger.warning("#{label} transport #{reason} — retrying once with a fresh connection")
-        Req.request(req)
+        run(req, label)
 
       result ->
         result
     end
   end
+
+  # A Finch pool-checkout queue timeout reraises a RuntimeError rather than
+  # returning {:error, _}. Convert it to the contract's error tuple so callers
+  # treat pool exhaustion as an ordinary, non-fatal error. Pool exhaustion is
+  # deliberately not retried here (the outer retry only matches transport
+  # tuples) — re-queuing against an over-capacity pool would just hammer it.
+  defp run(req, label) do
+    Req.request(req)
+  rescue
+    exception in [RuntimeError] ->
+      Logger.warning("#{label} HTTP request failed: #{Exception.message(exception)}")
+      {:error, exception}
+  end
+
+  @doc """
+  True when `exception` is the Finch pool-checkout queue timeout returned by
+  `request/2` — the daemon could not obtain *any* connection before the
+  checkout timed out.
+
+  This is the wake-from-sleep signature: just after the host resumes, the
+  network is not ready, connects stall, and checkouts queue past their timeout.
+  Callers (e.g. the Codex adapter) use it to mint a typed
+  `:connection_unavailable` transport error so transient-infrastructure
+  recovery can key on the contract instead of a message string. Every other
+  `RuntimeError` is a genuine bug and returns `false`.
+  """
+  @spec connection_unavailable?(Exception.t() | term()) :: boolean()
+  def connection_unavailable?(%RuntimeError{message: message}) when is_binary(message) do
+    String.contains?(message, @connection_unavailable_marker)
+  end
+
+  def connection_unavailable?(_other), do: false
 end

@@ -139,4 +139,64 @@ defmodule FermixCore.Net.HttpClientTest do
     assert pools["https://chatgpt.com"][:conn_max_idle_time] == 15_000
     assert pools["https://chatgpt.com"][:conn_opts] == [transport_opts: [timeout: 5_000]]
   end
+
+  test "a Finch pool-exhaustion raise is returned as {:error, exception}, not propagated" do
+    # Finch reraises a RuntimeError (not an {:error, _} tuple) when a pool
+    # checkout exceeds its queue timeout ("excess queuing for connections").
+    # Unwrapped, that raise crashes the caller — a starved api.telegram.org
+    # pool once aborted a whole agent turn through the cosmetic typing
+    # indicator. The wrapper must convert it to the {:error, Exception.t()}
+    # its @spec already promises, and must NOT retry it (don't hammer a pool
+    # that is already over capacity).
+    parent = self()
+
+    message =
+      "Finch was unable to provide a connection within the timeout due to " <>
+        "excess queuing for connections."
+
+    req =
+      Req.new(
+        url: "https://example.test",
+        method: :post,
+        json: %{},
+        retry: false,
+        adapter: fn _request ->
+          send(parent, :attempt)
+          raise RuntimeError, message
+        end
+      )
+
+    log =
+      capture_log(fn ->
+        assert {:error, %RuntimeError{message: ^message}} =
+                 HttpClient.request(req, "telegram-typing")
+      end)
+
+    assert log =~ "telegram-typing HTTP request failed"
+    assert log =~ "excess queuing"
+    assert_received :attempt
+    refute_received :attempt
+  end
+
+  describe "connection_unavailable?/1" do
+    test "classifies the Finch pool-checkout timeout RuntimeError" do
+      # The exact raise Finch reraises when a checkout exceeds the pool queue
+      # timeout — the wake-from-sleep signature, when the host network is not
+      # ready so connects stall and checkouts queue past their timeout.
+      exception =
+        RuntimeError.exception(
+          "Finch was unable to provide a connection within the timeout due to " <>
+            "excess queuing for connections."
+        )
+
+      assert HttpClient.connection_unavailable?(exception)
+    end
+
+    test "does not classify unrelated RuntimeErrors or non-exceptions" do
+      refute HttpClient.connection_unavailable?(RuntimeError.exception("something else broke"))
+      refute HttpClient.connection_unavailable?(%ArgumentError{message: "bad arg"})
+      refute HttpClient.connection_unavailable?(:closed)
+      refute HttpClient.connection_unavailable?("a string")
+    end
+  end
 end

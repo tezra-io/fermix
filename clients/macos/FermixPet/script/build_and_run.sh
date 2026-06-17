@@ -14,6 +14,7 @@ SWIFTPM_BUILD_PATH="${FERMIXPET_SWIFTPM_BUILD_PATH:-$CACHE_ROOT/swiftpm-build}"
 STAGING_DIR="${FERMIXPET_STAGE_DIR:-$CACHE_ROOT/app}"
 INSTALL_DIR="${FERMIXPET_INSTALL_DIR:-$HOME_DIR/Applications}"
 BUILD_CONFIGURATION="${FERMIXPET_SWIFT_CONFIGURATION:-debug}"
+SIGN_IDENTITY="${FERMIXPET_SIGN_IDENTITY:-FermixPet Dev}"
 
 case "$MODE" in
   install|--install)
@@ -83,6 +84,63 @@ write_info_plist() {
 PLIST
 }
 
+ensure_signing_identity() {
+  # `-v` lists valid (trusted) identities only; a self-signed cert is untrusted,
+  # so match on the codesigning policy without `-v`.
+  if security find-identity -p codesigning | grep -qF "$SIGN_IDENTITY"; then
+    return 0
+  fi
+
+  echo "Creating self-signed code-signing identity \"$SIGN_IDENTITY\" (one-time)..."
+  local dir cnf kc
+  dir="$(mktemp -d)"
+  cnf="$dir/cert.cnf"
+  kc="$HOME_DIR/Library/Keychains/login.keychain-db"
+
+  cat >"$cnf" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+[dn]
+CN = $SIGN_IDENTITY
+[v3]
+keyUsage = critical, digitalSignature
+extendedKeyUsage = critical, codeSigning
+basicConstraints = critical, CA:false
+EOF
+
+  openssl req -x509 -newkey rsa:2048 -nodes -keyout "$dir/key.pem" \
+    -out "$dir/cert.pem" -days 3650 -config "$cnf" >/dev/null 2>&1 ||
+    { rm -rf "$dir"; fail "failed to generate self-signed certificate"; }
+  openssl pkcs12 -export -inkey "$dir/key.pem" -in "$dir/cert.pem" \
+    -name "$SIGN_IDENTITY" -out "$dir/identity.p12" -passout pass:fermixpet >/dev/null 2>&1 ||
+    { rm -rf "$dir"; fail "failed to package certificate"; }
+  security import "$dir/identity.p12" -k "$kc" -P fermixpet -T /usr/bin/codesign >/dev/null 2>&1 ||
+    { rm -rf "$dir"; fail "failed to import certificate into login keychain"; }
+  rm -rf "$dir"
+
+  security find-identity -p codesigning | grep -qF "$SIGN_IDENTITY" ||
+    fail "certificate import did not register identity \"$SIGN_IDENTITY\""
+  echo "Created \"$SIGN_IDENTITY\". macOS will ask for your login password the first"
+  echo "time codesign uses it - enter it and click \"Always Allow\" (asked once)."
+}
+
+sign_app_bundle() {
+  # macOS TCC keys the microphone grant to the app's designated requirement,
+  # which derives from the code signature. An ad-hoc signature has no stable
+  # requirement (only a cdhash that changes on every `swift build`), so a stored
+  # mic grant stops matching after the next rebuild and the OS silently denies
+  # capture. Signing with a stable self-signed identity gives a constant
+  # requirement across rebuilds, so the grant survives.
+  ensure_signing_identity
+
+  codesign --force \
+    --sign "$SIGN_IDENTITY" \
+    --identifier "$BUNDLE_ID" \
+    "$APP_BUNDLE"
+}
+
 stage_app_bundle() {
   local build_binary="$1"
   local build_resource_bundle="$2"
@@ -91,9 +149,10 @@ stage_app_bundle() {
   mkdir -p "$APP_MACOS" "$APP_RESOURCES"
   cp "$build_binary" "$APP_BINARY"
   cp "$build_resource_bundle/FermixPet.icns" "$APP_RESOURCES/FermixPet.icns"
-  cp -R "$build_resource_bundle" "$APP_BUNDLE/$RESOURCE_BUNDLE_NAME"
+  cp -R "$build_resource_bundle" "$APP_RESOURCES/$RESOURCE_BUNDLE_NAME"
   chmod +x "$APP_BINARY"
   write_info_plist
+  sign_app_bundle
 }
 
 build_app_bundle() {

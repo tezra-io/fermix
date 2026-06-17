@@ -46,6 +46,12 @@ defmodule Fermix.CLI.Daemon.Client do
       [:binary, {:active, false}, {:packet, 4}, {:packet_size, @max_frame_bytes}],
       timeout
     )
+  catch
+    # AF_UNIX paths beyond the OS limit (104 bytes on macOS) make
+    # :gen_tcp.connect exit :badarg instead of returning an error tuple.
+    # No daemon can be listening on a path the OS cannot address, so it
+    # classifies with the other unreachable-socket reasons.
+    :exit, :badarg -> {:error, :badarg}
   end
 
   defp exchange(conn, method, opts, timeout) do
@@ -80,7 +86,7 @@ defmodule Fermix.CLI.Daemon.Client do
   end
 
   defp classify(reason)
-       when reason in [:enoent, :econnrefused, :timeout, :eaddrnotavail],
+       when reason in [:enoent, :econnrefused, :timeout, :eaddrnotavail, :badarg],
        do: {:error, :not_running}
 
   defp classify(reason), do: {:error, reason}

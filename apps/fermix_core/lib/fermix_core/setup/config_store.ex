@@ -10,6 +10,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -95,12 +96,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
     %{
       fermix_core: [
-        providers: [
-          openai: Keyword.get(providers, :openai, []),
-          openai_codex: Keyword.get(providers, :openai_codex, []),
-          anthropic: Keyword.get(providers, :anthropic, []),
-          xai: Keyword.get(providers, :xai, [])
-        ],
+        providers: Enum.map(Descriptor.ids(), fn id -> {id, Keyword.get(providers, id, [])} end),
         personalization: Application.get_env(:fermix_core, :personalization, []),
         agent: Application.get_env(:fermix_core, :agent, []),
         jobs: Application.get_env(:fermix_core, :jobs, []),
@@ -110,7 +106,8 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: Application.get_env(:fermix_core, :realtime, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
-        oauth: Application.get_env(:fermix_core, :oauth, %{})
+        oauth: Application.get_env(:fermix_core, :oauth, %{}),
+        profile: Application.get_env(:fermix_core, :profile, "general")
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -161,10 +158,9 @@ defmodule FermixCore.Setup.ConfigStore do
 
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
-    apply_provider_config(:openai, Keyword.get(providers, :openai, []))
-    apply_provider_config(:openai_codex, Keyword.get(providers, :openai_codex, []))
-    apply_provider_config(:anthropic, Keyword.get(providers, :anthropic, []))
-    apply_provider_config(:xai, Keyword.get(providers, :xai, []))
+    Enum.each(Descriptor.ids(), fn id ->
+      apply_provider_config(id, Keyword.get(providers, id, []))
+    end)
 
     apply_personalization_config(Keyword.get(persisted.fermix_core, :personalization, []))
     apply_agent_config(Keyword.get(persisted.fermix_core, :agent, []))
@@ -176,6 +172,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
+    apply_profile_config(Keyword.get(persisted.fermix_core, :profile, "general"))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -236,12 +233,11 @@ defmodule FermixCore.Setup.ConfigStore do
 
     %{
       fermix_core: [
-        providers: [
-          openai: providers |> Keyword.get(:openai, []) |> normalize_openai(),
-          openai_codex: providers |> Keyword.get(:openai_codex, []) |> normalize_openai_codex(),
-          anthropic: providers |> Keyword.get(:anthropic, []) |> normalize_anthropic(),
-          xai: providers |> Keyword.get(:xai, []) |> normalize_xai()
-        ],
+        providers:
+          Enum.map(Descriptor.all(), fn descriptor ->
+            {descriptor.id,
+             providers |> Keyword.get(descriptor.id, []) |> normalize_provider_block(descriptor)}
+          end),
         personalization:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -291,7 +287,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:oauth, %{})
-          |> normalize_oauth()
+          |> normalize_oauth(),
+        profile:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:profile, "general")
+          |> normalize_profile()
       ],
       sandbox:
         snapshot
@@ -344,7 +345,7 @@ defmodule FermixCore.Setup.ConfigStore do
   defp empty_runtime_config do
     %{
       fermix_core: [
-        providers: [openai: [], openai_codex: [], anthropic: [], xai: []],
+        providers: Enum.map(Descriptor.ids(), &{&1, []}),
         personalization: [user_name: nil, timezone: nil, communication_style: nil],
         agent: [name: "fermix"],
         jobs: [],
@@ -354,7 +355,8 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: [],
         tools: [],
         plugins: [],
-        oauth: %{}
+        oauth: %{},
+        profile: "general"
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
@@ -402,6 +404,27 @@ defmodule FermixCore.Setup.ConfigStore do
     Application.put_env(:fermix_core, :personalization, merged)
     :ok
   end
+
+  defp apply_profile_config(profile) do
+    Application.put_env(:fermix_core, :profile, normalize_profile(profile))
+    :ok
+  end
+
+  # The profile names the secret namespace (keychain prefix). "general" (the
+  # default and the unconfigured case) keeps the legacy bare `fermix:<ENV>`
+  # entries, so existing installs need no migration; a named profile isolates
+  # its secrets. Blank collapses to "general".
+  defp normalize_profile(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> "general"
+      name -> name
+    end
+  end
+
+  defp normalize_profile(_value), do: "general"
+
+  defp profile_render(profile) when profile in [nil, "", "general"], do: []
+  defp profile_render(profile) when is_binary(profile), do: [profile: profile]
 
   defp apply_agent_config(agent_config) do
     merged =
@@ -493,6 +516,7 @@ defmodule FermixCore.Setup.ConfigStore do
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
     oauth = Keyword.get(fermix_core, :oauth, %{})
+    profile = Keyword.get(fermix_core, :profile, "general")
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
@@ -500,23 +524,14 @@ defmodule FermixCore.Setup.ConfigStore do
       "# Managed by mix fermix.setup",
       "# Built-in tools ship inside Fermix and are always available when registered.",
       "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
+      render_section(["fermix_core"], profile_render(profile)),
       render_section(["fermix_core", "agent"], agent),
-      render_section(
-        ["fermix_core", "providers", "openai"],
-        Keyword.get(providers, :openai, [])
-      ),
-      render_section(
-        ["fermix_core", "providers", "openai_codex"],
-        Keyword.get(providers, :openai_codex, [])
-      ),
-      render_section(
-        ["fermix_core", "providers", "anthropic"],
-        Keyword.get(providers, :anthropic, [])
-      ),
-      render_section(
-        ["fermix_core", "providers", "xai"],
-        Keyword.get(providers, :xai, [])
-      ),
+      Enum.map(Descriptor.ids(), fn id ->
+        render_section(
+          ["fermix_core", "providers", Atom.to_string(id)],
+          Keyword.get(providers, id, [])
+        )
+      end),
       render_section(["fermix_core", "personalization"], personalization),
       render_section(["fermix_core", "jobs"], Keyword.drop(jobs, [:default_delivery_target])),
       render_section(
@@ -528,6 +543,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
+      render_section(
+        ["fermix_core", "tools", "tool_search"],
+        Keyword.get(tools, :tool_search, [])
+      ),
       render_plugins(plugins),
       render_oauth(oauth),
       render_sandbox(sandbox),
@@ -537,6 +556,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "slack"], Keyword.get(channels, :slack, [])),
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, []))
     ]
+    |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
     |> Kernel.<>("\n")
@@ -699,14 +719,12 @@ defmodule FermixCore.Setup.ConfigStore do
 
     %{
       fermix_core: [
-        providers: [
-          openai: normalize_openai(get_in(document, ["fermix_core", "providers", "openai"])),
-          openai_codex:
-            normalize_openai_codex(get_in(document, ["fermix_core", "providers", "openai_codex"])),
-          anthropic:
-            normalize_anthropic(get_in(document, ["fermix_core", "providers", "anthropic"])),
-          xai: normalize_xai(get_in(document, ["fermix_core", "providers", "xai"]))
-        ],
+        providers:
+          Enum.map(Descriptor.all(), fn descriptor ->
+            raw = get_in(document, ["fermix_core", "providers", Atom.to_string(descriptor.id)])
+            validate_provider_section_keys!(raw, descriptor)
+            {descriptor.id, normalize_provider_block(raw, descriptor)}
+          end),
         personalization:
           normalize_personalization(get_in(document, ["fermix_core", "personalization"])),
         agent: normalize_agent(get_in(document, ["fermix_core", "agent"])),
@@ -717,7 +735,8 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
         plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
-        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"]))
+        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
+        profile: normalize_profile(get_in(document, ["fermix_core", "profile"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
@@ -786,73 +805,65 @@ defmodule FermixCore.Setup.ConfigStore do
     String.starts_with?(value, left) and String.ends_with?(value, right)
   end
 
-  defp normalize_openai(nil), do: []
+  # One normalizer for every provider block, keyed on the descriptor's
+  # `config_keys` allowlist (M12 §2.2). App-env input may carry
+  # runtime-only baseline keys (e.g. the compile-time openai
+  # default_temperature) — those are projected out here, exactly as the
+  # bespoke per-provider normalizers always did. User-authored TOML gets
+  # the stricter unknown-key raise in `validate_provider_section_keys!/2`
+  # at the parse boundary.
+  defp normalize_provider_block(nil, _descriptor), do: []
 
-  defp normalize_openai(config) do
-    if has_provider_key?(config), do: raise_old_provider_layout!()
+  defp normalize_provider_block(config, descriptor) do
+    if descriptor.id == :openai and has_provider_key?(config), do: raise_old_provider_layout!()
 
-    []
-    |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
-    |> put_if_present(
-      :default_model,
-      normalize_string(lookup(config, "default_model", :default_model))
-    )
-    |> put_if_present(
-      :reasoning_effort,
-      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
-    )
-    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
+    Enum.reduce(descriptor.config_keys, [], fn key, acc ->
+      put_if_present(
+        acc,
+        key,
+        normalize_provider_value(key, lookup(config, Atom.to_string(key), key))
+      )
+    end)
   end
 
-  defp normalize_openai_codex(nil), do: []
+  defp normalize_provider_value(:api_key, value), do: normalize_string(value)
+  defp normalize_provider_value(:base_url, value), do: normalize_string(value)
+  defp normalize_provider_value(:default_model, value), do: normalize_string(value)
+  defp normalize_provider_value(:auth_mode, value), do: normalize_auth_mode(value)
+  defp normalize_provider_value(:fast, value), do: normalize_bool(value)
+  defp normalize_provider_value(:primary, value), do: normalize_bool(value)
 
-  defp normalize_openai_codex(config) do
-    []
-    |> put_if_present(
-      :default_model,
-      normalize_string(lookup(config, "default_model", :default_model))
-    )
-    |> put_if_present(
-      :reasoning_effort,
-      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
-    )
-    |> put_if_present(:fast, normalize_bool(lookup(config, "fast", :fast)))
-    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
-  end
+  defp normalize_provider_value(:reasoning_effort, value),
+    do: normalize_reasoning_effort(value)
 
-  defp normalize_anthropic(nil), do: []
+  # User-authored TOML keys outside the descriptor's allowlist raise at
+  # the parse boundary — a typo'd key must never be silently dropped
+  # (M12 §4; Code Rule 6). The legacy `provider = ...` key keeps its more
+  # specific migration message.
+  defp validate_provider_section_keys!(nil, _descriptor), do: :ok
 
-  defp normalize_anthropic(config) do
-    []
-    |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
-    |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
-    |> put_if_present(
-      :default_model,
-      normalize_string(lookup(config, "default_model", :default_model))
-    )
-    |> put_if_present(
-      :reasoning_effort,
-      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
-    )
-    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
-  end
+  defp validate_provider_section_keys!(config, descriptor) when is_map(config) do
+    if descriptor.id == :openai and has_provider_key?(config), do: raise_old_provider_layout!()
 
-  defp normalize_xai(nil), do: []
+    allowed = MapSet.new(descriptor.config_keys, &Atom.to_string/1)
 
-  defp normalize_xai(config) do
-    []
-    |> put_if_present(:auth_mode, normalize_auth_mode(lookup(config, "auth_mode", :auth_mode)))
-    |> put_if_present(:api_key, normalize_string(lookup(config, "api_key", :api_key)))
-    |> put_if_present(:base_url, normalize_string(lookup(config, "base_url", :base_url)))
-    |> put_if_present(
-      :default_model,
-      normalize_string(lookup(config, "default_model", :default_model))
-    )
-    |> put_if_present(
-      :reasoning_effort,
-      normalize_reasoning_effort(lookup(config, "reasoning_effort", :reasoning_effort))
-    )
-    |> put_if_present(:primary, normalize_bool(lookup(config, "primary", :primary)))
+    unknown =
+      config
+      |> Map.keys()
+      |> Enum.map(&to_string/1)
+      |> Enum.reject(&MapSet.member?(allowed, &1))
+      |> Enum.sort()
+
+    if unknown == [] do
+      :ok
+    else
+      raise ArgumentError, """
+      config.toml [fermix_core.providers.#{descriptor.id}] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.map_join(descriptor.config_keys, ", ", &Atom.to_string/1)}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
   end
 
   defp normalize_realtime(config) do
@@ -869,23 +880,54 @@ defmodule FermixCore.Setup.ConfigStore do
       :web_search,
       normalize_web_search_tool(lookup(config, "web_search", :web_search))
     )
+    |> put_if_present(
+      :tool_search,
+      normalize_tool_search(lookup(config, "tool_search", :tool_search))
+    )
   end
 
   defp normalize_tools(_config), do: []
+
+  # Tool-schema deferral flag (M10). `enabled` round-trips as a boolean; any
+  # other shape is left for FermixCore.Capabilities.Deferral to reject loudly
+  # at read time (config errors are boot errors).
+  defp normalize_tool_search(nil), do: []
+
+  defp normalize_tool_search(config) when is_map(config) or is_list(config) do
+    put_if_present([], :enabled, normalize_boolean(lookup(config, "enabled", :enabled)))
+  end
+
+  defp normalize_tool_search(_config), do: []
+
+  defp normalize_boolean(value) when is_boolean(value), do: value
+  defp normalize_boolean("true"), do: true
+  defp normalize_boolean("false"), do: false
+  defp normalize_boolean(_other), do: nil
 
   defp normalize_plugins(nil), do: []
 
   defp normalize_plugins(config) when is_map(config) or is_list(config) do
     enabled = normalize_string_list(lookup(config, "enabled", :enabled))
+    dev_local = normalize_string(lookup(config, "dev_local", :dev_local))
 
     entries =
       config
       |> lookup("entries", :entries)
       |> normalize_named_sections([])
-      |> Map.merge(normalize_named_sections(config, ["enabled", :enabled, "entries", :entries]))
+      |> Map.merge(
+        normalize_named_sections(config, [
+          "enabled",
+          :enabled,
+          "entries",
+          :entries,
+          "dev_local",
+          :dev_local
+        ])
+      )
 
     []
     |> put_if_present(:enabled, enabled)
+    |> put_if_present(:dev_local, dev_local)
     |> put_if_present(:entries, entries)
   end
 
@@ -1029,16 +1071,33 @@ defmodule FermixCore.Setup.ConfigStore do
     """
   end
 
+  # The legacy [fermix_core.agent] provider key is migration input; an
+  # unknown value used to silently normalize to nil and boot on the
+  # default provider — the worst silent failure the provider playbook
+  # recorded (M12 §2.3-1). Fail loud instead.
   defp normalize_provider(nil), do: nil
-  defp normalize_provider(:openai), do: :openai
-  defp normalize_provider(:openai_codex), do: :openai_codex
-  defp normalize_provider(:anthropic), do: :anthropic
-  defp normalize_provider(:xai), do: :xai
-  defp normalize_provider("openai"), do: :openai
-  defp normalize_provider("openai_codex"), do: :openai_codex
-  defp normalize_provider("anthropic"), do: :anthropic
-  defp normalize_provider("xai"), do: :xai
-  defp normalize_provider(_), do: nil
+
+  defp normalize_provider(value) when is_atom(value) do
+    if value in Descriptor.ids() do
+      value
+    else
+      raise_unknown_agent_provider!(value)
+    end
+  end
+
+  defp normalize_provider(value) when is_binary(value) do
+    Enum.find(Descriptor.ids(), &(Atom.to_string(&1) == value)) ||
+      raise_unknown_agent_provider!(value)
+  end
+
+  defp normalize_provider(value), do: raise_unknown_agent_provider!(value)
+
+  defp raise_unknown_agent_provider!(value) do
+    raise ArgumentError,
+          "config.toml [fermix_core.agent] provider = #{inspect(value)} is unknown; " <>
+            "expected one of #{Enum.map_join(Descriptor.ids(), ", ", &Atom.to_string/1)}. " <>
+            "Fix or remove the key; the daemon will not boot until this is fixed."
+  end
 
   defp normalize_personalization(nil), do: []
 
@@ -1074,31 +1133,42 @@ defmodule FermixCore.Setup.ConfigStore do
         lookup(config, "default_delivery_target", :default_delivery_target)
       )
     )
+    |> put_if_present(
+      :network_readiness_enabled,
+      normalize_boolean(lookup(config, "network_readiness_enabled", :network_readiness_enabled))
+    )
   end
 
   defp normalize_routing(nil), do: []
 
+  # subagent_*/cron_* drive delegated-worker and scheduled-job model selection
+  # (docs/design/SUBAGENT_MODEL_SELECTION.md); kept lax strings here and
+  # validated at the consumption seam by FermixCore.Providers.RoutingOverrides.
   defp normalize_routing(config) do
     []
     |> put_if_present(
-      :default_provider,
-      normalize_string(lookup(config, "default_provider", :default_provider))
+      :subagent_provider,
+      normalize_string(lookup(config, "subagent_provider", :subagent_provider))
     )
     |> put_if_present(
-      :default_model,
-      normalize_string(lookup(config, "default_model", :default_model))
+      :subagent_model,
+      normalize_string(lookup(config, "subagent_model", :subagent_model))
     )
     |> put_if_present(
-      :coding_model,
-      normalize_string(lookup(config, "coding_model", :coding_model))
+      :subagent_reasoning_effort,
+      normalize_string(lookup(config, "subagent_reasoning_effort", :subagent_reasoning_effort))
     )
     |> put_if_present(
-      :research_model,
-      normalize_string(lookup(config, "research_model", :research_model))
+      :cron_provider,
+      normalize_string(lookup(config, "cron_provider", :cron_provider))
     )
     |> put_if_present(
-      :review_model,
-      normalize_string(lookup(config, "review_model", :review_model))
+      :cron_model,
+      normalize_string(lookup(config, "cron_model", :cron_model))
+    )
+    |> put_if_present(
+      :cron_reasoning_effort,
+      normalize_string(lookup(config, "cron_reasoning_effort", :cron_reasoning_effort))
     )
   end
 

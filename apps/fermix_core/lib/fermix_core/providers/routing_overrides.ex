@@ -1,0 +1,198 @@
+defmodule FermixCore.Providers.RoutingOverrides do
+  @moduledoc """
+  Single reader, validator, and applier for the model-selection overrides in
+  `[fermix_core.routing]`:
+
+    * `subagent_provider` / `subagent_model` / `subagent_reasoning_effort` —
+      the model delegated `subagents` workers run on.
+    * `cron_provider` / `cron_model` / `cron_reasoning_effort` — the model
+      unpinned scheduled jobs run on.
+
+  Plus the per-call override the main agent may pass as `subagents` tool args
+  (`parse_tool_args/1`), which `merge/2`s field-level over the config default.
+
+  Resolution layers (highest first): per-call tool arg > `[fermix_core.routing]`
+  config > inherit. All three are stamped onto an `AgentDefinition`
+  (`model`/`provider`/`reasoning_effort`) and resolved by `RouteResolver`.
+
+  Validation is the boundary (Code Rule #6): an unknown provider or effort
+  raises `ArgumentError` naming the offending key + value. `apply_effort/2`
+  overlays a chosen thinking level onto already-resolved routes (clamped per
+  provider) so lowering the effort never changes the model or drops failover.
+
+  See `docs/design/SUBAGENT_MODEL_SELECTION.md`.
+  """
+
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.ReasoningEffort
+
+  @type override :: %{
+          provider: ModelCatalog.provider() | nil,
+          model: String.t() | nil,
+          reasoning_effort: ReasoningEffort.level() | nil
+        }
+
+  @doc "The configured subagent override (`[fermix_core.routing] subagent_*`)."
+  @spec subagent() :: override()
+  def subagent, do: parse(routing_config(), :subagent)
+
+  @doc "The configured cron override (`[fermix_core.routing] cron_*`)."
+  @spec cron() :: override()
+  def cron, do: parse(routing_config(), :cron)
+
+  defp routing_config, do: Application.get_env(:fermix_core, :routing, [])
+
+  @doc """
+  Reads + validates the `<prefix>_provider/model/reasoning_effort` keys from a
+  routing keyword list. Raises `ArgumentError` on an unknown provider or effort.
+  """
+  @spec parse(keyword(), :subagent | :cron) :: override()
+  def parse(routing, prefix) when is_list(routing) and prefix in [:subagent, :cron] do
+    %{
+      provider: validate_provider(get(routing, prefix, :provider), label(prefix, :provider)),
+      model: normalize_model(get(routing, prefix, :model)),
+      reasoning_effort:
+        validate_effort(get(routing, prefix, :reasoning_effort), label(prefix, :reasoning_effort))
+    }
+  end
+
+  @doc """
+  Parses a per-call override from `subagents` tool args (an LLM string map).
+  Same validators; `model` is a free slug. Raises `ArgumentError` (surfaced as a
+  clean tool error) on an unknown provider or effort. Provider is NOT inferred
+  here — `infer_provider/1` fills it from the slug after `merge/2`.
+  """
+  @spec parse_tool_args(map()) :: override()
+  def parse_tool_args(args) when is_map(args) do
+    %{
+      provider: validate_provider(Map.get(args, "provider"), ~s(subagents argument "provider")),
+      model: normalize_model(Map.get(args, "model")),
+      reasoning_effort:
+        validate_effort(
+          Map.get(args, "reasoning_effort"),
+          ~s(subagents argument "reasoning_effort")
+        )
+    }
+  end
+
+  @doc "Field-level precedence: each set field of `call` wins over `config`."
+  @spec merge(override(), override()) :: override()
+  def merge(call, config) do
+    %{
+      provider: call.provider || config.provider,
+      model: call.model || config.model,
+      reasoning_effort: call.reasoning_effort || config.reasoning_effort
+    }
+  end
+
+  @doc """
+  Fills `:provider` from `:model` when a model is set but no provider was given,
+  preferring the active primary provider, then the first catalog match. Leaves
+  the override untouched if provider is already set or no model is present
+  (`RouteResolver` then defaults the provider to the primary at resolve time).
+  """
+  @spec infer_provider(override()) :: override()
+  def infer_provider(%{provider: nil, model: model} = override) when is_binary(model) do
+    %{override | provider: provider_for(model)}
+  end
+
+  def infer_provider(override), do: override
+
+  defp provider_for(model) do
+    primary = current_primary()
+
+    if primary && ModelCatalog.known_model?(primary, model) do
+      primary
+    else
+      ModelCatalog.provider_for_model(model)
+    end
+  end
+
+  defp current_primary do
+    case PrimaryConfig.primary() do
+      {:ok, provider} -> provider
+      _other -> nil
+    end
+  end
+
+  @doc """
+  Overlays `level` onto each `{route_key, adapter_opts}` route, clamped to that
+  route's provider's supported range. `nil` leaves routes unchanged. Only the
+  effort field is touched — model and failover chain are preserved.
+
+  Routes whose provider has no `ReasoningEffort` levels entry (effort-less
+  providers, e.g. ChatCompletions-only ones) are left untouched — stamping
+  an effort their adapter must ignore would make the telemetry/wire
+  contract accidental instead of explicit (M12 §5.2).
+  """
+  @spec apply_effort([{map(), keyword()}], ReasoningEffort.level() | nil) :: [{map(), keyword()}]
+  def apply_effort(routes, nil), do: routes
+
+  def apply_effort(routes, level) when is_list(routes) and is_atom(level) do
+    Enum.map(routes, fn {%{provider: provider} = route_key, adapter_opts} ->
+      case ReasoningEffort.levels_for(provider) do
+        [] ->
+          {route_key, adapter_opts}
+
+        _supported ->
+          {route_key,
+           Keyword.put(adapter_opts, :reasoning_effort, ReasoningEffort.clamp(level, provider))}
+      end
+    end)
+  end
+
+  defp get(routing, prefix, field), do: Keyword.get(routing, :"#{prefix}_#{field}")
+  defp label(prefix, field), do: "[fermix_core.routing] #{prefix}_#{field}"
+
+  defp validate_provider(nil, _label), do: nil
+  defp validate_provider("", _label), do: nil
+
+  defp validate_provider(value, label) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    case Enum.find(ModelCatalog.providers(), &(Atom.to_string(&1) == trimmed)) do
+      nil ->
+        raise ArgumentError,
+              "#{label} = #{inspect(value)} is not a known provider (#{providers_hint()})"
+
+      provider ->
+        provider
+    end
+  end
+
+  defp validate_provider(value, label) when is_atom(value) do
+    if value in ModelCatalog.providers() do
+      value
+    else
+      raise ArgumentError,
+            "#{label} = #{inspect(value)} is not a known provider (#{providers_hint()})"
+    end
+  end
+
+  defp normalize_model(nil), do: nil
+
+  defp normalize_model(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp validate_effort(nil, _label), do: nil
+  defp validate_effort("", _label), do: nil
+
+  defp validate_effort(value, label) do
+    case ReasoningEffort.parse(value) do
+      {:ok, level} ->
+        level
+
+      :error ->
+        raise ArgumentError,
+              "#{label} = #{inspect(value)} is not a valid reasoning effort (#{efforts_hint()})"
+    end
+  end
+
+  defp providers_hint, do: Enum.map_join(ModelCatalog.providers(), ", ", &Atom.to_string/1)
+  defp efforts_hint, do: Enum.map_join(ReasoningEffort.levels(), ", ", &Atom.to_string/1)
+end

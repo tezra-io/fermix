@@ -4,6 +4,46 @@ defmodule Fermix.CLI.DaemonTest do
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
 
+  defmodule TestPluginsRuntime do
+    def apply_persisted do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, :plugins_apply_called)
+
+      {:ok,
+       %{
+         capabilities: %{registered: 0},
+         skills: :handled_by_main_agent,
+         main_agent: %{version: 1},
+         realtime: :skipped
+       }}
+    end
+  end
+
+  defmodule TestPluginsRuntimeWithSkillErrors do
+    # Real SkillRegistry reload summaries carry tuple `errors`; the daemon must
+    # render them as strings instead of crashing the connection handler.
+    def apply_persisted do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, :plugins_apply_called)
+
+      {:ok,
+       %{
+         capabilities: %{registered: 0},
+         skills: :handled_by_main_agent,
+         main_agent: %{
+           version: 2,
+           skills: 1,
+           names: ["ok-skill"],
+           added: [],
+           removed: [],
+           changed: [],
+           errors: [{:invalid_skill, "broken", :bad_frontmatter}]
+         },
+         realtime: :skipped
+       }}
+    end
+  end
+
   defmodule TestCLIBridge do
     def default_timeout_ms, do: 120_000
 
@@ -180,6 +220,62 @@ defmodule Fermix.CLI.DaemonTest do
     assert reply["session_id"] == "daemon-test"
     assert_receive {:bridge_call, "hello", opts}
     assert Keyword.get(opts, :session_id) == "daemon-test"
+  end
+
+  test "plugins_apply re-applies persisted config through the plugins runtime" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "plugins.sock")
+    {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.PluginsSup)
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: :"plugins_daemon_#{System.unique_integer([:positive, :monotonic])}",
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.PluginsSup,
+        plugins_runtime: TestPluginsRuntime
+      )
+
+    on_exit(fn ->
+      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert {:ok, reply} =
+             Client.request("plugins_apply", socket_path: socket_path, timeout: 1_000)
+
+    assert reply["status"] == "ok"
+    assert is_map(reply["reload"])
+    assert reply["reload"]["skills"] == "handled_by_main_agent"
+    assert_receive :plugins_apply_called
+  end
+
+  test "plugins_apply renders skill reload errors instead of crashing" do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "plugins_errors.sock")
+    {:ok, _sup} = Task.Supervisor.start_link(name: __MODULE__.PluginsErrSup)
+
+    {:ok, daemon} =
+      Daemon.start_link(
+        name: :"plugins_err_daemon_#{System.unique_integer([:positive, :monotonic])}",
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.PluginsErrSup,
+        plugins_runtime: TestPluginsRuntimeWithSkillErrors
+      )
+
+    on_exit(fn ->
+      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    assert {:ok, reply} =
+             Client.request("plugins_apply", socket_path: socket_path, timeout: 1_000)
+
+    assert reply["status"] == "ok"
+    assert reply["reload"]["main_agent"]["version"] == 2
+    assert [error] = reply["reload"]["main_agent"]["errors"]
+    assert error =~ "invalid_skill"
+    assert error =~ "broken"
+    assert_receive :plugins_apply_called
   end
 
   test "skills_list returns JSON-safe skill summaries", %{socket_path: socket_path} do

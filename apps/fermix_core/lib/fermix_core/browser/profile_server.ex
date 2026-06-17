@@ -21,6 +21,7 @@ defmodule FermixCore.Browser.ProfileServer do
   alias FermixCore.Browser.Policy
   alias FermixCore.Browser.Snapshot
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Telemetry
   alias FermixCore.Trace
 
   require Logger
@@ -84,8 +85,24 @@ defmodule FermixCore.Browser.ProfileServer do
 
   def handle_call({:request, request}, _from, state) do
     {reply, state} = run_request(request, touch_idle(state))
-    {:reply, reply, state}
+    {:reply, attach_console(reply, state), state}
   end
+
+  # A failed action carries the recent console/JS-exception buffer (oldest
+  # first, same order as the explicit `console` action) in its error details —
+  # page-side context is often the only clue to why a click/fill/navigate
+  # failed. Gated behind content capture so regular error details stay
+  # body-free. Entry COUNT is capped by `console_buffer_limit`; entry size is
+  # not — capture-on is full-fidelity by design.
+  defp attach_console({:error, %Error{} = error}, %{console: [_ | _] = console}) do
+    if Telemetry.capture_content?() do
+      {:error, %{error | details: Map.put(error.details, "console", Enum.reverse(console))}}
+    else
+      {:error, error}
+    end
+  end
+
+  defp attach_console(reply, _state), do: reply
 
   @impl true
   def handle_info(:idle_timeout, state), do: {:stop, :normal, state}

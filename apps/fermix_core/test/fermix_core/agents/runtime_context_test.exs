@@ -202,6 +202,85 @@ defmodule FermixCore.Agents.RuntimeContextTest do
     assert Enum.at(messages, runtime_index) == ctx.operator_profile.runtime_message
   end
 
+  test "messages_for/4 orders volatile memory AFTER the stable runtime section", %{
+    agent_id: agent_id,
+    registry: registry
+  } do
+    # Cache stratification (M10 P1): stable parts (bootstrap, runtime section)
+    # must precede volatile parts (memory context), so a memory rebuild never
+    # busts the provider prompt-cache for the stable sections.
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    write_memory(agent_id, "USER.md", "user is a tester")
+    :ok = CapabilityRegistry.register(registry, cap("read_tool"))
+
+    {:ok, ctx} =
+      RuntimeContext.build(
+        agent_id: agent_id,
+        available_skills: [],
+        capability_registry: registry
+      )
+
+    user_message = %{role: "user", content: "new turn"}
+    messages = RuntimeContext.messages_for(ctx, ctx.operator_profile, [], user_message)
+    contents = Enum.map(messages, & &1.content)
+
+    identity_index = Enum.find_index(contents, &String.contains?(&1, "identity content"))
+    runtime_index = Enum.find_index(messages, &(&1 == ctx.operator_profile.runtime_message))
+    memory_index = Enum.find_index(contents, &String.contains?(&1, "<memory-context>"))
+
+    assert identity_index < runtime_index
+    assert runtime_index < memory_index
+    assert memory_index == length(messages) - 2
+
+    # base_messages stays available (stable ++ volatile) for realtime sessions.
+    assert length(ctx.base_messages) ==
+             length(ctx.stable_messages) + length(ctx.volatile_messages)
+  end
+
+  test "build_profile/4 defers plugin schemas from the wire but keeps them dispatchable", %{
+    agent_id: agent_id,
+    registry: registry
+  } do
+    previous = Application.get_env(:fermix_core, :tools)
+    Application.put_env(:fermix_core, :tools, tool_search: [enabled: true])
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:fermix_core, :tools)
+        value -> Application.put_env(:fermix_core, :tools, value)
+      end
+    end)
+
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    :ok = CapabilityRegistry.register(registry, cap("read_tool"))
+
+    :ok =
+      CapabilityRegistry.register(
+        registry,
+        cap("x_whoami",
+          policy_class: :external_api,
+          metadata: %{plugin_owned?: true, category: :plugin, plugin: "x"}
+        )
+      )
+
+    {:ok, ctx} =
+      RuntimeContext.build(
+        agent_id: agent_id,
+        available_skills: [],
+        capability_registry: registry
+      )
+
+    profile = ctx.operator_profile
+    advertised = Enum.map(profile.capabilities, & &1.name)
+    dispatchable = Enum.map(profile.dispatchable, & &1.name)
+
+    # Wire: deferred plugin schema absent; dispatch surface keeps it.
+    refute "x_whoami" in advertised
+    assert "read_tool" in advertised
+    assert "x_whoami" in dispatchable
+    assert "read_tool" in dispatchable
+  end
+
   test "accounting_for/2 returns base + runtime accounting", %{
     agent_id: agent_id,
     registry: registry

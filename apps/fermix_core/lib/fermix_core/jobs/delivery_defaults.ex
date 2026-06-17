@@ -31,6 +31,38 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
     validate(raw_mode, raw_target)
   end
 
+  @doc """
+  Resolve delivery for an in-place job update.
+
+  Unlike `resolve/3`, an absent `delivery_mode`/`delivery_target` yields
+  `:no_change` rather than the configured default — editing an unrelated field
+  must never silently retarget the job (rule #12: no fallback). An explicitly
+  supplied delivery is validated exactly as on creation, including rejecting an
+  unknown mode.
+  """
+  @spec resolve_update(map(), map(), keyword()) ::
+          :no_change | {:ok, {String.t(), map() | nil}} | {:error, term()}
+  def resolve_update(args, context, opts \\ []) when is_map(args) and is_map(context) do
+    raw_mode = Map.get(args, "delivery_mode")
+    raw_target = Map.get(args, "delivery_target")
+
+    cond do
+      is_nil(raw_mode) and is_nil(raw_target) ->
+        :no_change
+
+      is_binary(raw_mode) ->
+        mode = String.trim(raw_mode)
+        target = optional_map(args, "delivery_target")
+        validate(mode, target_for_mode(mode, target, context, jobs_config(opts)))
+
+      is_map(raw_target) ->
+        validate("channel", normalize_target(raw_target))
+
+      true ->
+        {:error, {:invalid_delivery_mode, inspect(raw_mode)}}
+    end
+  end
+
   defp validate(mode, _target) when mode in ["none", "local"], do: {:ok, {mode, nil}}
 
   defp validate("channel", target) when is_map(target) do

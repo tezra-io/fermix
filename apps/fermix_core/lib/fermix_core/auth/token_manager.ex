@@ -13,6 +13,7 @@ defmodule FermixCore.Auth.TokenManager do
 
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
+  alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
@@ -259,53 +260,31 @@ defmodule FermixCore.Auth.TokenManager do
     end
   end
 
+  # Plugin OAuth profiles (google/github/notion/…): the provider registry
+  # rebuilds the definition from the [fermix_core.oauth.<provider>] client
+  # config; scopes come from the stored grant.
   defp refresh_entry(
          auth_profile,
-         %{provider: "google", tokens: %{refresh_token: refresh_token}} = entry,
+         %{provider: provider, tokens: %{refresh_token: refresh_token}} = entry,
          path,
          req_options
-       ) do
-    with {:ok, provider} <- google_refresh_provider(entry),
-         {:ok, tokens} <- RefreshClient.refresh(provider, refresh_token, req_options),
+       )
+       when is_binary(provider) and is_binary(refresh_token) and refresh_token != "" do
+    scopes = Map.get(entry, :granted_scopes, [])
+
+    with {:ok, oauth_provider} <- OAuthProviders.definition_from_env(provider, scopes),
+         {:ok, tokens} <- RefreshClient.refresh(oauth_provider, refresh_token, req_options),
          refreshed <- apply_tokens(entry, tokens),
          :ok <- Store.write(auth_profile, refreshed, path) do
       {:ok, refreshed}
     else
+      {:error, {:unsupported_oauth_provider, _provider}} -> {:error, :unsupported_provider}
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp refresh_entry(_auth_profile, _entry, _path, _req_options),
     do: {:error, :unsupported_provider}
-
-  defp google_refresh_provider(entry) do
-    case Application.get_env(:fermix_core, :oauth, %{}) do
-      %{"google" => config} -> google_provider(config, entry)
-      oauth when is_list(oauth) -> oauth |> Keyword.get(:google, []) |> google_provider(entry)
-      _other -> {:error, :needs_client_config}
-    end
-  end
-
-  defp google_provider(config, entry) do
-    client_id = Keyword.get(config, :client_id)
-    client_secret = Keyword.get(config, :client_secret)
-
-    if present?(client_id) and present?(client_secret) do
-      {:ok,
-       OAuthProvider.google(
-         client_id: client_id,
-         client_secret: client_secret,
-         redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
-         redirect_port: Keyword.get(config, :redirect_port, 1455),
-         scopes: Map.get(entry, :granted_scopes, [])
-       )}
-    else
-      {:error, :needs_client_config}
-    end
-  end
-
-  defp present?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present?(_value), do: false
 
   defp apply_tokens(entry, tokens) do
     %{

@@ -5,22 +5,25 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Tools.Support
 
+  # Sub-agent model routing (docs/design/SUBAGENT_MODEL_SELECTION.md). The cron_*
+  # keys are deliberately NOT settable here — they are an unadvertised,
+  # config.toml-only provision (they still surface in a `read`).
   @allowed_keys %{
-    "default_provider" => :default_provider,
-    "default_model" => :default_model,
-    "coding_model" => :coding_model,
-    "research_model" => :research_model,
-    "review_model" => :review_model
+    "subagent_provider" => :subagent_provider,
+    "subagent_model" => :subagent_model,
+    "subagent_reasoning_effort" => :subagent_reasoning_effort
   }
 
   @impl true
   def name, do: "model_routing_config"
 
   @impl true
-  def description, do: "Read or update [fermix_core.routing] model-routing keys in config.toml."
+  def description,
+    do: "Read or update the sub-agent model routing keys in [fermix_core.routing] (config.toml)."
 
   @impl true
   def parameters do
@@ -29,22 +32,28 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
       required: ["action"],
       properties: %{
         action: %{type: "string", enum: ["read", "set", "delete"]},
-        key: %{type: "string", description: "Routing key for set/delete."},
+        key: %{
+          type: "string",
+          enum: ["subagent_provider", "subagent_model", "subagent_reasoning_effort"],
+          description:
+            "Routing key for set/delete: subagent_provider, subagent_model, or subagent_reasoning_effort."
+        },
         value: %{type: "string", description: "Routing value for set."}
       }
     }
   end
 
   @impl true
-  def when_to_use, do: "Inspect or update Fermix model routing preferences in config.toml."
+  def when_to_use,
+    do: "Inspect or set the model/provider/effort that delegated sub-agents use, in config.toml."
 
   @impl true
   def examples do
     [
       %{args: %{"action" => "read"}, note: "inspect current routing"},
       %{
-        args: %{"action" => "set", "key" => "coding_model", "value" => "gpt-5.4-mini"},
-        note: "set the coding model"
+        args: %{"action" => "set", "key" => "subagent_model", "value" => "gpt-5.4-mini"},
+        note: "run sub-agents on a smaller, faster model"
       }
     ]
   end
@@ -84,6 +93,7 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
   defp do_execute(%{"action" => "set"} = args) do
     with {:ok, key} <- fetch_allowed_key(args),
          {:ok, value} <- Support.required_string(args, "value"),
+         :ok <- validate_value(key, value),
          {:ok, snapshot} <- ConfigStore.load_runtime_config(),
          next <- put_routing(snapshot, key, value),
          :ok <- ConfigStore.save_snapshot(next),
@@ -119,6 +129,16 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
       :error -> {:error, "invalid_key"}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Reuse the consumption-seam validator so a bad provider/effort is rejected at
+  # write time, not when a sub-agent later spawns. A free-form model slug always
+  # passes (the provider API is the source of truth for an unknown model).
+  defp validate_value(key, value) do
+    RoutingOverrides.parse([{key, value}], :subagent)
+    :ok
+  rescue
+    e in ArgumentError -> {:error, Exception.message(e)}
   end
 
   defp routing(snapshot), do: Keyword.get(snapshot.fermix_core, :routing, [])

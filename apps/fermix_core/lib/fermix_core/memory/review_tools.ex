@@ -16,14 +16,13 @@ defmodule FermixCore.Memory.ReviewTools do
   alias FermixCore.Memory.Repo
 
   @archive_actor "memory_reviewer"
-  @user_categories ~w(identity preference goal)
-  @memory_categories ~w(project environment instruction)
 
   @type context :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
           required(:repo) => GenServer.server(),
-          optional(:source_trust) => atom()
+          optional(:source_trust) => atom(),
+          optional(:telemetry) => map()
         }
 
   @type stats :: %{
@@ -40,12 +39,48 @@ defmodule FermixCore.Memory.ReviewTools do
 
     Enum.reduce_while(operations, {:ok, initial}, fn operation, {:ok, stats} ->
       case apply_operation(operation, ctx) do
-        {:ok, kind, memory} -> {:cont, {:ok, record_success(stats, kind, memory.id)}}
-        {:skip, reason} -> {:cont, {:ok, record_skip(stats, reason)}}
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:ok, kind, memory} ->
+          emit_write(ctx, kind, memory)
+          {:cont, {:ok, record_success(stats, kind, memory.id)}}
+
+        {:skip, reason} ->
+          {:cont, {:ok, record_skip(stats, reason)}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
+
+  # A durable reviewer write becomes an observable `[:fermix, :memory, :write]`
+  # span ONLY when the caller threads telemetry attribution (session_id + the
+  # conversation channel/chat_id, optional parent_session). Without it (legacy /
+  # test callers) the write stays silent — backward compatible. `tool:
+  # "memory_write"` makes it a tool-shaped span so it surfaces alongside tool
+  # spans and lands in the JSONL tool-exec stream. This is the reviewer's
+  # write-visibility seam; the `memory_store` tool already spans on its own path.
+  defp emit_write(%{telemetry: %{} = tel}, kind, memory) do
+    :telemetry.execute(
+      [:fermix, :memory, :write],
+      %{count: 1},
+      %{
+        tool: "memory_write",
+        action: kind,
+        category: memory.category,
+        key: memory.key,
+        scope_type: memory.scope_type,
+        memory_id: memory.id,
+        agent: Map.get(tel, :agent),
+        owner: Map.get(tel, :owner),
+        session_id: Map.get(tel, :session_id),
+        parent_session: Map.get(tel, :parent_session),
+        channel: Map.get(tel, :channel),
+        chat_id: Map.get(tel, :chat_id)
+      }
+    )
+  end
+
+  defp emit_write(_ctx, _kind, _memory), do: :ok
 
   defp apply_operation(%{"action" => "add"} = op, ctx), do: add_memory(op, ctx)
   defp apply_operation(%{action: "add"} = op, ctx), do: add_memory(op, ctx)
@@ -124,38 +159,35 @@ defmodule FermixCore.Memory.ReviewTools do
     end
   end
 
-  defp add_attrs("user", category, value, ctx) when category in @user_categories do
-    {:ok,
-     %{
-       agent_id: ctx.agent_id,
-       owner_id: ctx.owner_id,
-       scope_type: "owner",
-       scope_id: ctx.owner_id,
-       category: category,
-       key: fresh_key(category, value),
-       value: value,
-       confidence: 1.0,
-       promote_target: Admission.prompt_target(%{category: category, scope_type: "owner"})
-     }}
+  defp add_attrs("user", category, value, ctx) do
+    promoted_attrs(:user, "owner", ctx.owner_id, category, value, ctx)
   end
 
-  defp add_attrs("memory", category, value, ctx) when category in @memory_categories do
-    {:ok,
-     %{
-       agent_id: ctx.agent_id,
-       owner_id: ctx.owner_id,
-       scope_type: "agent",
-       scope_id: ctx.agent_id,
-       category: category,
-       key: fresh_key(category, value),
-       value: value,
-       confidence: 1.0,
-       promote_target: Admission.prompt_target(%{category: category, scope_type: "agent"})
-     }}
+  defp add_attrs("memory", category, value, ctx) do
+    promoted_attrs(:memory, "agent", ctx.agent_id, category, value, ctx)
   end
 
   defp add_attrs(target, category, _value, _ctx) do
     {:skip, {:invalid_add_target_category, target, category}}
+  end
+
+  defp promoted_attrs(bucket, scope_type, scope_id, category, value, ctx) do
+    if Admission.promotable_category?(bucket, category) do
+      {:ok,
+       %{
+         agent_id: ctx.agent_id,
+         owner_id: ctx.owner_id,
+         scope_type: scope_type,
+         scope_id: scope_id,
+         category: category,
+         key: fresh_key(category, value),
+         value: value,
+         confidence: 1.0,
+         promote_target: Admission.prompt_target(%{category: category, scope_type: scope_type})
+       }}
+    else
+      {:skip, {:invalid_add_target_category, Atom.to_string(bucket), category}}
+    end
   end
 
   defp get_owned_memory(id, ctx) do

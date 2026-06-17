@@ -191,6 +191,81 @@ defmodule FermixCore.Memory.CompactorTest do
            }
   end
 
+  test "summarizer is role-fenced and asks for tool attribution (M10 P2)", %{repo: repo} do
+    stub_summaries(["summary 1"])
+
+    messages = [
+      %{role: "user", content: String.duplicate("old user ", 80)},
+      %{role: "assistant", content: String.duplicate("old assistant ", 80)},
+      %{role: "user", content: "latest question"}
+    ]
+
+    assert {:ok, _result} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 80,
+               route: route(),
+               context: context(repo)
+             )
+
+    assert_received {:summary_request, body}
+    system_content = body |> Jason.decode!() |> request_system_text()
+
+    # Role fence: the summarizer must never continue the conversation.
+    assert system_content =~ "Do not continue the conversation"
+    assert system_content =~ "output only the summary"
+    # Provenance: facts from tool results carry inline attribution.
+    assert system_content =~ "[tool: <name>]"
+  end
+
+  test "checkpoint message carries the reference-only provenance note (M10 P2)", %{repo: repo} do
+    stub_summaries(["summary 1"])
+
+    messages = [
+      %{role: "user", content: String.duplicate("old user ", 80)},
+      %{role: "assistant", content: String.duplicate("old assistant ", 80)},
+      %{role: "user", content: "latest question"}
+    ]
+
+    assert {:ok, result} =
+             Compactor.compact(messages,
+               enabled: true,
+               token_budget: 80,
+               route: route(),
+               context: context(repo)
+             )
+
+    checkpoint =
+      Enum.find(result.messages, fn message ->
+        message.role == "system" and
+          String.starts_with?(message.content, "Conversation checkpoint summary:")
+      end)
+
+    assert checkpoint
+    assert checkpoint.content =~ "Reference only"
+    assert checkpoint.content =~ "latest user message wins"
+    assert checkpoint.content =~ "summary 1"
+
+    # The persisted checkpoint stores the RAW summary — the provenance note
+    # never leaks into the prior fed to the next compaction.
+    assert {:ok, [persisted]} = Repo.get_messages(checkpoint_selector(), server: repo, limit: 1)
+    assert persisted.content == "summary 1"
+  end
+
+  defp request_system_text(%{"messages" => messages}) do
+    messages
+    |> Enum.filter(&(&1["role"] in ["system", "developer"]))
+    |> Enum.map_join("\n", fn message ->
+      case message["content"] do
+        content when is_binary(content) -> content
+        parts when is_list(parts) -> Enum.map_join(parts, "\n", &(&1["text"] || ""))
+      end
+    end)
+  end
+
+  defp request_system_text(%{"instructions" => instructions}) when is_binary(instructions),
+    do: instructions
+
   test "does not create duplicate checkpoint revisions for unchanged summaries", %{repo: repo} do
     stub_summaries(["stable checkpoint", "stable checkpoint"])
 

@@ -46,18 +46,6 @@ defmodule FermixCore.Providers.OpenAITest do
     OpenAI.chat(messages, opts)
   end
 
-  # -- models/0 --
-
-  describe "models/0" do
-    test "returns a list of model names" do
-      assert {:ok, models} = OpenAI.models()
-      assert is_list(models)
-      assert "gpt-5.4" in models
-      assert "gpt-5.4" in models
-      assert Enum.all?(models, &is_binary/1)
-    end
-  end
-
   # -- chat/2: message formatting --
 
   describe "chat/2 message formatting" do

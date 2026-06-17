@@ -202,7 +202,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     # `config/2`, which only works inside the Config context. The bootstrap
     # block raises before any env-dependent config is read.
     assert_raise RuntimeError, ~r/bootstrap_runtime_config failed.*:enotdir/s, fn ->
-      Config.Reader.read!(runtime_exs)
+      read_runtime_config!(runtime_exs)
     end
   end
 
@@ -211,6 +211,10 @@ defmodule FermixCore.Setup.RuntimeTest do
     {:ok, port} = :inet.port(socket)
     :gen_tcp.close(socket)
     port
+  end
+
+  defp read_runtime_config!(path) do
+    Config.Reader.read!(path, env: :test)
   end
 
   defp oauth_opener(port, test_pid) do
@@ -1003,6 +1007,67 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
+    end
+
+    test "does not ask for reasoning_effort on providers without effort support" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      :ok =
+        ConfigStore.save_snapshot(%{
+          fermix_core: [
+            providers: [
+              openai: [api_key: "sk-test"],
+              openrouter: []
+            ],
+            personalization: [
+              user_name: "Op",
+              timezone: "UTC",
+              communication_style: "concise and direct"
+            ],
+            agent: [name: "fermix"]
+          ],
+          fermix_channels: [telegram: [enabled: true, mode: :webhook, bot_token: "bot-token"]],
+          fermix_web: []
+        })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-test"],
+        openrouter: []
+      )
+
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+
+      {:ok, prompt_log} = Agent.start_link(fn -> [] end)
+
+      prompt = fn label ->
+        Agent.update(prompt_log, &[label | &1])
+
+        if String.starts_with?(label, "Default model") do
+          "qwen-2.5-7b-instruct"
+        else
+          ""
+        end
+      end
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   provider: "openrouter",
+                   openrouter_api_key: "or-key",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: prompt
+               )
+
+      labels = Agent.get(prompt_log, &Enum.reverse/1)
+
+      refute Enum.any?(labels, &String.starts_with?(&1, "Reasoning effort"))
+      assert Enum.any?(labels, &String.starts_with?(&1, "Default model"))
     end
 
     test "--reconfigure prompts provider model and effort even when setup is ready" do

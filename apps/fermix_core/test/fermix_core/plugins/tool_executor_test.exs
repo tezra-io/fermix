@@ -1,7 +1,35 @@
 defmodule FermixCore.Plugins.ToolExecutorTest do
-  use ExUnit.Case, async: true
+  # async: false — the executor's call-time disabled check (Status.status/1)
+  # reads the global `:fermix_core, :plugins` app env, which setup below
+  # establishes explicitly per the hermetic-config rule.
+  use ExUnit.Case, async: false
 
   alias FermixCore.Plugins.ToolExecutor
+
+  @calendar_scopes [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events"
+  ]
+
+  setup do
+    plugins = Application.get_env(:fermix_core, :plugins, [])
+    oauth = Application.get_env(:fermix_core, :oauth, %{})
+
+    # Baseline: every plugin exercised here is enabled; google client config
+    # stays blank so Status.status/1 never reads the auth store.
+    Application.put_env(:fermix_core, :plugins,
+      enabled: ["gmail", "google_calendar", "google_drive"]
+    )
+
+    Application.put_env(:fermix_core, :oauth, %{})
+
+    on_exit(fn ->
+      Application.put_env(:fermix_core, :plugins, plugins)
+      Application.put_env(:fermix_core, :oauth, oauth)
+    end)
+
+    :ok
+  end
 
   test "searches Google Drive files with a resolved token" do
     parent = self()
@@ -27,6 +55,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "google_drive:primary" -> {:ok, "drive-token"} end
     }
@@ -70,9 +99,11 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "google_calendar:primary" -> {:ok, "old-token"} end,
-      plugin_token_refresher: fn "google_calendar:primary" -> {:ok, "fresh-token"} end
+      plugin_token_refresher: fn "google_calendar:primary" -> {:ok, "fresh-token"} end,
+      plugin_granted_scopes_getter: fn _ -> @calendar_scopes end
     }
 
     assert {:ok, result} =
@@ -80,7 +111,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"query" => "standup"},
                context,
                "google_calendar",
-               %{"name" => "google_calendar_search_events", "read_only" => true}
+               cal_tool("google_calendar_search_events")
              )
 
     assert result.success == true
@@ -101,6 +132,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
       plugin_granted_scopes_getter: fn _plugin ->
@@ -131,6 +163,41 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     refute_received {:provider_called, _path}
   end
 
+  test "disabled plugin tool refuses at call time with enable guidance" do
+    # Stale-context window (§4.5 gap 2): the registry still knows the plugin,
+    # but it is NOT in the enabled set — established explicitly here.
+    Application.put_env(:fermix_core, :plugins, enabled: [])
+
+    parent = self()
+
+    plug = fn conn ->
+      send(parent, {:provider_called, conn.request_path})
+      Plug.Conn.send_resp(conn, 200, "{}")
+    end
+
+    context = %{
+      plugin_url_guard: fn _ -> :ok end,
+      plugin_req_options: [plug: plug],
+      plugin_token_getter: fn _ -> {:ok, "tok"} end
+    }
+
+    assert {:ok, result} =
+             ToolExecutor.execute(
+               %{"query" => "Q2 Plan"},
+               context,
+               "google_drive",
+               %{"name" => "google_drive_search_files", "read_only" => true}
+             )
+
+    assert result.success == false
+
+    assert result.error ==
+             "google_drive is disabled — enable it on the setup page or run " <>
+               "`fermix plugins enable google_drive`."
+
+    refute_received {:provider_called, _path}
+  end
+
   test "server-side insufficient-scope 403 maps to reauthorize guidance and hides the body" do
     plug = fn conn ->
       conn
@@ -155,11 +222,10 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "google_calendar:primary" -> {:ok, "secret-access-token"} end,
-      plugin_granted_scopes_getter: fn _plugin ->
-        ["https://www.googleapis.com/auth/calendar.events"]
-      end
+      plugin_granted_scopes_getter: fn _ -> @calendar_scopes end
     }
 
     assert {:ok, result} =
@@ -171,11 +237,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                },
                context,
                "google_calendar",
-               %{
-                 "name" => "google_calendar_create_event",
-                 "read_only" => false,
-                 "requires_scopes" => ["https://www.googleapis.com/auth/calendar.events"]
-               }
+               cal_tool("google_calendar_create_event")
              )
 
     assert result.success == false
@@ -205,11 +267,10 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
-      plugin_granted_scopes_getter: fn _plugin ->
-        ["https://www.googleapis.com/auth/calendar.events"]
-      end
+      plugin_granted_scopes_getter: fn _ -> @calendar_scopes end
     }
 
     assert {:ok, result} =
@@ -217,11 +278,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"query" => "x"},
                context,
                "google_calendar",
-               %{
-                 "name" => "google_calendar_search_events",
-                 "read_only" => true,
-                 "requires_scopes" => ["https://www.googleapis.com/auth/calendar.events"]
-               }
+               cal_tool("google_calendar_search_events")
              )
 
     assert result.success == false
@@ -251,11 +308,10 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
-      plugin_granted_scopes_getter: fn _plugin ->
-        ["https://www.googleapis.com/auth/calendar.events"]
-      end
+      plugin_granted_scopes_getter: fn _ -> @calendar_scopes end
     }
 
     assert {:ok, result} =
@@ -263,11 +319,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"query" => "x"},
                context,
                "google_calendar",
-               %{
-                 "name" => "google_calendar_search_events",
-                 "read_only" => true,
-                 "requires_scopes" => ["https://www.googleapis.com/auth/calendar.events"]
-               }
+               cal_tool("google_calendar_search_events")
              )
 
     assert result.success == false
@@ -328,6 +380,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "gmail:primary" -> {:ok, "gmail-token"} end
     }
@@ -389,6 +442,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     context = %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
       plugin_token_getter: fn "gmail:primary" -> {:ok, "gmail-token"} end
     }
@@ -425,12 +479,23 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
   end
 
+  @gmail_scopes [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.compose",
+    "https://www.googleapis.com/auth/gmail.modify"
+  ]
+
   defp gmail_context(plug) do
     %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
-      plugin_token_getter: fn "gmail:primary" -> {:ok, "tok"} end
+      plugin_token_getter: fn "gmail:primary" -> {:ok, "tok"} end,
+      plugin_granted_scopes_getter: fn _ -> @gmail_scopes end
     }
   end
+
+  defp gmail_tool(name), do: plugin_tool("gmail", name)
 
   test "creates a Gmail draft from the composed message" do
     plug = gmail_write_plug(self(), %{"id" => "draft-1", "message" => %{"id" => "m9"}})
@@ -460,7 +525,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"id" => "draft-1"},
                gmail_context(plug),
                "gmail",
-               %{"name" => "gmail_send_draft", "read_only" => false}
+               gmail_tool("gmail_send_draft")
              )
 
     assert result.success == true
@@ -504,7 +569,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"id" => "m1", "remove_label_ids" => ["UNREAD"]},
                gmail_context(plug),
                "gmail",
-               %{"name" => "gmail_modify_message_labels", "read_only" => false}
+               gmail_tool("gmail_modify_message_labels")
              )
 
     assert result.success == true
@@ -526,19 +591,23 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     context = gmail_context(plug)
 
     assert {:ok, trashed} =
-             ToolExecutor.execute(%{"id" => "m1"}, context, "gmail", %{
-               "name" => "gmail_trash_message",
-               "read_only" => false
-             })
+             ToolExecutor.execute(
+               %{"id" => "m1"},
+               context,
+               "gmail",
+               gmail_tool("gmail_trash_message")
+             )
 
     assert trashed.success == true
     assert_received {:gmail_write, "/gmail/v1/users/me/messages/m1/trash"}
 
     assert {:ok, restored} =
-             ToolExecutor.execute(%{"id" => "m1"}, context, "gmail", %{
-               "name" => "gmail_untrash_message",
-               "read_only" => false
-             })
+             ToolExecutor.execute(
+               %{"id" => "m1"},
+               context,
+               "gmail",
+               gmail_tool("gmail_untrash_message")
+             )
 
     assert restored.success == true
     assert_received {:gmail_write, "/gmail/v1/users/me/messages/m1/untrash"}
@@ -552,7 +621,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"name" => "Receipts"},
                gmail_context(plug),
                "gmail",
-               %{"name" => "gmail_create_label", "read_only" => false}
+               gmail_tool("gmail_create_label")
              )
 
     assert result.success == true
@@ -562,9 +631,21 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
 
   defp calendar_context(plug) do
     %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
-      plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end
+      plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
+      plugin_granted_scopes_getter: fn _ -> @calendar_scopes end
     }
+  end
+
+  defp cal_tool(name), do: plugin_tool("google_calendar", name)
+
+  # Load a tool's real (now v2/declarative) manifest entry so tests exercise the
+  # migrated template path, not a hand-written inline tool.
+  defp plugin_tool(plugin_name, tool_name) do
+    {:ok, plugins} = FermixCore.Plugins.Registry.list()
+    plugin = Enum.find(plugins, &(&1.name == plugin_name))
+    Enum.find(plugin.tools, &(&1["name"] == tool_name))
   end
 
   test "updates an event with a partial patch" do
@@ -584,7 +665,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"event_id" => "evt-1", "summary" => "Renamed"},
                calendar_context(plug),
                "google_calendar",
-               %{"name" => "google_calendar_update_event", "read_only" => false}
+               cal_tool("google_calendar_update_event")
              )
 
     assert result.success == true
@@ -605,11 +686,12 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"event_id" => "evt-1"},
                calendar_context(plug),
                "google_calendar",
-               %{"name" => "google_calendar_delete_event", "read_only" => false}
+               cal_tool("google_calendar_delete_event")
              )
 
     assert result.success == true
-    assert Jason.decode!(result.output) == %{"ok" => true}
+    # the interpreter maps an empty 204 to an explicit empty-success result
+    assert Jason.decode!(result.output) == %{}
     assert_received {:cal, "DELETE", "/calendar/v3/calendars/primary/events/evt-1"}
   end
 
@@ -694,7 +776,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"event_id" => "evt-1", "destination_calendar_id" => "cal-2"},
                calendar_context(plug),
                "google_calendar",
-               %{"name" => "google_calendar_move_event", "read_only" => false}
+               cal_tool("google_calendar_move_event")
              )
 
     assert result.success == true
@@ -702,12 +784,18 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert params["destination"] == "cal-2"
   end
 
+  @drive_scopes ["https://www.googleapis.com/auth/drive"]
+
   defp drive_context(plug) do
     %{
+      plugin_url_guard: fn _ -> :ok end,
       plugin_req_options: [plug: plug],
-      plugin_token_getter: fn "google_drive:primary" -> {:ok, "tok"} end
+      plugin_token_getter: fn "google_drive:primary" -> {:ok, "tok"} end,
+      plugin_granted_scopes_getter: fn _ -> @drive_scopes end
     }
   end
+
+  defp drive_tool(name), do: plugin_tool("google_drive", name)
 
   test "creates a Drive folder" do
     parent = self()
@@ -722,10 +810,12 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
 
     assert {:ok, result} =
-             ToolExecutor.execute(%{"name" => "Receipts"}, drive_context(plug), "google_drive", %{
-               "name" => "google_drive_create_folder",
-               "read_only" => false
-             })
+             ToolExecutor.execute(
+               %{"name" => "Receipts"},
+               drive_context(plug),
+               "google_drive",
+               drive_tool("google_drive_create_folder")
+             )
 
     assert result.success == true
     assert_received {:drive, "POST", "/drive/v3/files", raw}
@@ -780,7 +870,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"file_id" => "file-1", "name" => "New Name"},
                drive_context(plug),
                "google_drive",
-               %{"name" => "google_drive_update_file", "read_only" => false}
+               drive_tool("google_drive_update_file")
              )
 
     assert result.success == true
@@ -805,7 +895,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"file_id" => "file-1", "add_parent_id" => "dest", "remove_parent_id" => "src"},
                drive_context(plug),
                "google_drive",
-               %{"name" => "google_drive_move_file", "read_only" => false}
+               drive_tool("google_drive_move_file")
              )
 
     assert result.success == true
@@ -831,7 +921,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
                %{"file_id" => "file-1", "name" => "Copy"},
                drive_context(plug),
                "google_drive",
-               %{"name" => "google_drive_copy_file", "read_only" => false}
+               drive_tool("google_drive_copy_file")
              )
 
     assert result.success == true
@@ -889,5 +979,220 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     assert result.success == true
     assert Jason.decode!(result.output) == %{"ok" => true}
     assert_received {:drive, "DELETE", "/drive/v3/files/file-1"}
+  end
+
+  describe "declarative tools (request template → Http.Interpreter)" do
+    # A tool carrying a `request` template routes through the interpreter +
+    # the executor's auth/refresh/plug seam, instead of hardcoded dispatch.
+    # (google_calendar supplies auth/scopes; the tool map itself is v2-shaped.)
+    defp declarative_tool do
+      %{
+        "name" => "google_calendar_search_events",
+        "read_only" => true,
+        "requires_scopes" => ["https://www.googleapis.com/auth/calendar.readonly"],
+        "rail" => "http",
+        "parameters" => %{
+          "type" => "object",
+          "properties" => %{
+            "query" => %{"type" => "string"},
+            "calendar_id" => %{"type" => "string", "default" => "primary"},
+            "max_results" => %{"type" => "integer", "default" => 10}
+          }
+        },
+        "request" => %{
+          "method" => "GET",
+          "url" => "https://www.googleapis.com/calendar/v3/calendars/{calendar_id}/events",
+          "query" => %{
+            "q" => "{query}",
+            "maxResults" => "{max_results}",
+            "singleEvents" => "true"
+          }
+        }
+      }
+    end
+
+    test "executes through the interpreter and shapes the request from the template" do
+      parent = self()
+
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        send(parent, {:declarative, conn.request_path, conn.query_params, auth_header(conn)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"items" => []}))
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"query" => "standup"},
+                 context,
+                 "google_calendar",
+                 declarative_tool()
+               )
+
+      assert result.success == true
+      assert Jason.decode!(result.output) == %{"items" => []}
+      # path uses the materialized default calendar_id=primary; query carries
+      # the interpolated value, the literal, and the default max_results.
+      assert_received {:declarative, "/calendar/v3/calendars/primary/events", params,
+                       "Bearer tok"}
+
+      assert params["q"] == "standup"
+      assert params["singleEvents"] == "true"
+      assert params["maxResults"] == "10"
+    end
+
+    test "refreshes the token once on a 401 for a read-only declarative tool" do
+      parent = self()
+
+      plug = fn conn ->
+        token = auth_header(conn)
+        send(parent, {:declarative_auth, token})
+
+        case token do
+          "Bearer old" ->
+            Plug.Conn.send_resp(conn, 401, "")
+
+          "Bearer fresh" ->
+            conn
+            |> Plug.Conn.put_resp_content_type("application/json")
+            |> Plug.Conn.send_resp(200, Jason.encode!(%{"items" => []}))
+        end
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "old"} end,
+        plugin_token_refresher: fn "google_calendar:primary" -> {:ok, "fresh"} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"query" => "x"},
+                 context,
+                 "google_calendar",
+                 declarative_tool()
+               )
+
+      assert result.success == true
+      assert_received {:declarative_auth, "Bearer old"}
+      assert_received {:declarative_auth, "Bearer fresh"}
+    end
+
+    test "keeps Google's bespoke 403 scope classification through the interpreter" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          403,
+          Jason.encode!(%{
+            "error" => %{
+              "code" => 403,
+              "message" => "secret-token rejected",
+              "details" => [%{"reason" => "ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]
+            }
+          })
+        )
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "secret-token"} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"query" => "x"},
+                 context,
+                 "google_calendar",
+                 declarative_tool()
+               )
+
+      assert result.success == false
+      # the bespoke message is preserved (not the interpreter's generic prose)
+      assert result.error =~ "missing a required scope"
+      assert result.error =~ "fermix plugins auth reauthorize google_calendar"
+      refute result.error =~ "secret-token"
+    end
+
+    test "blocks private-address URLs before any transport (SSRF floor)" do
+      parent = self()
+
+      plug = fn conn ->
+        send(parent, :transport_reached)
+        Plug.Conn.send_resp(conn, 200, "should never be reached")
+      end
+
+      # No :plugin_url_guard stub — the real Net.Guard runs. An IP-literal
+      # host is validated without DNS, so this stays hermetic.
+      context = %{
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "tok"} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      tool =
+        put_in(declarative_tool(), ["request", "url"], "https://169.254.169.254/latest/meta-data")
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{"query" => "x"}, context, "google_calendar", tool)
+
+      assert result.success == false
+      assert result.error =~ "blocked_url"
+      refute_received :transport_reached
+    end
+
+    test "surfaces the refresh failure reason instead of a synthetic 401" do
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "") end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_token_getter: fn "google_calendar:primary" -> {:ok, "old"} end,
+        plugin_token_refresher: fn "google_calendar:primary" -> {:error, :network_unreachable} end,
+        plugin_granted_scopes_getter: fn _ ->
+          ["https://www.googleapis.com/auth/calendar.readonly"]
+        end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(
+                 %{"query" => "x"},
+                 context,
+                 "google_calendar",
+                 declarative_tool()
+               )
+
+      assert result.success == false
+      assert result.error =~ "token_refresh_failed"
+      assert result.error =~ "network_unreachable"
+    end
+  end
+
+  defp auth_header(conn) do
+    case Plug.Conn.get_req_header(conn, "authorization") do
+      [value | _] -> value
+      [] -> nil
+    end
   end
 end

@@ -22,6 +22,10 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_event: "provider_failover"
     },
     %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent},
+    # A background-reviewer durable memory write — recorded as a tool_exec row
+    # (tool: "memory_write") so it is visible in the JSONL trace alongside tool
+    # spans, mirroring the Opik mapping.
+    %{event: [:fermix, :memory, :write], trace_type: :tool_exec, agent_field: :agent},
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
     %{
       event: [:fermix, :agent, :message],
@@ -58,6 +62,22 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :agent,
       trace_event: "capability_select"
+    },
+    # Plugin distribution ops (install/uninstall/gc). Catalog-scope
+    # ops carry `plugin: nil`, so the row's agent is the op itself.
+    %{
+      event: [:fermix, :plugin, :dist],
+      trace_type: :agent_event,
+      agent_field: :op,
+      trace_event: "plugin_dist"
+    },
+    # Tool-search bridge queries (M10): the search-miss rate (match_count == 0)
+    # is the primary soak-health metric for tool-schema deferral.
+    %{
+      event: [:fermix, :tool_search, :query],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "tool_search_query"
     }
   ]
 
@@ -72,6 +92,48 @@ defmodule FermixCore.Trace.TelemetryHandler do
       event: [:fermix, :mcp, :inbound, :call],
       trace_type: :tool_exec,
       agent_field: :client_name
+    }
+  ]
+
+  # Realtime voice lifecycle (its own WebSocket session). Tool calls and the
+  # model turn reuse `[:fermix, :tool, :exec]` / `[:fermix, :provider, :call]`;
+  # only these provider-lifecycle markers are realtime-specific.
+  @realtime_events [
+    %{
+      event: [:fermix, :realtime, :call_start],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_call_start"
+    },
+    %{
+      event: [:fermix, :realtime, :session_created],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_session_created"
+    },
+    %{
+      event: [:fermix, :realtime, :session_updated],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_session_updated"
+    },
+    %{
+      event: [:fermix, :realtime, :provider_error],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_provider_error"
+    },
+    %{
+      event: [:fermix, :realtime, :reconnect],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_reconnect"
+    },
+    %{
+      event: [:fermix, :realtime, :call_stop],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_call_stop"
     }
   ]
 
@@ -117,6 +179,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   defp event_definitions do
     @core_events ++
       @mcp_inbound_events ++
+      @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions()
   end
@@ -149,6 +212,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
   # consumers and acceptance tests rely on both the normalized `agent` and the
   # lifecycle-specific metadata key being present.
   defp sanitize_metadata(metadata, _agent_field), do: metadata
+
+  # Structs match `is_map/1`, but `Map.new/2` on one raises (a struct is not
+  # Enumerable). This runs in the emitting process, where an unhandled raise
+  # permanently detaches the telemetry handler — so render structs to a string
+  # rather than recurse into them.
+  defp json_safe(%_struct{} = value), do: inspect(value)
 
   defp json_safe(map) when is_map(map),
     do: Map.new(map, fn {key, value} -> {key, json_safe(value)} end)

@@ -219,6 +219,7 @@ defmodule FermixCore.Agents.TurnRunner do
         build_loop_runtime(state, messages, context,
           source_trust: source_trust,
           capabilities: profile.capabilities,
+          dispatchable_capabilities: Map.get(profile, :dispatchable, profile.capabilities),
           stream_callback: stream_callback
         )
       end)
@@ -265,6 +266,9 @@ defmodule FermixCore.Agents.TurnRunner do
     - Decompose it broadly and fan out WIDE with the `subagents` tool: many narrow, parallel
       probes, each gathering one specific piece of evidence. Prefer more probes over fewer —
       one probe = one question / one source / one angle.
+    - For the hardest or highest-stakes sub-problems, also fan out for DEPTH: run two or three
+      independent `subagents` on the SAME sub-problem (different framings or approaches),
+      compare their results, and keep the best-supported answer — discard the rest.
     - Don't answer from a single pass when the question has many facets; gather first.
     - Before relying on a finding, check it is well-supported; drop weak or unsupported ones.
     - Then synthesize everything into one thorough, well-organized answer, and note any gaps
@@ -375,8 +379,20 @@ defmodule FermixCore.Agents.TurnRunner do
       "`fermix auth login --provider xai` and retry."
   end
 
-  defp auth_reply({:provider_error, %{provider: provider}})
-       when provider in [:openai, :anthropic, :xai] do
+  # Codex is OAuth-only — "check the API key" advice would mislead.
+  defp auth_reply({:provider_error, %{provider: :openai_codex}}) do
+    "Authentication failed — run `fermix auth login` from the host and try again."
+  end
+
+  # Any other OAuth-tagged auth failure gets reconnect advice, never API-key
+  # advice (provider design §13 note 11 — dispatch on auth_mode, not a
+  # per-provider allowlist).
+  defp auth_reply({:provider_error, %{provider: provider, auth_mode: :oauth}}) do
+    "#{ProviderError.provider_label(provider)} authentication failed — reconnect with " <>
+      "`fermix auth login --provider #{provider}` and retry."
+  end
+
+  defp auth_reply({:provider_error, %{provider: provider}}) when is_atom(provider) do
     label = ProviderError.provider_label(provider)
     "#{label} authentication failed — check the #{label} API key in `fermix setup` and retry."
   end
@@ -462,6 +478,7 @@ defmodule FermixCore.Agents.TurnRunner do
       ]
       |> maybe_put_trust(Keyword.get(opts, :source_trust))
       |> maybe_put_capabilities(Keyword.get(opts, :capabilities))
+      |> maybe_put_dispatchable(Keyword.get(opts, :dispatchable_capabilities))
       |> maybe_put_stream_callback(Keyword.get(opts, :stream_callback))
 
     case resolve_loop_adapter(state) do
@@ -492,6 +509,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp maybe_put_capabilities(opts, capabilities) when is_list(capabilities),
     do: Keyword.put(opts, :capabilities, capabilities)
+
+  defp maybe_put_dispatchable(opts, nil), do: opts
+
+  defp maybe_put_dispatchable(opts, capabilities) when is_list(capabilities),
+    do: Keyword.put(opts, :dispatchable_capabilities, capabilities)
 
   defp maybe_put_stream_callback(opts, nil), do: opts
 

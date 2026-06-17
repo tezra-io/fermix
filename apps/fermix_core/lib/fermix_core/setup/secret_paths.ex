@@ -7,6 +7,8 @@ defmodule FermixCore.Setup.SecretPaths do
           :key => atom(),
           :env => String.t(),
           :path => [atom() | String.t()],
+          optional(:functionality) => String.t(),
+          optional(:optional?) => boolean(),
           optional(:sandbox_env) => boolean()
         }
 
@@ -30,39 +32,76 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :openrouter_api_key,
+      env: "OPENROUTER_API_KEY",
+      path: [:fermix_core, :providers, :openrouter, :api_key],
+      sandbox_env: true
+    },
+    %{
+      key: :mistral_api_key,
+      env: "MISTRAL_API_KEY",
+      path: [:fermix_core, :providers, :mistral, :api_key],
+      sandbox_env: true
+    },
+    %{
       key: :tavily_api_key,
       env: "TAVILY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :tavily_api_key],
+      functionality: "Tavily web_search backend",
+      optional?: true,
       sandbox_env: true
     },
     %{
       key: :exa_api_key,
       env: "EXA_API_KEY",
       path: [:fermix_core, :tools, :web_search, :exa_api_key],
+      functionality: "Exa web_search backend",
+      optional?: true,
       sandbox_env: true
     },
     %{
       key: :parallel_api_key,
       env: "PARALLEL_API_KEY",
       path: [:fermix_core, :tools, :web_search, :parallel_api_key],
+      functionality: "Parallel web_search backend",
+      optional?: true,
       sandbox_env: true
     },
     %{
       key: :brave_api_key,
       env: "BRAVE_API_KEY",
       path: [:fermix_core, :tools, :web_search, :brave_api_key],
+      functionality: "Brave web_search backend",
+      optional?: true,
       sandbox_env: true
     },
     %{
       key: :perplexity_api_key,
       env: "PERPLEXITY_API_KEY",
       path: [:fermix_core, :tools, :web_search, :perplexity_api_key],
+      functionality: "Perplexity web_search backend",
+      optional?: true,
       sandbox_env: true
     },
     %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "google", :client_secret]
+    },
+    %{
+      key: :github_oauth_client_secret,
+      env: "GITHUB_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "github", :client_secret]
+    },
+    %{
+      key: :notion_oauth_client_secret,
+      env: "NOTION_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "notion", :client_secret]
+    },
+    %{
+      key: :x_oauth_client_secret,
+      env: "X_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "x", :client_secret]
     },
     %{
       key: :telegram_bot_token,

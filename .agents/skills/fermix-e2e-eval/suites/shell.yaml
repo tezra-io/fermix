@@ -31,7 +31,7 @@ scenarios:
           max_duration_ms: 60000
         rubric: "Reports the machine's current date and/or time, obtained by running a command rather than guessed."
       - id: today_date_only
-        query: "Can you tell me today's date? Run a command to check."
+        query: "What's today's date on this machine?"
         expect:
           tools_any: [shell]
           reply_matches: "(?i)20[0-9]{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun"
@@ -39,7 +39,7 @@ scenarios:
           max_duration_ms: 60000
         rubric: "States today's date based on a command's output, not a guess."
       - id: echo_hello
-        query: "Run echo to print 'hello world' for me."
+        query: "Can you print the text 'hello world' to the terminal for me?"
         expect:
           tools_any: [shell]
           reply_matches: "(?i)hello world"
@@ -69,9 +69,10 @@ scenarios:
           max_duration_ms: 60000
         rubric: "Reports the files present in the current directory, obtained by running a listing command."
       - id: count_lines
-        query: "How many lines are in the README file? Use a command to count them."
+        query: "How many lines are in the README file?"
         expect:
           tools_any: [shell]
+          no_tool_errors: false  # model may glob_search to locate README first; errors are exploratory, not failures
           reply_matches: "(?i)[0-9]+\\s*(lines?)?|no such file|not found|doesn't exist|couldn't find"
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -91,7 +92,7 @@ scenarios:
           max_duration_ms: 60000
         rubric: "Reports disk usage (used/available/percentage) from a command's output rather than guessing."
       - id: disk_space_phrasing_two
-        query: "Run a command to check how much free disk space I have left."
+        query: "How much free disk space do I have left on this machine?"
         expect:
           tools_any: [shell]
           reply_matches: "(?i)[0-9].*(%|[KMGT]i?B|byte)|free|available|remaining|left|space"

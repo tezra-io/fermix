@@ -24,6 +24,9 @@ defmodule FermixCore.Tools.Subagents do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Agents.WorkerRun
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Tools.Support
 
   # Regular-mode caps (fallback defaults; the live values come from the
@@ -122,9 +125,34 @@ defmodule FermixCore.Tools.Subagents do
           type: "string",
           enum: ["concise", "detailed", "structured"],
           description: "Requested result shape from each subagent. Defaults to structured."
+        },
+        model: %{
+          type: "string",
+          description:
+            "Optional, one-shot. Run every subagent in THIS call on this model instead of the " <>
+              "configured default. Omit unless the user explicitly asked the subagents to use a " <>
+              "specific model — then pass its slug. Known slugs: #{model_slugs_hint()}."
+        },
+        provider: %{
+          type: "string",
+          enum: Enum.map(ModelCatalog.providers(), &Atom.to_string/1),
+          description: "Optional. Provider for `model`; inferred from the slug when omitted."
+        },
+        reasoning_effort: %{
+          type: "string",
+          enum: Enum.map(ReasoningEffort.levels(), &Atom.to_string/1),
+          description: "Optional, one-shot. Thinking level for the subagents in this call."
         }
       }
     }
+  end
+
+  defp model_slugs_hint do
+    ModelCatalog.providers()
+    |> Enum.flat_map(&ModelCatalog.models_for/1)
+    |> Enum.map(& &1.id)
+    |> Enum.uniq()
+    |> Enum.join(", ")
   end
 
   @impl true
@@ -176,14 +204,50 @@ defmodule FermixCore.Tools.Subagents do
          {:ok, source_trust} <- fetch_source_trust(context),
          {:ok, tasks} <- validate_tasks(args, context),
          {:ok, max_concurrency} <- validate_concurrency(args, context),
-         {:ok, timeout_seconds} <- validate_timeout(args) do
-      run_fanout(tasks, source_trust, max_concurrency, timeout_seconds, depth, args, context)
+         {:ok, timeout_seconds} <- validate_timeout(args),
+         {:ok, override} <- resolve_override(args) do
+      run_fanout(
+        tasks,
+        source_trust,
+        max_concurrency,
+        timeout_seconds,
+        depth,
+        args,
+        context,
+        override
+      )
     else
       {:error, message} -> Support.error(message)
     end
   end
 
-  defp run_fanout(tasks, source_trust, max_concurrency, timeout_seconds, depth, args, context) do
+  # The effective sub-agent model spec for this call: a per-call tool arg
+  # overrides the `[fermix_core.routing]` config default field-level, then the
+  # provider is inferred from the slug. Validated once, before fan-out — an
+  # invalid provider/effort fails the whole call cleanly instead of crashing N
+  # workers (docs/design/SUBAGENT_MODEL_SELECTION.md §5b).
+  defp resolve_override(args) do
+    override =
+      args
+      |> RoutingOverrides.parse_tool_args()
+      |> RoutingOverrides.merge(RoutingOverrides.subagent())
+      |> RoutingOverrides.infer_provider()
+
+    {:ok, override}
+  rescue
+    e in ArgumentError -> {:error, Exception.message(e)}
+  end
+
+  defp run_fanout(
+         tasks,
+         source_trust,
+         max_concurrency,
+         timeout_seconds,
+         depth,
+         args,
+         context,
+         override
+       ) do
     policy = worker_policy(source_trust)
     worker_context = sanitize_context(context, depth)
     spawn_opts = base_spawn_opts(context)
@@ -206,7 +270,8 @@ defmodule FermixCore.Tools.Subagents do
             shared_context: shared_context,
             result_format: result_format,
             per_worker_bytes: per_worker_bytes,
-            worker_iterations: worker_iterations_cap(context)
+            worker_iterations: worker_iterations_cap(context),
+            override: override
           })
         end,
         max_concurrency: max_concurrency,
@@ -231,7 +296,8 @@ defmodule FermixCore.Tools.Subagents do
         run.source_trust,
         run.policy,
         run.timeout_seconds,
-        run.worker_iterations
+        run.worker_iterations,
+        run.override
       )
 
     prompt = worker_prompt(task, run.shared_context, run.result_format)
@@ -246,15 +312,16 @@ defmodule FermixCore.Tools.Subagents do
     end
   end
 
-  defp build_definition(id, trust, policy, timeout_seconds, max_iterations) do
+  defp build_definition(id, trust, policy, timeout_seconds, max_iterations, override) do
     %AgentDefinition{
       name: "subagent:#{id}",
       description: "Temporary generic Fermix subagent for #{id}",
       role: :sub,
       persistent: false,
       system_prompt: worker_system_prompt(),
-      model: nil,
-      provider: nil,
+      model: override.model,
+      provider: override.provider,
+      reasoning_effort: override.reasoning_effort,
       temperature: nil,
       capabilities: [],
       allowed_tools: nil,

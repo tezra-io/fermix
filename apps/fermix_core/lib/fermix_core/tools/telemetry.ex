@@ -69,8 +69,15 @@ defmodule FermixCore.Tools.Telemetry do
     end
   end
 
-  defp result_output({:ok, tool_result}) when is_map(tool_result),
-    do: Map.get(tool_result, :output) || Map.get(tool_result, :error)
+  # Builtin failures (`Tool.error/1`) carry `output: ""` — fall through to the
+  # error text instead of tracing an empty body.
+  defp result_output({:ok, tool_result}) when is_map(tool_result) do
+    case Map.get(tool_result, :output) do
+      nil -> Map.get(tool_result, :error)
+      "" -> Map.get(tool_result, :error)
+      output -> output
+    end
+  end
 
   defp result_output(_other), do: nil
 

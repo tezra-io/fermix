@@ -9,7 +9,7 @@ defmodule Fermix.CLI.Service.TemplatesTest do
         Templates.render_darwin_plist(%{
           label: "io.tezra.fermix",
           fermix_path: "/usr/local/bin/fermix",
-          fermix_home: "/Users/dev/.fermix",
+          service_env: %{"FERMIX_HOME" => "/Users/dev/.fermix"},
           log_path: "/Users/dev/.fermix/logs/fermix.log"
         })
 
@@ -36,7 +36,7 @@ defmodule Fermix.CLI.Service.TemplatesTest do
         Templates.render_linux_unit(%{
           scope: :user,
           fermix_path: "/usr/local/bin/fermix",
-          fermix_home: "/home/dev/.fermix",
+          service_env: %{"FERMIX_HOME" => "/home/dev/.fermix"},
           log_path: "/home/dev/.fermix/logs/fermix.log"
         })
 
@@ -57,7 +57,7 @@ defmodule Fermix.CLI.Service.TemplatesTest do
         Templates.render_linux_unit(%{
           scope: :system,
           fermix_path: "/usr/local/bin/fermix",
-          fermix_home: "/var/lib/fermix",
+          service_env: %{"FERMIX_HOME" => "/var/lib/fermix"},
           log_path: "/var/log/fermix/fermix.log"
         })
 
@@ -66,4 +66,62 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert unit =~ "Environment=FERMIX_HOME=/var/lib/fermix"
     end
   end
+
+  describe "service env rendering" do
+    test "darwin renders all env vars sorted in EnvironmentVariables" do
+      plist =
+        Templates.render_darwin_plist(%{
+          label: "io.tezra.fermix",
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{
+            "FERMIX_HOME" => "/Users/dev/.fermix",
+            "FERMIX_OPIK_ENABLED" => "1",
+            "FERMIX_OPIK_BASE_URL" => "http://localhost:5173/api"
+          },
+          log_path: "/Users/dev/.fermix/logs/fermix.log"
+        })
+
+      assert plist =~ "<key>FERMIX_HOME</key><string>/Users/dev/.fermix</string>"
+      assert plist =~ "<key>FERMIX_OPIK_ENABLED</key><string>1</string>"
+
+      assert plist =~
+               "<key>FERMIX_OPIK_BASE_URL</key><string>http://localhost:5173/api</string>"
+
+      # Stable, sorted output: FERMIX_HOME < FERMIX_OPIK_BASE_URL < FERMIX_OPIK_ENABLED
+      assert pos(plist, "FERMIX_HOME") < pos(plist, "FERMIX_OPIK_BASE_URL")
+      assert pos(plist, "FERMIX_OPIK_BASE_URL") < pos(plist, "FERMIX_OPIK_ENABLED")
+    end
+
+    test "darwin xml-escapes env values" do
+      plist =
+        Templates.render_darwin_plist(%{
+          label: "io.tezra.fermix",
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{"FERMIX_OPIK_BASE_URL" => "http://h/api?a=1&b=2"},
+          log_path: "/l"
+        })
+
+      assert plist =~ "<string>http://h/api?a=1&amp;b=2</string>"
+      refute plist =~ "?a=1&b=2"
+    end
+
+    test "linux renders all env vars sorted as Environment= lines" do
+      unit =
+        Templates.render_linux_unit(%{
+          scope: :user,
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{
+            "FERMIX_HOME" => "/home/dev/.fermix",
+            "FERMIX_OPIK_ENABLED" => "1"
+          },
+          log_path: "/home/dev/.fermix/logs/fermix.log"
+        })
+
+      assert unit =~ "Environment=FERMIX_HOME=/home/dev/.fermix"
+      assert unit =~ "Environment=FERMIX_OPIK_ENABLED=1"
+      assert pos(unit, "Environment=FERMIX_HOME") < pos(unit, "Environment=FERMIX_OPIK_ENABLED")
+    end
+  end
+
+  defp pos(haystack, needle), do: :binary.match(haystack, needle) |> elem(0)
 end

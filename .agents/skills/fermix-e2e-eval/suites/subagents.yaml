@@ -1,128 +1,74 @@
 suite: subagents
-title: "Subagents — parallel delegation of broad tasks"
+title: "Subagents — fan-out mechanism + model routing"
 description: >
-  Exercises the delegation subsystem (the `subagents` tool). Two shapes of
-  request: a naturally broad "research and compare three different X" prompt
-  that INVITES fan-out without naming subagents, and an explicit "use parallel
-  workers to ..." prompt that names the mechanism. A scripted model cannot be
-  forced to fan out — the route is the model's choice every run — so the real
-  gates here grade the OUTCOME: every branch of the broad task must appear in
-  the final reply. `tools_any: [subagents]` is included only as a soft signal
-  on the explicit scenario, where naming parallel workers makes the tool a
-  reasonable (but still not guaranteed) choice. Budgets are deliberately higher
-  than a single lookup because fan-out runs several sub-turns. The implicit
-  scenario does NOT gate on the tool at all — broad research can validly be
-  answered in one pass.
+  Tests the delegation MECHANISM, deterministically: when the model is asked to
+  run parallel workers it fans out (the `subagents` tool span + nested
+  `subagent:*` worker spans), the MAIN turn runs on the default model, the WORKER
+  llm spans run on the configured sub-agent model (or a per-call override), and
+  the reply synthesizes every branch.
+
+  It deliberately does NOT test the model's *autonomous* "decide to fan out"
+  behavior. For small/medium tasks the model correctly answers in one pass
+  (cheaper and just as good), so a fan-out assertion on a natural query would be
+  testing a non-deterministic, task-size-dependent judgment call — and broad
+  outcome quality is already covered by `complex` and `knowledge_qa`. So the
+  gated subagents coverage is the explicit, deterministic fan-out below.
+
+  `subagent_model_matches` REQUIRES >=1 nested worker span, so it fails loud if
+  fan-out didn't nest into the trace (the "can't see inside the subagent" case)
+  rather than passing vacuously. PRECONDITION: dev config has
+  [fermix_core.routing] subagent_model = "claude-sonnet-4-6" and the main agent
+  runs claude-opus-4-8; adjust the model regexes if that config changes.
 defaults:
-  # Fan-out is SLOW and EXPENSIVE: an observed React/Svelte/Vue run was 254 spans,
-  # ~5-9 min, ~$20. Timeout and budgets are sized for that; do not bulk-run.
-  # No `no_tool_errors` default: a worker's occasional failed web_fetch among 100+
-  # tool calls is normal and must not fail the case.
+  # No `no_tool_errors` default: a worker's occasional failed web_fetch among many
+  # tool calls is normal and must not fail the case. timeout_ms is generous; the
+  # explicit small-task fan-outs here are actually cheap (a few sonnet workers).
   timeout_ms: 900000
   judge: true
   expect:
     status: ok
 
 scenarios:
-  - id: broad_compare_implicit
-    title: "Broad compare-three task — model may fan out, grade the outcome not the route"
+  - id: model_routing
+    title: "Explicit fan-out runs main on the default model, workers on the sub-agent model"
     severity: normal
-    tags: [subagents, delegation, research]
+    tags: [subagents, delegation, routing]
     cases:
-      # The prompt invites decomposition but never says "subagents". Whether the
-      # model fans out or answers in one pass is its choice — both are valid — so
-      # we gate ONLY on the reply covering all three branches, not on any tool.
-      - id: compare_three_databases
+      - id: default_subagent_model
         query: >
-          Research and compare three different databases for me — PostgreSQL,
-          MongoDB, and Redis. For each one, tell me what it's best suited for
-          and one real downside.
-        expect:
-          reply_matches: "(?i)postgres"
-          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
-          max_cost_usd: 25
-          max_duration_ms: 900000
-        rubric: >
-          Covers all three databases (PostgreSQL, MongoDB, Redis), giving each a
-          best-fit use case and at least one genuine downside, without confusing
-          them or inventing capabilities.
-      - id: compare_three_cloud_providers
-        query: >
-          I'm picking a cloud provider. Compare AWS, Google Cloud, and Azure
-          across pricing model, strongest service area, and learning curve, then
-          give me a one-line recommendation for a small startup.
-        expect:
-          reply_matches: "(?i)aws|amazon"
-          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
-          max_cost_usd: 25
-          max_duration_ms: 900000
-        rubric: >
-          Compares AWS, Google Cloud, and Azure on pricing, strongest area, and
-          learning curve, and ends with a clear one-line startup recommendation.
-      - id: compare_three_languages
-        query: >
-          Look into Rust, Go, and Elixir and tell me, for each, the kind of
-          backend system it shines at and its biggest adoption hurdle.
-        expect:
-          reply_matches: "(?i)\\brust\\b"
-          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
-          max_cost_usd: 25
-          max_duration_ms: 900000
-        rubric: >
-          Addresses Rust, Go, and Elixir individually with a fitting backend
-          use case and a real adoption hurdle for each, without mixing them up.
-
-  - id: explicit_parallel_workers
-    title: "User explicitly asks for parallel subagents/workers"
-    severity: normal
-    tags: [subagents, delegation, parallel]
-    cases:
-      # The user names parallel workers, so the subagents tool is a reasonable
-      # route — but a scripted model still can't be forced onto it, so tools_any
-      # stays a SOFT signal alongside the real outcome gate (all branches present).
-      - id: parallel_three_frameworks
-        query: >
-          Use parallel subagents to research three frontend frameworks at once —
-          React, Svelte, and Vue — and then bring back a side-by-side summary of
-          their bundle size, learning curve, and ecosystem maturity.
+          Use parallel subagents to research three things at once — the history of
+          espresso, how ocean tides work, and the basics of bookbinding — then give
+          me one short combined summary.
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 2
-          reply_matches: "(?i)react"
-          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          main_model_matches: "claude-opus-4-8"
+          subagent_model_matches: "claude-sonnet-4-6"
+          reply_matches: "(?i)espresso|tide|bookbind"
           max_cost_usd: 30
           max_duration_ms: 900000
         rubric: >
-          Returns a consolidated comparison of React, Svelte, and Vue covering
-          bundle size, learning curve, and ecosystem maturity for each.
-      - id: parallel_workers_topics
+          Fans out and returns a combined summary covering all three topics; the
+          main agent ran on the default model and the workers on the configured
+          cheaper sub-agent model.
+      - id: per_call_model_override
+        # The user names a model for the workers — the on-the-fly override path.
+        # opus is distinct from the configured sonnet default, so workers landing
+        # on opus proves the override took effect (if it were ignored they'd be on
+        # sonnet and subagent_model_matches would fail).
         query: >
-          Spin up parallel workers to look into three things independently and
-          report back together: the health benefits of green tea, the basics of
-          composting, and how noise-cancelling headphones work.
+          Spin up parallel subagents running on claude-opus-4-8 to look into three
+          separate topics — the rules of cricket, how vaccines work, and the basics
+          of jazz harmony — and bring it back as one summary.
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 2
-          reply_matches: "(?i)green tea"
-          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
+          main_model_matches: "claude-opus-4-8"
+          subagent_model_matches: "claude-opus-4-8"
+          reply_matches: "(?i)cricket|vaccine|jazz"
           max_cost_usd: 30
           max_duration_ms: 900000
         rubric: >
-          Reports on all three independent topics — green tea benefits,
-          composting basics, and how noise-cancelling headphones work — in one
-          consolidated answer.
-      - id: parallel_city_briefs
-        query: >
-          Fan this out to several subagents working in parallel: put together a
-          short travel brief for Tokyo, Lisbon, and Cape Town — one must-see
-          sight and the best season to visit for each — then combine them.
-        expect:
-          tools_any: [subagents]
-          min_subagent_spawns: 2
-          reply_matches: "(?i)tokyo"
-          reply_not_matches: "(?i)\\b(cannot|can't|unable to)\\b"
-          max_cost_usd: 30
-          max_duration_ms: 900000
-        rubric: >
-          Produces a combined travel brief covering Tokyo, Lisbon, and Cape Town,
-          each with a must-see sight and a recommended season to visit.
+          Honors the per-call model override: workers run on the requested model
+          (claude-opus-4-8) instead of the configured default sub-agent model, and
+          the reply covers all three topics.

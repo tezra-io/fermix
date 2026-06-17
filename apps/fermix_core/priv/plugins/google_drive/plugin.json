@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "name": "google_drive",
   "display_name": "Google Drive",
   "description": "Search Drive and create, edit, organize, and copy files from Fermix with a connected Google account.",
@@ -34,42 +34,184 @@
       "description": "Search Google Drive file metadata.",
       "policy_class": "external_api",
       "read_only": true,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive.metadata.readonly"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/drive.metadata.readonly"
+      ]
     },
     {
       "name": "google_drive_create_folder",
       "description": "Create a Google Drive folder.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string",
+            "description": "Parent folder id; omit for root."
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "request": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/drive/v3/files",
+        "body": {
+          "name": "{name}",
+          "mimeType": "application/vnd.google-apps.folder",
+          "parents": [
+            "{parent_id}"
+          ]
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     },
     {
       "name": "google_drive_upload_file",
       "description": "Create a Drive file with text content.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ]
     },
     {
       "name": "google_drive_update_file",
       "description": "Rename or update a Drive file's metadata.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "New name."
+          }
+        },
+        "required": [
+          "file_id",
+          "name"
+        ]
+      },
+      "request": {
+        "method": "PATCH",
+        "url": "https://www.googleapis.com/drive/v3/files/{file_id}",
+        "body": {
+          "name": "{name}"
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     },
     {
       "name": "google_drive_move_file",
       "description": "Move a Drive file to a different folder.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "add_parent_id": {
+            "type": "string",
+            "description": "Destination folder id."
+          },
+          "remove_parent_id": {
+            "type": "string",
+            "description": "Current parent folder id to detach."
+          }
+        },
+        "required": [
+          "file_id",
+          "add_parent_id"
+        ]
+      },
+      "request": {
+        "method": "PATCH",
+        "url": "https://www.googleapis.com/drive/v3/files/{file_id}",
+        "query": {
+          "addParents": "{add_parent_id}",
+          "removeParents": "{remove_parent_id}"
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     },
     {
       "name": "google_drive_copy_file",
       "description": "Copy a Drive file.",
       "policy_class": "external_api",
       "read_only": false,
-      "requires_scopes": ["https://www.googleapis.com/auth/drive"]
+      "requires_scopes": [
+        "https://www.googleapis.com/auth/drive"
+      ],
+      "rail": "http",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "file_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "description": "Name for the copy."
+          },
+          "parent_id": {
+            "type": "string",
+            "description": "Destination folder id."
+          }
+        },
+        "required": [
+          "file_id"
+        ]
+      },
+      "request": {
+        "method": "POST",
+        "url": "https://www.googleapis.com/drive/v3/files/{file_id}/copy",
+        "body": {
+          "name": "{name}",
+          "parents": [
+            "{parent_id}"
+          ]
+        },
+        "success": [
+          200,
+          201,
+          204
+        ]
+      }
     }
   ],
   "skills": [
@@ -81,5 +223,7 @@
   "health_check": {
     "kind": "local_readiness",
     "requires_auth": true
-  }
+  },
+  "plugin_api": 2,
+  "min_core_version": "0.4.0"
 }

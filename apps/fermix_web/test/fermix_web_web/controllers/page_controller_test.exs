@@ -147,7 +147,7 @@ defmodule FermixWebWeb.PageControllerTest do
     body = html_response(conn, 200)
 
     assert body =~ "Fermix"
-    assert body =~ "Agent runtime ready"
+    assert body =~ ~s(aria-label="Fermix")
     assert body =~ "Main agent"
     assert body =~ "Health"
     assert body =~ "online"

@@ -25,7 +25,9 @@ scenarios:
       - id: what_skills_do_you_have
         query: "What skills do you have installed?"
         expect:
-          tools_any: [skill_list]
+          # The skill catalog is in the prompt — the model can answer directly
+          # without calling skill_list, and that is correct. Gate on the reply
+          # naming a real skill rather than pinning the route.
           reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
           max_cost_usd: 0.5
           max_duration_ms: 90000
@@ -33,7 +35,6 @@ scenarios:
       - id: list_your_skills
         query: "Can you list your installed skills for me?"
         expect:
-          tools_any: [skill_list]
           reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
           max_cost_usd: 0.5
           max_duration_ms: 90000
@@ -41,11 +42,10 @@ scenarios:
       - id: which_capabilities_skills
         query: "Which skills are available to you right now? Just give me the names."
         expect:
-          tools_any: [skill_list]
           reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
           max_cost_usd: 0.5
           max_duration_ms: 90000
-        rubric: "Reports the installed skill names, grounded in the actual skill_list output."
+        rubric: "Reports the installed skill names without inventing any."
 
   - id: view_named_skill
     title: "Opens a named skill and describes its contents"
@@ -53,7 +53,7 @@ scenarios:
     tags: [skills, view]
     cases:
       - id: show_browser_guidance
-        query: "Show me the browser_guidance skill."
+        query: "Show me your browser guidance skill."
         expect:
           tools_any: [skill_view, skill_list]
           reply_matches: "(?i)browser"
@@ -61,7 +61,7 @@ scenarios:
           max_duration_ms: 120000
         rubric: "Opens the browser_guidance skill and summarizes or quotes its content, mentioning browser-related guidance."
       - id: open_self_knowledge
-        query: "Open the self_knowledge skill and tell me what it covers."
+        query: "Open your self knowledge skill and tell me what it covers."
         expect:
           tools_any: [skill_view, skill_list]
           reply_matches: "(?i)self.?knowledge|fermix"

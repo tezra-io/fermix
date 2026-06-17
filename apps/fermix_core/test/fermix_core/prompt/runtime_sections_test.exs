@@ -11,7 +11,9 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
     content = RuntimeSections.build([])
 
     assert content =~ "## Runtime Contract"
-    assert content =~ "Capabilities are available through the capability registry"
+    # M10 §7.6 audit cuts: non-actionable opener and rhetorical browser line.
+    refute content =~ "Capabilities are available through the capability registry"
+    refute content =~ "first-class built-in, not a fallback"
     assert content =~ "## Built-in Capability Catalog"
     assert content =~ "## Skill Catalog"
     assert content =~ "- none loaded"
@@ -191,6 +193,11 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
 
     assert content =~
              ~s(<plugin name="google_calendar" skill="google-calendar">google_calendar_search_events</plugin>)
+
+    # Reconciled with the deferred-tools routing (M10): skill_view is purposeful
+    # (load it for workflow/args), NOT mandated before every tool call.
+    assert content =~ "Open a plugin's skill with `skill_view` when you need"
+    refute content =~ "skill_view` first, then call its tools"
   end
 
   test "build/2 omits the plugin index when no plugins are supplied" do

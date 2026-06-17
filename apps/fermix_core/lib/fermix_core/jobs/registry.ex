@@ -125,6 +125,8 @@ defmodule FermixCore.Jobs.Registry do
         %{}
         |> put_present(:task_prompt, task)
         |> put_present(:description, description)
+        |> put_present(:skill_name, optional_update_string(attrs, :skill_name))
+        |> Map.merge(delivery_patch(attrs))
         |> Map.merge(schedule_job_patch)
 
       source_patch =
@@ -139,6 +141,15 @@ defmodule FermixCore.Jobs.Registry do
   rescue
     error in ArgumentError -> {:error, Exception.message(error)}
   end
+
+  # Delivery is set as a pair so switching to a target-less mode (none/local)
+  # also clears any stale delivery_target. The tool resolves and validates the
+  # mode/target before they reach here; an absent delivery yields no key at all.
+  defp delivery_patch(%{delivery_mode: mode} = attrs) when is_binary(mode) do
+    %{delivery_mode: mode, delivery_target: Map.get(attrs, :delivery_target)}
+  end
+
+  defp delivery_patch(_attrs), do: %{}
 
   defp schedule_patch(_job, nil, _now), do: {:ok, %{}, %{}}
 

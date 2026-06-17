@@ -82,12 +82,91 @@ defmodule FermixCore.Setup.SecretWriterTest do
              SecretWriter.command_source(:openai_api_key)
   end
 
-  test "secret-tool command source uses linux secret-tool lookup attributes" do
-    assert %{
-             command: command,
-             args: ["lookup", "service", "fermix", "account", "fermix", "env", "OPENAI_API_KEY"]
-           } = SecretWriter.SecretTool.command_source(:openai_api_key)
+  test "format_error trims helper output" do
+    reason = {:helper_failed, "/bin/keyring lookup", 44, "missing secret\n"}
 
-    assert command == "secret-tool" or String.ends_with?(command, "/secret-tool")
+    assert SecretWriter.format_error(:tavily_api_key, reason) ==
+             "TAVILY_API_KEY could not be resolved from @keyring: " <>
+               "/bin/keyring lookup exited 44: missing secret"
+  end
+
+  describe "keychain coordinate is scoped per profile" do
+    setup do
+      previous_profile = Application.get_env(:fermix_core, :profile)
+
+      on_exit(fn ->
+        case previous_profile do
+          nil -> Application.delete_env(:fermix_core, :profile)
+          value -> Application.put_env(:fermix_core, :profile, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "default profile keeps the legacy bare coordinate (no migration)" do
+      Application.delete_env(:fermix_core, :profile)
+
+      assert service_flag(SecretWriter.MacOS.command_source(:openai_api_key).args) ==
+               "fermix:OPENAI_API_KEY"
+
+      Application.put_env(:fermix_core, :profile, "general")
+
+      assert service_flag(SecretWriter.MacOS.command_source(:openai_api_key).args) ==
+               "fermix:OPENAI_API_KEY"
+    end
+
+    test "named profile prefixes the macOS entry name" do
+      Application.put_env(:fermix_core, :profile, "work")
+
+      assert service_flag(SecretWriter.MacOS.command_source(:telegram_bot_token).args) ==
+               "fermix:work:TELEGRAM_BOT_TOKEN"
+    end
+
+    test "explicit profile opt overrides the app-env profile" do
+      Application.put_env(:fermix_core, :profile, "general")
+
+      assert service_flag(
+               SecretWriter.MacOS.command_source(:openai_api_key, profile: "work").args
+             ) ==
+               "fermix:work:OPENAI_API_KEY"
+    end
+
+    test "secret-tool: default bare, named profile prefixed" do
+      Application.delete_env(:fermix_core, :profile)
+
+      assert %{command: command, args: bare} =
+               SecretWriter.SecretTool.command_source(:openai_api_key)
+
+      assert bare == [
+               "lookup",
+               "service",
+               "fermix",
+               "account",
+               "fermix",
+               "env",
+               "OPENAI_API_KEY"
+             ]
+
+      assert command == "secret-tool" or String.ends_with?(command, "/secret-tool")
+
+      Application.put_env(:fermix_core, :profile, "work")
+      assert %{args: scoped} = SecretWriter.SecretTool.command_source(:openai_api_key)
+
+      assert scoped == [
+               "lookup",
+               "service",
+               "fermix:work",
+               "account",
+               "fermix",
+               "env",
+               "OPENAI_API_KEY"
+             ]
+    end
+  end
+
+  defp service_flag(args) do
+    index = Enum.find_index(args, &(&1 == "-s"))
+    Enum.at(args, index + 1)
   end
 end

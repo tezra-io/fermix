@@ -25,7 +25,7 @@ At the highest level:
 4. `MainAgent` builds prompt context from bootstrap files, prompt memory,
    conversation history, and runtime capability sections.
 5. `FermixCore.AgentLoop` calls the configured provider, executes tool calls
-   through `FermixCore.Tools.Registry`, and loops until a final response or a
+   through `FermixCore.Capabilities.Registry`, and loops until a final response or a
    bounded stop condition.
 6. The original channel `reply_fn` sends the response back to the originating
    platform.
@@ -86,7 +86,7 @@ When a turn-state snapshot is checked out, `MainAgent`:
 
 - loads prompt context through `FermixCore.Prompt.PromptComposer`
 - reads recent conversation history from `FermixCore.Memory.ConversationStore`
-- fetches tools from `FermixCore.Tools.Registry`
+- fetches tools from `FermixCore.Capabilities.Registry`
 - calls `FermixCore.AgentLoop`
 - emits telemetry
 
@@ -103,33 +103,52 @@ and continues until the provider returns final content.
 
 Important bounds live here:
 
-- max iterations defaults to 25
+- max iterations is a bounded per-loop cap (default 100 for interactive turns,
+  sub-agents, and scheduled jobs; configurable via `[fermix_core.iteration_limits]`)
 - message compaction runs before provider calls when enabled
 - repeated tool-call loop detection can warn or abort
 - tool lookup honors an optional allowed-tool list
 
 Architecture Invariant: provider responses and tool results are data flowing
-through the loop; tool modules are looked up by name in `Tools.Registry`, not
-hard-coded in the loop.
+through the loop; tool modules are looked up by name in `Capabilities.Registry`,
+not hard-coded in the loop.
 
 ### `FermixCore.Providers`
 
-`FermixCore.Providers.Provider` is the provider behavior. `FermixCore.Providers.OpenAI`
-is the current implementation. It supports OpenAI API-key chat completions and an
-OAuth-backed Responses path used by Codex-style auth.
+`FermixCore.Providers.Adapter` is the provider behavior. The static
+`Providers.Descriptor` registry is the single source of truth for the supported
+providers — currently OpenAI (API key), `openai_codex` (Codex OAuth), Anthropic
+(API key or subscription OAuth), xAI (API key or Grok OAuth), OpenRouter, and a
+keyless local Ollama — including each one's adapter module, auth modes, secrets,
+config keys, and whether it supports reasoning effort. Adapters include
+`OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.Codex`, `Anthropic.Messages`,
+and `XAI.Responses`; OpenAI is `:routed` (model + base_url pick Responses vs
+ChatCompletions). `Selection` orders the configured providers into a
+primary-plus-fallback chain, `RouteResolver` resolves a route to an adapter +
+opts, and `RoutingOverrides` applies the `[fermix_core.routing]` sub-agent/cron
+model and reasoning-effort overrides.
 
 Architecture Invariant: the provider boundary returns a normalized response map
 with `content`, `tool_calls`, `usage`, and `model`. Agent code should not depend
 directly on provider-specific response bodies.
 
+Architecture Invariant: the supported-provider set and its per-provider metadata
+live only in `Providers.Descriptor`. Adding a provider is a registry entry plus an
+adapter, not a sweep of hand-maintained lists.
+
 ### `FermixCore.Tools`
 
-Tool modules implement `FermixCore.Tools.Tool`. Each tool exposes a name,
-description, JSON-schema parameters, and an `execute/2` callback. The registry is
-a GenServer that stores tool modules and formats their schemas for the provider.
+Tool modules implement `FermixCore.Capabilities.Capability`. Each capability
+exposes a name, description, JSON-schema parameters, and an `execute/2` callback.
+`Capabilities.Registry` is a GenServer that stores capability modules and formats
+their schemas for the provider. The same behavior also backs outbound MCP tools
+and HTTP-template plugins, so built-ins and external integrations share one
+registry surface.
 
-Built-in tools currently include shell execution, file read/write, memory
-store/recall, browser use, and skill invocation.
+Built-in tools currently include shell execution, file read/write/edit, glob and
+content search, git read/write, web fetch/search, sub-agent delegation, skill
+create/list/run/view, scheduled-job management, memory store/recall, and browser
+use.
 
 Architecture Invariant: tools receive explicit context from the agent runtime.
 They should not infer conversation identity, registry state, or provider state
@@ -281,6 +300,19 @@ placeholder module and does not participate in the main runtime path.
 Architecture Invariant: native code should stay a leaf dependency for narrow
 performance or platform primitives. Agent orchestration, provider calls, channel
 flow, and persistence belong in Elixir.
+
+### `apps/fermix_opik`
+
+This app exports Fermix's telemetry to an [Opik](https://www.comet.com/opik)
+instance for trace inspection. It is compiled into dev/prod builds but stays
+inert unless `FERMIX_OPIK_ENABLED` is set in the daemon environment: when
+disabled it attaches no telemetry handler and adds zero overhead. It reads the
+shared provider/tool/job telemetry (correlated by `session_id`) and maps each
+run into Opik's trace model.
+
+Architecture Invariant: observability export is opt-in and side-car. The exporter
+reads telemetry that the runtime emits regardless; it never sits on the reply path
+and its absence or failure must not affect a turn.
 
 ### `docs/`
 

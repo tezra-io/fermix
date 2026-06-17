@@ -148,6 +148,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       {:ok, turn} =
         ChatCompletions.chat(messages, [capability()],
           api_key: "sk-test",
+          provider: :openai,
           model: "gpt-5.4-mini",
           temperature: 0.4,
           response_format: response_format,
@@ -170,11 +171,191 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert metadata.adapter == :chat_completions
     end
 
+    test "sends reasoning_effort on the wire and reports it on the call telemetry" do
+      handler_id = "cc-effort-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry_call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["reasoning_effort"] == "high"
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      {:ok, _turn} =
+        ChatCompletions.chat([%{role: "user", content: "hi"}], [],
+          api_key: "sk-test",
+          provider: :openai,
+          model: "o4-custom",
+          base_url: "https://api.openai.com/v1",
+          reasoning_effort: :high,
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry_call, %{provider: :openai, reasoning_effort: :high}}
+    end
+
+    test "omits reasoning_effort from the body and telemetry when unset (effort-less providers)" do
+      handler_id = "cc-effort-absent-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry_call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "reasoning_effort")
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      {:ok, _turn} =
+        ChatCompletions.chat([%{role: "user", content: "hi"}], [],
+          api_key: "sk-or-test",
+          provider: :openrouter,
+          model: "anthropic/claude-sonnet-4.6",
+          base_url: "https://openrouter.test/api/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:telemetry_call, %{provider: :openrouter, reasoning_effort: nil}}
+    end
+
     test "returns an auth error when api_key is missing" do
       assert {:error, {:provider_error, %{provider: :openai, kind: :auth, message: message}}} =
-               ChatCompletions.chat([], [], model: "gpt-5.4-mini")
+               ChatCompletions.chat([], [], model: "gpt-5.4-mini", provider: :openai)
 
       assert message =~ "requires :api_key"
+    end
+
+    test "keyless auth (:none) sends no authorization header and needs no key" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        send(test_pid, {:auth_header, Plug.Conn.get_req_header(conn, "authorization")})
+
+        Req.Test.json(conn, %{
+          "choices" => [%{"message" => %{"content" => "local ok"}}],
+          "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+        })
+      end)
+
+      assert {:ok, turn} =
+               ChatCompletions.chat(
+                 [%{role: "user", content: "hi"}],
+                 [],
+                 model: "qwen3:32b",
+                 provider: :ollama,
+                 auth: :none,
+                 base_url: "http://localhost:11434/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      assert turn.content == "local ok"
+      assert_receive {:auth_header, []}
+    end
+
+    test "sends OpenRouter attribution headers only for :openrouter" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        send(
+          test_pid,
+          {:headers, Plug.Conn.get_req_header(conn, "http-referer"),
+           Plug.Conn.get_req_header(conn, "x-title")}
+        )
+
+        Req.Test.json(conn, %{
+          "choices" => [%{"message" => %{"content" => "ok"}}],
+          "usage" => %{"prompt_tokens" => 1, "completion_tokens" => 1, "total_tokens" => 2}
+        })
+      end)
+
+      base_opts = [
+        model: "anthropic/claude-sonnet-4.6",
+        api_key: "sk-or-test",
+        base_url: "https://openrouter.test/api/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      {:ok, _turn} =
+        ChatCompletions.chat(
+          [%{role: "user", content: "hi"}],
+          [],
+          Keyword.put(base_opts, :provider, :openrouter)
+        )
+
+      assert_receive {:headers, ["https://fermix.sh"], ["Fermix"]}
+
+      {:ok, _turn} =
+        ChatCompletions.chat(
+          [%{role: "user", content: "hi"}],
+          [],
+          Keyword.put(base_opts, :provider, :openai)
+        )
+
+      assert_receive {:headers, [], []}
+    end
+
+    # M12 §2.3-5: the adapter serves several providers; attribution must
+    # come from the resolver, never default to :openai.
+    test "raises when the :provider opt is missing" do
+      assert_raise ArgumentError, ~r/requires a :provider atom/, fn ->
+        ChatCompletions.chat([], [], model: "gpt-5.4-mini", api_key: "sk-test")
+      end
+    end
+
+    test "attributes errors and telemetry to the resolver-supplied provider" do
+      handler_id = "cc-provider-attribution-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry_call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(conn, 429, Jason.encode!(%{error: %{message: "slow down"}}))
+      end)
+
+      assert {:error, {:provider_error, %{provider: :openrouter, kind: :rate_limit}}} =
+               ChatCompletions.chat(
+                 [%{role: "user", content: "hi"}],
+                 [],
+                 model: "anthropic/claude-sonnet-4.6",
+                 api_key: "sk-or-test",
+                 provider: :openrouter,
+                 base_url: "https://openrouter.test/api/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+
+      # Telemetry handlers are global: filter on provider so concurrently
+      # running async tests' events don't cross-match (playbook note 30).
+      assert_receive {:telemetry_call, %{provider: :openrouter} = metadata}
+      assert metadata.adapter == :chat_completions
     end
 
     test "returns structured provider errors on a non-200 response" do
@@ -189,6 +370,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       {:error, {:provider_error, error}} =
         ChatCompletions.chat([%{role: "user", content: "x"}], [],
           api_key: "sk-test",
+          provider: :openai,
           model: "gpt-5.4-mini",
           base_url: "https://api.openai.com/v1",
           req_options: [plug: {Req.Test, __MODULE__}]
@@ -228,6 +410,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       {:error, {:provider_error, _error}} =
         ChatCompletions.chat([%{role: "user", content: "x"}], [],
           api_key: "sk-test",
+          provider: :openai,
           model: "gpt-5.4-mini",
           base_url: "https://api.openai.com/v1",
           req_options: [plug: {Req.Test, __MODULE__}]
@@ -267,12 +450,62 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       {:ok, turn} =
         ChatCompletions.continue(provider_state, tool_results,
           api_key: "sk-test",
+          provider: :openai,
           model: "gpt-5.4-mini",
           base_url: "https://api.openai.com/v1",
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
       assert turn.content == "Hi there"
+    end
+
+    # Mistral's strict validator 422s on an assistant message that carries
+    # empty-string `content` alongside `tool_calls`; the cross-ecosystem fix
+    # (langchain #21196, litellm #13355, vllm #38738) is to omit the `content`
+    # key entirely in that case. OpenAI/OpenRouter/Ollama tolerate the
+    # omission, so one wire shape stays valid on every ChatCompletions provider.
+    test "omits content from assistant messages carrying tool_calls" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assistant = Enum.find(decoded["messages"], &(&1["role"] == "assistant"))
+        send(test_pid, {:assistant_message, assistant})
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        messages: [%{role: "user", content: "Hi"}],
+        assistant: %{
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            %{
+              "id" => "abc123def",
+              "type" => "function",
+              "function" => %{"name" => "echo", "arguments" => "{}"}
+            }
+          ]
+        },
+        capabilities: [capability()]
+      }
+
+      tool_results = [%{call_id: "abc123def", output: "echoed"}]
+
+      {:ok, _turn} =
+        ChatCompletions.continue(provider_state, tool_results,
+          api_key: "key",
+          provider: :mistral,
+          model: "mistral-large-latest",
+          base_url: "https://api.mistral.ai/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:assistant_message, assistant}
+      refute Map.has_key?(assistant, "content")
+      assert [%{"id" => "abc123def"}] = assistant["tool_calls"]
     end
   end
 

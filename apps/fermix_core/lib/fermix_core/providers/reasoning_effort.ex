@@ -8,7 +8,7 @@ defmodule FermixCore.Providers.ReasoningEffort do
   support it); a level *above* a provider's ceiling clamps to that ceiling
   (so `:max` on OpenAI -> `"xhigh"`, its highest); a level *below* a
   provider's floor (e.g. `:none` on Anthropic) is rejected as unsupported.
-  Per-*model* support (e.g. Anthropic `xhigh` is Opus-4.7-only, `max` is
+  Per-*model* support (e.g. Anthropic `xhigh` is Opus-only, `max` is
   4.6+) is intentionally NOT enforced here; the provider API's 400 is the
   source of truth, matching the prior OpenAI design.
 
@@ -67,6 +67,30 @@ defmodule FermixCore.Providers.ReasoningEffort do
   @spec supported?(atom(), atom()) :: boolean()
   def supported?(level, provider) when is_atom(level) and is_atom(provider) do
     level in levels_for(provider)
+  end
+
+  @doc """
+  Clamps a canonical level into a provider's supported range: above the ceiling
+  clamps down to the ceiling, below the floor clamps up to the floor, a
+  supported level passes through unchanged. A range fit (never an error), used
+  to overlay one routing-level effort onto each route of a possibly
+  multi-provider chain without rejecting it. A provider with no known levels
+  returns the level unchanged.
+  """
+  @spec clamp(level(), provider()) :: level()
+  def clamp(level, provider) when level in @levels and is_atom(provider) do
+    case levels_for(provider) do
+      [] -> level
+      supported -> clamp_into(level, supported)
+    end
+  end
+
+  defp clamp_into(level, supported) do
+    cond do
+      level in supported -> level
+      rank(level) < rank(List.first(supported)) -> List.first(supported)
+      true -> List.last(supported)
+    end
   end
 
   @doc """

@@ -1,5 +1,6 @@
 defmodule FermixCore.Browser.ProfileServerTest do
-  use ExUnit.Case, async: true
+  # Sync: the console-capture tests mutate the global :telemetry app env.
+  use ExUnit.Case, async: false
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
@@ -77,6 +78,34 @@ defmodule FermixCore.Browser.ProfileServerTest do
     refute_received :launch_attempt
   end
 
+  test "a failed action carries the console buffer in error details when capture is on" do
+    set_capture(true)
+
+    {:ok, config} = Config.current()
+    pid = start_server(%{mode: :managed, behavior: :fail, test_pid: self()}, config, fn -> 0 end)
+
+    send(pid, {:cdp_event, "Runtime.consoleAPICalled", console_event("log", "first")})
+    send(pid, {:cdp_event, "Runtime.exceptionThrown", exception_event("boom")})
+
+    assert {:error, %Error{code: "chrome_missing", details: details}} = request(pid, "start")
+
+    # Oldest first, same order as the explicit `console` action.
+    assert [%{"type" => "log"}, %{"type" => "exception", "text" => "boom"}] =
+             details["console"]
+  end
+
+  test "console stays out of error details when capture is off" do
+    set_capture(false)
+
+    {:ok, config} = Config.current()
+    pid = start_server(%{mode: :managed, behavior: :fail, test_pid: self()}, config, fn -> 0 end)
+
+    send(pid, {:cdp_event, "Runtime.consoleAPICalled", console_event("log", "first")})
+
+    assert {:error, %Error{code: "chrome_missing", details: details}} = request(pid, "start")
+    refute Map.has_key?(details, "console")
+  end
+
   test "tears down the spawned browser when CDP connect fails after launch" do
     {:ok, config} = Config.current(action_timeout_ms: 500)
     now_fn = fn -> System.monotonic_time(:millisecond) end
@@ -92,5 +121,20 @@ defmodule FermixCore.Browser.ProfileServerTest do
     assert {:error, %Error{code: "cdp_connect_failed"}} = request(pid, "start")
     assert_received :launch_attempt
     assert_receive {:stopped, 4242}, 1_000
+  end
+
+  defp console_event(type, text) do
+    %{"params" => %{"type" => type, "args" => [%{"value" => text}]}}
+  end
+
+  defp exception_event(text) do
+    %{"params" => %{"exceptionDetails" => %{"text" => text}}}
+  end
+
+  defp set_capture(value) do
+    prior = Application.get_env(:fermix_core, :telemetry, [])
+    Application.put_env(:fermix_core, :telemetry, Keyword.put(prior, :capture_content, value))
+    on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prior) end)
+    :ok
   end
 end

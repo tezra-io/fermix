@@ -29,6 +29,7 @@ defmodule FermixCore.Providers.Adapter do
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Providers.Descriptor
 
   @type message :: %{
           required(:role) => String.t(),
@@ -66,7 +67,7 @@ defmodule FermixCore.Providers.Adapter do
   @type route_key :: %{
           required(:provider) => atom(),
           required(:model) => String.t(),
-          required(:auth_mode) => :api_key | :oauth,
+          required(:auth_mode) => :api_key | :oauth | :none,
           required(:base_url) => String.t()
         }
 
@@ -88,33 +89,31 @@ defmodule FermixCore.Providers.Adapter do
 
   @api_openai "https://api.openai.com"
 
+  # Dispatch derives from the Descriptor registry: a module adapter maps
+  # directly; `:routed` keeps the Responses-vs-ChatCompletions split for
+  # direct OpenAI (model string alone is unsafe — see moduledoc).
   @spec for_route(route_key()) :: module()
-  def for_route(%{provider: :openai_codex}),
-    do: FermixCore.Providers.OpenAI.Codex
+  def for_route(%{provider: provider} = route_key) when is_atom(provider) do
+    case Descriptor.fetch(provider) do
+      {:ok, %{adapter: :routed}} ->
+        routed_openai_adapter(Map.fetch!(route_key, :model), Map.fetch!(route_key, :base_url))
 
-  def for_route(%{provider: :openai, model: model, base_url: base_url})
-      when is_binary(model) and is_binary(base_url) do
+      {:ok, %{adapter: adapter}} when is_atom(adapter) ->
+        adapter
+
+      :error ->
+        raise ArgumentError,
+              "no adapter for #{inspect(provider)} #{Map.get(route_key, :model)} at " <>
+                "#{Map.get(route_key, :base_url)} — register one or set provider explicitly"
+    end
+  end
+
+  defp routed_openai_adapter(model, base_url) when is_binary(model) and is_binary(base_url) do
     if openai_direct?(base_url) and responses_eligible_model?(model) do
       FermixCore.Providers.OpenAI.Responses
     else
       FermixCore.Providers.OpenAI.ChatCompletions
     end
-  end
-
-  def for_route(%{provider: :anthropic}),
-    do: FermixCore.Providers.Anthropic.Messages
-
-  def for_route(%{provider: :xai}),
-    do: FermixCore.Providers.XAI.Responses
-
-  def for_route(%{provider: provider})
-      when provider in [:openrouter, :together, :groq],
-      do: FermixCore.Providers.OpenAI.ChatCompletions
-
-  def for_route(%{provider: provider, model: model, base_url: base_url}) do
-    raise ArgumentError,
-          "no adapter for #{inspect(provider)} #{model} at #{base_url} — " <>
-            "register one or set provider explicitly"
   end
 
   defp openai_direct?(base_url), do: String.starts_with?(base_url, @api_openai)
