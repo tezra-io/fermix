@@ -1838,6 +1838,33 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute "hackerdemo" in Keyword.get(plugins, :enabled, [])
     end
 
+    test "a missing cosign binary reports a cosign-specific message, not a bad signature", %{
+      conn: conn,
+      tmp_home: tmp_home,
+      fixtures: fixtures
+    } do
+      entry = wire_catalog_plugin(fixtures, "hackerdemo", "1.0.0")
+      # Download + checksum pass; the verifier reports cosign is absent. This is an
+      # environment problem, not an invalid signature — the prose must say so.
+      DistVerifierStub.fail("hackerdemo", "1.0.0", :cosign_not_installed)
+      seed_catalog(tmp_home, [entry])
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      view
+      |> element(~s|button[phx-click="plugin_enable"][phx-value-name="hackerdemo"]|)
+      |> render_click()
+
+      html = render_until(view, "cosign not found")
+      assert html =~ "hackerdemo install failed"
+      refute html =~ "signature invalid"
+      # Never enabled; still a catalog card.
+      assert html =~ ~s(data-catalog-name="hackerdemo")
+      plugins = Application.get_env(:fermix_core, :plugins, [])
+      refute "hackerdemo" in Keyword.get(plugins, :enabled, [])
+    end
+
     test "an incompatible catalog plugin renders greyed without an enable action", %{
       conn: conn,
       tmp_home: tmp_home,

@@ -6,6 +6,37 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-06-16
+
+### Fixed — Plugin install under the OS-service daemon
+- Plugin installation from the web setup page failed for **every** plugin
+  with a misleading `signature invalid — refusing.` The OS-service unit
+  (launchd `.plist` / systemd unit) carried no `PATH`, so the supervised
+  daemon inherited a bare `PATH` that omits the Homebrew prefix where
+  `cosign` lives. Signature verification shells out to `cosign`;
+  `System.find_executable("cosign")` returned `nil`, the install pipeline
+  reported `{:verification_failed, :cosign_not_installed}`, and the page
+  rendered it as a bad signature. The signature was never actually checked.
+  The same daemon ran fine in a dev shell (where `cosign` is on `PATH`),
+  which masked the problem. `fermix service install` now pins a `PATH` in
+  the unit file — leading with the directory `fermix` itself was installed
+  into (its sibling `cosign` on a Homebrew install) followed by the standard
+  system and Homebrew bin directories — so the daemon resolves `cosign` (and
+  brew-installed MCP runtimes like `node`/`python`) the same way an
+  interactive shell does.
+- `fermix setup` now **self-heals a drifted service unit**: when an already
+  installed unit no longer matches what the current binary would write (e.g.
+  after an upgrade changed the template or the computed `PATH`), setup rewrites
+  and reloads it instead of merely restarting the stale one. So upgrading and
+  re-running `fermix setup` is enough to pick up the new `PATH` — the manual
+  `fermix service install` becomes an escape hatch, not a required step, and
+  any future unit-file change reaches existing installs automatically. An
+  unchanged unit is still just restarted (no needless reinstall).
+- The web setup page no longer reports a missing `cosign` binary as
+  `signature invalid`; it now says `cosign not found — install it to verify
+  plugin signatures (e.g. \`brew install cosign\`).`, distinguishing an
+  environment problem from a genuinely bad signature.
+
 ## [0.3.0] - 2026-06-16
 
 ### Added — Provider Expansion (M12)
