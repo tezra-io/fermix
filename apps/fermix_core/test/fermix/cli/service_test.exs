@@ -95,12 +95,15 @@ defmodule Fermix.CLI.ServiceTest do
       assert spec.service_env["FERMIX_OPIK_ENABLED"] == "1"
     end
 
-    test "filters non-allowlisted env keys, keeping only the FERMIX_HOME baseline" do
+    test "rejects non-allowlisted env keys (incl. a stray PATH), keeping FERMIX_HOME + computed PATH" do
       tmp = mkdir!()
       opts = Keyword.put(fixture_opts(:linux, tmp), :env, %{"PATH" => "/x", "FOO" => "bar"})
       {:ok, spec} = Service.spec(:user, opts)
 
-      assert Map.keys(spec.service_env) == ["FERMIX_HOME"]
+      assert Enum.sort(Map.keys(spec.service_env)) == ["FERMIX_HOME", "PATH"]
+      # The install-time shell PATH is never copied into the unit; PATH is computed.
+      refute spec.service_env["PATH"] == "/x"
+      refute Map.has_key?(spec.service_env, "FOO")
     end
 
     test "drops blank observability values" do
@@ -128,6 +131,53 @@ defmodule Fermix.CLI.ServiceTest do
     end
   end
 
+  describe "spec/2 service_env PATH" do
+    test "darwin pins the fermix install dir, the Homebrew prefix, and system dirs" do
+      tmp = mkdir!()
+      # A Homebrew install: cosign lives next to fermix in /opt/homebrew/bin.
+      opts = Keyword.put(fixture_opts(:darwin, tmp), :fermix_path, "/opt/homebrew/bin/fermix")
+      {:ok, spec} = Service.spec(:user, opts)
+
+      dirs = String.split(spec.service_env["PATH"], ":")
+
+      assert "/opt/homebrew/bin" in dirs
+      assert "/usr/bin" in dirs
+      assert "/bin" in dirs
+      # No duplicate when the install dir already is a standard bin dir.
+      assert dirs == Enum.uniq(dirs)
+    end
+
+    test "leads with a non-standard fermix install dir" do
+      tmp = mkdir!()
+      # fixture fermix_path is <tmp>/fermix, so its directory leads the PATH.
+      {:ok, spec} = Service.spec(:user, fixture_opts(:darwin, tmp))
+
+      assert String.starts_with?(spec.service_env["PATH"], "#{tmp}:")
+      assert spec.service_env["PATH"] =~ "/opt/homebrew/bin"
+    end
+
+    test "linux omits the Homebrew prefix" do
+      tmp = mkdir!()
+      {:ok, spec} = Service.spec(:user, fixture_opts(:linux, tmp))
+
+      dirs = String.split(spec.service_env["PATH"], ":")
+
+      refute "/opt/homebrew/bin" in dirs
+      assert "/usr/local/bin" in dirs
+      assert "/usr/bin" in dirs
+    end
+
+    test "render_unit carries the computed PATH (darwin plist and linux unit)" do
+      tmp = mkdir!()
+
+      {:ok, plist} = Service.render_unit(:user, fixture_opts(:darwin, tmp))
+      assert plist =~ "<key>PATH</key><string>#{tmp}:/opt/homebrew/bin"
+
+      {:ok, unit} = Service.render_unit(:user, fixture_opts(:linux, tmp))
+      assert unit =~ "Environment=PATH=#{tmp}:/usr/local/bin"
+    end
+  end
+
   describe "installed?/2" do
     test "false when unit-path file is absent" do
       tmp = mkdir!()
@@ -143,6 +193,33 @@ defmodule Fermix.CLI.ServiceTest do
       opts = fixture_opts(:linux, tmp) ++ [unit_path: unit_path]
 
       assert Service.installed?(:user, opts)
+    end
+  end
+
+  describe "drifted?/2" do
+    test "false when the on-disk unit matches the rendered unit" do
+      tmp = mkdir!()
+      opts = fixture_opts(:linux, tmp) ++ [unit_path: Path.join(tmp, "fermix.service")]
+      {:ok, body} = Service.render_unit(:user, opts)
+      File.write!(Keyword.fetch!(opts, :unit_path), body)
+
+      refute Service.drifted?(:user, opts)
+    end
+
+    test "true when the on-disk unit differs (e.g. a stale unit with no PATH)" do
+      tmp = mkdir!()
+      unit_path = Path.join(tmp, "fermix.service")
+      File.write!(unit_path, "[Service]\nEnvironment=FERMIX_HOME=#{tmp}\n")
+      opts = fixture_opts(:linux, tmp) ++ [unit_path: unit_path]
+
+      assert Service.drifted?(:user, opts)
+    end
+
+    test "true when no unit file exists at the path" do
+      tmp = mkdir!()
+      opts = fixture_opts(:linux, tmp) ++ [unit_path: Path.join(tmp, "missing.service")]
+
+      assert Service.drifted?(:user, opts)
     end
   end
 

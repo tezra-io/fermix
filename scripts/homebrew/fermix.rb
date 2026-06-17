@@ -49,14 +49,15 @@ class Fermix < Formula
 
   def caveats
     <<~EOS
-      To finish setup:
+      To set up Fermix (installs and starts the background service for you):
         fermix setup
-
-      To install fermix as a launchd service:
-        fermix service install
 
       To check daemon health:
         fermix doctor
+
+      After upgrading, re-run `fermix setup` — it reconciles the service unit
+      if the new binary would write a different one. (`fermix service install`
+      is the manual escape hatch.)
     EOS
   end
 
