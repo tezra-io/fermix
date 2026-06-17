@@ -244,6 +244,7 @@ defmodule FermixOpik.Mapper do
   # test is the documented contract (provider playbook notes 2/34).
   def provider_string(:openrouter), do: "openrouter"
   def provider_string(:ollama), do: "ollama"
+  def provider_string(:mistral), do: "mistral"
   def provider_string(other), do: to_string(other)
 
   defp provider_span_name(metadata) do

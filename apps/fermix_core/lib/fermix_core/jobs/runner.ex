@@ -16,6 +16,8 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.Readiness
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
@@ -27,6 +29,16 @@ defmodule FermixCore.Jobs.Runner do
   @default_delivery_timeout_ms 60_000
   @default_capability_policy [:read_only, :network]
   @scheduled_job_trust :operator
+
+  # Transient-infrastructure retry (wake-from-sleep network race). A scheduled
+  # run that fires right after the host resumes can hit the network before it
+  # is ready; the LLM call cannot obtain a connection and surfaces as a
+  # `:connection_unavailable` transport error. The network comes up seconds
+  # later, so the runner re-runs the whole loop with exponential backoff,
+  # bounded by attempt count AND a cumulative wall-clock ceiling (Rule #2).
+  @default_max_transient_attempts 4
+  @default_transient_backoff_ms 2_000
+  @default_max_transient_retry_ms 60_000
 
   @type state :: %{
           repo: GenServer.server(),
@@ -43,7 +55,15 @@ defmodule FermixCore.Jobs.Runner do
           delivery_timeout_ms: non_neg_integer() | nil,
           output_base_dir: String.t(),
           timeout_ms: pos_integer() | nil,
-          inactivity_timeout_ms: pos_integer() | nil
+          inactivity_timeout_ms: pos_integer() | nil,
+          delay_fn: (non_neg_integer() -> any()),
+          max_transient_attempts: non_neg_integer(),
+          transient_backoff_ms: pos_integer(),
+          max_transient_retry_ms: non_neg_integer(),
+          readiness_enabled: boolean(),
+          readiness_host: String.t() | nil,
+          readiness_port: :inet.port_number() | nil,
+          readiness_opts: keyword()
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -88,7 +108,20 @@ defmodule FermixCore.Jobs.Runner do
           Keyword.fetch!(opts, :job),
           :inactivity_timeout_ms,
           :inactivity_timeout_seconds
-        )
+        ),
+      delay_fn: Keyword.get(opts, :delay_fn, &Process.sleep/1),
+      start_delay_ms: Keyword.get(opts, :start_delay_ms, 0),
+      max_transient_attempts:
+        Keyword.get(opts, :max_transient_attempts, @default_max_transient_attempts),
+      transient_backoff_ms:
+        Keyword.get(opts, :transient_backoff_ms, @default_transient_backoff_ms),
+      max_transient_retry_ms:
+        Keyword.get(opts, :max_transient_retry_ms, @default_max_transient_retry_ms),
+      readiness_enabled:
+        Keyword.get(opts, :network_readiness_enabled, network_readiness_enabled?()),
+      readiness_host: Keyword.get(opts, :readiness_host),
+      readiness_port: Keyword.get(opts, :readiness_port),
+      readiness_opts: Keyword.get(opts, :readiness_opts, [])
     }
 
     {:ok, state, {:continue, :run}}
@@ -118,7 +151,10 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp execute_and_finalize(state, loop_input) do
-    case run_agent_loop(loop_input.loop_opts, state) do
+    stagger_start(state)
+    await_network_ready(loop_input.loop_opts, state)
+
+    case run_agent_loop_with_retry(loop_input.loop_opts, state) do
       {:ok, result} ->
         completed_run = mark_completed(state, result)
         completed_state = %{state | run: completed_run}
@@ -469,8 +505,8 @@ defmodule FermixCore.Jobs.Runner do
     base = [
       context: loop_context(state, skill),
       capability_registry: state.capability_registry,
-      allowed_tools: narrow_allowed_tools(state.job.allowed_tools),
-      policy: scheduled_policy(state.job.capability_policy, trust),
+      allowed_tools: effective_allowed_tools(state.job, skill),
+      policy: effective_policy(state.job, trust, skill),
       trust: trust,
       max_iterations: state.job.max_iterations
     ]
@@ -488,6 +524,45 @@ defmodule FermixCore.Jobs.Runner do
   defp scheduled_policy(_explicit, :operator), do: nil
   defp scheduled_policy(explicit, _trust), do: capability_policy(explicit)
 
+  # A named skill's declared `policy` narrows the run further, clamped to the
+  # classes the job's own trust actually grants — so naming an operator skill
+  # from a guest job can never widen the run past guest. A skill with no policy
+  # (or `policy: []`, which `Registry.resolve_policy/2` reads as "use the trust
+  # default") leaves the job's trust-derived policy untouched. An empty clamp
+  # means the skill demanded only classes the trust forbids: fail the run loudly
+  # rather than silently leak back to the trust default.
+  defp effective_policy(job, trust, skill) do
+    base = scheduled_policy(job.capability_policy, trust)
+
+    case skill_policy(skill) do
+      nil -> base
+      skill_classes -> clamp_skill_policy(base, skill_classes, trust, skill)
+    end
+  end
+
+  defp skill_policy(nil), do: nil
+  defp skill_policy(%{policy: classes}) when is_list(classes) and classes != [], do: classes
+  defp skill_policy(_skill), do: nil
+
+  defp clamp_skill_policy(base, skill_classes, trust, skill) do
+    granted = job_policy_classes(base, trust)
+
+    case Enum.filter(skill_classes, &(&1 in granted)) do
+      [] ->
+        raise ArgumentError,
+              "skill #{inspect(skill.name)} policy #{inspect(skill_classes)} grants no " <>
+                "capability classes under job trust #{inspect(trust)}"
+
+      classes ->
+        classes
+    end
+  end
+
+  # The concrete class set the job runs with absent a skill: the explicit
+  # scheduled-job policy when set, else the trust's registry default.
+  defp job_policy_classes(base, _trust) when is_list(base), do: base
+  defp job_policy_classes(nil, trust), do: CapabilityRegistry.default_policy_classes(trust)
+
   # Audit F-08 follow-up. AgentLoop's `capability_allowed?/2` treats
   # `nil` as "no narrowing" and a list as an exact allowlist. An empty
   # list therefore means "deny every tool", which is the wrong default
@@ -498,6 +573,28 @@ defmodule FermixCore.Jobs.Runner do
   defp narrow_allowed_tools([]), do: nil
   defp narrow_allowed_tools(nil), do: nil
   defp narrow_allowed_tools(list) when is_list(list), do: list
+
+  # A job that names a skill must run inside that skill's declared tool
+  # confinement — otherwise the run "cosplays" as the skill (its prompt)
+  # while wielding the creator's full tool surface. The effective allowlist
+  # is the intersection of the job's caller-scoped allowlist (the ceiling
+  # its creator could reach) and the skill's declared allowlist. `nil` on
+  # either side means "no narrowing from that source"; an empty intersection
+  # denies every tool (AgentLoop reads `[]` as deny-all).
+  defp effective_allowed_tools(job, skill) do
+    intersect_allowlist(narrow_allowed_tools(job.allowed_tools), skill_allowed_tools(skill))
+  end
+
+  defp skill_allowed_tools(nil), do: nil
+  defp skill_allowed_tools(%{allowed_tools: allowed_tools}), do: allowed_tools
+
+  defp intersect_allowlist(nil, other), do: other
+  defp intersect_allowlist(other, nil), do: other
+
+  defp intersect_allowlist(job_list, skill_list)
+       when is_list(job_list) and is_list(skill_list) do
+    Enum.filter(job_list, &(&1 in skill_list))
+  end
 
   # Audit F-08 step 2 — intersection at run time.
   #
@@ -624,6 +721,155 @@ defmodule FermixCore.Jobs.Runner do
       run_id: state.run.id,
       skill_name: if(skill, do: skill.name)
     }
+  end
+
+  # Proactive readiness gate (Layer 2 of the wake-from-sleep defense). Before
+  # the first LLM call, poll a cheap TCP connect against the run's primary-route
+  # host until the local network is actually reachable, so a run that fired
+  # moments after the host resumed does not burn its first attempt on a dead
+  # network. Advisory only: an exhausted budget returns `:unready` and the run
+  # proceeds regardless — the transient-backoff retry below stays the floor.
+  # Skipped when disabled, or when no route host is known (an injected adapter
+  # in tests carries no `:routes`).
+  # Spread a wake-time burst: when the scheduler fires many due jobs at once,
+  # each runner waits a short, capped delay (assigned by the scheduler from how
+  # many runs are already active) before its first network call, so they don't
+  # all check out HTTP connections at the same instant — when the pool is least
+  # ready, just after wake-from-sleep. Zero for a lone run. Uses delay_fn so
+  # tests don't actually sleep.
+  defp stagger_start(%{start_delay_ms: ms} = state) when is_integer(ms) and ms > 0 do
+    state.delay_fn.(ms)
+  end
+
+  defp stagger_start(_state), do: :ok
+
+  defp await_network_ready(_loop_opts, %{readiness_enabled: false}), do: :ok
+
+  defp await_network_ready(loop_opts, state) do
+    case readiness_target(loop_opts, state) do
+      {host, port} ->
+        _result = Readiness.await(host, port, readiness_opts(state))
+        :ok
+
+      :none ->
+        :ok
+    end
+  end
+
+  # An explicit host/port (test injection) wins; production derives the target
+  # from the resolved primary route's base URL.
+  defp readiness_target(_loop_opts, %{readiness_host: host, readiness_port: port})
+       when is_binary(host) and is_integer(port) do
+    {host, port}
+  end
+
+  defp readiness_target(loop_opts, _state) do
+    loop_opts
+    |> Keyword.get(:routes, [])
+    |> primary_route_target()
+  end
+
+  defp primary_route_target([{%{base_url: base_url}, _opts} | _rest]) when is_binary(base_url) do
+    case URI.parse(base_url) do
+      %URI{host: host, port: port} when is_binary(host) and is_integer(port) ->
+        {host, port}
+
+      _unparseable ->
+        :none
+    end
+  end
+
+  defp primary_route_target(_routes), do: :none
+
+  defp readiness_opts(state) do
+    Keyword.put(state.readiness_opts, :delay_fn, state.delay_fn)
+  end
+
+  # Re-run the whole loop on a transient-infrastructure failure (see the
+  # @default_max_transient_* attributes). Provider failover cannot recover the
+  # wake-from-sleep network race — every provider shares the dead local
+  # network — so the time-delayed retry lives here, in the cron-specific path
+  # where "the host just woke" is the expected condition. A live user turn,
+  # by contrast, just surfaces the one error and the user retries.
+  defp run_agent_loop_with_retry(loop_opts, state) do
+    run_agent_loop_with_retry(loop_opts, state, 0, 0)
+  end
+
+  defp run_agent_loop_with_retry(loop_opts, state, attempt, elapsed_ms) do
+    case run_agent_loop(loop_opts, state) do
+      {:error, reason} -> retry_or_fail(reason, loop_opts, state, attempt, elapsed_ms)
+      other -> other
+    end
+  end
+
+  defp retry_or_fail(reason, loop_opts, state, attempt, elapsed_ms) do
+    cond do
+      not transient_infra?(reason) ->
+        {:error, reason}
+
+      attempt >= state.max_transient_attempts ->
+        log_retry_exhausted(state, :attempts, reason)
+        {:error, reason}
+
+      transient_budget_exceeded?(state, attempt, elapsed_ms) ->
+        log_retry_exhausted(state, :budget, reason)
+        {:error, reason}
+
+      true ->
+        retry_after_backoff(reason, loop_opts, state, attempt, elapsed_ms)
+    end
+  end
+
+  defp retry_after_backoff(reason, loop_opts, state, attempt, elapsed_ms) do
+    delay_ms = transient_backoff_ms(state, attempt)
+
+    Logger.warning(
+      "Scheduled job #{state.job.id} transient infrastructure failure " <>
+        "(#{transient_reason_kind(reason)}); retry #{attempt + 1}/#{state.max_transient_attempts} " <>
+        "after #{delay_ms}ms backoff"
+    )
+
+    state.delay_fn.(delay_ms)
+    run_agent_loop_with_retry(loop_opts, state, attempt + 1, elapsed_ms + delay_ms)
+  end
+
+  # The single transient-infrastructure signature the runner recovers from: HTTP
+  # pool-checkout exhaustion. Failover treats it as terminal (every route shares
+  # the one dead local network), so it reaches the runner unfailed-over — either
+  # as the typed `:connection_unavailable` transport error (Codex mints it) or as
+  # the bare Finch %RuntimeError{} the other providers return. Recognizing both
+  # keeps recovery provider-agnostic. Every other error — auth, provider 5xx, an
+  # exhausted failover chain, deterministic bugs — fails the run as before.
+  defp transient_infra?({:provider_transport_error, %{kind: :connection_unavailable}}), do: true
+  defp transient_infra?(%RuntimeError{} = reason), do: HttpClient.connection_unavailable?(reason)
+  defp transient_infra?(_reason), do: false
+
+  defp transient_reason_kind({:provider_transport_error, %{kind: kind}}), do: kind
+  defp transient_reason_kind(%RuntimeError{}), do: :connection_unavailable
+  defp transient_reason_kind(_reason), do: :unknown
+
+  # Exponential backoff, capped per step at the cumulative ceiling so a single
+  # sleep never overshoots the budget. attempt is 0-based (0 = before retry 1).
+  defp transient_backoff_ms(state, attempt) do
+    min(state.transient_backoff_ms * Integer.pow(2, attempt), state.max_transient_retry_ms)
+  end
+
+  defp transient_budget_exceeded?(state, attempt, elapsed_ms) do
+    elapsed_ms + transient_backoff_ms(state, attempt) > state.max_transient_retry_ms
+  end
+
+  defp log_retry_exhausted(state, :attempts, reason) do
+    Logger.error(
+      "Scheduled job #{state.job.id} exhausted transient-infrastructure retries " <>
+        "(#{state.max_transient_attempts}); failing run. Last reason: #{inspect(reason)}"
+    )
+  end
+
+  defp log_retry_exhausted(state, :budget, reason) do
+    Logger.error(
+      "Scheduled job #{state.job.id} exhausted transient-infrastructure retry budget " <>
+        "(#{state.max_transient_retry_ms}ms); failing run. Last reason: #{inspect(reason)}"
+    )
   end
 
   defp run_agent_loop(loop_opts, state) do
@@ -814,6 +1060,7 @@ defmodule FermixCore.Jobs.Runner do
     %{
       "job_id" => job.id,
       "name" => job.name,
+      "task_prompt" => job.task_prompt,
       "schedule_kind" => job.schedule_kind,
       "schedule_expr" => job.schedule_expr,
       "timezone" => job.timezone,
@@ -889,6 +1136,12 @@ defmodule FermixCore.Jobs.Runner do
     :fermix_core
     |> Application.get_env(:jobs, [])
     |> Keyword.get(:delivery_channels, %{})
+  end
+
+  defp network_readiness_enabled? do
+    :fermix_core
+    |> Application.get_env(:jobs, [])
+    |> Keyword.get(:network_readiness_enabled, true)
   end
 
   defp delivery_opts(state) do

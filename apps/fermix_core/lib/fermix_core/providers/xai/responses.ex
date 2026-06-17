@@ -26,6 +26,7 @@ defmodule FermixCore.Providers.XAI.Responses do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Net.HttpClient
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
@@ -33,13 +34,6 @@ defmodule FermixCore.Providers.XAI.Responses do
 
   @default_base_url "https://api.x.ai/v1"
   @receive_timeout_ms 120_000
-  # Models that reject `reasoning.effort` (design doc §6.2) — re-verify
-  # against current xAI docs when adding catalog models.
-  @no_reasoning_models [
-    "grok-4.20-0309-reasoning",
-    "grok-4.20-0309-non-reasoning",
-    "grok-code-fast-1"
-  ]
 
   @impl true
   def chat(messages, capabilities, opts)
@@ -117,15 +111,19 @@ defmodule FermixCore.Providers.XAI.Responses do
     |> maybe_put(:reasoning, maybe_reasoning(model, Keyword.get(opts, :reasoning_effort)))
   end
 
-  defp maybe_reasoning(model, effort) when model in @no_reasoning_models do
-    if effort != nil do
-      Logger.debug("xAI model #{model} rejects reasoning.effort — field omitted")
+  defp maybe_reasoning(model, effort) do
+    if ModelCatalog.reasoning_effort?(:xai, model) do
+      ResponsesShared.maybe_reasoning_field(effort, :xai)
+    else
+      log_dropped_effort(model, effort)
+      nil
     end
-
-    nil
   end
 
-  defp maybe_reasoning(_model, effort), do: ResponsesShared.maybe_reasoning_field(effort, :xai)
+  defp log_dropped_effort(_model, nil), do: :ok
+
+  defp log_dropped_effort(model, _effort),
+    do: Logger.debug("xAI model #{model} rejects reasoning.effort — field omitted")
 
   # xAI rejects tool schemas whose enum values contain slashes (Hermes
   # parity); MCP-provided capabilities can carry such enums.

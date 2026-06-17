@@ -103,6 +103,54 @@ uv run bin/run_eval.py --suite streaming --tag safety          # just the CLI-ne
 Note: operator-case traces live on your real `telegram:*` thread — `--purge`
 never touches them (it only deletes `e2e-*` threads).
 
+## Provider parity suites (one daemon, one provider, run separately)
+
+`suites/provider_*.yaml` are seven byte-identical task batteries — one per
+provider (`openai`, `openai_codex`, `anthropic`, `xai`, `openrouter`, `mistral`,
+`ollama`) — that run the **same** six scenarios (plain reasoning, web_search tool
+use, a local shell call, a memory store→recall round-trip, strict
+instruction-following, harmful-request refusal) so behaviour can be compared
+**task-for-task across providers**.
+
+There is **no per-call provider override**: `fermix ask` has no `--provider` /
+`--model` flag, and the daemon serves the single provider in its config. So the
+matrix is run by **cycling the daemon**, one provider at a time:
+
+1. Set the primary provider + model in `~/.fermix-dev/config.toml`.
+2. Restart the dev daemon (`FERMIX_HOME=~/.fermix-dev`).
+3. Run only that provider's suite: `uv run bin/run_eval.py --suite provider_anthropic`.
+4. Repeat for the next provider.
+
+**Model-pin integrity guard.** Each suite's `defaults.expect.main_model_matches`
+pins every turn to that provider's model slug (`^`-anchored: bare slugs like
+`claude-`, `gpt-5`, `grok-`, `mistral-`, `qwen3` for direct providers; the
+slash-prefixed `vendor/model` form for OpenRouter). If a *different* provider
+served the turn — wrong config, or an OpenRouter failover leaking a direct slug —
+the suite **fails loudly** instead of silently grading the wrong backend.
+
+**Do NOT bundle them into a blind `--all` or `--suite provider_*`.** Only one
+provider is active per daemon, so the other six would all fail the model pin. Run
+exactly the one suite matching the currently-configured provider.
+
+**Daemon preconditions for full coverage** (else those scenarios fail *uniformly*
+across providers — a daemon gap, not a provider difference): shell enabled with a
+sandbox workspace, and a working `web_search` backend. The memory round-trip gates
+on the **reply** (the CLI eval path emits no `memory_store` span — see
+`memory.yaml`), not on a tool span.
+
+**Severity / safety note.** The `harmful_request_refusal` scenario is
+`severity: normal` here on purpose: it is a parity *comparison* of refusal
+behaviour, not the safety gate of record (`safety.yaml` stays `critical`). Its
+real safety signal is the per-case `reply_not_matches` harm-artifact gate (did the
+model actually emit the bomb recipe / phishing email / keylogger?); the
+refusal-phrasing `reply_matches` is broad but softer, so it does not flip a parity
+run's exit code on phrasing alone.
+
+**Cost.** Seven providers × six scenarios is a large matrix — run providers
+selectively and use `--max-cases` to bound spend. Note OAuth-billed routes
+(`openai_codex`, and any OAuth-mode provider) report `$0.00` to the trace, so
+`max_cost_usd` gates pass *vacuously* there — they bound the API-key paths only.
+
 ## Keeping Opik tidy
 
 The skill drives the **shared** dev daemon, whose Opik project also collects your

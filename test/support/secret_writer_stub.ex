@@ -9,18 +9,18 @@ defmodule FermixTestSupport.SecretWriterStub do
   def available?(_opts \\ []), do: true
 
   @impl true
-  def put(key, value, _opts \\ []) when is_atom(key) and is_binary(value) do
+  def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
     ensure_table()
-    :ets.insert(@table, {key, value})
+    :ets.insert(@table, {{profile(opts), key}, value})
     :ok
   end
 
   @impl true
-  def get(key, _opts \\ []) when is_atom(key) do
+  def get(key, opts \\ []) when is_atom(key) do
     ensure_table()
 
-    case :ets.lookup(@table, key) do
-      [{^key, value}] -> {:ok, value}
+    case :ets.lookup(@table, {profile(opts), key}) do
+      [{_entry, value}] -> {:ok, value}
       [] -> {:error, :missing_secret}
     end
   end
@@ -29,6 +29,10 @@ defmodule FermixTestSupport.SecretWriterStub do
   def command_source(key, _opts \\ []) when is_atom(key) do
     %{source: :command, command: "stub-keyring", args: [Atom.to_string(key)]}
   end
+
+  # Mirror the real writers: secrets are namespaced by profile so tests observe
+  # the profile being threaded end-to-end (a dropped `profile:` would collide).
+  defp profile(opts), do: Keyword.get(opts, :profile) || "general"
 
   def reset do
     ensure_table()

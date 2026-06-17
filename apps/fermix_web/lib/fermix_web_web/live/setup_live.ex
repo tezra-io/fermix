@@ -1384,6 +1384,10 @@ defmodule FermixWebWeb.SetupLive do
   defp install_error({:download_failed, _reason, _url}), do: "download failed (network)."
   defp install_error({:download_status, status, _url}), do: "download failed (HTTP #{status})."
   defp install_error({:sha256_mismatch, _details}), do: "checksum mismatch — refusing."
+
+  defp install_error({:verification_failed, :cosign_not_installed}),
+    do: "cosign not found — install it to verify plugin signatures (e.g. `brew install cosign`)."
+
   defp install_error({:verification_failed, _reason}), do: "signature invalid — refusing."
 
   defp install_error({:incompatible, {:needs_newer_core, :min_core_version, floor}}),

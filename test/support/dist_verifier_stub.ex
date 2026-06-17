@@ -35,12 +35,23 @@ defmodule FermixTestSupport.DistVerifierStub do
     :ok
   end
 
+  @doc """
+  Deny this `{name, version}` with a *specific* `reason` (e.g.
+  `:cosign_not_installed`) instead of the default `{:verification_denied, key}`.
+  Still a denial — exercises a real verifier error reason through the pipeline.
+  """
+  def fail(name, version, reason) when is_binary(name) and is_binary(version) do
+    :ets.insert(@table, {{name, version}, {:error, reason}})
+    :ok
+  end
+
   @impl true
   def verify(_blob, _sig, _cert, opts) when is_list(opts) do
     key = {Keyword.get(opts, :name), Keyword.get(opts, :version)}
 
     case :ets.lookup(@table, key) do
       [{_, :ok}] -> :ok
+      [{_, {:error, reason}}] -> {:error, reason}
       [] -> {:error, {:verification_denied, key}}
     end
   end

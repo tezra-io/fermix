@@ -7,9 +7,13 @@ defmodule FermixCore.Jobs.Delivery do
   contract dynamically.
   """
 
+  alias FermixCore.Net.HttpClient
+
   @type delivery_result :: {:ok, String.t()} | {:error, term()}
 
   @default_timeout_ms 60_000
+  @default_delivery_attempts 3
+  @default_delivery_backoff_ms 1_000
 
   @spec initial_status(map(), String.t() | nil) :: String.t()
   def initial_status(job, text) do
@@ -108,13 +112,46 @@ defmodule FermixCore.Jobs.Delivery do
 
   defp deliver_to_channel(job, text, opts) do
     with {:ok, target} <- delivery_target(job),
-         {:ok, adapter} <- delivery_adapter(target.platform, opts),
-         :ok <- adapter.send_message(target.destination, text, target.opts ++ delivery_opts(opts)) do
-      {:ok, "sent"}
+         {:ok, adapter} <- delivery_adapter(target.platform, opts) do
+      send_opts = target.opts ++ delivery_opts(opts)
+      max_attempts = Keyword.get(opts, :delivery_max_attempts, @default_delivery_attempts)
+      backoff_ms = Keyword.get(opts, :delivery_backoff_ms, @default_delivery_backoff_ms)
+
+      # An unattended scheduled run already did its work, so a momentary HTTP
+      # pool-checkout timeout (common right after wake-from-sleep) must not lose
+      # its delivery. Retry the send with bounded backoff — but only on the
+      # transient connection-unavailable error, which means the request never
+      # obtained a connection (so a retry cannot duplicate a sent message).
+      # Every other error fails fast.
+      Enum.reduce_while(1..max_attempts, {:error, :not_attempted}, fn attempt, _acc ->
+        adapter.send_message(target.destination, text, send_opts)
+        |> decide_delivery_attempt(attempt, max_attempts, backoff_ms)
+      end)
     else
       {:error, reason} -> {:error, reason}
-      other -> {:error, {:unexpected_delivery_result, other}}
     end
+  end
+
+  defp decide_delivery_attempt(:ok, _attempt, _max_attempts, _backoff_ms) do
+    {:halt, {:ok, "sent"}}
+  end
+
+  defp decide_delivery_attempt({:error, reason}, attempt, max_attempts, backoff_ms)
+       when attempt < max_attempts do
+    if HttpClient.connection_unavailable?(reason) do
+      Process.sleep(backoff_ms * attempt)
+      {:cont, {:error, reason}}
+    else
+      {:halt, {:error, reason}}
+    end
+  end
+
+  defp decide_delivery_attempt({:error, reason}, _attempt, _max_attempts, _backoff_ms) do
+    {:halt, {:error, reason}}
+  end
+
+  defp decide_delivery_attempt(other, _attempt, _max_attempts, _backoff_ms) do
+    {:halt, {:error, {:unexpected_delivery_result, other}}}
   end
 
   defp delivery_target(%{delivery_target: target}) when is_map(target) and map_size(target) > 0 do

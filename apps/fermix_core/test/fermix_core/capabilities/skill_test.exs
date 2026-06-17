@@ -41,9 +41,6 @@ defmodule FermixCore.Capabilities.SkillTest do
     @impl FermixCore.Providers.Provider
     def chat(_messages, _opts), do: pop_response()
 
-    @impl FermixCore.Providers.Provider
-    def models, do: {:ok, ["mock-model"]}
-
     @impl FermixCore.Providers.Adapter
     def chat(messages, capabilities, _opts) do
       Agent.update(@captured, fn prior -> prior ++ [messages] end)

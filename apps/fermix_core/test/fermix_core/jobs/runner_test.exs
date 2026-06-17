@@ -2,6 +2,9 @@ defmodule FermixCore.Jobs.RunnerTest do
   # async: false — the cron-routing tests mutate the shared :routing app env.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
+  alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Registry
@@ -63,6 +66,33 @@ defmodule FermixCore.Jobs.RunnerTest do
     defp next_turn([], _opts), do: {:error, "No mock responses left"}
   end
 
+  defmodule SkillRegistryStub do
+    @moduledoc false
+    # Minimal stand-in for FermixCore.Agents.SkillRegistry: the Runner only
+    # ever calls `GenServer.call(registry, {:load, name})`, so a tiny map-backed
+    # GenServer keeps the skill-confinement tests hermetic (no fixture files,
+    # no default-skill seeding).
+    use GenServer
+
+    def start_link(skills) when is_map(skills) do
+      GenServer.start_link(__MODULE__, skills)
+    end
+
+    @impl true
+    def init(skills), do: {:ok, skills}
+
+    @impl true
+    def handle_call({:load, name}, _from, skills) do
+      reply =
+        case Map.fetch(skills, name) do
+          {:ok, definition} -> {:ok, definition}
+          :error -> {:error, {:unknown_skill, name}}
+        end
+
+      {:reply, reply, skills}
+    end
+  end
+
   defmodule RecordingDelivery do
     def send_message(target, text, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:delivery_send, target, text, opts})
@@ -79,6 +109,74 @@ defmodule FermixCore.Jobs.RunnerTest do
         ms when is_integer(ms) and ms > 0 -> Process.sleep(ms)
         _ms -> :ok
       end
+    end
+  end
+
+  defmodule TransientAdapter do
+    @moduledoc false
+    # Drives the runner's transient-infrastructure retry: each fresh AgentLoop
+    # run calls `chat/3` once, so a shared counter lets us fail the first N
+    # whole-loop attempts with a `:connection_unavailable` transport error
+    # (the wake-from-sleep pool-checkout signature) then succeed — or fail
+    # forever to exercise the bounded-attempts ceiling.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      counter = Keyword.fetch!(opts, :counter)
+      parent = Keyword.fetch!(opts, :test_pid)
+      n = Agent.get_and_update(counter, fn x -> {x + 1, x + 1} end)
+      send(parent, {:transient_chat, n})
+
+      cond do
+        n <= Keyword.get(opts, :fail_until, 0) ->
+          Keyword.get(opts, :transient_error, connection_unavailable_error())
+
+        error = Keyword.get(opts, :fail_with) ->
+          {:error, error}
+
+        true ->
+          success_turn(n)
+      end
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, "no continue expected"}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp connection_unavailable_error do
+      {:error,
+       {:provider_transport_error,
+        %{
+          provider: :openai_codex,
+          adapter: :codex,
+          reason: :connection_unavailable,
+          kind: :connection_unavailable,
+          message: "Codex could not obtain an HTTP connection (transient).",
+          stage: :before_response
+        }}}
+    end
+
+    defp success_turn(n) do
+      {:ok,
+       %{
+         content: "recovered after #{n - 1} transient retries",
+         tool_calls: [],
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock",
+         provider_state: %{rest: []}
+       }}
     end
   end
 
@@ -406,6 +504,156 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert "owner_external" in tool_names
   end
 
+  test "a scheduled job inherits its skill's tool allowlist", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("skill_read"))
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("skill_blocked"))
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "research" => skill_definition("research", allowed_tools: ["skill_read"])
+      })
+
+    # Operator job, no own allowlist -> full operator surface absent a skill.
+    # Naming a skill that allowlists only skill_read must confine the run.
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Skill Allowlist",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as the research skill.",
+               created_by_trust: "operator",
+               skill_name: "research"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, ["skill_read"]}, 1_000
+  end
+
+  test "a scheduled job inherits its skill's capability policy", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("policy_read"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, test_capability("policy_exec", :exec))
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "reader" => skill_definition("reader", policy: ["read_only"])
+      })
+
+    # Operator job, no own allowlist or policy -> full operator surface absent a
+    # skill. A skill declaring read_only policy must drop the exec capability.
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Skill Policy",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as the reader skill.",
+               created_by_trust: "operator",
+               skill_name: "reader"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, ["policy_read"]}, 1_000
+  end
+
+  test "a skill narrows a guest job below its own trust default", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    :ok = CapabilityRegistry.register(capability_registry, test_capability("guest_read"))
+
+    :ok =
+      CapabilityRegistry.register(capability_registry, test_capability("guest_net", :network))
+
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "narrow" => skill_definition("narrow", policy: ["read_only"])
+      })
+
+    # A guest job runs with the scheduled-job default policy ([:read_only,
+    # :network]) absent a skill. Naming a read_only-only skill must drop the
+    # network capability — the skill narrows further than the job would alone.
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Guest Narrow",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as the narrow skill.",
+               created_by_trust: "guest",
+               skill_name: "narrow"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "done"}]
+    )
+
+    assert_receive {:adapter_chat, _messages, ["guest_read"]}, 1_000
+  end
+
+  test "a guest job naming a skill that demands only forbidden classes fails loudly", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    {:ok, skills} =
+      SkillRegistryStub.start_link(%{
+        "exec_only" => skill_definition("exec_only", policy: ["exec"])
+      })
+
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Forbidden Skill",
+               schedule: "every 15 minutes",
+               task_prompt: "Run as an exec-only skill.",
+               created_by_trust: "guest",
+               skill_name: "exec_only"
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      skill_registry: skills,
+      output_base_dir: output_base_dir,
+      script: [%{content: "unreachable"}]
+    )
+
+    assert {:ok, failed_run} = Repo.get_job_run(run.id, server: repo)
+    assert failed_run.status == "error"
+    assert failed_run.error =~ "grants no"
+  end
+
   test "delivers successful channel output after persisting the run", %{
     repo: repo,
     capability_registry: capability_registry,
@@ -588,6 +836,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         run: run,
         notify: parent,
         capability_registry: Keyword.fetch!(opts, :capability_registry),
+        skill_registry: Keyword.get(opts, :skill_registry),
         adapter: RecordingAdapter,
         adapter_opts: Keyword.merge([test_pid: parent, script: script], adapter_opts),
         output_base_dir: Keyword.fetch!(opts, :output_base_dir),
@@ -641,6 +890,23 @@ defmodule FermixCore.Jobs.RunnerTest do
       {:ok, {claimed_job, run}}
     end
   end
+
+  defp skill_definition(name, opts) do
+    attrs =
+      %{
+        "name" => name,
+        "description" => "Test skill #{name}",
+        "system_prompt" => "You are the #{name} skill."
+      }
+      |> maybe_put_attr("allowed_tools", Keyword.get(opts, :allowed_tools))
+      |> maybe_put_attr("policy", Keyword.get(opts, :policy))
+
+    {:ok, definition} = AgentDefinition.new(attrs)
+    AgentDefinition.with_trust(definition, :operator)
+  end
+
+  defp maybe_put_attr(attrs, _key, nil), do: attrs
+  defp maybe_put_attr(attrs, key, value), do: Map.put(attrs, key, value)
 
   defp test_capability(name, policy_class \\ :read_only) do
     Capability.new(%{
@@ -702,6 +968,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.job_config_snapshot["task_prompt"] == "Run."
       route_used = stored_run.job_config_snapshot["route_used"]
       assert route_used["provider"] == "anthropic"
       assert route_used["model"] == "claude-haiku-4-5"
@@ -755,6 +1022,307 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       # No cron override -> today's primary/fallback chain (default :openai in test env).
       assert stored_run.job_config_snapshot["route_used"]["provider"] == "openai"
+    end
+  end
+
+  describe "network readiness gate" do
+    @readiness_script [
+      %{
+        content: "ran after network came up",
+        usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2}
+      }
+    ]
+
+    test "waits for the network before the first attempt, then runs the job", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      parent = self()
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      probe = fn _host, _port, _timeout ->
+        n = Agent.get_and_update(counter, fn x -> {x + 1, x + 1} end)
+        send(parent, {:readiness_probe, n})
+        if n >= 3, do: :ok, else: {:error, :ehostunreach}
+      end
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Readiness Recover", task_prompt: "Run.")
+
+      start_readiness_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        readiness_host: "api.test",
+        readiness_port: 443,
+        readiness_opts: [probe_fn: probe, interval_ms: 10, budget_ms: 10_000]
+      )
+
+      # Two failed probes, then the third succeeds and the run starts.
+      assert_receive {:readiness_probe, 1}, 1_000
+      assert_receive {:readiness_probe, 2}, 1_000
+      assert_receive {:readiness_probe, 3}, 1_000
+      refute_receive {:readiness_probe, 4}, 100
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.final_response == "ran after network came up"
+    end
+
+    test "skips the readiness probe when the gate is disabled", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      parent = self()
+
+      probe = fn _host, _port, _timeout ->
+        send(parent, :readiness_probe)
+        :ok
+      end
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Readiness Disabled", task_prompt: "Run.")
+
+      start_readiness_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        network_readiness_enabled: false,
+        readiness_host: "api.test",
+        readiness_port: 443,
+        readiness_opts: [probe_fn: probe]
+      )
+
+      refute_receive :readiness_probe, 200
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+    end
+
+    # Mirrors `assert_runner_exits_normally` but forwards the readiness-gate
+    # injection points (host/port/probe + disable flag) and a no-op delay so the
+    # backoff between probes never sleeps for real.
+    defp start_readiness_runner(job, run, opts) do
+      parent = self()
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: Keyword.fetch!(opts, :repo),
+          job: job,
+          run: run,
+          notify: parent,
+          capability_registry: Keyword.fetch!(opts, :capability_registry),
+          adapter: RecordingAdapter,
+          adapter_opts: [test_pid: parent, script: @readiness_script],
+          output_base_dir: Keyword.fetch!(opts, :output_base_dir),
+          delay_fn: fn _ms -> :ok end,
+          network_readiness_enabled: Keyword.get(opts, :network_readiness_enabled, true),
+          readiness_host: Keyword.get(opts, :readiness_host),
+          readiness_port: Keyword.get(opts, :readiness_port),
+          readiness_opts: Keyword.get(opts, :readiness_opts, [])
+        )
+
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+  end
+
+  describe "transient-infrastructure retry" do
+    test "retries a transient connection-unavailable failure and recovers", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Wake Race Recover", task_prompt: "Run.")
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        adapter_opts: [counter: counter, fail_until: 2]
+      )
+
+      # First whole-loop attempt + two retries: the third attempt succeeds.
+      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:transient_chat, 2}, 1_000
+      assert_receive {:transient_chat, 3}, 1_000
+      refute_receive {:transient_chat, 4}, 100
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.final_response == "recovered after 2 transient retries"
+    end
+
+    test "retries a bare connection-unavailable RuntimeError (non-Codex provider) and recovers",
+         %{
+           repo: repo,
+           capability_registry: capability_registry,
+           output_base_dir: output_base_dir
+         } do
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Wake Race Recover Bare", task_prompt: "Run.")
+
+      # Non-Codex adapters return the Finch pool-checkout timeout as a bare
+      # %RuntimeError{}, not the typed transport error Codex mints. The runner
+      # must still treat it as transient and retry — provider-agnostic recovery.
+      bare =
+        {:error,
+         %RuntimeError{
+           message:
+             "Finch was unable to provide a connection within the timeout due to excess " <>
+               "queuing for connections."
+         }}
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        adapter_opts: [counter: counter, fail_until: 2, transient_error: bare]
+      )
+
+      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:transient_chat, 2}, 1_000
+      assert_receive {:transient_chat, 3}, 1_000
+      refute_receive {:transient_chat, 4}, 100
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.final_response == "recovered after 2 transient retries"
+    end
+
+    test "waits the assigned startup delay before its first network call (burst stagger)", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = start_counter()
+      parent = self()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Stagger", task_prompt: "Run.")
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: parent,
+          capability_registry: capability_registry,
+          adapter: TransientAdapter,
+          adapter_opts: [test_pid: parent, counter: counter, fail_until: 0],
+          output_base_dir: output_base_dir,
+          network_readiness_enabled: false,
+          start_delay_ms: 750,
+          delay_fn: fn ms -> send(parent, {:delay, ms}) end
+        )
+
+      ref = Process.monitor(pid)
+
+      # The startup stagger is slept (via delay_fn) BEFORE the first chat call.
+      assert_receive {:delay, 750}, 1_000
+      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+    end
+
+    test "fails the run after the bounded retry ceiling without looping forever", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Wake Race Exhaust", task_prompt: "Run.")
+
+      log =
+        capture_log(fn ->
+          run_transient_runner(job, run,
+            repo: repo,
+            capability_registry: capability_registry,
+            output_base_dir: output_base_dir,
+            max_transient_attempts: 2,
+            adapter_opts: [counter: counter, fail_until: 999]
+          )
+        end)
+
+      # 1 initial attempt + exactly 2 retries, then the run fails — bounded.
+      assert_receive {:transient_chat, 1}, 1_000
+      assert_receive {:transient_chat, 2}, 1_000
+      assert_receive {:transient_chat, 3}, 1_000
+      refute_receive {:transient_chat, 4}, 100
+
+      assert log =~ "exhausted transient-infrastructure retries"
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "error"
+      assert stored_run.error =~ "connection_unavailable"
+    end
+
+    test "does not retry a non-transient error", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Hard Error", task_prompt: "Run.")
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        adapter_opts: [counter: counter, fail_with: "deterministic provider bug"]
+      )
+
+      # Exactly one attempt — a non-transient error must not enter the backoff.
+      assert_receive {:transient_chat, 1}, 1_000
+      refute_receive {:transient_chat, 2}, 100
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "error"
+      assert stored_run.error =~ "deterministic provider bug"
+    end
+
+    defp start_counter, do: Agent.start_link(fn -> 0 end)
+
+    # Mirrors `assert_runner_exits_normally` but injects TransientAdapter, a
+    # no-op delay (no real backoff sleep in tests), and any retry-ceiling
+    # overrides. Only keys actually present are forwarded so the Runner's own
+    # production defaults still apply for the rest.
+    defp run_transient_runner(job, run, opts) do
+      parent = self()
+      adapter_opts = Keyword.merge([test_pid: parent], Keyword.fetch!(opts, :adapter_opts))
+
+      base = [
+        repo: Keyword.fetch!(opts, :repo),
+        job: job,
+        run: run,
+        notify: parent,
+        capability_registry: Keyword.fetch!(opts, :capability_registry),
+        adapter: TransientAdapter,
+        adapter_opts: adapter_opts,
+        output_base_dir: Keyword.fetch!(opts, :output_base_dir),
+        delay_fn: fn _ms -> :ok end
+      ]
+
+      overrides =
+        Keyword.take(opts, [
+          :max_transient_attempts,
+          :transient_backoff_ms,
+          :max_transient_retry_ms
+        ])
+
+      {:ok, pid} = Runner.start_link(base ++ overrides)
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
     end
   end
 end

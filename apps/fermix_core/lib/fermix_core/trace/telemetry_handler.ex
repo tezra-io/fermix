@@ -213,6 +213,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
   # lifecycle-specific metadata key being present.
   defp sanitize_metadata(metadata, _agent_field), do: metadata
 
+  # Structs match `is_map/1`, but `Map.new/2` on one raises (a struct is not
+  # Enumerable). This runs in the emitting process, where an unhandled raise
+  # permanently detaches the telemetry handler — so render structs to a string
+  # rather than recurse into them.
+  defp json_safe(%_struct{} = value), do: inspect(value)
+
   defp json_safe(map) when is_map(map),
     do: Map.new(map, fn {key, value} -> {key, json_safe(value)} end)
 

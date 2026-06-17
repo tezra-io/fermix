@@ -49,6 +49,10 @@ defmodule FermixCore.Setup.SecretStoreTest do
     %{fermix_channels: [telegram: [bot_token: value]]}
   end
 
+  defp profiled_snapshot(profile, value) do
+    %{fermix_core: [profile: profile], fermix_channels: [telegram: [bot_token: value]]}
+  end
+
   describe "secure_snapshot/2 when the persisted value is the @keyring sentinel" do
     test "keeps the sentinel when the snapshot value matches the stored secret" do
       :ok = SecretWriter.put(:telegram_bot_token, "stored-token")
@@ -151,6 +155,26 @@ defmodule FermixCore.Setup.SecretStoreTest do
 
       assert SecretStore.get_snapshot_value(secured, @path) == SecretWriter.sentinel()
     end
+  end
+
+  describe "secrets are namespaced per profile" do
+    test "a named profile stores and resolves under its own keychain coordinate" do
+      # The same secret key, written under two profiles, must not collide — and
+      # each profile must resolve ITS OWN value. Guards the profile being threaded
+      # through secure_snapshot/resolve_sentinels: drop `profile:` on any path and
+      # the two profiles collapse to one entry, failing these assertions.
+      assert {:ok, _} = SecretStore.secure_snapshot(profiled_snapshot("work", "work-token"))
+      assert {:ok, _} = SecretStore.secure_snapshot(profiled_snapshot("general", "general-token"))
+
+      assert resolve(profiled_snapshot("work", SecretWriter.sentinel())) == "work-token"
+      assert resolve(profiled_snapshot("general", SecretWriter.sentinel())) == "general-token"
+    end
+  end
+
+  defp resolve(snapshot) do
+    snapshot
+    |> SecretStore.resolve_sentinels(warn_plaintext: false)
+    |> SecretStore.get_snapshot_value(@path)
   end
 
   test "plaintext warning includes the active config path" do

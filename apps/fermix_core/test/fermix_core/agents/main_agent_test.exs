@@ -67,9 +67,6 @@ defmodule FermixCore.Agents.MainAgentTest do
       record_and_reply(messages, opts)
     end
 
-    @impl FermixCore.Providers.Provider
-    def models, do: {:ok, ["mock-model"]}
-
     # --- Adapter interface ---
 
     @impl FermixCore.Providers.Adapter
@@ -214,9 +211,6 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     @impl FermixCore.Providers.Provider
     def chat(messages, opts), do: dispatch(messages, opts)
-
-    @impl FermixCore.Providers.Provider
-    def models, do: {:ok, ["controlled-model"]}
 
     @impl FermixCore.Providers.Adapter
     def chat(messages, capabilities, opts) do

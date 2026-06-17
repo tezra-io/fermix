@@ -27,6 +27,11 @@ defmodule FermixCore.Providers.Failover do
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   @fallback_api_kinds [:timeout, :rate_limit, :quota, :provider_unavailable]
+  # `:connection_unavailable` (pool-checkout exhaustion) is deliberately absent:
+  # it means no connection could be obtained at all, which on a wake-from-sleep
+  # race is true for every provider at once, so sweeping the chain only burns
+  # doomed attempts. It stays terminal here and the scheduled-job runner's
+  # transient backoff owns recovery instead.
   @fallback_transport_kinds [:timeout, :transport_closed, :network, :transport]
 
   @type route :: {Adapter.route_key(), keyword()}

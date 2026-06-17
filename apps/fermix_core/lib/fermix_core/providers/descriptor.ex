@@ -172,6 +172,30 @@ defmodule FermixCore.Providers.Descriptor do
       effort?: false
     },
     %{
+      id: :mistral,
+      label: "Mistral",
+      adapter: FermixCore.Providers.OpenAI.ChatCompletions,
+      default_base_url: "https://api.mistral.ai/v1",
+      auth_modes: [:api_key],
+      secrets: [:mistral_api_key],
+      config_keys: [:api_key, :base_url, :default_model, :primary],
+      setup_fields: [
+        %{
+          key: :mistral_api_key,
+          config_key: :api_key,
+          label: "Mistral API key",
+          secret?: true,
+          default: nil
+        }
+      ],
+      # Mistral's effort vocabulary is high|none, not the canonical
+      # none|low|medium|high subset; rather than map a partial range we omit
+      # the field entirely (like OpenRouter) and take the server default.
+      effort?: false
+    },
+    # Ollama stays last: a local model is the last-resort fallback hop, so
+    # every cloud provider (Mistral included) is tried before it.
+    %{
       id: :ollama,
       label: "Ollama",
       adapter: FermixCore.Providers.OpenAI.ChatCompletions,

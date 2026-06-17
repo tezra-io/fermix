@@ -106,7 +106,8 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: Application.get_env(:fermix_core, :realtime, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
-        oauth: Application.get_env(:fermix_core, :oauth, %{})
+        oauth: Application.get_env(:fermix_core, :oauth, %{}),
+        profile: Application.get_env(:fermix_core, :profile, "general")
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
       fermix_channels: [
@@ -171,6 +172,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
+    apply_profile_config(Keyword.get(persisted.fermix_core, :profile, "general"))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
     apply_channel_config(:telegram, Keyword.get(persisted.fermix_channels, :telegram, []))
@@ -285,7 +287,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:oauth, %{})
-          |> normalize_oauth()
+          |> normalize_oauth(),
+        profile:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:profile, "general")
+          |> normalize_profile()
       ],
       sandbox:
         snapshot
@@ -348,7 +355,8 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: [],
         tools: [],
         plugins: [],
-        oauth: %{}
+        oauth: %{},
+        profile: "general"
       ],
       sandbox: SandboxConfig.default(),
       fermix_channels: [telegram: [], whatsapp: [], discord: [], slack: [], signal: []],
@@ -396,6 +404,27 @@ defmodule FermixCore.Setup.ConfigStore do
     Application.put_env(:fermix_core, :personalization, merged)
     :ok
   end
+
+  defp apply_profile_config(profile) do
+    Application.put_env(:fermix_core, :profile, normalize_profile(profile))
+    :ok
+  end
+
+  # The profile names the secret namespace (keychain prefix). "general" (the
+  # default and the unconfigured case) keeps the legacy bare `fermix:<ENV>`
+  # entries, so existing installs need no migration; a named profile isolates
+  # its secrets. Blank collapses to "general".
+  defp normalize_profile(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> "general"
+      name -> name
+    end
+  end
+
+  defp normalize_profile(_value), do: "general"
+
+  defp profile_render(profile) when profile in [nil, "", "general"], do: []
+  defp profile_render(profile) when is_binary(profile), do: [profile: profile]
 
   defp apply_agent_config(agent_config) do
     merged =
@@ -487,6 +516,7 @@ defmodule FermixCore.Setup.ConfigStore do
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
     oauth = Keyword.get(fermix_core, :oauth, %{})
+    profile = Keyword.get(fermix_core, :profile, "general")
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
 
@@ -494,6 +524,7 @@ defmodule FermixCore.Setup.ConfigStore do
       "# Managed by mix fermix.setup",
       "# Built-in tools ship inside Fermix and are always available when registered.",
       "# Skills are separate SKILL.md directories under ~/.fermix/skills and plugin roots.",
+      render_section(["fermix_core"], profile_render(profile)),
       render_section(["fermix_core", "agent"], agent),
       Enum.map(Descriptor.ids(), fn id ->
         render_section(
@@ -704,7 +735,8 @@ defmodule FermixCore.Setup.ConfigStore do
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
         plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
-        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"]))
+        oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
+        profile: normalize_profile(get_in(document, ["fermix_core", "profile"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
       fermix_channels: [
@@ -1100,6 +1132,10 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_default_delivery_target(
         lookup(config, "default_delivery_target", :default_delivery_target)
       )
+    )
+    |> put_if_present(
+      :network_readiness_enabled,
+      normalize_boolean(lookup(config, "network_readiness_enabled", :network_readiness_enabled))
     )
   end
 

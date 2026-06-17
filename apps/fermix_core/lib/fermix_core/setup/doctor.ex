@@ -26,7 +26,8 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Tools.WebSearch
 
-  @type provider :: :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama
+  @type provider ::
+          :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
   @type probe_ok :: %{provider: provider(), model: String.t(), latency_ms: non_neg_integer()}
   @type channel_probe :: %{
           required(:channel) => atom(),
@@ -80,6 +81,7 @@ defmodule FermixCore.Setup.Doctor do
   # blocks don't persist a base_url through setup.
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
+  @mistral_default_base_url "https://api.mistral.ai/v1"
   @command_channels [:telegram, :whatsapp, :discord, :slack, :signal]
   @web_search_probe_query "fermix web search health check"
   @default_probe_timeout_ms 5_000
@@ -92,6 +94,7 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(:xai, opts), do: probe_xai(opts)
   def probe_provider(:openrouter, opts), do: probe_openrouter(opts)
   def probe_provider(:ollama, opts), do: probe_ollama(opts)
+  def probe_provider(:mistral, opts), do: probe_mistral(opts)
 
   def probe_provider(other, _opts) do
     raise ArgumentError,
@@ -501,6 +504,35 @@ defmodule FermixCore.Setup.Doctor do
     end
   end
 
+  # Mirrors the runtime adapter shape (probe-green => runtime-green for the
+  # request path). Mistral is a plain Bearer Chat Completions provider — no
+  # attribution headers — and uses `max_tokens` (not `max_completion_tokens`).
+  defp probe_mistral(opts) do
+    config = provider_config(:mistral)
+
+    case chat_completions_bearer(config, :mistral) do
+      {:error, _} = err ->
+        err
+
+      {:ok, bearer} ->
+        url = "#{base_url(config, :mistral, @mistral_default_base_url)}/chat/completions"
+        model = effective_model(config, :mistral)
+
+        body = %{
+          model: model,
+          messages: [%{role: "user", content: "."}],
+          max_tokens: 1
+        }
+
+        headers = [
+          {"authorization", "Bearer #{bearer}"},
+          {"content-type", "application/json"}
+        ]
+
+        do_post(:mistral, url, body, headers, model, "mistral.ai API key", opts)
+    end
+  end
+
   # Keyless local provider: 1-token chat completion through the same /v1
   # path the adapter uses, then a native /api/show check that the SERVED
   # context window is not silently below the catalog window (Ollama
@@ -813,6 +845,7 @@ defmodule FermixCore.Setup.Doctor do
     {"anthropic", "Anthropic API key rejected — verify it in the Anthropic console"},
     {"api.x.ai", "xAI API key rejected — verify it in the xAI console"},
     {"openrouter.ai", "OpenRouter API key rejected — verify it at openrouter.ai/settings/keys"},
+    {"mistral.ai", "Mistral API key rejected — verify it at console.mistral.ai/api-keys"},
     {"Ollama", "the Ollama server rejected the request — check its auth/proxy configuration"}
   ]
 
@@ -832,8 +865,8 @@ defmodule FermixCore.Setup.Doctor do
 
   defp catalog_windows do
     for provider <- ModelCatalog.providers(),
-        {model, _label, context_window} <- ModelCatalog.models_for(provider) do
-      %{provider: provider, model: model, context_window: context_window}
+        entry <- ModelCatalog.models_for(provider) do
+      %{provider: provider, model: entry.id, context_window: entry.context_window}
     end
   end
 

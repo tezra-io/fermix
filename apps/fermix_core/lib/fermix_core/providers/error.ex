@@ -166,6 +166,11 @@ defmodule FermixCore.Providers.Error do
   defp transport_kind(:timeout), do: :timeout
   defp transport_kind(:closed), do: :transport_closed
   defp transport_kind(:econnrefused), do: :network
+  # Pool-checkout exhaustion: no connection could be obtained at all (the
+  # wake-from-sleep race). Deliberately its own kind, NOT :network — it is
+  # terminal for failover (every provider shares the dead local network) and is
+  # recovered by the scheduled-job runner's transient backoff instead.
+  defp transport_kind(:connection_unavailable), do: :connection_unavailable
   defp transport_kind(_reason), do: :transport
 
   defp stage_opt(opts) do

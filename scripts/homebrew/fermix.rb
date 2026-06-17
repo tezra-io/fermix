@@ -17,6 +17,11 @@ class Fermix < Formula
   version "0.0.0" # bumped by scripts/homebrew/bump.sh
   license "MIT"
 
+  # The daemon shells out to cosign to verify every plugin's signature before
+  # install; without it on PATH, plugin installs fail. Pull it in so brew users
+  # have it. (bump.sh rewrites only version/url/sha256, so this line survives.)
+  depends_on "cosign"
+
   # Bumper rewrites both blocks. Keep target strings in sync with
   # apps/fermix_core/lib/fermix/cli/upgrade/manifest.ex.
   on_macos do
@@ -49,14 +54,15 @@ class Fermix < Formula
 
   def caveats
     <<~EOS
-      To finish setup:
+      To set up Fermix (installs and starts the background service for you):
         fermix setup
-
-      To install fermix as a launchd service:
-        fermix service install
 
       To check daemon health:
         fermix doctor
+
+      After upgrading, re-run `fermix setup` — it reconciles the service unit
+      if the new binary would write a different one. (`fermix service install`
+      is the manual escape hatch.)
     EOS
   end
 

@@ -6,6 +6,7 @@ defmodule FermixCore.Setup.SecretWriter do
   alias FermixCore.Setup.SecretPaths
 
   @sentinel "@keyring"
+  @default_profile "general"
   @type secret_key :: atom()
   @type writer_error :: {:error, term()}
 
@@ -16,6 +17,34 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @spec sentinel() :: String.t()
   def sentinel, do: @sentinel
+
+  @spec default_profile() :: String.t()
+  def default_profile, do: @default_profile
+
+  @doc """
+  Keychain entry-name prefix for the active profile. The default profile
+  (`"general"`, and the unconfigured case) uses the bare `fermix` prefix, so
+  existing single-profile installs keep their legacy `fermix:<ENV>` entries
+  with no migration. A named profile (e.g. `"work"`) gets `fermix:<profile>`,
+  isolating its secrets from other profiles on the same machine.
+
+  The profile comes from `opts[:profile]` — passed explicitly on the
+  boot-resolve and save paths, where app env is not yet populated — or the
+  `:fermix_core, :profile` app-env setting otherwise.
+  """
+  @spec scoped_prefix(keyword()) :: String.t()
+  def scoped_prefix(opts \\ []) when is_list(opts) do
+    case Keyword.get(opts, :profile) || Application.get_env(:fermix_core, :profile) do
+      profile when profile in [nil, "", @default_profile] ->
+        "fermix"
+
+      profile when is_binary(profile) ->
+        "fermix:#{profile}"
+
+      other ->
+        raise ArgumentError, "[fermix_core] profile must be a string, got: #{inspect(other)}"
+    end
+  end
 
   @spec put(secret_key(), String.t(), keyword()) :: :ok | writer_error()
   def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
@@ -140,9 +169,9 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
 
   alias FermixCore.CommandRunner
   alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretWriter
 
   @account "fermix"
-  @service "fermix"
   @label "Fermix"
   @default_timeout_ms 3_000
 
@@ -154,7 +183,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, shell} <- fetch_shell_binary() do
       with_temp_secret(value, fn secret_file ->
-        run_with_stdin(shell, secret_file, binary, put_args(key), timeout(opts))
+        run_with_stdin(shell, secret_file, binary, put_args(key, opts), timeout(opts))
       end)
     end
   end
@@ -162,7 +191,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   @impl true
   def get(key, opts \\ []) when is_atom(key) do
     with {:ok, binary} <- fetch_secret_tool_binary(),
-         {:ok, output} <- run(binary, lookup_args(key), timeout(opts)) do
+         {:ok, output} <- run(binary, lookup_args(key, opts), timeout(opts)) do
       output
       |> String.trim_trailing("\n")
       |> case do
@@ -173,24 +202,24 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   end
 
   @impl true
-  def command_source(key, _opts \\ []) when is_atom(key) do
+  def command_source(key, opts \\ []) when is_atom(key) do
     %{
       source: :command,
       command: secret_tool_binary() || "secret-tool",
-      args: lookup_args(key),
+      args: lookup_args(key, opts),
       timeout_ms: @default_timeout_ms
     }
   end
 
-  defp put_args(key) do
-    ["store", "--label", @label | attributes(key)]
+  defp put_args(key, opts) do
+    ["store", "--label", @label | attributes(key, opts)]
   end
 
-  defp lookup_args(key), do: ["lookup" | attributes(key)]
+  defp lookup_args(key, opts), do: ["lookup" | attributes(key, opts)]
 
-  defp attributes(key) do
+  defp attributes(key, opts) do
     secret = SecretPaths.fetch!(key)
-    ["service", @service, "account", @account, "env", secret.env]
+    ["service", SecretWriter.scoped_prefix(opts), "account", @account, "env", secret.env]
   end
 
   defp fetch_secret_tool_binary do
@@ -284,6 +313,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   alias FermixCore.CommandRunner
   alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretWriter
 
   @account "fermix"
   @default_timeout_ms 3_000
@@ -294,7 +324,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   @impl true
   def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
     with {:ok, binary} <- fetch_security_binary(),
-         {:ok, _output} <- run(binary, put_args(key, value), timeout(opts)) do
+         {:ok, _output} <- run(binary, put_args(key, value, opts), timeout(opts)) do
       :ok
     end
   end
@@ -302,7 +332,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   @impl true
   def get(key, opts \\ []) when is_atom(key) do
     with {:ok, binary} <- fetch_security_binary(),
-         {:ok, output} <- run(binary, get_args(key), timeout(opts)) do
+         {:ok, output} <- run(binary, get_args(key, opts), timeout(opts)) do
       output
       |> String.trim_trailing("\n")
       |> case do
@@ -314,26 +344,26 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @impl true
   @spec command_source(atom(), keyword()) :: map()
-  def command_source(key, _opts \\ []) when is_atom(key) do
+  def command_source(key, opts \\ []) when is_atom(key) do
     %{
       source: :command,
       command: security_binary() || "/usr/bin/security",
-      args: get_args(key),
+      args: get_args(key, opts),
       timeout_ms: @default_timeout_ms
     }
   end
 
-  defp put_args(key, value) do
-    ["add-generic-password", "-a", @account, "-s", service(key), "-w", value, "-U"]
+  defp put_args(key, value, opts) do
+    ["add-generic-password", "-a", @account, "-s", service(key, opts), "-w", value, "-U"]
   end
 
-  defp get_args(key) do
-    ["find-generic-password", "-a", @account, "-s", service(key), "-w"]
+  defp get_args(key, opts) do
+    ["find-generic-password", "-a", @account, "-s", service(key, opts), "-w"]
   end
 
-  defp service(key) do
+  defp service(key, opts) do
     secret = SecretPaths.fetch!(key)
-    "fermix:#{secret.env}"
+    "#{SecretWriter.scoped_prefix(opts)}:#{secret.env}"
   end
 
   defp fetch_security_binary do
