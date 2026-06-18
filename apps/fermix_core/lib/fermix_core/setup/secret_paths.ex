@@ -84,6 +84,14 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :firecrawl_api_key,
+      env: "FIRECRAWL_API_KEY",
+      path: [:fermix_core, :tools, :web_search, :firecrawl_api_key],
+      functionality: "Firecrawl web_search backend",
+      optional?: true,
+      sandbox_env: true
+    },
+    %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "google", :client_secret]

@@ -226,7 +226,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
             exa_api_key: "@keyring",
             parallel_api_key: "@keyring",
             brave_api_key: "@keyring",
-            perplexity_api_key: "@keyring"
+            perplexity_api_key: "@keyring",
+            firecrawl_api_key: "@keyring"
           ]
         ]
       ],
@@ -253,6 +254,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :parallel_api_key) == "@keyring"
     assert Keyword.get(web_search, :brave_api_key) == "@keyring"
     assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
+    assert Keyword.get(web_search, :firecrawl_api_key) == "@keyring"
   end
 
   test "save/load round-trip preserves the tool_search deferral flag (M10)" do

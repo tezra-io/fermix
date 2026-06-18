@@ -1005,6 +1005,10 @@ defmodule FermixCore.Setup.ConfigStore do
       :perplexity_api_key,
       normalize_string(lookup(config, "perplexity_api_key", :perplexity_api_key))
     )
+    |> put_if_present(
+      :firecrawl_api_key,
+      normalize_string(lookup(config, "firecrawl_api_key", :firecrawl_api_key))
+    )
   end
 
   defp normalize_web_search_tool(_config), do: []
@@ -1016,12 +1020,14 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_web_search_backend(:parallel), do: :parallel
   defp normalize_web_search_backend(:brave), do: :brave
   defp normalize_web_search_backend(:perplexity), do: :perplexity
+  defp normalize_web_search_backend(:firecrawl), do: :firecrawl
   defp normalize_web_search_backend("duckduckgo"), do: :duckduckgo
   defp normalize_web_search_backend("tavily"), do: :tavily
   defp normalize_web_search_backend("exa"), do: :exa
   defp normalize_web_search_backend("parallel"), do: :parallel
   defp normalize_web_search_backend("brave"), do: :brave
   defp normalize_web_search_backend("perplexity"), do: :perplexity
+  defp normalize_web_search_backend("firecrawl"), do: :firecrawl
   defp normalize_web_search_backend(_value), do: nil
 
   # Canonical enum + per-provider mapping live in ReasoningEffort.

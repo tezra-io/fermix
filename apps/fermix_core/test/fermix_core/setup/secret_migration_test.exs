@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 21 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 22 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -139,6 +139,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     parallel_api_key = "parallel-old"
     brave_api_key = "brave-old"
     perplexity_api_key = "perplexity-old"
+    firecrawl_api_key = "firecrawl-old"
 
     [fermix_core.oauth.google]
     client_type = "desktop_public_pkce"
@@ -190,6 +191,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       parallel_api_key: "parallel-old",
       brave_api_key: "brave-old",
       perplexity_api_key: "perplexity-old",
+      firecrawl_api_key: "firecrawl-old",
       google_oauth_client_secret: "google-oauth-old",
       github_oauth_client_secret: "github-oauth-old",
       notion_oauth_client_secret: "notion-oauth-old",

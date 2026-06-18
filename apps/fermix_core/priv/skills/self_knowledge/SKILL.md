@@ -35,7 +35,7 @@ Built-ins seed into the single capability registry at boot; outbound MCP tools r
 - **Meta**: `tool_help`, `send_attachment` (local sandbox file; URLs rejected), `model_routing_config` (set the sub-agent model in `[fermix_core.routing]`: `subagent_model`/`subagent_provider`/`subagent_reasoning_effort`)
 - **Tool-schema deferral (M10)**: default-on — `[fermix_core.tools.tool_search] enabled` absent means `true`; `enabled = false` is the kill switch. When on, plugin/MCP tool schemas leave the provider wire (names stay listed under `## Plugins`) and three bridges register: `tool_search` (BM25 over the deferred catalog), `tool_describe` (one tool's full schema on demand), `tool_call` (invoke a deferred tool; the loop unwraps it so traces/policy see the real tool name — direct calls by name also work). Off = bridges absent, all schemas inline.
 
-Built-ins need no API keys except alternate backends/integrations; default `web_search` is DuckDuckGo. If a configured non-DuckDuckGo backend (Brave/Exa/Tavily/etc.) hard-errors (auth, credits/HTTP 402, transport), `web_search` degrades once to keyless DuckDuckGo — loudly (a warning log + `degraded`/`primary_backend`/`fallback_reason` in the trace), not silently — so the broken backend stays visible. Empty results do not trigger the degrade.
+Built-ins need no API keys except alternate backends/integrations; default `web_search` is DuckDuckGo. If a configured non-DuckDuckGo backend (Brave/Exa/Tavily/Firecrawl/etc.) hard-errors (auth, credits/HTTP 402, transport), `web_search` degrades once to keyless DuckDuckGo — loudly (a warning log + `degraded`/`primary_backend`/`fallback_reason` in the trace), not silently — so the broken backend stays visible. Empty results do not trigger the degrade.
 
 ## Skills
 

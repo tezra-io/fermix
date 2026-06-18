@@ -685,6 +685,44 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ ~s(backend = "tavily")
       assert contents =~ ~s(tavily_api_key = "@keyring")
     end
+
+    test "selecting Firecrawl reveals only its key field and persists it", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"search\"]")
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_search\"]", search_form: %{backend: "firecrawl"})
+        |> render_change()
+
+      assert html =~ "search_form[firecrawl_api_key]"
+      refute html =~ "search_form[tavily_api_key]"
+      refute html =~ "search_form[perplexity_api_key]"
+
+      view
+      |> form("form[phx-submit=\"save_search\"]",
+        search_form: %{backend: "firecrawl", firecrawl_api_key: "fc-live-test"}
+      )
+      |> render_submit()
+
+      web_search =
+        :fermix_core
+        |> Application.get_env(:tools, [])
+        |> Keyword.get(:web_search, [])
+
+      assert Keyword.get(web_search, :backend) == :firecrawl
+      assert Keyword.get(web_search, :firecrawl_api_key) == "fc-live-test"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "firecrawl")
+      assert contents =~ ~s(firecrawl_api_key = "@keyring")
+    end
   end
 
   describe "Realtime form" do
