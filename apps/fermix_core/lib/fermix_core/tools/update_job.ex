@@ -50,6 +50,16 @@ defmodule FermixCore.Tools.UpdateJob do
           description:
             "Bind the job to an existing skill (rejected if unknown). The run then executes inside that skill's tool/capability confinement, intersected with the job's — never widened."
         },
+        provider: %{
+          type: "string",
+          description:
+            "Pin the job's runs to a provider (anthropic, openai, xai, openrouter, ollama, ...; must be a known, configured provider). Must be set together with model. Omit both to leave the current values unchanged."
+        },
+        model: %{
+          type: "string",
+          description:
+            "Pin the job's runs to a provider-specific model id (paired with provider). Free-form — providers like ollama/openrouter accept arbitrary models. Omit both provider and model to leave the current values unchanged."
+        },
         delivery_mode: %{
           type: "string",
           enum: ["none", "origin", "channel", "local"],
@@ -107,7 +117,8 @@ defmodule FermixCore.Tools.UpdateJob do
     with {:ok, job_id} <- Support.required_string(args, "job_id"),
          {:ok, skill_name} <- validate_skill_name(args, context),
          {:ok, delivery} <- resolve_delivery(args, context),
-         {:ok, attrs} <- update_attrs(args, skill_name, delivery) do
+         {:ok, route_pin} <- Support.validate_route_pin(args),
+         {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
         {:ok, job} -> Support.success_json(Support.job_payload(job))
         {:error, reason} -> Support.error(reason)
@@ -118,18 +129,20 @@ defmodule FermixCore.Tools.UpdateJob do
     end
   end
 
-  defp update_attrs(args, skill_name, delivery) do
+  defp update_attrs(args, skill_name, delivery, {provider, model}) do
     attrs =
       %{}
       |> put_present(:task_prompt, Support.optional_string(args, "task"))
       |> put_present(:schedule, Support.optional_string(args, "schedule"))
       |> put_present(:description, Support.optional_string(args, "description"))
       |> put_present(:skill_name, skill_name)
+      |> put_present(:provider, provider)
+      |> put_present(:model, model)
       |> put_delivery(delivery)
 
     if map_size(attrs) == 0 do
       {:error,
-       "Provide at least one of task, schedule, description, skill_name, or delivery to update."}
+       "Provide at least one of task, schedule, description, skill_name, provider/model, or delivery to update."}
     else
       {:ok, attrs}
     end
