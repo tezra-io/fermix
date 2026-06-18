@@ -126,6 +126,8 @@ defmodule FermixCore.Jobs.Registry do
         |> put_present(:task_prompt, task)
         |> put_present(:description, description)
         |> put_present(:skill_name, optional_update_string(attrs, :skill_name))
+        |> put_present(:provider, optional_update_string(attrs, :provider))
+        |> put_present(:model, optional_update_string(attrs, :model))
         |> Map.merge(delivery_patch(attrs))
         |> Map.merge(schedule_job_patch)
 
