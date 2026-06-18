@@ -1215,6 +1215,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               description="Structured search API"
               checked={@search_form.backend == :perplexity}
             />
+            <.search_backend_option
+              value="firecrawl"
+              label="Firecrawl"
+              description="Web search API"
+              checked={@search_form.backend == :firecrawl}
+            />
           </div>
         </fieldset>
 
@@ -1248,6 +1254,12 @@ defmodule FermixWebWeb.SetupLive.Components do
             label="Perplexity API key"
             name="search_form[perplexity_api_key]"
             set={@search_form.perplexity_api_key_set}
+          />
+          <.secret_input
+            :if={@search_form.backend == :firecrawl}
+            label="Firecrawl API key"
+            name="search_form[firecrawl_api_key]"
+            set={@search_form.firecrawl_api_key_set}
           />
           <p :if={@search_form.backend == :duckduckgo} class="text-sm text-base-content/60">
             DuckDuckGo needs no API key — nothing else to configure here.

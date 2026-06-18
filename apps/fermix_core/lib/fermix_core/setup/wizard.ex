@@ -53,6 +53,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:parallel_api_key, String.t()}
           | {:brave_api_key, String.t()}
           | {:perplexity_api_key, String.t()}
+          | {:firecrawl_api_key, String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -1463,7 +1464,9 @@ defmodule FermixCore.Setup.Wizard do
         brave_api_key:
           secret_snapshot_value(:brave_api_key, Keyword.get(answers, :brave_api_key)),
         perplexity_api_key:
-          secret_snapshot_value(:perplexity_api_key, Keyword.get(answers, :perplexity_api_key))
+          secret_snapshot_value(:perplexity_api_key, Keyword.get(answers, :perplexity_api_key)),
+        firecrawl_api_key:
+          secret_snapshot_value(:firecrawl_api_key, Keyword.get(answers, :firecrawl_api_key))
       ]
       |> reject_nil_values()
 
@@ -1482,6 +1485,7 @@ defmodule FermixCore.Setup.Wizard do
   defp normalize_web_search_backend(:parallel), do: :parallel
   defp normalize_web_search_backend(:brave), do: :brave
   defp normalize_web_search_backend(:perplexity), do: :perplexity
+  defp normalize_web_search_backend(:firecrawl), do: :firecrawl
 
   defp normalize_web_search_backend(value) when is_binary(value) do
     case String.trim(value) |> String.downcase() do
@@ -1491,6 +1495,7 @@ defmodule FermixCore.Setup.Wizard do
       "parallel" -> :parallel
       "brave" -> :brave
       "perplexity" -> :perplexity
+      "firecrawl" -> :firecrawl
       invalid -> raise ArgumentError, "invalid web_search_backend #{inspect(invalid)}"
     end
   end

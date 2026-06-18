@@ -304,6 +304,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:parallel_api_key, params["parallel_api_key"])
       |> maybe_put_string(:brave_api_key, params["brave_api_key"])
       |> maybe_put_string(:perplexity_api_key, params["perplexity_api_key"])
+      |> maybe_put_string(:firecrawl_api_key, params["firecrawl_api_key"])
 
     {:noreply, save_answers(socket, answers, "Search saved.", Map.get(root, "__nav"))}
   end
@@ -986,7 +987,8 @@ defmodule FermixWebWeb.SetupLive do
       exa_api_key_set: secret_set?(web_search, :exa_api_key),
       parallel_api_key_set: secret_set?(web_search, :parallel_api_key),
       brave_api_key_set: secret_set?(web_search, :brave_api_key),
-      perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key)
+      perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key),
+      firecrawl_api_key_set: secret_set?(web_search, :firecrawl_api_key)
     }
   end
 
@@ -1867,12 +1869,14 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_search_backend(:parallel), do: :parallel
   defp normalize_search_backend(:brave), do: :brave
   defp normalize_search_backend(:perplexity), do: :perplexity
+  defp normalize_search_backend(:firecrawl), do: :firecrawl
   defp normalize_search_backend("duckduckgo"), do: :duckduckgo
   defp normalize_search_backend("tavily"), do: :tavily
   defp normalize_search_backend("exa"), do: :exa
   defp normalize_search_backend("parallel"), do: :parallel
   defp normalize_search_backend("brave"), do: :brave
   defp normalize_search_backend("perplexity"), do: :perplexity
+  defp normalize_search_backend("firecrawl"), do: :firecrawl
   defp normalize_search_backend(_value), do: :duckduckgo
 
   defp parse_env_allow(value) when is_binary(value) do
