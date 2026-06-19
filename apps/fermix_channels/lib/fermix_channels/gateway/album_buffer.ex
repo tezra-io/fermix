@@ -109,8 +109,16 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
   end
 
   @impl true
-  def handle_info({:flush, key}, state) do
-    {:noreply, flush(key, state)}
+  def handle_info({:flush, key, token}, state) do
+    {:noreply, flush_if_current(key, token, state)}
+  end
+
+  # A flush with no current token — a timer that fired after its entry was
+  # superseded (Process.cancel_timer can't recall an already-delivered message),
+  # or a bare legacy {:flush, key} — is stale; ignore it so it can't dispatch a
+  # since-extended album early and split a later part into its own turn.
+  def handle_info({:flush, _key}, state) do
+    {:noreply, state}
   end
 
   # --- routing ---
@@ -134,7 +142,7 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
   end
 
   defp flush_then_dispatch(message, key, state) do
-    state = flush(key, state)
+    state = flush_now(key, state)
     deliver_single(message, state)
     state
   end
@@ -158,8 +166,8 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
   end
 
   defp start_new(key, message, state) do
-    timer = Process.send_after(self(), {:flush, key}, state.debounce_ms)
-    put_in(state, [:buffers, key], %{messages: [message], timer: timer})
+    {timer, token} = arm(key, state.debounce_ms)
+    put_in(state, [:buffers, key], %{messages: [message], timer: timer, token: token})
   end
 
   defp extend(key, %{messages: messages, timer: timer}, message, state) do
@@ -170,12 +178,32 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
       deliver_album(messages, state)
       %{state | buffers: Map.delete(state.buffers, key)}
     else
-      new_timer = Process.send_after(self(), {:flush, key}, state.debounce_ms)
-      put_in(state, [:buffers, key], %{messages: messages, timer: new_timer})
+      {new_timer, token} = arm(key, state.debounce_ms)
+      put_in(state, [:buffers, key], %{messages: messages, timer: new_timer, token: token})
     end
   end
 
-  defp flush(key, state) do
+  # Arm a debounce timer carrying a unique token so a stale flush (from a timer
+  # that fired before extend/4 could cancel it) is recognizable and ignored.
+  defp arm(key, debounce_ms) do
+    token = make_ref()
+    timer = Process.send_after(self(), {:flush, key, token}, debounce_ms)
+    {timer, token}
+  end
+
+  # Timer-driven flush: only fire if the token still matches the entry's current
+  # timer (a superseded timer's token won't match → ignored).
+  defp flush_if_current(key, token, state) do
+    case Map.get(state.buffers, key) do
+      %{token: ^token} -> flush_now(key, state)
+      _stale_or_absent -> state
+    end
+  end
+
+  # Unconditional flush of whatever is buffered under `key` (used by the timer
+  # path via flush_if_current, and directly when a non-image message flushes a
+  # pending album before dispatching).
+  defp flush_now(key, state) do
     case Map.pop(state.buffers, key) do
       {nil, _buffers} ->
         state

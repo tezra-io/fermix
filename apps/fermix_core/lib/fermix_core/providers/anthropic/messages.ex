@@ -251,11 +251,16 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     raise ArgumentError, "Anthropic.Messages requires system messages to lead the transcript"
   end
 
-  defp to_block_message(%{content: content} = message),
-    do: %{
-      role: "user",
-      content: [%{type: "text", text: content || ""} | anthropic_image_blocks(message)]
-    }
+  defp to_block_message(%{content: content} = message) do
+    image_blocks = anthropic_image_blocks(message)
+    %{role: "user", content: anthropic_text_blocks(content || "", image_blocks) ++ image_blocks}
+  end
+
+  # Anthropic rejects empty text content blocks, so a captionless image-only turn
+  # must send only its image block(s). A non-empty caption keeps its text block,
+  # so a text-only turn stays `[%{type: "text", ...}]` — byte-stable for the cache.
+  defp anthropic_text_blocks("", [_ | _]), do: []
+  defp anthropic_text_blocks(content, _image_blocks), do: [%{type: "text", text: content}]
 
   # Inbound images (M14) ride the user message's `image_parts`; append them after
   # the text block. Text-only turns produce `[%{type: "text", ...}]` unchanged,

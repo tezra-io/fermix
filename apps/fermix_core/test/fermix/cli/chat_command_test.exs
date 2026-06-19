@@ -121,6 +121,24 @@ defmodule Fermix.CLI.ChatCommandTest do
     assert Keyword.get(opts, :session_id) == "cli"
   end
 
+  test "rejects cumulative encoded attachments over the daemon frame cap" do
+    dir = mkdir!()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    first = Path.join(dir, "first.jpg")
+    second = Path.join(dir, "second.jpg")
+    File.write!(first, :binary.copy(<<1>>, 1_700_000))
+    File.write!(second, :binary.copy(<<2>>, 1_700_000))
+
+    output =
+      capture_io(:stderr, fn ->
+        assert ChatCommand.run(["--attach", first, "--attach", second]) == 1
+      end)
+
+    assert output =~ "exceeds daemon frame cap"
+    refute_received {:chat_command_bridge_call, _content, _opts}
+  end
+
   test "prints JSON error envelope with session id" do
     Application.put_env(:fermix_core, :chat_command_bridge_result, {:error, :timeout})
     test_self = self()

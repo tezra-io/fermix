@@ -106,6 +106,11 @@ defmodule FermixCore.Agents.TurnRunner do
       error_reply(last_reason)
   end
 
+  def error_reply({:image_unsupported, provider, model}) do
+    "That message includes an image, but the current model (#{provider}/#{model}) can't accept " <>
+      "images. Switch to a vision-capable model, or send text only."
+  end
+
   def error_reply(reason) do
     cond do
       context_length_error?(reason) ->

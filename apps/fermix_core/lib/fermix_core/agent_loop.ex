@@ -352,32 +352,32 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
-  # Rule #12 fail-loud: a turn carrying image content must not be sent to a
-  # model that can't accept it — no silent drop, no degrade-to-text. Runs per
-  # failover route, so a transient failover onto a non-vision model also fails
-  # loud rather than silently landing there.
-  defp ensure_image_capable!(bound) do
+  # Rule #12 fail-loud: a turn carrying image content must not be sent to a model
+  # that can't accept it — no silent drop, no degrade-to-text. Returns an error
+  # tuple (not a raise) so it rides the normal failover/error flow: the chain can
+  # try the next route for a vision-capable one, and the precise message reaches
+  # the user instead of a generic crash. Checked per route, so a transient
+  # failover onto a non-vision model is caught too.
+  defp ensure_image_capable(bound) do
     if Adapter.has_image_content?(bound.messages) do
       %{provider: provider, model: model} = bound.route_key
 
-      unless ModelCatalog.vision?(provider, model) do
-        raise ArgumentError,
-              "#{provider}/#{model} cannot accept image input; " <>
-                "route a vision-capable model or send text only"
-      end
+      if ModelCatalog.vision?(provider, model),
+        do: :ok,
+        else: {:error, {:image_unsupported, provider, model}}
+    else
+      :ok
     end
-
-    :ok
   end
 
   defp initial_attempt(state) do
     fn route ->
       bound = bind_route(state, route)
-      ensure_image_capable!(bound)
 
-      case bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
-        {:ok, turn} -> {:ok, {turn, bound}}
-        {:error, reason} -> {:error, reason}
+      with :ok <- ensure_image_capable(bound),
+           {:ok, turn} <-
+             bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
+        {:ok, {turn, bound}}
       end
     end
   end

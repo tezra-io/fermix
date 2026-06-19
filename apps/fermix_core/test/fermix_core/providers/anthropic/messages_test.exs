@@ -271,6 +271,32 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
       assert {:ok, _turn} = Messages.chat(messages, [], chat_opts())
     end
 
+    test "an image-only user message omits the empty text block" do
+      png = <<137, 80, 78, 71>>
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert [%{"role" => "user", "content" => [image_block]}] = decoded["messages"]
+        assert image_block["type"] == "image"
+        assert image_block["source"]["media_type"] == "image/png"
+        assert image_block["source"]["data"] == Base.encode64(png)
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      messages = [
+        %{
+          role: "user",
+          content: "",
+          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} = Messages.chat(messages, [], chat_opts())
+    end
+
     test "posts API-key headers and a cache-marked body" do
       Req.Test.stub(__MODULE__, fn conn ->
         assert ["sk-ant-test"] = Plug.Conn.get_req_header(conn, "x-api-key")
