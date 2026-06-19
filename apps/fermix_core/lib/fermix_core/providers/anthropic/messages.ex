@@ -251,8 +251,34 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     raise ArgumentError, "Anthropic.Messages requires system messages to lead the transcript"
   end
 
-  defp to_block_message(%{content: content}),
-    do: %{role: "user", content: [%{type: "text", text: content || ""}]}
+  defp to_block_message(%{content: content} = message),
+    do: %{
+      role: "user",
+      content: [%{type: "text", text: content || ""} | anthropic_image_blocks(message)]
+    }
+
+  # Inbound images (M14) ride the user message's `image_parts`; append them after
+  # the text block. Text-only turns produce `[%{type: "text", ...}]` unchanged,
+  # keeping the cached prefix byte-stable.
+  defp anthropic_image_blocks(message) do
+    message
+    |> Map.get(:image_parts, [])
+    |> Enum.map(&anthropic_image_block/1)
+  end
+
+  defp anthropic_image_block(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and is_binary(data),
+       do: %{
+         type: "image",
+         source: %{type: "base64", media_type: mime, data: Base.encode64(data)}
+       }
+
+  defp anthropic_image_block(part),
+    do:
+      raise(
+        ArgumentError,
+        "unsupported image content part for Anthropic encoder: #{inspect(part)}"
+      )
 
   defp tool_result_blocks(tool_results) do
     Enum.map(tool_results, fn %{call_id: call_id, output: output} ->

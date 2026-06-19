@@ -70,6 +70,30 @@ defmodule FermixChannels.Channels.WhatsApp do
     {:ok, messages}
   end
 
+  # Album policy for `Gateway.AlbumBuffer`: WhatsApp has no `media_group_id` and
+  # sends each image as its own webhook message, so coalesce image messages by
+  # `{phone_number_id, sender_id}`. A non-image message (text, audio, document)
+  # shares that key, so it flushes any pending album first, then dispatches.
+  @impl true
+  @spec album_classify(FermixChannels.Gateway.Channel.message()) ::
+          FermixChannels.Gateway.Channel.album_classification()
+  def album_classify(message) do
+    key = coalesce_key(message)
+    if image_message?(message), do: {:coalesce, key}, else: {:flush, key}
+  end
+
+  defp coalesce_key(message) do
+    meta = Map.get(message, :metadata, %{})
+    {Map.get(meta, :phone_number_id), Map.get(meta, :sender_id) || Map.get(message, :chat_id)}
+  end
+
+  defp image_message?(message) do
+    message
+    |> Map.get(:attachments, [])
+    |> List.wrap()
+    |> Enum.any?(fn attachment -> Map.get(attachment, :kind) == :image end)
+  end
+
   @spec verify_challenge(map()) :: {:ok, String.t()} | {:error, term()}
   def verify_challenge(params) when is_map(params) do
     with {:ok, expected} <- fetch_config_value(:verify_token),

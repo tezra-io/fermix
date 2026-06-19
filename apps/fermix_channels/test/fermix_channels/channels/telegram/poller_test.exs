@@ -3,10 +3,6 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
 
   alias FermixChannels.Channels.Telegram.Poller
 
-  defmodule TestAgent do
-    def handle_message(_message, _server), do: :ok
-  end
-
   setup do
     Req.Test.set_req_test_to_shared()
 
@@ -77,8 +73,9 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
     defaults = [
       req_options: [plug: {Req.Test, :telegram_poller}],
       poll_interval: :manual,
-      agent: TestAgent,
-      agent_server: self(),
+      # Forward parsed messages to the test process instead of the real album
+      # buffer; the poller casts AlbumBuffer.ingest/2 → {:"$gen_cast", {:ingest, msg}}.
+      buffer: self(),
       name: :"poller_#{System.unique_integer([:positive])}"
     ]
 
@@ -260,6 +257,27 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       assert_receive {:get_updates, retry_body}, 1_000
       assert retry_body["timeout"] == 50
       assert Process.alive?(pid)
+    end
+  end
+
+  describe "album-buffer handoff" do
+    test "forwards each parsed message to the album buffer (coalescing lives there)" do
+      stub_get_updates_sequence(self(), [
+        {:ok, []},
+        {:ok, [telegram_update(100, "hello"), telegram_update(101, "world")]}
+      ])
+
+      pid = start_poller()
+      send(pid, :poll)
+      assert_receive {:get_updates, startup_body}, 1_000
+      assert startup_body["timeout"] == 0
+
+      send(pid, :poll)
+      assert_receive {:get_updates, _poll_body}, 1_000
+
+      assert_receive {:"$gen_cast", {:ingest, %{content: "hello"}}}, 1_000
+      assert_receive {:"$gen_cast", {:ingest, %{content: "world"}}}, 1_000
+      assert_offset(pid, 102)
     end
   end
 end

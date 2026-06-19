@@ -22,6 +22,8 @@ Provider selection is **primary-flag driven**: each `[fermix_core.providers.<nam
 
 Provider/channel HTTP uses shared `FermixCore.Finch`. Idle keep-alive connections older than 15s are discarded at checkout. Codex retries `:closed` once only when it happens before response data; mid-response `:closed` and `:timeout` are not retried.
 
+Image input: an inbound image is forwarded to the model as a content block on vision-capable providers (Anthropic, the OpenAI Responses/Codex wire, and Grok); OpenRouter and Ollama are model-dependent (text-only local models are gated off). Each provider encodes the image at its own edge from one neutral content part, and the text-only request shape is unchanged, so prompt caching is unaffected.
+
 ## Built-in capabilities
 
 Built-ins seed into the single capability registry at boot; outbound MCP tools register as `mcp_<server>_<tool>`. The runtime prompt's `## Built-in Capability Catalog` is authoritative; use `tool_help` for one tool's schema/failure modes.
@@ -32,7 +34,7 @@ Built-ins seed into the single capability registry at boot; outbound MCP tools r
 - **Memory**: `memory_store`, `memory_recall`, `memory_sources_list`
 - **Jobs**: `schedule_job`, `update_job`, `list_jobs`, `pause_job`, `resume_job`, `remove_job`, `run_job_now`, `list_job_runs`, `get_job_run`
 - **Skills & delegation**: `skill_view`, `skill_run`, `skill_list`, `skill_create`, `skill_reload`, `subagents` (bounded temp sub-agents)
-- **Meta**: `tool_help`, `send_attachment` (local sandbox file; URLs rejected), `model_routing_config` (set the sub-agent model in `[fermix_core.routing]`: `subagent_model`/`subagent_provider`/`subagent_reasoning_effort`)
+- **Meta**: `tool_help`, `send_attachment` (send a local sandbox file out through the active channel — outbound only; inbound images are materialized by the gateway, not via a tool; URLs rejected), `model_routing_config` (set the sub-agent model in `[fermix_core.routing]`: `subagent_model`/`subagent_provider`/`subagent_reasoning_effort`)
 - **Tool-schema deferral (M10)**: default-on — `[fermix_core.tools.tool_search] enabled` absent means `true`; `enabled = false` is the kill switch. When on, plugin/MCP tool schemas leave the provider wire (names stay listed under `## Plugins`) and three bridges register: `tool_search` (BM25 over the deferred catalog), `tool_describe` (one tool's full schema on demand), `tool_call` (invoke a deferred tool; the loop unwraps it so traces/policy see the real tool name — direct calls by name also work). Off = bridges absent, all schemas inline.
 
 Built-ins need no API keys except alternate backends/integrations; default `web_search` is DuckDuckGo. If a configured non-DuckDuckGo backend (Brave/Exa/Tavily/Firecrawl/etc.) hard-errors (auth, credits/HTTP 402, transport), `web_search` degrades once to keyless DuckDuckGo — loudly (a warning log + `degraded`/`primary_backend`/`fallback_reason` in the trace), not silently — so the broken backend stays visible. Empty results do not trigger the degrade.
@@ -51,7 +53,7 @@ Durable memory is SQLite at `~/.fermix/memory.db`; ETS is cache. `memory_recall`
 
 ## Channels & access control
 
-Channels: Telegram, WhatsApp, Slack, Discord, Signal (text + media), plus local `cli` and `daemon`. Remote channels refuse to start without `owner_user_id` or `allowed_*_ids`.
+Channels: Telegram, WhatsApp, Slack, Discord, Signal (text + media), plus local `cli` and `daemon`. Remote channels refuse to start without `owner_user_id` or `allowed_*_ids`. Inbound images on media-capable channels are downloaded at the gateway (sibling to audio transcription) and passed to the model as image content — the agent sees the picture, not a placeholder; audio attachments are transcribed to text first. An image whose resolved model can't accept vision fails loud rather than dropping the image silently. Multi-image messages are coalesced into one turn so the agent sees every image together — Telegram albums (separate updates sharing a `media_group_id`) and WhatsApp's separate per-image webhook messages are both buffered by a short debounce and merged; Discord/Slack/Signal already deliver all attachments in one message.
 
 Live streaming (off by default): `[fermix_channels.<name>] streaming = "draft" | "block"`. `"draft"` shows the reply as one draft message edited in place (~1/s, ≥30 chars before the draft opens) and sealed to the final authoritative text; `/stop` deletes the draft; needs a draft-capable channel (Telegram today; `fermix doctor` warns otherwise). `"block"` sends each completed model "thought" as its own ordinary message (semantic boundary = completed output item; 800–1200-char paragraph chunking only as the long-text fallback, 1 s idle flush), including the model's 💭 reasoning-summary headings as separate one-line messages — works on every channel, and pre-tool commentary lands as its own message. Both need a streaming provider (Codex today — others simply deliver normally). Only real channel turns stream — background/CLI/cron runs never do. Stream telemetry: `[:fermix, :channel, :stream]` with `phase` open/edit/block/seal/discard and the turn's `session_id`.
 

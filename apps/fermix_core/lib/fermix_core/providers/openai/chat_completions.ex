@@ -273,10 +273,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       tool_calls = Map.get(msg, :tool_calls)
 
       %{role: msg.role}
-      |> put_content(Map.get(msg, :content), tool_calls)
+      |> put_content(Map.get(msg, :content), Map.get(msg, :image_parts, []), tool_calls)
       |> maybe_put_field(:tool_call_id, Map.get(msg, :tool_call_id))
       |> maybe_put_tool_calls(tool_calls)
     end)
+  end
+
+  # Inbound images (M14) → a multimodal content array (text + image_url parts).
+  # Only user turns carry them; image bytes ride as a base64 data URI. Checked
+  # first so the text-only clauses below stay byte-identical when there are none.
+  defp put_content(map, content, [_ | _] = image_parts, _calls) do
+    text_part = %{type: "text", text: content || ""}
+    Map.put(map, :content, [text_part | Enum.map(image_parts, &chat_image_part/1)])
   end
 
   # Mistral's strict validator 422s on empty-string `content` sent alongside
@@ -284,11 +292,22 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   # vllm #38738) is to omit the `content` key in exactly that case. A real
   # preamble (non-empty content + tool_calls) is kept, and OpenAI/OpenRouter/
   # Ollama tolerate the omission — one wire shape valid on every provider.
-  defp put_content(map, content, calls)
+  defp put_content(map, content, _no_images, calls)
        when is_list(calls) and calls != [] and content in [nil, ""],
        do: map
 
-  defp put_content(map, content, _calls), do: Map.put(map, :content, content || "")
+  defp put_content(map, content, _no_images, _calls), do: Map.put(map, :content, content || "")
+
+  defp chat_image_part(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and is_binary(data),
+       do: %{type: "image_url", image_url: %{url: "data:#{mime};base64,#{Base.encode64(data)}"}}
+
+  defp chat_image_part(part),
+    do:
+      raise(
+        ArgumentError,
+        "unsupported image content part for Chat Completions encoder: #{inspect(part)}"
+      )
 
   defp maybe_put_field(map, _key, nil), do: map
   defp maybe_put_field(map, key, value), do: Map.put(map, key, value)

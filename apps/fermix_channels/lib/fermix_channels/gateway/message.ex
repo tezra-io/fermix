@@ -21,7 +21,10 @@ defmodule FermixChannels.Gateway.Message do
     :thread_ts,
     thread_scope: :root,
     metadata: %{},
-    attachments: []
+    attachments: [],
+    # Transient materialized inbound content parts (e.g. image bytes resolved at
+    # the gateway media-ingest step). NOT persisted — turn-local (M14).
+    media_parts: []
   ]
 
   @type thread_scope :: :root | :thread
@@ -37,7 +40,8 @@ defmodule FermixChannels.Gateway.Message do
           thread_ts: thread_id() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
-          attachments: [map()]
+          attachments: [map()],
+          media_parts: [map()]
         }
 
   @spec new!(map()) :: t()

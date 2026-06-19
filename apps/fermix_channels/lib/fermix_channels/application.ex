@@ -3,6 +3,9 @@ defmodule FermixChannels.Application do
 
   use Application
 
+  alias FermixChannels.Channels.Telegram
+  alias FermixChannels.Channels.WhatsApp
+  alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixCore.Readiness
 
@@ -28,10 +31,32 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Idempotency
-      ] ++ ChannelRegistry.transport_children(readiness)
+      ] ++ album_buffers() ++ ChannelRegistry.transport_children(readiness)
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  # One non-blocking album buffer per channel that delivers a multi-image album
+  # as separate inbound messages (Telegram media groups across poll cycles;
+  # WhatsApp per-image webhooks with no media_group_id). Coalesced into one turn.
+  # Distinct child ids let two instances of the same module run side by side.
+  defp album_buffers do
+    [
+      Supervisor.child_spec(
+        {AlbumBuffer,
+         channel: Telegram, config_key: :telegram, name: AlbumBuffer.name_for(Telegram)},
+        id: {AlbumBuffer, Telegram}
+      ),
+      Supervisor.child_spec(
+        {AlbumBuffer,
+         channel: WhatsApp,
+         config_key: :whatsapp,
+         idempotency_key: :whatsapp,
+         name: AlbumBuffer.name_for(WhatsApp)},
+        id: {AlbumBuffer, WhatsApp}
+      )
+    ]
   end
 
   @doc false

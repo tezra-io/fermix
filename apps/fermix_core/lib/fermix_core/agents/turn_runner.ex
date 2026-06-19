@@ -148,6 +148,20 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp max_iterations_error?(_reason), do: false
 
+  # Build the user turn. Text-only stays a bare `%{role, content}` map —
+  # byte-identical to the pre-multimodal shape (no `:image_parts` key), so
+  # accounting, compaction, persistence, and the provider prompt cache are
+  # untouched. Inbound images the gateway materialized (M14) ride a transient
+  # `:image_parts` list the provider encoder reads; they are never persisted.
+  defp build_user_message(msg) do
+    base = %{role: "user", content: msg.content}
+
+    case Map.get(msg, :media_parts) || [] do
+      [] -> base
+      parts -> Map.put(base, :image_parts, parts)
+    end
+  end
+
   defp run_message_loop(msg, state, deliver, stream_callback) do
     start = System.monotonic_time(:millisecond)
     conversation_key = ConversationKey.from(msg)
@@ -163,7 +177,7 @@ defmodule FermixCore.Agents.TurnRunner do
         ConversationStore.get_history(conversation_key, server: state.conversation_store)
       end)
 
-    user_message = %{role: "user", content: msg.content}
+    user_message = build_user_message(msg)
 
     {history, preflight_compaction} =
       maybe_preflight_auto_compact(conversation_key, state, profile, history, user_message)

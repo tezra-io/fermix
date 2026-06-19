@@ -9,8 +9,13 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   - This also applies when switching from webhook mode to polling: queued pre-switch
     updates are dropped, and only updates that arrive after the startup probe are processed.
 
-  Reuses Telegram.parse_update/1 for message parsing and
-  FermixChannels.Dispatcher for delivery.
+  Parsed messages are forwarded to `Gateway.AlbumBuffer` (a separate,
+  non-blocking process) for album coalescing and dispatch. The poller never
+  buffers or dispatches inline: it blocks for tens of seconds inside getUpdates
+  long-polling, so an in-poller flush timer could not fire on time. Keeping the
+  album buffer out of this process is what makes coalescing prompt.
+
+  Reuses Telegram.parse_update/1 for message parsing.
   """
 
   use GenServer
@@ -18,8 +23,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   require Logger
 
   alias FermixChannels.Channels.Telegram
-  alias FermixChannels.Gateway
-  alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Gateway.AlbumBuffer
 
   @bot_api_base "https://api.telegram.org"
   @default_error_backoff_ms 5_000
@@ -45,8 +49,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
       error_backoff_ms: Keyword.get(opts, :error_backoff_ms, @default_error_backoff_ms),
       transient_backoff_ms:
         Keyword.get(opts, :transient_backoff_ms, @default_transient_backoff_ms),
-      agent: Keyword.get(opts, :agent, Queue),
-      agent_server: Keyword.get(opts, :agent_server, Queue)
+      buffer: Keyword.get(opts, :buffer, AlbumBuffer.name_for(Telegram))
     }
 
     if state.poll_interval == :immediate do
@@ -161,12 +164,15 @@ defmodule FermixChannels.Channels.Telegram.Poller do
 
   defp transient_transport_error?(_reason), do: false
 
+  # Forward each parsed message to the album buffer (a separate, non-blocking
+  # process) for coalescing and dispatch. Returns :ok — the poller carries no
+  # album state; offset advance is handled separately by the caller.
   defp process_updates(updates, state) do
     Enum.each(updates, fn update ->
       case Telegram.parse_update(update) do
         {:ok, messages} when messages != [] ->
           emit_inbound_telemetry(length(messages))
-          handle_dispatch_result(messages, state)
+          Enum.each(messages, &AlbumBuffer.ingest(&1, state.buffer))
 
         _ ->
           :ok
@@ -180,20 +186,6 @@ defmodule FermixChannels.Channels.Telegram.Poller do
       %{count: count},
       %{channel: :telegram, direction: :inbound}
     )
-  end
-
-  defp handle_dispatch_result(messages, state) do
-    case Gateway.ingest(messages,
-           channel: Telegram,
-           agent: state.agent,
-           agent_server: state.agent_server
-         ) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("Telegram poller dispatch failed: #{inspect(reason)}")
-    end
   end
 
   defp advance_offset(state, []), do: state

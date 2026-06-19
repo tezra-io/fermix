@@ -6,6 +6,7 @@ defmodule FermixWebWeb.WebhookController do
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Gateway
+  alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.Queue
 
@@ -170,7 +171,20 @@ defmodule FermixWebWeb.WebhookController do
     end
   end
 
+  # WhatsApp routes through the album buffer (multi-image albums arrive as
+  # separate webhook messages with no media_group_id — coalesced into one turn).
+  # Idempotency is already recorded per message id before this point, so the
+  # buffer never sees duplicates. Other webhook channels dispatch directly.
   defp run_dispatch(messages, opts) do
+    if Keyword.get(opts, :channel) == WhatsApp do
+      buffer = AlbumBuffer.name_for(WhatsApp)
+      Enum.each(messages, &AlbumBuffer.ingest(&1, buffer))
+    else
+      gateway_dispatch(messages, opts)
+    end
+  end
+
+  defp gateway_dispatch(messages, opts) do
     case Gateway.ingest(messages, opts) do
       :ok ->
         :ok
