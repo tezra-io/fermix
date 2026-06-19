@@ -11,6 +11,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
+  alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Trace
 
   @core_events [
@@ -181,7 +182,8 @@ defmodule FermixCore.Trace.TelemetryHandler do
       @mcp_inbound_events ++
       @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
-      JobTelemetry.trace_event_definitions()
+      JobTelemetry.trace_event_definitions() ++
+      SoulTelemetry.trace_event_definitions()
   end
 
   defp event_config(event) do

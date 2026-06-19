@@ -313,6 +313,62 @@ defmodule FermixCore.Resource.RegistryTest do
              )
   end
 
+  test "commit_and_write writes the file and commits a revision", %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write")
+    path = Path.join([dir, "main", "SOUL.md"])
+
+    assert {:ok, %Revision{} = revision} =
+             Registry.commit_and_write("main", "soul_md", "global", "soul v1\n",
+               mutation_source: :soul_curation,
+               provenance: %{"trigger" => "curation"},
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert revision.revision == 1
+    assert revision.mutation_source == "soul_curation"
+    assert File.read!(path) == "soul v1\n"
+    assert {:ok, 1} = Registry.current_revision("main", "soul_md", "global", repo: repo)
+    assert Path.wildcard("#{path}.tmp-*") == []
+  end
+
+  test "commit_and_write restores prior bytes and leaves the registry unchanged on commit failure",
+       %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write-restore")
+    path = Path.join([dir, "main", "SOUL.md"])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "original\n")
+
+    assert {:ok, _baseline} =
+             Registry.commit("main", "soul_md", "global", "original\n",
+               mutation_source: :imported,
+               provenance: %{"trigger" => "imported"},
+               resource_path: path,
+               repo: repo
+             )
+
+    # An invalid mutation source fails inside commit/5 — after commit_and_write
+    # has already rewritten the file — exercising the compensating restore.
+    assert {:error, {:commit_failed, {:unsupported_mutation_source, "bogus"}}} =
+             Registry.commit_and_write("main", "soul_md", "global", "tampered\n",
+               mutation_source: :bogus,
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert File.read!(path) == "original\n"
+    assert {:ok, 1} = Registry.current_revision("main", "soul_md", "global", repo: repo)
+    assert Path.wildcard("#{path}.tmp-*") == []
+  end
+
+  test "commit_and_write rejects resource types with no on-disk file", %{repo: repo} do
+    assert {:error, {:not_file_backed, "checkpoint"}} =
+             Registry.commit_and_write("main", "checkpoint", "global", "summary",
+               mutation_source: :compaction,
+               repo: repo
+             )
+  end
+
   defp temp_resource_path(name) do
     unique = System.unique_integer([:positive])
     dir = Path.join(System.tmp_dir!(), "#{name}-#{unique}")
@@ -321,5 +377,15 @@ defmodule FermixCore.Resource.RegistryTest do
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
 
     Path.join(dir, "RESOURCE.md")
+  end
+
+  defp temp_bootstrap_dir(name) do
+    unique = System.unique_integer([:positive])
+    dir = Path.join(System.tmp_dir!(), "#{name}-#{unique}")
+    File.mkdir_p!(dir)
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+
+    dir
   end
 end
