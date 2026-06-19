@@ -263,6 +263,88 @@ defmodule FermixOpik.AggregationTest do
     assert llm.provider == "openai"
   end
 
+  test "a soul-curation draft is its own trace nesting the bounded provider call" do
+    {_state, closed} =
+      run([
+        {[:fermix, :soul_curation, :run_start], %{},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:abc",
+           mode: :suggest,
+           with_context: true
+         }},
+        {[:fermix, :provider, :call], %{duration_ms: 400},
+         %{
+           provider: :anthropic,
+           model: "claude-opus-4-8",
+           status: :ok,
+           session_id: "soul_curation:abc",
+           tokens: %{prompt: 80, completion: 20}
+         }},
+        {[:fermix, :soul_curation, :run_complete], %{byte_delta: 12, line_delta: 1},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:abc",
+           mode: :suggest,
+           status: "proposed",
+           route: "anthropic/claude-opus-4-8",
+           byte_delta: 12,
+           line_delta: 1
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "soul_curation:suggest"
+    assert "soul_curation" in trace.tags
+    assert trace.metadata.mode == "suggest"
+    assert trace.metadata.route == "anthropic/claude-opus-4-8"
+    assert trace.metadata.with_context == true
+    assert [llm] = spans_of_type(spans, "llm")
+    assert llm.provider == "anthropic"
+  end
+
+  test "a soul-curation draft's synthetic command parent keeps it a standalone root" do
+    # The draft's parent_session is the originating command id (never a registered
+    # turn session), so it resolves to its own root trace — correlatable but
+    # separate from a concurrent main turn, not collapsed into it.
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 200},
+         %{
+           provider: :anthropic,
+           model: "claude-opus-4-8",
+           status: :ok,
+           session_id: "main-1",
+           tokens: %{prompt: 5, completion: 5}
+         }},
+        {[:fermix, :soul_curation, :run_start], %{},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:def",
+           parent_session: "command:soul:telegram:c1",
+           mode: :review,
+           with_context: false
+         }},
+        {[:fermix, :soul_curation, :run_complete], %{byte_delta: 0, line_delta: 0},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:def",
+           mode: :review,
+           status: "no_change",
+           byte_delta: 0,
+           line_delta: 0
+         }},
+        {[:fermix, :agent, :message], %{},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+      ])
+
+    # Two distinct root traces: the draft and the turn never share a trace_id.
+    names = closed |> Enum.map(& &1.trace.name) |> Enum.sort()
+    assert names == ["agent:main", "soul_curation:review"]
+    ids = closed |> Enum.map(& &1.trace.id) |> Enum.uniq()
+    assert length(ids) == 2
+  end
+
   test "sweep force-flushes a run whose completion was never signalled" do
     agg = Aggregation.new(project: "fermix", ttl_ms: 1)
 

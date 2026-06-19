@@ -200,6 +200,54 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
+  # A `/soul review` draft is a single bounded provider call minted with its own
+  # `session_id` before any turn exists (see `SoulCuration.Telemetry`). run_start
+  # opens its root trace; the provider.call span nests via the shared session_id;
+  # run_complete/run_error close it. `parent_session` (the originating command)
+  # is present when the draft was dispatched from a channel command.
+  def apply_event(state, [:fermix, :soul_curation, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: Map.get(meta, :parent_session),
+          kind: :soul_curation,
+          name: stringify(Map.get(meta, :mode)),
+          input: Map.get(meta, :input),
+          trace_metadata:
+            compact(%{
+              mode: stringify(Map.get(meta, :mode)),
+              with_context: Map.get(meta, :with_context)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  def apply_event(state, [:fermix, :soul_curation, run], _meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    status = if run == :run_error, do: "error", else: Map.get(meta, :status, "ok")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :output) || Map.get(meta, :error),
+      status: status,
+      metadata:
+        compact(%{
+          mode: stringify(Map.get(meta, :mode)),
+          route: Map.get(meta, :route),
+          byte_delta: Map.get(meta, :byte_delta),
+          line_delta: Map.get(meta, :line_delta),
+          suspect: Map.get(meta, :suspect)
+        })
+    })
+  end
+
   # Realtime voice runs on its own WebSocket session. call_start opens the root
   # trace (carrying model/voice/device); the model turn and tool calls reuse the
   # provider/tool spans and nest via the shared session_id; call_stop closes it.
@@ -613,6 +661,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("main-" <> _), do: :main
   defp infer_kind("cron_" <> _), do: :scheduled
   defp infer_kind("session:" <> _), do: :realtime
+  defp infer_kind("soul_curation:" <> _), do: :soul_curation
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill

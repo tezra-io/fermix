@@ -30,6 +30,7 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.Queue,
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
+        FermixChannels.Gateway.Commands.Soul.Confirmations,
         FermixChannels.Gateway.Idempotency
       ] ++ album_buffers() ++ ChannelRegistry.transport_children(readiness)
 
