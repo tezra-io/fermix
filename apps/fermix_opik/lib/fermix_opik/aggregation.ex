@@ -18,6 +18,12 @@ defmodule FermixOpik.Aggregation do
 
   alias FermixOpik.Mapper
 
+  # Grace added to a scheduled run's max duration before the sweep force-closes
+  # it: the run's watchdog fires `run_error`/timeout at the cap and closes the
+  # trace through the normal path, so the duration-based sweep only acts as a
+  # backstop for a run that died without signalling (e.g. daemon restart).
+  @sweep_grace_ms 60_000
+
   @enforce_keys [:project, :ttl_ms]
   defstruct project: nil, ttl_ms: 120_000, traces: %{}, sessions: %{}
 
@@ -79,10 +85,21 @@ defmodule FermixOpik.Aggregation do
   # flood the trace; the seal span carries total_edits/dropped_snapshots
   # instead. :block phases (one per sent chunk, a handful per turn) do export.
   def apply_event(state, [:fermix, :channel, :stream], meas, meta, at) do
-    if Map.get(meta, :phase) in [:open, :block, :seal, :discard] do
-      add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
-    else
-      {state, []}
+    case Map.get(meta, :phase) do
+      phase when phase in [:open, :block] ->
+        add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
+
+      phase when phase in [:seal, :discard] ->
+        # Terminal phases can arrive after the turn's `agent.message` already
+        # closed and shipped the trace (the draft is sealed just after the turn
+        # completes). Creating a span here via `place_under` would lazily
+        # resurrect a phantom empty trace — no input/output, no thread (stream
+        # telemetry carries no chat_id) — that the sweep later flushes to Opik.
+        # So attach only while the run's session is still open; otherwise drop.
+        attach_if_open(state, meta, at, &Mapper.stream_span(meta, meas, &1))
+
+      _other ->
+        {state, []}
     end
   end
 
@@ -154,6 +171,7 @@ defmodule FermixOpik.Aggregation do
           name: Map.get(meta, :name) || Map.get(meta, :agent),
           input: Map.get(meta, :input),
           thread_id: Map.get(meta, :job_id),
+          max_duration_ms: Map.get(meta, :max_duration_ms),
           trace_metadata:
             compact(%{
               job_id: Map.get(meta, :job_id),
@@ -272,12 +290,16 @@ defmodule FermixOpik.Aggregation do
 
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
-  @doc "Force-close traces whose last event is older than `ttl_ms`."
+  @doc """
+  Force-close abandoned traces. A scheduled run with a duration floor is closed
+  only once past that absolute deadline (its max wall-clock duration + grace);
+  every other trace uses the idle TTL (no event within `ttl_ms`).
+  """
   @spec sweep(%__MODULE__{}, integer()) :: {%__MODULE__{}, [closed()]}
   def sweep(state, now_mono) do
     stale =
       for {trace_id, acc} <- state.traces,
-          now_mono - acc.last_seen_mono > state.ttl_ms * 1000,
+          stale?(acc, now_mono, state.ttl_ms),
           do: trace_id
 
     Enum.reduce(stale, {state, []}, fn trace_id, {st, closed} ->
@@ -285,6 +307,12 @@ defmodule FermixOpik.Aggregation do
       {st, closed ++ List.wrap(one)}
     end)
   end
+
+  defp stale?(%{sweep_floor_mono: floor}, now_mono, _ttl_ms) when is_integer(floor),
+    do: now_mono > floor
+
+  defp stale?(acc, now_mono, ttl_ms),
+    do: now_mono - acc.last_seen_mono > ttl_ms * 1000
 
   @doc "All currently-open traces flushed immediately (used at shutdown / replay end)."
   @spec drain(%__MODULE__{}) :: {%__MODULE__{}, [closed()]}
@@ -299,6 +327,20 @@ defmodule FermixOpik.Aggregation do
 
   defp add_child_span(state, meta, at, span_fun) do
     place_under(state, Map.get(meta, :session_id), meta, at, span_fun)
+  end
+
+  # Attach a span only if its run's session is still open; never create a trace.
+  # Used for terminal stream phases so a late event can't resurrect a closed run
+  # into a phantom trace. (Distinct from `memory.write`, which is *meant* to open
+  # its own post-turn trace.)
+  defp attach_if_open(state, meta, at, span_fun) do
+    session_id = Map.get(meta, :session_id)
+
+    if session_id && Map.has_key?(state.sessions, session_id) do
+      place_under(state, session_id, meta, at, span_fun)
+    else
+      {state, []}
+    end
   end
 
   # Attach a child span under `session_id`'s wrapper (creating the run lazily).
@@ -404,10 +446,23 @@ defmodule FermixOpik.Aggregation do
       tags: [Atom.to_string(kind)],
       spans: [],
       last_seen_mono: ctx.mono,
+      sweep_floor_mono: sweep_floor(ctx),
       open?: true
     }
 
     {trace_id, nil, put_in(state, [Access.key(:traces), trace_id], acc)}
+  end
+
+  # A scheduled run is bounded by its own wall-clock timeout, not the idle TTL:
+  # a long job can sit silent past the idle window yet still be running, so we
+  # only force-close once it is past the point where it could still be alive
+  # (its max duration + grace). Roots without a max duration (main turns,
+  # subagents, realtime) get `nil` and fall back to the idle TTL.
+  defp sweep_floor(ctx) do
+    case Map.get(ctx, :max_duration_ms) do
+      ms when is_integer(ms) and ms > 0 -> ctx.mono + (ms + @sweep_grace_ms) * 1000
+      _absent -> nil
+    end
   end
 
   defp finish_wrapper(state, nil, _at, _fields), do: {state, []}

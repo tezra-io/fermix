@@ -202,6 +202,28 @@ defmodule FermixOpik.AggregationTest do
     assert tool.parent_span_id == sub_wrap.id
   end
 
+  test "a draft-stream :seal arriving after the turn closed does not resurrect a phantom trace" do
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_000},
+         %{provider: :openai_codex, model: "gpt-5-codex", status: :ok, session_id: "main-1"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+        # The channel seals the draft just AFTER the turn's message closed and
+        # shipped the trace — this must not spawn an empty phantom trace.
+        {[:fermix, :channel, :stream], %{total_edits: 1, dropped_snapshots: 5},
+         %{channel: "telegram", session_id: "main-1", phase: :seal, status: :ok}}
+      ])
+
+    # Exactly one trace (the real turn); the late seal is dropped, and no phantom
+    # is left open in state for the sweep to later flush.
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "telegram:c1"
+    refute Enum.any?(spans, &(&1.name == "stream:seal"))
+    assert state.traces == %{}
+  end
+
   test "a scheduled job run is its own trace with a job thread id" do
     {_state, closed} =
       run([
@@ -262,6 +284,38 @@ defmodule FermixOpik.AggregationTest do
     {_agg, closed} = Aggregation.sweep(agg, 10_000_000)
     assert [%{trace: trace}] = closed
     assert trace.name == "agent:main"
+  end
+
+  test "a scheduled run is swept by its max duration, not the idle TTL" do
+    # Tiny idle TTL so a last_seen-based sweep would fire almost immediately; the
+    # scheduled run must instead survive until its max_duration (+ grace) passes.
+    agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+    {agg, []} =
+      Aggregation.apply_event(
+        agg,
+        [:fermix, :job, :run_start],
+        %{},
+        %{
+          agent: "scheduled:job-9",
+          job_id: "job-9",
+          run_id: "run-9",
+          name: "slow",
+          session_id: "cron_job-9_1",
+          max_duration_ms: 1_000
+        },
+        %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+      )
+
+    # mono is microseconds; floor = (1_000 + 60_000) * 1_000 = 61_000_000us.
+    # Well past the 1us idle TTL but within the duration floor: NOT swept.
+    {agg, []} = Aggregation.sweep(agg, 500_000)
+
+    # Past max_duration + grace: swept as one trace on the job thread.
+    {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+    assert [%{trace: trace}] = closed
+    assert trace.thread_id == "job-9"
+    assert trace.name == "scheduled:slow"
   end
 
   test "a realtime call becomes one trace with nested llm and tool spans" do
