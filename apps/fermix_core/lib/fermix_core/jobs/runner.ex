@@ -186,7 +186,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
-    JobTelemetry.run_start(state.job, run, loop_input)
+    JobTelemetry.run_start(state.job, run, loop_input, state.timeout_ms)
     run
   end
 
