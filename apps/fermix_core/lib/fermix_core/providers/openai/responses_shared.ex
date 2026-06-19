@@ -244,14 +244,40 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     "call_#{hash}"
   end
 
-  defp message_to_item(%{role: "user", content: content}),
-    do: %{role: "user", content: [%{type: "input_text", text: content || ""}]}
-
   defp message_to_item(%{role: "assistant", content: content}),
     do: %{role: "assistant", content: [%{type: "output_text", text: content || ""}]}
 
-  defp message_to_item(%{content: content}),
-    do: %{role: "user", content: [%{type: "input_text", text: content || ""}]}
+  defp message_to_item(%{role: "user"} = message), do: user_item(message)
+
+  defp message_to_item(message), do: user_item(message)
+
+  # User content: the text caption (a plain string) plus any image parts the
+  # gateway materialized (M14). Appending image parts to the single-element text
+  # list keeps text-only turns byte-identical to the pre-multimodal shape, so the
+  # provider prompt-cache prefix is unaffected (see the characterization test).
+  defp user_item(message) do
+    text = Map.get(message, :content) || ""
+
+    image_parts =
+      message
+      |> Map.get(:image_parts, [])
+      |> Enum.map(&image_part_to_responses/1)
+
+    %{role: "user", content: [%{type: "input_text", text: text} | image_parts]}
+  end
+
+  # Image bytes ride as a base64 data URI in `image_url` (the same field a remote
+  # URL would use), the shape the Codex/Responses backend accepts.
+  defp image_part_to_responses(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and is_binary(data),
+       do: %{type: "input_image", image_url: "data:#{mime};base64,#{Base.encode64(data)}"}
+
+  defp image_part_to_responses(part),
+    do:
+      raise(
+        ArgumentError,
+        "unsupported image content part for Responses encoder: #{inspect(part)}"
+      )
 
   defp normalize_tool_call(%{"type" => "function_call"} = item, idx) do
     name = Map.get(item, "name", "")

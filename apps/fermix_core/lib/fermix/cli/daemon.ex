@@ -336,12 +336,43 @@ defmodule Fermix.CLI.Daemon do
         cli_channel_bridge().default_timeout_ms()
       )
 
-    if content == "" do
-      %{status: "error", error: "empty_input", session_id: session_id}
-    else
-      cli_bridge_reply(content, session_id: session_id, timeout_ms: timeout_ms)
+    case decode_images(Map.get(params, "images", [])) do
+      {:ok, media_parts} ->
+        if content == "" and media_parts == [] do
+          %{status: "error", error: "empty_input", session_id: session_id}
+        else
+          cli_bridge_reply(content,
+            session_id: session_id,
+            timeout_ms: timeout_ms,
+            media_parts: media_parts
+          )
+        end
+
+      {:error, reason} ->
+        %{status: "error", error: reason_to_string(reason), session_id: session_id}
     end
   end
+
+  # Decode `fermix ask --attach` image payloads (mime + base64) into the neutral
+  # content parts the turn runner expects. Fail loud on a malformed payload.
+  defp decode_images(images) when is_list(images) do
+    images
+    |> Enum.reduce_while({:ok, []}, fn image, {:ok, acc} ->
+      with mime when is_binary(mime) <- Map.get(image, "mime_type"),
+           b64 when is_binary(b64) <- Map.get(image, "data_base64"),
+           {:ok, data} <- Base.decode64(b64) do
+        {:cont, {:ok, [%{type: :image, mime_type: mime, data: data} | acc]}}
+      else
+        _ -> {:halt, {:error, :invalid_image_payload}}
+      end
+    end)
+    |> case do
+      {:ok, parts} -> {:ok, Enum.reverse(parts)}
+      other -> other
+    end
+  end
+
+  defp decode_images(_images), do: {:ok, []}
 
   defp cli_bridge_reply(content, opts) do
     session_id = Keyword.fetch!(opts, :session_id)

@@ -53,6 +53,24 @@ defmodule FermixChannels.CLITest do
       assert {:error, :empty_input} = CLI.parse_input("  ")
     end
 
+    test "carries media_parts onto the message (fermix ask --attach)" do
+      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+
+      assert {:ok, [%Message{} = message]} =
+               CLI.parse_input("what is this?", media_parts: [part])
+
+      assert message.content == "what is this?"
+      assert message.media_parts == [part]
+    end
+
+    test "allows an image-only turn (blank text + media_parts)" do
+      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+
+      assert {:ok, [%Message{} = message]} = CLI.parse_input("  ", media_parts: [part])
+      assert message.content == ""
+      assert message.media_parts == [part]
+    end
+
     test "emits inbound channel telemetry" do
       handler_id = attach_channel_telemetry(self())
       on_exit(fn -> :telemetry.detach(handler_id) end)

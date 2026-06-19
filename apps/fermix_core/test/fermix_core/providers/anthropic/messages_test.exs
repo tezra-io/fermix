@@ -240,6 +240,37 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
   end
 
   describe "chat/3 — request shape" do
+    test "a user image_parts message adds a base64 image block after the text block" do
+      png = <<137, 80, 78, 71>>
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert [%{"role" => "user", "content" => [text_block, image_block | _]}] =
+                 decoded["messages"]
+
+        assert text_block["type"] == "text"
+        assert text_block["text"] == "what is this?"
+        assert image_block["type"] == "image"
+        assert image_block["source"]["type"] == "base64"
+        assert image_block["source"]["media_type"] == "image/png"
+        assert image_block["source"]["data"] == Base.encode64(png)
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      messages = [
+        %{
+          role: "user",
+          content: "what is this?",
+          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} = Messages.chat(messages, [], chat_opts())
+    end
+
     test "posts API-key headers and a cache-marked body" do
       Req.Test.stub(__MODULE__, fn conn ->
         assert ["sk-ant-test"] = Plug.Conn.get_req_header(conn, "x-api-key")

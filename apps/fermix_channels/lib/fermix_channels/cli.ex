@@ -30,8 +30,9 @@ defmodule FermixChannels.CLI do
 
   defp do_parse_input(input, opts) do
     content = String.trim(input)
+    media_parts = Keyword.get(opts, :media_parts, [])
 
-    if content == "" do
+    if content == "" and media_parts == [] do
       {:error, :empty_input}
     else
       sender = opts |> Keyword.get(:sender, default_sender()) |> to_string()
@@ -45,7 +46,8 @@ defmodule FermixChannels.CLI do
           channel: @channel,
           chat_id: session_id,
           reply_target: session_id,
-          metadata: %{source: :cli, user_id: "cli", chat_type: "private"}
+          metadata: %{source: :cli, user_id: "cli", chat_type: "private"},
+          media_parts: media_parts
         })
 
       {:ok, [message]}

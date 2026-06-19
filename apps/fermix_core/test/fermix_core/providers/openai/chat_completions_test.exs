@@ -104,6 +104,39 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
   end
 
   describe "chat/3 — request shape and response handling" do
+    test "a user image_parts message becomes a multimodal content array" do
+      png = <<137, 80, 78, 71>>
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert [%{"role" => "user", "content" => [text_part, image_part]}] = decoded["messages"]
+        assert text_part == %{"type" => "text", "text" => "what is this?"}
+        assert image_part["type"] == "image_url"
+        assert image_part["image_url"]["url"] == "data:image/png;base64," <> Base.encode64(png)
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      messages = [
+        %{
+          role: "user",
+          content: "what is this?",
+          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} =
+               ChatCompletions.chat(messages, [],
+                 api_key: "sk-test",
+                 provider: :openai,
+                 model: "gpt-5.4-mini",
+                 base_url: "https://api.openai.com/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+    end
+
     test "posts the standard chat completions body and parses the response" do
       test_pid = self()
       handler_id = "test-chat-completions-tool-schema-#{System.unique_integer()}"

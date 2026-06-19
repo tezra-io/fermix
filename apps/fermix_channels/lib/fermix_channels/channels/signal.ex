@@ -12,6 +12,7 @@ defmodule FermixChannels.Channels.Signal do
   require Logger
 
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Telemetry
@@ -248,6 +249,36 @@ defmodule FermixChannels.Channels.Signal do
   defp maybe_release_claim({:error, _reason} = error, claim) do
     :ok = Idempotency.release_outbound_media_claim(claim)
     error
+  end
+
+  @impl true
+  @spec download_attachment(FermixChannels.Gateway.Channel.message(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def download_attachment(_message, attachment) when is_map(attachment) do
+    with :ok <- MediaDownload.preflight_cap(attachment, @max_media_bytes),
+         {:ok, source} <- local_source(attachment),
+         {:ok, body} <- read_local_attachment(source),
+         {:ok, body} <- MediaDownload.enforce_cap(body, @max_media_bytes),
+         {:ok, path} <- MediaDownload.write_temp(body, "signal", attachment) do
+      {:ok, path}
+    end
+  end
+
+  defp local_source(attachment) do
+    case MediaDownload.value(attachment, :url) do
+      path when is_binary(path) and path != "" -> {:ok, path}
+      _ -> {:error, :missing_attachment_reference}
+    end
+  end
+
+  # signal-cli stores inbound media as a local file on its own host; copy the
+  # bytes into our own temp so cleanup never deletes signal-cli's original. Fail
+  # loud if the path is unreadable (e.g. signal-cli runs on a different host).
+  defp read_local_attachment(path) do
+    case File.read(path) do
+      {:ok, body} -> {:ok, body}
+      {:error, reason} -> {:error, {:attachment_unreadable, reason}}
+    end
   end
 
   defp attachment_kind("audio/" <> _rest), do: :audio

@@ -18,6 +18,7 @@ defmodule FermixChannels.Gateway do
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Delivery
   alias FermixChannels.Gateway.DraftStream
+  alias FermixChannels.Gateway.MediaIngest
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
@@ -121,7 +122,9 @@ defmodule FermixChannels.Gateway do
              channel,
              reply_message,
              transcription_opts
-           ) do
+           ),
+         {:ok, reply_message} <-
+           MediaIngest.maybe_attach_images(channel, reply_message) do
       reply_fn =
         Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
 
@@ -185,7 +188,7 @@ defmodule FermixChannels.Gateway do
         :ok
 
       {:error, reason} = error ->
-        Logger.error("Dispatcher transcription failed: #{inspect(reason)}")
+        Logger.error("Dispatcher ingress failed (transcription/media): #{inspect(reason)}")
         error
     end
   end

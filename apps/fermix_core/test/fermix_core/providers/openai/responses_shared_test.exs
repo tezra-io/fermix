@@ -3,6 +3,59 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
 
   alias FermixCore.Providers.OpenAI.ResponsesShared
 
+  describe "build_input/1 multimodal content encoding" do
+    test "text-only transcript is byte-identical to the pre-multimodal shape (prompt-cache stability)" do
+      msgs = [
+        %{role: "user", content: "hello world"},
+        %{role: "assistant", content: "hi back"}
+      ]
+
+      {_instructions, input} = ResponsesShared.build_input(msgs)
+
+      # Pinned literal — any future key added to a text part fails here loudly
+      # rather than silently eroding cache hit rate.
+      assert Jason.encode!(input) ==
+               ~s([{"role":"user","content":[{"type":"input_text","text":"hello world"}]},{"role":"assistant","content":[{"type":"output_text","text":"hi back"}]}])
+    end
+
+    test "nil text content stays byte-identical (empty string)" do
+      {_instructions, input} = ResponsesShared.build_input([%{role: "user", content: nil}])
+
+      assert Jason.encode!(input) ==
+               ~s([{"role":"user","content":[{"type":"input_text","text":""}]}])
+    end
+
+    test "a user turn with image_parts emits input_text + input_image (base64 data URI)" do
+      png = <<137, 80, 78, 71>>
+
+      msgs = [
+        %{
+          role: "user",
+          content: "what is this?",
+          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      {_instructions, [item]} = ResponsesShared.build_input(msgs)
+
+      assert item == %{
+               role: "user",
+               content: [
+                 %{type: "input_text", text: "what is this?"},
+                 %{type: "input_image", image_url: "data:image/png;base64," <> Base.encode64(png)}
+               ]
+             }
+    end
+
+    test "an unsupported image part fails loud (no silent drop)" do
+      msgs = [%{role: "user", content: "x", image_parts: [%{type: :video, data: "x"}]}]
+
+      assert_raise ArgumentError, ~r/unsupported image content part/, fn ->
+        ResponsesShared.build_input(msgs)
+      end
+    end
+  end
+
   describe "maybe_reasoning_field/2" do
     test "returns nil for nil, :none, and \"none\" — caller omits the body field" do
       assert ResponsesShared.maybe_reasoning_field(nil, :openai) == nil

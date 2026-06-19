@@ -31,9 +31,25 @@ defmodule FermixCore.Providers.Adapter do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Providers.Descriptor
 
+  @typedoc """
+  A neutral, provider-agnostic image content part. Inbound images are
+  materialized at the channel gateway and ride a user message's `image_parts`
+  list. Each adapter translates a part into its provider's wire shape at its own
+  edge (base64 image block / `input_image` data URI / `image_url`), so the spine
+  and conversation store never depend on any provider's format. The message text
+  stays a plain `String.t()` on `content`, so text accounting, compaction, and
+  persistence are unaffected.
+  """
+  @type content_part :: %{
+          required(:type) => :image,
+          required(:mime_type) => String.t(),
+          required(:data) => binary()
+        }
+
   @type message :: %{
           required(:role) => String.t(),
           required(:content) => String.t(),
+          optional(:image_parts) => [content_part()],
           optional(:tool_call_id) => String.t(),
           optional(:tool_calls) => [map()]
         }
@@ -106,6 +122,22 @@ defmodule FermixCore.Providers.Adapter do
               "no adapter for #{inspect(provider)} #{Map.get(route_key, :model)} at " <>
                 "#{Map.get(route_key, :base_url)} — register one or set provider explicitly"
     end
+  end
+
+  @doc """
+  True if any message carries a multimodal content list with at least one image
+  part. The agent loop uses this to fail loud before sending an image to a
+  non-vision model (no silent drop).
+  """
+  @spec has_image_content?([message()]) :: boolean()
+  def has_image_content?(messages) when is_list(messages) do
+    Enum.any?(messages, fn
+      %{image_parts: parts} when is_list(parts) ->
+        Enum.any?(parts, &match?(%{type: :image}, &1))
+
+      _ ->
+        false
+    end)
   end
 
   defp routed_openai_adapter(model, base_url) when is_binary(model) and is_binary(base_url) do

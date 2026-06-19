@@ -154,10 +154,29 @@ defmodule FermixCore.Providers.ModelCatalog do
   # less (default num_ctx is small) and truncates silently — the doctor
   # probe checks the served num_ctx against these (M12 §3.2, [verify]
   # ids/windows against ollama.com/library tool-capable tags).
+  # These catalog entries are text-only models — vision needs a separate tag
+  # (llava / llama3.2-vision), so they carry `vision?: false`: an image turn
+  # routed to one fails loud at the capability gate (M14) instead of 400-ing
+  # downstream. Vision-capable local models added later set `vision?: true`.
   @ollama [
-    %Entry{id: "qwen3:32b", label: "Qwen3 32B (default; tools)", context_window: 128_000},
-    %Entry{id: "gpt-oss:20b", label: "GPT-OSS 20B (tools)", context_window: 128_000},
-    %Entry{id: "llama3.3:70b", label: "Llama 3.3 70B (tools)", context_window: 128_000}
+    %Entry{
+      id: "qwen3:32b",
+      label: "Qwen3 32B (default; tools)",
+      context_window: 128_000,
+      vision?: false
+    },
+    %Entry{
+      id: "gpt-oss:20b",
+      label: "GPT-OSS 20B (tools)",
+      context_window: 128_000,
+      vision?: false
+    },
+    %Entry{
+      id: "llama3.3:70b",
+      label: "Llama 3.3 70B (tools)",
+      context_window: 128_000,
+      vision?: false
+    }
   ]
 
   # The canonical ordered provider list lives in the Descriptor registry
@@ -230,6 +249,21 @@ defmodule FermixCore.Providers.ModelCatalog do
   def reasoning_effort?(provider, model_id) when is_binary(model_id) do
     case find_entry(provider, model_id) do
       %Entry{reasoning_effort?: value} -> value
+      nil -> true
+    end
+  end
+
+  @doc """
+  Whether `model_id` accepts image (vision) input. Defaults to `true`; only
+  models known to be text-only carry `vision?: false`. Unknown ids and
+  non-catalog providers (e.g. the `:mock` test adapter, or a free-form custom
+  model) default to `true` — permissive, with the downstream provider 400 as
+  the documented model-dependent edge.
+  """
+  @spec vision?(provider(), String.t()) :: boolean()
+  def vision?(provider, model_id) when is_binary(model_id) do
+    case find_entry(provider, model_id) do
+      %Entry{vision?: value} -> value
       nil -> true
     end
   end

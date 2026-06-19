@@ -19,6 +19,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Telemetry
 
   @max_iterations 25
@@ -351,9 +352,28 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
+  # Rule #12 fail-loud: a turn carrying image content must not be sent to a
+  # model that can't accept it — no silent drop, no degrade-to-text. Runs per
+  # failover route, so a transient failover onto a non-vision model also fails
+  # loud rather than silently landing there.
+  defp ensure_image_capable!(bound) do
+    if Adapter.has_image_content?(bound.messages) do
+      %{provider: provider, model: model} = bound.route_key
+
+      unless ModelCatalog.vision?(provider, model) do
+        raise ArgumentError,
+              "#{provider}/#{model} cannot accept image input; " <>
+                "route a vision-capable model or send text only"
+      end
+    end
+
+    :ok
+  end
+
   defp initial_attempt(state) do
     fn route ->
       bound = bind_route(state, route)
+      ensure_image_capable!(bound)
 
       case bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
         {:ok, turn} -> {:ok, {turn, bound}}
