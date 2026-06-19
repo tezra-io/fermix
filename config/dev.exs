@@ -24,6 +24,12 @@ config :fermix_web, FermixWebWeb.Endpoint,
 
 config :fermix_web, dev_routes: true
 
+# Opik traces from a dev instance land in their own project, so dev and prod
+# don't share one messy trace stream. Compile-env gated (dev.exs only applies
+# to MIX_ENV=dev, e.g. `mix fermix.dev`); prod releases keep the "fermix"
+# default. `FERMIX_OPIK_PROJECT` still overrides this for one-off runs.
+config :fermix_opik, project_name: "fermix-dev"
+
 config :logger, :default_formatter, format: "[$level] $message\n"
 config :logger, level: :debug
 
