@@ -211,9 +211,16 @@ defmodule Fermix.CLI.ChatCommand do
     |> maybe_put("session_id", Map.get(extra, "session_id"))
   end
 
+  defp reason_to_string({:request_too_large, size, limit}) do
+    "request too large: the encoded request is #{mib(size)} MiB and exceeds " <>
+      "daemon frame cap of #{mib(limit)} MiB. Send fewer or smaller images."
+  end
+
   defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_to_string(reason) when is_binary(reason), do: reason
   defp reason_to_string(reason), do: inspect(reason)
+
+  defp mib(bytes), do: Float.round(bytes / 1_048_576, 1)
 
   defp default_timeout_ms do
     cli_channel_bridge().default_timeout_ms()

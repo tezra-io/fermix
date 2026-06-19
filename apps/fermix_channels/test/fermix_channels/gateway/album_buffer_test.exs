@@ -117,6 +117,20 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       refute_received {:dispatched, _}
     end
 
+    test "ignores stale queued flushes after a debounce reset" do
+      pid = start_buffer(debounce_ms: 10_000)
+
+      AlbumBuffer.ingest(image_message("1", "wa-1", "first"), pid)
+      [key] = Map.keys(buffers(pid))
+
+      AlbumBuffer.ingest(image_message("2", "wa-1", "second"), pid)
+      send(pid, {:flush, key})
+
+      assert [%{messages: messages}] = Map.values(buffers(pid))
+      assert Enum.map(messages, & &1.id) == ["1", "2"]
+      refute_received {:dispatched, _}
+    end
+
     test "a text message flushes the pending album first, then dispatches (arrival order)" do
       pid = start_buffer(debounce_ms: 10_000)
 

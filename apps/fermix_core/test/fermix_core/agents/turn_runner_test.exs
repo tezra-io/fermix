@@ -743,6 +743,15 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute reply == "Sorry, I encountered an error processing your message."
     end
 
+    test "maps unsupported image input to the explicit routing message" do
+      reply = TurnRunner.error_reply({:image_unsupported, :ollama, "qwen3:32b"})
+
+      assert reply =~ "ollama/qwen3:32b"
+      assert reply =~ "vision-capable"
+      refute reply =~ "HTTP"
+      refute reply == "Sorry, I encountered an error processing your message."
+    end
+
     test "maps max iteration exhaustion to an actionable step-limit message" do
       reply = TurnRunner.error_reply("Maximum iterations (50) reached")
 

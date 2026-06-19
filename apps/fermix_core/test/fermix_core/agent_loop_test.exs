@@ -1453,6 +1453,33 @@ defmodule FermixCore.AgentLoopTest do
       assert_received {:chat, :recovering}
     end
 
+    test "an image-incompatible route returns an error and falls over", %{registry: registry} do
+      image = %{type: :image, mime_type: "image/png", data: <<137, 80, 78, 71>>}
+      messages = [%{role: "user", content: "", image_parts: [image]}]
+
+      routes = [
+        {%{
+           provider: :ollama,
+           model: "qwen3:32b",
+           auth_mode: :none,
+           base_url: "http://localhost:11434/v1"
+         }, [adapter: EligibleFailAdapter, model: "qwen3:32b", test_pid: self()]},
+        {%{provider: :openai, model: "gpt-5.5", auth_mode: :api_key, base_url: "https://o/v1"},
+         [adapter: RecoveringAdapter, model: "gpt-5.5", test_pid: self()]}
+      ]
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: messages,
+                 routes: routes,
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      refute_received {:chat, :eligible_fail}
+      assert_received {:chat, :recovering}
+    end
+
     test "an api-key auth failure does not fall over", %{registry: registry} do
       assert {:error, {:provider_error, %{kind: :auth}}} =
                AgentLoop.run(

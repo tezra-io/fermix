@@ -362,6 +362,31 @@ defmodule Fermix.CLI.DaemonTest do
              Client.request("status", socket_path: socket_path, timeout: 2_000)
   end
 
+  test "an oversized request frame fails loud with request_too_large, not opaque emsgsize" do
+    # A request whose encoded frame exceeds the 4 MiB control-socket limit (e.g.
+    # large base64 image attachments via `fermix ask --attach`) is rejected
+    # before send with a structured error instead of an opaque :emsgsize.
+    dir = mkdir!()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+    socket_path = Path.join(dir, "big-req.sock")
+
+    {:ok, listener} =
+      :gen_tcp.listen(0, [
+        :binary,
+        {:active, false},
+        {:ifaddr, {:local, to_charlist(socket_path)}}
+      ])
+
+    on_exit(fn -> :gen_tcp.close(listener) end)
+
+    big = String.duplicate("x", 5_000_000)
+
+    assert {:error, {:request_too_large, size, 4_194_304}} =
+             Client.agent_message(%{"content" => big}, socket_path: socket_path, timeout: 2_000)
+
+    assert size > 4_194_304
+  end
+
   defp mkdir! do
     path =
       Path.join(

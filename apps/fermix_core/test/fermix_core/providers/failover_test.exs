@@ -40,6 +40,10 @@ defmodule FermixCore.Providers.FailoverTest do
 
       assert Failover.eligible?(Error.api(:openai_codex, Codex, 503, %{}, stage: :mid_stream))
     end
+
+    test "an image turn on a non-vision route is eligible (fail over to seek a vision route)" do
+      assert Failover.eligible?({:image_unsupported, :ollama, "llama3.3:70b"})
+    end
   end
 
   describe "eligible?/1 — not eligible" do
