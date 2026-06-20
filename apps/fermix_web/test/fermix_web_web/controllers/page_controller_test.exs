@@ -163,10 +163,18 @@ defmodule FermixWebWeb.PageControllerTest do
     assert body =~ "Active sessions"
     assert body =~ "realtime.sock"
     assert body =~ "Open setup"
+    assert setup_href = setup_href(body)
+    assert setup_href =~ ~r{^/setup\?t=}
     assert body =~ ~s(href="/health/ready?pretty=1")
     assert body =~ ~s(href="/health/live?pretty=1")
     refute body =~ "Phoenix Framework"
     refute body =~ "Peace of mind from prototype to production"
+
+    setup_conn = build_conn() |> get(setup_href)
+    assert redirected_to(setup_conn) == ~p"/setup"
+
+    authorized_conn = setup_conn |> recycle() |> get(~p"/setup")
+    assert html_response(authorized_conn, 200) =~ "Fermix setup"
   end
 
   test "GET / renders a safe error when runtime snapshot fails", %{conn: conn} do
@@ -241,4 +249,11 @@ defmodule FermixWebWeb.PageControllerTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp setup_href(body) do
+    case Regex.run(~r/<a[^>]+href="([^"]+)"[^>]*>\s*.*?Open setup/s, body) do
+      [_, href] -> href
+      nil -> nil
+    end
+  end
 end
