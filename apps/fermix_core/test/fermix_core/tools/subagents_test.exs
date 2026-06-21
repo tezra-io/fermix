@@ -582,14 +582,16 @@ defmodule FermixCore.Tools.SubagentsTest do
   end
 
   describe "access model" do
-    test "worker surface includes read/network/external_api/exec but excludes read_write", ctx do
+    test "worker surface includes read/network/external_api/exec but excludes read_write and gui_control",
+         ctx do
       Enum.each(
         [
           stub_cap("reader", :read_only),
           stub_cap("writer", :read_write),
           stub_cap("net", :network),
           stub_cap("api", :external_api),
-          stub_cap("runner", :exec)
+          stub_cap("runner", :exec),
+          stub_cap("desktop", :gui_control)
         ],
         &CapabilityRegistry.register(ctx.registry, &1)
       )
@@ -604,6 +606,9 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert "api" in worker_caps
       assert "runner" in worker_caps
       refute "writer" in worker_caps
+      # Desktop/GUI control is attended + operator-only and must never be delegated
+      # to an unwatched worker (COMPUTER_USE.md §7).
+      refute "desktop" in worker_caps
     end
 
     test "a :guest parent narrows the worker to read-only (cannot be widened)", ctx do

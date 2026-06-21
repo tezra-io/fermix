@@ -6,10 +6,12 @@ defmodule FermixCore.Tools.Subagents do
   (concurrency, timeout, result shape) — never `policy`, `allowed_tools`, or
   `trust`. Fermix computes the worker surface from the parent turn's
   `:source_trust`: a worker runs at the parent's trust with the parent's policy
-  classes **minus `:read_write`**, so it can read, browse the web, use MCP/plugin
-  tools, run skills, and run sandbox-bounded `shell`, but cannot directly mutate
-  local/Fermix state. The worker `tool_context` is sanitized so a subagent cannot
-  reply on Fermix's channel or reach the parent's memory.
+  classes **minus `:read_write` and `:gui_control`**, so it can read, browse the
+  web, use MCP/plugin tools, run skills, and run sandbox-bounded `shell`, but cannot
+  directly mutate local/Fermix state and can never drive the desktop/GUI (computer
+  use is attended, operator-only, and never delegated to an unwatched worker). The
+  worker `tool_context` is sanitized so a subagent cannot reply on Fermix's channel
+  or reach the parent's memory.
 
   Workers run concurrently up to a bounded cap; each is a one-shot
   `FermixCore.Agents.WorkerRun` pass with its own wall-clock timeout. The caller
@@ -334,8 +336,11 @@ defmodule FermixCore.Tools.Subagents do
     }
   end
 
+  # `:gui_control` is subtracted alongside `:read_write`: desktop/GUI control is
+  # attended + operator-only and must never be handed to an unwatched delegated
+  # worker (COMPUTER_USE.md §7).
   defp worker_policy(source_trust) do
-    CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write]
+    CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write, :gui_control]
   end
 
   defp sanitize_context(context, depth) do

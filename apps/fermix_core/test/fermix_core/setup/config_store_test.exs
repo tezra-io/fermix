@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     compaction = Application.get_env(:fermix_core, :compaction, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    computer_use = Application.get_env(:fermix_core, :computer_use, [])
     tools = Application.get_env(:fermix_core, :tools, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     oauth = Application.get_env(:fermix_core, :oauth, %{})
@@ -32,6 +33,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :compaction, compaction)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
+      Application.put_env(:fermix_core, :computer_use, computer_use)
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :plugins, plugins)
       Application.put_env(:fermix_core, :oauth, oauth)
@@ -255,6 +257,86 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(web_search, :brave_api_key) == "@keyring"
     assert Keyword.get(web_search, :perplexity_api_key) == "@keyring"
     assert Keyword.get(web_search, :firecrawl_api_key) == "@keyring"
+  end
+
+  test "save/load round-trip preserves generate_image backend config (M15)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        tools: [
+          generate_image: [
+            backend: "openai",
+            model: "gpt-image-2",
+            size: "1024x1024",
+            google_api_key: "@keyring"
+          ]
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.tools.generate_image]"
+    assert contents =~ ~s(backend = "openai")
+    # A keyring sentinel is never written back as plaintext.
+    assert contents =~ ~s(google_api_key = "@keyring")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    generate_image =
+      loaded.fermix_core
+      |> Keyword.get(:tools, [])
+      |> Keyword.get(:generate_image, [])
+
+    assert Keyword.get(generate_image, :backend) == "openai"
+    assert Keyword.get(generate_image, :model) == "gpt-image-2"
+    assert Keyword.get(generate_image, :size) == "1024x1024"
+    assert Keyword.get(generate_image, :google_api_key) == "@keyring"
+  end
+
+  test "load refuses to boot on an unknown generate_image key (M15)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.tools.generate_image]
+    backend = "openai"
+    bakend = "typo"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown key\(s\): bakend/, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  test "load refuses to boot on an unknown generate_image backend (M15)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.tools.generate_image]
+    backend = "midjourney"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown backend.*midjourney/s, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
   end
 
   test "save/load round-trip preserves the tool_search deferral flag (M10)" do
@@ -724,6 +806,65 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     refute Keyword.has_key?(realtime, :activation)
     refute Keyword.has_key?(realtime, :turn_detection)
     assert Keyword.get(realtime, :max_session_minutes) == 7
+  end
+
+  test "save/load round-trips computer_use config" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        providers: [openai: []],
+        computer_use: [
+          enabled: true,
+          mode: :host,
+          display_width_px: 1366,
+          allowed_apps: ["Safari"],
+          confirm_consequential: true,
+          max_actions: 25
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.computer_use]"
+    assert contents =~ "enabled = true"
+    assert contents =~ ~s(mode = "host")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    computer_use = Keyword.get(loaded.fermix_core, :computer_use, [])
+
+    assert Keyword.get(computer_use, :enabled) == true
+    assert Keyword.get(computer_use, :mode) == :host
+    assert Keyword.get(computer_use, :display_width_px) == 1366
+    assert Keyword.get(computer_use, :allowed_apps) == ["Safari"]
+    assert Keyword.get(computer_use, :max_actions) == 25
+  end
+
+  test "apply_snapshot writes computer_use config into Application env" do
+    Application.put_env(:fermix_core, :computer_use, enabled: true, mode: :host)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [
+        computer_use: [enabled: false]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    computer_use = Application.get_env(:fermix_core, :computer_use, [])
+
+    # Replace (not merge): a disabled snapshot must not leave the prior `mode: :host`
+    # / `enabled: true` behind — the section is fully normalized to the intended state.
+    assert Keyword.get(computer_use, :enabled) == false
+    assert Keyword.get(computer_use, :mode) == :browser
   end
 
   test "load_runtime_config rejects non-positive extraction_timeout_ms from hand-edited TOML" do

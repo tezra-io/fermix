@@ -76,6 +76,10 @@ defmodule FermixCore.Agents.AgentDefinition do
   ]
 
   @absent_sentinel :__absent__
+  # Deliberately excludes `gui_control` (a valid Capability policy class): computer
+  # use is operator-only and never delegatable, so an agent/subagent definition may
+  # not request it as a policy. Do not add it here to "match" Capability —
+  # the omission is the guard.
   @valid_policy_strings ~w(read_only read_write exec network external_api)
   # Derived from the Descriptor registry — accepted strings and routable
   # providers can no longer diverge. `together`/`groq` were removed: they

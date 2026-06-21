@@ -22,7 +22,8 @@ defmodule FermixCore.Capabilities.Capability do
   """
 
   @type kind :: :builtin | :skill | :mcp
-  @type policy_class :: :read_only | :read_write | :exec | :network | :external_api
+  @type policy_class ::
+          :read_only | :read_write | :exec | :network | :external_api | :gui_control
   @type executor :: {module(), atom(), list()}
 
   @type t :: %__MODULE__{
@@ -49,7 +50,13 @@ defmodule FermixCore.Capabilities.Capability do
   ]
 
   @valid_kinds [:builtin, :skill, :mcp]
-  @valid_policy_classes [:read_only, :read_write, :exec, :network, :external_api]
+  # `:gui_control` is the computer-use blast class. It carries NO sandbox/path/shell
+  # enforcement (there is none to carry — see COMPUTER_USE.md §7.1); it exists purely
+  # to label the capability and route it to the §7 action-boundary safety layer. It
+  # is granted only to the operator surface (registry.ex) and is deliberately excluded
+  # from the subagent worker surface (subagents.ex) so desktop control is never
+  # delegated to an unattended worker.
+  @valid_policy_classes [:read_only, :read_write, :exec, :network, :external_api, :gui_control]
 
   @spec new(map()) :: t()
   def new(%{} = attrs) do

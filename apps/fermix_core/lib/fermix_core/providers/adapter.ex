@@ -56,7 +56,8 @@ defmodule FermixCore.Providers.Adapter do
 
   @type tool_result :: %{
           required(:call_id) => String.t(),
-          required(:output) => String.t()
+          required(:output) => String.t(),
+          optional(:images) => [content_part()]
         }
 
   @type normalized_tool_call :: %{

@@ -17,6 +17,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
@@ -137,7 +139,8 @@ defmodule FermixCore.Application do
         JobRunnerSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
         maybe_daemon_socket(),
-        maybe_realtime_supervisor()
+        maybe_realtime_supervisor(),
+        maybe_computer_use_supervisor()
       ]
       |> List.flatten()
 
@@ -209,6 +212,18 @@ defmodule FermixCore.Application do
   defp maybe_realtime_supervisor do
     if realtime_socket_enabled?() and realtime_ready?() do
       [RealtimeSupervisor]
+    else
+      []
+    end
+  end
+
+  # Same gate as tool registration (`ComputerUse.ready?/0`): the session
+  # infrastructure boots only when computer use is enabled, the sidecar is
+  # installed, and OS permissions are granted. Off/unready (the default) starts
+  # nothing — no OS-driver process is ever spawned.
+  defp maybe_computer_use_supervisor do
+    if ComputerUse.ready?() do
+      [ComputerUseSupervisor]
     else
       []
     end
