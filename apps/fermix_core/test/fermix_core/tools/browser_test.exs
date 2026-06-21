@@ -240,6 +240,67 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
+  describe "screenshot_aware_success/1" do
+    setup do
+      dir =
+        Path.join([
+          System.tmp_dir!(),
+          "fermix-browser-shot-test",
+          "run-#{System.unique_integer([:positive])}"
+        ])
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
+      %{dir: dir}
+    end
+
+    test "a screenshot result materializes the artifact bytes as an image content part",
+         %{dir: dir} do
+      png = <<137, 80, 78, 71, 13, 10>>
+      path = Path.join(dir, "shot.png")
+      File.write!(path, png)
+
+      json =
+        Jason.encode!(%{
+          "ok" => true,
+          "target" => "t1",
+          "path" => path,
+          "mime_type" => "image/png"
+        })
+
+      assert %{success: true, output: ^json, error: nil, images: [image]} =
+               Browser.screenshot_aware_success(json)
+
+      assert image == %{type: :image, mime_type: "image/png", data: png}
+    end
+
+    test "a non-image result returns the plain text summary with no images" do
+      json = Jason.encode!(%{"ok" => true, "tabs" => []})
+      result = Browser.screenshot_aware_success(json)
+
+      assert result == %{success: true, output: json, error: nil}
+      refute Map.has_key?(result, :images)
+    end
+
+    test "an unreadable artifact degrades to the text summary and logs (never crashes)" do
+      json =
+        Jason.encode!(%{
+          "ok" => true,
+          "path" => "/nonexistent/shot.png",
+          "mime_type" => "image/png"
+        })
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          result = Browser.screenshot_aware_success(json)
+          assert result == %{success: true, output: json, error: nil}
+          refute Map.has_key?(result, :images)
+        end)
+
+      assert log =~ "artifact unreadable"
+    end
+  end
+
   defp set_capture(value) do
     prev = Application.get_env(:fermix_core, :telemetry, [])
     Application.put_env(:fermix_core, :telemetry, Keyword.put(prev, :capture_content, value))
