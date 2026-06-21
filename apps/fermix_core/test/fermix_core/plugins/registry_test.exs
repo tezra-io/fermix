@@ -158,6 +158,34 @@ defmodule FermixCore.Plugins.RegistryTest do
       assert plugin.auth.key_name == "NOTION_TOKEN"
     end
 
+    test "decodes auth.scheme \"Bot\" and defaults it to nil when absent" do
+      with_scheme =
+        v2_manifest("notion")
+        |> api_key_auth()
+        |> put_in(["auth", "scheme"], "Bot")
+        |> Map.put("tools", [http_tool("notion_search")])
+
+      assert {:ok, plugin} = Registry.decode_manifest(with_scheme, "/tmp/notion/plugin.json")
+      assert plugin.auth.scheme == "Bot"
+
+      without =
+        v2_manifest("notion") |> api_key_auth() |> Map.put("tools", [http_tool("notion_search")])
+
+      assert {:ok, plugin} = Registry.decode_manifest(without, "/tmp/notion/plugin.json")
+      assert plugin.auth.scheme == nil
+    end
+
+    test "an unknown auth.scheme is rejected at decode" do
+      manifest =
+        v2_manifest("notion")
+        |> api_key_auth()
+        |> put_in(["auth", "scheme"], "Basic")
+        |> Map.put("tools", [http_tool("notion_search")])
+
+      assert {:error, {:invalid_auth_scheme, "Basic"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
     test "a declarative http tool with a request must declare parameters" do
       no_params = Map.delete(http_tool("notion_search"), "parameters")
       manifest = v2_manifest("notion") |> Map.put("tools", [no_params]) |> api_key_auth()

@@ -249,4 +249,72 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
       assert decoded["truncated"] == true
     end
   end
+
+  describe "pagination (id_window)" do
+    test "derives the next cursor from the last item's id and stops on an empty page" do
+      t =
+        tool(%{
+          "method" => "GET",
+          "url" => "https://discord.com/api/v10/channels/123/messages",
+          "paginate" => %{
+            "mode" => "id_window",
+            "cursor_param" => "before",
+            "cursor_in" => "query",
+            "id_field" => "id",
+            "max_pages" => 5
+          }
+        })
+
+      http = fn req ->
+        before = req.query |> Enum.into(%{}) |> Map.get("before")
+
+        body =
+          case before do
+            nil -> [%{"id" => "30"}, %{"id" => "20"}]
+            "20" -> [%{"id" => "10"}]
+            "10" -> []
+          end
+
+        {:ok,
+         %{
+           status: 200,
+           headers: [{"content-type", "application/json"}],
+           body: Jason.encode!(body)
+         }}
+      end
+
+      assert {:ok, %{success: true, output: out}} = Interpreter.run(t, %{}, http: http)
+      decoded = Jason.decode!(out)
+      assert Enum.map(decoded["items"], & &1["id"]) == ["30", "20", "10"]
+      assert decoded["truncated"] == false
+    end
+
+    test "id_window paging is bounded by max_pages" do
+      t =
+        tool(%{
+          "method" => "GET",
+          "url" => "https://discord.com/api/v10/channels/123/messages",
+          "paginate" => %{
+            "mode" => "id_window",
+            "cursor_param" => "before",
+            "cursor_in" => "query",
+            "max_pages" => 2
+          }
+        })
+
+      # always returns a fresh-looking id → would loop forever without the cap
+      http = fn _ ->
+        {:ok,
+         %{
+           status: 200,
+           headers: [{"content-type", "application/json"}],
+           body: Jason.encode!([%{"id" => "1"}])
+         }}
+      end
+
+      assert {:ok, %{success: true, output: out}} = Interpreter.run(t, %{}, http: http)
+      decoded = Jason.decode!(out)
+      assert decoded["truncated"] == true
+    end
+  end
 end

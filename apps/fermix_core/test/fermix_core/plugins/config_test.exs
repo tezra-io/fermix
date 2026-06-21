@@ -123,6 +123,63 @@ defmodule FermixCore.Plugins.ConfigTest do
              FermixTestSupport.SecretWriterStub.get(:google_oauth_client_secret)
   end
 
+  test "set_plugin_secret keychains an api_key plugin credential (§8.2)", %{home: home} do
+    checkout = write_api_key_plugin("discord")
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+
+    assert {:ok, _snapshot} = Config.set_plugin_secret("discord", "xoxb-secret")
+
+    # resolved into app env for the runtime to read
+    assert Config.plugin_secret("discord") == "xoxb-secret"
+
+    # keychained via the writer; sentinel (not plaintext) on disk
+    assert {:ok, "xoxb-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+
+    contents = File.read!(Path.join(home, "config.toml"))
+    assert contents =~ "@keyring"
+    refute contents =~ "xoxb-secret"
+
+    # clearing it returns the plugin to the unset state
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    assert {:ok, _snapshot} = Config.clear_plugin_secret("discord")
+    assert Config.plugin_secret("discord") == nil
+  end
+
+  test "set_plugin_secret refuses a non-api_key plugin" do
+    assert {:error, {:not_api_key_plugin, "google_calendar"}} =
+             Config.set_plugin_secret("google_calendar", "nope")
+  end
+
+  defp write_api_key_plugin(name) do
+    checkout = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-config-api-key")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(checkout) end)
+    dir = Path.join(checkout, name)
+    File.mkdir_p!(dir)
+
+    manifest = %{
+      "schema_version" => 2,
+      "name" => name,
+      "display_name" => name,
+      "description" => "#{name} api_key fixture",
+      "category" => "communication",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{
+        "type" => "api_key",
+        "header" => "authorization",
+        "scheme" => "Bot",
+        "scopes" => []
+      },
+      "tools" => [],
+      "skills" => []
+    }
+
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+    checkout
+  end
+
   test "stores github, notion, and x oauth client config like google", %{home: home} do
     assert {:ok, _snapshot} =
              Config.set_oauth_provider("github",
@@ -162,12 +219,15 @@ defmodule FermixCore.Plugins.ConfigTest do
              FermixTestSupport.SecretWriterStub.get(:x_oauth_client_secret)
   end
 
-  test "rejects github, notion, and x oauth client config missing fields" do
+  test "rejects github, notion, x, and slack oauth client config missing fields" do
     assert {:error, {:missing_oauth_client_field, "github", :client_secret}} =
              Config.set_oauth_provider("github", client_id: "gh-client-id")
 
     assert {:error, {:missing_oauth_client_field, "x", :client_secret}} =
              Config.set_oauth_provider("x", client_id: "x-client-id")
+
+    assert {:error, {:missing_oauth_client_field, "slack", :client_secret}} =
+             Config.set_oauth_provider("slack", client_id: "slack-client-id")
 
     assert {:error, {:missing_oauth_client_field, "notion", :client_id}} =
              Config.set_oauth_provider("notion", client_secret: "n-client-secret")

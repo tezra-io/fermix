@@ -9,7 +9,8 @@ defmodule FermixCore.Setup.SecretPaths do
           :path => [atom() | String.t()],
           optional(:functionality) => String.t(),
           optional(:optional?) => boolean(),
-          optional(:sandbox_env) => boolean()
+          optional(:sandbox_env) => boolean(),
+          optional(:plugin) => String.t()
         }
 
   @secrets [
@@ -92,6 +93,15 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: true
     },
     %{
+      key: :google_api_key,
+      env: "GEMINI_API_KEY",
+      path: [:fermix_core, :tools, :generate_image, :google_api_key],
+      functionality: "Google (Gemini) generate_image backend",
+      optional?: true,
+      # BEAM-internal HTTP (no subprocess), so it is not exposed via [sandbox.env].
+      sandbox_env: false
+    },
+    %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "google", :client_secret]
@@ -110,6 +120,11 @@ defmodule FermixCore.Setup.SecretPaths do
       key: :x_oauth_client_secret,
       env: "X_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "x", :client_secret]
+    },
+    %{
+      key: :slack_oauth_client_secret,
+      env: "SLACK_OAUTH_CLIENT_SECRET",
+      path: [:fermix_core, :oauth, "slack", :client_secret]
     },
     %{
       key: :telegram_bot_token,
@@ -145,6 +160,37 @@ defmodule FermixCore.Setup.SecretPaths do
       key: :slack_signing_secret,
       env: "SLACK_SIGNING_SECRET",
       path: [:fermix_channels, :slack, :signing_secret]
+    },
+    # api_key-plugin secrets (M16): the static credential an `auth: api_key`
+    # plugin authenticates with (e.g. a Discord bot token). Plugin-namespaced
+    # env + a per-plugin config path so they never collide with the channel
+    # tokens above (e.g. the channel `DISCORD_BOT_TOKEN`). `optional?` so a
+    # locked/missing keychain warns and surfaces `:needs_secret` rather than
+    # crashing boot for one plugin. The `plugin` tag maps a plugin name to its
+    # secret entry (`fetch_plugin/1`).
+    %{
+      key: :discord_plugin_secret,
+      env: "FERMIX_PLUGIN_DISCORD",
+      path: [:fermix_core, :plugin_secrets, "discord"],
+      plugin: "discord",
+      functionality: "Discord plugin",
+      optional?: true
+    },
+    %{
+      key: :agentmail_plugin_secret,
+      env: "FERMIX_PLUGIN_AGENTMAIL",
+      path: [:fermix_core, :plugin_secrets, "agentmail"],
+      plugin: "agentmail",
+      functionality: "AgentMail plugin",
+      optional?: true
+    },
+    %{
+      key: :slack_plugin_secret,
+      env: "FERMIX_PLUGIN_SLACK",
+      path: [:fermix_core, :plugin_secrets, "slack"],
+      plugin: "slack",
+      functionality: "Slack plugin",
+      optional?: true
     }
   ]
 
@@ -155,6 +201,12 @@ defmodule FermixCore.Setup.SecretPaths do
   def fetch!(key) when is_atom(key) do
     Enum.find(@secrets, &(&1.key == key)) ||
       raise ArgumentError, "unknown setup secret key #{inspect(key)}"
+  end
+
+  @doc "The secret entry for an `api_key` plugin by name, or `nil` if it has none."
+  @spec fetch_plugin(String.t()) :: secret() | nil
+  def fetch_plugin(name) when is_binary(name) do
+    Enum.find(@secrets, &(Map.get(&1, :plugin) == name))
   end
 
   @spec by_answer_key() :: keyword([atom()])
