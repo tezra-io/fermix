@@ -13,10 +13,17 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
   regardless of `kind`.
   """
 
+  @type image_part :: %{
+          required(:type) => :image,
+          required(:mime_type) => String.t(),
+          required(:data) => binary()
+        }
+
   @type tool_result :: %{
-          success: boolean(),
-          output: String.t(),
-          error: String.t() | nil
+          required(:success) => boolean(),
+          required(:output) => String.t(),
+          required(:error) => String.t() | nil,
+          optional(:images) => [image_part()]
         }
 
   @type context :: %{
@@ -46,8 +53,37 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
     %{success: true, output: output, error: nil}
   end
 
+  @doc """
+  A successful result that returns one or more images to the model (e.g. a
+  screenshot). `output` is the model-visible text summary; the images ride a
+  dedicated `:images` field so they reach the provider as image content parts and
+  never leak into text logs or telemetry — `Tools.Telemetry`/`Providers.Telemetry`
+  preview `:output`/`:result`, never `:images`. Use `success/1` when there are no
+  images; an empty image list here is a caller bug and fails loud.
+  """
+  @spec success_with_images(String.t(), [image_part()]) :: tool_result()
+  def success_with_images(_output, []) do
+    raise ArgumentError,
+          "success_with_images/2 requires at least one image; use success/1 for none"
+  end
+
+  def success_with_images(output, images) when is_binary(output) and is_list(images) do
+    Enum.each(images, &validate_image_part!/1)
+    %{success: true, output: output, error: nil, images: images}
+  end
+
   @spec error(String.t()) :: tool_result()
   def error(message) when is_binary(message) do
     %{success: false, output: "", error: message}
+  end
+
+  defp validate_image_part!(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and mime != "" and is_binary(data),
+       do: :ok
+
+  defp validate_image_part!(part) do
+    raise ArgumentError,
+          "invalid image part for success_with_images/2: expected " <>
+            "%{type: :image, mime_type: binary, data: binary}, got #{inspect(part)}"
   end
 end

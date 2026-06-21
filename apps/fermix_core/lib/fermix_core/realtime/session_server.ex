@@ -490,7 +490,9 @@ defmodule FermixCore.Realtime.SessionServer do
            ) do
       profile =
         RuntimeContext.build_profile(:operator, available_skills, capability_registry,
-          excluded_categories: [:channel]
+          # `:media` too — image/video generation egresses through a channel
+          # `reply_fn`, which a voice session does not have (M15 §411).
+          excluded_categories: [:channel, :media]
         )
 
       {:ok,
@@ -747,7 +749,9 @@ defmodule FermixCore.Realtime.SessionServer do
     # explicitly at the call site rather than inferred from absence.
     CapabilityRegistry.list_for(capability_registry,
       trust: :operator,
-      excluded_categories: [:channel]
+      # `:media` too — generation egresses through a channel `reply_fn` a voice
+      # session lacks (M15 §411); kept in sync with the profile above.
+      excluded_categories: [:channel, :media]
     )
   end
 
