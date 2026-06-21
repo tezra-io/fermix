@@ -144,6 +144,25 @@ defmodule FermixCore.AgentLoopTest do
     def execute(_args, _ctx), do: {:ok, Tool.success(<<"risk: ", 0xF3, " exposure">>)}
   end
 
+  defmodule ScreenshotTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "screenshot_tool"
+    @impl true
+    def description, do: "Returns an image content part (e.g. a screenshot)"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    @impl true
+    def execute(_args, _ctx) do
+      {:ok,
+       Tool.success_with_images("captured", [
+         %{type: :image, mime_type: "image/png", data: <<137, 80, 78, 71>>}
+       ])}
+    end
+  end
+
   # -- Helpers --
 
   defp turn(content, opts \\ []) do
@@ -258,6 +277,49 @@ defmodule FermixCore.AgentLoopTest do
 
       assert {:ok, result} = run_loop(capability_registry: registry)
       assert result.context_tokens == 1234
+    end
+  end
+
+  # -- Image-bearing tool results (computer-use / browser screenshots) --
+
+  describe "run/1 image-bearing tool results" do
+    test "a tool returning images threads them to continue/3 as a tool_result with :images",
+         %{registry: registry} do
+      register_caps(registry, [ScreenshotTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "screenshot_tool", %{})]),
+        turn("done")
+      ])
+
+      assert {:ok, result} = run_loop(capability_registry: registry)
+      assert result.response == "done"
+
+      assert [{_state, [tool_result], _opts}] = mock_continues()
+      assert tool_result.call_id == "c1"
+
+      assert tool_result.images == [
+               %{type: :image, mime_type: "image/png", data: <<137, 80, 78, 71>>}
+             ]
+    end
+
+    test "an image-bearing tool result on a NON-vision route fails loud (no silent drop)",
+         %{registry: registry} do
+      register_caps(registry, [ScreenshotTool])
+      set_mock_responses([turn("", tool_calls: [tool_call("c1", "screenshot_tool", %{})])])
+
+      route_key = %{
+        provider: :ollama,
+        model: "qwen3:32b",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      assert {:error, {:image_unsupported, :ollama, "qwen3:32b"}} =
+               run_loop(capability_registry: registry, route_key: route_key)
+
+      # The gate fires BEFORE the continuation — the model is never asked.
+      assert mock_continues() == []
     end
   end
 
@@ -574,6 +636,14 @@ defmodule FermixCore.AgentLoopTest do
 
       assert wrapped_output("mcp_stub_tool", [mcp]) =~ "<untrusted_tool_result"
       assert wrapped_output("x_stub", [plugin]) =~ "<untrusted_tool_result"
+    end
+
+    test "wraps gui_control (computer-use) tool results as untrusted data" do
+      # Screenshots/UI text are attacker-controllable (screen prompt-injection,
+      # COMPUTER_USE.md §7.8) — the computer_use result must be wrapped as DATA.
+      cap = content_cap("computer_use", policy_class: :gui_control)
+
+      assert wrapped_output("computer_use", [cap]) =~ "<untrusted_tool_result"
     end
 
     test "does not wrap internal tools — including subagents-style external_api" do

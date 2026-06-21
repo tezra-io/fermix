@@ -19,6 +19,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Telemetry
 
   @type tool_result :: %{required(:call_id) => String.t(), required(:output) => term()}
@@ -116,12 +117,75 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     {instructions, input}
   end
 
+  # A `function_call_output` item is text-only on the Responses item list, so a
+  # screenshot cannot ride inside it. The replay-safe shape (this surface has no
+  # `previous_response_id` either — every turn replays the full item list): emit
+  # all `function_call_output` items first (each paired to its `call_id`), then the
+  # image(s) as a SUBSEQUENT user item carrying `input_image` parts — the same
+  # encoding inbound images use. Ordering matters: outputs must immediately follow
+  # their function_calls before any user item. Both OpenAI.Responses and
+  # OpenAI.Codex concatenate this list last, so both get the screenshot path.
+  @image_followup_label "Screen state returned by the preceding tool call:"
+  @image_followup_placeholder "[screen state in the following message]"
+  # Replaces a screenshot input item once it ages out of the retention window
+  # (ScreenshotRetention) — image bytes drop, the textual trail stays.
+  @image_followup_elided "[earlier screen state omitted to bound context]"
+
   @spec build_function_call_outputs([tool_result()]) :: [map()]
   def build_function_call_outputs(tool_results) when is_list(tool_results) do
-    Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
-      %{type: "function_call_output", call_id: call_id, output: to_string(output)}
-    end)
+    outputs = Enum.map(tool_results, &function_call_output_item/1)
+
+    image_items =
+      tool_results |> Enum.filter(&has_images?/1) |> Enum.map(&screenshot_input_item/1)
+
+    outputs ++ image_items
   end
+
+  defp function_call_output_item(%{call_id: call_id, output: output} = result) do
+    text = to_string(output)
+
+    item_output =
+      if text == "" and has_images?(result), do: @image_followup_placeholder, else: text
+
+    %{type: "function_call_output", call_id: call_id, output: item_output}
+  end
+
+  defp screenshot_input_item(%{images: images}) do
+    image_parts = Enum.map(images, &image_part_to_responses/1)
+    %{role: "user", content: [%{type: "input_text", text: @image_followup_label} | image_parts]}
+  end
+
+  defp has_images?(%{images: [_ | _]}), do: true
+  defp has_images?(_), do: false
+
+  @doc """
+  Keep screenshot image bytes only in the most recent `keep` screenshot input
+  items of the assembled `input` list; older ones are elided to a text marker. A
+  `keep` of `nil` disables retention. Shared by the Responses and Codex adapters,
+  which both replay the full item list each turn.
+  """
+  @spec retain_screenshots([map()], non_neg_integer() | nil) :: [map()]
+  def retain_screenshots(input, keep) when is_list(input) do
+    ScreenshotRetention.keep_last(input, keep, &screenshot_item?/1, &elide_screenshot_item/1)
+  end
+
+  # A screenshot carrier is the labelled follow-up user item holding `input_image`
+  # parts. Inbound user images arrive as their own items without this label, so
+  # they are never matched or elided.
+  defp screenshot_item?(%{
+         role: "user",
+         content: [%{type: "input_text", text: @image_followup_label} | rest]
+       })
+       when is_list(rest),
+       do: Enum.any?(rest, &match?(%{type: "input_image"}, &1))
+
+  defp screenshot_item?(_), do: false
+
+  # The screenshot item's only text is the now-meaningless follow-up label (the
+  # real tool output rides a separate function_call_output), so the whole content
+  # collapses to the elision marker once the image bytes are dropped.
+  defp elide_screenshot_item(item),
+    do: %{item | content: [%{type: "input_text", text: @image_followup_elided}]}
 
   @context_length_markers [
     "context_length_exceeded",

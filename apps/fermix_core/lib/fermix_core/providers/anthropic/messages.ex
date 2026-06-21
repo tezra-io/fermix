@@ -49,9 +49,11 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
@@ -61,9 +63,10 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # §5.1: non-streaming requests need a bounded output ceiling; the SSE
   # follow-up raises this toward ModelCatalog.max_output_tokens_for/2.
   @non_streaming_max_tokens 8_192
-  # Codex precedent — HttpClient sets no receive timeout of its own.
-  @receive_timeout_ms 120_000
   @cache_control %{type: "ephemeral"}
+  # Marker left in place of an older screenshot's image bytes once it falls
+  # outside the retention window (ScreenshotRetention) — keeps the textual trail.
+  @screenshot_elided "[earlier screenshot omitted to bound context]"
   # Claude 4.7+ rejects sampling params (temperature/top_p/top_k) — §5.1.
   @no_sampling_substrings ["4-7", "4.7", "4-8", "4.8"]
   @known_stop_reasons ["end_turn", "tool_use", "max_tokens", "stop_sequence", "refusal"]
@@ -103,14 +106,47 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     } = provider_state
 
     next_messages =
-      messages ++
-        [
-          %{role: "assistant", content: assistant_content},
-          %{role: "user", content: tool_result_blocks(tool_results)}
-        ]
+      (messages ++
+         [
+           %{role: "assistant", content: assistant_content},
+           %{role: "user", content: tool_result_blocks(tool_results)}
+         ])
+      |> ScreenshotRetention.keep_last(
+        Keyword.get(opts, :max_retained_screenshots),
+        &screenshot_message?/1,
+        &elide_screenshot_message/1
+      )
 
     request(next_messages, system, tools, capabilities, opts)
   end
+
+  # A screenshot carrier is a user message holding a `tool_result` block whose
+  # content array contains image blocks (the reference computer-use shape).
+  # Inbound user images ride the message content directly, never inside a
+  # `tool_result`, so they are not matched and never elided.
+  defp screenshot_message?(%{role: "user", content: blocks}) when is_list(blocks),
+    do: Enum.any?(blocks, &tool_result_with_image?/1)
+
+  defp screenshot_message?(_), do: false
+
+  defp tool_result_with_image?(%{type: "tool_result", content: content}) when is_list(content),
+    do: Enum.any?(content, &match?(%{type: "image"}, &1))
+
+  defp tool_result_with_image?(_), do: false
+
+  defp elide_screenshot_message(%{role: "user", content: blocks} = message),
+    do: %{message | content: Enum.map(blocks, &elide_tool_result_images/1)}
+
+  defp elide_tool_result_images(%{type: "tool_result", content: content} = block)
+       when is_list(content) do
+    text =
+      content |> Enum.filter(&match?(%{type: "text"}, &1)) |> Enum.map_join(" ", & &1.text)
+
+    marker = String.trim("#{text} #{@screenshot_elided}")
+    %{block | content: marker}
+  end
+
+  defp elide_tool_result_images(block), do: block
 
   @impl true
   def to_provider_tools([]), do: []
@@ -286,10 +322,22 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       )
 
   defp tool_result_blocks(tool_results) do
-    Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
-      %{type: "tool_result", tool_use_id: call_id, content: to_string(output)}
+    Enum.map(tool_results, fn %{call_id: call_id} = result ->
+      %{type: "tool_result", tool_use_id: call_id, content: tool_result_content(result)}
     end)
   end
+
+  # Text-only results stay a plain string — byte-identical to pre-image behavior,
+  # so the cached prefix is unaffected. A result carrying images (e.g. a
+  # screenshot) becomes a content-block array: the text block (omitted when empty,
+  # since Anthropic rejects empty text) then the image blocks — the reference
+  # computer-use `tool_result` shape, reusing the inbound-image encoders.
+  defp tool_result_content(%{output: output, images: [_ | _] = images}) do
+    text = to_string(output)
+    anthropic_text_blocks(text, images) ++ Enum.map(images, &anthropic_image_block/1)
+  end
+
+  defp tool_result_content(%{output: output}), do: to_string(output)
 
   defp system_blocks(nil, :api_key), do: nil
 
@@ -444,7 +492,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
         url: "#{base_url}/messages",
         method: :post,
         json: body,
-        receive_timeout: @receive_timeout_ms,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: request_headers(credential)
       )
       |> Req.merge(req_options)
