@@ -4,12 +4,27 @@ defmodule FermixCore.ComputerUse.Config do
   (`:host`) or a browser context (`:browser`).
 
   Off by default. `:host` mode drives the real logged-in desktop and is dangerous
-  (ambient authority, no rollback, unsolved screenshot prompt-injection); it is
-  gated behind an explicit grant + loud consent at the tool/session boundary, and
-  `confirm_consequential?` defaults to true so every mutating action is confirmed
-  (docs/design/COMPUTER_USE.md §7). This module is pure config normalization with
-  fail-loud validation; it mirrors `FermixCore.Realtime.Config`.
+  (ambient authority, no rollback, unsolved screenshot prompt-injection).
+
+  The safety posture, `access`, is DERIVED 1:1 from `[sandbox] mode` — there is NO
+  separate computer-use posture knob (COMPUTER_USE.md §14): an `open` sandbox is an
+  `open` desktop. Three tiers:
+
+    * `:strict`   — look only: read-only actions run; any mutating action is refused
+      (the one deterministic floor).
+    * `:standard` — acts freely; the agent confirms IRREVERSIBLE actions
+      conversationally before doing them (its own judgment — most destructive things).
+    * `:open`     — acts autonomously; pauses to confirm ONLY a TRULY dangerous /
+      catastrophic action — a HIGHER bar than standard (mass deletion, sending money,
+      wiping data), not every little change.
+
+  `access` is set by `current/0` from the live sandbox mode; the computer-use config
+  never stores it. The standard/open confirm is a prompt principle (Tools.ComputerUse),
+  not a gate; only `:strict` (refuse-all) and the attended-origin gate are hard floors.
+  This module is pure config normalization with fail-loud validation.
   """
+
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
 
   @modes [:browser, :host]
 
@@ -19,40 +34,39 @@ defmodule FermixCore.ComputerUse.Config do
   @max_dimension_px 1366
 
   @type mode :: :browser | :host
+  @type access :: :strict | :standard | :open
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
           mode: mode(),
+          access: access(),
           display: non_neg_integer(),
           display_width_px: pos_integer(),
           display_height_px: pos_integer(),
-          allowed_apps: [String.t()],
-          allowed_domains: [String.t()],
-          confirm_consequential?: boolean(),
           screenshot_after?: boolean(),
           max_actions: pos_integer(),
-          max_retained_screenshots: pos_integer(),
-          approval_timeout_ms: pos_integer()
+          max_retained_screenshots: pos_integer()
         }
 
   defstruct enabled?: false,
             mode: :browser,
+            access: :standard,
             display: 0,
             display_width_px: 1280,
             display_height_px: 800,
-            allowed_apps: [],
-            allowed_domains: [],
-            confirm_consequential?: true,
             screenshot_after?: true,
             max_actions: 40,
-            max_retained_screenshots: 3,
-            approval_timeout_ms: 300_000
+            max_retained_screenshots: 3
 
   @spec current() :: t()
   def current do
-    :fermix_core
-    |> Application.get_env(:computer_use, [])
-    |> normalize()
+    cu =
+      :fermix_core
+      |> Application.get_env(:computer_use, [])
+      |> normalize()
+
+    # Posture is one knob: mirror the live sandbox mode (strict/standard/open).
+    %{cu | access: SandboxConfig.current().mode}
   end
 
   @spec enabled?() :: boolean()
@@ -68,13 +82,9 @@ defmodule FermixCore.ComputerUse.Config do
       display: non_neg_int(config, :display, 0),
       display_width_px: dimension(config, :display_width_px, 1280),
       display_height_px: dimension(config, :display_height_px, 800),
-      allowed_apps: string_list(config, :allowed_apps),
-      allowed_domains: string_list(config, :allowed_domains),
-      confirm_consequential?: bool(config, :confirm_consequential, true),
       screenshot_after?: bool(config, :screenshot_after, true),
       max_actions: positive_int(config, :max_actions, 40),
-      max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3),
-      approval_timeout_ms: positive_int(config, :approval_timeout_ms, 300_000)
+      max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3)
     }
 
     validate!(cu)
@@ -93,13 +103,9 @@ defmodule FermixCore.ComputerUse.Config do
       display: cu.display,
       display_width_px: cu.display_width_px,
       display_height_px: cu.display_height_px,
-      allowed_apps: cu.allowed_apps,
-      allowed_domains: cu.allowed_domains,
-      confirm_consequential: cu.confirm_consequential?,
       screenshot_after: cu.screenshot_after?,
       max_actions: cu.max_actions,
-      max_retained_screenshots: cu.max_retained_screenshots,
-      approval_timeout_ms: cu.approval_timeout_ms
+      max_retained_screenshots: cu.max_retained_screenshots
     ]
   end
 
@@ -138,27 +144,6 @@ defmodule FermixCore.ComputerUse.Config do
     end
 
     value
-  end
-
-  defp string_list(config, key) do
-    case lookup(config, key) do
-      nil ->
-        []
-
-      value when is_list(value) ->
-        Enum.map(value, fn
-          item when is_binary(item) and item != "" ->
-            item
-
-          item ->
-            raise ArgumentError,
-                  "computer_use.#{key} entries must be non-empty strings, got: #{inspect(item)}"
-        end)
-
-      value ->
-        raise ArgumentError,
-              "computer_use.#{key} must be a list of strings, got: #{inspect(value)}"
-    end
   end
 
   defp bool(config, key, default) do

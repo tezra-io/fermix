@@ -1,15 +1,22 @@
 defmodule FermixCore.ComputerUse.Safety do
   @moduledoc """
-  Pure safety policy for computer-use (docs/design/COMPUTER_USE.md §7). The
+  Pure safety policy for computer-use (docs/design/COMPUTER_USE.md §14). The
   `Session` wires these decisions; keeping them pure makes the safety floor
   unit-testable.
 
-  None of these is sufficient alone — defense-in-depth — and host control of a
-  real logged-in session remains risk *mitigation, not containment*. In
-  particular the frontmost-app allowlist is a focus CHECK, not input routing, and
-  is bypassable (§7.4); the load-bearing rule is that consequential actions are
-  gated by a present human (§7.2/§7.3) and that only an attended origin may start
-  a host session (§7.6).
+  Two orthogonal, deterministic floors live here:
+
+    * `gate/2` — the `access` posture: `:strict` refuses every mutating action
+      (look only); `:standard`/`:open` auto-run them. `:standard`'s "confirm before
+      something irreversible" is a PROMPT principle the agent applies itself (it
+      sees the screen), NOT a per-action human gate — there is no blocking
+      confirmation anywhere anymore.
+    * `host_start_allowed?/1` — only an attended origin (interactive chat or the
+      voice pet) may START a host session, independent of access.
+
+  Host control of a real logged-in session remains risk *mitigation, not
+  containment*: an on-screen prompt-injection can in principle talk a `:standard`
+  agent out of asking (§14.4). Only `:strict` and the attended-origin gate are hard.
   """
 
   alias FermixCore.ComputerUse.Config
@@ -22,23 +29,23 @@ defmodule FermixCore.ComputerUse.Safety do
   @attended_origins [:interactive, :voice]
 
   @doc """
-  Gate decision for an action given config:
+  Gate decision for an action given the `access` posture (COMPUTER_USE.md §14):
 
-    * `:auto`    — run without confirmation (read-only actions always; or when an
-      operator has explicitly disabled confirmation behind the §7.8 grant)
-    * `:confirm` — require human-in-the-loop confirmation (a consequential action
-      while `confirm_consequential?` is on — the default)
+    * `:auto`   — run it.
+    * `:refuse` — deny it (a mutating action under `:strict`, which is look-only).
 
-  Clicks/type/key/drag/scroll are consequential and gated by default: in a
-  pixel-coordinate tool there is no semantic target, so the floor confirms every
-  mutating action rather than guess (the Phase-2 AX-tree classifier relaxes this
-  safely). Read-only actions (screenshot/mouse_move/wait) always auto-run.
+  This is the ONLY deterministic floor. Read-only actions (screenshot/mouse_move/
+  wait) always auto-run. Under `:standard`/`:open` mutating actions also auto-run —
+  `:standard`'s "confirm before something irreversible" is a PROMPT principle the
+  agent applies with its own judgment (it sees the screen), not a per-action gate;
+  `:open` never pauses. There is no `:confirm` outcome here by design.
   """
-  @spec gate(String.t(), Config.t()) :: :auto | :confirm
-  def gate(action, %Config{} = config) when is_binary(action) do
+  @type gate_decision :: :auto | :refuse
+  @spec gate(String.t(), Config.t()) :: gate_decision()
+  def gate(action, %Config{access: access}) when is_binary(action) do
     cond do
       Protocol.read_only?(action) -> :auto
-      config.confirm_consequential? -> :confirm
+      access == :strict -> :refuse
       true -> :auto
     end
   end
@@ -62,26 +69,4 @@ defmodule FermixCore.ComputerUse.Safety do
   """
   @spec host_start_allowed?(atom()) :: boolean()
   def host_start_allowed?(origin) when is_atom(origin), do: origin in @attended_origins
-
-  @doc """
-  Frontmost-app allowlist CHECK for host mode (§7.4) — defense-in-depth, NOT a
-  containment boundary (it races, and the agent can refocus a denied app with
-  allowed keystrokes). An empty allowlist permits nothing (fail-closed).
-  """
-  @spec frontmost_app_allowed?(String.t(), Config.t()) :: boolean()
-  def frontmost_app_allowed?(_app, %Config{allowed_apps: []}), do: false
-
-  def frontmost_app_allowed?(app, %Config{allowed_apps: apps}) when is_binary(app),
-    do: app in apps
-
-  @doc """
-  Domain allowlist for browser mode (§7.5) — an enforceable boundary there (the
-  context cannot navigate off-allowlist), unlike the host-mode app check. An empty
-  allowlist permits nothing (fail-closed).
-  """
-  @spec domain_allowed?(String.t(), Config.t()) :: boolean()
-  def domain_allowed?(_host, %Config{allowed_domains: []}), do: false
-
-  def domain_allowed?(host, %Config{allowed_domains: domains}) when is_binary(host),
-    do: host in domains
 end

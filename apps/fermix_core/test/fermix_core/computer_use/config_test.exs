@@ -2,23 +2,21 @@ defmodule FermixCore.ComputerUse.ConfigTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
 
   describe "normalize/1 defaults" do
-    test "empty config is disabled, browser mode, with safe defaults" do
+    test "empty config is disabled, browser mode, standard access, with safe defaults" do
       config = Config.normalize([])
 
       assert config.enabled? == false
       assert config.mode == :browser
+      assert config.access == :standard
       assert config.display == 0
       assert config.display_width_px == 1280
       assert config.display_height_px == 800
-      assert config.allowed_apps == []
-      assert config.allowed_domains == []
-      assert config.confirm_consequential? == true
       assert config.screenshot_after? == true
       assert config.max_actions == 40
       assert config.max_retained_screenshots == 3
-      assert config.approval_timeout_ms == 300_000
     end
 
     test "nil normalizes to defaults" do
@@ -33,17 +31,15 @@ defmodule FermixCore.ComputerUse.ConfigTest do
           enabled: true,
           mode: :host,
           display: 1,
-          allowed_apps: ["Safari", "Finder"],
-          confirm_consequential: false,
           max_actions: 10
         )
 
       assert config.enabled? == true
       assert config.mode == :host
       assert config.display == 1
-      assert config.allowed_apps == ["Safari", "Finder"]
-      assert config.confirm_consequential? == false
       assert config.max_actions == 10
+      # access is NOT read from the computer_use config — it's derived from the
+      # sandbox mode at current/0 (see the derivation describe block below).
     end
 
     test "reads a map with string keys (TOML shape) and string booleans/mode" do
@@ -51,13 +47,11 @@ defmodule FermixCore.ComputerUse.ConfigTest do
         Config.normalize(%{
           "enabled" => "true",
           "mode" => "host",
-          "allowed_domains" => ["example.com"],
           "screenshot_after" => "false"
         })
 
       assert config.enabled? == true
       assert config.mode == :host
-      assert config.allowed_domains == ["example.com"]
       assert config.screenshot_after? == false
     end
   end
@@ -93,20 +87,6 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       end
     end
 
-    test "rejects a non-list allowed_apps" do
-      assert_raise ArgumentError, ~r/computer_use.allowed_apps must be a list/, fn ->
-        Config.normalize(allowed_apps: "Safari")
-      end
-    end
-
-    test "rejects a non-string entry in allowed_domains" do
-      assert_raise ArgumentError,
-                   ~r/computer_use.allowed_domains entries must be non-empty strings/,
-                   fn ->
-                     Config.normalize(allowed_domains: ["ok.com", 42])
-                   end
-    end
-
     test "rejects a negative display index" do
       assert_raise ArgumentError, ~r/computer_use.display must be a non-negative integer/, fn ->
         Config.normalize(display: -1)
@@ -117,7 +97,13 @@ defmodule FermixCore.ComputerUse.ConfigTest do
   describe "current/0 and enabled?/0" do
     setup do
       prev = Application.get_env(:fermix_core, :computer_use)
-      on_exit(fn -> restore(prev) end)
+      prev_sandbox = Application.get_env(:fermix_core, :sandbox)
+
+      on_exit(fn ->
+        restore(prev)
+        restore_sandbox(prev_sandbox)
+      end)
+
       :ok
     end
 
@@ -128,6 +114,15 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       assert config.mode == :host
     end
 
+    test "current/0 DERIVES access 1:1 from the live [sandbox] mode" do
+      Application.put_env(:fermix_core, :computer_use, enabled: true)
+
+      for mode <- [:strict, :standard, :open] do
+        Application.put_env(:fermix_core, :sandbox, %{SandboxConfig.default() | mode: mode})
+        assert Config.current().access == mode
+      end
+    end
+
     test "enabled?/0 is false when unconfigured" do
       Application.delete_env(:fermix_core, :computer_use)
       refute Config.enabled?()
@@ -136,4 +131,6 @@ defmodule FermixCore.ComputerUse.ConfigTest do
 
   defp restore(nil), do: Application.delete_env(:fermix_core, :computer_use)
   defp restore(prev), do: Application.put_env(:fermix_core, :computer_use, prev)
+  defp restore_sandbox(nil), do: Application.delete_env(:fermix_core, :sandbox)
+  defp restore_sandbox(prev), do: Application.put_env(:fermix_core, :sandbox, prev)
 end

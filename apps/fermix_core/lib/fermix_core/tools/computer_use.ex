@@ -5,18 +5,20 @@ defmodule FermixCore.Tools.ComputerUse do
 
   Off by default and dangerous in `:host` mode (it drives the real logged-in
   desktop). The tool is thin: it resolves the per-conversation `ComputerUse.Session`
-  and the owner's confirm surface from the call context (wired by the session
-  manager + agent loop), then runs each action through the session's
-  classify → (confirm if consequential) → execute flow and returns the post-action
+  from the call context (started lazily by the session manager), then runs each
+  action through the session's classify → execute flow and returns the post-action
   screenshot as an image the model can see (the Phase-0 `success_with_images` path).
-  Consequential actions (clicks/type/key/drag/scroll) are confirmed by a present
-  human by default; read-only actions (screenshot/mouse_move/wait) auto-run.
+
+  Safety is the `access` posture (COMPUTER_USE.md §14): `:strict` refuses mutating
+  actions (look only — the one deterministic floor); `:standard`/`:open` run them.
+  `:standard`'s "confirm before something irreversible" is a PROMPT principle the
+  agent applies itself (it sees the screen) — surfaced in the live action schema via
+  `dynamic_parameters/1` — not a per-action gate. There is no blocking confirmation.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
-  alias FermixCore.ComputerUse.Approval
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Session
@@ -33,7 +35,9 @@ defmodule FermixCore.Tools.ComputerUse do
   def description do
     "Drive a desktop or browser GUI by screenshot + mouse/keyboard, one action per call. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
-      "pixel coordinates from the latest screenshot. Consequential actions need owner confirmation."
+      "pixel coordinates from the latest screenshot. Honor the access mode shown on the `action` " <>
+      "parameter: standard confirms before anything irreversible; open acts autonomously but still " <>
+      "confirms a truly dangerous/catastrophic action; strict is look-only."
   end
 
   @impl true
@@ -46,9 +50,7 @@ defmodule FermixCore.Tools.ComputerUse do
         "action" => %{
           "type" => "string",
           "enum" => Protocol.actions(),
-          "description" =>
-            "The GUI action. Read-only: screenshot, mouse_move, wait. Consequential " <>
-              "(confirmed): left_click, right_click, double_click, left_click_drag, scroll, type, key."
+          "description" => base_action_description()
         },
         "x" => %{
           "type" => "integer",
@@ -85,11 +87,51 @@ defmodule FermixCore.Tools.ComputerUse do
     }
   end
 
+  # Per-turn schema refresh (called by the agent loop when present): fold the LIVE
+  # access mode + its guidance into the `action` description so the model knows the
+  # current posture — strict (look only), standard (confirm destructive), or open
+  # (autonomous). This is how the prompt-driven §14 confirm principle reaches the
+  # model without a cached prompt section that would freeze on config change.
+  @spec dynamic_parameters(map()) :: map()
+  def dynamic_parameters(_context) do
+    put_in(
+      parameters(),
+      ["properties", "action", "description"],
+      action_description(Config.current().access)
+    )
+  end
+
   @impl true
   def when_to_use do
     "When a task needs eyes-and-hands on a GUI that has no API — clicking, typing, or " <>
       "reading rendered visual state in a desktop app or browser. Screenshot first, then act. " <>
-      "Prefer the dedicated browser/file/web tools when they cover the task; this is the last resort."
+      "Prefer the dedicated browser/file/web tools when they cover the task; this is the last resort. " <>
+      "In standard access, ask the owner and wait for their go-ahead before any irreversible action."
+  end
+
+  defp base_action_description do
+    "The GUI action. Read-only: screenshot, mouse_move, wait. Mutating: left_click, " <>
+      "right_click, double_click, left_click_drag, scroll, type, key."
+  end
+
+  defp action_description(:strict) do
+    base_action_description() <>
+      " ACCESS=strict (look only): screenshot/mouse_move/wait run; every mutating action is refused."
+  end
+
+  defp action_description(:standard) do
+    base_action_description() <>
+      " ACCESS=standard: act directly for routine navigation and typing, but FIRST ask the owner" <>
+      " and wait for their reply before any irreversible action — delete, send, purchase, sign out," <>
+      " overwrite, move to trash."
+  end
+
+  defp action_description(:open) do
+    base_action_description() <>
+      " ACCESS=open (autonomous): act directly, including ordinary destructive steps, WITHOUT" <>
+      " asking — but STILL pause to confirm with the owner before a TRULY dangerous, catastrophic" <>
+      " action: bulk/mass deletion, wiping or formatting data, sending money or irreversible" <>
+      " external messages, or destructive system changes. A higher bar than standard, not zero."
   end
 
   @impl true
@@ -112,8 +154,8 @@ defmodule FermixCore.Tools.ComputerUse do
         description: "the action or its arguments were malformed (fail-loud)"
       },
       %{
-        tag: "action not confirmed",
-        description: "the owner denied, did not respond, or no owner was present (fail-closed)"
+        tag: "refused (strict access)",
+        description: "a mutating action while access is strict (look-only); not performed"
       },
       %{
         tag: "action_budget_exhausted",
@@ -149,18 +191,13 @@ defmodule FermixCore.Tools.ComputerUse do
   # `:computer_use_session` on the context (tests, a future eager path), otherwise
   # the tool starts/reuses it through `SessionManager.ensure/3` keyed by the turn's
   # `conversation_key` — so the OS-driver process opens only when the tool is actually
-  # used, and is reused across actions in the same conversation. The confirm surface
-  # (`:computer_use_surface`) stays optional: read-only actions never need it;
-  # consequential ones fail closed without it (no_owner).
+  # used, and is reused across actions in the same conversation.
   defp dispatch(params, context) do
     config = Map.get(context, :computer_use_config) || Config.current()
 
     case resolve_session(context, config) do
-      {:ok, session} ->
-        run(session, Map.get(context, :computer_use_surface), config, params)
-
-      {:error, reason} ->
-        {:ok, Tool.error(unavailable_message(reason))}
+      {:ok, session} -> run(session, params)
+      {:error, reason} -> {:ok, Tool.error(unavailable_message(reason))}
     end
   end
 
@@ -200,26 +237,20 @@ defmodule FermixCore.Tools.ComputerUse do
     "computer-use session unavailable: #{format_reason(reason)}"
   end
 
-  defp run(session, surface, config, params) do
+  defp run(session, params) do
     case Session.classify(session, params) do
       {:ok, :auto, request} ->
         perform(session, request)
 
-      {:ok, :confirm, request, desc} ->
-        confirm_then_perform(session, surface, config, request, desc)
+      {:error, {:refused, :strict_mode}} ->
+        {:ok,
+         Tool.error(
+           "computer use is in strict (look-only) access — only screenshot, mouse_move, and wait " <>
+             "run; this mutating action was refused. Ask the owner to switch access to standard to act."
+         )}
 
       {:error, reason} ->
         {:ok, Tool.error("invalid action: #{format_reason(reason)}")}
-    end
-  end
-
-  defp confirm_then_perform(session, surface, config, request, desc) do
-    case Approval.request(desc, surface, config) do
-      :ok ->
-        perform(session, request)
-
-      {:error, reason} ->
-        {:ok, Tool.error("action not confirmed (#{reason}); it was not performed")}
     end
   end
 

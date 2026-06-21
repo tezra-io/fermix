@@ -822,8 +822,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
           enabled: true,
           mode: :host,
           display_width_px: 1366,
-          allowed_apps: ["Safari"],
-          confirm_consequential: true,
+          screenshot_after: false,
+          max_retained_screenshots: 5,
           max_actions: 25
         ]
       ],
@@ -837,14 +837,20 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ "[fermix_core.computer_use]"
     assert contents =~ "enabled = true"
     assert contents =~ ~s(mode = "host")
+    assert contents =~ "screenshot_after = false"
+    # access is derived from [sandbox] mode — it is NEVER persisted in this section.
+    refute contents =~ "access ="
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     computer_use = Keyword.get(loaded.fermix_core, :computer_use, [])
 
     assert Keyword.get(computer_use, :enabled) == true
     assert Keyword.get(computer_use, :mode) == :host
+    refute Keyword.has_key?(computer_use, :access)
     assert Keyword.get(computer_use, :display_width_px) == 1366
-    assert Keyword.get(computer_use, :allowed_apps) == ["Safari"]
+    # the `?`-suffix struct fields must round-trip under their TOML key names
+    assert Keyword.get(computer_use, :screenshot_after) == false
+    assert Keyword.get(computer_use, :max_retained_screenshots) == 5
     assert Keyword.get(computer_use, :max_actions) == 25
   end
 
@@ -867,7 +873,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(computer_use, :mode) == :browser
   end
 
-  test "load_runtime_config rejects non-positive extraction_timeout_ms from hand-edited TOML" do
+  test "load_runtime_config rejects negative review_interval_hours from hand-edited TOML" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
@@ -877,10 +883,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     File.write!(Path.join(tmp_home, "config.toml"), """
     [fermix_core.memory]
-    extraction_timeout_ms = 0
+    review_interval_hours = -1
     """)
 
-    assert_raise ArgumentError, ~r/extraction_timeout_ms/, fn ->
+    assert_raise ArgumentError, ~r/review_interval_hours/, fn ->
       ConfigStore.load_runtime_config()
     end
   end

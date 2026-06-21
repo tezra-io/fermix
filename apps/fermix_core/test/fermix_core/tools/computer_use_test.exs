@@ -1,11 +1,11 @@
 defmodule FermixCore.Tools.ComputerUseTest do
   use ExUnit.Case, async: false
 
-  alias FermixCore.ComputerUse.Approval
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
 
   defmodule StubDriver do
@@ -37,6 +37,26 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
   @context %{agent_name: "main", conversation_key: {"cli", "chat-cu", :root}}
 
+  defp action_desc(params), do: params["properties"]["action"]["description"]
+
+  # access is derived from the sandbox mode, so dynamic_parameters tests steer it
+  # via [sandbox] mode rather than the computer_use config.
+  defp put_access(mode) do
+    Application.put_env(:fermix_core, :sandbox, %{SandboxConfig.default() | mode: mode})
+  end
+
+  defp strict_session do
+    start_supervised!(
+      {Session,
+       [
+         config: %{Config.normalize(enabled: true) | access: :strict},
+         driver: {StubDriver, [test_pid: self()]},
+         origin: :interactive,
+         session_id: "cua_strict_#{System.unique_integer([:positive])}"
+       ]}
+    )
+  end
+
   describe "static surface" do
     test "name and category" do
       assert ComputerUse.name() == "computer_use"
@@ -55,22 +75,70 @@ defmodule FermixCore.Tools.ComputerUseTest do
     end
   end
 
+  describe "dynamic_parameters/1 — live access mode folded into the action schema" do
+    setup do
+      prev = Application.get_env(:fermix_core, :sandbox)
+
+      on_exit(fn ->
+        case prev do
+          nil -> Application.delete_env(:fermix_core, :sandbox)
+          value -> Application.put_env(:fermix_core, :sandbox, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "strict access surfaces the look-only guidance" do
+      put_access(:strict)
+      desc = action_desc(ComputerUse.dynamic_parameters(%{}))
+      assert desc =~ "ACCESS=strict"
+      assert desc =~ "look only"
+    end
+
+    test "standard access surfaces the confirm-irreversible guidance" do
+      put_access(:standard)
+      desc = action_desc(ComputerUse.dynamic_parameters(%{}))
+      assert desc =~ "ACCESS=standard"
+      assert desc =~ ~r/(confirm|ask the owner)/i
+    end
+
+    test "open access surfaces autonomous + the truly-dangerous higher bar" do
+      put_access(:open)
+      desc = action_desc(ComputerUse.dynamic_parameters(%{}))
+      assert desc =~ "ACCESS=open"
+      assert desc =~ ~r/(autonomous|without asking)/i
+      assert desc =~ ~r/truly dangerous|catastrophic/i
+    end
+
+    test "the dynamic schema differs from the static parameters (mode is injected)" do
+      put_access(:strict)
+
+      refute action_desc(ComputerUse.dynamic_parameters(%{})) ==
+               action_desc(ComputerUse.parameters())
+
+      # action enum is unchanged either way
+      assert ComputerUse.dynamic_parameters(%{})["properties"]["action"]["enum"] ==
+               Protocol.actions()
+    end
+  end
+
   describe "execute/2 wiring" do
     setup do
-      start_supervised!(Approval)
+      config = Config.normalize(enabled: true)
 
       session =
         start_supervised!(
           {Session,
            [
-             config: Config.normalize(enabled: true),
+             config: config,
              driver: {StubDriver, [test_pid: self()]},
              origin: :interactive,
              session_id: "cua_tool_test"
            ]}
         )
 
-      %{session: session, config: Config.normalize(enabled: true)}
+      %{session: session, config: config}
     end
 
     test "disabled feature → inert with a clear message (no silent no-op)" do
@@ -93,74 +161,18 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert data == StubDriver.png()
     end
 
-    test "a consequential action runs after the owner approves", %{
+    test "standard access: a mutating action auto-runs without confirmation", %{
       session: session,
       config: config
     } do
-      test_pid = self()
-      surface = fn token, _action -> send(test_pid, {:prompted, token}) end
-
-      context =
-        Map.merge(@context, %{
-          computer_use_session: session,
-          computer_use_surface: surface,
-          computer_use_config: config
-        })
-
-      task =
-        Task.async(fn ->
-          ComputerUse.execute(%{"action" => "left_click", "x" => 10, "y" => 20}, context)
-        end)
-
-      assert_receive {:prompted, token}
-      assert :ok = Approval.resolve(token, :approve)
-
-      assert {:ok, result} = Task.await(task)
-      assert result.success == true
-      assert [%{type: :image}] = result.images
-    end
-
-    test "a denied consequential action is not performed", %{session: session, config: config} do
-      test_pid = self()
-      surface = fn token, _action -> send(test_pid, {:prompted, token}) end
-
-      context =
-        Map.merge(@context, %{
-          computer_use_session: session,
-          computer_use_surface: surface,
-          computer_use_config: config
-        })
-
-      task =
-        Task.async(fn ->
-          ComputerUse.execute(%{"action" => "type", "text" => "rm -rf"}, context)
-        end)
-
-      assert_receive {:prompted, token}
-      assert :ok = Approval.resolve(token, :deny)
-
-      assert {:ok, result} = Task.await(task)
-      assert result.success == false
-      assert result.error =~ "not confirmed"
-      refute_received {:driver_execute, _}
-    end
-
-    test "a consequential action with no owner surface fails closed", %{
-      session: session,
-      config: config
-    } do
-      context =
-        Map.merge(@context, %{
-          computer_use_session: session,
-          computer_use_surface: nil,
-          computer_use_config: config
-        })
+      context = Map.merge(@context, %{computer_use_session: session, computer_use_config: config})
 
       assert {:ok, result} =
-               ComputerUse.execute(%{"action" => "left_click", "x" => 1, "y" => 1}, context)
+               ComputerUse.execute(%{"action" => "left_click", "x" => 10, "y" => 20}, context)
 
-      assert result.success == false
-      assert result.error =~ "no_owner"
+      assert result.success == true
+      assert [%{type: :image}] = result.images
+      assert_received {:driver_execute, %{"action" => "left_click"}}
     end
 
     test "an invalid action is rejected before any driver call", %{
@@ -173,6 +185,29 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.success == false
       assert result.error =~ "invalid action"
       refute_received {:driver_execute, _}
+    end
+  end
+
+  describe "strict access (look-only floor)" do
+    test "a mutating action is refused before any driver call" do
+      session = strict_session()
+      context = Map.merge(@context, %{computer_use_session: session})
+
+      assert {:ok, result} =
+               ComputerUse.execute(%{"action" => "left_click", "x" => 1, "y" => 1}, context)
+
+      assert result.success == false
+      assert result.error =~ "strict"
+      refute_received {:driver_execute, _}
+    end
+
+    test "a read-only action still runs in strict" do
+      session = strict_session()
+      context = Map.merge(@context, %{computer_use_session: session})
+
+      assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert result.success == true
+      assert [%{type: :image}] = result.images
     end
   end
 
