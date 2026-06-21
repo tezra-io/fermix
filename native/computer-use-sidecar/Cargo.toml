@@ -1,0 +1,44 @@
+# Fermix Computer-Use sidecar — the native OS-driver helper.
+#
+# A standalone binary (NOT a Rustler NIF) that Fermix's ComputerUse.PortDriver
+# spawns as an OS Port. It speaks the line-framed JSON protocol defined in
+# apps/fermix_core/lib/fermix_core/computer_use/protocol.ex: one request line in
+# on stdin, one response line out on stdout.
+#
+# Build (dev loop):  cargo build --release
+#   → target/release/fermix-computer-use
+# Then drop it under your `[fermix_core.plugins] dev_local` checkout at
+#   <dev_local>/computer-use-sidecar/bin/<os>-<arch>/fermix-computer-use  (mode 0755)
+# alongside a plugin.json (see native/computer-use-sidecar/README.md).
+#
+# NOTE: this is the v1 implementation. It compiles against the crate APIs noted
+# below; pin exact versions on first `cargo build` and adjust if a crate's API
+# has shifted. Screen capture + input injection require macOS TCC grants
+# (Screen Recording + Accessibility) and must be verified on a real machine.
+
+[package]
+name = "fermix-computer-use"
+version = "0.1.0"
+edition = "2021"
+description = "Native screen-capture + input-injection helper for Fermix Computer Use"
+license = "MIT"
+
+[[bin]]
+name = "fermix-computer-use"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Cross-platform synthetic input (macOS CGEvent, Linux XTEST/uinput).
+enigo = "0.3"
+# Cross-platform screen capture (macOS ScreenCaptureKit/CG, Linux X11).
+xcap = "0.4"
+# PNG encoding + downscale of the captured frame.
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
