@@ -24,6 +24,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.WebSearch
 
   @type provider ::
@@ -61,6 +62,10 @@ defmodule FermixCore.Setup.Doctor do
           optional(:probe_result) => atom(),
           optional(:result_count) => non_neg_integer()
         }
+  @type image_report ::
+          %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
+          | %{status: :unconfigured}
+          | %{status: :error, error: String.t()}
   @type model_window :: %{
           provider: provider(),
           model: String.t(),
@@ -257,6 +262,36 @@ defmodule FermixCore.Setup.Doctor do
       String.starts_with?(reason, "provider_error") -> :provider_error
       String.starts_with?(reason, "parser_changed") -> :parser_changed
       true -> :network
+    end
+  end
+
+  @doc """
+  Reports the active `generate_image` backend and whether its credential is
+  present.
+
+  Offline only — unlike `web_search_report/1` there is no `full:` live probe,
+  because an image-generation call costs real money (not a 1-token ping). The
+  doctor checks credential presence, never bills the operator.
+  """
+  @spec image_report(keyword()) :: image_report()
+  def image_report(_opts \\ []) do
+    case FermixCore.Config.tool(:generate_image) do
+      {:ok, config} -> image_report_for(config)
+      {:error, :not_configured} -> %{status: :unconfigured}
+    end
+  end
+
+  defp image_report_for(config) do
+    case MediaRegistry.active_backend(:image, config) do
+      {:ok, module} ->
+        %{
+          status: :configured,
+          backend: module.name(),
+          credential_present?: module.configured?(config)
+        }
+
+      {:error, reason} ->
+        %{status: :error, error: reason}
     end
   end
 

@@ -790,6 +790,47 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :xai_api_key) == "xai-key"
     end
 
+    test "extracts the M15 image flags as answers" do
+      answers =
+        Runtime.provided_answers(
+          image_backend: "google",
+          image_model: "gemini-2.5-flash-image",
+          google_api_key: "gm-key"
+        )
+
+      assert Keyword.get(answers, :image_backend) == "google"
+      assert Keyword.get(answers, :image_model) == "gemini-2.5-flash-image"
+      assert Keyword.get(answers, :google_api_key) == "gm-key"
+    end
+
+    test "non-interactive run persists the generate_image backend, model, and google key" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   image_backend: "google",
+                   image_model: "gemini-2.5-flash-image",
+                   google_api_key: "gm-key",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      tools = Keyword.get(snapshot.fermix_core, :tools, [])
+      generate_image = Keyword.get(tools, :generate_image, [])
+
+      assert Keyword.get(generate_image, :backend) == "google"
+      assert Keyword.get(generate_image, :model) == "gemini-2.5-flash-image"
+      assert Keyword.get(generate_image, :google_api_key) == "gm-key"
+    end
+
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)

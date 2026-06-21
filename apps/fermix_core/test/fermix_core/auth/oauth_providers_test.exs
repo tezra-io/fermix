@@ -104,10 +104,31 @@ defmodule FermixCore.Auth.OAuthProvidersTest do
     end
   end
 
+  describe "definition/2 — slack" do
+    test "builds the Slack provider (comma scopes, fixed port, no userinfo)" do
+      assert {:ok, %OAuthProvider{} = provider} =
+               OAuthProviders.definition(
+                 "slack",
+                 @client ++ [scopes: ["channels:read", "channels:history", "users:read"]]
+               )
+
+      assert provider.id == :slack
+      assert provider.authorize_url == "https://slack.com/oauth/v2/authorize"
+      assert provider.token_url == "https://slack.com/api/oauth.v2.access"
+      assert provider.userinfo_url == nil
+      assert provider.redirect_host == "127.0.0.1"
+      assert provider.redirect_port == 1460
+      assert provider.scopes == ["channels:read", "channels:history", "users:read"]
+      assert provider.scope_delimiter == ","
+      assert provider.token_auth == :body
+      assert provider.fixed_port? == true
+    end
+  end
+
   describe "definition/2 — validation" do
     test "unknown providers are refused" do
-      assert {:error, {:unsupported_oauth_provider, "slack"}} =
-               OAuthProviders.definition("slack", @client)
+      assert {:error, {:unsupported_oauth_provider, "linear"}} =
+               OAuthProviders.definition("linear", @client)
     end
 
     test "a nil provider (manifest without one) is refused" do

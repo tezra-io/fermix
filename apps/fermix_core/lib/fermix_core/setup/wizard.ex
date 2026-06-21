@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.Wizard do
   Shared setup/readiness surface for CLI and web onboarding.
   """
 
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.Descriptor
@@ -47,6 +48,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
+          | {:computer_use_enabled, boolean() | String.t()}
           | {:web_search_backend, atom() | String.t()}
           | {:tavily_api_key, String.t()}
           | {:exa_api_key, String.t()}
@@ -54,6 +56,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:brave_api_key, String.t()}
           | {:perplexity_api_key, String.t()}
           | {:firecrawl_api_key, String.t()}
+          | {:image_backend, atom() | String.t()}
+          | {:image_model, String.t()}
+          | {:google_api_key, String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -97,7 +102,8 @@ defmodule FermixCore.Setup.Wizard do
     :default_model,
     :reasoning_effort,
     :fast,
-    :realtime_enabled
+    :realtime_enabled,
+    :computer_use_enabled
   ]
 
   @channel_owner_reconfigure_keys %{
@@ -587,7 +593,9 @@ defmodule FermixCore.Setup.Wizard do
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
+      |> put_computer_use_config(answers)
       |> put_web_search_config(answers)
+      |> put_image_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -1374,6 +1382,32 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  # Computer use exposes a single setup knob: the on/off flag. The sidecar binary
+  # and OS permissions are prerequisites the card surfaces separately; flipping this
+  # flag is what `ComputerUse.ready?/0` (and thus tool registration) gates on. All
+  # other fields keep their config defaults until an operator hand-edits config.toml.
+  defp put_computer_use_config(snapshot, answers) do
+    case normalize_realtime_bool(
+           Keyword.get(answers, :computer_use_enabled),
+           :computer_use_enabled
+         ) do
+      nil ->
+        snapshot
+
+      enabled? ->
+        fermix_core = Map.get(snapshot, :fermix_core, [])
+        existing = Keyword.get(fermix_core, :computer_use, [])
+
+        computer_use =
+          existing
+          |> Keyword.put(:enabled, enabled?)
+          |> ComputerUseConfig.normalize()
+          |> ComputerUseConfig.to_keyword()
+
+        Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
+    end
+  end
+
   defp normalize_extraction_timeout_ms(nil), do: nil
   defp normalize_extraction_timeout_ms(""), do: nil
 
@@ -1517,6 +1551,65 @@ defmodule FermixCore.Setup.Wizard do
       snapshot,
       :fermix_core,
       Keyword.put(fermix_core, :tools, Keyword.put(tools, :web_search, web_search))
+    )
+  end
+
+  defp put_image_config(snapshot, answers) do
+    values =
+      [
+        backend: normalize_image_backend(Keyword.get(answers, :image_backend)),
+        model: normalize_image_model(Keyword.get(answers, :image_model)),
+        google_api_key:
+          secret_snapshot_value(:google_api_key, Keyword.get(answers, :google_api_key))
+      ]
+      |> reject_nil_values()
+
+    if values == [] do
+      snapshot
+    else
+      update_image_config(snapshot, values)
+    end
+  end
+
+  defp normalize_image_backend(nil), do: nil
+  defp normalize_image_backend(""), do: nil
+
+  defp normalize_image_backend(value) when is_atom(value),
+    do: normalize_image_backend(Atom.to_string(value))
+
+  defp normalize_image_backend(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      backend when backend in ~w(openai xai google) -> backend
+      invalid -> raise ArgumentError, "invalid image_backend #{inspect(invalid)}"
+    end
+  end
+
+  defp normalize_image_backend(value) do
+    raise ArgumentError, "invalid image_backend #{inspect(value)}"
+  end
+
+  defp normalize_image_model(nil), do: nil
+
+  defp normalize_image_model(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp update_image_config(snapshot, values) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    tools = Keyword.get(fermix_core, :tools, [])
+
+    generate_image =
+      tools
+      |> Keyword.get(:generate_image, [])
+      |> Keyword.merge(values)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :tools, Keyword.put(tools, :generate_image, generate_image))
     )
   end
 

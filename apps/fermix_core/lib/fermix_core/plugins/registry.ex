@@ -31,7 +31,8 @@ defmodule FermixCore.Plugins.Registry do
     health_check
   )
 
-  @auth_fields ~w(type provider profile_key account_mode scopes key_name header prompt help_url)
+  @auth_fields ~w(type provider profile_key account_mode scopes key_name header scheme prompt help_url)
+  @auth_schemes ~w(Bearer Bot)
   @config_entry_fields ~w(key prompt required)
   @config_key_regex ~r/^[A-Z][A-Z0-9_]*$/
   @runtime_kinds ~w(node python binary escript)
@@ -290,7 +291,8 @@ defmodule FermixCore.Plugins.Registry do
 
   defp decode_auth(%{} = auth) do
     with :ok <- reject_unknown_fields(auth, @auth_fields),
-         {:ok, type} <- auth_type(Map.get(auth, "type")) do
+         {:ok, type} <- auth_type(Map.get(auth, "type")),
+         {:ok, scheme} <- auth_scheme(Map.get(auth, "scheme")) do
       {:ok,
        %{
          type: type,
@@ -300,6 +302,7 @@ defmodule FermixCore.Plugins.Registry do
          scopes: Map.get(auth, "scopes", []),
          key_name: Map.get(auth, "key_name"),
          header: Map.get(auth, "header"),
+         scheme: scheme,
          prompt: Map.get(auth, "prompt"),
          help_url: Map.get(auth, "help_url")
        }}
@@ -312,6 +315,13 @@ defmodule FermixCore.Plugins.Registry do
   defp auth_type("oauth2"), do: {:ok, :oauth2}
   defp auth_type("api_key"), do: {:ok, :api_key}
   defp auth_type(other), do: {:error, {:invalid_auth_type, other}}
+
+  # The `Authorization` scheme prefix (e.g. `Bot <token>` for Discord). Absent
+  # defaults to `Bearer` at injection time; an unknown scheme is rejected at
+  # decode so no manifest can inject an arbitrary header prefix.
+  defp auth_scheme(nil), do: {:ok, nil}
+  defp auth_scheme(scheme) when scheme in @auth_schemes, do: {:ok, scheme}
+  defp auth_scheme(other), do: {:error, {:invalid_auth_scheme, other}}
 
   # Optional per-plugin config declarations (M8.1 §4.4): flat key/prompt/
   # required entries, nothing more. Values are collected on Connect and live

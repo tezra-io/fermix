@@ -208,6 +208,8 @@ defmodule Fermix.CLI.PluginsCommand do
   defp auth(["reauthorize", name | rest]), do: auth_login(name, rest)
   defp auth(["refresh", name | rest]), do: auth_refresh(name, rest)
   defp auth(["logout", name | rest]), do: auth_logout(name, rest)
+  defp auth(["set", name, value | rest]), do: auth_set(name, value, rest)
+  defp auth(["clear", name | rest]), do: auth_clear(name, rest)
   defp auth(["status" | rest]), do: auth_status(rest)
   defp auth(_argv), do: usage()
 
@@ -245,6 +247,30 @@ defmodule Fermix.CLI.PluginsCommand do
       end)
     else
       :error -> invalid_options("auth logout")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp auth_set(name, value, argv) do
+    with {:ok, opts} <- parse_opts(argv, @json_switches),
+         {:ok, _name} <- Auth.set_secret(name, value) do
+      print(%{plugin: name, secret_set: true}, Keyword.get(opts, :json, false), fn _ ->
+        IO.puts("stored api key for #{name}")
+      end)
+    else
+      :error -> invalid_options("auth set")
+      {:error, reason} -> error(reason)
+    end
+  end
+
+  defp auth_clear(name, argv) do
+    with {:ok, opts} <- parse_opts(argv, @json_switches),
+         :ok <- Auth.clear_secret(name) do
+      print(%{plugin: name, cleared: true}, Keyword.get(opts, :json, false), fn _ ->
+        IO.puts("cleared api key for #{name}")
+      end)
+    else
+      :error -> invalid_options("auth clear")
       {:error, reason} -> error(reason)
     end
   end
@@ -594,6 +620,8 @@ defmodule Fermix.CLI.PluginsCommand do
            fermix plugins config NAME [--json]
            fermix plugins config set NAME KEY VALUE [--json]
            fermix plugins auth [login|reauthorize|refresh|logout] NAME [--json]
+           fermix plugins auth set NAME VALUE [--json]
+           fermix plugins auth clear NAME [--json]
            fermix plugins auth status [NAME] [--json]
     """)
 

@@ -351,6 +351,56 @@ defmodule FermixCore.Setup.WizardTest do
     assert contents =~ ~s(base_url = "http://tail.example:11434/v1")
   end
 
+  test "M15 image fields persist: generate_image backend + model + google key (sentinel)" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m15-image")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               image_backend: "google",
+               image_model: "gemini-2.5-flash-image",
+               google_api_key: "gm-secret"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    tools = Keyword.get(persisted.fermix_core, :tools, [])
+    generate_image = Keyword.get(tools, :generate_image, [])
+
+    assert Keyword.get(generate_image, :backend) == "google"
+    assert Keyword.get(generate_image, :model) == "gemini-2.5-flash-image"
+    # Secret routes through the writer stub; the snapshot stores a sentinel and
+    # load resolves it back to plaintext.
+    assert Keyword.get(generate_image, :google_api_key) == "gm-secret"
+    assert {:ok, "gm-secret"} = FermixTestSupport.SecretWriterStub.get(:google_api_key)
+
+    contents = File.read!(ConfigStore.path())
+    assert contents =~ "[fermix_core.tools.generate_image]"
+    assert contents =~ ~s(backend = "google")
+    assert contents =~ ~s(google_api_key = "@keyring")
+    refute contents =~ "gm-secret"
+  end
+
+  test "M15 image save rejects an unknown backend" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m15-bad-backend")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert_raise ArgumentError, ~r/invalid image_backend/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(image_backend: "midjourney")
+    end
+  end
+
   test "a newly configured provider stays a fallback when a primary already exists" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-fallback")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -748,6 +798,36 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(realtime, :max_session_minutes) == 20
     assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 35
     assert Keyword.get(realtime, :persist_transcripts) == true
+  end
+
+  test "save_answers persists the computer_use enable flag" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-cu-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(computer_use_enabled: "yes")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    computer_use = Keyword.get(persisted.fermix_core, :computer_use, [])
+    assert Keyword.get(computer_use, :enabled) == true
+
+    # Toggling off round-trips to a disabled flag (the enable cascade's master switch).
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(computer_use_enabled: "no")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert persisted.fermix_core |> Keyword.get(:computer_use, []) |> Keyword.get(:enabled) ==
+             false
   end
 
   test "fresh setup asks for realtime opt-in before realtime details" do

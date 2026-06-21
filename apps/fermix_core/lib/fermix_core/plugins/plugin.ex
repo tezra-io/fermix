@@ -10,6 +10,7 @@ defmodule FermixCore.Plugins.Plugin do
           scopes: [String.t()],
           key_name: String.t() | nil,
           header: String.t() | nil,
+          scheme: String.t() | nil,
           prompt: String.t() | nil,
           help_url: String.t() | nil
         }

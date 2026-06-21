@@ -25,6 +25,8 @@ defmodule FermixCore.Plugins.Status do
   alias FermixCore.Plugins.Registry
   alias FermixCore.Setup.ConfigStore
 
+  @sentinel FermixCore.Setup.SecretWriter.sentinel()
+
   @spec status(Plugin.t() | String.t()) :: atom()
   def status(plugin_or_name), do: status(plugin_or_name, [])
 
@@ -47,6 +49,9 @@ defmodule FermixCore.Plugins.Status do
 
       plugin.auth.type == :none ->
         :ready
+
+      plugin.auth.type == :api_key ->
+        api_key_status(plugin)
 
       missing_client_config?(plugin) ->
         :needs_client_config
@@ -124,6 +129,16 @@ defmodule FermixCore.Plugins.Status do
   end
 
   defp missing_client_config?(_plugin), do: false
+
+  # api_key plugins are ready once their static credential is keychained;
+  # otherwise they need it set (`fermix plugins auth set <name>`).
+  defp api_key_status(%Plugin{name: name}) do
+    case Config.plugin_secret(name) do
+      @sentinel -> :needs_secret
+      secret when is_binary(secret) and secret != "" -> :ready
+      _missing -> :needs_secret
+    end
+  end
 
   defp auth_status(plugin) do
     case Store.read(Config.auth_profile(plugin)) do

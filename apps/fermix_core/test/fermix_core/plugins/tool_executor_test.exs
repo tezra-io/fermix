@@ -1189,6 +1189,121 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     end
   end
 
+  describe "auth.scheme + api_key credential (§8.1/§8.2)" do
+    test "an api_key plugin with auth.scheme \"Bot\" sends `Authorization: Bot <secret>`" do
+      assert capture_scheme_header("Bot") == "Bot bot-token"
+    end
+
+    test "a plugin with no auth.scheme defaults to `Bearer`" do
+      assert capture_scheme_header(nil) == "Bearer bot-token"
+    end
+
+    test "a missing api_key surfaces `fermix plugins auth set` guidance" do
+      name = setup_scheme_fixture("Bot")
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_secret_getter: fn ^name -> :error end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
+
+      assert result.success == false
+      assert result.error =~ "fermix plugins auth set #{name}"
+    end
+  end
+
+  # Run the dev_local api_key fixture's declarative tool through the real
+  # pipeline (Registry → resolve_credential → Interpreter → seam) and return the
+  # `Authorization` header the provider received. The secret is injected so the
+  # test exercises the scheme/header construction (§8.1) over the api_key
+  # resolution path (§8.2) without touching the keychain.
+  defp capture_scheme_header(scheme) do
+    parent = self()
+    name = setup_scheme_fixture(scheme)
+
+    plug = fn conn ->
+      send(parent, {:auth_header, auth_header(conn)})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, "{}")
+    end
+
+    context = %{
+      plugin_url_guard: fn _ -> :ok end,
+      plugin_req_options: [plug: plug],
+      plugin_secret_getter: fn ^name -> {:ok, "bot-token"} end
+    }
+
+    assert {:ok, %{success: true}} =
+             ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
+
+    assert_received {:auth_header, header}
+    header
+  end
+
+  # Lay down a single dev_local api_key fixture and enable it (hermetic app-env
+  # set + restore). Returns the plugin name.
+  defp setup_scheme_fixture(scheme) do
+    name = "schemefix"
+
+    dev = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-scheme-fixture")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dev) end)
+    write_scheme_fixture(dev, name, scheme)
+
+    previous = Application.get_env(:fermix_core, :plugins, [])
+    Application.put_env(:fermix_core, :plugins, enabled: [name], dev_local: dev)
+    on_exit(fn -> Application.put_env(:fermix_core, :plugins, previous) end)
+
+    name
+  end
+
+  defp write_scheme_fixture(dev, name, scheme) do
+    auth =
+      %{"type" => "api_key", "header" => "authorization", "scopes" => []}
+      |> then(fn auth -> if scheme, do: Map.put(auth, "scheme", scheme), else: auth end)
+
+    manifest = %{
+      "schema_version" => 2,
+      "name" => name,
+      "display_name" => "Scheme Fixture",
+      "description" => "api_key scheme fixture",
+      "category" => "developer",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => auth,
+      "tools" => [scheme_fixture_tool(name)],
+      "skills" => []
+    }
+
+    dir = Path.join(dev, name)
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+  end
+
+  defp scheme_fixture_tool(name) do
+    %{
+      "name" => "#{name}_read",
+      "description" => "Read an item.",
+      "policy_class" => "external_api",
+      "read_only" => true,
+      "rail" => "http",
+      "parameters" => %{
+        "type" => "object",
+        "properties" => %{"id" => %{"type" => "string"}},
+        "required" => ["id"]
+      },
+      "request" => %{
+        "method" => "GET",
+        "url" => "https://provider.test/items/{id}",
+        "success" => [200]
+      }
+    }
+  end
+
   defp auth_header(conn) do
     case Plug.Conn.get_req_header(conn, "authorization") do
       [value | _] -> value

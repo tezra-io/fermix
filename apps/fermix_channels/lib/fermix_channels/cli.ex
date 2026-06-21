@@ -15,7 +15,11 @@ defmodule FermixChannels.CLI do
   alias FermixCore.Telemetry
 
   @channel "cli"
-  @default_timeout_ms 120_000
+  # End-to-end wait for one CLI turn's reply. Aligned with the gateway's 300s
+  # turn budget (`Gateway.Typing`) so a long turn — e.g. reasoning that then
+  # renders an image (a 300s inner HTTP budget, see `Net.TimeoutPolicy`) — is
+  # not clipped at the CLI before the daemon finishes.
+  @default_timeout_ms 300_000
 
   @spec default_timeout_ms() :: pos_integer()
   def default_timeout_ms, do: @default_timeout_ms

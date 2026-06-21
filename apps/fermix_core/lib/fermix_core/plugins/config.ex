@@ -8,6 +8,8 @@ defmodule FermixCore.Plugins.Config do
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Runtime
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretPaths
+  alias FermixCore.Setup.SecretStore
 
   require Logger
 
@@ -57,6 +59,51 @@ defmodule FermixCore.Plugins.Config do
       ConfigStore.current_snapshot()
       |> update_plugins(fn plugins -> put_plugin_setting(plugins, plugin, key, value) end)
       |> commit()
+    end
+  end
+
+  @doc """
+  Persist the static credential an `auth: api_key` plugin authenticates with
+  (M16). The plaintext lands at the plugin's registered `SecretPaths` path;
+  `commit/1` routes it through the secure-on-save path, so it is keychained
+  (not written to `config.toml` plaintext) and the runtime reflects it.
+  """
+  @spec set_plugin_secret(String.t(), String.t()) :: snapshot_result()
+  def set_plugin_secret(name, value) when is_binary(name) and is_binary(value) do
+    with {:ok, plugin} <- fetch_plugin(name),
+         :ok <- ensure_api_key(plugin),
+         {:ok, secret} <- fetch_plugin_secret(name),
+         :ok <- ensure_non_blank(value) do
+      ConfigStore.current_snapshot()
+      |> SecretStore.put_snapshot_value(secret.path, value)
+      |> commit()
+    end
+  end
+
+  @doc """
+  Remove a plugin's stored api_key from config (the keychain entry is left
+  orphaned but unreferenced). The plugin then resolves `:needs_secret`.
+  """
+  @spec clear_plugin_secret(String.t()) :: snapshot_result()
+  def clear_plugin_secret(name) when is_binary(name) do
+    with {:ok, _plugin} <- fetch_plugin(name),
+         {:ok, secret} <- fetch_plugin_secret(name) do
+      ConfigStore.current_snapshot()
+      |> SecretStore.delete_snapshot_value(secret.path)
+      |> commit()
+    end
+  end
+
+  @doc """
+  The resolved static credential for an `api_key` plugin (read from app env,
+  populated at boot from the keychain), or `nil` when unset.
+  """
+  @spec plugin_secret(String.t()) :: String.t() | nil
+  def plugin_secret(name) when is_binary(name) do
+    case Application.get_env(:fermix_core, :plugin_secrets, %{}) do
+      secrets when is_map(secrets) -> Map.get(secrets, name)
+      secrets when is_list(secrets) -> plugin_secret_from_keyword(secrets, name)
+      _other -> nil
     end
   end
 
@@ -123,6 +170,24 @@ defmodule FermixCore.Plugins.Config do
       :error -> {:error, {:unknown_plugin, name}}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp ensure_api_key(%Plugin{auth: %{type: :api_key}}), do: :ok
+  defp ensure_api_key(%Plugin{name: name}), do: {:error, {:not_api_key_plugin, name}}
+
+  defp fetch_plugin_secret(name) do
+    case SecretPaths.fetch_plugin(name) do
+      nil -> {:error, {:plugin_secret_unsupported, name}}
+      secret -> {:ok, secret}
+    end
+  end
+
+  defp ensure_non_blank(value) do
+    if String.trim(value) == "", do: {:error, :blank_secret}, else: :ok
+  end
+
+  defp plugin_secret_from_keyword(secrets, name) do
+    Enum.find_value(secrets, fn {key, value} -> if to_string(key) == name, do: value end)
   end
 
   defp update_plugins(snapshot, fun) when is_function(fun, 1) do
@@ -219,7 +284,13 @@ defmodule FermixCore.Plugins.Config do
     Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :oauth, updated))
   end
 
-  @registry_oauth_providers ~w(google github notion x)
+  # Providers whose OAuth client config gets strict field validation. Slack is
+  # listed even though the Slack *plugin* authenticates with an api_key bot token
+  # (reads): its OAuth provider is deferred scaffolding for the user-token
+  # search.messages flow (M16 §7.1, see Auth.OAuthProviders.build/2). Keeping it
+  # here means a Slack OAuth client is validated like every other provider rather
+  # than falling through to the permissive clause below.
+  @registry_oauth_providers ~w(google github notion x slack)
 
   defp normalize_oauth_provider(provider, opts) when provider in @registry_oauth_providers do
     client_type = Keyword.get(opts, :client_type, "desktop_public_pkce")

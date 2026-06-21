@@ -169,6 +169,53 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "image_generation/0 (M15)" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "reports an unconfigured generate_image as :ok (optional capability)" do
+      Application.put_env(:fermix_core, :tools, [])
+
+      result = Checks.image_generation()
+
+      assert result.name == "image generation"
+      assert result.status == :ok
+      assert result.detail =~ "not configured"
+    end
+
+    test "reports a configured backend with a present credential as :ok" do
+      Application.put_env(:fermix_core, :tools,
+        generate_image: [backend: "google", google_api_key: "gm-secret"]
+      )
+
+      result = Checks.image_generation()
+
+      assert result.status == :ok
+      assert result.detail =~ "google_image"
+    end
+
+    test "warns when the selected backend has no credential configured" do
+      Application.put_env(:fermix_core, :tools, generate_image: [backend: "google"])
+
+      result = Checks.image_generation()
+
+      assert result.status == :warn
+      assert result.detail =~ "google_image"
+    end
+
+    test "warns when the configured backend is unknown" do
+      Application.put_env(:fermix_core, :tools, generate_image: [backend: "midjourney"])
+
+      result = Checks.image_generation()
+
+      assert result.status == :warn
+      assert result.detail =~ "Unknown"
+    end
+  end
+
   describe "channel_health/1" do
     setup do
       original_registry = Application.get_env(:fermix_channels, :channel_registry)

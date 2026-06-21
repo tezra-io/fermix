@@ -92,9 +92,22 @@ defmodule FermixCore.Plugins.StatusTest do
     }
   end
 
+  defp api_key_manifest do
+    %{
+      "auth" => %{"type" => "api_key", "header" => "authorization", "scopes" => []},
+      "tools" => []
+    }
+  end
+
   defp load_plugin(checkout, name) do
     {:ok, plugins} = Registry.list(dev_local: checkout)
     Enum.find(plugins, &(&1.name == name)) || raise "plugin #{name} not loaded"
+  end
+
+  defp put_plugin_secrets(secrets) do
+    previous = Application.get_env(:fermix_core, :plugin_secrets, %{})
+    Application.put_env(:fermix_core, :plugin_secrets, secrets)
+    on_exit(fn -> Application.put_env(:fermix_core, :plugin_secrets, previous) end)
   end
 
   defp put_plugins_env(enabled, entries) do
@@ -125,6 +138,24 @@ defmodule FermixCore.Plugins.StatusTest do
     plugin = load_plugin(checkout, "obsidian")
 
     assert Status.status(plugin, probe: probe_ok()) == :needs_config
+  end
+
+  test "an enabled api_key plugin with no stored secret is :needs_secret", %{checkout: checkout} do
+    write_plugin(checkout, "keyfix", api_key_manifest())
+    put_plugins_env(["keyfix"], %{})
+    put_plugin_secrets(%{})
+    plugin = load_plugin(checkout, "keyfix")
+
+    assert Status.status(plugin) == :needs_secret
+  end
+
+  test "an enabled api_key plugin with a stored secret is :ready", %{checkout: checkout} do
+    write_plugin(checkout, "keyfix", api_key_manifest())
+    put_plugins_env(["keyfix"], %{})
+    put_plugin_secrets(%{"keyfix" => "tok"})
+    plugin = load_plugin(checkout, "keyfix")
+
+    assert Status.status(plugin) == :ready
   end
 
   test "a disabled plugin is :not_configured before any runtime check", %{checkout: checkout} do
