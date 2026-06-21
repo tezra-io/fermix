@@ -460,6 +460,100 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
     end
   end
 
+  describe "continue/3 screenshot retention" do
+    @screenshot_label "Screen state returned by the preceding tool call:"
+    @screenshot_elided "[earlier screen state omitted to bound context]"
+
+    test "keeps only the most recent N screenshots; older image bytes are elided" do
+      test_pid = self()
+      png = <<137, 80, 78, 71>>
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_messages, Jason.decode!(body)["messages"]})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      # Two screenshot follow-up turns already in history (older), plus a fresh one
+      # from this turn's tool result → three total; cap of 1 keeps only the newest.
+      old_shot = %{role: "user", content: @screenshot_label, image_parts: [img_part(png, "old")]}
+
+      provider_state = %{
+        messages: [%{role: "user", content: "go"}, old_shot, old_shot],
+        assistant: %{role: "assistant", content: "", tool_calls: []},
+        capabilities: [capability()]
+      }
+
+      tool_results = [%{call_id: "c1", output: "captured", images: [img_part(png, "new")]}]
+
+      {:ok, _turn} =
+        ChatCompletions.continue(provider_state, tool_results,
+          api_key: "sk-test",
+          provider: :openai,
+          model: "gpt-5.4-mini",
+          base_url: "https://api.openai.com/v1",
+          max_retained_screenshots: 1,
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_received {:request_messages, messages}
+
+      image_parts =
+        messages
+        |> Enum.flat_map(fn m -> List.wrap(m["content"]) end)
+        |> Enum.filter(&(is_map(&1) and &1["type"] == "image_url"))
+
+      # exactly one screenshot keeps its bytes (the newest), the two older are elided
+      assert length(image_parts) == 1
+      assert Enum.count(messages, &(&1["content"] == @screenshot_elided)) == 2
+    end
+
+    test "an inbound user image is never elided by retention" do
+      test_pid = self()
+      png = <<137, 80, 78, 71>>
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_messages, Jason.decode!(body)["messages"]})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      # A real user image (no screenshot label) plus an older screenshot carrier.
+      user_image = %{role: "user", content: "look", image_parts: [img_part(png, "user")]}
+      old_shot = %{role: "user", content: @screenshot_label, image_parts: [img_part(png, "old")]}
+
+      provider_state = %{
+        messages: [user_image, old_shot],
+        assistant: %{role: "assistant", content: "", tool_calls: []},
+        capabilities: [capability()]
+      }
+
+      tool_results = [%{call_id: "c1", output: "captured", images: [img_part(png, "new")]}]
+
+      {:ok, _turn} =
+        ChatCompletions.continue(provider_state, tool_results,
+          api_key: "sk-test",
+          provider: :openai,
+          model: "gpt-5.4-mini",
+          base_url: "https://api.openai.com/v1",
+          max_retained_screenshots: 1,
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_received {:request_messages, messages}
+
+      # The user's own image survives even though it predates the kept screenshot.
+      user_msg = Enum.find(messages, &(&1["content"] != nil and is_list(&1["content"])))
+
+      assert Enum.any?(
+               List.wrap(user_msg["content"]),
+               &(is_map(&1) and &1["type"] == "image_url")
+             )
+    end
+
+    defp img_part(data, _tag), do: %{type: :image, mime_type: "image/png", data: data}
+  end
+
   describe "continue/3" do
     test "appends assistant + tool result messages and re-posts" do
       Req.Test.stub(__MODULE__, fn conn ->
@@ -539,6 +633,62 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       assert_receive {:assistant_message, assistant}
       refute Map.has_key?(assistant, "content")
       assert [%{"id" => "abc123def"}] = assistant["tool_calls"]
+    end
+
+    test "an image-bearing tool result emits a text tool message then a subsequent user image turn" do
+      png = <<137, 80, 78, 71>>
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        messages: [%{role: "user", content: "Hi"}],
+        assistant: %{role: "assistant", content: "", tool_calls: []},
+        capabilities: [capability()]
+      }
+
+      tool_results = [
+        %{
+          call_id: "call_shot",
+          output: "captured",
+          images: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      {:ok, _turn} =
+        ChatCompletions.continue(provider_state, tool_results,
+          api_key: "sk-test",
+          provider: :openai,
+          model: "gpt-5.4-mini",
+          base_url: "https://api.openai.com/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert_receive {:body, decoded}
+      messages = decoded["messages"]
+
+      # The tool message keeps the call/result pairing; the screenshot rides a
+      # SUBSEQUENT user turn (a `tool` message is text-only on this surface).
+      assert Enum.map(messages, & &1["role"]) == ["user", "assistant", "tool", "user"]
+
+      tool_msg = Enum.find(messages, &(&1["role"] == "tool"))
+      assert tool_msg["tool_call_id"] == "call_shot"
+      assert tool_msg["content"] == "captured"
+
+      image_user = List.last(messages)
+      assert [text_part, image_part] = image_user["content"]
+
+      assert text_part == %{
+               "type" => "text",
+               "text" => "Screen state returned by the preceding tool call:"
+             }
+
+      assert image_part["type"] == "image_url"
+      assert image_part["image_url"]["url"] == "data:image/png;base64," <> Base.encode64(png)
     end
   end
 

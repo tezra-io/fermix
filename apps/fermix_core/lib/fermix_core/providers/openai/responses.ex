@@ -32,6 +32,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
@@ -105,7 +106,10 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
-    next_input = prior_input ++ output_items ++ outputs
+
+    next_input =
+      (prior_input ++ output_items ++ outputs)
+      |> ResponsesShared.retain_screenshots(Keyword.get(opts, :max_retained_screenshots))
 
     body =
       %{model: model, input: next_input, store: false}
@@ -152,6 +156,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
         url: "#{base_url}/responses",
         method: :post,
         json: body,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: [
           {"authorization", "Bearer #{bearer}"},
           {"content-type", "application/json"}

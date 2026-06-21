@@ -25,6 +25,7 @@ defmodule FermixCore.Providers.XAI.Responses do
 
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ResponsesShared
@@ -33,7 +34,6 @@ defmodule FermixCore.Providers.XAI.Responses do
   require Logger
 
   @default_base_url "https://api.x.ai/v1"
-  @receive_timeout_ms 120_000
 
   @impl true
   def chat(messages, capabilities, opts)
@@ -268,7 +268,7 @@ defmodule FermixCore.Providers.XAI.Responses do
         url: "#{base_url}/responses",
         method: :post,
         json: body,
-        receive_timeout: @receive_timeout_ms,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: [
           {"authorization", "Bearer " <> bearer},
           {"content-type", "application/json"}

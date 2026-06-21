@@ -491,6 +491,139 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
     Messages.chat([%{role: "user", content: "x"}], [], chat_opts())
   end
 
+  describe "continue/3 — tool result image blocks" do
+    test "an image-bearing tool result becomes a tool_result content array (text + image block)" do
+      png = <<137, 80, 78, 71>>
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        system: nil,
+        messages: [%{role: "user", content: "Hi"}],
+        assistant_content: [%{"type" => "text", "text" => "ok"}],
+        tools: [],
+        capabilities: []
+      }
+
+      tool_results = [
+        %{
+          call_id: "call_shot",
+          output: "captured",
+          images: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} = Messages.continue(provider_state, tool_results, chat_opts())
+
+      assert_receive {:body, decoded}
+      user_msg = List.last(decoded["messages"])
+      assert user_msg["role"] == "user"
+      assert [block] = user_msg["content"]
+      assert block["type"] == "tool_result"
+      assert block["tool_use_id"] == "call_shot"
+      assert [text_block, image_block] = block["content"]
+      assert text_block == %{"type" => "text", "text" => "captured"}
+      assert image_block["type"] == "image"
+      assert image_block["source"]["media_type"] == "image/png"
+      assert image_block["source"]["data"] == Base.encode64(png)
+    end
+
+    test "retention keeps only the most recent N tool_result screenshots; older bytes elided" do
+      png = <<137, 80, 78, 71>>
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      # Two prior tool_result screenshot messages in history + a fresh one this
+      # turn → three; cap of 1 keeps only the newest's image block.
+      encoded_image = %{
+        type: "image",
+        source: %{type: "base64", media_type: "image/png", data: Base.encode64(png)}
+      }
+
+      old_shot = %{
+        role: "user",
+        content: [
+          %{
+            type: "tool_result",
+            tool_use_id: "old",
+            content: [%{type: "text", text: "captured"}, encoded_image]
+          }
+        ]
+      }
+
+      provider_state = %{
+        system: nil,
+        messages: [%{role: "user", content: "Hi"}, old_shot, old_shot],
+        assistant_content: [%{"type" => "text", "text" => "ok"}],
+        tools: [],
+        capabilities: []
+      }
+
+      tool_results = [
+        %{
+          call_id: "new",
+          output: "captured",
+          images: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} =
+               Messages.continue(
+                 provider_state,
+                 tool_results,
+                 Keyword.put(chat_opts(), :max_retained_screenshots, 1)
+               )
+
+      assert_receive {:body, decoded}
+
+      image_blocks =
+        decoded["messages"]
+        |> Enum.flat_map(fn m -> List.wrap(m["content"]) end)
+        |> Enum.filter(&match?(%{"type" => "tool_result"}, &1))
+        |> Enum.flat_map(fn tr -> tr["content"] |> List.wrap() |> Enum.filter(&is_map/1) end)
+        |> Enum.filter(&(&1["type"] == "image"))
+
+      # only the newest screenshot keeps an image block; the two older are elided
+      # to a plain-string content (no image block survives there).
+      assert length(image_blocks) == 1
+    end
+
+    test "a text-only tool result keeps a plain string content (byte-identical to pre-image)" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        system: nil,
+        messages: [%{role: "user", content: "Hi"}],
+        assistant_content: [%{"type" => "text", "text" => "ok"}],
+        tools: [],
+        capabilities: []
+      }
+
+      assert {:ok, _turn} =
+               Messages.continue(provider_state, [%{call_id: "c", output: "plain"}], chat_opts())
+
+      assert_receive {:body, decoded}
+      block = decoded["messages"] |> List.last() |> Map.fetch!("content") |> hd()
+      assert block["content"] == "plain"
+    end
+  end
+
   describe "chat/3 — error handling" do
     test "401 becomes a structured auth error" do
       assert {:error, {:provider_error, error}} =

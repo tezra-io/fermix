@@ -56,6 +56,136 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
     end
   end
 
+  describe "build_function_call_outputs/1" do
+    test "text-only results are byte-identical to the pre-image shape (no extra items)" do
+      assert ResponsesShared.build_function_call_outputs([%{call_id: "call_1", output: "echoed"}]) ==
+               [%{type: "function_call_output", call_id: "call_1", output: "echoed"}]
+    end
+
+    test "an image-bearing result appends a subsequent user input_image item AFTER the output" do
+      png = <<137, 80, 78, 71>>
+
+      results = [
+        %{
+          call_id: "call_shot",
+          output: "captured",
+          images: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert ResponsesShared.build_function_call_outputs(results) == [
+               %{type: "function_call_output", call_id: "call_shot", output: "captured"},
+               %{
+                 role: "user",
+                 content: [
+                   %{
+                     type: "input_text",
+                     text: "Screen state returned by the preceding tool call:"
+                   },
+                   %{
+                     type: "input_image",
+                     image_url: "data:image/png;base64," <> Base.encode64(png)
+                   }
+                 ]
+               }
+             ]
+    end
+
+    test "empty output + images uses a placeholder so the function_call_output is never empty" do
+      results = [
+        %{call_id: "c", output: "", images: [%{type: :image, mime_type: "image/png", data: "x"}]}
+      ]
+
+      assert [fco | _] = ResponsesShared.build_function_call_outputs(results)
+
+      assert fco == %{
+               type: "function_call_output",
+               call_id: "c",
+               output: "[screen state in the following message]"
+             }
+    end
+
+    test "ordering: all function_call_outputs precede any user image item" do
+      results = [
+        %{call_id: "a", output: "no image"},
+        %{
+          call_id: "b",
+          output: "shot",
+          images: [%{type: :image, mime_type: "image/png", data: "z"}]
+        }
+      ]
+
+      kinds =
+        results
+        |> ResponsesShared.build_function_call_outputs()
+        |> Enum.map(fn
+          %{type: type} -> type
+          %{role: role} -> role
+        end)
+
+      assert kinds == ["function_call_output", "function_call_output", "user"]
+    end
+  end
+
+  describe "retain_screenshots/2" do
+    @label "Screen state returned by the preceding tool call:"
+    @elided "[earlier screen state omitted to bound context]"
+
+    defp screenshot_item(n) do
+      %{
+        role: "user",
+        content: [
+          %{type: "input_text", text: @label},
+          %{type: "input_image", image_url: "data:image/png;base64,shot#{n}"}
+        ]
+      }
+    end
+
+    defp inbound_image_item do
+      %{
+        role: "user",
+        content: [
+          %{type: "input_text", text: "look at my photo"},
+          %{type: "input_image", image_url: "data:image/png;base64,user"}
+        ]
+      }
+    end
+
+    test "nil keep returns the input unchanged" do
+      input = [screenshot_item(1), screenshot_item(2)]
+      assert ResponsesShared.retain_screenshots(input, nil) == input
+    end
+
+    test "keeps the most recent N screenshot items, elides the older bytes" do
+      input = [
+        %{type: "function_call_output", call_id: "a", output: "x"},
+        screenshot_item(1),
+        screenshot_item(2),
+        screenshot_item(3)
+      ]
+
+      result = ResponsesShared.retain_screenshots(input, 1)
+
+      # screenshots 1 and 2 lose their image bytes; only the newest (3) keeps them
+      assert [_fco, elided1, elided2, kept] = result
+
+      assert elided1.content == [%{type: "input_text", text: @elided}]
+      assert elided2.content == [%{type: "input_text", text: @elided}]
+      assert Enum.any?(kept.content, &match?(%{type: "input_image"}, &1))
+    end
+
+    test "an inbound user image (no screenshot label) is never elided" do
+      input = [inbound_image_item(), screenshot_item(1), screenshot_item(2)]
+
+      result = ResponsesShared.retain_screenshots(input, 1)
+
+      # the user's own image is untouched; only the older screenshot is elided
+      assert Enum.at(result, 0) == inbound_image_item()
+      assert Enum.at(result, 1).content == [%{type: "input_text", text: @elided}]
+      assert Enum.any?(Enum.at(result, 2).content, &match?(%{type: "input_image"}, &1))
+    end
+  end
+
   describe "maybe_reasoning_field/2" do
     test "returns nil for nil, :none, and \"none\" — caller omits the body field" do
       assert ResponsesShared.maybe_reasoning_field(nil, :openai) == nil

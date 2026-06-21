@@ -133,7 +133,10 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     service_tier = codex_service_tier(Keyword.get(opts, :fast))
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
-    next_input = prior_input ++ replayable_output_items(output_items) ++ outputs
+
+    next_input =
+      (prior_input ++ replayable_output_items(output_items) ++ outputs)
+      |> ResponsesShared.retain_screenshots(Keyword.get(opts, :max_retained_screenshots))
 
     body =
       %{
