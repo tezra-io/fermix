@@ -15,6 +15,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse
 
   require Logger
 
@@ -50,7 +51,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.GetJobRun,
     FermixCore.Tools.MemorySourcesList,
     FermixCore.Tools.Browser,
-    FermixCore.Tools.SendAttachment
+    FermixCore.Tools.SendAttachment,
+    FermixCore.Tools.GenerateImage
   ]
 
   def child_spec(opts) do
@@ -92,22 +94,35 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ToolCall
   ]
 
+  # Computer use: the single tool is seeded only when `ComputerUse.ready?()`
+  # (enabled + sidecar installed + OS permissions granted). Disabled-or-unready =
+  # zero residue: the LLM never sees a tool it cannot run. Re-evaluated each boot,
+  # which (with the save+restart enable flow) is the readiness-transition trigger.
+  @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
+
   @doc """
-  The built-in tool modules seeded into the capability registry at boot.
-  Exposed for the classification guard test that asserts every built-in has an
-  explicit `policy_class` (see `FermixCore.Capabilities.Builtin`).
+  Every built-in tool module that can be seeded into the capability registry —
+  the unconditional ones plus the conditionally-seeded bridge and computer-use
+  tools. Exposed for the classification guard test that asserts every built-in has
+  an explicit `policy_class` (see `FermixCore.Capabilities.Builtin`); membership
+  here is about classification coverage, not whether a tool is seeded on a given boot.
   """
   @spec builtin_tool_modules() :: [module()]
-  def builtin_tool_modules, do: @builtin_tool_modules ++ @bridge_tool_modules
+  def builtin_tool_modules,
+    do: @builtin_tool_modules ++ @bridge_tool_modules ++ @computer_use_tool_modules
 
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do
       {:ok, modules} -> modules
-      :error -> @builtin_tool_modules ++ bridge_modules()
+      :error -> @builtin_tool_modules ++ bridge_modules() ++ computer_use_modules()
     end
   end
 
   defp bridge_modules do
     if Deferral.enabled?(), do: @bridge_tool_modules, else: []
+  end
+
+  defp computer_use_modules do
+    if ComputerUse.ready?(), do: @computer_use_tool_modules, else: []
   end
 end

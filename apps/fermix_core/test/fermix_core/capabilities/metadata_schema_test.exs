@@ -8,6 +8,7 @@ defmodule FermixCore.Capabilities.MetadataSchemaTest do
   @known_categories [
     :file,
     :web,
+    :media,
     :git,
     :delegation,
     :skill_admin,

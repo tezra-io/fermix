@@ -32,6 +32,37 @@ defmodule FermixOpik.MapperTest do
     assert span.end_time == "2026-06-02T12:00:03.200Z"
   end
 
+  test "llm_span renders a media provider failure as an adapter-qualified, errored span" do
+    # Shape emitted by Media.Support.with_provider_call on a failed image gen:
+    # adapter set (so the name is qualified), zero tokens (no phantom cost),
+    # error_code/error_summary (so it renders red, not green).
+    metadata = %{
+      provider: :openai,
+      adapter: :openai,
+      model: "gpt-image-2",
+      status: :error,
+      tokens: %{},
+      error_code: "auth_failed",
+      error_summary: "auth_failed: HTTP 401"
+    }
+
+    span =
+      Mapper.llm_span(metadata, %{duration_ms: 448},
+        trace_id: "trace-1",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    # Adapter-qualified, so it is filterable and distinct from chat llm spans.
+    assert span.name == "llm:openai:gpt-image-2"
+    # Flagged as errored — the whole point of the fix.
+    assert span.error_info == %{exception_type: "auth_failed", message: "auth_failed: HTTP 401"}
+    # Zero-token image call carries no usage (no phantom Opik cost) but is still a real span.
+    refute Map.has_key?(span, :usage)
+    assert span.metadata.status == "error"
+    assert span.metadata.adapter == :openai
+  end
+
   test "tool_span records name, type, and preserves plugin metadata" do
     metadata = %{tool: "shell", success: true, plugin: "builtin", action: "navigate"}
 

@@ -52,13 +52,18 @@ defmodule FermixCore.Capabilities.Registry do
   #               (least privilege). This is the forgiving safe default:
   #               a forgotten trust degrades the surface rather than
   #               silently granting full access.
+  # `:gui_control` (computer-use) is operator-only: it appears in the operator
+  # allow set so the owner's agent sees the tool once it is registered (registration
+  # is itself gated on `ComputerUse.ready?()` in BuiltinSeeder), and in the guest deny
+  # set so a non-operator never does. Subagents subtract it explicitly
+  # (subagents.ex `worker_policy/1`) — desktop control is never delegated.
   @operator_default_policy [
-    allow: [:read_only, :read_write, :exec, :network, :external_api],
+    allow: [:read_only, :read_write, :exec, :network, :external_api, :gui_control],
     deny: []
   ]
   @guest_default_policy [
     allow: [:read_only],
-    deny: [:read_write, :exec, :network, :external_api]
+    deny: [:read_write, :exec, :network, :external_api, :gui_control]
   ]
 
   # --- Client API ---

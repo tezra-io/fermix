@@ -215,8 +215,17 @@ defmodule FermixCore.Agents.TurnRunner do
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
+      # Main interactive turns (a human in a chat, or `fermix ask`) are an ATTENDED
+      # computer-use origin: a present owner who can abort. This lets the tool start a
+      # host session (COMPUTER_USE.md §7.6); scheduled-job and other paths never set
+      # this and so fail closed (SessionManager's `:unattended` default). Voice sets
+      # `:voice` on its own path.
+      computer_use_origin: :interactive,
       reply_fn: deliver,
-      channel: msg.channel
+      channel: msg.channel,
+      # This-turn inbound channel images (M14), so `generate_image` edit can
+      # reference `inbound:last`. Transient like `:image_parts`, never persisted.
+      inbound_images: Map.get(msg, :media_parts) || []
     }
 
     # The composed prompt + runtime section are cached per profile, so the
