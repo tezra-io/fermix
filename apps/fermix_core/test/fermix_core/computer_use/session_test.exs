@@ -95,14 +95,23 @@ defmodule FermixCore.ComputerUse.SessionTest do
       refute Map.has_key?(request, "screenshot_after")
     end
 
-    test "a consequential action is gated (confirm) and gets screenshot_after from config" do
+    test "a mutating action auto-runs under standard access and gets screenshot_after from config" do
       session = start_session([])
 
-      assert {:ok, :confirm, request, desc} =
+      assert {:ok, :auto, request} =
                Session.classify(session, %{"action" => "left_click", "x" => 10, "y" => 20})
 
       assert request["screenshot_after"] == true
-      assert desc == "left_click"
+    end
+
+    test "a mutating action is refused under strict access (the look-only floor)" do
+      session = start_session(config: %{Config.normalize(enabled: true) | access: :strict})
+
+      assert {:error, {:refused, :strict_mode}} =
+               Session.classify(session, %{"action" => "left_click", "x" => 10, "y" => 20})
+
+      # read-only still classifies fine in strict
+      assert {:ok, :auto, _request} = Session.classify(session, %{"action" => "screenshot"})
     end
 
     test "an invalid action is rejected (fail loud)" do
@@ -148,7 +157,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
     test "a bare ack response becomes a text summary with no image" do
       session = start_session([])
 
-      assert {:ok, _, request, _} =
+      assert {:ok, :auto, request} =
                Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
 
       assert {:ok, result} = Session.execute(session, request)
@@ -203,11 +212,10 @@ defmodule FermixCore.ComputerUse.SessionTest do
     end
   end
 
-  # classify a read-only action and return just the request (helper for execute tests)
+  # classify an action and return just the request (helper for execute tests)
   defp wrap_classify(session, params) do
     case Session.classify(session, params) do
       {:ok, :auto, request} -> {:ok, request}
-      {:ok, :confirm, request, _desc} -> {:ok, request}
       other -> other
     end
   end
