@@ -978,7 +978,6 @@ defmodule FermixCore.Agents.TurnRunner do
         repo: state.memory_repo,
         task_supervisor: state.task_supervisor,
         main_agent_server: state.main_agent_server,
-        extraction_timeout_ms: state.extraction_timeout_ms,
         review_interval_hours: state.review_interval_hours,
         review_max_messages: state.review_max_messages,
         review_input_token_budget: state.review_input_token_budget,

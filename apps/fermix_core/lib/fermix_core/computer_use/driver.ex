@@ -11,6 +11,9 @@ defmodule FermixCore.ComputerUse.Driver do
 
   Contract:
     * `start/1` opens the backend (spawns/attaches the sidecar) → an opaque handle.
+      `opts` may carry `:session_id` (the owning `Session`'s id); a driver that
+      enforces its own action deadline should stash it so a timeout firing can
+      correlate via `FermixCore.Timeouts.expired/3`.
     * `execute/2` runs one validated `Protocol` request, returning the decoded
       response map (`%{"ok" => true, ...}` shape) or an error.
     * `stop/1` tears the backend down — for the real driver this kills the Port AND

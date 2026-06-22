@@ -141,6 +141,22 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["duration_ms"] == 87
   end
 
+  test "timeout:expired event creates a timeout agent_event trace", %{dir: dir, server: server} do
+    :telemetry.execute(
+      [:fermix, :timeout, :expired],
+      %{ms: 30_000},
+      %{name: :cu_sidecar_action, session_id: "cua_1"}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "timeout"))
+    assert entry["agent"] == "cu_sidecar_action"
+    assert entry["session_id"] == "cua_1"
+    assert entry["ms"] == 30_000
+  end
+
   test "channel:message event creates channel_msg trace", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :channel, :message],
@@ -174,6 +190,34 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["reply_type"] == "text"
     assert entry["status"] == "ok"
     assert entry["duration_us"] == 1200
+  end
+
+  test "memory:review event creates a memory_review agent_event trace", %{
+    dir: dir,
+    server: server
+  } do
+    :telemetry.execute(
+      [:fermix, :memory, :review],
+      %{duration_us: 1_500_000, ops_added: 1, ops_replaced: 0, ops_archived: 0, ops_skipped: 0},
+      %{
+        agent: "main",
+        session_id: "memory_review:main:telegram:c1:root:42",
+        conversation_key: "telegram:c1:root",
+        channel: "telegram",
+        chat_id: "c1",
+        status: :ok,
+        fired: true
+      }
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    entry = find_entry!(entries, &(&1["event"] == "memory_review"))
+    assert entry["agent"] == "main"
+    assert entry["session_id"] == "memory_review:main:telegram:c1:root:42"
+    assert entry["status"] == "ok"
+    assert entry["ops_added"] == 1
   end
 
   test "telemetry data merges measurements and metadata", %{dir: dir, server: server} do

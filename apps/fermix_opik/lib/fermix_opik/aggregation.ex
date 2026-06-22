@@ -70,6 +70,36 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.memory_write_span(meta, meas, &1))
   end
 
+  # The reviewer's run closer. It carries the run session_id (shared with the
+  # review's provider.call/memory.write spans) plus its op-count summary, so the
+  # reviewer's root trace ships here with an output/status instead of only via the
+  # exporter's TTL sweep. session_id is nil on a pre-call failure → close_root
+  # no-ops (no root was ever opened). The run was tagged :memory_review when its
+  # first span created the session (see infer_kind).
+  def apply_event(state, [:fermix, :memory, :review], meas, meta, at) do
+    close_root(state, meta, at, %{
+      output:
+        compact(%{
+          status: stringify(Map.get(meta, :status)),
+          added: Map.get(meas, :ops_added),
+          replaced: Map.get(meas, :ops_replaced),
+          archived: Map.get(meas, :ops_archived),
+          skipped: Map.get(meas, :ops_skipped),
+          input_messages: Map.get(meas, :input_messages)
+        }),
+      status: stringify(Map.get(meta, :status)),
+      thread_id: thread_id(meta),
+      metadata:
+        compact(%{
+          conversation_key: Map.get(meta, :conversation_key),
+          channel: stringify(Map.get(meta, :channel)),
+          chat_id: Map.get(meta, :chat_id),
+          input_tokens: Map.get(meas, :input_tokens),
+          duration_us: Map.get(meas, :duration_us)
+        })
+    })
+  end
+
   def apply_event(state, [:fermix, :skill, :invoke], meas, meta, at) do
     # A skill invocation is a point event; model it as a tool-like span under the
     # invoking run (parent_session), named for the skill.
@@ -334,6 +364,14 @@ defmodule FermixOpik.Aggregation do
       })
 
     {state, [%{trace: trace, spans: []}]}
+  end
+
+  # A fired failure-deadline timeout ([:fermix, :timeout, :expired]): a point
+  # span under the run's trace via the shared session_id, flagged errored so a
+  # deadline that fired mid-run is visible rather than only inferable from a
+  # missing child span. session_id nil → place_under no-ops (nothing to nest).
+  def apply_event(state, [:fermix, :timeout, :expired], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.timeout_span(meta, meas, &1))
   end
 
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
@@ -662,6 +700,7 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("cron_" <> _), do: :scheduled
   defp infer_kind("session:" <> _), do: :realtime
   defp infer_kind("soul_curation:" <> _), do: :soul_curation
+  defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill

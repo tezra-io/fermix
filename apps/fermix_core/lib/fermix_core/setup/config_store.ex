@@ -1328,12 +1328,6 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_memory(config) when is_map(config) or is_list(config) do
     []
     |> put_if_present(
-      :extraction_timeout_ms,
-      normalize_extraction_timeout_ms(
-        lookup(config, "extraction_timeout_ms", :extraction_timeout_ms)
-      )
-    )
-    |> put_if_present(
       :review_interval_hours,
       normalize_non_negative_integer(
         lookup(config, "review_interval_hours", :review_interval_hours),
@@ -1361,15 +1355,6 @@ defmodule FermixCore.Setup.ConfigStore do
         :review_failure_backoff_ms
       )
     )
-  end
-
-  defp normalize_extraction_timeout_ms(nil), do: nil
-
-  defp normalize_extraction_timeout_ms(value) when is_integer(value) and value > 0, do: value
-
-  defp normalize_extraction_timeout_ms(value) do
-    raise ArgumentError,
-          "invalid memory.extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
   end
 
   defp normalize_positive_memory_integer(nil, _key), do: nil

@@ -19,11 +19,11 @@ defmodule FermixCore.ComputerUse.PortDriver do
   @behaviour FermixCore.ComputerUse.Driver
 
   alias FermixCore.ComputerUse.Protocol
+  alias FermixCore.Timeouts
 
   require Logger
 
   @max_response_bytes 16_777_216
-  @exec_timeout_ms 15_000
 
   @impl true
   def start(opts) do
@@ -31,16 +31,18 @@ defmodule FermixCore.ComputerUse.PortDriver do
 
     if File.regular?(path) do
       port = Port.open({:spawn_executable, path}, port_options(opts))
-      {:ok, %{port: port}}
+      # session_id (optional) rides in the driver state so a sidecar-action
+      # timeout firing in receive_response/2 can correlate via Timeouts.expired/3.
+      {:ok, %{port: port, session_id: Keyword.get(opts, :session_id)}}
     else
       {:error, {:sidecar_missing, path}}
     end
   end
 
   @impl true
-  def execute(%{port: port}, request) when is_map(request) do
+  def execute(%{port: port} = state, request) when is_map(request) do
     Port.command(port, Protocol.encode_request(request))
-    receive_response(port)
+    receive_response(port, Map.get(state, :session_id))
   rescue
     # Port.command raises if the port is already closed (sidecar died).
     ArgumentError -> {:error, :sidecar_unavailable}
@@ -65,28 +67,30 @@ defmodule FermixCore.ComputerUse.PortDriver do
     ]
   end
 
-  defp receive_response(port, acc \\ [], size \\ 0) do
+  defp receive_response(port, session_id, acc \\ [], size \\ 0) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         Protocol.decode_response(IO.iodata_to_binary([acc, chunk]))
 
       {^port, {:data, {:noeol, chunk}}} ->
-        accumulate(port, acc, size, chunk)
+        accumulate(port, session_id, acc, size, chunk)
 
       {^port, {:exit_status, status}} ->
         {:error, {:sidecar_exited, status}}
     after
-      @exec_timeout_ms -> {:error, :sidecar_timeout}
+      Timeouts.cu_sidecar_action() ->
+        ms = Timeouts.cu_sidecar_action()
+        Timeouts.expired(:cu_sidecar_action, ms, %{session_id: session_id})
     end
   end
 
-  defp accumulate(port, acc, size, chunk) do
+  defp accumulate(port, session_id, acc, size, chunk) do
     new_size = size + byte_size(chunk)
 
     if new_size > @max_response_bytes do
       {:error, :sidecar_response_too_large}
     else
-      receive_response(port, [acc, chunk], new_size)
+      receive_response(port, session_id, [acc, chunk], new_size)
     end
   end
 end

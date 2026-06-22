@@ -10,7 +10,6 @@ defmodule FermixCore.Memory.Config do
 
   @prompt_user_token_cap 1500
   @prompt_memory_token_cap 2000
-  @extraction_timeout_ms 90_000
   @extraction_context_messages 12
   @extraction_min_confidence 0.75
   @review_interval_hours 24
@@ -39,16 +38,6 @@ defmodule FermixCore.Memory.Config do
   @spec extraction_model(options()) :: String.t() | nil
   def extraction_model(opts \\ []) do
     Keyword.get(opts, :extraction_model, Keyword.get(memory_config(), :extraction_model))
-  end
-
-  @spec extraction_timeout_ms(options()) :: pos_integer()
-  def extraction_timeout_ms(opts \\ []) do
-    opts
-    |> Keyword.get(
-      :extraction_timeout_ms,
-      Keyword.get(memory_config(), :extraction_timeout_ms, @extraction_timeout_ms)
-    )
-    |> normalize_positive_integer!(:extraction_timeout_ms)
   end
 
   @spec extraction_context_messages(options()) :: pos_integer()

@@ -41,7 +41,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:reasoning_effort, reasoning_effort() | String.t()}
           | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
-          | {:extraction_timeout_ms, pos_integer() | String.t()}
+          | {:review_interval_hours, non_neg_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
           | {:realtime_api_key, String.t()}
           | {:realtime_voice, String.t()}
@@ -402,9 +402,9 @@ defmodule FermixCore.Setup.Wizard do
         required?: false
       },
       %{
-        key: :extraction_timeout_ms,
-        label: "Background extraction timeout in milliseconds (blank = 90000)",
-        default: 90_000,
+        key: :review_interval_hours,
+        label: "Background memory review interval in hours (blank = 24)",
+        default: 24,
         required?: false
       }
     ]
@@ -1330,14 +1330,14 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp put_memory_config(snapshot, answers) do
-    case normalize_extraction_timeout_ms(Keyword.get(answers, :extraction_timeout_ms)) do
+    case normalize_review_interval_hours(Keyword.get(answers, :review_interval_hours)) do
       nil ->
         snapshot
 
-      timeout_ms ->
+      hours ->
         fermix_core = Map.get(snapshot, :fermix_core, [])
         existing = Keyword.get(fermix_core, :memory, [])
-        memory = Keyword.put(existing, :extraction_timeout_ms, timeout_ms)
+        memory = Keyword.put(existing, :review_interval_hours, hours)
         Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :memory, memory))
     end
   end
@@ -1408,25 +1408,25 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp normalize_extraction_timeout_ms(nil), do: nil
-  defp normalize_extraction_timeout_ms(""), do: nil
+  defp normalize_review_interval_hours(nil), do: nil
+  defp normalize_review_interval_hours(""), do: nil
 
-  defp normalize_extraction_timeout_ms(value) when is_integer(value) and value > 0, do: value
+  defp normalize_review_interval_hours(value) when is_integer(value) and value >= 0, do: value
 
-  defp normalize_extraction_timeout_ms(value) when is_binary(value) do
+  defp normalize_review_interval_hours(value) when is_binary(value) do
     case Integer.parse(String.trim(value)) do
-      {timeout_ms, ""} when timeout_ms > 0 ->
-        timeout_ms
+      {hours, ""} when hours >= 0 ->
+        hours
 
       _invalid ->
         raise ArgumentError,
-              "invalid extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+              "invalid review_interval_hours #{inspect(value)}; expected non-negative integer hours"
     end
   end
 
-  defp normalize_extraction_timeout_ms(value) do
+  defp normalize_review_interval_hours(value) do
     raise ArgumentError,
-          "invalid extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+          "invalid review_interval_hours #{inspect(value)}; expected non-negative integer hours"
   end
 
   defp normalize_realtime_bool(nil, _key), do: nil

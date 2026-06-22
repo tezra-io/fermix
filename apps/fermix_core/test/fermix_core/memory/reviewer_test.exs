@@ -260,6 +260,45 @@ defmodule FermixCore.Memory.ReviewerTest do
     assert_receive {:tagged, :fallback, "memory_reviewer", ^expected_session}
   end
 
+  test "reviewer emits a :review closer carrying the run session_id", %{repo: repo} do
+    message = insert_user_message(repo, "Please keep answers terse.")
+
+    test_pid = self()
+    handler_id = "reviewer-memory-review-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :memory, :review],
+      fn _e, meas, meta, _c -> send(test_pid, {:review_done, meas, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    assert {:ok, result} =
+             Reviewer.review_now(
+               provider: FakeProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert result.status == :ok
+
+    # The closer shares the run id with the provider.call / memory.write spans, so
+    # the exporter ships the run on this event instead of via the TTL sweep.
+    expected_session = "memory_review:main:telegram:chat-1:root:#{message.id}"
+
+    assert_receive {:review_done, meas, meta}
+    assert meta.session_id == expected_session
+    assert meta.fired == true
+    assert meta.status == :ok
+    assert meta.channel == "telegram"
+    assert meta.chat_id == "chat-1"
+    assert meas.ops_added == 1
+  end
+
   test "nothing to save advances the reviewed pointer without rebuilding", %{repo: repo} do
     insert_user_message(repo, "hello")
 

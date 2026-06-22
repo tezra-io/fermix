@@ -21,10 +21,9 @@ defmodule FermixCore.ComputerUse.Session do
   alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
+  alias FermixCore.Timeouts
 
   require Logger
-
-  @execute_timeout_ms 30_000
 
   @type action_result :: %{summary: String.t(), image: map() | nil}
 
@@ -47,10 +46,21 @@ defmodule FermixCore.ComputerUse.Session do
     GenServer.call(server, {:classify, action_params})
   end
 
-  @doc "Run a finalized request through the driver; increments the action count."
+  @doc """
+  Run a finalized request through the driver; increments the action count.
+
+  The outer call deadline (`Timeouts.cu_session_call/0`) is a backstop that
+  outlives the driver's own inner sidecar-action receive (the cushion invariant);
+  if it ever fires, the `GenServer.call` *exit* is normalized through
+  `Timeouts.expired/3` so it logs/traces and returns the same structured shape as
+  the inner timeout (§3.6).
+  """
   @spec execute(GenServer.server(), map()) :: {:ok, action_result()} | {:error, term()}
   def execute(server, request) when is_map(request) do
-    GenServer.call(server, {:execute, request}, @execute_timeout_ms)
+    GenServer.call(server, {:execute, request}, Timeouts.cu_session_call())
+  catch
+    :exit, {:timeout, {GenServer, :call, _}} ->
+      Timeouts.expired(:cu_session_call, Timeouts.cu_session_call(), %{session: inspect(server)})
   end
 
   @doc "Actions issued so far this session."
@@ -65,7 +75,11 @@ defmodule FermixCore.ComputerUse.Session do
   def init(opts) do
     config = Keyword.fetch!(opts, :config)
     origin = Keyword.get(opts, :origin, :interactive)
+    session_id = Keyword.get(opts, :session_id) || mint_session_id()
     {driver_mod, driver_opts} = Keyword.fetch!(opts, :driver)
+    # Thread the session id into the driver so a sidecar-action timeout firing
+    # inside the driver can correlate (F2). put_new: a test/caller override wins.
+    driver_opts = Keyword.put_new(driver_opts, :session_id, session_id)
 
     with :ok <- ensure_host_start_allowed(config, origin),
          {:ok, driver_state} <- driver_mod.start(driver_opts) do
@@ -77,7 +91,7 @@ defmodule FermixCore.ComputerUse.Session do
         driver_mod: driver_mod,
         driver_state: driver_state,
         action_count: 0,
-        session_id: Keyword.get(opts, :session_id) || mint_session_id(),
+        session_id: session_id,
         parent_session: Keyword.get(opts, :parent_session),
         agent: Keyword.get(opts, :agent, "computer_use"),
         started_at: now_ms()
@@ -116,6 +130,32 @@ defmodule FermixCore.ComputerUse.Session do
 
   def handle_call(:action_count, _from, state), do: {:reply, state.action_count, state}
 
+  # A late/stale sidecar response arriving after a prior action timed out. The
+  # protocol matches responses by Port order (no request-id today), so a stale
+  # one would desync onto the next action — drain it. Matches only the driver's
+  # own port; anything else falls to the catch-all. (Fixes the cryptic
+  # "received unexpected message in handle_info/2" the incident produced.)
+  @impl true
+  def handle_info({port, {:data, _data}}, %{driver_state: %{port: port}} = state) do
+    Logger.debug("computer_use: dropping stale sidecar response after a prior timeout")
+    {:noreply, state}
+  end
+
+  def handle_info({port, {:exit_status, status}}, %{driver_state: %{port: port}} = state) do
+    Logger.warning("computer_use: sidecar exited (status #{status}); stopping session")
+    {:stop, {:sidecar_exited, status}, state}
+  end
+
+  def handle_info({:EXIT, _pid, reason}, state) do
+    Logger.warning("computer_use: trapped EXIT (#{inspect(reason)}); stopping session")
+    {:stop, reason, state}
+  end
+
+  def handle_info(message, state) do
+    Logger.debug("computer_use: ignoring unexpected message #{inspect(message)}")
+    {:noreply, state}
+  end
+
   @impl true
   def terminate(reason, state) do
     state.driver_mod.stop(state.driver_state)
@@ -132,6 +172,14 @@ defmodule FermixCore.ComputerUse.Session do
           {:ok, result} -> {:reply, {:ok, result}, state}
           {:error, reason} -> {:reply, {:error, reason}, state}
         end
+
+      {:error, {:timeout, :cu_sidecar_action, _ms} = reason} ->
+        # The Port is poisoned: a late response would desync onto the next action
+        # (responses match by Port order, no request-id today). Reply the
+        # structured error AND stop, so the next action starts a clean driver;
+        # terminate/2 closes the Port (releasing any held input). The generous
+        # 30s budget makes a real firing rare, so resetting is acceptable.
+        {:stop, :sidecar_timeout, {:error, reason}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
