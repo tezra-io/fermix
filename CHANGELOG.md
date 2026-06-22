@@ -6,6 +6,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed — Memory tuning surfaces cadence, not the extraction timeout
+- The setup page's Memory tuning pane (and the CLI wizard's memory prompt) now
+  exposes **Review interval (hours)** — the background memory-review cadence —
+  instead of the extraction timeout. The timeout is not a knob worth operator
+  attention.
+- `memory.extraction_timeout_ms` is removed as a config key. The memory review
+  is a buffered LLM call and now inherits the centralized `:llm_buffered`
+  ceiling from `FermixCore.Net.TimeoutPolicy`, exactly like every other
+  buffered turn — one timeout table instead of a bespoke per-feature knob. The
+  review claim-lock TTL derives from that same value. Hand-edited
+  `extraction_timeout_ms` entries in `config.toml` are ignored.
+
 ## [0.3.1] - 2026-06-16
 
 ### Fixed — Plugin install under the OS-service daemon

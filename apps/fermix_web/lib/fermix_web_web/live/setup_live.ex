@@ -456,7 +456,7 @@ defmodule FermixWebWeb.SetupLive do
     answers =
       []
       |> maybe_put_string(:compaction_threshold, params["compaction_threshold"])
-      |> maybe_put_string(:extraction_timeout_ms, params["extraction_timeout_ms"])
+      |> maybe_put_string(:review_interval_hours, params["review_interval_hours"])
 
     {:noreply, save_answers(socket, answers, "Memory saved.", Map.get(root, "__nav"))}
   end
@@ -1102,7 +1102,7 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       compaction_threshold: safe_string(CompactionConfig.threshold(compaction)),
-      extraction_timeout_ms: safe_string(Keyword.get(memory, :extraction_timeout_ms, 90_000))
+      review_interval_hours: safe_string(Keyword.get(memory, :review_interval_hours, 24))
     }
   end
 

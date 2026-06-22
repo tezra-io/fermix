@@ -169,7 +169,7 @@ defmodule FermixCore.Setup.WizardTest do
         telegram_bot_token: "bot-token",
         telegram_owner_user_id: "111",
         compaction_threshold: "0.8",
-        extraction_timeout_ms: "120000"
+        review_interval_hours: "48"
       )
 
     assert report.status == :ready
@@ -199,7 +199,7 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :owner_user_id) == "111"
     refute Keyword.has_key?(telegram, :allowed_user_ids)
     assert Keyword.get(compaction, :threshold) == 0.8
-    assert Keyword.get(memory, :extraction_timeout_ms) == 120_000
+    assert Keyword.get(memory, :review_interval_hours) == 48
   end
 
   test "save_answers persists xai provider, model, and reasoning effort" do

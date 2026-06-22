@@ -99,6 +99,25 @@ defmodule FermixOpik.AggregationTest do
     assert failover.metadata.reason_kind == "timeout"
   end
 
+  test "a fired timeout nests as an errored point span under the run trace" do
+    {_state, closed} =
+      run([
+        {[:fermix, :timeout, :expired], %{ms: 30_000},
+         %{name: :cu_sidecar_action, session_id: "main-1"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    wrapper = span_named(spans, "agent:main")
+    timeout = span_named(spans, "timeout:cu_sidecar_action")
+
+    assert timeout.parent_span_id == wrapper.id
+    assert timeout.trace_id == trace.id
+    assert timeout.metadata.ms == 30_000
+    assert timeout.error_info.exception_type == "Timeout"
+  end
+
   test "a main turn becomes one trace with nested llm and tool spans" do
     {_state, closed} =
       run([
@@ -301,6 +320,64 @@ defmodule FermixOpik.AggregationTest do
     assert trace.metadata.with_context == true
     assert [llm] = spans_of_type(spans, "llm")
     assert llm.provider == "anthropic"
+  end
+
+  test "a background memory review is its own memory_review trace closed by the :review event" do
+    session = "memory_review:main:telegram:c1:root:42"
+
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_000},
+         %{
+           provider: :openai_codex,
+           model: "gpt-5.5",
+           status: :ok,
+           agent: "memory_reviewer",
+           session_id: session,
+           tokens: %{prompt: 100, completion: 20}
+         }},
+        {[:fermix, :memory, :write], %{count: 1},
+         %{
+           tool: "memory_write",
+           action: :added,
+           agent: "memory_reviewer",
+           session_id: session,
+           channel: "telegram",
+           chat_id: "c1"
+         }},
+        {[:fermix, :memory, :review],
+         %{
+           duration_us: 1_500_000,
+           ops_added: 1,
+           ops_replaced: 0,
+           ops_archived: 0,
+           ops_skipped: 0,
+           input_messages: 3,
+           input_tokens: 120
+         },
+         %{
+           agent: "main",
+           owner: "default",
+           session_id: session,
+           conversation_key: "telegram:c1:root",
+           channel: "telegram",
+           chat_id: "c1",
+           status: :ok,
+           fired: true
+         }}
+      ])
+
+    # The :review event closes the run as one trace (not a TTL-swept orphan),
+    # tagged memory_review, with its llm + memory-write spans nested under it and
+    # the conversation thread backfilled from the event's channel/chat_id.
+    assert [%{trace: trace, spans: spans}] = closed
+    assert "memory_review" in trace.tags
+    assert trace.name == "memory_review:memory_reviewer"
+    assert trace.thread_id == "telegram:c1"
+    assert trace.output.value.status == "ok"
+    assert trace.output.value.added == 1
+    assert [_llm] = spans_of_type(spans, "llm")
+    assert [_write] = spans_of_type(spans, "tool")
   end
 
   test "a soul-curation draft's synthetic command parent keeps it a standalone root" do
@@ -550,7 +627,7 @@ defmodule FermixOpik.AggregationTest do
     # write must be an observable span (not invisible like the old behavior).
     {_state, drained} = Aggregation.drain(state)
     assert [%{trace: trace, spans: spans}] = drained
-    assert trace.name == "subagent:memory_reviewer"
+    assert trace.name == "memory_review:memory_reviewer"
     assert trace.thread_id == "cli:e2e-x"
 
     write = span_named(spans, "memory_write")
@@ -559,7 +636,7 @@ defmodule FermixOpik.AggregationTest do
     assert write.metadata.category == "preference"
     assert write.metadata.memory_id == 7
 
-    wrapper = span_named(spans, "subagent:memory_reviewer")
+    wrapper = span_named(spans, "memory_review:memory_reviewer")
     assert write.parent_span_id == wrapper.id
   end
 

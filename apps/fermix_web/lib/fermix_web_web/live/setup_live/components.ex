@@ -1418,9 +1418,11 @@ defmodule FermixWebWeb.SetupLive.Components do
             step="0.01"
           />
           <.number_field
-            label="Extraction timeout ms"
-            name="memory_form[extraction_timeout_ms]"
-            value={@memory_form.extraction_timeout_ms}
+            label="Review interval (hours)"
+            name="memory_form[review_interval_hours]"
+            value={@memory_form.review_interval_hours}
+            min="0"
+            step="1"
           />
         </div>
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save memory" />

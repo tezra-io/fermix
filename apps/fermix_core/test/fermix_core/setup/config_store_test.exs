@@ -667,7 +667,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(compaction, :threshold) == 0.85
   end
 
-  test "save/load round-trips memory.extraction_timeout_ms" do
+  test "save/load round-trips memory.review_interval_hours" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
 
@@ -678,7 +678,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       fermix_core: [
         providers: [openai: []],
         agent: [name: "fermix"],
-        memory: [extraction_timeout_ms: 90_000]
+        memory: [review_interval_hours: 48]
       ],
       fermix_channels: [],
       fermix_web: []
@@ -688,11 +688,11 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     contents = File.read!(Path.join(tmp_home, "config.toml"))
     assert contents =~ "[fermix_core.memory]"
-    assert contents =~ "extraction_timeout_ms = 90000"
+    assert contents =~ "review_interval_hours = 48"
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config()
     memory = Keyword.get(loaded.fermix_core, :memory, [])
-    assert Keyword.get(memory, :extraction_timeout_ms) == 90_000
+    assert Keyword.get(memory, :review_interval_hours) == 48
   end
 
   test "save/load round-trips realtime config" do
@@ -766,12 +766,12 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     Application.put_env(:fermix_core, :memory,
       extraction_enabled: false,
       agent_id: "stable-agent",
-      extraction_timeout_ms: 1_000
+      review_interval_hours: 1
     )
 
     ConfigStore.apply_snapshot(%{
       fermix_core: [
-        memory: [extraction_timeout_ms: 90_000]
+        memory: [review_interval_hours: 48]
       ],
       fermix_channels: [],
       fermix_web: []
@@ -779,7 +779,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     memory = Application.get_env(:fermix_core, :memory, [])
 
-    assert Keyword.get(memory, :extraction_timeout_ms) == 90_000
+    assert Keyword.get(memory, :review_interval_hours) == 48
     assert Keyword.get(memory, :extraction_enabled) == false
     assert Keyword.get(memory, :agent_id) == "stable-agent"
   end

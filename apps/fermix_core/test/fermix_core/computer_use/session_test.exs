@@ -14,7 +14,10 @@ defmodule FermixCore.ComputerUse.SessionTest do
       {:ok,
        %{
          test_pid: Keyword.fetch!(opts, :test_pid),
-         response: Keyword.get(opts, :response, %{"ok" => true})
+         response: Keyword.get(opts, :response, %{"ok" => true}),
+         # An optional fake port so handle_info port-matched clauses can be
+         # exercised without a real Port/sidecar.
+         port: Keyword.get(opts, :port)
        }}
     end
 
@@ -23,6 +26,25 @@ defmodule FermixCore.ComputerUse.SessionTest do
       send(pid, {:driver_execute, request})
       {:ok, state.response}
     end
+
+    @impl true
+    def stop(%{test_pid: pid}) do
+      send(pid, :driver_stop)
+      :ok
+    end
+  end
+
+  # A Driver whose action always reports the inner sidecar timeout (the shape
+  # FermixCore.Timeouts.expired/3 returns) — exercises the poison-reset path
+  # without a 30s wall-clock wait.
+  defmodule TimeoutDriver do
+    @behaviour FermixCore.ComputerUse.Driver
+
+    @impl true
+    def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
+
+    @impl true
+    def execute(_state, _request), do: {:error, {:timeout, :cu_sidecar_action, 30_000}}
 
     @impl true
     def stop(%{test_pid: pid}) do
@@ -210,6 +232,57 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert_receive :driver_stop
       assert_receive {:completed, %{actions: 0}, %{session_id: "cua_teardown"}}
     end
+  end
+
+  describe "sidecar timeout / poison-reset" do
+    test "a sidecar-action timeout replies the structured error and stops the session" do
+      {session, ref} = start_monitored(TimeoutDriver)
+
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+      assert {:error, {:timeout, :cu_sidecar_action, 30_000}} = Session.execute(session, request)
+
+      # poisoned Port → session stops so the next action gets a clean driver,
+      # and terminate still tears the driver down (releasing held input).
+      assert_receive {:DOWN, ^ref, :process, ^session, :sidecar_timeout}
+      assert_receive :driver_stop
+    end
+  end
+
+  describe "handle_info" do
+    test "drains a stale sidecar response after a prior timeout without crashing" do
+      port = make_ref()
+      session = start_session(driver_opts: [port: port])
+
+      # the cryptic-incident message: a late {port,{:data,_}} after a timeout
+      send(session, {port, {:data, {:eol, "stale"}}})
+
+      # still alive and serving (no crash, no unexpected-message error)
+      assert Session.action_count(session) == 0
+    end
+
+    test "stops the session when the sidecar exits" do
+      port = make_ref()
+      {session, ref} = start_monitored(StubDriver, port: port)
+
+      send(session, {port, {:exit_status, 2}})
+
+      assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
+    end
+  end
+
+  # Start a session via start_link (trapping exits so an abnormal stop is a
+  # message, not a test kill) and monitor it, so a {:stop, …} can be observed.
+  defp start_monitored(driver_mod, driver_opts \\ []) do
+    Process.flag(:trap_exit, true)
+
+    {:ok, session} =
+      Session.start_link(
+        config: Config.normalize(enabled: true),
+        driver: {driver_mod, [test_pid: self()] ++ driver_opts},
+        session_id: "cua_mon"
+      )
+
+    {session, Process.monitor(session)}
   end
 
   # classify an action and return just the request (helper for execute tests)
