@@ -549,6 +549,12 @@ defmodule FermixCore.Setup.Wizard do
   defp personalization_prompts(%{state: state}) do
     [
       %{
+        key: :bot_name,
+        label: "Name for the assistant (what it calls itself; blank = Fermix)",
+        # Optional: the agent has a default name; this only renames it.
+        required?: false
+      },
+      %{
         key: :user_name,
         label: "Your name",
         required?: missing_component?(state, "personalization")
@@ -603,6 +609,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_signal_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
+      |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
     commit_snapshot(snapshot)
@@ -1757,6 +1764,23 @@ defmodule FermixCore.Setup.Wizard do
       existing = Keyword.get(fermix_core, :personalization, [])
       merged = Keyword.merge(existing, values)
       Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :personalization, merged))
+    end
+  end
+
+  # The bot's NAME is identity, not a user preference: it persists to
+  # `[fermix_core.agent].name` (the source of truth that seeds IDENTITY.md), even
+  # though the input is collected in the personalization step. Blank leaves the
+  # existing/default name untouched.
+  defp put_bot_name(snapshot, answers) do
+    case reject_blank_values(name: Keyword.get(answers, :bot_name)) do
+      [] ->
+        snapshot
+
+      [name: name] ->
+        fermix_core = Map.get(snapshot, :fermix_core, [])
+        agent = Keyword.get(fermix_core, :agent, [])
+        merged = Keyword.put(agent, :name, name)
+        Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :agent, merged))
     end
   end
 

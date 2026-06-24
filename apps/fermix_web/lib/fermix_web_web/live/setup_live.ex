@@ -478,6 +478,7 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("save_personalization", %{"personalization_form" => params} = root, socket) do
     answers =
       []
+      |> maybe_put_string(:bot_name, params["bot_name"])
       |> maybe_put_string(:user_name, params["user_name"])
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
@@ -1110,6 +1111,9 @@ defmodule FermixWebWeb.SetupLive do
     personalization = get_fermix_core(snapshot, :personalization)
 
     %{
+      # The bot's name is identity (the agent block), surfaced here so the field
+      # shows the current name; blank on save keeps it.
+      bot_name: snapshot |> get_fermix_core(:agent) |> Keyword.get(:name, ""),
       user_name: Keyword.get(personalization, :user_name, ""),
       # Default to New York so the form is never blank; the agent reads this
       # (via Application env) to stamp each turn with the current local date.
