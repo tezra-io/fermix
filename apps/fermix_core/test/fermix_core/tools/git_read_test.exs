@@ -49,11 +49,7 @@ defmodule FermixCore.Tools.GitReadTest do
   } do
     assert {:ok, result} =
              GitRead.execute(
-               %{
-                 "command" => "diff",
-                 "repo" => dir,
-                 "args" => ["--no-index", "/etc/passwd", "/etc/group"]
-               },
+               %{"command" => "diff", "repo" => dir, "args" => ["--no-index"]},
                context
              )
 
