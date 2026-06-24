@@ -24,11 +24,13 @@ defmodule FermixChannels.Gateway.Queue do
 
   require Logger
 
+  alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Typing
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Browser
   alias FermixCore.Memory.ConversationStore
 
   # Appended (as an assistant turn) to a conversation whose active turn was
@@ -340,27 +342,50 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   defp run_and_deliver(%{runner: runner, core_msg: core_msg, turn_state: turn_state} = turn) do
-    case run_turn(runner, core_msg, turn_state, turn.deliver, turn.stream_callback) do
-      {:ok, response, context_tokens} ->
-        # A turn stopped by `/stop` mid-run must neither deliver nor commit.
-        if fresh?(turn) do
-          deliver_final(turn, response)
-          mark_final_reply_delivered(turn)
+    result =
+      case run_turn(runner, core_msg, turn_state, turn.deliver, turn.stream_callback) do
+        {:ok, response, context_tokens} ->
+          # A turn stopped by `/stop` mid-run must neither deliver nor commit.
+          if fresh?(turn) do
+            deliver_final(turn, response)
+            mark_final_reply_delivered(turn)
 
-          core_msg
-          |> runner.commit(turn_state, response, context_tokens)
-          |> maybe_notify_compacted(turn.deliver)
-        else
+            core_msg
+            |> runner.commit(turn_state, response, context_tokens)
+            |> maybe_notify_compacted(turn.deliver)
+          else
+            discard_draft(turn)
+            :stopped
+          end
+
+        {:error, reason} ->
           discard_draft(turn)
-          :stopped
-        end
 
-      {:error, reason} ->
-        discard_draft(turn)
+          if fresh?(turn), do: turn.deliver.({:text, runner.error_reply(reason)}), else: :stopped
+      end
 
-        if fresh?(turn), do: turn.deliver.({:text, runner.error_reply(reason)}), else: :stopped
-    end
+    reap_one_shot_browser(turn)
+    result
   end
+
+  # A one-shot (loopback) conversation — CLI `ask`, daemon — will not send a
+  # follow-up, so tear its managed browser down now instead of pinning a Chrome
+  # window for the full idle TTL. Remote interactive channels keep their browser
+  # warm for the next message (the ProfileServer re-arms its idle timer per
+  # request). Gated on `fresh?`: a superseded/`/stop`ped turn is NOT reaped, so
+  # the successor turn that now owns the conversation never loses its browser
+  # mid-run. Owner scope is per-conversation; this runs off the reply path (the
+  # reply was already delivered) and only casts, so it adds no reply latency.
+  defp reap_one_shot_browser(%{core_msg: %{channel: channel} = msg} = turn)
+       when is_binary(channel) do
+    if fresh?(turn) and ChannelRegistry.local?(channel) do
+      Browser.reap_conversation(ConversationKey.from(msg))
+    end
+
+    :ok
+  end
+
+  defp reap_one_shot_browser(_turn), do: :ok
 
   # Streaming turns thread the engine callback via run/4; everything else keeps
   # the 3-arity call so non-streaming surfaces (and runner stubs) are untouched.

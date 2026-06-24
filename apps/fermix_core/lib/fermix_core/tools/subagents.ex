@@ -43,14 +43,18 @@ defmodule FermixCore.Tools.Subagents do
 
   # Context keys stripped before a worker runs: channel-reply targeting and the
   # parent's memory/sandbox handles. The worker keeps the infra keys it needs to
-  # function (registries, supervisors, provider, journal dir).
+  # function (registries, supervisors, provider, journal dir). NOTE:
+  # `:conversation_key` is deliberately NOT stripped — it derives the browser
+  # owner scope (Browser.Scope.owner_key/1), so a worker's browser shares the
+  # parent conversation's single Chrome instead of spawning its own per-worker
+  # instance. Replying/memory stay impossible without :reply_fn/:channel/:memory_*
+  # (all stripped), so inheriting the key alone grants no parent-state access.
   @stripped_context_keys [
     :reply_fn,
     :channel,
     :source_channel,
     :source_trust,
     :sandbox_config,
-    :conversation_key,
     :memory_agent_id,
     :memory_owner_id,
     :memory_store,

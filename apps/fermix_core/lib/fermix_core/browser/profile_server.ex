@@ -8,6 +8,12 @@ defmodule FermixCore.Browser.ProfileServer do
   Chrome teardown on every exit path (idle, eviction, shutdown, crash), so no
   Chrome process is ever orphaned.
 
+  Tabs are bounded too: each `open` spawns a new CDP target, so without a cap a
+  long session would accumulate tabs (they outlive any single action) and grow
+  Chrome's memory unbounded. `enforce_tab_cap/1` closes the oldest non-active
+  tabs back to `max_tabs` after each `open`, for managed profiles only — a
+  user-attached Chrome's own tabs are never closed.
+
   Callers reach this process directly (via the registry); the manager only
   starts/evicts it. Requests are serialized per scope by the GenServer.
   """
@@ -67,6 +73,7 @@ defmodule FermixCore.Browser.ProfileServer do
       runtime: nil,
       targets: %{},
       active_target: nil,
+      tab_order: [],
       ref_maps: %{},
       console: [],
       dialogs: [],
@@ -362,10 +369,60 @@ defmodule FermixCore.Browser.ProfileServer do
 
     with {:ok, %{"targetId" => target_id}} <- command(state, "Target.createTarget", params),
          {:ok, state} <- refresh_targets(%{state | active_target: tab_id(target_id)}),
-         {:ok, tab, state} <- resolve_tab(tab_id(target_id), state) do
+         {:ok, tab, state} <- resolve_tab(tab_id(target_id), state),
+         {:ok, state} <- enforce_tab_cap(state) do
       {:ok, tab_result(tab), state}
     end
   end
+
+  # Keep a managed Chrome from accumulating tabs across a session: after an
+  # `open` pushes the live count past `max_tabs`, close the oldest non-active
+  # tabs back to the cap. Managed-only — a user-attached Chrome (cdp_url
+  # profile) keeps all of its own tabs.
+  defp enforce_tab_cap(state) do
+    cap = state.config.max_tabs
+    excess = map_size(state.targets) - cap
+
+    if managed?(state) and excess > 0 do
+      evict_oldest_tabs(state, excess)
+    else
+      {:ok, state}
+    end
+  end
+
+  defp evict_oldest_tabs(state, excess) do
+    victims =
+      state.tab_order
+      |> Enum.reject(&(&1 == state.active_target))
+      |> Enum.take(excess)
+
+    state = Enum.reduce(victims, state, &close_evicted_tab/2)
+    refresh_targets(state)
+  end
+
+  # Best-effort: eviction is housekeeping for the just-served `open`, so a failed
+  # close is logged (never swallowed) and the open still succeeds — the next
+  # open re-attempts the trim.
+  defp close_evicted_tab(tab_id, state) do
+    case Map.fetch(state.targets, tab_id) do
+      {:ok, tab} -> close_target(tab, state)
+      :error -> state
+    end
+  end
+
+  defp close_target(tab, state) do
+    case command(state, "Target.closeTarget", %{targetId: tab.target_id}) do
+      {:ok, _result} ->
+        Logger.debug("browser: closed tab #{tab.id} to stay within max_tabs")
+        state
+
+      {:error, error} ->
+        Logger.warning("browser: tab-cap eviction failed for #{tab.id}: #{inspect(error)}")
+        state
+    end
+  end
+
+  defp managed?(state), do: Map.get(state.profile, :mode) == :managed
 
   defp navigate_chain(uri, args, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
@@ -1003,8 +1060,20 @@ defmodule FermixCore.Browser.ProfileServer do
     with {:ok, %{"targetInfos" => infos}} <- command(state, "Target.getTargets", %{}) do
       targets = infos |> selectable_targets() |> Map.new(&target_entry/1)
       active = active_target(state.active_target, targets)
-      {:ok, %{state | targets: targets, active_target: active}}
+      order = reconcile_order(state.tab_order, targets)
+      {:ok, %{state | targets: targets, active_target: active, tab_order: order}}
     end
+  end
+
+  # Track tab age (oldest first) so the cap evicts the oldest. Drop ids whose
+  # tabs are gone, then append any newly-seen tabs at the tail (newest). Leftover
+  # tabs from a reattached crashed session are seen on the first refresh, before
+  # any new `open`, so they sort oldest and get reaped first.
+  defp reconcile_order(order, targets) do
+    kept = Enum.filter(order, &Map.has_key?(targets, &1))
+    seen = MapSet.new(kept)
+    fresh = targets |> Map.keys() |> Enum.sort() |> Enum.reject(&MapSet.member?(seen, &1))
+    kept ++ fresh
   end
 
   defp selectable_targets(infos) do
@@ -1352,7 +1421,7 @@ defmodule FermixCore.Browser.ProfileServer do
   defp stop_runtime(state) do
     close_connection(state.runtime, state.conn_mod)
     state.launcher.stop(state.runtime, state.config)
-    %{state | runtime: nil, targets: %{}, active_target: nil, ref_maps: %{}}
+    %{state | runtime: nil, targets: %{}, active_target: nil, tab_order: [], ref_maps: %{}}
   end
 
   defp close_connection(%{connection: pid}, conn_mod) when is_pid(pid), do: conn_mod.close(pid)
