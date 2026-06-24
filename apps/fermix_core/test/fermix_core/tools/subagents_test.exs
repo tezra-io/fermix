@@ -640,7 +640,8 @@ defmodule FermixCore.Tools.SubagentsTest do
   end
 
   describe "context sanitizing and recursion depth" do
-    test "worker context drops reply_fn/conversation_key and sets subagent_depth", ctx do
+    test "worker drops channel/memory handles, keeps conversation_key, sets subagent_depth",
+         ctx do
       CapabilityRegistry.register(ctx.registry, probe_cap())
       MockAdapter.set_turns([call_turn("c1", "probe", %{}), text_turn("done")])
 
@@ -673,7 +674,6 @@ defmodule FermixCore.Tools.SubagentsTest do
             :source_channel,
             :source_trust,
             :sandbox_config,
-            :conversation_key,
             :memory_agent_id,
             :memory_owner_id,
             :memory_store,
@@ -681,6 +681,11 @@ defmodule FermixCore.Tools.SubagentsTest do
           ] do
         refute Map.has_key?(worker_ctx, key), "expected #{inspect(key)} to be stripped"
       end
+
+      # conversation_key is INHERITED (not stripped): it derives the browser owner
+      # scope, so a worker's browser shares the parent conversation's one Chrome
+      # instead of spawning its own per-worker instance.
+      assert worker_ctx[:conversation_key] == "conv-1"
     end
   end
 end
