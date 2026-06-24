@@ -4,7 +4,7 @@ defmodule FermixWeb.MixProject do
   def project do
     [
       app: :fermix_web,
-      version: "0.3.1",
+      version: "0.4.0-beta",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
