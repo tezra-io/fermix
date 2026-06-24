@@ -1439,6 +1439,11 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Seed the profile that guides how the agent addresses you and frames replies."
       />
       <form phx-submit="save_personalization" class="mt-6 space-y-5">
+        <.text_input
+          label="Assistant name (what it calls itself; blank keeps the current name)"
+          name="personalization_form[bot_name]"
+          value={@personalization_form.bot_name}
+        />
         <div class="grid gap-4 lg:grid-cols-3">
           <.text_input
             label="Your name"

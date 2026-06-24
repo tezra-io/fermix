@@ -202,6 +202,47 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(memory, :review_interval_hours) == 48
   end
 
+  test "save_answers persists a bot name to [fermix_core.agent].name, not personalization" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-botname")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(openai_api_key: "sk-test-123", bot_name: "Aria")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    agent = Keyword.get(persisted.fermix_core, :agent, [])
+    personalization = Keyword.get(persisted.fermix_core, :personalization, [])
+
+    # Identity lives in the agent block (source of truth for IDENTITY.md), and is
+    # never mixed into the user-scoped personalization block.
+    assert Keyword.get(agent, :name) == "Aria"
+    refute Keyword.has_key?(personalization, :bot_name)
+  end
+
+  test "save_answers leaves the bot name untouched when bot_name is blank" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-botname-blank")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(openai_api_key: "sk-test-123", bot_name: "")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    agent = Keyword.get(persisted.fermix_core, :agent, [])
+    # Blank input writes no name of its own; the config default ("fermix") stands.
+    assert Keyword.get(agent, :name) == "fermix"
+  end
+
   test "save_answers persists xai provider, model, and reasoning effort" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-xai")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
