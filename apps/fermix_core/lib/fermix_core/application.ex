@@ -28,6 +28,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
+  alias FermixCore.Prompt.IdentityName
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -110,6 +111,7 @@ defmodule FermixCore.Application do
     remember_launch_cwd()
     :ok = ConfigStore.ensure_workspace()
     :ok = BootstrapRename.run()
+    :ok = IdentityName.reconcile()
     :ok = AuthStore.validate_permissions!()
     setup_file_logger()
     Trace.TelemetryHandler.attach()
