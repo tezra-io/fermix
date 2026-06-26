@@ -128,6 +128,7 @@ defmodule FermixCore.Jobs.Registry do
         |> put_present(:skill_name, optional_update_string(attrs, :skill_name))
         |> put_present(:provider, optional_update_string(attrs, :provider))
         |> put_present(:model, optional_update_string(attrs, :model))
+        |> Map.merge(route_pin_patch(attrs))
         |> Map.merge(delivery_patch(attrs))
         |> Map.merge(schedule_job_patch)
 
@@ -142,6 +143,17 @@ defmodule FermixCore.Jobs.Registry do
     end
   rescue
     error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  # An explicit clear_route_pin sentinel nulls provider AND model together so a
+  # job returns to default routing. Both are written as a pair: the normal write
+  # path drops provider: nil ("leave unchanged"), so the pin would otherwise
+  # survive. The tool guarantees the sentinel never co-occurs with a new pin.
+  defp route_pin_patch(attrs) do
+    case fetch_field(attrs, :clear_route_pin) do
+      true -> %{provider: nil, model: nil}
+      _absent -> %{}
+    end
   end
 
   # Delivery is set as a pair so switching to a target-less mode (none/local)

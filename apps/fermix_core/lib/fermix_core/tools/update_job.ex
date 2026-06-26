@@ -53,12 +53,17 @@ defmodule FermixCore.Tools.UpdateJob do
         provider: %{
           type: "string",
           description:
-            "Pin the job's runs to a provider (anthropic, openai, xai, openrouter, ollama, ...; must be a known, configured provider). Must be set together with model. Omit both to leave the current values unchanged."
+            "Pin the job's runs to a provider (anthropic, openai, xai, openrouter, ollama, ...; must be a known, configured provider). Must be set together with model. Omit both to leave the current values unchanged. To remove an existing pin, use clear_route_pin instead."
         },
         model: %{
           type: "string",
           description:
-            "Pin the job's runs to a provider-specific model id (paired with provider). Free-form — providers like ollama/openrouter accept arbitrary models. Omit both provider and model to leave the current values unchanged."
+            "Pin the job's runs to a provider-specific model id (paired with provider). Free-form — providers like ollama/openrouter accept arbitrary models. Omit both provider and model to leave the current values unchanged. To remove an existing pin, use clear_route_pin instead."
+        },
+        clear_route_pin: %{
+          type: "boolean",
+          description:
+            "Set true to remove any pinned provider/model and return the job to default routing. Mutually exclusive with provider/model (set those to re-pin instead). Omit or false to leave the current pin unchanged."
         },
         delivery_mode: %{
           type: "string",
@@ -98,7 +103,11 @@ defmodule FermixCore.Tools.UpdateJob do
       %{tag: "empty_update", description: "no editable field provided"},
       %{tag: "invalid_schedule", description: "schedule expression cannot be parsed"},
       %{tag: "unknown_skill", description: "skill_name does not name an existing skill"},
-      %{tag: "invalid_delivery", description: "delivery_mode or delivery_target is invalid"}
+      %{tag: "invalid_delivery", description: "delivery_mode or delivery_target is invalid"},
+      %{
+        tag: "route_pin_conflict",
+        description: "clear_route_pin was combined with provider or model"
+      }
     ]
   end
 
@@ -117,8 +126,9 @@ defmodule FermixCore.Tools.UpdateJob do
     with {:ok, job_id} <- Support.required_string(args, "job_id"),
          {:ok, skill_name} <- validate_skill_name(args, context),
          {:ok, delivery} <- resolve_delivery(args, context),
+         {:ok, clear_route_pin?} <- validate_clear_route_pin(args),
          {:ok, route_pin} <- Support.validate_route_pin(args),
-         {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin) do
+         {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin, clear_route_pin?) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
         {:ok, job} -> Support.success_json(Support.job_payload(job))
         {:error, reason} -> Support.error(reason)
@@ -129,7 +139,21 @@ defmodule FermixCore.Tools.UpdateJob do
     end
   end
 
-  defp update_attrs(args, skill_name, delivery, {provider, model}) do
+  # Clearing a pin and setting one are mutually exclusive: clear_route_pin=true
+  # un-pins to default routing, so combining it with a provider/model is an
+  # ambiguous request, not a fallback. Reject it loud (CLAUDE.md #12).
+  defp validate_clear_route_pin(args) do
+    clear? = Map.get(args, "clear_route_pin") == true
+    has_pin? = Support.optional_string(args, "provider") || Support.optional_string(args, "model")
+
+    if clear? and has_pin? do
+      {:error, "clear_route_pin cannot be combined with provider or model"}
+    else
+      {:ok, clear?}
+    end
+  end
+
+  defp update_attrs(args, skill_name, delivery, {provider, model}, clear_route_pin?) do
     attrs =
       %{}
       |> put_present(:task_prompt, Support.optional_string(args, "task"))
@@ -139,14 +163,21 @@ defmodule FermixCore.Tools.UpdateJob do
       |> put_present(:provider, provider)
       |> put_present(:model, model)
       |> put_delivery(delivery)
+      |> put_route_pin_clear(clear_route_pin?)
 
     if map_size(attrs) == 0 do
       {:error,
-       "Provide at least one of task, schedule, description, skill_name, provider/model, or delivery to update."}
+       "Provide at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, or delivery to update."}
     else
       {:ok, attrs}
     end
   end
+
+  # Signals the registry to null provider AND model atomically. A dedicated
+  # sentinel is required because the registry's nil-drop write path treats
+  # provider: nil as "leave unchanged", so the pin would otherwise survive.
+  defp put_route_pin_clear(map, true), do: Map.put(map, :clear_route_pin, true)
+  defp put_route_pin_clear(map, false), do: map
 
   # Absent delivery yields :no_change so an unrelated edit never retargets the
   # job; an explicit delivery is validated by DeliveryDefaults before it lands.
