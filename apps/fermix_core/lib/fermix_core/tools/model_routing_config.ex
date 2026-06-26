@@ -93,9 +93,9 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
   defp do_execute(%{"action" => "set"} = args) do
     with {:ok, key} <- fetch_allowed_key(args),
          {:ok, value} <- Support.required_string(args, "value"),
-         :ok <- validate_value(key, value),
          {:ok, snapshot} <- ConfigStore.load_runtime_config(),
          next <- put_routing(snapshot, key, value),
+         :ok <- validate_routing(next),
          :ok <- ConfigStore.save_snapshot(next),
          :ok <- ConfigStore.apply_snapshot(next) do
       Support.success_json(%{updated: Atom.to_string(key), value: value})
@@ -131,11 +131,13 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
     end
   end
 
-  # Reuse the consumption-seam validator so a bad provider/effort is rejected at
-  # write time, not when a sub-agent later spawns. A free-form model slug always
-  # passes (the provider API is the source of truth for an unknown model).
-  defp validate_value(key, value) do
-    RoutingOverrides.parse([{key, value}], :subagent)
+  # Validate the RESULTING merged subagent routing (provider + model + effort,
+  # including the provider/model pairing), not just the single key being set —
+  # so setting `subagent_model` while `subagent_provider` already conflicts (a
+  # mismatch built up across separate calls) is rejected before it persists.
+  # An unknown free-form model slug still passes (the provider API owns it).
+  defp validate_routing(snapshot) do
+    RoutingOverrides.parse(routing(snapshot), :subagent)
     :ok
   rescue
     e in ArgumentError -> {:error, Exception.message(e)}

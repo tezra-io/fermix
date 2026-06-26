@@ -99,6 +99,29 @@ defmodule FermixCore.Tools.AdminToolsTest do
     assert cron_rejected.error =~ "invalid_key"
   end
 
+  test "model_routing_config rejects a provider/model pairing mismatch across separate set calls" do
+    assert {:ok, set_provider} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_provider", "value" => "openrouter"},
+               @context
+             )
+
+    assert set_provider.success == true
+
+    # qwen3:32b is an Ollama model — invalid under the now-configured openrouter
+    # provider. Validating the MERGED routing rejects it here, rather than
+    # silently persisting it to 400 at the next sub-agent spawn.
+    assert {:ok, mismatch} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_model", "value" => "qwen3:32b"},
+               @context
+             )
+
+    assert mismatch.success == false
+    assert mismatch.error =~ "qwen3:32b"
+    assert mismatch.error =~ "openrouter"
+  end
+
   test "model_routing_config read normalizes config load failures", %{home: home} do
     File.write!(home, "not a directory")
 

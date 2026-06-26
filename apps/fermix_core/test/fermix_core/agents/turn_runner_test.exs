@@ -564,6 +564,35 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
     end
 
+    test "rate-limit reply names the reset window when the body carried resets_at" do
+      resets_at = System.system_time(:second) + 1800
+
+      reply =
+        TurnRunner.error_reply(
+          ProviderError.api(:openai_codex, :codex, 429, %{
+            "error" => %{
+              "code" => "usage_limit_reached",
+              "plan_type" => "Plus",
+              "resets_at" => resets_at
+            }
+          })
+        )
+
+      assert reply =~ "usage limit"
+      assert reply =~ "plus plan"
+      assert reply =~ ~r/~\d+ min/
+    end
+
+    test "rate-limit reply falls back to generic text without a reset time" do
+      reply =
+        TurnRunner.error_reply(
+          ProviderError.api(:openai, :openai, 429, %{"error" => %{"message" => "slow down"}})
+        )
+
+      assert reply =~ "rate-limited"
+      refute reply =~ "usage limit"
+    end
+
     test "maps API-key provider auth failures to a check-your-key hint" do
       reply =
         TurnRunner.error_reply(

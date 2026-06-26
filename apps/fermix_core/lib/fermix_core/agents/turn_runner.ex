@@ -430,12 +430,14 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp provider_error_reply({:provider_error, %{kind: :rate_limit} = error}) do
-    "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
+    usage_limit_reply(error) ||
+      "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
   end
 
   defp provider_error_reply({:provider_error, %{kind: :quota} = error}) do
-    "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
-      "billing, or model access, then retry."
+    usage_limit_reply(error) ||
+      "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
+        "billing, or model access, then retry."
   end
 
   defp provider_error_reply({:provider_error, %{kind: :provider_unavailable} = error}) do
@@ -468,6 +470,23 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp provider_error_reply(_reason), do: nil
+
+  # Friendly usage-limit message when the provider's 429 body carried a reset
+  # time (OpenAI/Codex). Best-effort and provider-agnostic — nil when no reset
+  # is available, so the caller falls back to its generic text.
+  defp usage_limit_reply(%{resets_at: resets_at} = error) when is_number(resets_at) do
+    mins = max(0, round((resets_at * 1000 - System.system_time(:millisecond)) / 60_000))
+
+    "You've hit your #{provider_label(error)} usage limit#{plan_suffix(error)}. " <>
+      "Try again in ~#{mins} min."
+  end
+
+  defp usage_limit_reply(_error), do: nil
+
+  defp plan_suffix(%{plan_type: plan}) when is_binary(plan) and plan != "",
+    do: " (#{String.downcase(plan)} plan)"
+
+  defp plan_suffix(_error), do: ""
 
   defp provider_label(error) when is_map(error) do
     error
