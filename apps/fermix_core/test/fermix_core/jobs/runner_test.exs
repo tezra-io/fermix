@@ -1197,6 +1197,47 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert stored_run.final_response == "recovered after 2 transient retries"
     end
 
+    test "does NOT retry a provider :timeout — that would blow past the configured job timeout",
+         %{
+           repo: repo,
+           capability_registry: capability_registry,
+           output_base_dir: output_base_dir
+         } do
+      {:ok, counter} = start_counter()
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Provider Timeout Terminal", task_prompt: "Run.")
+
+      # A provider timeout means the call already burned its full receive-timeout
+      # budget; retrying it (with a fresh per-attempt watchdog) lets the run exceed
+      # `[fermix_core.jobs] timeout_seconds` by multiple slow attempts. Cron only
+      # retries the fast wake-from-sleep pool-checkout race, so this is terminal.
+      provider_timeout =
+        {:error,
+         {:provider_transport_error,
+          %{
+            provider: :openai_codex,
+            adapter: :codex,
+            reason: :timeout,
+            kind: :timeout,
+            message: "Codex request timed out.",
+            stage: :before_response
+          }}}
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        adapter_opts: [counter: counter, fail_until: 1, transient_error: provider_timeout]
+      )
+
+      assert_receive {:transient_chat, 1}, 1_000
+      refute_receive {:transient_chat, 2}, 200
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "error"
+    end
+
     test "waits the assigned startup delay before its first network call (burst stagger)", %{
       repo: repo,
       capability_registry: capability_registry,

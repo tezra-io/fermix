@@ -49,9 +49,13 @@ defmodule FermixCore.Providers.RoutingOverrides do
   """
   @spec parse(keyword(), :subagent | :cron) :: override()
   def parse(routing, prefix) when is_list(routing) and prefix in [:subagent, :cron] do
+    provider = validate_provider(get(routing, prefix, :provider), label(prefix, :provider))
+    model = normalize_model(get(routing, prefix, :model))
+    validate_pairing(provider, model, label(prefix, :model))
+
     %{
-      provider: validate_provider(get(routing, prefix, :provider), label(prefix, :provider)),
-      model: normalize_model(get(routing, prefix, :model)),
+      provider: provider,
+      model: model,
       reasoning_effort:
         validate_effort(get(routing, prefix, :reasoning_effort), label(prefix, :reasoning_effort))
     }
@@ -65,9 +69,13 @@ defmodule FermixCore.Providers.RoutingOverrides do
   """
   @spec parse_tool_args(map()) :: override()
   def parse_tool_args(args) when is_map(args) do
+    provider = validate_provider(Map.get(args, "provider"), ~s(subagents argument "provider"))
+    model = normalize_model(Map.get(args, "model"))
+    validate_pairing(provider, model, ~s(subagents argument "model"))
+
     %{
-      provider: validate_provider(Map.get(args, "provider"), ~s(subagents argument "provider")),
-      model: normalize_model(Map.get(args, "model")),
+      provider: provider,
+      model: model,
       reasoning_effort:
         validate_effort(
           Map.get(args, "reasoning_effort"),
@@ -178,6 +186,34 @@ defmodule FermixCore.Providers.RoutingOverrides do
       trimmed -> trimmed
     end
   end
+
+  # A model slug stays free-form (an unknown id is the provider API's call, so a
+  # brand-new OpenRouter model still passes), but a slug the catalog KNOWS under a
+  # *different* provider than the one explicitly paired with it is a definite
+  # mis-pairing — e.g. `subagent_provider = "openrouter"` + `subagent_model =
+  # "qwen3:32b"` (an Ollama model), which otherwise only 400s at spawn. Reject it
+  # at the parse boundary so no automated writer can persist it (and a manual
+  # config edit fails loud here at the next subagent/cron spawn).
+  defp validate_pairing(provider, model, label)
+       when is_atom(provider) and not is_nil(provider) and is_binary(model) do
+    cond do
+      ModelCatalog.known_model?(provider, model) ->
+        :ok
+
+      is_nil(ModelCatalog.provider_for_model(model)) ->
+        :ok
+
+      true ->
+        owner = ModelCatalog.provider_for_model(model)
+
+        raise ArgumentError,
+              "#{label} = #{inspect(model)} belongs to provider #{owner}, not #{provider} " <>
+                "(invalid provider/model pairing). Use a #{provider} model slug, change the " <>
+                "provider, or clear the override."
+    end
+  end
+
+  defp validate_pairing(_provider, _model, _label), do: :ok
 
   defp validate_effort(nil, _label), do: nil
   defp validate_effort("", _label), do: nil
