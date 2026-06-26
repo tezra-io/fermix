@@ -35,6 +35,22 @@ defmodule FermixCore.Tools.ComputerUseTest do
     def stop(_state), do: :ok
   end
 
+  # Returns a configurable sidecar error from every action — exercises the tool's
+  # action-failure messaging path (the real driver decodes `{"ok": false, ...}`
+  # into the same `{:error, reason}` this returns).
+  defmodule ErrorDriver do
+    @behaviour FermixCore.ComputerUse.Driver
+
+    @impl true
+    def start(opts), do: {:ok, %{error: Keyword.fetch!(opts, :error)}}
+
+    @impl true
+    def execute(%{error: error}, _request), do: {:error, error}
+
+    @impl true
+    def stop(_state), do: :ok
+  end
+
   @context %{agent_name: "main", conversation_key: {"cli", "chat-cu", :root}}
 
   defp action_desc(params), do: params["properties"]["action"]["description"]
@@ -53,6 +69,18 @@ defmodule FermixCore.Tools.ComputerUseTest do
          driver: {StubDriver, [test_pid: self()]},
          origin: :interactive,
          session_id: "cua_strict_#{System.unique_integer([:positive])}"
+       ]}
+    )
+  end
+
+  defp error_session(error) do
+    start_supervised!(
+      {Session,
+       [
+         config: Config.normalize(enabled: true),
+         driver: {ErrorDriver, [error: error]},
+         origin: :interactive,
+         session_id: "cua_err_#{System.unique_integer([:positive])}"
        ]}
     )
   end
@@ -259,6 +287,41 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
       assert result.success == false
       assert result.error =~ "attended session"
+    end
+  end
+
+  describe "action-failure messaging" do
+    test "a no_active_display sidecar error becomes an honest, non-transient diagnosis" do
+      session = error_session("no_active_display")
+
+      context =
+        Map.merge(@context, %{
+          computer_use_session: session,
+          computer_use_config: Config.normalize(enabled: true)
+        })
+
+      assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert result.success == false
+      # Names the real cause (locked / asleep) and that retrying is futile; carries
+      # no app-specific example. The raw machine token never leaks to the model.
+      assert result.error =~ ~r/lock(ed)?/i
+      assert result.error =~ ~r/asleep|awake/i
+      refute result.error =~ "no_active_display"
+    end
+
+    test "an unrecognized sidecar error still surfaces verbatim (errors are never swallowed)" do
+      session = error_session("scale_factor: backend hiccup")
+
+      context =
+        Map.merge(@context, %{
+          computer_use_session: session,
+          computer_use_config: Config.normalize(enabled: true)
+        })
+
+      assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert result.success == false
+      assert result.error =~ "action failed:"
+      assert result.error =~ "scale_factor: backend hiccup"
     end
   end
 end
