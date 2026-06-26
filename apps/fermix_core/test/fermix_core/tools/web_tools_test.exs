@@ -78,6 +78,59 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert result.error =~ "too_large"
   end
 
+  test "web_fetch renders decoded JSON object responses" do
+    test_id = :"web_fetch_json_object_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(test_id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(
+        200,
+        Jason.encode!(%{
+          "Count" => 1,
+          "Items" => [%{"serviceName" => "Azure Kubernetes Service", "unitPrice" => 0.1}]
+        })
+      )
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    assert {:ok, result} =
+             WebFetch.execute(%{"url" => "https://example.com/prices"}, context)
+
+    assert result.success == true
+
+    assert Jason.decode!(result.output)["Items"] == [
+             %{"serviceName" => "Azure Kubernetes Service", "unitPrice" => 0.1}
+           ]
+  end
+
+  test "web_fetch renders decoded JSON array responses" do
+    test_id = :"web_fetch_json_array_#{System.unique_integer([:positive])}"
+
+    Req.Test.stub(test_id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(200, Jason.encode!([%{"id" => "microsoft/FastContext"}]))
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    assert {:ok, result} =
+             WebFetch.execute(%{"url" => "https://example.com/models"}, context)
+
+    assert result.success == true
+    assert Jason.decode!(result.output) == [%{"id" => "microsoft/FastContext"}]
+  end
+
   test "web_fetch pins the connection to the validated IP (F-04 rebinding)" do
     test_id = :"web_fetch_pin_#{System.unique_integer([:positive])}"
     test_pid = self()
