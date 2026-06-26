@@ -129,6 +129,9 @@ defmodule FermixCore.Tools.WebFetch do
     end
   end
 
+  defp render_response(%{body: body}) when is_map(body) or is_list(body),
+    do: Support.success_json(body)
+
   defp render_response(%{body: body}), do: {:ok, Tool.success(to_string(body))}
 
   defp stream_body({:data, data}, {req, %{body: body} = response}) when is_binary(data) do
