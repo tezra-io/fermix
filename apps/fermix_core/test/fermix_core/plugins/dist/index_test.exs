@@ -94,6 +94,25 @@ defmodule FermixCore.Plugins.Dist.IndexTest do
     end
   end
 
+  describe "bundled production index integrity" do
+    @zero_sha256 String.duplicate("0", 64)
+
+    test "no bundled artifact ships a placeholder all-zero sha256" do
+      assert {:ok, index} = Index.load([])
+
+      offenders =
+        for plugin <- index.plugins,
+            version <- plugin.versions,
+            artifact <- version.artifacts,
+            artifact.sha256 == @zero_sha256,
+            do: {plugin.name, version.version, artifact.target}
+
+      assert offenders == [],
+             "bundled index.json advertises unprovisionable artifacts " <>
+               "(all-zero sha256 placeholder): #{inspect(offenders)}"
+    end
+  end
+
   describe "find/2 and yanked?/3" do
     test "find returns the plugin; yanked? reflects the per-plugin yanked list" do
       {:ok, decoded} = Jason.decode(index_json("2026-06-07T00:00:00Z", [sample_plugin()]))

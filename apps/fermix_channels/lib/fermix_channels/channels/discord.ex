@@ -262,8 +262,8 @@ defmodule FermixChannels.Channels.Discord do
       {:ok, %{status: 200, body: body}} ->
         {:ok, IO.iodata_to_binary(body)}
 
-      {:ok, %{status: status, body: body}} ->
-        Logger.error("Discord media download failed: #{status} - #{inspect(body)}")
+      {:ok, %{status: status}} ->
+        Logger.error("Discord media download failed: status=#{status}")
         {:error, {:download_failed, status}}
 
       {:error, reason} ->
