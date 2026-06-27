@@ -80,6 +80,47 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     FermixTestSupport.SafeRm.rm_rf!(home)
   end
 
+  test "allowed_path?/3 with precomputed roots matches allowed_path?/2 decisions" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-precomputed")
+    File.mkdir_p!(Path.join(home, ".ssh"))
+    File.mkdir_p!(Path.join(home, "work"))
+    config = Config.normalize(mode: :open, home: home, workspace_root: home)
+
+    # The protected-roots walk happens once; the precomputed list must yield the
+    # exact same allow/deny decision as the self-computing /2 arity for every
+    # representative path (protected root, allowed path under root, OS root, outside).
+    roots = PathPolicy.protected_paths(config)
+
+    paths = [
+      Path.join(home, ".ssh/id_rsa"),
+      Path.join(home, "work/file.txt"),
+      "/etc/passwd",
+      Path.join(System.tmp_dir!(), "path-policy-elsewhere/file.txt")
+    ]
+
+    for path <- paths do
+      assert PathPolicy.allowed_path?(path, config, roots) ==
+               PathPolicy.allowed_path?(path, config)
+    end
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
+  test "resolve_working_dir/4 with precomputed roots matches resolve_working_dir/3" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-rwd")
+    config = Config.normalize(mode: :strict, workspace_root: root)
+    roots = PathPolicy.protected_paths(config)
+    context = %{cwd: root}
+
+    assert PathPolicy.resolve_working_dir(root, config, context, roots) ==
+             PathPolicy.resolve_working_dir(root, config, context)
+
+    assert PathPolicy.resolve_working_dir(nil, config, context, roots) ==
+             PathPolicy.resolve_working_dir(nil, config, context)
+
+    FermixTestSupport.SafeRm.rm_rf!(root)
+  end
+
   test "protects macOS private etc alias when present" do
     if File.exists?("/private/etc") do
       root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-private")

@@ -24,10 +24,12 @@ defmodule FermixCore.Sandbox do
           {:ok, %{working_dir: String.t(), env: [{String.t(), String.t()}]}} | {:error, term()}
   def shell_plan(command, requested_dir, context) when is_binary(command) and is_map(context) do
     config = config_from(context)
+    protected_roots = PathPolicy.protected_paths(config)
 
     with :allow <- hardline_decision(command, context),
-         {:ok, working_dir} <- resolve_working_dir(requested_dir, config, context),
-         :allow <- enforce(:exec, %{operation: :shell, working_dir: working_dir}, context),
+         {:ok, working_dir} <-
+           resolve_working_dir(requested_dir, config, context, protected_roots),
+         :allow <- enforce_exec(working_dir, context, config, protected_roots),
          {:ok, env} <- Env.build(config) do
       {:ok, %{working_dir: working_dir, env: env}}
     else
@@ -95,6 +97,23 @@ defmodule FermixCore.Sandbox do
     end
   end
 
+  # Exec decision for shell_plan: reuses the config + protected roots already
+  # resolved for the working-dir decision instead of re-resolving via enforce/3.
+  defp enforce_exec(working_dir, context, config, protected_roots) do
+    request = %{operation: :shell, working_dir: working_dir}
+
+    working_dir
+    |> path_decision(config, protected_roots)
+    |> Decision.emit(metadata(:exec, request, context))
+  end
+
+  defp path_decision(path, config, protected_roots) do
+    case PathPolicy.allowed_path?(path, config, protected_roots) do
+      :ok -> :allow
+      {:error, reason} -> {:deny, reason}
+    end
+  end
+
   defp hardline_decision(command, context) do
     case Hardline.classify(command) do
       :allow ->
@@ -105,8 +124,8 @@ defmodule FermixCore.Sandbox do
     end
   end
 
-  defp resolve_working_dir(requested_dir, config, context) do
-    case PathPolicy.resolve_working_dir(requested_dir, config, context) do
+  defp resolve_working_dir(requested_dir, config, context, protected_roots) do
+    case PathPolicy.resolve_working_dir(requested_dir, config, context, protected_roots) do
       {:ok, dir} ->
         {:ok, dir}
 
