@@ -3,6 +3,7 @@ defmodule FermixCore.Browser.ProfileManagerTest do
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.ProfileManager
+  alias FermixCore.Browser.Scope
 
   # A stand-in for ProfileServer that registers itself in the manager's
   # registry exactly like the real one, but never launches Chrome.
@@ -134,8 +135,8 @@ defmodule FermixCore.Browser.ProfileManagerTest do
   test "reap_conversation stops the browser for that conversation's owner only", ctx do
     keep = {"telegram", "chat-keep", :root}
     reap = {"cli", "sess-reap", :root}
-    {:ok, keep_owner} = FermixCore.Browser.Scope.owner_key(%{conversation_key: keep})
-    {:ok, reap_owner} = FermixCore.Browser.Scope.owner_key(%{conversation_key: reap})
+    {:ok, keep_owner} = Scope.owner_key(%{conversation_key: keep})
+    {:ok, reap_owner} = Scope.owner_key(%{conversation_key: reap})
 
     assert {:ok, keep_pid} = start(ctx.manager, keep_owner, "fermix", ctx.config)
     assert {:ok, reap_pid} = start(ctx.manager, reap_owner, "fermix", ctx.config)
