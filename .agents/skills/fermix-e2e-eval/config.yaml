@@ -18,7 +18,8 @@ opik:
   # Local Opik REST base (no trailing slash). Env: OPIK_BASE_URL.
   base_url: "http://localhost:5173/api/v1/private"
   # Project the dev daemon exports to. Env: OPIK_PROJECT.
-  project: "fermix"
+  # The source-built dev daemon (mix fermix.dev) uses "fermix-dev" from config/dev.exs.
+  project: "fermix-dev"
   # How long to wait for a turn's trace to appear after `fermix ask` returns.
   poll_timeout_s: 90
   poll_interval_s: 2

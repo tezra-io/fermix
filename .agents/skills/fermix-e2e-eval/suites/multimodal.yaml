@@ -1,0 +1,144 @@
+suite: multimodal
+title: "Inbound multimodal — images reach and are understood by the model"
+description: >
+  Verifies an inbound image attachment is materialized at the gateway, encoded as
+  a provider image content part, and actually understood by the model (M14). Real
+  channel media cannot be synthesized through `fermix ask`, so these cases use
+  drive: telegram_operator and run only with --operator (like the streaming suite).
+  OPERATOR INSTRUCTION: when prompted to send the marked message, attach a PHOTO
+  to the dev Telegram bot and put the prompted text (which carries the eval marker)
+  in the photo's CAPTION — the marker must be in the caption so the runner can
+  correlate the resulting telegram trace. The non-vision-route fail-loud boundary
+  is covered by deterministic unit tests (ModelCatalog.vision?/RouteResolver),
+  not here, because the eval daemon runs a vision-capable model.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+scenarios:
+  # Automated (no operator): a bundled known-content image is injected through
+  # `fermix ask --attach`, which carries it via the same gateway → turn_runner →
+  # provider-encoder spine a channel image would. The fixture is a solid red
+  # square, so the model must say "red".
+  - id: image_described_auto
+    title: "A bundled sample image is read via `fermix ask --attach`"
+    severity: critical
+    tags: [multimodal, vision, automated]
+    cases:
+      - id: red_square_colour
+        image: fixtures/red_square.png
+        query: "What is the dominant colour of this image? Answer with the colour name."
+        expect:
+          main_model_matches: "."
+          reply_matches: "(?i)\\bred\\b"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open)"
+        rubric: "Identifies the image as predominantly red."
+      - id: red_square_describe
+        image: fixtures/red_square.png
+        query: "Describe this image in a few words."
+        expect:
+          reply_matches: "(?i)(red|square|colou?r)"
+          reply_not_matches: "(?i)(can't|cannot|unable to) (see|view)"
+        rubric: "Describes a solid red square / red image."
+      - id: red_square_choice
+        image: fixtures/red_square.png
+        query: "Is this image mostly red, green, or blue?"
+        expect:
+          reply_matches: "(?i)\\bred\\b"
+        rubric: "Answers red."
+
+  # OCR: a bundled image with rendered text ("ALPHA 42"). The model must read it
+  # back, so the assertion is exact-string, not a fuzzy description.
+  - id: image_text_auto
+    title: "A bundled text image is read back via `fermix ask --attach`"
+    severity: critical
+    tags: [multimodal, vision, ocr, automated]
+    cases:
+      - id: read_text_alpha
+        image: fixtures/text_alpha.png
+        query: "Read the text shown in this image and quote it exactly."
+        expect:
+          main_model_matches: "."
+          reply_matches: "(?i)alpha"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|read|open)"
+        rubric: "Reads back the text ALPHA 42 (at least the word ALPHA) from the image."
+      - id: read_text_bravo
+        image: fixtures/text_bravo.png
+        query: "Read the text shown in this image and quote it exactly."
+        expect:
+          reply_matches: "(?i)bravo"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|read|open)"
+        rubric: "Reads back the text BRAVO 73 (at least the word BRAVO) from the image."
+
+  # Multi-image / album: TWO bundled images in one turn must BOTH reach the model
+  # (the bug class behind album coalescing — "2 images, sees only 1"). Each image
+  # carries a distinct token, so the reply must mention BOTH ALPHA and BRAVO.
+  - id: images_multi_auto
+    title: "Two images attached in one turn are BOTH understood"
+    severity: critical
+    tags: [multimodal, vision, multi-image, automated]
+    cases:
+      - id: read_both_labels
+        images:
+          - fixtures/text_alpha.png
+          - fixtures/text_bravo.png
+        query: "There are two images here. Read the text in each one and list both."
+        expect:
+          main_model_matches: "."
+          # A single regex requiring BOTH tokens (grader uses re.search, no
+          # DOTALL → match across newlines with [\\s\\S]).
+          reply_matches: "(?i)(?=[\\s\\S]*\\balpha\\b)(?=[\\s\\S]*\\bbravo\\b)"
+          reply_not_matches: "(?i)(only|just) (one|a single|1) image"
+        rubric: >
+          Reads BOTH images — mentions ALPHA (42) and BRAVO (73). Fails if it sees
+          only one image or omits either label.
+      - id: read_both_numbers
+        images:
+          - fixtures/text_alpha.png
+          - fixtures/text_bravo.png
+        query: "List every number you can see across these images."
+        expect:
+          # Both numbers (42 and 73) present → both images were read, not just one.
+          reply_matches: "(?i)(?=[\\s\\S]*\\b42\\b)(?=[\\s\\S]*\\b73\\b)"
+        rubric: "Reports both numbers 42 and 73 — proof both images reached the model."
+
+  - id: image_described
+    title: "A photo with a caption is read and described"
+    severity: critical
+    tags: [multimodal, vision, core]
+    cases:
+      - id: photo_describe
+        drive: telegram_operator
+        query: "Describe what is in this image in one sentence."
+        expect:
+          # A main model turn served the reply (sanity: the turn actually ran).
+          main_model_matches: "."
+          # The model must say something concrete about the picture — NOT claim it
+          # cannot see an image (the pre-M14 failure mode).
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open).{0,20}(image|picture|photo|attach)"
+        rubric: >
+          Accurately describes the visible content of the operator-sent photo.
+          Fails if it claims it cannot see the image.
+      - id: photo_read_text
+        drive: telegram_operator
+        query: "Read any text shown in this image and quote it back."
+        expect:
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open).{0,20}(image|picture|photo|attach)"
+        rubric: >
+          Transcribes or describes the text visible in the operator-sent photo;
+          does not claim it cannot see the image.
+  - id: image_plus_question
+    title: "A photo plus a specific question about it"
+    severity: normal
+    tags: [multimodal, vision]
+    cases:
+      - id: photo_count
+        drive: telegram_operator
+        query: "How many distinct objects are in this photo? Give a number."
+        rubric: "Gives a plausible count grounded in the actual photo contents."
+      - id: photo_colour
+        drive: telegram_operator
+        query: "What is the dominant colour in this image?"
+        rubric: "Names a colour consistent with the operator-sent photo."
