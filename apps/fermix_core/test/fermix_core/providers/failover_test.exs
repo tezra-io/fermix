@@ -274,25 +274,24 @@ defmodule FermixCore.Providers.FailoverTest do
     {:ok, agent} = start_supervised({Agent, fn -> %{remaining: responses, calls: %{}} end})
 
     attempt = fn {route_key, _opts} ->
-      Agent.get_and_update(agent, fn st ->
-        provider = route_key.provider
-
-        {result, rest} =
-          case Map.fetch!(st.remaining, provider) do
-            [only] -> {only, [only]}
-            [head | tail] -> {head, tail}
-          end
-
-        st = %{
-          st
-          | remaining: Map.put(st.remaining, provider, rest),
-            calls: Map.update(st.calls, provider, 1, &(&1 + 1))
-        }
-
-        {result, st}
-      end)
+      Agent.get_and_update(agent, &pop_response(&1, route_key.provider))
     end
 
     {attempt, fn -> Agent.get(agent, & &1.calls) end}
   end
+
+  defp pop_response(st, provider) do
+    {result, rest} = next_response(Map.fetch!(st.remaining, provider))
+
+    st = %{
+      st
+      | remaining: Map.put(st.remaining, provider, rest),
+        calls: Map.update(st.calls, provider, 1, &(&1 + 1))
+    }
+
+    {result, st}
+  end
+
+  defp next_response([only]), do: {only, [only]}
+  defp next_response([head | tail]), do: {head, tail}
 end
