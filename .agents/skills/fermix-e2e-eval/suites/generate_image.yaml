@@ -1,0 +1,151 @@
+# Media generation — the generate_image builtin (create + edit).
+#
+# PHILOSOPHY (UAT, not spoon-fed): a real user says "make me a picture of X" or
+# "edit this image", never "call generate_image". So every query states intent
+# and the MODEL decides the tool. Route is asserted in exactly two LABELED sanity
+# scenarios (one for create, one for edit) — everywhere else we gate on the
+# OUTCOME (the turn completed and the reply is honest), not on which tool fired.
+#
+# CLI HAS NO MEDIA REPLY PORT. The harness drives the local `cli` channel, whose
+# reply_fn returns {:error, :media_unsupported} for a media part (cli.ex). So a
+# successful generate_image here ALWAYS plays out as: the image IS generated (the
+# provider call runs and spends real credits) and written under the sandbox
+# `media/` floor, then the channel delivery fails with media_unsupported — so the
+# generate_image tool span carries error_info. That tool-error outcome is
+# EXPECTED, exactly like the send_attachment suite: these cases deliberately do
+# NOT assert no_tool_errors and the suite does not default it on. The turn itself
+# still completes (status ok) and the model reports the generated image / the
+# delivery limitation. (The clean file-only success — delivered?: false, no tool
+# error — only happens when there is NO reply_fn at all, i.e. a subagent or
+# scheduled job; that path is covered by deterministic unit tests, not here.)
+#
+# PRECONDITION: the dev daemon must run with the OpenAI image backend enabled:
+#
+#   [fermix_core.tools.generate_image]
+#   backend = "openai"
+#
+# and a valid OpenAI key (the same provider key the chat backend uses). With the
+# block absent the tool is not registered and the create/edit sanity scenarios
+# fail loudly on their tools_any gate — that is the signal you are pointed at the
+# wrong daemon, not a bug (same contract as tool_search.yaml's flag precondition).
+#
+# COST NOTE: image generation is modeled as a provider call with tokens: %{}, so
+# it contributes ZERO to the trace's estimated cost — `max_cost_usd` only bounds
+# the agent's text reasoning. But each case still spends real OpenAI image
+# credits for the picture it renders before delivery fails.
+#
+# After generate_image renders the image, media_unsupported hits and the model
+# (at high effort) typically tries shell + send_attachment alternatives before
+# giving up and replying honestly. This adds ~80k–150k tokens (~$0.5–0.9) of
+# reasoning cost on top of the nominal call. max_cost_usd is set to $1.20 for
+# edit/UAT cases to tolerate this variation without masking a real runaway loop
+# (which would exceed even $1.20). Six renders per full run; run explicitly:
+#   uv run bin/run_eval.py --suite generate_image
+suite: generate_image
+title: "Media generation — generate_image (create + edit) via the OpenAI backend"
+description: >
+  Exercises the generate_image builtin end to end against the OpenAI image
+  backend: a text prompt renders an image (create), and an inbound image is
+  edited (edit + inbound:last resolution). The CLI channel cannot carry media, so
+  delivery fails with media_unsupported on every case — that tool error is
+  expected and the gates tolerate it; they assert the turn completed, the route
+  fired for the two labeled sanity scenarios, and the reply is honest about what
+  happened (no fabricated "I sent it to you").
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  # Labeled CREATE sanity — the one place we pin that the create route fires.
+  - id: generate_image_route
+    title: "An explicit 'make me an image' request routes to generate_image"
+    severity: critical
+    tags: [media, generate_image, create, sanity, route]
+    cases:
+      - id: watercolor_fox
+        query: "Generate an image of a watercolor fox sitting in autumn leaves."
+        expect:
+          tools_any: [generate_image]
+          reply_matches: "(?i)image|generat|creat|render|pictur|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          max_cost_usd: 0.6
+          max_duration_ms: 150000
+        rubric: >
+          Calls generate_image to render the watercolor fox. The image is
+          generated and written; because the CLI channel can't carry media the
+          reply either reports the saved image or explains the channel can't send
+          it. Does NOT falsely claim the image was delivered to the user.
+      - id: isometric_cabin
+        query: "Please create a picture: a cozy isometric cabin in a snowy forest at dusk."
+        expect:
+          tools_any: [generate_image]
+          reply_matches: "(?i)image|generat|creat|render|pictur|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          max_cost_usd: 0.6
+          max_duration_ms: 150000
+        rubric: >
+          Calls generate_image for the cabin scene. Reports the generated image or
+          the delivery limitation honestly; no invented successful delivery.
+
+  # Labeled EDIT sanity — exercises operation: edit AND inbound:last resolution.
+  # The fixture rides `fermix ask --attach` through the same gateway →
+  # turn_runner → inbound_images spine a real channel image would, so an edit can
+  # resolve `inbound:last`.
+  - id: edit_inbound_image
+    title: "An 'edit the image I just sent' request routes to generate_image (edit)"
+    severity: critical
+    tags: [media, generate_image, edit, inbound, sanity, route]
+    cases:
+      - id: recolor_attached
+        image: fixtures/red_square.png
+        query: "Take the image I just sent and turn the background a deep ocean blue."
+        expect:
+          tools_any: [generate_image]
+          reply_matches: "(?i)image|edit|blue|generat|render|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          max_cost_usd: 1.20
+          max_duration_ms: 180000
+        rubric: >
+          Calls generate_image in edit mode against the attached image
+          (input_image inbound:last). The edited image is produced and written;
+          the reply reports it or the channel's inability to send it, without
+          claiming a delivery that did not happen.
+      - id: add_to_attached
+        image: fixtures/red_square.png
+        query: "Edit the picture I attached: add a small yellow star in the centre."
+        expect:
+          tools_any: [generate_image]
+          reply_matches: "(?i)image|edit|star|generat|render|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          max_cost_usd: 1.20
+          max_duration_ms: 180000
+        rubric: >
+          Calls generate_image (edit) on the attached image and reports the result
+          honestly. No fabricated delivery to the user.
+
+  # Pure UAT — intent only, NO route assertion. The model picks the tool; we gate
+  # on the turn completing and an honest reply. (Same outcome-only stance the
+  # other capability suites take outside their one labeled sanity case.)
+  - id: generate_real_intent
+    title: "Real-user image requests, model picks the route"
+    severity: normal
+    tags: [media, generate_image, create, uat]
+    cases:
+      - id: logo_idea
+        query: "I need a simple flat logo for a coffee shop called 'Ember' — can you make one?"
+        expect:
+          reply_matches: "(?i)image|logo|generat|creat|render|design|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          max_cost_usd: 1.20
+          max_duration_ms: 150000
+        rubric: >
+          Treats this as an image-generation request (rendering an Ember logo),
+          not a text description of one. If it renders, it reports the image or the
+          channel limit honestly; it does not pretend a file was delivered.
+      - id: birthday_card
+        query: "Make me a birthday card image with balloons and confetti for my friend Sam."
+        expect:
+          reply_matches: "(?i)image|card|generat|creat|render|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          max_cost_usd: 1.20
+          max_duration_ms: 150000
+        rubric: >
+          Renders a birthday-card image (rather than only describing one) and
+          reports the outcome honestly, including the channel's inability to
+          deliver media if it surfaces. No invented successful send.
