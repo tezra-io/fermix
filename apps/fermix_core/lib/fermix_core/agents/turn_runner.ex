@@ -88,12 +88,19 @@ defmodule FermixCore.Agents.TurnRunner do
 
     maybe_start_memory_review(msg, turn_state)
 
-    maybe_auto_compact(
-      conversation_key,
-      turn_state,
-      compaction_target(turn_state),
-      context_tokens
-    )
+    result =
+      maybe_auto_compact(
+        conversation_key,
+        turn_state,
+        compaction_target(turn_state),
+        context_tokens
+      )
+
+    # Carry this turn's real peak so the NEXT turn's preflight gate reads it
+    # (same real measure as this post-delivery gate). Best-effort, off the
+    # reply path — mirrors clear_auto_compaction_failure.
+    record_context_tokens_peak(turn_state, conversation_key, context_tokens)
+    result
   end
 
   @doc "Map an agent-loop error reason to the user-facing reply text."
@@ -185,7 +192,7 @@ defmodule FermixCore.Agents.TurnRunner do
     user_message = build_user_message(msg)
 
     {history, preflight_compaction} =
-      maybe_preflight_auto_compact(conversation_key, state, profile, history, user_message)
+      maybe_preflight_auto_compact(conversation_key, state, history)
 
     maybe_notify_preflight_compacted(preflight_compaction, deliver)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
@@ -602,7 +609,7 @@ defmodule FermixCore.Agents.TurnRunner do
     Code.ensure_loaded?(mod) and function_exported?(mod, :chat, 3)
   end
 
-  defp maybe_preflight_auto_compact(conversation_key, state, profile, history, user_message) do
+  defp maybe_preflight_auto_compact(conversation_key, state, history) do
     config = Application.get_env(:fermix_core, :compaction, [])
 
     cond do
@@ -614,35 +621,50 @@ defmodule FermixCore.Agents.TurnRunner do
         {history, :ok}
 
       true ->
-        preflight_auto_compact_now(
-          conversation_key,
-          state,
-          profile,
-          history,
-          user_message,
-          config
-        )
+        preflight_auto_compact_now(conversation_key, state, history, config)
     end
   end
 
-  defp preflight_auto_compact_now(conversation_key, state, profile, history, user_message, config) do
+  # Gate the preflight compaction on the REAL provider-reported context_tokens
+  # carried from the prior turn (turn_state.last_context_tokens, set at
+  # checkout), so preflight behaves identically to the post-delivery gate. A 0
+  # means no prior measurement exists (cold/first turn, or first turn after a
+  # daemon restart): skip cleanly — there is NO byte-estimate fallback on the
+  # trigger path. Post-delivery still catches an over-budget turn this turn.
+  defp preflight_auto_compact_now(conversation_key, state, history, config) do
+    context_tokens = Map.get(state, :last_context_tokens, 0)
+
+    if context_tokens <= 0 do
+      emit_auto_compaction_skipped(conversation_key, :no_prior_measurement)
+      {history, :ok}
+    else
+      preflight_compact_if_over_threshold(
+        conversation_key,
+        state,
+        history,
+        config,
+        context_tokens
+      )
+    end
+  end
+
+  defp preflight_compact_if_over_threshold(
+         conversation_key,
+         state,
+         history,
+         config,
+         context_tokens
+       ) do
     {_adapter, [{lead_key, _lead_opts} | _rest]} = target = compaction_target(state)
     context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
-    prompt_tokens = preflight_prompt_tokens(state.runtime_context, profile, history, user_message)
 
-    if prompt_tokens / context_window >= threshold do
+    if context_tokens / context_window >= threshold do
       compact_preflight_history(conversation_key, history, state, target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
       {history, :ok}
     end
-  end
-
-  defp preflight_prompt_tokens(ctx, profile, history, user_message) do
-    ctx
-    |> RuntimeContext.messages_for(profile, history, user_message)
-    |> Compactor.estimate_tokens()
   end
 
   defp compact_preflight_history(conversation_key, history, state, target, config) do
@@ -888,6 +910,22 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp clear_auto_compaction_failure(state, conversation_key) do
     GenServer.cast(state.main_agent_server, {:clear_auto_compaction_failure, conversation_key})
+    :ok
+  end
+
+  # Best-effort: a missing/restarting MainAgent must not crash the commit (which
+  # runs after the reply is delivered). A 0 means no provider call this turn —
+  # skip, so a no-op turn never overwrites a real peak.
+  defp record_context_tokens_peak(%{main_agent_server: nil}, _conversation_key, _tokens), do: :ok
+
+  defp record_context_tokens_peak(state, _conversation_key, _tokens)
+       when not is_map_key(state, :main_agent_server),
+       do: :ok
+
+  defp record_context_tokens_peak(_state, _conversation_key, tokens) when tokens <= 0, do: :ok
+
+  defp record_context_tokens_peak(state, conversation_key, tokens) do
+    MainAgent.record_context_tokens(state.main_agent_server, conversation_key, tokens)
     :ok
   end
 
