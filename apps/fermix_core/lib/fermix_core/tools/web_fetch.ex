@@ -122,7 +122,7 @@ defmodule FermixCore.Tools.WebFetch do
   end
 
   defp render_response(%{body: body}) when is_binary(body) do
-    with {:ok, doc} <- Floki.parse_document(body) do
+    with {:ok, doc} <- Floki.parse_document(ensure_utf8(body)) do
       {:ok, Tool.success(HtmlText.extract(doc))}
     else
       {:error, reason} -> Support.error("parse_failed: #{inspect(reason)}")
@@ -133,6 +133,24 @@ defmodule FermixCore.Tools.WebFetch do
     do: Support.success_json(body)
 
   defp render_response(%{body: body}), do: {:ok, Tool.success(to_string(body))}
+
+  # Fetched pages arrive in arbitrary charsets; a non-UTF-8 body (e.g. a Latin-1
+  # page) carries invalid byte sequences that make the unicode-flagged regex in
+  # the text renderer raise (`:re.run` badarg, crashing the tool) and would also
+  # break JSON-encoding the result. Replace invalid sequences with U+FFFD so the
+  # whole pipeline — Floki, HtmlText, and the returned text — is valid UTF-8.
+  # A valid body (the common case) is returned unchanged.
+  defp ensure_utf8(body) when is_binary(body) do
+    if String.valid?(body), do: body, else: scrub_utf8(body, <<>>)
+  end
+
+  defp scrub_utf8(<<>>, acc), do: acc
+
+  defp scrub_utf8(<<codepoint::utf8, rest::binary>>, acc),
+    do: scrub_utf8(rest, acc <> <<codepoint::utf8>>)
+
+  defp scrub_utf8(<<_byte, rest::binary>>, acc),
+    do: scrub_utf8(rest, acc <> "�")
 
   defp stream_body({:data, data}, {req, %{body: body} = response}) when is_binary(data) do
     next_size = byte_size(body) + byte_size(data)
