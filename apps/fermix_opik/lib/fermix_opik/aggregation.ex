@@ -113,19 +113,24 @@ defmodule FermixOpik.Aggregation do
   # never a root run (the stream has no parent_session of its own). Interim
   # draft :edit phases are deliberately not exported: at ~1 edit/s they would
   # flood the trace; the seal span carries total_edits/dropped_snapshots
-  # instead. :block phases (one per sent chunk, a handful per turn) do export.
+  # instead. :block phases (one per sent chunk, a handful per turn) export too,
+  # but only while the run's session is still open (see below).
   def apply_event(state, [:fermix, :channel, :stream], meas, meta, at) do
     case Map.get(meta, :phase) do
-      phase when phase in [:open, :block] ->
+      :open ->
+        # :open fires on the first edit/block, always during the agent loop, so
+        # the run's session is guaranteed open — safe to create the child span.
         add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
 
-      phase when phase in [:seal, :discard] ->
-        # Terminal phases can arrive after the turn's `agent.message` already
-        # closed and shipped the trace (the draft is sealed just after the turn
-        # completes). Creating a span here via `place_under` would lazily
-        # resurrect a phantom empty trace — no input/output, no thread (stream
-        # telemetry carries no chat_id) — that the sweep later flushes to Opik.
-        # So attach only while the run's session is still open; otherwise drop.
+      phase when phase in [:block, :seal, :discard] ->
+        # These phases can arrive AFTER the turn's `agent.message` already closed
+        # and shipped the trace: :seal/:discard fire just as the turn completes,
+        # and in block streaming a paced :block edit (~1s throttle / idle flush)
+        # can land after completion too. Creating a span here via `place_under`
+        # would lazily resurrect a phantom empty trace — no input/output, no
+        # thread (stream telemetry carries no chat_id) — that the sweep later
+        # flushes to Opik. So attach only while the run's session is still open;
+        # otherwise drop (the seal span already carries the aggregate counts).
         attach_if_open(state, meta, at, &Mapper.stream_span(meta, meas, &1))
 
       _other ->
