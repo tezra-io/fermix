@@ -38,7 +38,8 @@ defmodule Mix.Tasks.Fermix.Bench.Diff do
     |> Enum.sort_by(fn row -> {row.scenario, row.stage} end)
     |> Enum.each(fn row ->
       Mix.shell().info(
-        "#{row.scenario}/#{row.stage}: #{row.old_p95_us}us -> #{row.new_p95_us}us #{row.status}"
+        "#{row.scenario}/#{row.stage}: p50 #{row.old_p50_us}us -> #{row.new_p50_us}us " <>
+          "(p95 #{row.old_p95_us}->#{row.new_p95_us}) #{row.status}"
       )
     end)
   end
