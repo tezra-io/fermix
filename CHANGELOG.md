@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.0-beta] - 2026-06-26
+## [0.4.0] - 2026-06-26
 
 ### Added — Media Generation (M15)
 - `generate_image` built-in tool over a modular `FermixCore.Media.Backend`
