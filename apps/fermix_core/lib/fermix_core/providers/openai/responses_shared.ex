@@ -89,17 +89,40 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     tools
   end
 
-  @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
-  def request_metrics(input, instructions, tools, capabilities)
-      when is_list(input) and is_list(tools) and is_list(capabilities) do
+  @doc """
+  The per-call request-metric fields: they change on every provider call as the
+  item list and instructions grow across the agent loop, so they are recomputed
+  each turn.
+  """
+  @spec input_metrics([map()], String.t() | nil) :: map()
+  def input_metrics(input, instructions) when is_list(input) do
     %{
       input_items: length(input),
       input_bytes: encoded_size(input),
-      instructions_bytes: string_size(instructions),
+      instructions_bytes: string_size(instructions)
+    }
+  end
+
+  @doc """
+  The turn-invariant request-metric fields: tools and capabilities do not change
+  across the continuation loop, so `encoded_size(tools)` is computed once on the
+  initial call and carried (via `provider_state`/`turn_state`) into every
+  continuation, which merges it onto the recomputed `input_metrics/2`.
+  """
+  @spec invariant_metrics([map()], [Capability.t()]) :: map()
+  def invariant_metrics(tools, capabilities)
+      when is_list(tools) and is_list(capabilities) do
+    %{
       tools_count: length(tools),
       tools_bytes: encoded_size(tools),
       capabilities_count: length(capabilities)
     }
+  end
+
+  @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
+  def request_metrics(input, instructions, tools, capabilities)
+      when is_list(input) and is_list(tools) and is_list(capabilities) do
+    Map.merge(input_metrics(input, instructions), invariant_metrics(tools, capabilities))
   end
 
   @spec build_input([map()]) :: {String.t() | nil, [map()]}
@@ -256,9 +279,9 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     )
   end
 
-  @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()]) ::
+  @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()], map() | nil) ::
           {:ok, map()}
-  def build_turn(body, fallback_model, input, tools, capabilities) do
+  def build_turn(body, fallback_model, input, tools, capabilities, invariant_metrics \\ nil) do
     output_items = Map.get(body, "output") || []
     usage = Map.get(body, "usage") || %{}
 
@@ -278,7 +301,8 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
          input: input,
          output_items: output_items,
          tools: tools,
-         capabilities: capabilities
+         capabilities: capabilities,
+         invariant_metrics: invariant_metrics
        },
        usage: %{
          prompt_tokens: prompt,

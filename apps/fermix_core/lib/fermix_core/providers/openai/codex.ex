@@ -62,6 +62,7 @@ defmodule FermixCore.Providers.OpenAI.Codex do
     # instructions, so the composed prefix stays byte-stable for caching.
     resolved_instructions = ModelOverlays.apply_codex(instructions || @default_instructions)
     tools = ResponsesShared.to_provider_tools(capabilities)
+    invariant_metrics = ResponsesShared.invariant_metrics(tools, capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
 
     reasoning =
@@ -96,8 +97,9 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
       fast: Keyword.get(opts, :fast, false) == true,
+      invariant_metrics: invariant_metrics,
       request_metrics:
-        ResponsesShared.request_metrics(input, resolved_instructions, tools, capabilities)
+        Map.merge(ResponsesShared.input_metrics(input, resolved_instructions), invariant_metrics)
     }
 
     post(url, body, auth, req_options, turn_state, Keyword.get(opts, :stream_callback))
@@ -123,6 +125,13 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       capabilities: caps,
       instructions: instructions
     } = provider_state
+
+    # invariant_metrics is precomputed once per turn in the chat/continue path
+    # and carried in provider_state; recompute here only if an isolated caller
+    # built the state without it (identical value — memoization, not a fallback).
+    invariant_metrics =
+      Map.get(provider_state, :invariant_metrics) ||
+        ResponsesShared.invariant_metrics(tools, caps)
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
 
@@ -163,7 +172,9 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
       fast: Keyword.get(opts, :fast, false) == true,
-      request_metrics: ResponsesShared.request_metrics(next_input, instructions, tools, caps)
+      invariant_metrics: invariant_metrics,
+      request_metrics:
+        Map.merge(ResponsesShared.input_metrics(next_input, instructions), invariant_metrics)
     }
 
     post(url, body, auth, req_options, turn_state, Keyword.get(opts, :stream_callback))
@@ -344,7 +355,8 @@ defmodule FermixCore.Providers.OpenAI.Codex do
            turn_state.model,
            turn_state.input,
            turn_state.tools,
-           turn_state.capabilities
+           turn_state.capabilities,
+           turn_state.invariant_metrics
          ) do
       {:ok, turn} ->
         provider_state =
