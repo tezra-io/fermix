@@ -28,6 +28,32 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert result.output =~ "Hello [world](/x)"
   end
 
+  test "web_fetch scrubs invalid UTF-8 (Latin-1 page) instead of raising on the renderer regex" do
+    test_id = :"web_fetch_latin1_#{System.unique_integer([:positive])}"
+
+    # 0xE8 is 'è' in Latin-1 but an invalid UTF-8 lead byte. "info[1]" makes the
+    # renderer's u-flagged `alnum\[` regex run over the bad byte — the crash path.
+    body = <<"<p>Terminal Crociere ", 0xE8, " info[1]</p>">>
+
+    Req.Test.stub(test_id, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("text/html")
+      |> Plug.Conn.resp(200, body)
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    assert {:ok, result} = WebFetch.execute(%{"url" => "https://example.com/it"}, context)
+
+    assert result.success == true
+    assert String.valid?(result.output)
+    assert result.output =~ "Terminal Crociere"
+  end
+
   test "web_fetch streams response body through a bounded collector" do
     test_id = :"web_fetch_stream_#{System.unique_integer([:positive])}"
     test_pid = self()
