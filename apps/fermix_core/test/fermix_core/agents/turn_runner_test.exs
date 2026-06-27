@@ -36,6 +36,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       send(state.test_pid, {:compaction_failure_cleared, key})
       {:noreply, state}
     end
+
+    def handle_cast({:record_context_tokens, key, tokens}, state) do
+      send(state.test_pid, {:context_tokens_recorded, key, tokens})
+      {:noreply, state}
+    end
   end
 
   defmodule SummaryAdapter do
@@ -357,6 +362,9 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert_receive {:runtime_invalidated, :compaction}, 5_000
       assert_receive {:compaction_failure_cleared, ^conversation_key}, 5_000
 
+      # The real peak is carried to MainAgent for the next turn's preflight gate.
+      assert_receive {:context_tokens_recorded, ^conversation_key, 50_000}, 5_000
+
       history = ConversationStore.get_history(conversation_key, server: store)
       assert Enum.any?(history, &String.contains?(&1.content, "summary from commit"))
       assert List.last(history).content == "assistant reply"
@@ -523,7 +531,10 @@ defmodule FermixCore.Agents.TurnRunnerTest do
           adapter: PreflightAdapter,
           adapter_opts: [model: "mock-model", test_pid: self()],
           capability_registry: registry_name,
-          conversation_store: store
+          conversation_store: store,
+          # Real provider-reported peak from the prior turn (mock-model context
+          # window is 100_000; threshold 0.1 => 10_000). 50_000 is over.
+          last_context_tokens: 50_000
         )
 
       deliver = fn {:text, text} -> send(self(), {:reply, text}) end
@@ -541,6 +552,117 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert main_text =~ "preflight summary"
       assert main_text =~ "latest question"
       refute main_text =~ old_content
+    end
+
+    test "preflight skips when the carried context_tokens is under threshold, despite large history" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.1,
+        reasoning_effort: :medium
+      )
+
+      registry_name =
+        :"turn_runner_preflight_under_registry_#{System.unique_integer([:positive])}"
+
+      store_name = :"turn_runner_preflight_under_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "preflight_under_threshold"
+      conversation_key = {"telegram", chat_id, :root}
+      # Large enough that a byte-estimate trigger WOULD compact — proving the
+      # gate now reads the carried real token count, not the history bytes.
+      old_content = String.duplicate("old context ", 25_000)
+
+      ConversationStore.add_message(conversation_key, "user", old_content, server: store)
+      ConversationStore.add_message(conversation_key, "assistant", "old answer", server: store)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "latest question",
+        source_trust: :operator
+      }
+
+      turn_state =
+        turn_state(
+          adapter: PreflightAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store,
+          # 5_000 / 100_000 = 0.05, under the 0.1 threshold.
+          last_context_tokens: 5_000
+        )
+
+      deliver = fn {:text, text} -> send(self(), {:reply, text}) end
+
+      assert {:ok, "assistant after preflight", _context_tokens} =
+               TurnRunner.run(msg, turn_state, deliver)
+
+      refute_receive {:preflight_summary_call, _text}, 200
+      refute_receive {:reply, _notice}, 200
+
+      assert_receive {:preflight_main_call, main_text}, 5_000
+      # History was NOT trimmed — the big old content still reaches the model.
+      assert main_text =~ old_content
+    end
+
+    test "preflight skips cleanly when no prior context_tokens was measured (cold turn)" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.1,
+        reasoning_effort: :medium
+      )
+
+      registry_name = :"turn_runner_preflight_cold_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_preflight_cold_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "preflight_cold_turn"
+      conversation_key = {"telegram", chat_id, :root}
+      old_content = String.duplicate("old context ", 25_000)
+
+      ConversationStore.add_message(conversation_key, "user", old_content, server: store)
+      ConversationStore.add_message(conversation_key, "assistant", "old answer", server: store)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "latest question",
+        source_trust: :operator
+      }
+
+      # No last_context_tokens set: a cold conversation (or first turn after a
+      # daemon restart) has no prior real measurement and must skip preflight.
+      turn_state =
+        turn_state(
+          adapter: PreflightAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        )
+
+      deliver = fn {:text, text} -> send(self(), {:reply, text}) end
+
+      assert {:ok, "assistant after preflight", _context_tokens} =
+               TurnRunner.run(msg, turn_state, deliver)
+
+      refute_receive {:preflight_summary_call, _text}, 200
+      refute_receive {:reply, _notice}, 200
+      assert_receive {:preflight_main_call, _main_text}, 5_000
     end
   end
 
