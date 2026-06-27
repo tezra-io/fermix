@@ -40,6 +40,11 @@ defmodule FermixChannels.Gateway.Queue do
                          "It is kept here for context only — I should not act on it now " <>
                          "unless asked again.)"
 
+  # Delivered when a successful turn returns blank content (an empty model
+  # completion). The empty response is never committed, so it cannot poison
+  # replayed history; the user gets an honest prompt to retry.
+  @empty_completion_reply "I didn't get a response — please try again."
+
   @type status :: %{
           active_conversations: non_neg_integer(),
           pending_conversations: non_neg_integer(),
@@ -345,17 +350,28 @@ defmodule FermixChannels.Gateway.Queue do
     result =
       case run_turn(runner, core_msg, turn_state, turn.deliver, turn.stream_callback) do
         {:ok, response, context_tokens} ->
-          # A turn stopped by `/stop` mid-run must neither deliver nor commit.
-          if fresh?(turn) do
-            deliver_final(turn, response)
-            mark_final_reply_delivered(turn)
+          cond do
+            # A turn stopped by `/stop` mid-run must neither deliver nor commit.
+            not fresh?(turn) ->
+              discard_draft(turn)
+              :stopped
 
-            core_msg
-            |> runner.commit(turn_state, response, context_tokens)
-            |> maybe_notify_compacted(turn.deliver)
-          else
-            discard_draft(turn)
-            :stopped
+            # An empty model completion (the provider returned blank content):
+            # never deliver a blank bubble and never commit it (committing would
+            # poison replayed history). Surface it honestly and let the user
+            # retry. Provider-agnostic — guards the returned text, not an adapter.
+            String.trim(response) == "" ->
+              discard_draft(turn)
+              emit_empty_completion_telemetry(turn)
+              turn.deliver.({:text, @empty_completion_reply})
+
+            true ->
+              deliver_final(turn, response)
+              mark_final_reply_delivered(turn)
+
+              core_msg
+              |> runner.commit(turn_state, response, context_tokens)
+              |> maybe_notify_compacted(turn.deliver)
           end
 
         {:error, reason} ->
@@ -680,6 +696,14 @@ defmodule FermixChannels.Gateway.Queue do
 
   defp increment_if(counts, key, true), do: Map.update!(counts, key, &(&1 + 1))
   defp increment_if(counts, _key, false), do: counts
+
+  defp emit_empty_completion_telemetry(%{core_msg: core_msg}) do
+    :telemetry.execute(
+      [:fermix, :dispatcher, :empty_completion],
+      %{count: 1},
+      %{channel: Map.get(core_msg, :channel)}
+    )
+  end
 
   defp emit_enqueue_telemetry(msg, state) do
     counts = conversation_counts(state.conversations)
