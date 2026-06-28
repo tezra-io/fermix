@@ -1,0 +1,91 @@
+# Discord plugin — http-rail api_key plugin (M16, read-only).
+#
+# Plugin tools register as ordinary capabilities, so they emit normal tool
+# spans with exact names: discord_list_guilds, discord_get_guild,
+# discord_list_channels, discord_channel_messages, discord_list_members. All
+# reads — this milestone ships no Discord write tools, and Discord exposes NO
+# bot REST message search, so there is deliberately no discord_search tool.
+#
+# PRECONDITIONS: the discord plugin is enabled ([fermix_core.plugins] enabled)
+# and its bot token is set (`fermix plugins auth set discord <token>`; status
+# `needs_secret` until then). The bot must be a member of the guild with
+# VIEW_CHANNEL + READ_MESSAGE_HISTORY, the GUILD_MEMBERS privileged intent for
+# member listing, and the MESSAGE_CONTENT privileged intent for message bodies —
+# without MESSAGE_CONTENT, messages return with EMPTY content (not an error), so
+# a "lists messages but they're blank" result means the intent is missing.
+#
+# PRIVACY NOTE: server/channel/message/member data lands in local Opik traces
+# (the dev daemon captures content). Local-only; purge with --purge.
+suite: discord
+title: "Discord — server read paths + no-search honesty"
+description: >
+  Verifies the enabled Discord plugin end-to-end through the real agent path:
+  read tools fire for natural queries (proving registration, a valid bot token,
+  the Bot auth scheme, and API reachability), replies ground in real server
+  data, and the agent reads history rather than expecting a search verb.
+defaults:
+  timeout_ms: 180000
+  judge: false
+  expect:
+    status: ok
+
+scenarios:
+  - id: discord_servers
+    title: "Discord — servers and channels"
+    severity: normal
+    tags: [plugins, discord, core]
+    cases:
+      - id: list_guilds
+        query: "What Discord servers is my bot in?"
+        expect:
+          tools_any: [discord_list_guilds]
+          reply_matches: "(?i)server|guild|member|it'?s in|no servers"
+          reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret|not connected|use (the )?browser)\\b"
+      - id: list_channels
+        query: "List the channels in my Discord server."
+        expect:
+          tools_any: [discord_list_channels, discord_list_guilds]
+          reply_matches: "(?i)channel|#|text|voice|category|no channels"
+          reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret|use (the )?browser)\\b"
+
+  - id: discord_read
+    title: "Discord — read recent messages and members"
+    severity: normal
+    tags: [plugins, discord, core]
+    cases:
+      - id: channel_messages
+        query: "Catch me up on the recent messages in one of my Discord channels."
+        expect:
+          tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
+          reply_matches: "(?i)message|said|recent|discussed|nothing|no (messages|activity)"
+          reply_not_matches: "(?i)\\b(unable to (access|read)|i can'?t (access|read)|use (the )?browser|web search)\\b"
+      - id: list_members
+        query: "Who's in my Discord server?"
+        expect:
+          tools_any: [discord_list_members, discord_list_guilds]
+          reply_matches: "(?i)member|user|people|@|server"
+          reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret)\\b"
+
+  - id: discord_no_search
+    title: "Discord has no message search — read history, don't claim a search"
+    severity: normal
+    tags: [plugins, discord, sanity]
+    cases:
+      - id: search_falls_back_to_history
+        query: "Find recent Discord messages mentioning the release in my server."
+        timeout_ms: 300000
+        expect:
+          tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
+          tools_none: [discord_search]
+          reply_not_matches: "(?i)\\b(unable to (access|search)|i can'?t (access|search)|use (the )?browser)\\b"
+      - id: keyword_lookup_reads_history
+        query: "Can you search Discord for any mention of 'hotfix' in the past week?"
+        timeout_ms: 300000
+        expect:
+          tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
+          tools_none: [discord_search]
+          reply_not_matches: "(?i)\\b(unable to (access|search)|i can'?t (access|search)|use (the )?browser)\\b"
+        rubric: >
+          When the user asks to "search" Discord for a keyword, the agent reads
+          channel history (discord_channel_messages) and scans the results, rather
+          than refusing or using a non-existent search endpoint.

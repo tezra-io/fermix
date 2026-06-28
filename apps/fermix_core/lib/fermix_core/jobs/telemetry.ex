@@ -43,9 +43,17 @@ defmodule FermixCore.Jobs.Telemetry do
   @spec trace_event_definitions() :: [map()]
   def trace_event_definitions, do: @trace_event_definitions
 
-  @spec run_start(map(), map(), map()) :: :ok
-  def run_start(job, run, loop_input) do
-    metadata = job |> base_metadata(run) |> maybe_put_input(loop_input)
+  @spec run_start(map(), map(), map(), non_neg_integer() | nil) :: :ok
+  def run_start(job, run, loop_input, max_duration_ms \\ nil) do
+    metadata =
+      job
+      |> base_metadata(run)
+      |> maybe_put_input(loop_input)
+      # The run's max wall-clock duration lets the Opik exporter bound a
+      # scheduled trace's sweep by the run's own timeout instead of a flat idle
+      # window, so a long-but-alive run is never force-closed mid-flight.
+      |> Map.put(:max_duration_ms, max_duration_ms)
+
     execute(@run_start_event, %{}, metadata)
   end
 

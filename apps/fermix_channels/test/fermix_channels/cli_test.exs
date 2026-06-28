@@ -4,6 +4,7 @@ defmodule FermixChannels.CLITest do
   import ExUnit.CaptureIO
 
   alias FermixChannels.CLI
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
 
   defmodule TestAgent do
@@ -53,6 +54,24 @@ defmodule FermixChannels.CLITest do
       assert {:error, :empty_input} = CLI.parse_input("  ")
     end
 
+    test "carries media_parts onto the message (fermix ask --attach)" do
+      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+
+      assert {:ok, [%Message{} = message]} =
+               CLI.parse_input("what is this?", media_parts: [part])
+
+      assert message.content == "what is this?"
+      assert message.media_parts == [part]
+    end
+
+    test "allows an image-only turn (blank text + media_parts)" do
+      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+
+      assert {:ok, [%Message{} = message]} = CLI.parse_input("  ", media_parts: [part])
+      assert message.content == ""
+      assert message.media_parts == [part]
+    end
+
     test "emits inbound channel telemetry" do
       handler_id = attach_channel_telemetry(self())
       on_exit(fn -> :telemetry.detach(handler_id) end)
@@ -89,6 +108,53 @@ defmodule FermixChannels.CLITest do
 
       refute_received {:handled_message, _message}
     end
+  end
+
+  describe "Gateway empty-inbound guard" do
+    test "an empty inbound message is answered and never reaches the agent (no turn)" do
+      test_pid = self()
+
+      assert :ok =
+               Gateway.ingest([blank_message()],
+                 channel: CLI,
+                 agent: TestAgent,
+                 agent_server: test_pid,
+                 reply_fn: fn {:text, text} -> send(test_pid, {:empty_reply, text}) end
+               )
+
+      assert_receive {:empty_reply, reply}
+      assert reply =~ "empty"
+      # The agent is never invoked: the queue is never occupied, no turn runs.
+      refute_received {:handled_message, _message}
+    end
+
+    test "a captionless image (blank text + media) is actionable and reaches the agent" do
+      test_pid = self()
+      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+
+      assert :ok =
+               Gateway.ingest([blank_message(media_parts: [part])],
+                 channel: CLI,
+                 agent: TestAgent,
+                 agent_server: test_pid
+               )
+
+      assert_receive {:handled_message, delivered}
+      assert delivered.media_parts == [part]
+    end
+  end
+
+  defp blank_message(fields \\ []) do
+    Message.new!(
+      Enum.into(fields, %{
+        id: "m-#{System.unique_integer([:positive])}",
+        content: "",
+        sender: "operator",
+        channel: "cli",
+        chat_id: "cli",
+        reply_target: "cli"
+      })
+    )
   end
 
   describe "dispatch_input_sync/2" do

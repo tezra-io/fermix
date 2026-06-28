@@ -14,6 +14,7 @@ defmodule FermixOpik.Reporter do
     [:fermix, :provider, :failover],
     [:fermix, :tool, :exec],
     [:fermix, :memory, :write],
+    [:fermix, :memory, :review],
     [:fermix, :agent, :start],
     [:fermix, :agent, :stop],
     [:fermix, :agent, :task_start],
@@ -24,6 +25,9 @@ defmodule FermixOpik.Reporter do
     [:fermix, :job, :run_start],
     [:fermix, :job, :run_complete],
     [:fermix, :job, :run_error],
+    [:fermix, :soul_curation, :run_start],
+    [:fermix, :soul_curation, :run_complete],
+    [:fermix, :soul_curation, :run_error],
     [:fermix, :channel, :stream],
     [:fermix, :plugin, :dist],
     [:fermix, :realtime, :call_start],
@@ -31,7 +35,8 @@ defmodule FermixOpik.Reporter do
     [:fermix, :realtime, :session_updated],
     [:fermix, :realtime, :provider_error],
     [:fermix, :realtime, :reconnect],
-    [:fermix, :realtime, :call_stop]
+    [:fermix, :realtime, :call_stop],
+    [:fermix, :timeout, :expired]
   ]
 
   @handler_id "fermix-opik-reporter"

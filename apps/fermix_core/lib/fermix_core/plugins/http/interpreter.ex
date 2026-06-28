@@ -141,7 +141,7 @@ defmodule FermixCore.Plugins.Http.Interpreter do
   end
 
   defp continue_pages(request, config, opts, max, items_path, acc, page, decoded) do
-    case cursor_value(decoded, Map.get(config, "cursor_path")) do
+    case next_cursor(config, decoded, items_path) do
       nil ->
         {:ok, Enum.reverse(acc) |> List.flatten(), false}
 
@@ -155,6 +155,26 @@ defmodule FermixCore.Plugins.Http.Interpreter do
           acc,
           page + 1
         )
+    end
+  end
+
+  # The next page's cursor. `cursor` mode (default) reads an opaque token from
+  # the response body (`cursor_path`) — Slack's `next_cursor`, AgentMail's
+  # `next_page_token`. `id_window` mode derives it from the last item's id
+  # (`id_field`, default `"id"`) — Discord's `before`/`after` snowflake paging,
+  # which no `cursor_path` can express. Both terminate on an exhausted page
+  # (nil cursor) and are bounded by `max_pages`.
+  defp next_cursor(config, decoded, items_path) do
+    case Map.get(config, "mode", "cursor") do
+      "id_window" -> id_window_cursor(decoded, items_path, Map.get(config, "id_field", "id"))
+      _cursor -> cursor_value(decoded, Map.get(config, "cursor_path"))
+    end
+  end
+
+  defp id_window_cursor(decoded, items_path, id_field) do
+    case decoded |> navigate_items(items_path) |> List.last() do
+      %{} = last -> Map.get(last, id_field)
+      _empty_or_scalar -> nil
     end
   end
 

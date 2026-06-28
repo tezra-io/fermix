@@ -13,12 +13,9 @@ config :logger, level: :warning
 
 config :fermix_core, :log, enabled: false
 
-config :fermix_core, :browser, cdp_port_range: 19_100..19_199
-
 config :fermix_core, :memory,
   enabled: false,
   extraction_enabled: false,
-  extraction_timeout_ms: 1_000,
   extraction_context_messages: 8,
   extraction_min_confidence: 0.75,
   review_interval_hours: 24,

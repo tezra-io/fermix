@@ -16,13 +16,13 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
-  alias FermixCore.Net.HttpClient
   alias FermixCore.Net.Readiness
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
+  alias FermixCore.Providers.Transient
   alias FermixCore.Setup.ConfigStore
 
   @default_timeout_ms 30 * 60 * 1_000
@@ -186,7 +186,7 @@ defmodule FermixCore.Jobs.Runner do
       })
 
     {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
-    JobTelemetry.run_start(state.job, run, loop_input)
+    JobTelemetry.run_start(state.job, run, loop_input, state.timeout_ms)
     run
   end
 
@@ -719,7 +719,12 @@ defmodule FermixCore.Jobs.Runner do
       memory_read_scopes: state.job.memory_read_scopes,
       job_id: state.job.id,
       run_id: state.run.id,
-      skill_name: if(skill, do: skill.name)
+      skill_name: if(skill, do: skill.name),
+      # Cron owns transient recovery via its own deadline-bounded outer backoff
+      # (run_agent_loop_with_retry), whose longer waits suit the wake-from-sleep
+      # race better than the inner loop's quick retries — so opt the route-level
+      # retry out and avoid stacking two retry loops on the same error.
+      route_transient_retry: false
     }
   end
 
@@ -804,7 +809,12 @@ defmodule FermixCore.Jobs.Runner do
 
   defp retry_or_fail(reason, loop_opts, state, attempt, elapsed_ms) do
     cond do
-      not transient_infra?(reason) ->
+      # Cron retries ONLY the fast wake-from-sleep pool-checkout race, NOT the
+      # broader transient set the interactive route-retry uses. A provider
+      # timeout/5xx already burned its receive-timeout budget, and the watchdog
+      # is recreated per attempt with only backoff counted against the budget, so
+      # retrying slow failures would let a run exceed its configured job timeout.
+      not Transient.connection_unavailable?(reason) ->
         {:error, reason}
 
       attempt >= state.max_transient_attempts ->
@@ -840,10 +850,6 @@ defmodule FermixCore.Jobs.Runner do
   # the bare Finch %RuntimeError{} the other providers return. Recognizing both
   # keeps recovery provider-agnostic. Every other error — auth, provider 5xx, an
   # exhausted failover chain, deterministic bugs — fails the run as before.
-  defp transient_infra?({:provider_transport_error, %{kind: :connection_unavailable}}), do: true
-  defp transient_infra?(%RuntimeError{} = reason), do: HttpClient.connection_unavailable?(reason)
-  defp transient_infra?(_reason), do: false
-
   defp transient_reason_kind({:provider_transport_error, %{kind: kind}}), do: kind
   defp transient_reason_kind(%RuntimeError{}), do: :connection_unavailable
   defp transient_reason_kind(_reason), do: :unknown

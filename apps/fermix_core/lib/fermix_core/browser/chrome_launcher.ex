@@ -16,14 +16,15 @@ defmodule FermixCore.Browser.ChromeLauncher do
   def start(%Config{} = config, profile, owner_key, profile_name) do
     with {:ok, executable} <- find_executable(config, profile),
          {:ok, headless} <- headless(profile),
-         {:ok, port} <- choose_port(config, profile),
+         {:ok, requested_port} <- requested_port(profile),
          {:ok, profile_dir} <- profile_dir(owner_key, profile_name),
          :ok <- File.mkdir_p(profile_dir),
-         {:ok, port_ref, os_pid} <- launch(executable, profile_dir, port, headless) do
-      ready_or_cleanup(config, port, port_ref, os_pid, %{
+         :ok <- clear_devtools_port(profile_dir),
+         {:ok, port_ref, os_pid} <- launch(executable, profile_dir, requested_port, headless) do
+      ready_or_cleanup(config, requested_port, profile_dir, port_ref, os_pid, %{
         executable: executable,
         headless: headless,
-        port: port,
+        port: requested_port,
         port_ref: port_ref,
         os_pid: os_pid,
         profile_dir: profile_dir
@@ -56,7 +57,8 @@ defmodule FermixCore.Browser.ChromeLauncher do
   def attach(%Config{} = config, %{mode: :managed}, owner_key, profile_name) do
     {:ok, profile_dir} = profile_dir(owner_key, profile_name)
 
-    with {pid, port} <- running_chrome_for_dir(profile_dir),
+    with {:ok, pid} <- running_pid_for_dir(profile_dir),
+         {:ok, port} <- read_devtools_port(profile_dir),
          {:ok, ws_url} <- fetch_version(port, config) do
       {:ok,
        %{
@@ -85,10 +87,10 @@ defmodule FermixCore.Browser.ChromeLauncher do
     end
   end
 
-  defp ready_or_cleanup(config, port, port_ref, os_pid, runtime) do
-    case wait_until_ready(port, port_ref, config) do
-      {:ok, ws_url} ->
-        {:ok, Map.put(runtime, :ws_url, ws_url)}
+  defp ready_or_cleanup(config, requested_port, profile_dir, port_ref, os_pid, runtime) do
+    case wait_until_ready(requested_port, profile_dir, port_ref, config) do
+      {:ok, port, ws_url} ->
+        {:ok, runtime |> Map.put(:port, port) |> Map.put(:ws_url, ws_url)}
 
       {:error, output} ->
         kill_process(os_pid, config)
@@ -151,17 +153,27 @@ defmodule FermixCore.Browser.ChromeLauncher do
       is_nil(System.get_env("WAYLAND_DISPLAY"))
   end
 
-  defp choose_port(_config, %{cdp_port: port}) when is_integer(port) do
+  # An explicit port is honored (and pre-checked); `:auto` defers to Chrome via
+  # `--remote-debugging-port=0`, which binds an OS-assigned free port atomically
+  # and publishes it in `<user-data-dir>/DevToolsActivePort`. Letting Chrome pick
+  # removes the check-then-bind race two concurrent launches had when Fermix
+  # scanned a shared range (both could see the same port "free" and collide).
+  defp requested_port(%{cdp_port: port}) when is_integer(port) do
     if port_free?(port),
       do: {:ok, port},
       else: {:error, Error.new("port_conflict", "Browser CDP port #{port} is already in use")}
   end
 
-  defp choose_port(config, %{cdp_port: :auto}) do
-    Enum.find_value(config.cdp_port_range, fn port ->
-      if port_free?(port), do: {:ok, port}, else: nil
-    end) || {:error, Error.new("port_conflict", "No free browser CDP port is available")}
+  defp requested_port(%{cdp_port: :auto}), do: {:ok, 0}
+
+  # Drop any DevToolsActivePort a prior (now-dead) Chrome left for this dir, so
+  # the readiness wait reads the port the NEW Chrome publishes, never a stale one.
+  defp clear_devtools_port(profile_dir) do
+    _ = profile_dir |> devtools_port_path() |> File.rm()
+    :ok
   end
+
+  defp devtools_port_path(profile_dir), do: Path.join(profile_dir, "DevToolsActivePort")
 
   defp port_free?(port) do
     case :gen_tcp.listen(port, [:binary, active: false, ip: {127, 0, 0, 1}]) do
@@ -187,10 +199,12 @@ defmodule FermixCore.Browser.ChromeLauncher do
   end
 
   # Find a managed Chrome already running for exactly this user-data-dir and
-  # return {os_pid, cdp_port}. Unix-only (release targets are macOS/Linux); on
-  # other platforms there is no reuse and we always spawn.
-  defp running_chrome_for_dir(profile_dir) do
-    if unix?(), do: parse_ps_output(ps_output(), profile_dir), else: :none
+  # return its os pid. Unix-only (release targets are macOS/Linux); on other
+  # platforms there is no reuse and we always spawn. The actual CDP port is read
+  # from DevToolsActivePort, not parsed from ps — with `--remote-debugging-port=0`
+  # the ps args show "0", not the OS-assigned port.
+  defp running_pid_for_dir(profile_dir) do
+    if unix?(), do: parse_ps_pid(ps_output(), profile_dir), else: :none
   end
 
   defp ps_output do
@@ -204,34 +218,24 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   @doc """
   Parse `ps -o pid=,command=` output for a managed Chrome bound to exactly
-  `profile_dir`, returning `{os_pid, cdp_port}` or `:none`. Exposed for tests.
+  `profile_dir`, returning `{:ok, os_pid}` or `:none`. Exposed for tests.
   """
-  @spec parse_ps_output(String.t(), String.t()) :: {pos_integer(), pos_integer()} | :none
-  def parse_ps_output(output, profile_dir) when is_binary(output) and is_binary(profile_dir) do
-    output |> String.split("\n") |> Enum.find_value(:none, &parse_chrome_line(&1, profile_dir))
+  @spec parse_ps_pid(String.t(), String.t()) :: {:ok, pos_integer()} | :none
+  def parse_ps_pid(output, profile_dir) when is_binary(output) and is_binary(profile_dir) do
+    output |> String.split("\n") |> Enum.find_value(:none, &parse_chrome_pid(&1, profile_dir))
   end
 
   # Exact-token match on --user-data-dir avoids a prefix collision between
   # e.g. ".../fermix" and ".../fermix_visible".
-  defp parse_chrome_line(line, profile_dir) do
+  defp parse_chrome_pid(line, profile_dir) do
     tokens = String.split(line)
 
     with true <- ("--user-data-dir=" <> profile_dir) in tokens,
-         pid when is_integer(pid) <- parse_int(List.first(tokens)),
-         port when is_integer(port) <- port_from_tokens(tokens) do
-      {pid, port}
+         pid when is_integer(pid) <- parse_int(List.first(tokens)) do
+      {:ok, pid}
     else
       _other -> nil
     end
-  end
-
-  defp port_from_tokens(tokens) do
-    Enum.find_value(tokens, nil, fn token ->
-      case token do
-        "--remote-debugging-port=" <> port -> parse_int(port)
-        _other -> nil
-      end
-    end)
   end
 
   defp parse_int(nil), do: nil
@@ -292,25 +296,47 @@ defmodule FermixCore.Browser.ChromeLauncher do
     if match?({:unix, :linux}, :os.type()), do: ["--disable-dev-shm-usage" | args], else: args
   end
 
-  defp wait_until_ready(port, port_ref, %Config{} = config) do
+  defp wait_until_ready(requested_port, profile_dir, port_ref, %Config{} = config) do
     deadline = System.monotonic_time(:millisecond) + config.launch_timeout_ms
-    do_wait_until_ready(port, port_ref, deadline, config, "")
+    do_wait_until_ready(requested_port, profile_dir, port_ref, deadline, config, "")
   end
 
-  defp do_wait_until_ready(port, port_ref, deadline, config, output) do
+  # Two-stage readiness sharing one deadline: learn the actual port (Chrome
+  # publishes DevToolsActivePort once its CDP server binds), then confirm the
+  # endpoint answers `/json/version`.
+  defp do_wait_until_ready(requested_port, profile_dir, port_ref, deadline, config, output) do
     output = output <> drain_port(port_ref)
 
-    case fetch_version(port, config) do
-      {:ok, ws_url} ->
-        {:ok, ws_url}
-
-      {:error, _reason} ->
+    with {:ok, port} <- resolve_port(requested_port, profile_dir),
+         {:ok, ws_url} <- fetch_version(port, config) do
+      {:ok, port, ws_url}
+    else
+      _not_ready ->
         if System.monotonic_time(:millisecond) >= deadline do
           {:error, output <> drain_port(port_ref)}
         else
           Process.sleep(config.cdp_ready_poll_interval_ms)
-          do_wait_until_ready(port, port_ref, deadline, config, output)
+          do_wait_until_ready(requested_port, profile_dir, port_ref, deadline, config, output)
         end
+    end
+  end
+
+  defp resolve_port(0, profile_dir), do: read_devtools_port(profile_dir)
+  defp resolve_port(port, _profile_dir) when port > 0, do: {:ok, port}
+
+  @doc """
+  Read the CDP port Chrome bound from `<user-data-dir>/DevToolsActivePort`
+  (line 1 is the port). Chrome writes it for any `--remote-debugging-port`,
+  including `0`, once the endpoint is listening. Exposed for tests.
+  """
+  @spec read_devtools_port(String.t()) :: {:ok, pos_integer()} | {:error, term()}
+  def read_devtools_port(profile_dir) do
+    with {:ok, contents} <- File.read(devtools_port_path(profile_dir)),
+         [line | _rest] <- String.split(contents, "\n"),
+         {port, _rest} <- Integer.parse(String.trim(line)) do
+      {:ok, port}
+    else
+      _other -> {:error, :no_devtools_port}
     end
   end
 

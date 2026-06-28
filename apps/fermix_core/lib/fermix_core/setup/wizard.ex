@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.Wizard do
   Shared setup/readiness surface for CLI and web onboarding.
   """
 
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.Descriptor
@@ -40,19 +41,24 @@ defmodule FermixCore.Setup.Wizard do
           | {:reasoning_effort, reasoning_effort() | String.t()}
           | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
-          | {:extraction_timeout_ms, pos_integer() | String.t()}
+          | {:review_interval_hours, non_neg_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
           | {:realtime_api_key, String.t()}
           | {:realtime_voice, String.t()}
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
+          | {:computer_use_enabled, boolean() | String.t()}
           | {:web_search_backend, atom() | String.t()}
           | {:tavily_api_key, String.t()}
           | {:exa_api_key, String.t()}
           | {:parallel_api_key, String.t()}
           | {:brave_api_key, String.t()}
           | {:perplexity_api_key, String.t()}
+          | {:firecrawl_api_key, String.t()}
+          | {:image_backend, atom() | String.t()}
+          | {:image_model, String.t()}
+          | {:google_api_key, String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -96,7 +102,8 @@ defmodule FermixCore.Setup.Wizard do
     :default_model,
     :reasoning_effort,
     :fast,
-    :realtime_enabled
+    :realtime_enabled,
+    :computer_use_enabled
   ]
 
   @channel_owner_reconfigure_keys %{
@@ -395,9 +402,9 @@ defmodule FermixCore.Setup.Wizard do
         required?: false
       },
       %{
-        key: :extraction_timeout_ms,
-        label: "Background extraction timeout in milliseconds (blank = 90000)",
-        default: 90_000,
+        key: :review_interval_hours,
+        label: "Background memory review interval in hours (blank = 24)",
+        default: 24,
         required?: false
       }
     ]
@@ -542,6 +549,12 @@ defmodule FermixCore.Setup.Wizard do
   defp personalization_prompts(%{state: state}) do
     [
       %{
+        key: :bot_name,
+        label: "Name for the assistant (what it calls itself; blank = Fermix)",
+        # Optional: the agent has a default name; this only renames it.
+        required?: false
+      },
+      %{
         key: :user_name,
         label: "Your name",
         required?: missing_component?(state, "personalization")
@@ -586,7 +599,9 @@ defmodule FermixCore.Setup.Wizard do
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
+      |> put_computer_use_config(answers)
       |> put_web_search_config(answers)
+      |> put_image_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -594,6 +609,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_signal_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
+      |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
     commit_snapshot(snapshot)
@@ -1321,14 +1337,14 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp put_memory_config(snapshot, answers) do
-    case normalize_extraction_timeout_ms(Keyword.get(answers, :extraction_timeout_ms)) do
+    case normalize_review_interval_hours(Keyword.get(answers, :review_interval_hours)) do
       nil ->
         snapshot
 
-      timeout_ms ->
+      hours ->
         fermix_core = Map.get(snapshot, :fermix_core, [])
         existing = Keyword.get(fermix_core, :memory, [])
-        memory = Keyword.put(existing, :extraction_timeout_ms, timeout_ms)
+        memory = Keyword.put(existing, :review_interval_hours, hours)
         Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :memory, memory))
     end
   end
@@ -1373,25 +1389,51 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp normalize_extraction_timeout_ms(nil), do: nil
-  defp normalize_extraction_timeout_ms(""), do: nil
+  # Computer use exposes a single setup knob: the on/off flag. The sidecar binary
+  # and OS permissions are prerequisites the card surfaces separately; flipping this
+  # flag is what `ComputerUse.ready?/0` (and thus tool registration) gates on. All
+  # other fields keep their config defaults until an operator hand-edits config.toml.
+  defp put_computer_use_config(snapshot, answers) do
+    case normalize_realtime_bool(
+           Keyword.get(answers, :computer_use_enabled),
+           :computer_use_enabled
+         ) do
+      nil ->
+        snapshot
 
-  defp normalize_extraction_timeout_ms(value) when is_integer(value) and value > 0, do: value
+      enabled? ->
+        fermix_core = Map.get(snapshot, :fermix_core, [])
+        existing = Keyword.get(fermix_core, :computer_use, [])
 
-  defp normalize_extraction_timeout_ms(value) when is_binary(value) do
-    case Integer.parse(String.trim(value)) do
-      {timeout_ms, ""} when timeout_ms > 0 ->
-        timeout_ms
+        computer_use =
+          existing
+          |> Keyword.put(:enabled, enabled?)
+          |> ComputerUseConfig.normalize()
+          |> ComputerUseConfig.to_keyword()
 
-      _invalid ->
-        raise ArgumentError,
-              "invalid extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+        Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :computer_use, computer_use))
     end
   end
 
-  defp normalize_extraction_timeout_ms(value) do
+  defp normalize_review_interval_hours(nil), do: nil
+  defp normalize_review_interval_hours(""), do: nil
+
+  defp normalize_review_interval_hours(value) when is_integer(value) and value >= 0, do: value
+
+  defp normalize_review_interval_hours(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {hours, ""} when hours >= 0 ->
+        hours
+
+      _invalid ->
+        raise ArgumentError,
+              "invalid review_interval_hours #{inspect(value)}; expected non-negative integer hours"
+    end
+  end
+
+  defp normalize_review_interval_hours(value) do
     raise ArgumentError,
-          "invalid extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
+          "invalid review_interval_hours #{inspect(value)}; expected non-negative integer hours"
   end
 
   defp normalize_realtime_bool(nil, _key), do: nil
@@ -1463,7 +1505,9 @@ defmodule FermixCore.Setup.Wizard do
         brave_api_key:
           secret_snapshot_value(:brave_api_key, Keyword.get(answers, :brave_api_key)),
         perplexity_api_key:
-          secret_snapshot_value(:perplexity_api_key, Keyword.get(answers, :perplexity_api_key))
+          secret_snapshot_value(:perplexity_api_key, Keyword.get(answers, :perplexity_api_key)),
+        firecrawl_api_key:
+          secret_snapshot_value(:firecrawl_api_key, Keyword.get(answers, :firecrawl_api_key))
       ]
       |> reject_nil_values()
 
@@ -1482,6 +1526,7 @@ defmodule FermixCore.Setup.Wizard do
   defp normalize_web_search_backend(:parallel), do: :parallel
   defp normalize_web_search_backend(:brave), do: :brave
   defp normalize_web_search_backend(:perplexity), do: :perplexity
+  defp normalize_web_search_backend(:firecrawl), do: :firecrawl
 
   defp normalize_web_search_backend(value) when is_binary(value) do
     case String.trim(value) |> String.downcase() do
@@ -1491,6 +1536,7 @@ defmodule FermixCore.Setup.Wizard do
       "parallel" -> :parallel
       "brave" -> :brave
       "perplexity" -> :perplexity
+      "firecrawl" -> :firecrawl
       invalid -> raise ArgumentError, "invalid web_search_backend #{inspect(invalid)}"
     end
   end
@@ -1512,6 +1558,65 @@ defmodule FermixCore.Setup.Wizard do
       snapshot,
       :fermix_core,
       Keyword.put(fermix_core, :tools, Keyword.put(tools, :web_search, web_search))
+    )
+  end
+
+  defp put_image_config(snapshot, answers) do
+    values =
+      [
+        backend: normalize_image_backend(Keyword.get(answers, :image_backend)),
+        model: normalize_image_model(Keyword.get(answers, :image_model)),
+        google_api_key:
+          secret_snapshot_value(:google_api_key, Keyword.get(answers, :google_api_key))
+      ]
+      |> reject_nil_values()
+
+    if values == [] do
+      snapshot
+    else
+      update_image_config(snapshot, values)
+    end
+  end
+
+  defp normalize_image_backend(nil), do: nil
+  defp normalize_image_backend(""), do: nil
+
+  defp normalize_image_backend(value) when is_atom(value),
+    do: normalize_image_backend(Atom.to_string(value))
+
+  defp normalize_image_backend(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      backend when backend in ~w(openai xai google) -> backend
+      invalid -> raise ArgumentError, "invalid image_backend #{inspect(invalid)}"
+    end
+  end
+
+  defp normalize_image_backend(value) do
+    raise ArgumentError, "invalid image_backend #{inspect(value)}"
+  end
+
+  defp normalize_image_model(nil), do: nil
+
+  defp normalize_image_model(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp update_image_config(snapshot, values) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    tools = Keyword.get(fermix_core, :tools, [])
+
+    generate_image =
+      tools
+      |> Keyword.get(:generate_image, [])
+      |> Keyword.merge(values)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :tools, Keyword.put(tools, :generate_image, generate_image))
     )
   end
 
@@ -1659,6 +1764,23 @@ defmodule FermixCore.Setup.Wizard do
       existing = Keyword.get(fermix_core, :personalization, [])
       merged = Keyword.merge(existing, values)
       Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :personalization, merged))
+    end
+  end
+
+  # The bot's NAME is identity, not a user preference: it persists to
+  # `[fermix_core.agent].name` (the source of truth that seeds IDENTITY.md), even
+  # though the input is collected in the personalization step. Blank leaves the
+  # existing/default name untouched.
+  defp put_bot_name(snapshot, answers) do
+    case reject_blank_values(name: Keyword.get(answers, :bot_name)) do
+      [] ->
+        snapshot
+
+      [name: name] ->
+        fermix_core = Map.get(snapshot, :fermix_core, [])
+        agent = Keyword.get(fermix_core, :agent, [])
+        merged = Keyword.put(agent, :name, name)
+        Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :agent, merged))
     end
   end
 

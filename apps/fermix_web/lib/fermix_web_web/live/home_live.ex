@@ -16,6 +16,7 @@ defmodule FermixWebWeb.HomeLive do
 
   use FermixWebWeb, :live_view
 
+  alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.BootReport
   alias FermixWebWeb.HomeSnapshot
 
@@ -29,11 +30,14 @@ defmodule FermixWebWeb.HomeLive do
   def mount(_params, _session, socket) do
     case BootReport.current() do
       %{status: :ready} ->
+        setup_path = setup_path!()
+
         if connected?(socket), do: schedule_refresh()
 
         {:ok,
          socket
          |> assign(page_title: "Fermix")
+         |> assign(:setup_path, setup_path)
          |> assign_home_snapshot()}
 
       _not_ready ->
@@ -61,6 +65,13 @@ defmodule FermixWebWeb.HomeLive do
 
   defp schedule_refresh do
     Process.send_after(self(), :refresh, @refresh_interval_ms)
+  end
+
+  defp setup_path! do
+    case AccessToken.mint_launch_token() do
+      {:ok, launch} -> ~p"/setup?t=#{launch.token}"
+      {:error, reason} -> raise "could not mint setup launch token: #{inspect(reason)}"
+    end
   end
 
   defp snapshot_error_label({:main_agent_unavailable, _reason}),

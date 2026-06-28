@@ -89,6 +89,53 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
     test "an empty args map yields all-nil" do
       assert RoutingOverrides.parse_tool_args(%{}) == @empty
     end
+
+    test "rejects an explicit provider/model mismatch in a per-call arg" do
+      assert_raise ArgumentError, ~r/qwen3:32b/, fn ->
+        RoutingOverrides.parse_tool_args(%{"provider" => "openrouter", "model" => "qwen3:32b"})
+      end
+    end
+  end
+
+  describe "parse/2 — provider/model pairing guard" do
+    test "rejects an explicit provider paired with another provider's known model" do
+      assert_raise ArgumentError, ~r/qwen3:32b.*ollama|ollama.*qwen3:32b/, fn ->
+        RoutingOverrides.parse(
+          [subagent_provider: "openrouter", subagent_model: "qwen3:32b"],
+          :subagent
+        )
+      end
+    end
+
+    test "accepts a provider paired with its own catalog model" do
+      assert %{provider: :ollama, model: "qwen3:32b"} =
+               RoutingOverrides.parse(
+                 [subagent_provider: "ollama", subagent_model: "qwen3:32b"],
+                 :subagent
+               )
+    end
+
+    test "accepts an unknown free-form slug (provider API is the source of truth)" do
+      assert %{provider: :openrouter, model: "some-vendor/brand-new-xyz"} =
+               RoutingOverrides.parse(
+                 [subagent_provider: "openrouter", subagent_model: "some-vendor/brand-new-xyz"],
+                 :subagent
+               )
+    end
+
+    test "a provider-only or model-only override has nothing to pair-check" do
+      assert %{provider: :openrouter, model: nil} =
+               RoutingOverrides.parse([subagent_provider: "openrouter"], :subagent)
+
+      assert %{provider: nil, model: "qwen3:32b"} =
+               RoutingOverrides.parse([subagent_model: "qwen3:32b"], :subagent)
+    end
+
+    test "the cron prefix gets the same guard" do
+      assert_raise ArgumentError, ~r/qwen3:32b/, fn ->
+        RoutingOverrides.parse([cron_provider: "openrouter", cron_model: "qwen3:32b"], :cron)
+      end
+    end
   end
 
   describe "merge/2 (pure, field-level)" do

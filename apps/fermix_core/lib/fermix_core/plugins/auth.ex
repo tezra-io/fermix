@@ -78,6 +78,40 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
+  @doc """
+  Store the static credential for an `api_key` plugin (M16). The value is
+  keychained via the secure-on-save path; the plugin then resolves `:ready`.
+  """
+  @spec set_secret(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def set_secret(name, value) when is_binary(name) and is_binary(value) do
+    started_at = System.monotonic_time(:millisecond)
+
+    case Config.set_plugin_secret(name, value) do
+      {:ok, _snapshot} ->
+        emit_auth_event(:set, name, "ready", started_at)
+        {:ok, name}
+
+      {:error, reason} = err ->
+        emit_auth_event(:set, name, {:error, reason}, started_at)
+        err
+    end
+  end
+
+  @spec clear_secret(String.t()) :: :ok | {:error, term()}
+  def clear_secret(name) when is_binary(name) do
+    started_at = System.monotonic_time(:millisecond)
+
+    case Config.clear_plugin_secret(name) do
+      {:ok, _snapshot} ->
+        emit_auth_event(:clear, name, "logged_out", started_at)
+        :ok
+
+      {:error, reason} = err ->
+        emit_auth_event(:clear, name, {:error, reason}, started_at)
+        err
+    end
+  end
+
   defp fetch_oauth_plugin(name) do
     case Registry.find(name) do
       {:ok, %Plugin{auth: %{type: :oauth2}} = plugin} -> {:ok, plugin}

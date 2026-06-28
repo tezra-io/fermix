@@ -58,6 +58,18 @@ defmodule FermixCore.Jobs.TelemetryTest do
     assert metadata.session_id == "cron_job-7_20260602"
     assert metadata.trigger == "schedule"
     refute Map.has_key?(metadata, :input)
+    # No max duration passed → key dropped (exporter falls back to the idle TTL).
+    refute Map.has_key?(metadata, :max_duration_ms)
+  end
+
+  test "run_start carries the run max duration for the exporter sweep bound", %{
+    job: job,
+    run: run
+  } do
+    JobTelemetry.run_start(job, run, %{prompt_snapshot: "Summarize today"}, 1_800_000)
+
+    assert_receive {:job_event, [:fermix, :job, :run_start], _measurements, metadata}
+    assert metadata.max_duration_ms == 1_800_000
   end
 
   test "run_complete reports duration and status", %{job: job, run: run} do

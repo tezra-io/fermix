@@ -59,6 +59,16 @@ defmodule FermixCore.Tools.ScheduleJob do
           description:
             "Optional name of an existing skill to bind the run to. The scheduled run then executes inside that skill's confinement — its allowed_tools and capability policy are intersected with the job's, never widened. Unknown skill names are rejected."
         },
+        provider: %{
+          type: "string",
+          description:
+            "Optional provider to pin this job's runs to (anthropic, openai, xai, openrouter, ollama, ...; must be a known, configured provider). Must be set together with model. Omit both to use the default cron route."
+        },
+        model: %{
+          type: "string",
+          description:
+            "Optional provider-specific model id to pin this job's runs to (paired with provider). Free-form — providers like ollama/openrouter accept arbitrary models. Omit both provider and model to use the default cron route."
+        },
         timeout_seconds: %{
           type: "integer",
           minimum: 1,
@@ -104,7 +114,11 @@ defmodule FermixCore.Tools.ScheduleJob do
     [
       %{tag: "missing_parameters", description: "name, schedule, or task is absent"},
       %{tag: "invalid_schedule", description: "schedule expression cannot be parsed"},
-      %{tag: "invalid_delivery", description: "delivery_mode or delivery_target is invalid"}
+      %{tag: "invalid_delivery", description: "delivery_mode or delivery_target is invalid"},
+      %{
+        tag: "invalid_route_pin",
+        description: "provider is unknown, or provider/model are not paired"
+      }
     ]
   end
 
@@ -129,12 +143,15 @@ defmodule FermixCore.Tools.ScheduleJob do
          {:ok, expires_at} <- Support.optional_datetime(args, "expires_at"),
          {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context),
          {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context),
-         {:ok, skill_name} <- validate_skill_name(args, context) do
+         {:ok, skill_name} <- validate_skill_name(args, context),
+         {:ok, {provider, model}} <- Support.validate_route_pin(args) do
       attrs = %{
         name: name,
         schedule: schedule,
         task_prompt: task,
         skill_name: skill_name,
+        provider: provider,
+        model: model,
         description: Support.optional_string(args, "description"),
         timezone: Support.optional_string(args, "timezone", "UTC"),
         allowed_tools: allowed_tools,

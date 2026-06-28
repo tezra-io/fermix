@@ -39,6 +39,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :restart_pending?, :boolean, default: false
   attr :sandbox_form, :map, required: true
   attr :search_form, :map, required: true
+  attr :image_form, :map, required: true
   attr :restarting, :boolean, default: false
   attr :saved_flash, :map, default: nil
   attr :skill_summary, :map, required: true
@@ -120,6 +121,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               restart_pending?={@restart_pending?}
               sandbox_form={@sandbox_form}
               search_form={@search_form}
+              image_form={@image_form}
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
@@ -242,6 +244,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :restart_pending?, :boolean, default: false
   attr :sandbox_form, :map, required: true
   attr :search_form, :map, required: true
+  attr :image_form, :map, required: true
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
@@ -254,6 +257,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("channels", assigns), do: channels_pane(assigns)
   defp render_active_pane("plugins", assigns), do: plugins_pane(assigns)
   defp render_active_pane("search", assigns), do: search_pane(assigns)
+  defp render_active_pane("media", assigns), do: media_pane(assigns)
   defp render_active_pane("sandbox", assigns), do: sandbox_pane(assigns)
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
@@ -1215,6 +1219,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               description="Structured search API"
               checked={@search_form.backend == :perplexity}
             />
+            <.search_backend_option
+              value="firecrawl"
+              label="Firecrawl"
+              description="Web search API"
+              checked={@search_form.backend == :firecrawl}
+            />
           </div>
         </fieldset>
 
@@ -1249,12 +1259,100 @@ defmodule FermixWebWeb.SetupLive.Components do
             name="search_form[perplexity_api_key]"
             set={@search_form.perplexity_api_key_set}
           />
+          <.secret_input
+            :if={@search_form.backend == :firecrawl}
+            label="Firecrawl API key"
+            name="search_form[firecrawl_api_key]"
+            set={@search_form.firecrawl_api_key_set}
+          />
           <p :if={@search_form.backend == :duckduckgo} class="text-sm text-base-content/60">
             DuckDuckGo needs no API key — nothing else to configure here.
           </p>
         </div>
 
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save search" />
+      </form>
+    </div>
+    """
+  end
+
+  defp media_pane(assigns) do
+    ~H"""
+    <div>
+      <.pane_header
+        title="Image generation"
+        subtitle="Pick the backend for the generate_image tool and set its API key here. The OpenAI and xAI keys are the same keys those providers use for chat; Google uses its own Gemini key."
+      />
+
+      <form phx-change="image_changed" phx-submit="save_image" class="mt-6 space-y-6">
+        <fieldset>
+          <legend class="text-sm font-medium text-base-content/80">Backend</legend>
+          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <.image_backend_option
+              value="openai"
+              label="OpenAI"
+              description="gpt-image — reuses your OpenAI key"
+              checked={@image_form.backend == :openai}
+            />
+            <.image_backend_option
+              value="xai"
+              label="xAI"
+              description="grok image — reuses your xAI key"
+              checked={@image_form.backend == :xai}
+            />
+            <.image_backend_option
+              value="google"
+              label="Google"
+              description="Gemini image — needs a Gemini key"
+              checked={@image_form.backend == :google}
+            />
+          </div>
+        </fieldset>
+
+        <div class="max-w-xl space-y-4">
+          <div :if={@image_form.backend == :openai} class="space-y-2">
+            <.secret_input
+              label="OpenAI API key"
+              name="image_form[openai_api_key]"
+              set={@image_form.openai_api_key_set}
+            />
+            <p :if={@image_form.openai_api_key_set} class="text-sm text-success">
+              Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+          <div :if={@image_form.backend == :xai} class="space-y-2">
+            <.secret_input
+              label="xAI API key"
+              name="image_form[xai_api_key]"
+              set={@image_form.xai_api_key_set}
+            />
+            <p :if={@image_form.xai_api_key_set} class="text-sm text-success">
+              Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+          <div :if={@image_form.backend == :google} class="space-y-2">
+            <.secret_input
+              label="Gemini API key"
+              name="image_form[google_api_key]"
+              set={@image_form.google_api_key_set}
+            />
+            <p :if={@image_form.google_api_key_set} class="text-sm text-success">
+              Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+
+          <.select_field
+            label="Model"
+            name="image_form[model]"
+            options={@image_form.model_options}
+            value={@image_form.model}
+          />
+          <p class="text-sm text-base-content/60">
+            Choose the image model for this backend.
+          </p>
+        </div>
+
+        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save media" />
       </form>
     </div>
     """
@@ -1320,9 +1418,11 @@ defmodule FermixWebWeb.SetupLive.Components do
             step="0.01"
           />
           <.number_field
-            label="Extraction timeout ms"
-            name="memory_form[extraction_timeout_ms]"
-            value={@memory_form.extraction_timeout_ms}
+            label="Review interval (hours)"
+            name="memory_form[review_interval_hours]"
+            value={@memory_form.review_interval_hours}
+            min="0"
+            step="1"
           />
         </div>
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save memory" />
@@ -1339,6 +1439,11 @@ defmodule FermixWebWeb.SetupLive.Components do
         subtitle="Seed the profile that guides how the agent addresses you and frames replies."
       />
       <form phx-submit="save_personalization" class="mt-6 space-y-5">
+        <.text_input
+          label="Assistant name (what it calls itself; blank keeps the current name)"
+          name="personalization_form[bot_name]"
+          value={@personalization_form.bot_name}
+        />
         <div class="grid gap-4 lg:grid-cols-3">
           <.text_input
             label="Your name"
@@ -1652,6 +1757,11 @@ defmodule FermixWebWeb.SetupLive.Components do
      "https://developer.x.com/en/portal/dashboard"}
   end
 
+  defp oauth_help_content("slack") do
+    {"Slack api.slack.com/apps → Create New App (from scratch) → OAuth & Permissions: add redirect URL http://127.0.0.1:1460/auth/callback and the bot scopes, then paste the Client ID and secret from Basic Information.",
+     "https://api.slack.com/apps"}
+  end
+
   defp oauth_help_content(provider) do
     {"Create an OAuth client with #{provider}, then paste its Client ID and secret.", nil}
   end
@@ -1891,6 +2001,27 @@ defmodule FermixWebWeb.SetupLive.Components do
           />
           <button type="submit" class="btn btn-outline btn-sm">Save</button>
         </form>
+        <form
+          :if={@plugin.auth_type == :api_key && @plugin.enabled? && @plugin.status == :needs_secret}
+          id={"plugin-secret-form-#{@plugin.name}"}
+          phx-submit="set_plugin_secret"
+          class="mt-2 flex items-end gap-2"
+        >
+          <input type="hidden" name="name" value={@plugin.name} />
+          <label class="form-control min-w-0 flex-1">
+            <span class="label flex items-center justify-between gap-2 pb-1 text-xs font-medium">
+              <span>{@plugin.secret_prompt || "API key"}</span>
+            </span>
+            <input
+              type="password"
+              name="plugin_secret_form[value]"
+              autocomplete="off"
+              placeholder="Paste the key"
+              class="input input-bordered input-sm w-full bg-base-100"
+            />
+          </label>
+          <button type="submit" class="btn btn-outline btn-sm shrink-0">Connect</button>
+        </form>
       </div>
 
       <div class="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
@@ -1936,7 +2067,10 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-check-circle" class="size-3.5" /> Check
         </button>
         <button
-          :if={!@oauth_unset? && @plugin.enabled? && @plugin.account}
+          :if={
+            !@oauth_unset? && @plugin.enabled? &&
+              (@plugin.account || (@plugin.auth_type == :api_key && @plugin.status == :ready))
+          }
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_disconnect"
@@ -2027,7 +2161,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           <.icon name="hero-key" class="size-3.5" /> Connect
         </button>
         <button
-          :if={!@oauth_unset? && !@blocked_reason && !@installing?}
+          :if={!@oauth_unset? && !@blocked_reason && !@installing? && !@entry.enabled?}
           type="button"
           class="btn btn-primary btn-xs"
           phx-click="plugin_enable"
@@ -2035,6 +2169,15 @@ defmodule FermixWebWeb.SetupLive.Components do
         >
           <.icon name="hero-arrow-down-tray" class="size-3.5" />
           {if @entry.auth_type == :oauth2, do: "Connect", else: "Enable"}
+        </button>
+        <button
+          :if={@entry.enabled? && !@installing?}
+          type="button"
+          class="btn btn-ghost btn-xs"
+          phx-click="plugin_disable"
+          phx-value-name={@entry.name}
+        >
+          Disable
         </button>
         <button
           :if={@oauth != nil && !@oauth_unset? && !@installing?}
@@ -2089,6 +2232,28 @@ defmodule FermixWebWeb.SetupLive.Components do
     </label>
     """
   end
+
+  defp image_backend_option(assigns) do
+    ~H"""
+    <label class={search_backend_option_class(@checked)}>
+      <input
+        type="radio"
+        name="image_form[backend]"
+        value={@value}
+        checked={@checked}
+        class="radio radio-primary radio-sm mt-0.5"
+      />
+      <span class="min-w-0">
+        <span class="block font-medium">{@label}</span>
+        <span class="block text-xs leading-5 text-base-content/60">{@description}</span>
+      </span>
+    </label>
+    """
+  end
+
+  # OpenAI/xAI image generation reuses the chat-provider key from the Provider
+  # tab, so there is nothing to paste here — this just reports whether that key
+  # is already configured.
 
   attr :field, :map, required: true
 
@@ -2182,14 +2347,15 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :label, :string, required: true
   attr :name, :string, required: true
   attr :options, :list, required: true
-  attr :value, :atom, required: true
+  # Atom (sandbox mode/profile) or string (model ids) — compared via to_string/1.
+  attr :value, :any, required: true
 
   defp select_field(assigns) do
     ~H"""
     <label class="form-control w-full">
       <span class="label pb-1 text-sm font-medium">{@label}</span>
       <select name={@name} class="select select-bordered w-full bg-base-100">
-        <option :for={option <- @options} value={option} selected={option == Atom.to_string(@value)}>
+        <option :for={option <- @options} value={option} selected={option == to_string(@value)}>
           {option}
         </option>
       </select>
@@ -2539,6 +2705,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp status_pill_class(:needs_auth), do: "badge badge-warning badge-sm"
   defp status_pill_class(:needs_client_config), do: "badge badge-warning badge-sm"
   defp status_pill_class(:needs_config), do: "badge badge-warning badge-sm"
+  defp status_pill_class(:needs_secret), do: "badge badge-warning badge-sm"
   defp status_pill_class(:reauthorization_required), do: "badge badge-error badge-sm"
   defp status_pill_class(:error), do: "badge badge-error badge-sm"
   defp status_pill_class(:not_configured), do: "badge badge-ghost badge-sm"
@@ -2552,6 +2719,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp status_pill_label(:needs_auth), do: "Needs auth"
   defp status_pill_label(:needs_client_config), do: "needs client config"
   defp status_pill_label(:needs_config), do: "Needs config"
+  defp status_pill_label(:needs_secret), do: "Needs key"
   defp status_pill_label(:reauthorization_required), do: "Reauthorize"
   defp status_pill_label(:error), do: "Error"
   defp status_pill_label(:not_configured), do: "Not configured"
@@ -2570,6 +2738,11 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp plugin_action_label(_status), do: "Enable"
 
   defp catalog_status(_entry, true), do: :installing
+  # Computer use stays a catalog entry even when on; reflect its real state instead
+  # of a perpetual "Available" (enabled + sidecar/permissions ready, vs enabled but
+  # not yet runnable). Every other catalog entry carries `enabled?: false`.
+  defp catalog_status(%{enabled?: true, ready?: true}, _installing?), do: :ready
+  defp catalog_status(%{enabled?: true, ready?: false}, _installing?), do: :partial
   defp catalog_status(%{compat: {:error, _reason}}, _installing?), do: :incompatible
   defp catalog_status(_entry, _installing?), do: :available
 

@@ -6,6 +6,7 @@ defmodule FermixCore.Providers.OpenAI do
   @behaviour FermixCore.Providers.Provider
 
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
@@ -65,6 +66,7 @@ defmodule FermixCore.Providers.OpenAI do
         url: "#{url}/chat/completions",
         method: :post,
         json: body,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: [{"authorization", "Bearer #{key}"}]
       )
       |> Req.merge(req_options)

@@ -45,7 +45,14 @@ defmodule FermixCore.Capabilities.Builtin do
     "get_job_run" => %{policy_class: :read_only, hidden_from_agent?: false},
     "memory_sources_list" => %{policy_class: :read_only, hidden_from_agent?: false},
     "browser" => %{policy_class: :network, hidden_from_agent?: false},
-    "send_attachment" => %{policy_class: :read_only, hidden_from_agent?: false}
+    "send_attachment" => %{policy_class: :read_only, hidden_from_agent?: false},
+    "generate_image" => %{policy_class: :external_api, hidden_from_agent?: false},
+    # Computer use. `:gui_control` buys ZERO sandbox enforcement (COMPUTER_USE.md
+    # §7.1) — it labels the blast class and routes to the §7 action-boundary layer.
+    # Operator-only (registry.ex), never delegated to subagents (subagents.ex). Only
+    # seeded when `ComputerUse.ready?()` (BuiltinSeeder), so an unready/disabled
+    # daemon never advertises it.
+    "computer_use" => %{policy_class: :gui_control, hidden_from_agent?: false}
   }
 
   @doc """

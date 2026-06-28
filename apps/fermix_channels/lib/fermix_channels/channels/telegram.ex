@@ -21,6 +21,10 @@ defmodule FermixChannels.Channels.Telegram do
   @bot_api_base "https://api.telegram.org"
   @health_timeout_ms 5_000
   @max_message_length 4096
+  # Inbound image download cap (≤ Telegram's getFile 20 MB ceiling); the
+  # post-receive guard in download_attachment/2 is the hard backstop for a
+  # missing/lying declared file_size.
+  @max_inbound_media_bytes 20 * 1_024 * 1_024
   @bullet_markdown_pattern ~r/^(\s*)[-*]\s+/u
   @heading_markdown_pattern ~r/^([ ]{0,3})\#{1,6}[ \t]+(.+?)(?:[ \t]+\#+[ \t]*)?$/u
   @fenced_code_pattern ~r/```([A-Za-z0-9_+-]*)\n([\s\S]*?)```/u
@@ -57,6 +61,20 @@ defmodule FermixChannels.Channels.Telegram do
     ChannelTelemetry.emit_parse(:telegram, result, duration_us)
     maybe_emit_inbound_message(:telegram, result, duration_us)
     result
+  end
+
+  # Album policy for `Gateway.AlbumBuffer`: Telegram delivers a media group as
+  # separate updates sharing a `media_group_id`, so coalesce by that id. A single
+  # message has no group id and can never collide with an album key, so it passes
+  # straight through.
+  @impl true
+  @spec album_classify(FermixChannels.Gateway.Channel.message()) ::
+          FermixChannels.Gateway.Channel.album_classification()
+  def album_classify(message) do
+    case message |> Map.get(:metadata, %{}) |> Map.get(:media_group_id) do
+      nil -> :passthrough
+      group_id -> {:coalesce, group_id}
+    end
   end
 
   defp do_parse_update(update) do
@@ -743,11 +761,70 @@ defmodule FermixChannels.Channels.Telegram do
         chat_id: chat_id,
         reply_target: chat_id,
         thread_ts: msg["message_thread_id"],
-        metadata: %{chat_type: get_in(msg, ["chat", "type"]), user_id: to_string(user_id)}
+        metadata:
+          %{chat_type: get_in(msg, ["chat", "type"]), user_id: to_string(user_id)}
+          |> maybe_put_media_group(msg["media_group_id"]),
+        attachments: parse_attachments(msg)
       })
 
     {:ok, [message]}
   end
+
+  # Inbound photos arrive as a list of PhotoSize (file_id only — no URL); the
+  # bytes are fetched lazily by download_attachment/2 at the gateway media-ingest
+  # step. Only images are parsed today (P1); other media kinds are P2.
+  defp parse_attachments(%{"photo" => sizes}) when is_list(sizes) and sizes != [] do
+    case largest_photo(sizes) do
+      %{"file_id" => file_id} = size when is_binary(file_id) ->
+        [
+          %{
+            kind: :image,
+            file_id: file_id,
+            url: nil,
+            mime_type: "image/jpeg",
+            size_bytes: Map.get(size, "file_size")
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp parse_attachments(_msg), do: []
+
+  # A multi-attachment message ("album") shares a media_group_id across the
+  # separate updates Telegram delivers it as; the poller buffers by this id so
+  # the album becomes one turn. Single messages have no media_group_id.
+  defp maybe_put_media_group(metadata, group_id) when is_binary(group_id) and group_id != "",
+    do: Map.put(metadata, :media_group_id, group_id)
+
+  defp maybe_put_media_group(metadata, _group_id), do: metadata
+
+  # Prefer the largest variant whose declared file_size is under the cap so we
+  # never request an over-limit original; if none declares a size under the cap,
+  # fall back to the highest-resolution variant and let the download cap decide.
+  defp largest_photo(sizes) do
+    candidates =
+      case Enum.filter(sizes, &photo_under_cap?/1) do
+        [] -> sizes
+        under_cap -> under_cap
+      end
+
+    Enum.max_by(candidates, &photo_pixels/1, fn -> nil end)
+  end
+
+  defp photo_under_cap?(size) do
+    case Map.get(size, "file_size") do
+      n when is_integer(n) -> n <= @max_inbound_media_bytes
+      _ -> true
+    end
+  end
+
+  defp photo_pixels(%{"width" => w, "height" => h}) when is_integer(w) and is_integer(h),
+    do: w * h
+
+  defp photo_pixels(_size), do: 0
 
   defp maybe_emit_inbound_message(channel, {:ok, messages}, duration_us) when messages != [] do
     ChannelTelemetry.emit_message(channel, :inbound, length(messages), duration_us)
@@ -860,6 +937,126 @@ defmodule FermixChannels.Channels.Telegram do
     else
       _ -> {:error, :not_configured}
     end
+  end
+
+  @impl true
+  @spec download_attachment(FermixChannels.Gateway.Channel.message(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def download_attachment(_message, attachment) when is_map(attachment) do
+    with :ok <- preflight_size_cap(attachment),
+         {:ok, token} <- get_bot_token(),
+         {:ok, file_path} <- resolve_file_path(attachment_value(attachment, :file_id), token),
+         {:ok, body} <- download_file(token, file_path),
+         {:ok, path} <- write_temp_file(body, attachment) do
+      {:ok, path}
+    end
+  end
+
+  defp preflight_size_cap(attachment) do
+    case attachment_value(attachment, :size_bytes) do
+      size when is_integer(size) and size > @max_inbound_media_bytes ->
+        {:error, {:byte_cap_exceeded, size, @max_inbound_media_bytes}}
+
+      _ ->
+        :ok
+    end
+  end
+
+  # file_path is ~1h ephemeral, so resolve it fresh on every download — never
+  # cache the resulting token-bearing URL.
+  defp resolve_file_path(file_id, token) when is_binary(file_id) and file_id != "" do
+    result =
+      Req.new(
+        url: "#{@bot_api_base}/bot#{token}/getFile",
+        method: :post,
+        json: %{file_id: file_id}
+      )
+      |> Req.merge(req_options([]))
+      |> HttpClient.request("Telegram getFile")
+
+    case result do
+      {:ok, %{status: 200, body: %{"ok" => true, "result" => %{"file_path" => file_path}}}}
+      when is_binary(file_path) ->
+        {:ok, file_path}
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("Telegram getFile failed: #{status} - #{inspect(body)}")
+        {:error, {:getfile_failed, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_file_path(_missing, _token), do: {:error, :missing_attachment_reference}
+
+  # The download URL carries the bot token — never log it.
+  defp download_file(token, file_path) do
+    result =
+      Req.new(url: "#{@bot_api_base}/file/bot#{token}/#{file_path}", method: :get)
+      |> Req.merge(req_options([]))
+      |> HttpClient.request("Telegram file download")
+
+    case result do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        enforce_inbound_cap(body)
+
+      {:ok, %{status: 200, body: body}} ->
+        enforce_inbound_cap(IO.iodata_to_binary(body))
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("Telegram file download failed: #{status} - #{inspect(body)}")
+        {:error, {:download_failed, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp enforce_inbound_cap(body) when byte_size(body) > @max_inbound_media_bytes do
+    Logger.error("Telegram inbound media exceeded #{@max_inbound_media_bytes}-byte cap; refusing")
+    {:error, {:byte_cap_exceeded, byte_size(body), @max_inbound_media_bytes}}
+  end
+
+  defp enforce_inbound_cap(body), do: {:ok, body}
+
+  defp write_temp_file(body, attachment) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-telegram-#{System.unique_integer([:positive])}#{attachment_extension(attachment)}"
+      )
+
+    case File.write(path, body) do
+      :ok -> {:ok, path}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp attachment_extension(attachment) do
+    attachment
+    |> attachment_value(:mime_type)
+    |> normalize_extension()
+  end
+
+  defp normalize_extension(nil), do: ".bin"
+
+  defp normalize_extension(mime_type) when is_binary(mime_type) do
+    mime_type
+    |> String.split(";", parts: 2)
+    |> hd()
+    |> String.split("/", parts: 2)
+    |> case do
+      [_type, subtype] when subtype != "" ->
+        "." <> String.replace(subtype, ~r/[^a-zA-Z0-9]+/, "_")
+
+      _ ->
+        ".bin"
+    end
+  end
+
+  defp attachment_value(attachment, key) when is_map(attachment) do
+    Map.get(attachment, key) || Map.get(attachment, Atom.to_string(key))
   end
 
   defp req_options(opts) do

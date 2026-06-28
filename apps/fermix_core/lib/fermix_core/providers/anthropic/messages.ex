@@ -49,9 +49,11 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
@@ -61,9 +63,10 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # §5.1: non-streaming requests need a bounded output ceiling; the SSE
   # follow-up raises this toward ModelCatalog.max_output_tokens_for/2.
   @non_streaming_max_tokens 8_192
-  # Codex precedent — HttpClient sets no receive timeout of its own.
-  @receive_timeout_ms 120_000
   @cache_control %{type: "ephemeral"}
+  # Marker left in place of an older screenshot's image bytes once it falls
+  # outside the retention window (ScreenshotRetention) — keeps the textual trail.
+  @screenshot_elided "[earlier screenshot omitted to bound context]"
   # Claude 4.7+ rejects sampling params (temperature/top_p/top_k) — §5.1.
   @no_sampling_substrings ["4-7", "4.7", "4-8", "4.8"]
   @known_stop_reasons ["end_turn", "tool_use", "max_tokens", "stop_sequence", "refusal"]
@@ -87,7 +90,9 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   def chat(messages, capabilities, opts)
       when is_list(messages) and messages != [] and is_list(capabilities) and is_list(opts) do
     {system, anthropic_messages} = split_system(messages)
-    request(anthropic_messages, system, to_provider_tools(capabilities), capabilities, opts)
+    tools = to_provider_tools(capabilities)
+    invariant = invariant_metrics(tools, capabilities)
+    request(anthropic_messages, system, tools, capabilities, invariant, opts)
   end
 
   @impl true
@@ -102,15 +107,54 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       capabilities: capabilities
     } = provider_state
 
-    next_messages =
-      messages ++
-        [
-          %{role: "assistant", content: assistant_content},
-          %{role: "user", content: tool_result_blocks(tool_results)}
-        ]
+    # invariant_metrics is precomputed once per turn in the chat/continue path
+    # and carried in provider_state; recompute here only if an isolated caller
+    # built the state without it (identical value — memoization, not a fallback).
+    invariant =
+      Map.get(provider_state, :invariant_metrics) || invariant_metrics(tools, capabilities)
 
-    request(next_messages, system, tools, capabilities, opts)
+    next_messages =
+      (messages ++
+         [
+           %{role: "assistant", content: assistant_content},
+           %{role: "user", content: tool_result_blocks(tool_results)}
+         ])
+      |> ScreenshotRetention.keep_last(
+        Keyword.get(opts, :max_retained_screenshots),
+        &screenshot_message?/1,
+        &elide_screenshot_message/1
+      )
+
+    request(next_messages, system, tools, capabilities, invariant, opts)
   end
+
+  # A screenshot carrier is a user message holding a `tool_result` block whose
+  # content array contains image blocks (the reference computer-use shape).
+  # Inbound user images ride the message content directly, never inside a
+  # `tool_result`, so they are not matched and never elided.
+  defp screenshot_message?(%{role: "user", content: blocks}) when is_list(blocks),
+    do: Enum.any?(blocks, &tool_result_with_image?/1)
+
+  defp screenshot_message?(_), do: false
+
+  defp tool_result_with_image?(%{type: "tool_result", content: content}) when is_list(content),
+    do: Enum.any?(content, &match?(%{type: "image"}, &1))
+
+  defp tool_result_with_image?(_), do: false
+
+  defp elide_screenshot_message(%{role: "user", content: blocks} = message),
+    do: %{message | content: Enum.map(blocks, &elide_tool_result_images/1)}
+
+  defp elide_tool_result_images(%{type: "tool_result", content: content} = block)
+       when is_list(content) do
+    text =
+      content |> Enum.filter(&match?(%{type: "text"}, &1)) |> Enum.map_join(" ", & &1.text)
+
+    marker = String.trim("#{text} #{@screenshot_elided}")
+    %{block | content: marker}
+  end
+
+  defp elide_tool_result_images(block), do: block
 
   @impl true
   def to_provider_tools([]), do: []
@@ -150,15 +194,15 @@ defmodule FermixCore.Providers.Anthropic.Messages do
 
   # --- request build ---
 
-  defp request(messages, system, tools, capabilities, opts) do
+  defp request(messages, system, tools, capabilities, invariant, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
 
     with {:ok, auth} <- resolve_auth(opts) do
-      do_request(messages, system, tools, capabilities, auth, req_options, opts)
+      do_request(messages, system, tools, capabilities, invariant, auth, req_options, opts)
     end
   end
 
-  defp do_request(messages, system, tools, capabilities, auth, req_options, opts) do
+  defp do_request(messages, system, tools, capabilities, invariant, auth, req_options, opts) do
     mode = auth_mode(auth)
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
@@ -185,7 +229,8 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       agent: Keyword.get(opts, :agent),
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
-      request_metrics: request_metrics(messages, system, tools, capabilities)
+      invariant_metrics: invariant,
+      request_metrics: Map.merge(input_metrics(messages, system), invariant)
     }
 
     post(base_url, auth, body, req_options, turn_state)
@@ -251,14 +296,57 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     raise ArgumentError, "Anthropic.Messages requires system messages to lead the transcript"
   end
 
-  defp to_block_message(%{content: content}),
-    do: %{role: "user", content: [%{type: "text", text: content || ""}]}
+  defp to_block_message(%{content: content} = message) do
+    image_blocks = anthropic_image_blocks(message)
+    %{role: "user", content: anthropic_text_blocks(content || "", image_blocks) ++ image_blocks}
+  end
+
+  # Anthropic rejects empty text content blocks, so a captionless image-only turn
+  # must send only its image block(s). A non-empty caption keeps its text block,
+  # so a text-only turn stays `[%{type: "text", ...}]` — byte-stable for the cache.
+  defp anthropic_text_blocks("", [_ | _]), do: []
+  defp anthropic_text_blocks(content, _image_blocks), do: [%{type: "text", text: content}]
+
+  # Inbound images (M14) ride the user message's `image_parts`; append them after
+  # the text block. Text-only turns produce `[%{type: "text", ...}]` unchanged,
+  # keeping the cached prefix byte-stable.
+  defp anthropic_image_blocks(message) do
+    message
+    |> Map.get(:image_parts, [])
+    |> Enum.map(&anthropic_image_block/1)
+  end
+
+  defp anthropic_image_block(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and is_binary(data),
+       do: %{
+         type: "image",
+         source: %{type: "base64", media_type: mime, data: Base.encode64(data)}
+       }
+
+  defp anthropic_image_block(part),
+    do:
+      raise(
+        ArgumentError,
+        "unsupported image content part for Anthropic encoder: #{inspect(part)}"
+      )
 
   defp tool_result_blocks(tool_results) do
-    Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
-      %{type: "tool_result", tool_use_id: call_id, content: to_string(output)}
+    Enum.map(tool_results, fn %{call_id: call_id} = result ->
+      %{type: "tool_result", tool_use_id: call_id, content: tool_result_content(result)}
     end)
   end
+
+  # Text-only results stay a plain string — byte-identical to pre-image behavior,
+  # so the cached prefix is unaffected. A result carrying images (e.g. a
+  # screenshot) becomes a content-block array: the text block (omitted when empty,
+  # since Anthropic rejects empty text) then the image blocks — the reference
+  # computer-use `tool_result` shape, reusing the inbound-image encoders.
+  defp tool_result_content(%{output: output, images: [_ | _] = images}) do
+    text = to_string(output)
+    anthropic_text_blocks(text, images) ++ Enum.map(images, &anthropic_image_block/1)
+  end
+
+  defp tool_result_content(%{output: output}), do: to_string(output)
 
   defp system_blocks(nil, :api_key), do: nil
 
@@ -413,7 +501,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
         url: "#{base_url}/messages",
         method: :post,
         json: body,
-        receive_timeout: @receive_timeout_ms,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: request_headers(credential)
       )
       |> Req.merge(req_options)
@@ -510,6 +598,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
          assistant_content: blocks,
          tools: turn_state.tools,
          capabilities: turn_state.capabilities,
+         invariant_metrics: turn_state.invariant_metrics,
          stop_reason: stop_reason
        },
        usage: parse_usage(body),
@@ -629,11 +718,21 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     )
   end
 
-  defp request_metrics(messages, system, tools, capabilities) do
+  # Per-call fields: messages/system grow each turn, so they are recomputed
+  # on every provider call.
+  defp input_metrics(messages, system) do
     %{
       input_items: length(messages),
       input_bytes: encoded_size(messages),
-      instructions_bytes: if(is_binary(system), do: byte_size(system), else: 0),
+      instructions_bytes: if(is_binary(system), do: byte_size(system), else: 0)
+    }
+  end
+
+  # Turn-invariant fields: tools/capabilities do not change across the loop, so
+  # `encoded_size(tools)` runs once on the initial call and is carried through
+  # `provider_state`/`turn_state` into every continuation.
+  defp invariant_metrics(tools, capabilities) do
+    %{
       tools_count: length(tools),
       tools_bytes: encoded_size(tools),
       capabilities_count: length(capabilities)

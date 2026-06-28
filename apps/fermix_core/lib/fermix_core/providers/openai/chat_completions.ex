@@ -26,8 +26,10 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
   alias FermixCore.Telemetry
 
@@ -41,20 +43,61 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     request(messages, capabilities, opts)
   end
 
+  # A `tool` message is text-only on every OpenAI-shaped surface, so a screenshot
+  # cannot ride inside it. The replay-safe shape (no `previous_response_id` here):
+  # the `tool` message keeps the call/result pairing and carries the text (or a
+  # short placeholder when the image is the whole payload), then the image(s) ride
+  # a SUBSEQUENT user turn — emitted after ALL tool messages so every tool_call is
+  # paired before any user turn. State carries by full replay, so the image is
+  # re-sent each turn (bounded by the screenshot-retention cap once it lands).
+  @image_followup_label "Screen state returned by the preceding tool call:"
+  @image_followup_placeholder "[screen state in the following message]"
+  # Replaces a screenshot follow-up turn once it ages out of the retention
+  # window (ScreenshotRetention) — the image bytes drop, the textual trail stays.
+  @image_followup_elided "[earlier screen state omitted to bound context]"
+
   @impl true
   def continue(
         %{messages: prior, assistant: assistant, capabilities: capabilities},
         tool_results,
         opts
       ) do
-    tool_messages =
-      Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
-        %{role: "tool", tool_call_id: call_id, content: to_string(output)}
-      end)
+    tool_messages = Enum.map(tool_results, &tool_result_message/1)
+    image_turns = tool_results |> Enum.filter(&has_images?/1) |> Enum.map(&image_user_message/1)
 
-    next_messages = prior ++ [assistant] ++ tool_messages
+    next_messages =
+      (prior ++ [assistant] ++ tool_messages ++ image_turns)
+      |> ScreenshotRetention.keep_last(
+        Keyword.get(opts, :max_retained_screenshots),
+        &screenshot_message?/1,
+        &elide_screenshot_message/1
+      )
+
     request(next_messages, capabilities, opts)
   end
+
+  # A screenshot carrier is the dedicated follow-up user turn (labelled, carrying
+  # `image_parts`) emitted after the tool messages — NOT an inbound user image
+  # (those also carry `image_parts` but never this label), so user content is
+  # left untouched.
+  defp screenshot_message?(%{content: @image_followup_label, image_parts: [_ | _]}), do: true
+  defp screenshot_message?(_), do: false
+
+  defp elide_screenshot_message(message),
+    do: message |> Map.delete(:image_parts) |> Map.put(:content, @image_followup_elided)
+
+  defp tool_result_message(%{call_id: call_id, output: output} = result) do
+    text = to_string(output)
+    content = if text == "" and has_images?(result), do: @image_followup_placeholder, else: text
+    %{role: "tool", tool_call_id: call_id, content: content}
+  end
+
+  defp image_user_message(%{images: images}) do
+    %{role: "user", content: @image_followup_label, image_parts: images}
+  end
+
+  defp has_images?(%{images: [_ | _]}), do: true
+  defp has_images?(_), do: false
 
   @impl true
   def to_provider_tools(capabilities) when is_list(capabilities) do
@@ -151,6 +194,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
         url: "#{base_url}/chat/completions",
         method: :post,
         json: body,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: auth_headers(api_key) ++ provider_headers(ctx.provider)
       )
       |> Req.merge(req_options)
@@ -273,10 +317,18 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       tool_calls = Map.get(msg, :tool_calls)
 
       %{role: msg.role}
-      |> put_content(Map.get(msg, :content), tool_calls)
+      |> put_content(Map.get(msg, :content), Map.get(msg, :image_parts, []), tool_calls)
       |> maybe_put_field(:tool_call_id, Map.get(msg, :tool_call_id))
       |> maybe_put_tool_calls(tool_calls)
     end)
+  end
+
+  # Inbound images (M14) → a multimodal content array (text + image_url parts).
+  # Only user turns carry them; image bytes ride as a base64 data URI. Checked
+  # first so the text-only clauses below stay byte-identical when there are none.
+  defp put_content(map, content, [_ | _] = image_parts, _calls) do
+    text_part = %{type: "text", text: content || ""}
+    Map.put(map, :content, [text_part | Enum.map(image_parts, &chat_image_part/1)])
   end
 
   # Mistral's strict validator 422s on empty-string `content` sent alongside
@@ -284,11 +336,22 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   # vllm #38738) is to omit the `content` key in exactly that case. A real
   # preamble (non-empty content + tool_calls) is kept, and OpenAI/OpenRouter/
   # Ollama tolerate the omission — one wire shape valid on every provider.
-  defp put_content(map, content, calls)
+  defp put_content(map, content, _no_images, calls)
        when is_list(calls) and calls != [] and content in [nil, ""],
        do: map
 
-  defp put_content(map, content, _calls), do: Map.put(map, :content, content || "")
+  defp put_content(map, content, _no_images, _calls), do: Map.put(map, :content, content || "")
+
+  defp chat_image_part(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and is_binary(data),
+       do: %{type: "image_url", image_url: %{url: "data:#{mime};base64,#{Base.encode64(data)}"}}
+
+  defp chat_image_part(part),
+    do:
+      raise(
+        ArgumentError,
+        "unsupported image content part for Chat Completions encoder: #{inspect(part)}"
+      )
 
   defp maybe_put_field(map, _key, nil), do: map
   defp maybe_put_field(map, key, value), do: Map.put(map, key, value)

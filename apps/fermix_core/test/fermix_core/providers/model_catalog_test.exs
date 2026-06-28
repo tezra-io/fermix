@@ -140,6 +140,26 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
   end
 
+  describe "vision?/2" do
+    test "vision-capable catalog models return true" do
+      assert ModelCatalog.vision?(:openai_codex, "gpt-5.5")
+      assert ModelCatalog.vision?(:openai, "gpt-5.5")
+      assert ModelCatalog.vision?(:anthropic, "claude-opus-4-8")
+      assert ModelCatalog.vision?(:xai, "grok-4.3")
+    end
+
+    test "text-only local models are flagged false (capability gate fails loud)" do
+      refute ModelCatalog.vision?(:ollama, "qwen3:32b")
+      refute ModelCatalog.vision?(:ollama, "gpt-oss:20b")
+      refute ModelCatalog.vision?(:ollama, "llama3.3:70b")
+    end
+
+    test "defaults to true for unknown models and non-catalog providers" do
+      assert ModelCatalog.vision?(:openai, "gpt-future-unlisted")
+      assert ModelCatalog.vision?(:mock, "mock")
+    end
+  end
+
   describe "known_model?/2" do
     test "matches catalog entries and rejects unknowns" do
       for provider <- ModelCatalog.providers() do

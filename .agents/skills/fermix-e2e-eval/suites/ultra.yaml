@@ -74,43 +74,49 @@ scenarios:
           comparison rather than a generic answer.
 
   - id: multipart_planning
-    title: "Decomposes a broad planning task and synthesizes a structured plan"
+    title: "Decomposes a broad planning task with live research across multiple sources"
     severity: normal
     tags: [ultra, fanout, planning]
     cases:
-      - id: launch_plan_saas
+      - id: platform_migration_comparison
         query: >
-          /ultra Put together a launch plan for a small B2B SaaS scheduling tool
-          aimed at dental clinics. Cover four areas: target market and
-          positioning, a pricing model with tiers, the first three months of
-          go-to-market and marketing channels, and the key product and
-          engineering milestones needed to be launch-ready. Pull it together into
-          one coherent plan.
+          /ultra We're moving off Heroku (3 apps, ~5 million requests/month,
+          one managed Postgres at 10 GB). Research the three most commonly
+          recommended alternatives — Railway, Fly.io, and Render — by fetching
+          their current pricing pages and docs. For each: what would our monthly
+          bill look like at our scale, how does their managed Postgres compare
+          (backups, connection pooling, max storage), and what do recent
+          developer community posts say about reliability and support quality.
+          Then give us a concrete recommendation with a migration sequence.
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 3
-          reply_matches: "(?i)pricing"
+          reply_matches: "(?i)railway|fly\\.io|render"
           max_cost_usd: 120
         rubric: >
-          Addresses all four requested areas (market/positioning, tiered pricing,
-          a first-three-months go-to-market plan, and product/engineering
-          milestones) and weaves them into one coherent launch plan rather than
-          answering only one part.
-      - id: migration_strategy
+          Fetches current pricing and docs for all three platforms (Railway,
+          Fly.io, Render), produces a cost estimate for the stated scale,
+          compares managed Postgres across the three, incorporates recent
+          community sentiment (not just marketing copy), and ends with a single
+          concrete recommendation and a migration sequence.
+      - id: hiring_senior_engineers
         query: >
-          /ultra We run a monolithic Rails app and want to move toward services.
-          Lay out a migration strategy that covers: how to decide which pieces to
-          extract first, the data-ownership and database-splitting approach,
-          rollout and deployment safety (feature flags, canaries, rollback), and
-          the observability and on-call changes we'll need. End with a phased
-          roadmap.
+          /ultra We need to hire 4 senior backend engineers (Go/Elixir) over the
+          next 5 months, remote-first, US timezones. Research current market
+          salary ranges from levels.fyi and similar sources, which job boards
+          (LinkedIn, Wellfound, Hired, etc.) have the best signal-to-noise for
+          this profile right now, and what the standard interview process looks
+          like at well-regarded remote-first companies in this stack. Then give
+          us a month-by-month hiring plan with realistic timelines and sourcing
+          priorities.
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 3
-          reply_matches: "(?i)roadmap|phase"
+          reply_matches: "(?i)salary|compensation|levels"
           max_cost_usd: 120
         rubric: >
-          Covers all four requested dimensions (what to extract first, data
-          ownership / database splitting, rollout safety such as feature flags
-          and canaries, and observability/on-call changes) and ends with a phased
-          roadmap, synthesizing the parts into one strategy.
+          Pulls current salary benchmarks from at least one live source
+          (levels.fyi or equivalent), evaluates multiple job boards by
+          signal-to-noise for this stack, references real interview process
+          norms from recent sources, and delivers a month-by-month plan with
+          concrete sourcing priorities rather than generic hiring advice.

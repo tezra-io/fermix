@@ -12,36 +12,13 @@ defmodule FermixCore.Tools.GitRead do
 
   @commands ~w(status log diff branch show)
 
-  # Audit F-01 follow-up: even though the resolved repo path is
-  # sandbox-checked, git accepts a handful of flags that escape the
-  # `cd: repo` boundary and read arbitrary host paths. `--no-index`
-  # turns `git diff` into a path-pair comparator that ignores the
-  # working tree. `--git-dir`, `--work-tree`, `-C`, `--exec-path`,
-  # `--output`, and `--upload-pack` redirect git's view of the repo
-  # or its output sink. Absolute-path positional args are similarly
-  # outside the sandbox. Reject all of these at the tool boundary
-  # before they reach `git`.
-  @arg_flag_denylist ~w(
-    --no-index
-    --git-dir
-    --work-tree
-    --exec-path
-    --output
-    --output-directory
-    --upload-pack
-    --receive-pack
-    --man-path
-    --info-path
-  )
-  @arg_flag_prefix_denylist ~w(
-    --git-dir=
-    --work-tree=
-    --exec-path=
-    --output=
-    --output-directory=
-    --upload-pack=
-    --receive-pack=
-  )
+  # Audit F-01 follow-up: dangerous git *flags* that escape the `cd: repo`
+  # boundary (`--upload-pack`, `--git-dir`, `--no-index`, ...) are rejected at
+  # the shared chokepoint in `FermixCore.Tools.GitCommand`, so every git tool
+  # is covered uniformly. Here we additionally reject *positional* args that
+  # point outside the repo — absolute paths and `..` traversal — a read-tool
+  # concern (mutating tools pass free-text like commit messages that may
+  # legitimately resemble paths, so they do not apply this positional check).
 
   @impl true
   def name, do: "git_read"
@@ -120,12 +97,6 @@ defmodule FermixCore.Tools.GitRead do
 
   defp classify_arg(arg) do
     cond do
-      arg in @arg_flag_denylist ->
-        {:error, "git arg #{inspect(arg)} is rejected; it can escape sandbox containment"}
-
-      Enum.any?(@arg_flag_prefix_denylist, &String.starts_with?(arg, &1)) ->
-        {:error, "git arg #{inspect(arg)} is rejected; it can escape sandbox containment"}
-
       absolute_path_arg?(arg) ->
         {:error, "git arg #{inspect(arg)} is an absolute path; pass repo-relative paths only"}
 

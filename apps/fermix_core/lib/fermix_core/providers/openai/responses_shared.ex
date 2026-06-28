@@ -19,6 +19,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Telemetry
 
   @type tool_result :: %{required(:call_id) => String.t(), required(:output) => term()}
@@ -88,17 +89,40 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     tools
   end
 
-  @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
-  def request_metrics(input, instructions, tools, capabilities)
-      when is_list(input) and is_list(tools) and is_list(capabilities) do
+  @doc """
+  The per-call request-metric fields: they change on every provider call as the
+  item list and instructions grow across the agent loop, so they are recomputed
+  each turn.
+  """
+  @spec input_metrics([map()], String.t() | nil) :: map()
+  def input_metrics(input, instructions) when is_list(input) do
     %{
       input_items: length(input),
       input_bytes: encoded_size(input),
-      instructions_bytes: string_size(instructions),
+      instructions_bytes: string_size(instructions)
+    }
+  end
+
+  @doc """
+  The turn-invariant request-metric fields: tools and capabilities do not change
+  across the continuation loop, so `encoded_size(tools)` is computed once on the
+  initial call and carried (via `provider_state`/`turn_state`) into every
+  continuation, which merges it onto the recomputed `input_metrics/2`.
+  """
+  @spec invariant_metrics([map()], [Capability.t()]) :: map()
+  def invariant_metrics(tools, capabilities)
+      when is_list(tools) and is_list(capabilities) do
+    %{
       tools_count: length(tools),
       tools_bytes: encoded_size(tools),
       capabilities_count: length(capabilities)
     }
+  end
+
+  @spec request_metrics([map()], String.t() | nil, [map()], [Capability.t()]) :: map()
+  def request_metrics(input, instructions, tools, capabilities)
+      when is_list(input) and is_list(tools) and is_list(capabilities) do
+    Map.merge(input_metrics(input, instructions), invariant_metrics(tools, capabilities))
   end
 
   @spec build_input([map()]) :: {String.t() | nil, [map()]}
@@ -116,12 +140,75 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     {instructions, input}
   end
 
+  # A `function_call_output` item is text-only on the Responses item list, so a
+  # screenshot cannot ride inside it. The replay-safe shape (this surface has no
+  # `previous_response_id` either — every turn replays the full item list): emit
+  # all `function_call_output` items first (each paired to its `call_id`), then the
+  # image(s) as a SUBSEQUENT user item carrying `input_image` parts — the same
+  # encoding inbound images use. Ordering matters: outputs must immediately follow
+  # their function_calls before any user item. Both OpenAI.Responses and
+  # OpenAI.Codex concatenate this list last, so both get the screenshot path.
+  @image_followup_label "Screen state returned by the preceding tool call:"
+  @image_followup_placeholder "[screen state in the following message]"
+  # Replaces a screenshot input item once it ages out of the retention window
+  # (ScreenshotRetention) — image bytes drop, the textual trail stays.
+  @image_followup_elided "[earlier screen state omitted to bound context]"
+
   @spec build_function_call_outputs([tool_result()]) :: [map()]
   def build_function_call_outputs(tool_results) when is_list(tool_results) do
-    Enum.map(tool_results, fn %{call_id: call_id, output: output} ->
-      %{type: "function_call_output", call_id: call_id, output: to_string(output)}
-    end)
+    outputs = Enum.map(tool_results, &function_call_output_item/1)
+
+    image_items =
+      tool_results |> Enum.filter(&has_images?/1) |> Enum.map(&screenshot_input_item/1)
+
+    outputs ++ image_items
   end
+
+  defp function_call_output_item(%{call_id: call_id, output: output} = result) do
+    text = to_string(output)
+
+    item_output =
+      if text == "" and has_images?(result), do: @image_followup_placeholder, else: text
+
+    %{type: "function_call_output", call_id: call_id, output: item_output}
+  end
+
+  defp screenshot_input_item(%{images: images}) do
+    image_parts = Enum.map(images, &image_part_to_responses/1)
+    %{role: "user", content: [%{type: "input_text", text: @image_followup_label} | image_parts]}
+  end
+
+  defp has_images?(%{images: [_ | _]}), do: true
+  defp has_images?(_), do: false
+
+  @doc """
+  Keep screenshot image bytes only in the most recent `keep` screenshot input
+  items of the assembled `input` list; older ones are elided to a text marker. A
+  `keep` of `nil` disables retention. Shared by the Responses and Codex adapters,
+  which both replay the full item list each turn.
+  """
+  @spec retain_screenshots([map()], non_neg_integer() | nil) :: [map()]
+  def retain_screenshots(input, keep) when is_list(input) do
+    ScreenshotRetention.keep_last(input, keep, &screenshot_item?/1, &elide_screenshot_item/1)
+  end
+
+  # A screenshot carrier is the labelled follow-up user item holding `input_image`
+  # parts. Inbound user images arrive as their own items without this label, so
+  # they are never matched or elided.
+  defp screenshot_item?(%{
+         role: "user",
+         content: [%{type: "input_text", text: @image_followup_label} | rest]
+       })
+       when is_list(rest),
+       do: Enum.any?(rest, &match?(%{type: "input_image"}, &1))
+
+  defp screenshot_item?(_), do: false
+
+  # The screenshot item's only text is the now-meaningless follow-up label (the
+  # real tool output rides a separate function_call_output), so the whole content
+  # collapses to the elision marker once the image bytes are dropped.
+  defp elide_screenshot_item(item),
+    do: %{item | content: [%{type: "input_text", text: @image_followup_elided}]}
 
   @context_length_markers [
     "context_length_exceeded",
@@ -192,9 +279,9 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     )
   end
 
-  @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()]) ::
+  @spec build_turn(map(), String.t(), [map()], term(), [Capability.t()], map() | nil) ::
           {:ok, map()}
-  def build_turn(body, fallback_model, input, tools, capabilities) do
+  def build_turn(body, fallback_model, input, tools, capabilities, invariant_metrics \\ nil) do
     output_items = Map.get(body, "output") || []
     usage = Map.get(body, "usage") || %{}
 
@@ -214,7 +301,8 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
          input: input,
          output_items: output_items,
          tools: tools,
-         capabilities: capabilities
+         capabilities: capabilities,
+         invariant_metrics: invariant_metrics
        },
        usage: %{
          prompt_tokens: prompt,
@@ -244,14 +332,40 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
     "call_#{hash}"
   end
 
-  defp message_to_item(%{role: "user", content: content}),
-    do: %{role: "user", content: [%{type: "input_text", text: content || ""}]}
-
   defp message_to_item(%{role: "assistant", content: content}),
     do: %{role: "assistant", content: [%{type: "output_text", text: content || ""}]}
 
-  defp message_to_item(%{content: content}),
-    do: %{role: "user", content: [%{type: "input_text", text: content || ""}]}
+  defp message_to_item(%{role: "user"} = message), do: user_item(message)
+
+  defp message_to_item(message), do: user_item(message)
+
+  # User content: the text caption (a plain string) plus any image parts the
+  # gateway materialized (M14). Appending image parts to the single-element text
+  # list keeps text-only turns byte-identical to the pre-multimodal shape, so the
+  # provider prompt-cache prefix is unaffected (see the characterization test).
+  defp user_item(message) do
+    text = Map.get(message, :content) || ""
+
+    image_parts =
+      message
+      |> Map.get(:image_parts, [])
+      |> Enum.map(&image_part_to_responses/1)
+
+    %{role: "user", content: [%{type: "input_text", text: text} | image_parts]}
+  end
+
+  # Image bytes ride as a base64 data URI in `image_url` (the same field a remote
+  # URL would use), the shape the Codex/Responses backend accepts.
+  defp image_part_to_responses(%{type: :image, mime_type: mime, data: data})
+       when is_binary(mime) and is_binary(data),
+       do: %{type: "input_image", image_url: "data:#{mime};base64,#{Base.encode64(data)}"}
+
+  defp image_part_to_responses(part),
+    do:
+      raise(
+        ArgumentError,
+        "unsupported image content part for Responses encoder: #{inspect(part)}"
+      )
 
   defp normalize_tool_call(%{"type" => "function_call"} = item, idx) do
     name = Map.get(item, "name", "")

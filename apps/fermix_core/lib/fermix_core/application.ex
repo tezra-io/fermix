@@ -17,6 +17,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
@@ -26,6 +28,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
+  alias FermixCore.Prompt.IdentityName
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
@@ -108,6 +111,7 @@ defmodule FermixCore.Application do
     remember_launch_cwd()
     :ok = ConfigStore.ensure_workspace()
     :ok = BootstrapRename.run()
+    :ok = IdentityName.reconcile()
     :ok = AuthStore.validate_permissions!()
     setup_file_logger()
     Trace.TelemetryHandler.attach()
@@ -137,7 +141,8 @@ defmodule FermixCore.Application do
         JobRunnerSupervisor,
         {JobScheduler, jobs_scheduler_opts()},
         maybe_daemon_socket(),
-        maybe_realtime_supervisor()
+        maybe_realtime_supervisor(),
+        maybe_computer_use_supervisor()
       ]
       |> List.flatten()
 
@@ -209,6 +214,18 @@ defmodule FermixCore.Application do
   defp maybe_realtime_supervisor do
     if realtime_socket_enabled?() and realtime_ready?() do
       [RealtimeSupervisor]
+    else
+      []
+    end
+  end
+
+  # Same gate as tool registration (`ComputerUse.ready?/0`): the session
+  # infrastructure boots only when computer use is enabled, the sidecar is
+  # installed, and OS permissions are granted. Off/unready (the default) starts
+  # nothing — no OS-driver process is ever spawned.
+  defp maybe_computer_use_supervisor do
+    if ComputerUse.ready?() do
+      [ComputerUseSupervisor]
     else
       []
     end

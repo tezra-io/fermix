@@ -169,7 +169,7 @@ defmodule FermixCore.Setup.WizardTest do
         telegram_bot_token: "bot-token",
         telegram_owner_user_id: "111",
         compaction_threshold: "0.8",
-        extraction_timeout_ms: "120000"
+        review_interval_hours: "48"
       )
 
     assert report.status == :ready
@@ -199,7 +199,48 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(telegram, :owner_user_id) == "111"
     refute Keyword.has_key?(telegram, :allowed_user_ids)
     assert Keyword.get(compaction, :threshold) == 0.8
-    assert Keyword.get(memory, :extraction_timeout_ms) == 120_000
+    assert Keyword.get(memory, :review_interval_hours) == 48
+  end
+
+  test "save_answers persists a bot name to [fermix_core.agent].name, not personalization" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-botname")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(openai_api_key: "sk-test-123", bot_name: "Aria")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    agent = Keyword.get(persisted.fermix_core, :agent, [])
+    personalization = Keyword.get(persisted.fermix_core, :personalization, [])
+
+    # Identity lives in the agent block (source of truth for IDENTITY.md), and is
+    # never mixed into the user-scoped personalization block.
+    assert Keyword.get(agent, :name) == "Aria"
+    refute Keyword.has_key?(personalization, :bot_name)
+  end
+
+  test "save_answers leaves the bot name untouched when bot_name is blank" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-botname-blank")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(openai_api_key: "sk-test-123", bot_name: "")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    agent = Keyword.get(persisted.fermix_core, :agent, [])
+    # Blank input writes no name of its own; the config default ("fermix") stands.
+    assert Keyword.get(agent, :name) == "fermix"
   end
 
   test "save_answers persists xai provider, model, and reasoning effort" do
@@ -349,6 +390,56 @@ defmodule FermixCore.Setup.WizardTest do
     assert contents =~ ~s(api_key = "@keyring")
     assert contents =~ "[fermix_core.providers.ollama]"
     assert contents =~ ~s(base_url = "http://tail.example:11434/v1")
+  end
+
+  test "M15 image fields persist: generate_image backend + model + google key (sentinel)" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m15-image")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               image_backend: "google",
+               image_model: "gemini-2.5-flash-image",
+               google_api_key: "gm-secret"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    tools = Keyword.get(persisted.fermix_core, :tools, [])
+    generate_image = Keyword.get(tools, :generate_image, [])
+
+    assert Keyword.get(generate_image, :backend) == "google"
+    assert Keyword.get(generate_image, :model) == "gemini-2.5-flash-image"
+    # Secret routes through the writer stub; the snapshot stores a sentinel and
+    # load resolves it back to plaintext.
+    assert Keyword.get(generate_image, :google_api_key) == "gm-secret"
+    assert {:ok, "gm-secret"} = FermixTestSupport.SecretWriterStub.get(:google_api_key)
+
+    contents = File.read!(ConfigStore.path())
+    assert contents =~ "[fermix_core.tools.generate_image]"
+    assert contents =~ ~s(backend = "google")
+    assert contents =~ ~s(google_api_key = "@keyring")
+    refute contents =~ "gm-secret"
+  end
+
+  test "M15 image save rejects an unknown backend" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m15-bad-backend")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    assert_raise ArgumentError, ~r/invalid image_backend/, fn ->
+      Wizard.report().wizard
+      |> Wizard.save_answers(image_backend: "midjourney")
+    end
   end
 
   test "a newly configured provider stays a fallback when a primary already exists" do
@@ -748,6 +839,36 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(realtime, :max_session_minutes) == 20
     assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 35
     assert Keyword.get(realtime, :persist_transcripts) == true
+  end
+
+  test "save_answers persists the computer_use enable flag" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-cu-setup-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+
+    System.put_env("FERMIX_HOME", tmp_home)
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+    start_memory_repo!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(computer_use_enabled: "yes")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    computer_use = Keyword.get(persisted.fermix_core, :computer_use, [])
+    assert Keyword.get(computer_use, :enabled) == true
+
+    # Toggling off round-trips to a disabled flag (the enable cascade's master switch).
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(computer_use_enabled: "no")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert persisted.fermix_core |> Keyword.get(:computer_use, []) |> Keyword.get(:enabled) ==
+             false
   end
 
   test "fresh setup asks for realtime opt-in before realtime details" do

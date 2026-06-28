@@ -262,6 +262,56 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert source.description == "Refreshed."
   end
 
+  test "create_job persists a pinned provider and model", %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{
+                 name: "Pinned",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run on a pinned route.",
+                 provider: "anthropic",
+                 model: "claude-opus-4-8"
+               },
+               repo: repo
+             )
+
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
+
+    assert {:ok, reloaded} = Registry.get_job(job.id, repo: repo)
+    assert reloaded.provider == "anthropic"
+    assert reloaded.model == "claude-opus-4-8"
+  end
+
+  test "update_job persists provider and model and leaves them untouched when omitted",
+       %{repo: repo} do
+    assert {:ok, job} =
+             Registry.create_job(
+               %{name: "Repin", schedule: "every 15 minutes", task_prompt: "Run."},
+               repo: repo
+             )
+
+    assert job.provider == nil
+    assert job.model == nil
+
+    assert {:ok, pinned} =
+             Registry.update_job(
+               job.id,
+               %{provider: "anthropic", model: "claude-opus-4-8"},
+               repo: repo
+             )
+
+    assert pinned.provider == "anthropic"
+    assert pinned.model == "claude-opus-4-8"
+
+    assert {:ok, retouched} =
+             Registry.update_job(job.id, %{task_prompt: "Run differently."}, repo: repo)
+
+    assert retouched.task_prompt == "Run differently."
+    assert retouched.provider == "anthropic"
+    assert retouched.model == "claude-opus-4-8"
+  end
+
   test "update_job rejects an empty patch and unknown jobs", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(

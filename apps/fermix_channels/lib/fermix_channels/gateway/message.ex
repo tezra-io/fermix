@@ -21,7 +21,10 @@ defmodule FermixChannels.Gateway.Message do
     :thread_ts,
     thread_scope: :root,
     metadata: %{},
-    attachments: []
+    attachments: [],
+    # Transient materialized inbound content parts (e.g. image bytes resolved at
+    # the gateway media-ingest step). NOT persisted — turn-local (M14).
+    media_parts: []
   ]
 
   @type thread_scope :: :root | :thread
@@ -37,7 +40,8 @@ defmodule FermixChannels.Gateway.Message do
           thread_ts: thread_id() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
-          attachments: [map()]
+          attachments: [map()],
+          media_parts: [map()]
         }
 
   @spec new!(map()) :: t()
@@ -45,6 +49,19 @@ defmodule FermixChannels.Gateway.Message do
     attrs
     |> Map.put(:thread_scope, thread_scope(attrs))
     |> then(&struct!(__MODULE__, &1))
+  end
+
+  @doc """
+  Whether the message carries something the agent can act on: non-blank text, or
+  any materialized media. A captionless image is actionable (the media carries
+  the turn); a sticker / poll / blank text with no media is not. This is the one
+  shared definition of "empty inbound" the gateway guards on — replying and not
+  scheduling a turn when a message is not actionable.
+  """
+  @spec actionable?(t()) :: boolean()
+  def actionable?(%__MODULE__{content: content, media_parts: parts})
+      when is_binary(content) and is_list(parts) do
+    String.trim(content) != "" or parts != []
   end
 
   defp thread_scope(%{thread_ts: nil}), do: :root

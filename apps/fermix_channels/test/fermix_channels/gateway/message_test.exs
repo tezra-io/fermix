@@ -50,4 +50,34 @@ defmodule FermixChannels.Gateway.MessageTest do
       assert thread_message.thread_scope == :thread
     end
   end
+
+  describe "actionable?/1" do
+    test "non-blank text is actionable" do
+      assert Message.actionable?(message(content: "hello", media_parts: []))
+    end
+
+    test "blank or whitespace-only text with no media is NOT actionable" do
+      refute Message.actionable?(message(content: "", media_parts: []))
+      refute Message.actionable?(message(content: "   \n  ", media_parts: []))
+    end
+
+    test "blank text WITH media (captionless image) IS actionable" do
+      assert Message.actionable?(
+               message(content: "", media_parts: [%{type: :image, data: "PNG"}])
+             )
+    end
+  end
+
+  defp message(fields) do
+    Message.new!(
+      Enum.into(fields, %{
+        id: "i",
+        content: "",
+        sender: "u",
+        channel: "telegram",
+        chat_id: "c",
+        reply_target: "c"
+      })
+    )
+  end
 end

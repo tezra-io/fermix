@@ -43,7 +43,7 @@ config :logger, :default_formatter,
 
 config :phoenix,
   filter_parameters:
-    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token)
+    ~w(password secret token t _csrf_token access_token refresh_token bot_token verify_token api_key)
 
 config :fermix_core,
   providers: [
@@ -59,7 +59,6 @@ config :fermix_core,
 config :fermix_core, :memory,
   enabled: true,
   extraction_enabled: true,
-  extraction_timeout_ms: 90_000,
   extraction_context_messages: 12,
   extraction_min_confidence: 0.75,
   review_interval_hours: 24,

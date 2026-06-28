@@ -3,6 +3,7 @@ defmodule FermixCore.Browser.ProfileManagerTest do
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.ProfileManager
+  alias FermixCore.Browser.Scope
 
   # A stand-in for ProfileServer that registers itself in the manager's
   # registry exactly like the real one, but never launches Chrome.
@@ -110,6 +111,42 @@ defmodule FermixCore.Browser.ProfileManagerTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 2_000
     refute Process.alive?(pid)
     assert live_keys(ctx.registry) == []
+  end
+
+  test "stop_owner tears down every profile for that owner, leaving others alive", ctx do
+    assert {:ok, pid_a1} = start(ctx.manager, "owner-a", "fermix", ctx.config)
+    Process.sleep(2)
+    assert {:ok, pid_a2} = start(ctx.manager, "owner-a", "fermix_visible", ctx.config)
+    Process.sleep(2)
+    assert {:ok, pid_b} = start(ctx.manager, "owner-b", "fermix", ctx.config)
+
+    ref_a1 = Process.monitor(pid_a1)
+    ref_a2 = Process.monitor(pid_a2)
+
+    assert :ok = ProfileManager.stop_owner("owner-a", server: ctx.manager)
+
+    # Both of owner-a's profiles are reaped; owner-b is untouched.
+    assert_receive {:DOWN, ^ref_a1, :process, ^pid_a1, _reason}, 2_000
+    assert_receive {:DOWN, ^ref_a2, :process, ^pid_a2, _reason}, 2_000
+    assert Process.alive?(pid_b)
+    assert live_keys(ctx.registry) == [{"owner-b", "fermix"}]
+  end
+
+  test "reap_conversation stops the browser for that conversation's owner only", ctx do
+    keep = {"telegram", "chat-keep", :root}
+    reap = {"cli", "sess-reap", :root}
+    {:ok, keep_owner} = Scope.owner_key(%{conversation_key: keep})
+    {:ok, reap_owner} = Scope.owner_key(%{conversation_key: reap})
+
+    assert {:ok, keep_pid} = start(ctx.manager, keep_owner, "fermix", ctx.config)
+    assert {:ok, reap_pid} = start(ctx.manager, reap_owner, "fermix", ctx.config)
+    ref = Process.monitor(reap_pid)
+
+    assert :ok = FermixCore.Browser.reap_conversation(reap, server: ctx.manager)
+
+    assert_receive {:DOWN, ^ref, :process, ^reap_pid, _reason}, 2_000
+    assert Process.alive?(keep_pid)
+    assert live_keys(ctx.registry) == [{keep_owner, "fermix"}]
   end
 
   test "dispatch reaches the profile server directly and reuses it", ctx do

@@ -7,6 +7,26 @@ defmodule FermixCore.Providers.AdapterTest do
   alias FermixCore.Providers.OpenAI.Codex
   alias FermixCore.Providers.OpenAI.Responses
 
+  describe "has_image_content?/1" do
+    test "true when a user message carries an image part" do
+      messages = [
+        %{
+          role: "user",
+          content: "hi",
+          image_parts: [%{type: :image, mime_type: "image/png", data: "x"}]
+        }
+      ]
+
+      assert Adapter.has_image_content?(messages)
+    end
+
+    test "false for plain text turns and messages without image parts" do
+      refute Adapter.has_image_content?([%{role: "user", content: "hello"}])
+      refute Adapter.has_image_content?([%{role: "user", content: "hi", image_parts: []}])
+      refute Adapter.has_image_content?([])
+    end
+  end
+
   describe "for_route/1" do
     test "openai_codex provider routes to Codex regardless of model" do
       assert Adapter.for_route(%{

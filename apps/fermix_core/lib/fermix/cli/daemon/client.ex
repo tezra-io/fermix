@@ -58,7 +58,8 @@ defmodule Fermix.CLI.Daemon.Client do
     payload = Jason.encode!(request_payload(method, opts))
 
     try do
-      with :ok <- :gen_tcp.send(conn, payload),
+      with :ok <- ensure_within_frame(payload),
+           :ok <- :gen_tcp.send(conn, payload),
            {:ok, data} <- :gen_tcp.recv(conn, 0, timeout) do
         case Jason.decode(data) do
           {:ok, decoded} ->
@@ -74,6 +75,20 @@ defmodule Fermix.CLI.Daemon.Client do
       end
     after
       :gen_tcp.close(conn)
+    end
+  end
+
+  # The socket is framed at @max_frame_bytes on both ends ({:packet, 4} +
+  # {:packet_size}), so an oversized request (e.g. large base64 image
+  # attachments) would otherwise fail on send with an opaque :emsgsize. Reject it
+  # before send with a structured, actionable error instead.
+  defp ensure_within_frame(payload) do
+    size = byte_size(payload)
+
+    if size > @max_frame_bytes do
+      {:error, {:request_too_large, size, @max_frame_bytes}}
+    else
+      :ok
     end
   end
 

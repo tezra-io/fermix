@@ -17,6 +17,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
   @category_order [
     :file,
     :web,
+    :media,
+    :computer,
     :git,
     :scheduling,
     :memory,
@@ -29,6 +31,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
   @category_labels %{
     file: "File & Code",
     web: "Web",
+    media: "Media Generation",
+    computer: "Computer Use",
     git: "Git",
     scheduling: "Scheduling",
     memory: "Memory",

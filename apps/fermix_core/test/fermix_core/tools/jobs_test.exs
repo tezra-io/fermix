@@ -163,7 +163,9 @@ defmodule FermixCore.Tools.JobsTest do
 
     assert {:ok, result} = UpdateJob.execute(%{"job_id" => job_id}, context)
     assert result.success == false
-    assert result.error =~ "at least one of task, schedule, description, skill_name, or delivery"
+
+    assert result.error =~
+             "at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, or delivery"
   end
 
   test "schedule_job exposes and persists runner timeout controls", %{context: context} do
@@ -448,6 +450,296 @@ defmodule FermixCore.Tools.JobsTest do
     params = ScheduleJob.parameters()
     assert Map.has_key?(params.properties, :skill_name)
     assert params.properties.skill_name.description =~ "confinement"
+  end
+
+  test "schedule_job exposes the provider and model pinning parameters" do
+    params = ScheduleJob.parameters()
+    assert Map.has_key?(params.properties, :provider)
+    assert Map.has_key?(params.properties, :model)
+    assert params.properties.provider.description =~ "default cron route"
+    assert params.properties.model.description =~ "model"
+  end
+
+  test "schedule_job pins provider and model on the job row", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Pinned Digest",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Summarize.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    assert created.success == true
+    created_payload = Jason.decode!(created.output)
+    assert created_payload["provider"] == "anthropic"
+    assert created_payload["model"] == "claude-opus-4-8"
+
+    assert {:ok, job} = Repo.get_scheduled_job(created_payload["id"], server: context.memory_repo)
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
+  end
+
+  test "schedule_job leaves provider and model nil when omitted", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "Default Route", "schedule" => "every 15 minutes", "task" => "Go."},
+               context
+             )
+
+    assert created.success == true
+    created_payload = Jason.decode!(created.output)
+    assert created_payload["provider"] == nil
+    assert created_payload["model"] == nil
+
+    assert {:ok, job} = Repo.get_scheduled_job(created_payload["id"], server: context.memory_repo)
+    assert job.provider == nil
+    assert job.model == nil
+  end
+
+  test "schedule_job rejects an unknown provider and creates no job", %{context: context} do
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Bad Provider",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "nope",
+                 "model" => "whatever"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ ~s(unknown provider "nope")
+
+    assert {:ok, %{"jobs" => []}} =
+             Jason.decode(elem(ListJobs.execute(%{}, context), 1).output)
+  end
+
+  test "schedule_job rejects model without provider (both-or-neither)", %{context: context} do
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Half Pin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "provider and model must be set together"
+
+    assert {:ok, %{"jobs" => []}} =
+             Jason.decode(elem(ListJobs.execute(%{}, context), 1).output)
+  end
+
+  test "update_job exposes the provider and model pinning parameters" do
+    params = UpdateJob.parameters()
+    assert Map.has_key?(params.properties, :provider)
+    assert Map.has_key?(params.properties, :model)
+    assert params.properties.provider.description =~ "unchanged"
+  end
+
+  test "update_job pins provider and model in place", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "Repin", "schedule" => "every 15 minutes", "task" => "Go."},
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(
+               %{"job_id" => job_id, "provider" => "anthropic", "model" => "claude-opus-4-8"},
+               context
+             )
+
+    assert updated.success == true
+    payload = Jason.decode!(updated.output)
+    assert payload["provider"] == "anthropic"
+    assert payload["model"] == "claude-opus-4-8"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
+  end
+
+  test "update_job leaves provider and model untouched when omitted", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Keep Pin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "task" => "Go differently."}, context)
+
+    assert updated.success == true
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.task_prompt == "Go differently."
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
+  end
+
+  test "update_job rejects an unknown provider and leaves the job unchanged", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "Stable Route", "schedule" => "every 15 minutes", "task" => "Go."},
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, result} =
+             UpdateJob.execute(
+               %{"job_id" => job_id, "provider" => "nope", "model" => "x"},
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ ~s(unknown provider "nope")
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == nil
+    assert job.model == nil
+  end
+
+  test "update_job rejects provider without model (both-or-neither)", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{"name" => "Half Repin", "schedule" => "every 15 minutes", "task" => "Go."},
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, result} =
+             UpdateJob.execute(%{"job_id" => job_id, "provider" => "anthropic"}, context)
+
+    assert result.success == false
+    assert result.error =~ "provider and model must be set together"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == nil
+    assert job.model == nil
+  end
+
+  test "update_job exposes the clear_route_pin parameter" do
+    params = UpdateJob.parameters()
+    assert Map.has_key?(params.properties, :clear_route_pin)
+    assert params.properties.clear_route_pin.type == "boolean"
+    assert params.properties.clear_route_pin.description =~ "default routing"
+  end
+
+  test "update_job clears a pinned route back to default routing", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Unpin Me",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, %{provider: "anthropic", model: "claude-opus-4-8"}} =
+             Repo.get_scheduled_job(job_id, server: context.memory_repo)
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "clear_route_pin" => true}, context)
+
+    assert updated.success == true
+    payload = Jason.decode!(updated.output)
+    assert payload["provider"] == nil
+    assert payload["model"] == nil
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == nil
+    assert job.model == nil
+  end
+
+  test "update_job rejects clearing the route pin together with provider/model", %{
+    context: context
+  } do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Conflicting Pin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, result} =
+             UpdateJob.execute(
+               %{
+                 "job_id" => job_id,
+                 "clear_route_pin" => true,
+                 "provider" => "openai",
+                 "model" => "gpt-5"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "clear_route_pin cannot be combined with provider or model"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
+  end
+
+  test "update_job leaves an existing route pin when all route fields are omitted", %{
+    context: context
+  } do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Untouched Pin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "task" => "Go elsewhere."}, context)
+
+    assert updated.success == true
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.task_prompt == "Go elsewhere."
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
   end
 
   test "schedule_job binds a job to an existing skill and surfaces it", %{context: context} do

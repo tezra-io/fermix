@@ -11,6 +11,7 @@ defmodule FermixCore.Tools.WebSearch do
   alias FermixCore.Tools.WebSearch.Backends.Brave
   alias FermixCore.Tools.WebSearch.Backends.DuckDuckGo
   alias FermixCore.Tools.WebSearch.Backends.Exa
+  alias FermixCore.Tools.WebSearch.Backends.Firecrawl
   alias FermixCore.Tools.WebSearch.Backends.Parallel
   alias FermixCore.Tools.WebSearch.Backends.Perplexity
   alias FermixCore.Tools.WebSearch.Backends.Tavily
@@ -19,6 +20,7 @@ defmodule FermixCore.Tools.WebSearch do
     brave: Brave,
     duckduckgo: DuckDuckGo,
     exa: Exa,
+    firecrawl: Firecrawl,
     parallel: Parallel,
     perplexity: Perplexity,
     tavily: Tavily

@@ -8,6 +8,7 @@ defmodule FermixCore.Setup.ConfigStore do
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.Descriptor
@@ -104,9 +105,11 @@ defmodule FermixCore.Setup.ConfigStore do
         compaction: Application.get_env(:fermix_core, :compaction, []),
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
+        computer_use: Application.get_env(:fermix_core, :computer_use, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
+        plugin_secrets: Application.get_env(:fermix_core, :plugin_secrets, %{}),
         profile: Application.get_env(:fermix_core, :profile, "general")
       ],
       sandbox: Application.get_env(:fermix_core, :sandbox, SandboxConfig.default()),
@@ -169,9 +172,11 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
+    apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
+    apply_plugin_secrets_config(Keyword.get(persisted.fermix_core, :plugin_secrets, %{}))
     apply_profile_config(Keyword.get(persisted.fermix_core, :profile, "general"))
     apply_sandbox_config(Map.get(persisted, :sandbox, SandboxConfig.default()))
 
@@ -273,6 +278,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:realtime, [])
           |> normalize_realtime(),
+        computer_use:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:computer_use, [])
+          |> normalize_computer_use(),
         tools:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -288,6 +298,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:oauth, %{})
           |> normalize_oauth(),
+        plugin_secrets:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:plugin_secrets, %{})
+          |> normalize_plugin_secrets(),
         profile:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -353,9 +368,11 @@ defmodule FermixCore.Setup.ConfigStore do
         compaction: [],
         memory: [],
         realtime: [],
+        computer_use: [],
         tools: [],
         plugins: [],
         oauth: %{},
+        plugin_secrets: %{},
         profile: "general"
       ],
       sandbox: SandboxConfig.default(),
@@ -474,6 +491,14 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge) so a disabled snapshot can't leave a stale `enabled: true`
+  # behind — the computer-use section is fully normalized by persistable_snapshot,
+  # so the persisted keyword is the complete intended state.
+  defp apply_computer_use_config(computer_use_config) do
+    Application.put_env(:fermix_core, :computer_use, computer_use_config)
+    :ok
+  end
+
   defp apply_tools_config(tools_config) do
     Application.put_env(:fermix_core, :tools, tools_config)
     :ok
@@ -486,6 +511,11 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp apply_oauth_config(oauth_config) do
     Application.put_env(:fermix_core, :oauth, oauth_config)
+    :ok
+  end
+
+  defp apply_plugin_secrets_config(secrets) do
+    Application.put_env(:fermix_core, :plugin_secrets, secrets)
     :ok
   end
 
@@ -513,9 +543,11 @@ defmodule FermixCore.Setup.ConfigStore do
     compaction = Keyword.get(fermix_core, :compaction, [])
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
+    computer_use = Keyword.get(fermix_core, :computer_use, [])
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
     oauth = Keyword.get(fermix_core, :oauth, %{})
+    plugin_secrets = Keyword.get(fermix_core, :plugin_secrets, %{})
     profile = Keyword.get(fermix_core, :profile, "general")
     sandbox = Map.get(snapshot, :sandbox, [])
     channels = Map.get(snapshot, :fermix_channels, [])
@@ -542,13 +574,19 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "compaction"], compaction),
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
+      render_section(["fermix_core", "computer_use"], computer_use),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
         ["fermix_core", "tools", "tool_search"],
         Keyword.get(tools, :tool_search, [])
       ),
+      render_section(
+        ["fermix_core", "tools", "generate_image"],
+        Keyword.get(tools, :generate_image, [])
+      ),
       render_plugins(plugins),
       render_oauth(oauth),
+      render_plugin_secrets(plugin_secrets),
       render_sandbox(sandbox),
       render_section(["fermix_channels", "telegram"], Keyword.get(channels, :telegram, [])),
       render_section(["fermix_channels", "whatsapp"], Keyword.get(channels, :whatsapp, [])),
@@ -605,6 +643,17 @@ defmodule FermixCore.Setup.ConfigStore do
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
   end
+
+  # api_key-plugin secrets render as a flat `[fermix_core.plugin_secrets]` table
+  # (plugin name → @keyring sentinel), omitted when empty.
+  defp render_plugin_secrets(secrets) when is_map(secrets) and map_size(secrets) > 0 do
+    render_section(
+      ["fermix_core", "plugin_secrets"],
+      Enum.sort_by(Map.to_list(secrets), &elem(&1, 0))
+    )
+  end
+
+  defp render_plugin_secrets(_secrets), do: nil
 
   defp render_named_sections(parent, entries) when is_map(entries) do
     entries
@@ -733,9 +782,12 @@ defmodule FermixCore.Setup.ConfigStore do
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
+        computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
         plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
+        plugin_secrets:
+          normalize_plugin_secrets(get_in(document, ["fermix_core", "plugin_secrets"])),
         profile: normalize_profile(get_in(document, ["fermix_core", "profile"]))
       ],
       sandbox: SandboxConfig.normalize(Map.get(document, "sandbox")),
@@ -872,6 +924,12 @@ defmodule FermixCore.Setup.ConfigStore do
     |> RealtimeConfig.to_keyword()
   end
 
+  defp normalize_computer_use(config) do
+    config
+    |> ComputerUseConfig.normalize()
+    |> ComputerUseConfig.to_keyword()
+  end
+
   defp normalize_tools(nil), do: []
 
   defp normalize_tools(config) when is_map(config) or is_list(config) do
@@ -883,6 +941,10 @@ defmodule FermixCore.Setup.ConfigStore do
     |> put_if_present(
       :tool_search,
       normalize_tool_search(lookup(config, "tool_search", :tool_search))
+    )
+    |> put_if_present(
+      :generate_image,
+      normalize_generate_image(lookup(config, "generate_image", :generate_image))
     )
   end
 
@@ -939,6 +1001,16 @@ defmodule FermixCore.Setup.ConfigStore do
     do: normalize_named_sections(config, [])
 
   defp normalize_oauth(_config), do: %{}
+
+  # Plugin api_key secrets are a flat string-keyed map (plugin name → value or
+  # the @keyring sentinel), unlike oauth's nested client sections.
+  defp normalize_plugin_secrets(secrets) when is_map(secrets) or is_list(secrets) do
+    secrets
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.into(%{}, fn {key, value} -> {to_string(key), to_string(value)} end)
+  end
+
+  defp normalize_plugin_secrets(_secrets), do: %{}
 
   defp normalize_named_sections(nil, _ignored_keys), do: %{}
 
@@ -1005,6 +1077,10 @@ defmodule FermixCore.Setup.ConfigStore do
       :perplexity_api_key,
       normalize_string(lookup(config, "perplexity_api_key", :perplexity_api_key))
     )
+    |> put_if_present(
+      :firecrawl_api_key,
+      normalize_string(lookup(config, "firecrawl_api_key", :firecrawl_api_key))
+    )
   end
 
   defp normalize_web_search_tool(_config), do: []
@@ -1016,13 +1092,86 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_web_search_backend(:parallel), do: :parallel
   defp normalize_web_search_backend(:brave), do: :brave
   defp normalize_web_search_backend(:perplexity), do: :perplexity
+  defp normalize_web_search_backend(:firecrawl), do: :firecrawl
   defp normalize_web_search_backend("duckduckgo"), do: :duckduckgo
   defp normalize_web_search_backend("tavily"), do: :tavily
   defp normalize_web_search_backend("exa"), do: :exa
   defp normalize_web_search_backend("parallel"), do: :parallel
   defp normalize_web_search_backend("brave"), do: :brave
   defp normalize_web_search_backend("perplexity"), do: :perplexity
+  defp normalize_web_search_backend("firecrawl"), do: :firecrawl
   defp normalize_web_search_backend(_value), do: nil
+
+  # `[fermix_core.tools.generate_image]` (M15). Image generation has no keyless
+  # degrade path, so config drift here must refuse boot rather than silently
+  # default (Rule #12): a typo'd key or an unknown backend raises at the parse
+  # boundary, mirroring `validate_provider_section_keys!/2`.
+  @generate_image_keys ~w(backend model size google_api_key)
+
+  defp normalize_generate_image(nil), do: []
+
+  defp normalize_generate_image(config) when is_map(config) or is_list(config) do
+    validate_generate_image_keys!(config)
+
+    []
+    |> put_if_present(:backend, normalize_image_backend(lookup(config, "backend", :backend)))
+    |> put_if_present(:model, normalize_string(lookup(config, "model", :model)))
+    |> put_if_present(:size, normalize_string(lookup(config, "size", :size)))
+    |> put_if_present(
+      :google_api_key,
+      normalize_string(lookup(config, "google_api_key", :google_api_key))
+    )
+  end
+
+  defp normalize_generate_image(_config), do: []
+
+  defp validate_generate_image_keys!(config) do
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&(&1 in @generate_image_keys))
+      |> Enum.sort()
+
+    if unknown != [] do
+      raise ArgumentError, """
+      config.toml [fermix_core.tools.generate_image] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.join(@generate_image_keys, ", ")}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  defp section_keys(config) when is_map(config),
+    do: config |> Map.keys() |> Enum.map(&to_string/1)
+
+  defp section_keys(config) when is_list(config),
+    do: Enum.map(config, fn {key, _value} -> to_string(key) end)
+
+  # Enum validator: a chosen backend must be one Fermix ships, else boot
+  # refuses. `nil` is a partial config (backend not chosen yet) — the runtime
+  # `Media.Registry` then fails loud with the supported list. Stricter than
+  # `normalize_web_search_backend/1`'s silent-nil because a mistyped media
+  # backend has no keyless fallback to limp along on.
+  defp normalize_image_backend(nil), do: nil
+
+  defp normalize_image_backend(value) when is_atom(value),
+    do: normalize_image_backend(Atom.to_string(value))
+
+  defp normalize_image_backend(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      backend when backend in ~w(openai xai google) ->
+        backend
+
+      other ->
+        raise ArgumentError, """
+        config.toml [fermix_core.tools.generate_image] has an unknown backend: #{inspect(other)}.
+
+        Allowed backends: google, openai, xai.
+        Remove or fix `backend`; the daemon will not boot until this is fixed.
+        """
+    end
+  end
 
   # Canonical enum + per-provider mapping live in ReasoningEffort.
   # Returns the atom on success, or nil on unknown input — consistent
@@ -1179,12 +1328,6 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_memory(config) when is_map(config) or is_list(config) do
     []
     |> put_if_present(
-      :extraction_timeout_ms,
-      normalize_extraction_timeout_ms(
-        lookup(config, "extraction_timeout_ms", :extraction_timeout_ms)
-      )
-    )
-    |> put_if_present(
       :review_interval_hours,
       normalize_non_negative_integer(
         lookup(config, "review_interval_hours", :review_interval_hours),
@@ -1212,15 +1355,6 @@ defmodule FermixCore.Setup.ConfigStore do
         :review_failure_backoff_ms
       )
     )
-  end
-
-  defp normalize_extraction_timeout_ms(nil), do: nil
-
-  defp normalize_extraction_timeout_ms(value) when is_integer(value) and value > 0, do: value
-
-  defp normalize_extraction_timeout_ms(value) do
-    raise ArgumentError,
-          "invalid memory.extraction_timeout_ms #{inspect(value)}; expected positive integer milliseconds"
   end
 
   defp normalize_positive_memory_integer(nil, _key), do: nil

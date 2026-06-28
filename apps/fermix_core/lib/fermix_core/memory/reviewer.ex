@@ -12,6 +12,7 @@ defmodule FermixCore.Memory.Reviewer do
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.ReviewTools
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.Selection
@@ -78,8 +79,7 @@ defmodule FermixCore.Memory.Reviewer do
       input_token_budget: Config.review_input_token_budget(opts),
       failure_backoff_ms: Config.review_failure_backoff_ms(opts),
       user_char_cap: Config.prompt_user_token_cap(opts) * 4,
-      memory_char_cap: Config.prompt_memory_token_cap(opts) * 4,
-      timeout_ms: Config.extraction_timeout_ms(opts)
+      memory_char_cap: Config.prompt_memory_token_cap(opts) * 4
     }
   end
 
@@ -98,7 +98,10 @@ defmodule FermixCore.Memory.Reviewer do
          :ok <- failure_gate(state, ctx, now, force?),
          {:ok, [preview | _]} <- new_messages(ctx.repo, selector, state, 1),
          {:ok, _claimed} <-
-           Repo.claim_memory_review(selector, now, max(ctx.failure_backoff_ms, ctx.timeout_ms),
+           Repo.claim_memory_review(
+             selector,
+             now,
+             max(ctx.failure_backoff_ms, TimeoutPolicy.receive_timeout_for(:llm_buffered)),
              server: ctx.repo
            ) do
       {:ok, selector, state, preview}
@@ -167,17 +170,31 @@ defmodule FermixCore.Memory.Reviewer do
   defp run_claimed_review(ctx, selector, state, preview) do
     started = System.monotonic_time(:microsecond)
 
-    result =
-      with {:ok, input} <- build_input(ctx, selector, state, preview),
-           call_ctx = tag_provider_call(ctx, selector, input),
-           {:ok, operations} <- call_reviewer(call_ctx, input),
-           {:ok, stats} <- apply_operations(ctx, selector, input, operations),
-           {:ok, status} <- finish_review(ctx, selector, input, stats) do
-        {:ok, review_result(status, stats, input)}
+    # session_id needs input.max_message_id, so it only exists once build_input
+    # succeeds. It is `nil` on a pre-call failure (no provider.call fired → no
+    # root trace opened → the closer no-ops). When present it is the same id the
+    # provider.call and memory.write spans carry, so the closer lands the run.
+    {result, session_id} =
+      case build_input(ctx, selector, state, preview) do
+        {:ok, input} ->
+          {review_with_input(ctx, selector, input), review_session_id(selector, input)}
+
+        {:error, reason} ->
+          {{:error, reason}, nil}
       end
 
-    emit_review(ctx, selector, result, started)
+    emit_review(ctx, selector, session_id, result, started)
     record_review_completion(ctx, selector, result)
+  end
+
+  defp review_with_input(ctx, selector, input) do
+    call_ctx = tag_provider_call(ctx, selector, input)
+
+    with {:ok, operations} <- call_reviewer(call_ctx, input),
+         {:ok, stats} <- apply_operations(ctx, selector, input, operations),
+         {:ok, status} <- finish_review(ctx, selector, input, stats) do
+      {:ok, review_result(status, stats, input)}
+    end
   end
 
   defp build_input(ctx, selector, state, _preview) do
@@ -451,24 +468,18 @@ defmodule FermixCore.Memory.Reviewer do
     )
   end
 
-  defp provider_opts(ctx) do
+  # No receive_timeout here: the memory review is a buffered LLM call, so it
+  # inherits the centralized `:llm_buffered` ceiling its provider adapter sets
+  # via `TimeoutPolicy` — the same window every other buffered turn gets.
+  defp provider_opts(_ctx) do
     [
       temperature: 0.1,
-      tools: chat_tools(),
-      req_options: [receive_timeout: ctx.timeout_ms]
+      tools: chat_tools()
     ]
   end
 
   defp adapter_opts(ctx) do
-    ctx.adapter_opts
-    |> Keyword.put_new(:temperature, 0.1)
-    |> Keyword.put(:req_options, req_options(ctx))
-  end
-
-  defp req_options(ctx) do
-    ctx.adapter_opts
-    |> Keyword.get(:req_options, [])
-    |> Keyword.put(:receive_timeout, ctx.timeout_ms)
+    Keyword.put_new(ctx.adapter_opts, :temperature, 0.1)
   end
 
   defp parse_operations(%{tool_calls: calls}) when is_list(calls) and calls != [] do
@@ -642,34 +653,41 @@ defmodule FermixCore.Memory.Reviewer do
     }
   end
 
-  defp emit_review(ctx, selector, result, started) do
+  defp emit_review(ctx, selector, session_id, result, started) do
     duration_us = System.monotonic_time(:microsecond) - started
-    metadata = review_metadata(ctx, selector, result)
+    metadata = review_metadata(ctx, selector, session_id, result)
     measurements = review_measurements(result, duration_us)
 
     :telemetry.execute([:fermix, :memory, :review], measurements, metadata)
   end
 
-  defp review_metadata(ctx, selector, {:ok, result}) do
-    %{
-      agent: ctx.agent_id,
-      owner: ctx.owner_id,
-      conversation_key: conversation_key_string(selector),
-      interval_hours: ctx.interval_hours,
-      fired: true,
-      status: result.status
-    }
+  # session_id (+ parent_session) makes this the run's closer: it correlates with
+  # the provider.call/memory.write spans that share the id, so the trace ships on
+  # this event instead of the exporter's TTL sweep. channel/chat_id let the Opik
+  # exporter backfill the conversation thread even on a write-free review.
+  defp review_metadata(ctx, selector, session_id, {:ok, result}) do
+    ctx
+    |> base_review_metadata(selector, session_id)
+    |> Map.put(:status, result.status)
   end
 
-  defp review_metadata(ctx, selector, {:error, reason}) do
+  defp review_metadata(ctx, selector, session_id, {:error, reason}) do
+    ctx
+    |> base_review_metadata(selector, session_id)
+    |> Map.merge(%{status: :failed, reason: reason})
+  end
+
+  defp base_review_metadata(ctx, selector, session_id) do
     %{
       agent: ctx.agent_id,
       owner: ctx.owner_id,
+      session_id: session_id,
+      parent_session: ctx.parent_session,
       conversation_key: conversation_key_string(selector),
+      channel: selector.channel,
+      chat_id: selector.chat_id,
       interval_hours: ctx.interval_hours,
-      fired: true,
-      status: :failed,
-      reason: reason
+      fired: true
     }
   end
 

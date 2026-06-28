@@ -12,6 +12,10 @@ defmodule FermixCore.Browser.Config do
 
     * `max_live_profiles` — hard ceiling on concurrent live Chrome instances.
       A cold start beyond this evicts the least-recently-used profile.
+    * `max_tabs` — hard ceiling on live tabs per managed Chrome. Each `open`
+      spawns a new tab; opening past this closes the oldest non-active tabs so
+      a long session can't accumulate tabs and grow Chrome's memory unbounded.
+      Managed profiles only — a user-attached Chrome's tabs are never closed.
     * `idle_profile_ttl_ms` — a profile with no activity for this long is
       stopped by the manager's idle sweep (frees its Chrome process).
     * `idle_sweep_interval_ms` — how often the manager scans for idle profiles.
@@ -76,7 +80,6 @@ defmodule FermixCore.Browser.Config do
   alias FermixCore.Browser.Error
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
-  @default_port_range 18_900..18_999
   @default_profiles %{
     "fermix" => %{mode: :managed, headless: :auto, cdp_port: :auto},
     "fermix_visible" => %{mode: :managed, headless: false, cdp_port: :auto},
@@ -96,6 +99,7 @@ defmodule FermixCore.Browser.Config do
           allow_private_network: boolean(),
           allowed_hosts: [String.t()],
           max_live_profiles: pos_integer(),
+          max_tabs: pos_integer(),
           idle_profile_ttl_ms: pos_integer(),
           idle_sweep_interval_ms: pos_integer(),
           action_timeout_ms: pos_integer(),
@@ -125,7 +129,6 @@ defmodule FermixCore.Browser.Config do
           snapshot_max_chars: pos_integer(),
           screenshot_max_side_px: pos_integer(),
           screenshot_max_bytes: pos_integer(),
-          cdp_port_range: Range.t(),
           profiles: %{String.t() => profile()}
         }
 
@@ -133,6 +136,7 @@ defmodule FermixCore.Browser.Config do
             allow_private_network: false,
             allowed_hosts: @default_allowed_hosts,
             max_live_profiles: 6,
+            max_tabs: 10,
             idle_profile_ttl_ms: 900_000,
             idle_sweep_interval_ms: 60_000,
             action_timeout_ms: 8_000,
@@ -162,11 +166,10 @@ defmodule FermixCore.Browser.Config do
             snapshot_max_chars: 50_000,
             screenshot_max_side_px: 4_000,
             screenshot_max_bytes: 8_000_000,
-            cdp_port_range: @default_port_range,
             profiles: @default_profiles
 
   @positive_fields ~w(
-    max_live_profiles idle_profile_ttl_ms idle_sweep_interval_ms action_timeout_ms
+    max_live_profiles max_tabs idle_profile_ttl_ms idle_sweep_interval_ms action_timeout_ms
     navigation_timeout_ms cdp_keepalive_ms cdp_response_grace_ms launch_timeout_ms
     cdp_ready_poll_interval_ms cdp_version_probe_timeout_ms stop_grace_ms kill_grace_ms
     start_failure_threshold start_cooldown_ms start_cooldown_max_ms start_retries
@@ -244,7 +247,6 @@ defmodule FermixCore.Browser.Config do
 
   defp validate(%__MODULE__{} = config) do
     with :ok <- validate_positive_fields(config),
-         :ok <- valid_range(config.cdp_port_range),
          :ok <- validate_depth_bounds(config),
          :ok <- validate_profiles(config.profiles) do
       {:ok, config}
@@ -323,9 +325,6 @@ defmodule FermixCore.Browser.Config do
 
   defp depth(value, max) when is_integer(value) and value > 0 and value <= max, do: :ok
   defp depth(_value, max), do: {:error, Error.new("invalid_config", "depth must be 1..#{max}")}
-
-  defp valid_range(%Range{} = range) when range.first <= range.last, do: :ok
-  defp valid_range(_range), do: {:error, Error.new("invalid_config", "cdp_port_range is invalid")}
 
   defp to_map(value) when is_map(value), do: Map.new(value, &normalize_key/1)
   defp to_map(value) when is_list(value), do: value |> Map.new() |> to_map()

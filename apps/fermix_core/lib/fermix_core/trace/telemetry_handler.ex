@@ -11,6 +11,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
 
   alias FermixCore.Agents.LifecycleTelemetry
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
+  alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Trace
 
   @core_events [
@@ -26,6 +27,15 @@ defmodule FermixCore.Trace.TelemetryHandler do
     # (tool: "memory_write") so it is visible in the JSONL trace alongside tool
     # spans, mirroring the Opik mapping.
     %{event: [:fermix, :memory, :write], trace_type: :tool_exec, agent_field: :agent},
+    # The background reviewer's run closer (status + op counts), carrying the run
+    # session_id. Recorded as the review run's lifecycle row so the run is visible
+    # in the JSONL trace rather than only reconstructable from its child spans.
+    %{
+      event: [:fermix, :memory, :review],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "memory_review"
+    },
     %{event: [:fermix, :channel, :message], trace_type: :channel_msg, agent_field: :agent},
     %{
       event: [:fermix, :agent, :message],
@@ -78,6 +88,16 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :agent,
       trace_event: "tool_search_query"
+    },
+    # A fired failure-deadline timeout (FermixCore.Timeouts.expired/3). The
+    # timeout `name` is the row's agent (these are not agent-scoped — they carry
+    # session_id for correlation, mirroring plugin :dist using :op), so the
+    # firing is visible in the JSONL trace, not only in Opik.
+    %{
+      event: [:fermix, :timeout, :expired],
+      trace_type: :agent_event,
+      agent_field: :name,
+      trace_event: "timeout"
     }
   ]
 
@@ -141,10 +161,11 @@ defmodule FermixCore.Trace.TelemetryHandler do
   def attach(opts \\ []) do
     server = Keyword.get(opts, :trace_server, Trace)
     prefix = Keyword.get(opts, :handler_prefix, "fermix")
-    config = %{trace_server: server}
+    base_config = %{trace_server: server}
 
-    for %{event: event} <- event_definitions() do
+    for %{event: event} = definition <- event_definitions() do
       handler_id = "#{prefix}-#{Enum.join(event, "-")}"
+      config = Map.put(base_config, :definition, definition)
 
       case :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, config) do
         :ok ->
@@ -170,10 +191,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
   end
 
   @spec handle_event([atom()], map(), map(), map()) :: :ok
-  def handle_event(event, measurements, metadata, %{trace_server: server}) do
-    config = event_config(event)
-    {agent, data} = build_trace_payload(config, measurements, metadata)
-    Trace.record(config.trace_type, agent, data, server: server)
+  def handle_event(_event, measurements, metadata, %{
+        trace_server: server,
+        definition: definition
+      }) do
+    {agent, data} = build_trace_payload(definition, measurements, metadata)
+    Trace.record(definition.trace_type, agent, data, server: server)
   end
 
   defp event_definitions do
@@ -181,12 +204,8 @@ defmodule FermixCore.Trace.TelemetryHandler do
       @mcp_inbound_events ++
       @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
-      JobTelemetry.trace_event_definitions()
-  end
-
-  defp event_config(event) do
-    Enum.find(event_definitions(), fn definition -> definition.event == event end) ||
-      raise ArgumentError, "unhandled telemetry event: #{inspect(event)}"
+      JobTelemetry.trace_event_definitions() ++
+      SoulTelemetry.trace_event_definitions()
   end
 
   defp build_trace_payload(%{agent_field: agent_field} = config, measurements, metadata) do
