@@ -263,9 +263,22 @@ defmodule FermixCore.Tools.ComputerUse do
         {:ok, Tool.success_with_images(summary, [image])}
 
       {:error, reason} ->
-        {:ok, Tool.error("action failed: #{format_reason(reason)}")}
+        {:ok, Tool.error(action_error_message(reason))}
     end
   end
+
+  # A sidecar action error that maps to a known, non-transient host condition gets
+  # an honest, general diagnosis (no app-specific examples — the model decides what
+  # to do with the fact). Every other reason surfaces verbatim so a real backend
+  # error is never masked (Rule #7).
+  defp action_error_message("no_active_display") do
+    "no capturable display — the screen is locked, the display is asleep, or this " <>
+      "process has no active GUI session. Computer use cannot see or control the " <>
+      "desktop until there is an unlocked, awake display; retrying will not help " <>
+      "until that changes."
+  end
+
+  defp action_error_message(reason), do: "action failed: #{format_reason(reason)}"
 
   defp point_schema(description) do
     %{

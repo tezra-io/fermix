@@ -161,10 +161,11 @@ defmodule FermixCore.Trace.TelemetryHandler do
   def attach(opts \\ []) do
     server = Keyword.get(opts, :trace_server, Trace)
     prefix = Keyword.get(opts, :handler_prefix, "fermix")
-    config = %{trace_server: server}
+    base_config = %{trace_server: server}
 
-    for %{event: event} <- event_definitions() do
+    for %{event: event} = definition <- event_definitions() do
       handler_id = "#{prefix}-#{Enum.join(event, "-")}"
+      config = Map.put(base_config, :definition, definition)
 
       case :telemetry.attach(handler_id, event, &__MODULE__.handle_event/4, config) do
         :ok ->
@@ -190,10 +191,12 @@ defmodule FermixCore.Trace.TelemetryHandler do
   end
 
   @spec handle_event([atom()], map(), map(), map()) :: :ok
-  def handle_event(event, measurements, metadata, %{trace_server: server}) do
-    config = event_config(event)
-    {agent, data} = build_trace_payload(config, measurements, metadata)
-    Trace.record(config.trace_type, agent, data, server: server)
+  def handle_event(_event, measurements, metadata, %{
+        trace_server: server,
+        definition: definition
+      }) do
+    {agent, data} = build_trace_payload(definition, measurements, metadata)
+    Trace.record(definition.trace_type, agent, data, server: server)
   end
 
   defp event_definitions do
@@ -203,11 +206,6 @@ defmodule FermixCore.Trace.TelemetryHandler do
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions() ++
       SoulTelemetry.trace_event_definitions()
-  end
-
-  defp event_config(event) do
-    Enum.find(event_definitions(), fn definition -> definition.event == event end) ||
-      raise ArgumentError, "unhandled telemetry event: #{inspect(event)}"
   end
 
   defp build_trace_payload(%{agent_field: agent_field} = config, measurements, metadata) do

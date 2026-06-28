@@ -70,6 +70,13 @@ the `query` shorthand; multi-turn uses `turns`.
   Single-turn `query` only. Such cases run only with `--operator` (skipped
   with a notice otherwise) and precheck that the dev daemon config has
   `[fermix_channels.telegram] streaming = "draft"`.
+- `image` (string, optional) — `drive: ask` only, single-turn: a path to a
+  local image (relative to the suite file's directory) attached via
+  `fermix ask --attach`. The image rides the same gateway → turn_runner →
+  provider-encoder spine a channel image would, so this is the automated
+  (no-operator) way to test inbound vision. Validated at load: the file must
+  exist (`--dry-run` fails loud otherwise). Bundle fixtures under
+  `suites/fixtures/` (e.g. a known-content image whose contents you assert on).
 - `expect` (map) — case-level structural gates, graded on the **final** turn's
   trace. `defaults.expect` is merged beneath it (case wins on conflict).
 - `rubric` (string) — natural-language quality check, graded by the LLM judge

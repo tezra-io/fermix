@@ -100,6 +100,33 @@ defmodule FermixChannels.Gateway do
 
   defp to_agent_message(%Message{} = message), do: Map.from_struct(message)
 
+  @empty_inbound_reply "Your message looks empty — send some text or media I can read."
+
+  # An empty inbound message (no text, no media — a sticker, poll, blank) is not
+  # something the agent can act on. Reply once and short-circuit: returning
+  # anything other than `:actionable` drops out of the dispatch `with` into the
+  # `:replied_empty` branch, so NO turn is scheduled and the queue stays free.
+  # Provider-agnostic — no LLM is touched. Runs AFTER authorization, so an
+  # unauthorized sender is already dropped and never receives this reply.
+  defp ensure_actionable(%Message{} = message, reply_fn) when is_function(reply_fn, 1) do
+    if Message.actionable?(message) do
+      :actionable
+    else
+      :telemetry.execute(
+        [:fermix, :dispatcher, :empty_inbound],
+        %{count: 1},
+        %{channel: message.channel}
+      )
+
+      Logger.info(
+        "Dispatcher: empty #{message.channel} message (no text, no media); replied without scheduling a turn"
+      )
+
+      _ = reply_fn.({:text, @empty_inbound_reply})
+      :replied_empty
+    end
+  end
+
   defp dispatch_message(
          channel,
          message,
@@ -124,10 +151,10 @@ defmodule FermixChannels.Gateway do
              transcription_opts
            ),
          {:ok, reply_message} <-
-           MediaIngest.maybe_attach_images(channel, reply_message) do
-      reply_fn =
-        Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
-
+           MediaIngest.maybe_attach_images(channel, reply_message),
+         reply_fn =
+           Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override),
+         :actionable <- ensure_actionable(reply_message, reply_fn) do
       typing_fn = build_typing_fn(channel, reply_message)
       stream_spec = build_stream_spec(channel, reply_message, reply_fn)
 
@@ -176,6 +203,9 @@ defmodule FermixChannels.Gateway do
           )
       end
     else
+      :replied_empty ->
+        :ok
+
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
         error

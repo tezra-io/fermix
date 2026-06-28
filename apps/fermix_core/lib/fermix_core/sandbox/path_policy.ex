@@ -12,18 +12,32 @@ defmodule FermixCore.Sandbox.PathPolicy do
   @spec resolve_working_dir(String.t() | nil, Config.t(), map()) ::
           {:ok, String.t()} | {:error, term()}
   def resolve_working_dir(nil, config, context) when is_map(context) do
+    resolve_working_dir(nil, config, context, protected_paths(config))
+  end
+
+  def resolve_working_dir(dir, config, context) when is_binary(dir) do
+    resolve_working_dir(dir, config, context, protected_paths(config))
+  end
+
+  def resolve_working_dir(_dir, _config, _context), do: {:error, :invalid_working_dir}
+
+  @spec resolve_working_dir(String.t() | nil, Config.t(), map(), [String.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def resolve_working_dir(nil, config, context, protected_roots)
+      when is_map(context) and is_list(protected_roots) do
     base = Map.get(context, :cwd)
 
-    if is_binary(base) and allowed_path?(base, config) == :ok do
+    if is_binary(base) and allowed_path?(base, config, protected_roots) == :ok do
       {:ok, Path.expand(base)}
     else
       {:ok, Mode.default_working_dir(config)}
     end
   end
 
-  def resolve_working_dir(dir, config, _context) when is_binary(dir) do
+  def resolve_working_dir(dir, config, _context, protected_roots)
+      when is_binary(dir) and is_list(protected_roots) do
     with {:ok, resolved} <- resolve(dir, Mode.default_working_dir(config)),
-         :ok <- allowed_path?(resolved, config),
+         :ok <- allowed_path?(resolved, config, protected_roots),
          true <- File.dir?(resolved) do
       {:ok, resolved}
     else
@@ -32,7 +46,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
     end
   end
 
-  def resolve_working_dir(_dir, _config, _context), do: {:error, :invalid_working_dir}
+  def resolve_working_dir(_dir, _config, _context, _protected_roots),
+    do: {:error, :invalid_working_dir}
 
   @spec resolve_write_path(String.t(), Config.t(), map()) :: {:ok, String.t()} | {:error, term()}
   def resolve_write_path(path, config, context) when is_binary(path),
@@ -56,17 +71,25 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
   @spec allowed_path?(String.t(), Config.t()) :: :ok | {:error, term()}
   def allowed_path?(path, config) when is_binary(path) do
+    allowed_path?(path, config, protected_paths(config))
+  end
+
+  def allowed_path?(_path, _config), do: {:error, :invalid_path}
+
+  @spec allowed_path?(String.t(), Config.t(), [String.t()]) :: :ok | {:error, term()}
+  def allowed_path?(path, config, protected_roots)
+      when is_binary(path) and is_list(protected_roots) do
     expanded = canonical_path(path)
 
     cond do
-      protected_path?(expanded, config) -> {:error, {:protected_path, expanded}}
+      inside_any?(expanded, protected_roots) -> {:error, {:protected_path, expanded}}
       blocked_path?(expanded, config.blocked_roots) -> {:error, {:blocked_root, expanded}}
       under_effective_root?(expanded, config) -> :ok
       true -> {:error, {:outside_root, expanded}}
     end
   end
 
-  def allowed_path?(_path, _config), do: {:error, :invalid_path}
+  def allowed_path?(_path, _config, _protected_roots), do: {:error, :invalid_path}
 
   @spec protected_paths(Config.t()) :: [String.t()]
   def protected_paths(config) do
@@ -166,12 +189,12 @@ defmodule FermixCore.Sandbox.PathPolicy do
     end
   end
 
-  defp protected_path?(path, config) do
-    Enum.any?(protected_paths(config), &inside_or_equal?(path, &1))
+  defp blocked_path?(path, blocked_roots) do
+    inside_any?(path, blocked_roots)
   end
 
-  defp blocked_path?(path, blocked_roots) do
-    Enum.any?(blocked_roots, &inside_or_equal?(path, &1))
+  defp inside_any?(path, roots) do
+    Enum.any?(roots, &inside_or_equal?(path, &1))
   end
 
   defp under_effective_root?(path, config) do

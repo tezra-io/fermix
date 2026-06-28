@@ -61,8 +61,18 @@ defmodule FermixCore.Memory.ConversationStore do
   def add_message({channel, chat_id, _thread_scope} = key, role, content, opts \\ [])
       when is_binary(channel) and is_binary(chat_id) and
              is_binary(role) and is_binary(content) do
-    server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, {:add_message, key, role, content, opts})
+    if blank_chat_turn?(content) do
+      # A content-less chat turn carries nothing to replay — a captionless image
+      # upload persisted with no text (the image rides transiently, never into
+      # `content`), or an empty model completion. Replayed, it makes Anthropic
+      # reject the whole call ("messages: text content blocks must be non-empty")
+      # and is fragile on the OpenAI/xAI Responses shape. The store never holds
+      # one — drop it at the boundary, for any role.
+      :ok
+    else
+      server = Keyword.get(opts, :server, __MODULE__)
+      GenServer.call(server, {:add_message, key, role, content, opts})
+    end
   end
 
   @doc """
@@ -702,10 +712,26 @@ defmodule FermixCore.Memory.ConversationStore do
                  limit: limit,
                  server: repo
                ) do
-          {:ok, Enum.map(rows, &to_history_message/1)}
+          # Drop any content-less rows persisted before the write guard landed,
+          # so an already-poisoned history un-wedges on the next backfill instead
+          # of failing every request (see `add_message/4`).
+          messages =
+            rows
+            |> Enum.map(&to_history_message/1)
+            |> Enum.reject(&blank_chat_turn?(&1.content))
+
+          {:ok, messages}
         end
     end
   end
+
+  # A content-less chat turn is never valid history — a captionless image upload
+  # persisted with no text, or an empty model completion. It carries nothing to
+  # replay and, sent to a provider, breaks Anthropic (empty text block 400) and
+  # is fragile on the OpenAI/xAI Responses shape. The store neither persists one
+  # (write side) nor serves one from the repo (read side), for any role.
+  defp blank_chat_turn?(content) when is_binary(content), do: String.trim(content) == ""
+  defp blank_chat_turn?(_content), do: false
 
   defp to_history_message(row) do
     %{

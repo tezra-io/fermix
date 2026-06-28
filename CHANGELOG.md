@@ -6,6 +6,130 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-26
+
+### Added — Media Generation (M15)
+- `generate_image` built-in tool over a modular `FermixCore.Media.Backend`
+  surface (OpenAI / Google / xAI image backends, OpenAI transcription), plus
+  the multimodal reply / attachment / browser plumbing that carries generated
+  and returned images through to the channel.
+
+### Added — Inbound Multimodal Images
+- Inbound images on media-capable channels are downloaded at the gateway
+  (sibling to audio transcription) and passed to the model as image content;
+  an image whose resolved model cannot accept vision fails loud rather than
+  being dropped silently. Each provider encodes one neutral image part at its
+  own edge (Anthropic base64 blocks; OpenAI Responses/Codex/xAI `input_image`;
+  ChatCompletions `image_url` for OpenRouter/Mistral/Ollama), so the text-only
+  request shape is byte-unchanged and prompt caching is unaffected.
+- Multi-image messages are coalesced into one turn (shared, non-blocking
+  `Gateway.AlbumBuffer`) so the agent sees every image together: Telegram by
+  `media_group_id`, WhatsApp per-image webhooks by a per-sender debounce. This
+  also removes the ~50s Telegram album delay (the flush timer no longer sits
+  behind the `getUpdates` long-poll). New CLI `ask --attach PATH`.
+
+### Added — Plugins (M16: Slack / Discord / AgentMail)
+- Three HTTP-rail `api_key` plugins — Slack, Discord, and AgentMail — with the
+  shared static-secret slice across plugin secret paths, migration, and the
+  setup CLI / wizard / doctor / web UI. Slack uses a bot token (`api_key`),
+  with OAuth scaffolding retained for deferred `search.messages`.
+
+### Added — Soul Self-Curation (`/soul`)
+- Owner-only `/soul` channel command and the `SoulCuration` core module: an
+  owner-driven, never-autonomous path to review, apply, revert, and reset the
+  agent's persona file (`SOUL.md`). `/soul review` drafts a versioned edit
+  through one bounded provider call that advertises no tools and never writes;
+  `:review` is subtle and voice-preserving (declining is the common outcome),
+  `:suggest` follows an explicit instruction with proportional scope.
+  `--with-context` folds a hard-bounded window of the owner's own recent
+  messages in as labeled evidence (guest turns filtered out). Every write goes
+  through the resource registry (versioned and itself revertable) behind a
+  propose → token → `/soul apply` confirmation; prompt-injection markers in
+  source memory are surfaced on the diff. Apply invalidates the MainAgent's
+  cached runtime context so a new persona takes effect without a restart.
+
+### Added — Assistant Naming
+- An "Assistant name" field in the personalization step (CLI wizard + web
+  setup). The name is identity, so it persists to `[fermix_core.agent].name` —
+  the source of truth that seeds `IDENTITY.md` — not the personalization block.
+  Blank keeps the current/default name (`fermix`).
+
+### Added — Web Search (Firecrawl backend)
+- Firecrawl (`api.firecrawl.dev/v2/search`) as a seventh `web_search` backend
+  alongside duckduckgo / tavily / exa / parallel / brave / perplexity.
+  Cloud-only, snippet-only, Bearer auth with a 500-char query pre-flight and
+  shared error mapping, wired through the secret paths, config, wizard, and web
+  setup UI.
+
+### Added — Computer Use (host / browser GUI control) — EXPERIMENTAL
+- Source-only host/browser GUI control: a `computer_use` tool, the
+  `FermixCore.ComputerUse` session / config / safety modules, and a signed
+  Rust sidecar (`native/computer-use-sidecar`). Its access posture derives 1:1
+  from the existing `[sandbox]` mode (`strict` refuses all mutating actions;
+  `standard` confirms irreversible actions; `open` confirms only catastrophic
+  ones), with hard floors (strict-refuse, attended-origin gate) orthogonal to
+  access. **EXPERIMENTAL and disabled in the production catalog** — it is not
+  wired into the default seeder/supervisor and ships off.
+
+### Added — Scheduled Jobs (provider/model pinning)
+- Optional provider/model route pinning on `schedule_job` and `update_job`,
+  validated by a shared `validate_route_pin/1` (both-or-neither; the provider
+  must be a known, configured provider per the same catalog `Jobs.Runner`
+  gates against, so the tool-boundary check cannot drift). The registry
+  persists the pin and the job payload surfaces it; an unpinned job keeps using
+  the global `[fermix_core.routing]` `cron_*` default.
+- `update_job` accepts a `clear_route_pin` boolean that un-pins a job's
+  provider/model back to default routing (clears both atomically). It is
+  mutually exclusive with `provider`/`model` — supplying those re-pins instead,
+  and combining a clear with a pin is rejected.
+
+### Added — Centralized Timeouts
+- `FermixCore.Timeouts` (named failure deadlines + `expired/3`) and a
+  `Timeouts.Telemetry` emitter for one stable `[:fermix, :timeout, :expired]`
+  event, wired into both the JSONL `Trace.TelemetryHandler` and `fermix_opik`.
+  First adopter: the computer-use Port timeout, which now fires a named
+  `expired(:cu_sidecar_action, ...)` and poison-resets the sidecar instead of
+  surfacing a cryptic "received unexpected message".
+
+### Changed — Web Fetch (JSON passthrough)
+- When a fetched URL serves JSON, `web_fetch` now renders it verbatim instead
+  of running it through HTML text extraction (which garbled it). The binary
+  HTML path and the size cap are unchanged; the too-large guard still runs
+  first on the raw bytes.
+
+### Changed — Provider Resilience (transient retry & friendly 429)
+- A bounded same-provider transient retry under the failover executor (new
+  `Providers.Transient` classifier) so connection-unavailable and transient
+  transport/5xx flakes self-heal on interactive turns and all surfaces, not
+  just cron. Cron keeps its own deadline-bounded outer backoff, opts out of the
+  inner retry, and retries only the fast pool-checkout race so a slow provider
+  `:timeout` can never push a run past its configured job timeout.
+- Rate-limit / quota errors now carry `resets_at` / `plan_type` from the body
+  and surface a friendly "usage limit — try again in ~N min" message instead of
+  a raw error tuple.
+- A routing pairing guard: `RoutingOverrides` rejects an explicit provider
+  paired with a model the catalog knows under a different provider, and
+  `model_routing_config` validates the merged routing on every set, so no
+  automated path can persist a mis-pairing.
+
+### Changed — Browser Lifecycle Bounds
+- Fermix-managed Chrome no longer accumulates tabs and instances. A per-Chrome
+  tab cap (`max_tabs`, default 10) closes the oldest non-active tab past the
+  cap; one-shot/loopback conversations (CLI `ask`, daemon) reap their browser
+  at turn end instead of pinning a Chrome for the 15-minute idle TTL, while
+  remote interactive channels keep their warm Chrome for follow-ups. Subagents
+  inherit the parent conversation's browser scope (one shared Chrome), and
+  `:auto` profiles launch with `--remote-debugging-port=0` and read the real
+  port from `DevToolsActivePort`, removing the check-then-bind race two cold
+  starts had on the shared range (the now-dead `cdp_port_range` config is
+  dropped).
+
+### Changed — Replayed Screenshot Retention
+- `ScreenshotRetention` keeps image bytes only in the most-recent N screenshot
+  carriers across the assembled history (Anthropic + OpenAI chat/responses/
+  codex), eliding older ones to a text marker, replacing the inverted per-turn
+  prune in the agent loop.
+
 ### Changed — Memory tuning surfaces cadence, not the extraction timeout
 - The setup page's Memory tuning pane (and the CLI wizard's memory prompt) now
   exposes **Review interval (hours)** — the background memory-review cadence —
@@ -17,6 +141,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   buffered turn — one timeout table instead of a bespoke per-feature knob. The
   review claim-lock TTL derives from that same value. Hand-edited
   `extraction_timeout_ms` entries in `config.toml` are ignored.
+
+### Fixed — Assistant Name reconcile on boot
+- `IDENTITY.md` was seeded once and never rewritten, so changing
+  `[fermix_core.agent].name` never reached the file the model reads and the
+  agent kept answering with the originally-seeded name. `Prompt.IdentityName`
+  now reconciles on boot (idempotent, fail-soft): when a name is explicitly
+  configured and differs from the file's `**Name:**` line, it rewrites only
+  that line, preserving other operator edits. A blank/unset name is a
+  deliberate no-op.
+
+### Security — Git sandbox-escape flag hardening
+- `git_write` passed model-supplied args to `git` unfiltered, allowing
+  `git pull --upload-pack=<cmd>` argument-injection-to-RCE (`git_read` had a
+  denylist but `git_write` did not). A prefix-aware flag denylist is now
+  centralized in the shared `GitCommand.run` sink both tools call, so every git
+  tool is covered uniformly and abbreviations (e.g. `--upload-pac=`) are caught
+  too. `git_read` keeps its read-specific positional-path checks locally.
 
 ## [0.3.1] - 2026-06-16
 

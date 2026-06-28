@@ -50,6 +50,56 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert length(indexes) == length(Enum.uniq(indexes))
   end
 
+  test "handle_event routes via the BAKED definition, not by re-looking up the event", %{
+    dir: dir,
+    server: server
+  } do
+    # Discriminating test: feed an event that the pre-change code would have
+    # looked up to :llm_call ([:fermix, :provider, :call]) but bake the *tool*
+    # definition (:tool_exec) into the config. The new handler routes by the
+    # baked definition, so this MUST land as tool_exec with NO llm_call row.
+    # Against the old event-lookup code it would land as llm_call and this
+    # assertion fails — that is the regression guard.
+    tool_def = %{event: [:fermix, :tool, :exec], trace_type: :tool_exec, agent_field: :agent}
+
+    TelemetryHandler.handle_event(
+      [:fermix, :provider, :call],
+      %{duration_ms: 12},
+      %{agent: "main", tool: "shell"},
+      %{trace_server: server, definition: tool_def}
+    )
+
+    sync(server)
+
+    llm_call_path = Path.join([dir, Date.utc_today() |> Date.to_iso8601(), "llm_call.jsonl"])
+    refute File.exists?(llm_call_path)
+
+    tool = find_entry!(read_entries(dir, :tool_exec), &(&1["tool"] == "shell"))
+    assert tool["type"] == "tool_exec"
+    assert tool["agent"] == "main"
+
+    # And a custom trace_event in the baked definition is honored verbatim.
+    failover_def = %{
+      event: [:fermix, :provider, :failover],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "provider_failover"
+    }
+
+    TelemetryHandler.handle_event(
+      failover_def.event,
+      %{},
+      %{agent: "main", from: "openai", to: "anthropic"},
+      %{trace_server: server, definition: failover_def}
+    )
+
+    sync(server)
+
+    failover = find_entry!(read_entries(dir, :agent_event), &(&1["event"] == "provider_failover"))
+    assert failover["type"] == "agent_event"
+    assert failover["to"] == "anthropic"
+  end
+
   test "provider:call event creates llm_call trace", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :provider, :call],

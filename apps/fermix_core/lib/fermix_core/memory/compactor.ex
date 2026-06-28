@@ -386,26 +386,13 @@ defmodule FermixCore.Memory.Compactor do
   defp role(message), do: Map.get(message, :role) || Map.get(message, "role") || "unknown"
   defp content(message), do: Map.get(message, :content) || Map.get(message, "content") || ""
 
-  defp count_tokens(text) do
-    nif_module = Module.concat([:FermixNif])
-
-    cond do
-      Code.ensure_loaded?(nif_module) && function_exported?(nif_module, :count_tokens, 1) ->
-        normalize_token_count(apply(nif_module, :count_tokens, [text]), text)
-
-      Code.ensure_loaded?(nif_module) && function_exported?(nif_module, :estimate_tokens, 1) ->
-        normalize_token_count(apply(nif_module, :estimate_tokens, [text]), text)
-
-      true ->
-        fallback_token_count(text)
-    end
-  end
-
-  defp normalize_token_count(count, _text) when is_integer(count) and count >= 0, do: count
-  defp normalize_token_count({:ok, count}, _text) when is_integer(count) and count >= 0, do: count
-  defp normalize_token_count(_bad_count, text), do: fallback_token_count(text)
-
-  defp fallback_token_count(text), do: div(byte_size(text) + 3, 4)
+  # Byte-length heuristic (~4 bytes/token), NOT a real tokenizer. There is no
+  # tokenizer NIF — `FermixNif` exports only `hello/0`. This estimate is used
+  # solely for the compactor's per-message relative split
+  # (`split_for_compaction/2`, `trim_recent_to_budget/4`), where a relative size
+  # is correct and unavoidable. The auto-compaction TRIGGER decision is made by
+  # the caller (TurnRunner) on the provider's real reported context_tokens.
+  defp count_tokens(text), do: div(byte_size(text) + 3, 4)
 
   defp unchanged(messages), do: %{messages: messages, compacted?: false, cache: nil}
 end

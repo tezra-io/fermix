@@ -58,6 +58,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
     {instructions, input} = ResponsesShared.build_input(messages)
     tools = ResponsesShared.to_provider_tools(capabilities)
+    invariant_metrics = ResponsesShared.invariant_metrics(tools, capabilities)
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
     reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
     text = text_field(opts)
@@ -79,7 +80,9 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
-      request_metrics: ResponsesShared.request_metrics(input, instructions, tools, capabilities)
+      invariant_metrics: invariant_metrics,
+      request_metrics:
+        Map.merge(ResponsesShared.input_metrics(input, instructions), invariant_metrics)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -99,8 +102,19 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     base_url = Keyword.get(opts, :base_url, @default_base_url)
     temperature = Keyword.get(opts, :temperature, @default_temperature)
 
-    %{input: prior_input, output_items: output_items, tools: tools, capabilities: caps} =
-      provider_state
+    %{
+      input: prior_input,
+      output_items: output_items,
+      tools: tools,
+      capabilities: caps
+    } = provider_state
+
+    # invariant_metrics is precomputed once per turn in the chat/continue path
+    # and carried in provider_state; recompute here only if an isolated caller
+    # built the state without it (identical value — memoization, not a fallback).
+    invariant_metrics =
+      Map.get(provider_state, :invariant_metrics) ||
+        ResponsesShared.invariant_metrics(tools, caps)
 
     reasoning_effort = Keyword.get(opts, :reasoning_effort)
     reasoning = ResponsesShared.maybe_reasoning_field(reasoning_effort, :openai)
@@ -127,7 +141,9 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: reasoning_effort,
-      request_metrics: ResponsesShared.request_metrics(next_input, nil, tools, caps)
+      invariant_metrics: invariant_metrics,
+      request_metrics:
+        Map.merge(ResponsesShared.input_metrics(next_input, nil), invariant_metrics)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -178,7 +194,8 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       turn_state.model,
       turn_state.input,
       turn_state.tools,
-      turn_state.capabilities
+      turn_state.capabilities,
+      turn_state.invariant_metrics
     )
   end
 

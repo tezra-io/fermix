@@ -90,7 +90,9 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   def chat(messages, capabilities, opts)
       when is_list(messages) and messages != [] and is_list(capabilities) and is_list(opts) do
     {system, anthropic_messages} = split_system(messages)
-    request(anthropic_messages, system, to_provider_tools(capabilities), capabilities, opts)
+    tools = to_provider_tools(capabilities)
+    invariant = invariant_metrics(tools, capabilities)
+    request(anthropic_messages, system, tools, capabilities, invariant, opts)
   end
 
   @impl true
@@ -105,6 +107,12 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       capabilities: capabilities
     } = provider_state
 
+    # invariant_metrics is precomputed once per turn in the chat/continue path
+    # and carried in provider_state; recompute here only if an isolated caller
+    # built the state without it (identical value — memoization, not a fallback).
+    invariant =
+      Map.get(provider_state, :invariant_metrics) || invariant_metrics(tools, capabilities)
+
     next_messages =
       (messages ++
          [
@@ -117,7 +125,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
         &elide_screenshot_message/1
       )
 
-    request(next_messages, system, tools, capabilities, opts)
+    request(next_messages, system, tools, capabilities, invariant, opts)
   end
 
   # A screenshot carrier is a user message holding a `tool_result` block whose
@@ -186,15 +194,15 @@ defmodule FermixCore.Providers.Anthropic.Messages do
 
   # --- request build ---
 
-  defp request(messages, system, tools, capabilities, opts) do
+  defp request(messages, system, tools, capabilities, invariant, opts) do
     {req_options, opts} = Keyword.pop(opts, :req_options, [])
 
     with {:ok, auth} <- resolve_auth(opts) do
-      do_request(messages, system, tools, capabilities, auth, req_options, opts)
+      do_request(messages, system, tools, capabilities, invariant, auth, req_options, opts)
     end
   end
 
-  defp do_request(messages, system, tools, capabilities, auth, req_options, opts) do
+  defp do_request(messages, system, tools, capabilities, invariant, auth, req_options, opts) do
     mode = auth_mode(auth)
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
@@ -221,7 +229,8 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       agent: Keyword.get(opts, :agent),
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
-      request_metrics: request_metrics(messages, system, tools, capabilities)
+      invariant_metrics: invariant,
+      request_metrics: Map.merge(input_metrics(messages, system), invariant)
     }
 
     post(base_url, auth, body, req_options, turn_state)
@@ -589,6 +598,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
          assistant_content: blocks,
          tools: turn_state.tools,
          capabilities: turn_state.capabilities,
+         invariant_metrics: turn_state.invariant_metrics,
          stop_reason: stop_reason
        },
        usage: parse_usage(body),
@@ -708,11 +718,21 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     )
   end
 
-  defp request_metrics(messages, system, tools, capabilities) do
+  # Per-call fields: messages/system grow each turn, so they are recomputed
+  # on every provider call.
+  defp input_metrics(messages, system) do
     %{
       input_items: length(messages),
       input_bytes: encoded_size(messages),
-      instructions_bytes: if(is_binary(system), do: byte_size(system), else: 0),
+      instructions_bytes: if(is_binary(system), do: byte_size(system), else: 0)
+    }
+  end
+
+  # Turn-invariant fields: tools/capabilities do not change across the loop, so
+  # `encoded_size(tools)` runs once on the initial call and is carried through
+  # `provider_state`/`turn_state` into every continuation.
+  defp invariant_metrics(tools, capabilities) do
+    %{
       tools_count: length(tools),
       tools_bytes: encoded_size(tools),
       capabilities_count: length(capabilities)

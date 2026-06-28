@@ -1,7 +1,93 @@
 defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Providers.OpenAI.ResponsesShared
+
+  describe "request-metric split (turn-invariant tools hoist)" do
+    # A capability whose schema carries enough bytes that tools_bytes is a
+    # non-trivial, stable number across calls.
+    defp cap(name) do
+      %Capability{
+        name: name,
+        description: "description for #{name}",
+        parameters: %{
+          "type" => "object",
+          "properties" => %{"q" => %{"type" => "string"}},
+          "required" => ["q"]
+        },
+        kind: :builtin,
+        executor: {Kernel, :is_map, []}
+      }
+    end
+
+    defp tools_and_caps do
+      caps = [cap("search"), cap("fetch")]
+      tools = ResponsesShared.to_provider_tools(caps)
+      {tools, caps}
+    end
+
+    test "request_metrics/4 == Map.merge(input_metrics, invariant_metrics), all 6 keys" do
+      {tools, caps} = tools_and_caps()
+      input = [%{role: "user", content: [%{type: "input_text", text: "hello there"}]}]
+      instructions = "be concise"
+
+      merged =
+        Map.merge(
+          ResponsesShared.input_metrics(input, instructions),
+          ResponsesShared.invariant_metrics(tools, caps)
+        )
+
+      assert merged == ResponsesShared.request_metrics(input, instructions, tools, caps)
+
+      assert Enum.sort(Map.keys(merged)) == [
+               :capabilities_count,
+               :input_bytes,
+               :input_items,
+               :instructions_bytes,
+               :tools_bytes,
+               :tools_count
+             ]
+    end
+
+    test "continuation metric map is byte-identical to a fresh per-call computation" do
+      {tools, caps} = tools_and_caps()
+
+      # The continuation hoist: carry invariant_metrics from the initial call and
+      # merge it onto the recomputed input_metrics for the (larger) next_input.
+      carried_invariant = ResponsesShared.invariant_metrics(tools, caps)
+
+      next_input = [
+        %{role: "user", content: [%{type: "input_text", text: "first"}]},
+        %{type: "function_call_output", call_id: "c1", output: "tool said x"},
+        %{role: "user", content: [%{type: "input_text", text: "second turn"}]}
+      ]
+
+      hoisted = Map.merge(ResponsesShared.input_metrics(next_input, nil), carried_invariant)
+
+      assert hoisted == ResponsesShared.request_metrics(next_input, nil, tools, caps)
+    end
+
+    test "invariant_metrics is independent of the input/instructions" do
+      {tools, caps} = tools_and_caps()
+
+      input_a = [%{role: "user", content: [%{type: "input_text", text: "a"}]}]
+      input_b = [%{role: "user", content: [%{type: "input_text", text: "a much longer turn"}]}]
+
+      from_a = ResponsesShared.request_metrics(input_a, "sys a", tools, caps)
+      from_b = ResponsesShared.request_metrics(input_b, "sys b longer", tools, caps)
+
+      invariant_keys = [:tools_count, :tools_bytes, :capabilities_count]
+
+      assert Map.take(from_a, invariant_keys) ==
+               Map.take(from_b, invariant_keys)
+
+      assert Map.take(from_a, invariant_keys) == ResponsesShared.invariant_metrics(tools, caps)
+
+      # The input-dependent fields DO differ, proving the split is real.
+      assert from_a.input_bytes != from_b.input_bytes
+    end
+  end
 
   describe "build_input/1 multimodal content encoding" do
     test "text-only transcript is byte-identical to the pre-multimodal shape (prompt-cache stability)" do

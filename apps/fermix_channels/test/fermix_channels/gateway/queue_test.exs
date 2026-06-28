@@ -37,6 +37,9 @@ defmodule FermixChannels.Gateway.QueueTest do
         {:proceed, :reply} ->
           {:ok, "reply:" <> msg.content, 0}
 
+        {:proceed, :empty} ->
+          {:ok, "", 0}
+
         {:proceed, :crash} ->
           raise "boom"
       after
@@ -154,6 +157,19 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:turn_started, "hello", turn_pid}, 5_000
       send(turn_pid, {:proceed, :reply})
       assert_receive {:reply, "reply:hello"}, 5_000
+    end
+
+    test "an empty model completion is surfaced honestly and never committed", ctx do
+      queue = start_queue(ctx)
+
+      assert :ok = Queue.enqueue(queue, make_msg("anything", "ce", ctx.test_pid))
+
+      assert_receive {:turn_started, "anything", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :empty})
+
+      assert_receive {:reply, "I didn't get a response — please try again."}, 5_000
+      # The blank completion is dropped pre-commit, so it cannot poison history.
+      refute_received {:committed, _response}
     end
 
     test "sends a compaction notice after the reply when the turn compacted", ctx do

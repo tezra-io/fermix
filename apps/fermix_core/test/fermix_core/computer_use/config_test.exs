@@ -54,6 +54,24 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       assert config.mode == :host
       assert config.screenshot_after? == false
     end
+
+    test "an explicit atom-key false on a map is honored, not discarded for the default" do
+      config = Config.normalize(%{screenshot_after: false})
+
+      assert config.screenshot_after? == false
+    end
+
+    test "an explicit atom-key false on a map keeps enabled? false" do
+      config = Config.normalize(%{enabled: false})
+
+      assert config.enabled? == false
+    end
+
+    test "a map string-key value resolves when the atom key is absent" do
+      config = Config.normalize(%{"mode" => "host"})
+
+      assert config.mode == :host
+    end
   end
 
   describe "normalize/1 fail-loud validation" do

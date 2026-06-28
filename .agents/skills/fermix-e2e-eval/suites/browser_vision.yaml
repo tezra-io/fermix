@@ -1,0 +1,51 @@
+suite: browser_vision
+title: "Outbound tool images — a browser screenshot is SEEN by the model"
+description: >
+  Phase 0 of computer-use lets a tool RESULT carry image content parts back to the
+  model, not just text. The browser `screenshot` action is the first consumer: the
+  captured PNG now rides the tool result as an image the model can actually look at,
+  through the same provider image-encoder spine inbound channel images use
+  (an Anthropic `tool_result` content array; a placeholder tool message plus a
+  following user image turn on the OpenAI-shaped wires). The rigorous mechanism proof
+  is the deterministic unit suite (Builtin.Tool.success_with_images, the three
+  provider tool-result encoders, the agent-loop continuation vision gate, and the
+  browser screenshot materialization). THIS suite is the integrated UAT: it drives a
+  real turn that captures a page and reasons over the rendered image, and verifies the
+  model does NOT claim it "cannot see" the capture. Requires the dev daemon to have a
+  working browser runtime (Chrome) and outbound network; cases are severity:normal
+  because a missing/blocked browser is an environment condition, not a code defect.
+  States real-user intent and lets the model pick the route — the only route gate is a
+  single tools_any:[browser] sanity case (the screenshot path runs through the
+  `browser` tool); everything else gates on the substance of the reply.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+scenarios:
+  - id: screenshot_seen
+    title: "Capture a page and reason over the rendered screenshot"
+    severity: normal
+    tags: [browser, vision, computer-use, screenshot]
+    cases:
+      - id: example_appearance
+        query: "Open https://example.com in the browser, take a screenshot of it, and tell me what the page looks like — its overall layout and visual style."
+        expect:
+          tools_any: [browser]
+          main_model_matches: "."
+          reply_matches: "(?i)(example domain|heading|title|cent(er|re)|paragraph|plain|white|minimal|simple|link|text)"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|render|open).{0,24}(image|screenshot|capture|page)"
+        rubric: >
+          Describes the actual rendered appearance of example.com — a minimal page
+          with the "Example Domain" heading, a short paragraph, and a link, on plain
+          styling. Fails if it claims it cannot see the screenshot/image, or if it
+          never captured the page.
+      - id: example_look
+        query: "Take a visual look at how https://example.com renders and describe its appearance in a sentence or two."
+        expect:
+          reply_matches: "(?i)(example domain|heading|title|paragraph|plain|white|minimal|simple|link|text|page)"
+          reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|render).{0,24}(image|screenshot|capture)"
+        rubric: >
+          Gives a description grounded in the rendered page (heading plus a short
+          paragraph, plain/minimal styling); does not claim it cannot see the
+          captured image.

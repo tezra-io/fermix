@@ -21,6 +21,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.Transient
   alias FermixCore.Telemetry
 
   @max_iterations 25
@@ -394,12 +395,23 @@ defmodule FermixCore.AgentLoop do
   # providers would mix outputs — the loop's emitted? flag gates eligibility
   # on top of the error's own kind/stage.
   defp failover_opts(state) do
-    [
+    opts = [
       eligible?: fn reason ->
         not stream_content_emitted?(state.stream) and Failover.eligible?(reason)
       end,
+      retryable?: fn reason ->
+        not stream_content_emitted?(state.stream) and Transient.retryable?(reason)
+      end,
       telemetry: failover_telemetry_meta(state)
     ]
+
+    # Cron opts out of the inner route-level retry (it owns its own
+    # deadline-bounded outer backoff), so the two retry loops never stack.
+    if Map.get(state.context, :route_transient_retry, true) do
+      opts
+    else
+      Keyword.put(opts, :max_retries, 0)
+    end
   end
 
   defp failover_telemetry_meta(state) do

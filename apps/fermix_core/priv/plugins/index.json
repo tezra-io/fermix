@@ -3,37 +3,6 @@
   "generated_at": "2026-06-11T10:35:03Z",
   "plugins": [
     {
-      "name": "computer-use-sidecar",
-      "display_name": "Computer Use (native helper)",
-      "category": "system",
-      "description": "The signed native helper that powers Computer Use — screen capture plus mouse and keyboard control. It adds no agent tools on its own; turn on Computer Use in settings after installing. Pre-release: the helper binary isn't published yet, so install will fail until it ships.",
-      "short_description": "Native helper for Computer Use",
-      "developer_name": "Fermix",
-      "brand_color": "#5B8DEF",
-      "logo": {
-        "mime": "image/svg+xml",
-        "data_base64": "PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB4PSIzIiB5PSI1IiB3aWR0aD0iMjYiIGhlaWdodD0iMTcuNSIgcng9IjMiIHN0cm9rZT0iIzVCOERFRiIgc3Ryb2tlLXdpZHRoPSIyLjIiLz48cGF0aCBkPSJNMTYgMjIuNXYzLjNNMTIgMjYuNWg4IiBzdHJva2U9IiM1QjhERUYiIHN0cm9rZS13aWR0aD0iMi4yIiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz48ZyB0cmFuc2Zvcm09InRyYW5zbGF0ZSgxMS4yIDguNCkgc2NhbGUoMC42MikiPjxwYXRoIGQ9Ik0wIDAgTDAgMTYgTDQuMiAxMiBMNi41IDE3LjUgTDguNSAxNi43IEw2LjIgMTEuMiBMMTEgMTEgWiIgZmlsbD0iIzVCOERFRiIvPjwvZz48L3N2Zz4K"
-      },
-      "auth_type": "none",
-      "rails": ["binary"],
-      "latest": "0.1.0",
-      "yanked": [],
-      "versions": [
-        {
-          "version": "0.1.0",
-          "published_at": "2026-06-20T00:00:00Z",
-          "min_core_version": "0.3.1",
-          "plugin_api": 2,
-          "artifacts": [
-            { "target": "macos-aarch64", "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-macos-aarch64.tar.gz", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-macos-aarch64.tar.gz.sig", "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-macos-aarch64.tar.gz.pem" },
-            { "target": "macos-x86_64", "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-macos-x86_64.tar.gz", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-macos-x86_64.tar.gz.sig", "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-macos-x86_64.tar.gz.pem" },
-            { "target": "linux-x86_64", "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-linux-x86_64.tar.gz", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-linux-x86_64.tar.gz.sig", "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-linux-x86_64.tar.gz.pem" },
-            { "target": "linux-aarch64", "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-linux-aarch64.tar.gz", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-linux-aarch64.tar.gz.sig", "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer-use-sidecar-v0.1.0/computer-use-sidecar-0.1.0-linux-aarch64.tar.gz.pem" }
-          ]
-        }
-      ]
-    },
-    {
       "name": "github",
       "display_name": "GitHub",
       "category": "developer",

@@ -51,6 +51,19 @@ defmodule FermixChannels.Gateway.Message do
     |> then(&struct!(__MODULE__, &1))
   end
 
+  @doc """
+  Whether the message carries something the agent can act on: non-blank text, or
+  any materialized media. A captionless image is actionable (the media carries
+  the turn); a sticker / poll / blank text with no media is not. This is the one
+  shared definition of "empty inbound" the gateway guards on — replying and not
+  scheduling a turn when a message is not actionable.
+  """
+  @spec actionable?(t()) :: boolean()
+  def actionable?(%__MODULE__{content: content, media_parts: parts})
+      when is_binary(content) and is_list(parts) do
+    String.trim(content) != "" or parts != []
+  end
+
   defp thread_scope(%{thread_ts: nil}), do: :root
   defp thread_scope(%{thread_ts: _thread_ts}), do: :thread
   defp thread_scope(_attrs), do: :root

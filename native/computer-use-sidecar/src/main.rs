@@ -105,13 +105,29 @@ struct Display {
     scale_factor: f32,
 }
 
+/// Pick the requested monitor, distinguishing "no display is capturable at all"
+/// from "that index doesn't exist on a multi-monitor host".
+///
+/// `xcap`'s active-monitor list is EMPTY when nothing can be captured — on macOS
+/// that is the screen-locked, display-asleep, or no-GUI-session state, none of
+/// which a different `display` index can fix. Reporting that as `display 0 not
+/// found` reads like a bad index and sends the caller hunting for another monitor;
+/// the typed `no_active_display` lets the Elixir layer say what is actually wrong.
+fn select_monitor(monitors: Vec<Monitor>, index: usize) -> Result<Monitor, String> {
+    if monitors.is_empty() {
+        return Err("no_active_display".to_string());
+    }
+
+    monitors
+        .into_iter()
+        .nth(index)
+        .ok_or_else(|| format!("display {index} not found"))
+}
+
 fn target_display(req: &Value) -> Result<Display, String> {
     let index = req.get("display").and_then(Value::as_u64).unwrap_or(0) as usize;
     let monitors = Monitor::all().map_err(|e| format!("enumerate displays: {e}"))?;
-    let monitor = monitors
-        .into_iter()
-        .nth(index)
-        .ok_or_else(|| format!("display {index} not found"))?;
+    let monitor = select_monitor(monitors, index)?;
 
     // xcap 0.4 returns the monitor geometry as `Result`s — unwrap each loudly so a
     // capture-backend hiccup surfaces as a clean action error, never a wrong click.
@@ -383,5 +399,26 @@ fn named_key(name: &str) -> Option<Key> {
                 _ => None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An empty monitor list (locked / asleep / no GUI session) maps to the typed
+    // `no_active_display` for ANY requested index — never the bad-index message,
+    // which would wrongly suggest another monitor could work. The non-empty path
+    // needs a real `Monitor` (an OS handle) and is covered by on-device runs.
+    #[test]
+    fn empty_monitor_list_is_no_active_display_for_any_index() {
+        assert_eq!(
+            select_monitor(Vec::new(), 0).err(),
+            Some("no_active_display".to_string())
+        );
+        assert_eq!(
+            select_monitor(Vec::new(), 4).err(),
+            Some("no_active_display".to_string())
+        );
     }
 }

@@ -19,13 +19,17 @@ defmodule FermixCore.Providers.Error do
   @type stage :: :before_response | :mid_stream
 
   @type api_error :: %{
-          provider: provider(),
-          adapter: adapter(),
-          status: pos_integer() | nil,
-          kind: atom(),
-          code: String.t() | nil,
-          message: String.t(),
-          stage: stage()
+          :provider => provider(),
+          :adapter => adapter(),
+          :status => pos_integer() | nil,
+          :kind => atom(),
+          :code => String.t() | nil,
+          :message => String.t(),
+          :stage => stage(),
+          # Present on rate-limit/quota errors when the provider body carried
+          # them (OpenAI/Codex usage limits); nil otherwise.
+          optional(:resets_at) => non_neg_integer() | nil,
+          optional(:plan_type) => String.t() | nil
         }
   @type transport_error :: %{
           provider: provider(),
@@ -52,6 +56,8 @@ defmodule FermixCore.Providers.Error do
        kind: api_kind(status, code, message),
        code: code,
        message: message,
+       resets_at: resets_at(decoded),
+       plan_type: plan_type(decoded),
        stage: stage_opt(opts)
      }}
   end
@@ -214,6 +220,28 @@ defmodule FermixCore.Providers.Error do
 
       _other ->
         string_value(body, "message", :message)
+    end
+  end
+
+  # Unix-seconds reset time from an OpenAI/Codex usage-limit body, if present.
+  defp resets_at(body) when is_map(body) do
+    case error_object(body) do
+      error when is_map(error) -> number_value(error, "resets_at", :resets_at)
+      _other -> nil
+    end
+  end
+
+  defp plan_type(body) when is_map(body) do
+    case error_object(body) do
+      error when is_map(error) -> string_value(error, "plan_type", :plan_type)
+      _other -> nil
+    end
+  end
+
+  defp number_value(map, string_key, atom_key) do
+    case Map.get(map, string_key, Map.get(map, atom_key)) do
+      value when is_number(value) and value >= 0 -> value
+      _other -> nil
     end
   end
 
