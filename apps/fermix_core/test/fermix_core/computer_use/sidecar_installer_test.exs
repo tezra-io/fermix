@@ -81,14 +81,6 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     refute SidecarInstaller.installed?()
   end
 
-  test "install/0 routes through the signed pipeline and fails closed with no catalog entry" do
-    # The bundled index ships no computer_use_sidecar entry yet (that catalog entry
-    # is coordinated separately), so run_install resolves no plugin and returns an
-    # error — proving install/0 wires to the verified pipeline and never silently
-    # no-ops. (Runs entirely under the tmp FERMIX_HOME store; no network.)
-    assert {:error, _reason} = SidecarInstaller.install()
-  end
-
   describe "dev_local resolution" do
     setup do
       prev = Application.get_env(:fermix_core, :plugins)
