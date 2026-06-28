@@ -6,6 +6,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-28
+
+### Added — Computer Use is now installable (signed catalog plugin)
+
+- The computer-use native sidecar ships as a cosign-signed catalog plugin
+  (`computer_use_sidecar`): install it (`fermix plugins install
+  computer_use_sidecar`), then turn computer use on by flipping
+  `[fermix_core.computer_use] enabled`. 0.4.0 shipped the runtime + safety
+  floor but not the signed binary; it now installs through the normal plugin
+  flow. Still **experimental and off by default** — registered for the model
+  only once enabled and `ready?` (binary installed + OS permissions granted),
+  with the `access` posture derived 1:1 from `[sandbox] mode` plus the
+  attended-origin gate.
+- Supported platforms: **Apple Silicon (M-series) macOS and Linux x86_64**.
+  Intel Macs are not supported — install fails cleanly with `no_build_for_target`.
+- The sidecar binary is cross-compiled per target and published as a per-target
+  signed release, then pinned into the bundled plugin catalog (`index.json`).
+  The plugin release pipeline and the catalog sync gained a native-build path
+  (per-target tarballs) without weakening the mandatory sha256 + cosign install
+  verification.
+
 ## [0.4.1] - 2026-06-27
 
 ### Added — Slack, Discord, and AgentMail plugins

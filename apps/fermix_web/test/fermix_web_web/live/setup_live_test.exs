@@ -3,6 +3,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   import Phoenix.LiveViewTest
 
+  alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.Auth.Store
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.Installer, as: DistInstaller
@@ -258,6 +259,56 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_submit()
 
       assert {:ok, "xoxb-secret"} = FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
+    end
+
+    test "an installed computer-use sidecar card reflects the feature flag, not registry enablement",
+         %{conn: conn} do
+      checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-cu")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(checkout) end)
+      write_cu_dev_local(checkout)
+
+      # The signed sidecar is installed (a registry plugin), but the feature lives
+      # under [fermix_core.computer_use], never the [fermix_core.plugins] enabled
+      # list. With no binary on disk ComputerUse.ready?/0 is false => "Needs setup".
+      prev_cu = Application.get_env(:fermix_core, :computer_use)
+      on_exit(fn -> restore_env(:fermix_core, :computer_use, prev_cu) end)
+      Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+      Application.put_env(:fermix_core, :computer_use, enabled: true)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-plugin-name="computer_use_sidecar"]|) |> render()
+
+      assert card =~ "Disable"
+      assert card =~ "Needs setup"
+      # Pre-fix this read [fermix_core.plugins] and rendered the install-time
+      # "Enable" with the status pill hidden (:not_configured).
+      refute card =~ ~s(phx-click="plugin_enable")
+    end
+
+    test "a ready computer-use sidecar card shows Ready without a registry health check",
+         %{conn: conn} do
+      checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-cu-ready")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(checkout) end)
+      write_cu_dev_local(checkout)
+      write_cu_dev_local_binary(checkout)
+
+      prev_cu = Application.get_env(:fermix_core, :computer_use)
+      on_exit(fn -> restore_env(:fermix_core, :computer_use, prev_cu) end)
+      Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+      Application.put_env(:fermix_core, :computer_use, enabled: true)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-plugin-name="computer_use_sidecar"]|) |> render()
+
+      assert card =~ "Ready"
+      assert card =~ "Disable"
+      # The config-gated sidecar's registry status is :not_configured, so the
+      # generic Check button would flash "not ready"; it must not render.
+      refute card =~ ~s(phx-click="plugin_check")
     end
 
     test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do
@@ -2503,6 +2554,40 @@ defmodule FermixWebWeb.SetupLiveTest do
 
     opts = seed_catalog(tmp_home, [entry])
     assert {:ok, :installed} = DistInstaller.run_install("github", opts)
+  end
+
+  # A dev_local checkout of the computer-use sidecar (manifest only): the registry
+  # discovers it as an installed plugin, but with no binary the sidecar is not
+  # runnable, mirroring "installed via catalog, OS permissions still pending".
+  defp write_cu_dev_local(checkout) do
+    File.mkdir_p!(Path.join(checkout, "computer_use_sidecar"))
+
+    File.write!(
+      Path.join([checkout, "computer_use_sidecar", "plugin.json"]),
+      Jason.encode!(%{
+        "schema_version" => 2,
+        "name" => "computer_use_sidecar",
+        "display_name" => "Computer Use Sidecar",
+        "description" => "Computer-use sidecar fixture",
+        "category" => "system",
+        "version" => "0.1.0",
+        "min_core_version" => "0.1.0",
+        "plugin_api" => 2,
+        "auth" => %{"type" => "none"},
+        "tools" => []
+      })
+    )
+  end
+
+  # Drop an executable sidecar binary at the host-target path so
+  # SidecarInstaller.installed?/0 (hence ComputerUse.ready?/0) turns true.
+  defp write_cu_dev_local_binary(checkout) do
+    {:ok, {os, arch}} = Manifest.target_for_host()
+    bin_dir = Path.join([checkout, "computer_use_sidecar", "bin", "#{os}-#{arch}"])
+    File.mkdir_p!(bin_dir)
+    binary = Path.join(bin_dir, "fermix-computer-use")
+    File.write!(binary, "#!/bin/sh\n")
+    File.chmod!(binary, 0o755)
   end
 
   # Write the seed index and point the :plugins_dist_opts seam at it. The seam

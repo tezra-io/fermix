@@ -2058,7 +2058,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           {plugin_action_label(@plugin.status)}
         </button>
         <button
-          :if={!@oauth_unset? && @plugin.enabled? && @plugin.status == :ready}
+          :if={!@oauth_unset? && @plugin.enabled? && @plugin.status == :ready && @plugin.checkable?}
           type="button"
           class="btn btn-ghost btn-xs"
           phx-click="plugin_check"

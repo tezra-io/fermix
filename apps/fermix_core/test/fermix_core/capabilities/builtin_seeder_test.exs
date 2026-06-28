@@ -87,7 +87,7 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
 
   defp install_dev_local_sidecar(home, target) do
     bin_dir =
-      Path.join([home, "dev-plugins", "computer-use-sidecar", "bin", target])
+      Path.join([home, "dev-plugins", "computer_use_sidecar", "bin", target])
 
     File.mkdir_p!(bin_dir)
     binary = Path.join(bin_dir, "fermix-computer-use")

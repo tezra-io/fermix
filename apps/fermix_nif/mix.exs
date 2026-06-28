@@ -4,7 +4,7 @@ defmodule FermixNif.MixProject do
   def project do
     [
       app: :fermix_nif,
-      version: "0.4.1",
+      version: "0.4.2",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
