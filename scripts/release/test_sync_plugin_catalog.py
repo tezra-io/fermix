@@ -53,9 +53,9 @@ def artifact_fixture(name="github", version="1.2.0"):
     }
 
 
-def release_fixture(name="github", version="1.2.0", **overrides):
+def release_fixture(name="github", version="1.2.0", artifacts=None, **overrides):
     return (version, "2026-06-09T12:00:00Z", manifest_fixture(name=name, version=version, **overrides),
-            artifact_fixture(name, version))
+            artifacts if artifacts is not None else [artifact_fixture(name, version)])
 
 
 class TagParsingTest(unittest.TestCase):
@@ -104,6 +104,13 @@ class EntryBuildingTest(unittest.TestCase):
         self.assertEqual(version["min_core_version"], "0.2.0")
         self.assertEqual(version["plugin_api"], 1)
         self.assertEqual(version["artifacts"], [artifact_fixture()])
+
+    def test_per_target_artifacts_preserved(self):
+        # A native plugin pins one artifact per target; plugin_entry emits the list as-is.
+        a1 = {**artifact_fixture(), "target": "macos-aarch64"}
+        a2 = {**artifact_fixture(), "target": "linux-x86_64"}
+        entry = sync.plugin_entry("github", [release_fixture(artifacts=[a1, a2])], [], None)
+        self.assertEqual(entry["versions"][0]["artifacts"], [a1, a2])
 
     def test_versions_sorted_semver_not_lexicographic(self):
         releases = [release_fixture(version="1.2.0"), release_fixture(version="1.10.0")]

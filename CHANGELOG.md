@@ -6,7 +6,39 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-06-26
+## [0.4.2] - 2026-06-28
+
+### Added — Computer Use is now installable (signed catalog plugin)
+
+- The computer-use native sidecar ships as a cosign-signed catalog plugin
+  (`computer_use_sidecar`): install it (`fermix plugins install
+  computer_use_sidecar`), then turn computer use on by flipping
+  `[fermix_core.computer_use] enabled`. 0.4.0 shipped the runtime + safety
+  floor but not the signed binary; it now installs through the normal plugin
+  flow. Still **experimental and off by default** — registered for the model
+  only once enabled and `ready?` (binary installed + OS permissions granted),
+  with the `access` posture derived 1:1 from `[sandbox] mode` plus the
+  attended-origin gate.
+- Supported platforms: **Apple Silicon (M-series) macOS and Linux x86_64**.
+  Intel Macs are not supported — install fails cleanly with `no_build_for_target`.
+- The sidecar binary is cross-compiled per target and published as a per-target
+  signed release, then pinned into the bundled plugin catalog (`index.json`).
+  The plugin release pipeline and the catalog sync gained a native-build path
+  (per-target tarballs) without weakening the mandatory sha256 + cosign install
+  verification.
+
+## [0.4.1] - 2026-06-27
+
+### Added — Slack, Discord, and AgentMail plugins
+- The three M16 static-secret (`api_key`) communication plugins now ship in the
+  bundled catalog: `fermix plugins install slack | discord | agentmail`, then
+  `enable` and set the credential (`SLACK_BOT_TOKEN` / `DISCORD_BOT_TOKEN` /
+  `AGENTMAIL_API_KEY`). 0.4.0 shipped the api_key HTTP-rail runtime that runs
+  them, but the plugin packages themselves were not yet released, so they did
+  not appear in the catalog. They are now published as signed releases in
+  `fermix-plugins` and synced into the bundled plugin index (`index.json`).
+
+## [0.4.0] - 2026-06-27
 
 ### Added — Media Generation (M15)
 - `generate_image` built-in tool over a modular `FermixCore.Media.Backend`
@@ -28,11 +60,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   also removes the ~50s Telegram album delay (the flush timer no longer sits
   behind the `getUpdates` long-poll). New CLI `ask --attach PATH`.
 
-### Added — Plugins (M16: Slack / Discord / AgentMail)
-- Three HTTP-rail `api_key` plugins — Slack, Discord, and AgentMail — with the
-  shared static-secret slice across plugin secret paths, migration, and the
-  setup CLI / wizard / doctor / web UI. Slack uses a bot token (`api_key`),
-  with OAuth scaffolding retained for deferred `search.messages`.
+### Added — Plugin runtime for static-secret (api_key) integrations (M16)
+- The HTTP-rail `api_key` plugin runtime — the shared static-secret slice across
+  plugin secret paths, migration, and the setup CLI / wizard / doctor / web UI
+  (Bearer auth by default, `Bot` for providers like Discord/Slack), with OAuth
+  scaffolding retained for deferred `search.messages`. This shipped the runtime
+  that *runs* static-secret plugins; the Slack, Discord, and AgentMail plugin
+  **packages** were not released in 0.4.0 and so did not appear in the catalog —
+  they ship in 0.4.1.
 
 ### Added — Soul Self-Curation (`/soul`)
 - Owner-only `/soul` channel command and the `SoulCuration` core module: an
@@ -141,6 +176,49 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   buffered turn — one timeout table instead of a bespoke per-feature knob. The
   review claim-lock TTL derives from that same value. Hand-edited
   `extraction_timeout_ms` entries in `config.toml` are ignored.
+
+### Changed — Reply-path performance
+- Cut redundant per-iteration work on the agent reply path, behavior-preserving
+  (telemetry, security decisions, and trace routing are unchanged): the
+  turn-invariant tool-schema byte metrics are now computed once per turn and
+  carried in `provider_state` instead of re-encoded on every provider call
+  (Anthropic / OpenAI Responses / Codex / xAI); the sandbox resolves its config
+  and symlink-resolving protected-roots list once per shell command instead of
+  twice; and `Trace.TelemetryHandler` reads each event's definition from its
+  handler config rather than rebuilding and linear-scanning the definition list
+  on every emitted event.
+
+### Changed — Auto-compaction triggers on real provider token usage
+- Preflight auto-compaction now gates on the real provider-reported
+  `context_tokens` (the same measure the post-delivery pass already uses),
+  tracked per conversation in `MainAgent` (pruned, written off the reply path)
+  and read through `turn_state` — instead of a `byte_size/4` estimate dispatched
+  through a tiktoken NIF that never existed. The dead NIF reflection is removed;
+  a single byte-length estimate remains only for the compactor's per-message
+  split. Cold conversations with no prior measurement skip the preflight
+  cleanly (the post-delivery pass still catches them).
+
+### Changed — Agent operating principles (prompt)
+- Two `FERMIX.md` rules drawn from live traces: change runtime state through the
+  owning tool or config, never by editing the source, database, or config it
+  runs on; and treat a fact tool-verified earlier in the same conversation as
+  current evidence — answer a restatement from it and re-verify only when the
+  state could have changed, rather than re-running the whole investigation.
+
+### Fixed — web_fetch crash on non-UTF-8 pages
+- `web_fetch` raised on a page served in a non-UTF-8 charset (e.g. Latin-1): the
+  unicode-flagged regex in the HTML text renderer hit invalid UTF-8 bytes and
+  crashed the tool (and would have broken JSON-encoding the result). The body is
+  now normalized to valid UTF-8 at the fetch boundary (invalid sequences →
+  U+FFFD; valid bodies pass through unchanged), so the whole pipeline and the
+  returned text are valid UTF-8.
+
+### Fixed — Phantom empty Opik traces from late stream:block events
+- In block streaming, a `stream:block` telemetry event firing after the turn's
+  trace had already closed lazily resurrected a parentless, empty trace that the
+  sweep then exported to Opik (the "empty trace after each query"). Late
+  `:block` events now attach only if the session is still open and otherwise
+  drop, mirroring the `:seal`/`:discard` handling.
 
 ### Fixed — Assistant Name reconcile on boot
 - `IDENTITY.md` was seeded once and never rewritten, so changing
