@@ -48,6 +48,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.sandbox_config(),
       Checks.sandbox_trace_suggestions(),
       Checks.auth_file_permissions(),
+      Checks.auth_token_expiry(),
       Checks.plaintext_secrets(),
       Checks.linger(),
       Checks.web_search(full?),
