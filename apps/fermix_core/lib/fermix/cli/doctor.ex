@@ -50,7 +50,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.auth_file_permissions(),
       Checks.plaintext_secrets(),
       Checks.linger(),
-      Checks.web_search(full?)
+      Checks.web_search(full?),
+      Checks.image_generation()
     ]
 
     network =

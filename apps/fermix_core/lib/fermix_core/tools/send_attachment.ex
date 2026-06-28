@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.SendAttachment do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Reply
   alias FermixCore.Sandbox
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -182,43 +183,16 @@ defmodule FermixCore.Tools.SendAttachment do
 
   defp deliver(reply_fn, part) do
     case reply_fn.({:media, part}) do
-      :ok -> :ok
-      {:error, reason} -> {:error, "Failed to send attachment: #{format_delivery_error(reason)}"}
-      other -> {:error, "Failed to send attachment: invalid reply result #{inspect(other)}"}
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to send attachment: #{Reply.format_delivery_error(reason)}"}
+
+      other ->
+        {:error, "Failed to send attachment: invalid reply result #{inspect(other)}"}
     end
   end
-
-  defp format_delivery_error({:byte_cap_exceeded, actual, allowed}) do
-    "attachment is #{format_bytes(actual)}; limit is #{format_bytes(allowed)}"
-  end
-
-  defp format_delivery_error({:rate_limited, retry_after_ms}) do
-    "channel is rate limited; retry after #{format_duration(retry_after_ms)}"
-  end
-
-  defp format_delivery_error({:text_cap_exceeded, actual, allowed}) do
-    "reply text is #{actual} characters; limit is #{allowed} characters"
-  end
-
-  defp format_delivery_error(reason), do: inspect(reason)
-
-  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_048_576 do
-    "#{Float.round(bytes / 1_048_576, 1)} MiB"
-  end
-
-  defp format_bytes(bytes) when is_integer(bytes) and bytes >= 1_024 do
-    "#{Float.round(bytes / 1_024, 1)} KiB"
-  end
-
-  defp format_bytes(bytes) when is_integer(bytes), do: "#{bytes} bytes"
-  defp format_bytes(value), do: inspect(value)
-
-  defp format_duration(ms) when is_integer(ms) and ms >= 1_000 and rem(ms, 1_000) == 0 do
-    "#{div(ms, 1_000)}s"
-  end
-
-  defp format_duration(ms) when is_integer(ms) and ms >= 0, do: "#{ms}ms"
-  defp format_duration(value), do: inspect(value)
 
   defp format_error(message) when is_binary(message), do: message
   defp format_error({:protected_path, path}), do: "Path is protected by the sandbox: #{path}"

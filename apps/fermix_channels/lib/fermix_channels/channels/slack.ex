@@ -12,6 +12,7 @@ defmodule FermixChannels.Channels.Slack do
   require Logger
 
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -258,6 +259,48 @@ defmodule FermixChannels.Channels.Slack do
   end
 
   defp parse_attachments(_files), do: []
+
+  @impl true
+  @spec download_attachment(FermixChannels.Gateway.Channel.message(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def download_attachment(_message, attachment) when is_map(attachment) do
+    with :ok <- MediaDownload.preflight_cap(attachment, @max_media_bytes),
+         {:ok, url} <- attachment_url(attachment),
+         {:ok, token} <- bot_token(),
+         {:ok, body} <- fetch_private_media(url, token),
+         {:ok, body} <- MediaDownload.enforce_cap(body, @max_media_bytes),
+         {:ok, path} <- MediaDownload.write_temp(body, "slack", attachment) do
+      {:ok, path}
+    end
+  end
+
+  defp attachment_url(attachment) do
+    case MediaDownload.value(attachment, :url) do
+      url when is_binary(url) and url != "" -> {:ok, url}
+      _ -> {:error, :missing_attachment_reference}
+    end
+  end
+
+  # Slack `url_private` requires the bot token as a Bearer header.
+  defp fetch_private_media(url, token) do
+    case Req.new(url: url, method: :get)
+         |> Req.Request.put_header("authorization", "Bearer #{token}")
+         |> Req.merge(req_options([]))
+         |> HttpClient.request("Slack media download") do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        {:ok, body}
+
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, IO.iodata_to_binary(body)}
+
+      {:ok, %{status: status}} ->
+        Logger.error("Slack media download failed: status=#{status}")
+        {:error, {:download_failed, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp attachment_kind("audio/" <> _rest), do: :audio
   defp attachment_kind("image/" <> _rest), do: :image

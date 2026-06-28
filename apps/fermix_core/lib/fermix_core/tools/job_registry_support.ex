@@ -3,6 +3,7 @@ defmodule FermixCore.Tools.JobRegistrySupport do
 
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Memory.Repo
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   def run(tool_name, context, fun) do
@@ -64,6 +65,57 @@ defmodule FermixCore.Tools.JobRegistrySupport do
     end
   end
 
+  @doc """
+  Validates the optional `provider`/`model` route pin shared by `schedule_job`
+  and `update_job`. Returns `{:ok, {provider, model}}` where each is a string or
+  nil, or `{:error, message}` for a clean tool error.
+
+  Contract:
+
+    * `provider`, if present, must be a known provider. The known set is
+      `ModelCatalog.providers/0` — the SAME source `Jobs.Runner.provider_atom/1`
+      gates against at run time, so this tool-boundary check can never drift
+      from the run-time guard.
+    * `model` is a free-form provider-specific slug (ollama/openrouter accept
+      arbitrary models) — not validated against any list.
+    * Both-or-neither: `RouteResolver.resolve!/1` defaults the model to a
+      catalog/config value when only a provider is pinned, so a provider-only
+      pin would silently resolve to a model the caller never chose. Requiring
+      the pair keeps the pin unambiguous (CLAUDE.md #12 — no fallbacks).
+  """
+  @spec validate_route_pin(map()) ::
+          {:ok, {String.t() | nil, String.t() | nil}} | {:error, String.t()}
+  def validate_route_pin(args) when is_map(args) do
+    provider = optional_string(args, "provider")
+    model = optional_string(args, "model")
+
+    with :ok <- validate_route_pair(provider, model),
+         :ok <- validate_known_provider(provider) do
+      {:ok, {provider, model}}
+    end
+  end
+
+  defp validate_route_pair(nil, nil), do: :ok
+  defp validate_route_pair(provider, model) when is_binary(provider) and is_binary(model), do: :ok
+
+  defp validate_route_pair(_provider, _model) do
+    {:error, "provider and model must be set together (both pin the job's route, or neither)"}
+  end
+
+  defp validate_known_provider(nil), do: :ok
+
+  defp validate_known_provider(provider) when is_binary(provider) do
+    known = ModelCatalog.providers()
+
+    if Enum.any?(known, &(Atom.to_string(&1) == provider)) do
+      :ok
+    else
+      {:error, "unknown provider #{inspect(provider)} (known: #{providers_hint(known)})"}
+    end
+  end
+
+  defp providers_hint(known), do: Enum.map_join(known, ", ", &Atom.to_string/1)
+
   def optional_datetime(args, key) do
     case Map.get(args, key) do
       nil ->
@@ -90,6 +142,8 @@ defmodule FermixCore.Tools.JobRegistrySupport do
       schedule_expr: job.schedule_expr,
       timezone: job.timezone,
       skill_name: job.skill_name,
+      provider: job.provider,
+      model: job.model,
       next_run_at: timestamp(job.next_run_at),
       expires_at: timestamp(job.expires_at),
       memory_source_id: job.memory_source_id,

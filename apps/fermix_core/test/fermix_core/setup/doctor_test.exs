@@ -886,8 +886,63 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  describe "image_report/1 (M15)" do
+    test "reports :unconfigured when no generate_image block is set" do
+      Application.put_env(:fermix_core, :tools, [])
+
+      assert %{status: :unconfigured} = Doctor.image_report()
+    end
+
+    test "reports the configured backend with a present credential (google)" do
+      put_generate_image(backend: "google", google_api_key: "gm-secret")
+
+      assert %{status: :configured, backend: :google_image, credential_present?: true} =
+               Doctor.image_report()
+    end
+
+    test "reports a missing credential without crashing (google)" do
+      put_generate_image(backend: "google")
+
+      assert %{status: :configured, backend: :google_image, credential_present?: false} =
+               Doctor.image_report()
+    end
+
+    test "reuses the openai provider key through the api_key seam (openai)" do
+      put_generate_image(backend: "openai", api_key: "sk-image")
+
+      assert %{status: :configured, backend: :openai_image, credential_present?: true} =
+               Doctor.image_report()
+    end
+
+    test "reports an unknown backend as a config error" do
+      put_generate_image(backend: "midjourney")
+
+      assert %{status: :error, error: error} = Doctor.image_report()
+      assert error =~ "Unknown"
+    end
+
+    test "reports a missing backend selection as a config error" do
+      put_generate_image(model: "gpt-image-2")
+
+      assert %{status: :error, error: error} = Doctor.image_report()
+      assert error =~ "no configured backend"
+    end
+
+    test "never reaches the network (offline credential check only)" do
+      put_generate_image(backend: "openai", api_key: "sk-image")
+
+      Doctor.image_report()
+
+      refute_received :web_search_probe_request
+    end
+  end
+
   defp put_web_search(config) do
     Application.put_env(:fermix_core, :tools, web_search: config)
+  end
+
+  defp put_generate_image(config) do
+    Application.put_env(:fermix_core, :tools, generate_image: config)
   end
 
   defp private_resolver do

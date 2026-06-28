@@ -157,6 +157,24 @@ defmodule FermixCore.Sandbox.ConfigTest do
     assert File.dir?(Path.join(home, "grants"))
   end
 
+  test "normalize is idempotent over an already-normalized struct" do
+    raw = %{
+      "mode" => "strict",
+      "workspace_root" => "~/workbox",
+      "allowed_roots" => ["~/projects/app"],
+      "env" => %{"mode" => "selected", "allow" => ["OPENAI_API_KEY"]},
+      "commands" => %{"profile" => "assistant", "presets" => ["ai_tools"]}
+    }
+
+    once = Config.normalize(raw)
+
+    # normalize(normalize(x)) == normalize(x): a second pass changes nothing.
+    # normalize/1 re-runs over a struct (a struct is also a map) so that a
+    # %Config{} carrying not-yet-normalized env sources is still fully
+    # normalized by the to_keyword/persistence path.
+    assert Config.normalize(once) == once
+  end
+
   test "old mode names fail with exact migration guidance" do
     error =
       assert_raise ArgumentError, fn ->

@@ -18,6 +18,12 @@ defmodule FermixOpik.Aggregation do
 
   alias FermixOpik.Mapper
 
+  # Grace added to a scheduled run's max duration before the sweep force-closes
+  # it: the run's watchdog fires `run_error`/timeout at the cap and closes the
+  # trace through the normal path, so the duration-based sweep only acts as a
+  # backstop for a run that died without signalling (e.g. daemon restart).
+  @sweep_grace_ms 60_000
+
   @enforce_keys [:project, :ttl_ms]
   defstruct project: nil, ttl_ms: 120_000, traces: %{}, sessions: %{}
 
@@ -64,6 +70,36 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.memory_write_span(meta, meas, &1))
   end
 
+  # The reviewer's run closer. It carries the run session_id (shared with the
+  # review's provider.call/memory.write spans) plus its op-count summary, so the
+  # reviewer's root trace ships here with an output/status instead of only via the
+  # exporter's TTL sweep. session_id is nil on a pre-call failure → close_root
+  # no-ops (no root was ever opened). The run was tagged :memory_review when its
+  # first span created the session (see infer_kind).
+  def apply_event(state, [:fermix, :memory, :review], meas, meta, at) do
+    close_root(state, meta, at, %{
+      output:
+        compact(%{
+          status: stringify(Map.get(meta, :status)),
+          added: Map.get(meas, :ops_added),
+          replaced: Map.get(meas, :ops_replaced),
+          archived: Map.get(meas, :ops_archived),
+          skipped: Map.get(meas, :ops_skipped),
+          input_messages: Map.get(meas, :input_messages)
+        }),
+      status: stringify(Map.get(meta, :status)),
+      thread_id: thread_id(meta),
+      metadata:
+        compact(%{
+          conversation_key: Map.get(meta, :conversation_key),
+          channel: stringify(Map.get(meta, :channel)),
+          chat_id: Map.get(meta, :chat_id),
+          input_tokens: Map.get(meas, :input_tokens),
+          duration_us: Map.get(meas, :duration_us)
+        })
+    })
+  end
+
   def apply_event(state, [:fermix, :skill, :invoke], meas, meta, at) do
     # A skill invocation is a point event; model it as a tool-like span under the
     # invoking run (parent_session), named for the skill.
@@ -77,12 +113,28 @@ defmodule FermixOpik.Aggregation do
   # never a root run (the stream has no parent_session of its own). Interim
   # draft :edit phases are deliberately not exported: at ~1 edit/s they would
   # flood the trace; the seal span carries total_edits/dropped_snapshots
-  # instead. :block phases (one per sent chunk, a handful per turn) do export.
+  # instead. :block phases (one per sent chunk, a handful per turn) export too,
+  # but only while the run's session is still open (see below).
   def apply_event(state, [:fermix, :channel, :stream], meas, meta, at) do
-    if Map.get(meta, :phase) in [:open, :block, :seal, :discard] do
-      add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
-    else
-      {state, []}
+    case Map.get(meta, :phase) do
+      :open ->
+        # :open fires on the first edit/block, always during the agent loop, so
+        # the run's session is guaranteed open — safe to create the child span.
+        add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
+
+      phase when phase in [:block, :seal, :discard] ->
+        # These phases can arrive AFTER the turn's `agent.message` already closed
+        # and shipped the trace: :seal/:discard fire just as the turn completes,
+        # and in block streaming a paced :block edit (~1s throttle / idle flush)
+        # can land after completion too. Creating a span here via `place_under`
+        # would lazily resurrect a phantom empty trace — no input/output, no
+        # thread (stream telemetry carries no chat_id) — that the sweep later
+        # flushes to Opik. So attach only while the run's session is still open;
+        # otherwise drop (the seal span already carries the aggregate counts).
+        attach_if_open(state, meta, at, &Mapper.stream_span(meta, meas, &1))
+
+      _other ->
+        {state, []}
     end
   end
 
@@ -154,6 +206,7 @@ defmodule FermixOpik.Aggregation do
           name: Map.get(meta, :name) || Map.get(meta, :agent),
           input: Map.get(meta, :input),
           thread_id: Map.get(meta, :job_id),
+          max_duration_ms: Map.get(meta, :max_duration_ms),
           trace_metadata:
             compact(%{
               job_id: Map.get(meta, :job_id),
@@ -179,6 +232,54 @@ defmodule FermixOpik.Aggregation do
       output: Map.get(meta, :output) || Map.get(meta, :error),
       status: status,
       metadata: compact(%{job_id: Map.get(meta, :job_id), run_id: Map.get(meta, :run_id)})
+    })
+  end
+
+  # A `/soul review` draft is a single bounded provider call minted with its own
+  # `session_id` before any turn exists (see `SoulCuration.Telemetry`). run_start
+  # opens its root trace; the provider.call span nests via the shared session_id;
+  # run_complete/run_error close it. `parent_session` (the originating command)
+  # is present when the draft was dispatched from a channel command.
+  def apply_event(state, [:fermix, :soul_curation, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: Map.get(meta, :parent_session),
+          kind: :soul_curation,
+          name: stringify(Map.get(meta, :mode)),
+          input: Map.get(meta, :input),
+          trace_metadata:
+            compact(%{
+              mode: stringify(Map.get(meta, :mode)),
+              with_context: Map.get(meta, :with_context)
+            }),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  def apply_event(state, [:fermix, :soul_curation, run], _meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    status = if run == :run_error, do: "error", else: Map.get(meta, :status, "ok")
+
+    close_root(state, meta, at, %{
+      output: Map.get(meta, :output) || Map.get(meta, :error),
+      status: status,
+      metadata:
+        compact(%{
+          mode: stringify(Map.get(meta, :mode)),
+          route: Map.get(meta, :route),
+          byte_delta: Map.get(meta, :byte_delta),
+          line_delta: Map.get(meta, :line_delta),
+          suspect: Map.get(meta, :suspect)
+        })
     })
   end
 
@@ -270,14 +371,26 @@ defmodule FermixOpik.Aggregation do
     {state, [%{trace: trace, spans: []}]}
   end
 
+  # A fired failure-deadline timeout ([:fermix, :timeout, :expired]): a point
+  # span under the run's trace via the shared session_id, flagged errored so a
+  # deadline that fired mid-run is visible rather than only inferable from a
+  # missing child span. session_id nil → place_under no-ops (nothing to nest).
+  def apply_event(state, [:fermix, :timeout, :expired], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.timeout_span(meta, meas, &1))
+  end
+
   def apply_event(state, _event, _meas, _meta, _at), do: {state, []}
 
-  @doc "Force-close traces whose last event is older than `ttl_ms`."
+  @doc """
+  Force-close abandoned traces. A scheduled run with a duration floor is closed
+  only once past that absolute deadline (its max wall-clock duration + grace);
+  every other trace uses the idle TTL (no event within `ttl_ms`).
+  """
   @spec sweep(%__MODULE__{}, integer()) :: {%__MODULE__{}, [closed()]}
   def sweep(state, now_mono) do
     stale =
       for {trace_id, acc} <- state.traces,
-          now_mono - acc.last_seen_mono > state.ttl_ms * 1000,
+          stale?(acc, now_mono, state.ttl_ms),
           do: trace_id
 
     Enum.reduce(stale, {state, []}, fn trace_id, {st, closed} ->
@@ -285,6 +398,12 @@ defmodule FermixOpik.Aggregation do
       {st, closed ++ List.wrap(one)}
     end)
   end
+
+  defp stale?(%{sweep_floor_mono: floor}, now_mono, _ttl_ms) when is_integer(floor),
+    do: now_mono > floor
+
+  defp stale?(acc, now_mono, ttl_ms),
+    do: now_mono - acc.last_seen_mono > ttl_ms * 1000
 
   @doc "All currently-open traces flushed immediately (used at shutdown / replay end)."
   @spec drain(%__MODULE__{}) :: {%__MODULE__{}, [closed()]}
@@ -299,6 +418,20 @@ defmodule FermixOpik.Aggregation do
 
   defp add_child_span(state, meta, at, span_fun) do
     place_under(state, Map.get(meta, :session_id), meta, at, span_fun)
+  end
+
+  # Attach a span only if its run's session is still open; never create a trace.
+  # Used for terminal stream phases so a late event can't resurrect a closed run
+  # into a phantom trace. (Distinct from `memory.write`, which is *meant* to open
+  # its own post-turn trace.)
+  defp attach_if_open(state, meta, at, span_fun) do
+    session_id = Map.get(meta, :session_id)
+
+    if session_id && Map.has_key?(state.sessions, session_id) do
+      place_under(state, session_id, meta, at, span_fun)
+    else
+      {state, []}
+    end
   end
 
   # Attach a child span under `session_id`'s wrapper (creating the run lazily).
@@ -404,10 +537,23 @@ defmodule FermixOpik.Aggregation do
       tags: [Atom.to_string(kind)],
       spans: [],
       last_seen_mono: ctx.mono,
+      sweep_floor_mono: sweep_floor(ctx),
       open?: true
     }
 
     {trace_id, nil, put_in(state, [Access.key(:traces), trace_id], acc)}
+  end
+
+  # A scheduled run is bounded by its own wall-clock timeout, not the idle TTL:
+  # a long job can sit silent past the idle window yet still be running, so we
+  # only force-close once it is past the point where it could still be alive
+  # (its max duration + grace). Roots without a max duration (main turns,
+  # subagents, realtime) get `nil` and fall back to the idle TTL.
+  defp sweep_floor(ctx) do
+    case Map.get(ctx, :max_duration_ms) do
+      ms when is_integer(ms) and ms > 0 -> ctx.mono + (ms + @sweep_grace_ms) * 1000
+      _absent -> nil
+    end
   end
 
   defp finish_wrapper(state, nil, _at, _fields), do: {state, []}
@@ -558,6 +704,8 @@ defmodule FermixOpik.Aggregation do
   defp infer_kind("main-" <> _), do: :main
   defp infer_kind("cron_" <> _), do: :scheduled
   defp infer_kind("session:" <> _), do: :realtime
+  defp infer_kind("soul_curation:" <> _), do: :soul_curation
+  defp infer_kind("memory_review:" <> _), do: :memory_review
   defp infer_kind(_other), do: :subagent
 
   defp kind_from_role(role) when role in [:skill, "skill"], do: :skill

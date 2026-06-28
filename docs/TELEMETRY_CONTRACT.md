@@ -104,6 +104,20 @@ the reviewer's root trace from this event. The synchronous `memory_store` tool
 keeps its own `[:fermix, :tool, :exec]` span — this event is only the reviewer's
 otherwise-invisible write path.
 
+The review run also emits a **lifecycle closer**, `[:fermix, :memory, :review]`
+(measurements `%{duration_us, ops_added, ops_replaced, ops_archived,
+ops_skipped, input_messages, input_tokens}`; metadata `agent`, `owner`,
+`session_id` — the same per-run id its provider.call/memory.write spans carry —
+plus `parent_session`, `conversation_key`, `channel`/`chat_id`, `status`,
+`fired`). It is the reviewer's **closer** (§"Adding a new run kind"): the root
+trace opens lazily on the run's first span and would otherwise ship only via the
+exporter's TTL sweep with no status/output. `Trace.TelemetryHandler` records it
+as a `memory_review` `agent_event` row; `FermixOpik` consumes it
+(`Aggregation.close_root`) to close the run with an op-count output, and
+`infer_kind` tags the run `:memory_review` (not `:subagent`). When a review skips
+before any provider call (`session_id: nil`), `close_root` no-ops — nothing was
+opened.
+
 ## Content (prompts / responses / tool IO)
 
 Attach bodies **only** behind `FermixCore.Telemetry.capture_content?/0`, and

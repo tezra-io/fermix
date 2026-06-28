@@ -200,8 +200,44 @@ defmodule FermixCore.Tools.Browser do
     result
   end
 
-  defp to_tool_result({:ok, output}), do: {:ok, Tool.success(output)}
+  defp to_tool_result({:ok, output}), do: {:ok, screenshot_aware_success(output)}
   defp to_tool_result({:error, error}), do: {:ok, Tool.error(error_text(error))}
+
+  # A `screenshot` action returns a JSON summary with an `image/*` mime_type and an
+  # artifact path. Materialize the bytes as an image content part so the model can
+  # SEE the capture instead of a path it can't open. The model-visible text stays
+  # the summary — the bytes ride `:images` only, never the text/telemetry. Every
+  # other action (and an unreadable artifact) returns the plain text summary, the
+  # exact pre-existing shape — not a degraded fallback, just no image to attach.
+  @doc false
+  @spec screenshot_aware_success(String.t()) :: Tool.tool_result()
+  def screenshot_aware_success(json) when is_binary(json) do
+    case screenshot_image_part(json) do
+      {:ok, image_part} -> Tool.success_with_images(json, [image_part])
+      :none -> Tool.success(json)
+    end
+  end
+
+  defp screenshot_image_part(json) do
+    case Jason.decode(json) do
+      {:ok, %{"mime_type" => "image/" <> _ = mime, "path" => path}} ->
+        read_screenshot_artifact(mime, path)
+
+      _not_an_image_result ->
+        :none
+    end
+  end
+
+  defp read_screenshot_artifact(mime, path) do
+    case File.read(path) do
+      {:ok, bytes} ->
+        {:ok, %{type: :image, mime_type: mime, data: bytes}}
+
+      {:error, reason} ->
+        Logger.warning("browser screenshot artifact unreadable (#{inspect(reason)}): #{path}")
+        :none
+    end
+  end
 
   # Always-on, body-free trace fields: structural identifiers plus a bounded
   # error code/summary on failure. URLs are reduced to scheme+host+path so query

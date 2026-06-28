@@ -88,6 +88,60 @@ defmodule FermixCore.Tools.GitToolsTest do
     assert push_result.error =~ "M10"
   end
 
+  test "git_write rejects sandbox-escaping flags incl. abbreviations (argument injection)", %{
+    dir: dir,
+    context: context
+  } do
+    # `git pull --upload-pack=<cmd>` runs <cmd> for the file:// transport — a
+    # classic argument-injection-to-RCE primitive. git also honors unambiguous
+    # prefix abbreviations of long options, so the abbreviated form must be
+    # rejected too. `true` is a harmless stand-in for the injected command.
+    dangerous = [
+      ["--upload-pack=true", "file:///tmp/fermix_nonexistent_xyz"],
+      ["--upload-pac=true", "file:///tmp/fermix_nonexistent_xyz"],
+      ["--upload-pack", "true"],
+      ["--receive-pack=true", "file:///tmp/fermix_nonexistent_xyz"],
+      ["--git-dir=/tmp/other.git"],
+      ["--exec-path=/tmp"],
+      ["--output=/tmp/leak"]
+    ]
+
+    for args <- dangerous do
+      assert {:ok, result} =
+               GitWrite.execute(%{"repo" => dir, "command" => "pull", "args" => args}, context)
+
+      assert result.success == false, "expected #{inspect(args)} to be rejected"
+
+      assert result.error =~ "escape sandbox containment",
+             "expected sandbox-containment rejection for #{inspect(args)}, got: #{result.error}"
+    end
+  end
+
+  test "git_write does not over-reject commit messages that resemble paths", %{
+    dir: dir,
+    context: context
+  } do
+    File.write!(Path.join(dir, "README.md"), "# Changed\n")
+
+    {:ok, _} =
+      GitWrite.execute(%{"repo" => dir, "command" => "add", "args" => ["README.md"]}, context)
+
+    # Positional path containment (absolute / `..`) is a read-tool concern; it
+    # must not reject legitimate commit messages that happen to look like paths.
+    assert {:ok, result} =
+             GitWrite.execute(
+               %{
+                 "repo" => dir,
+                 "command" => "commit",
+                 "args" => ["-m", "/etc/hosts: noted the ../old path"]
+               },
+               context
+             )
+
+    assert result.success == true,
+           "commit message resembling a path was wrongly rejected: #{inspect(result)}"
+  end
+
   test "git_write denies repo outside sandbox roots", %{context: context} do
     outside = FermixTestSupport.SafeRm.make_tmp_dir!("git-outside")
     System.cmd("git", ["init", "--initial-branch=main"], cd: outside)

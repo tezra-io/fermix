@@ -342,6 +342,34 @@ defmodule Fermix.CLI.Doctor.Checks do
     ok("web search", "backend #{report.backend} configured")
   end
 
+  @doc """
+  Image-generation backend health: which backend is selected and whether its
+  credential is present. Offline only — never bills the operator with a live
+  image call. Not configuring `generate_image` is normal (optional capability),
+  so the absent case is `:ok`, not a warning.
+  """
+  @spec image_generation() :: result()
+  def image_generation do
+    ProviderProbe.image_report()
+    |> format_image_generation()
+  end
+
+  defp format_image_generation(%{status: :unconfigured}) do
+    ok("image generation", "not configured (optional)")
+  end
+
+  defp format_image_generation(%{status: :error, error: error}) do
+    warn("image generation", error)
+  end
+
+  defp format_image_generation(%{credential_present?: false} = report) do
+    warn("image generation", "backend #{report.backend} selected but no credential configured")
+  end
+
+  defp format_image_generation(%{backend: backend}) do
+    ok("image generation", "backend #{backend} configured")
+  end
+
   defp format_channel_health([]), do: ok("channel health", "no enabled channels configured")
 
   defp format_channel_health(probes) do

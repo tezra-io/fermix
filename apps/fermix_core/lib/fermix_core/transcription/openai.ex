@@ -4,6 +4,7 @@ defmodule FermixCore.Transcription.OpenAI do
   require Logger
 
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
 
   @base_url "https://api.openai.com/v1"
   @default_model "whisper-1"
@@ -15,7 +16,12 @@ defmodule FermixCore.Transcription.OpenAI do
         url = "#{base_url()}/audio/transcriptions"
 
         result =
-          Req.new(url: url, method: :post, form_multipart: fields)
+          Req.new(
+            url: url,
+            method: :post,
+            form_multipart: fields,
+            receive_timeout: TimeoutPolicy.receive_timeout_for(:transcription)
+          )
           |> Req.Request.put_header("authorization", "Bearer #{token}")
           |> Req.merge(Keyword.get(opts, :req_options, []))
           |> HttpClient.request("OpenAI Whisper")

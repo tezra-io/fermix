@@ -12,7 +12,7 @@ defmodule FermixCore.Auth.OAuthProviders do
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Plugins.Config
 
-  @supported_providers ~w(google github notion x)
+  @supported_providers ~w(google github notion x slack)
 
   @type error ::
           {:unsupported_oauth_provider, term()}
@@ -147,6 +147,28 @@ defmodule FermixCore.Auth.OAuthProviders do
       redirect_path: "/auth/callback",
       scopes: Keyword.get(config, :scopes, []),
       token_auth: :basic,
+      fixed_port?: true
+    }
+  end
+
+  # Slack OAuth v2: bot scopes go in `scope` (comma-separated) and the token
+  # endpoint (`oauth.v2.access`) returns JSON with the bot token at
+  # `access_token`. Confidential client (client_secret) with an exact-match
+  # fixed redirect URI. User-token methods (search.messages) need a separate
+  # `user_scope`/token and are deferred — see M16 §7.1.
+  defp build("slack", config) do
+    %OAuthProvider{
+      id: :slack,
+      authorize_url: "https://slack.com/oauth/v2/authorize",
+      token_url: "https://slack.com/api/oauth.v2.access",
+      userinfo_url: nil,
+      client_id: Keyword.fetch!(config, :client_id),
+      client_secret: Keyword.get(config, :client_secret),
+      redirect_host: Keyword.get(config, :redirect_host, "127.0.0.1"),
+      redirect_port: Keyword.get(config, :redirect_port, 1460),
+      redirect_path: "/auth/callback",
+      scopes: Keyword.get(config, :scopes, []),
+      scope_delimiter: ",",
       fixed_port?: true
     }
   end

@@ -25,6 +25,7 @@ defmodule FermixCore.Providers.XAI.Responses do
 
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ResponsesShared
@@ -33,7 +34,6 @@ defmodule FermixCore.Providers.XAI.Responses do
   require Logger
 
   @default_base_url "https://api.x.ai/v1"
-  @receive_timeout_ms 120_000
 
   @impl true
   def chat(messages, capabilities, opts)
@@ -55,8 +55,12 @@ defmodule FermixCore.Providers.XAI.Responses do
       |> ResponsesShared.to_provider_tools(:xai_responses)
       |> sanitize_tools()
 
+    invariant_metrics = ResponsesShared.invariant_metrics(tools, capabilities)
     body = build_body(model, input, instructions, tools, opts)
-    turn_state = turn_state(model, auth, input, instructions, tools, capabilities, opts)
+
+    turn_state =
+      turn_state(model, auth, input, instructions, tools, capabilities, invariant_metrics, opts)
+
     post(base_url(opts), auth, body, req_options, turn_state)
   end
 
@@ -74,14 +78,22 @@ defmodule FermixCore.Providers.XAI.Responses do
   defp do_continue(provider_state, tool_results, auth, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
 
-    %{input: prior_input, output_items: output_items, tools: tools, capabilities: capabilities} =
-      provider_state
+    %{
+      input: prior_input,
+      output_items: output_items,
+      tools: tools,
+      capabilities: capabilities,
+      invariant_metrics: invariant_metrics
+    } = provider_state
 
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
     next_input = prior_input ++ output_items ++ outputs
 
     body = build_body(model, next_input, nil, tools, opts)
-    turn_state = turn_state(model, auth, next_input, nil, tools, capabilities, opts)
+
+    turn_state =
+      turn_state(model, auth, next_input, nil, tools, capabilities, invariant_metrics, opts)
+
     post(base_url(opts), auth, body, req_options, turn_state)
   end
 
@@ -151,7 +163,16 @@ defmodule FermixCore.Providers.XAI.Responses do
   defp slash_value?(value) when is_binary(value), do: String.contains?(value, "/")
   defp slash_value?(_value), do: false
 
-  defp turn_state(model, auth, input, instructions, tools, capabilities, opts) do
+  defp turn_state(
+         model,
+         auth,
+         input,
+         instructions,
+         tools,
+         capabilities,
+         invariant_metrics,
+         opts
+       ) do
     %{
       model: model,
       auth_mode: auth_mode(auth),
@@ -162,7 +183,9 @@ defmodule FermixCore.Providers.XAI.Responses do
       session_id: Keyword.get(opts, :session_id),
       parent_session: Keyword.get(opts, :parent_session),
       reasoning_effort: Keyword.get(opts, :reasoning_effort),
-      request_metrics: ResponsesShared.request_metrics(input, instructions, tools, capabilities)
+      invariant_metrics: invariant_metrics,
+      request_metrics:
+        Map.merge(ResponsesShared.input_metrics(input, instructions), invariant_metrics)
     }
   end
 
@@ -268,7 +291,7 @@ defmodule FermixCore.Providers.XAI.Responses do
         url: "#{base_url}/responses",
         method: :post,
         json: body,
-        receive_timeout: @receive_timeout_ms,
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:llm_buffered),
         headers: [
           {"authorization", "Bearer " <> bearer},
           {"content-type", "application/json"}
@@ -287,7 +310,8 @@ defmodule FermixCore.Providers.XAI.Responses do
       turn_state.model,
       turn_state.input,
       turn_state.tools,
-      turn_state.capabilities
+      turn_state.capabilities,
+      turn_state.invariant_metrics
     )
   end
 

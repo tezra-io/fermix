@@ -21,6 +21,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   @gmail_metadata_headers ["From", "To", "Subject", "Date"]
   @max_mime_depth 8
   @rate_limit_reasons ~w(rateLimitExceeded userRateLimitExceeded dailyLimitExceeded quotaExceeded)
+  @sentinel FermixCore.Setup.SecretWriter.sentinel()
 
   @spec parameters(String.t()) :: map()
   def parameters("gmail_search_messages") do
@@ -128,7 +129,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
          :ok <- ensure_enabled(plugin),
          :ok <- ensure_granted(plugin, tool, context),
          auth_profile <- Config.auth_profile(plugin),
-         {:ok, token} <- get_token(auth_profile, context) do
+         {:ok, token} <- resolve_credential(plugin, auth_profile, context) do
       run_tool(args, context, plugin, plugin_name, auth_profile, token, tool)
     else
       {:error, reason} -> {:ok, Tool.error(format_auth_error(plugin_name, reason))}
@@ -167,8 +168,10 @@ defmodule FermixCore.Plugins.ToolExecutor do
   end
 
   defp run_declarative(args, context, plugin, plugin_name, auth_profile, token, tool) do
+    cred = credential(plugin.auth, token)
+
     Interpreter.run(tool, args,
-      http: declarative_seam(context, plugin_name, auth_profile, tool, token),
+      http: declarative_seam(context, plugin_name, auth_profile, tool, cred),
       auth_header: nil,
       auth_type: plugin.auth.type,
       plugin: plugin_name,
@@ -176,6 +179,21 @@ defmodule FermixCore.Plugins.ToolExecutor do
       error_classifier: google_error_classifier(plugin, plugin_name, tool)
     )
   end
+
+  # Bundle the resolved credential with the manifest-declared `Authorization`
+  # header name + scheme prefix, so the seam can rebuild the header on token
+  # refresh and so a non-`Bearer` provider (Discord: `Bot`) authenticates
+  # correctly. Absent header/scheme default to `authorization`/`Bearer`.
+  defp credential(auth, token) do
+    %{
+      token: token,
+      header: Map.get(auth, :header) || "authorization",
+      scheme: Map.get(auth, :scheme) || "Bearer",
+      type: Map.get(auth, :type)
+    }
+  end
+
+  defp auth_header(cred), do: {cred.header, "#{cred.scheme} #{cred.token}"}
 
   # Google plugins keep their machine-readable 403/401 classification
   # (`format_forbidden`/`format_auth_error`) instead of the interpreter's
@@ -200,15 +218,15 @@ defmodule FermixCore.Plugins.ToolExecutor do
   # The interpreter shapes the request/response; this seam owns transport, the
   # `Authorization` header, the test plug passthrough, and the one-shot 401
   # refresh-retry for read-only tools (parity with the hardcoded path).
-  defp declarative_seam(context, plugin_name, auth_profile, tool, token) do
+  defp declarative_seam(context, plugin_name, auth_profile, tool, cred) do
     fn request ->
-      declarative_call(request, token, 0, context, plugin_name, auth_profile, tool)
+      declarative_call(request, cred, 0, context, plugin_name, auth_profile, tool)
     end
   end
 
-  defp declarative_call(request, token, attempt, context, plugin_name, auth_profile, tool) do
+  defp declarative_call(request, cred, attempt, context, plugin_name, auth_profile, tool) do
     case guard_url(request.url, context) do
-      :ok -> issue_declarative(request, token, attempt, context, plugin_name, auth_profile, tool)
+      :ok -> issue_declarative(request, cred, attempt, context, plugin_name, auth_profile, tool)
       {:error, reason} -> {:error, {:blocked_url, reason}}
     end
   end
@@ -221,7 +239,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
     guard.(url)
   end
 
-  defp issue_declarative(request, token, attempt, context, plugin_name, auth_profile, tool) do
+  defp issue_declarative(request, cred, attempt, context, plugin_name, auth_profile, tool) do
     req_options = Map.get(context, :plugin_req_options, [])
 
     req =
@@ -229,7 +247,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
         method: request.method,
         url: request.url,
         params: request.query,
-        headers: [{"authorization", "Bearer #{token}"} | request.headers],
+        headers: [auth_header(cred) | request.headers],
         decode_body: false
       )
       |> maybe_merge(:json, request.body)
@@ -237,7 +255,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
     case Req.request(req) do
       {:ok, %{status: 401}} when attempt == 0 ->
-        refresh_or_pass(request, attempt, context, plugin_name, auth_profile, tool)
+        refresh_or_pass(request, cred, attempt, context, plugin_name, auth_profile, tool)
 
       {:ok, response} ->
         {:ok,
@@ -252,21 +270,37 @@ defmodule FermixCore.Plugins.ToolExecutor do
     end
   end
 
-  defp refresh_or_pass(request, _attempt, context, plugin_name, auth_profile, tool) do
-    if Map.get(tool, "read_only") == true do
-      case refresh_token(auth_profile, context) do
-        {:ok, fresh} ->
-          declarative_call(request, fresh, 1, context, plugin_name, auth_profile, tool)
+  defp refresh_or_pass(request, cred, _attempt, context, plugin_name, auth_profile, tool) do
+    cond do
+      cred.type == :api_key ->
+        # A static api_key has no refresh — a 401 is a rejected key, not an
+        # expired token. Hand the 401 to the interpreter, which classifies it
+        # with `fermix plugins auth set` guidance (its :api_key 401 branch).
+        {:ok, %{status: 401, headers: [], body: ""}}
 
-        {:error, reason} ->
-          # Surface the refresh failure itself (network vs revoked grant)
-          # instead of synthesizing a 401 that classifies as a generic
-          # reauthorize — parity with the hardcoded path's format_auth_error.
-          {:error, {:token_refresh_failed, reason}}
-      end
-    else
-      # A write 401 is terminal — hand the 401 to the interpreter to classify.
-      {:ok, %{status: 401, headers: [], body: ""}}
+      Map.get(tool, "read_only") == true ->
+        case refresh_token(auth_profile, context) do
+          {:ok, fresh} ->
+            declarative_call(
+              request,
+              %{cred | token: fresh},
+              1,
+              context,
+              plugin_name,
+              auth_profile,
+              tool
+            )
+
+          {:error, reason} ->
+            # Surface the refresh failure itself (network vs revoked grant)
+            # instead of synthesizing a 401 that classifies as a generic
+            # reauthorize — parity with the hardcoded path's format_auth_error.
+            {:error, {:token_refresh_failed, reason}}
+        end
+
+      true ->
+        # A write 401 is terminal — hand the 401 to the interpreter to classify.
+        {:ok, %{status: 401, headers: [], body: ""}}
     end
   end
 
@@ -754,6 +788,31 @@ defmodule FermixCore.Plugins.ToolExecutor do
     %{type: "object", required: required, properties: properties}
   end
 
+  # api_key plugins authenticate with a static keychained secret resolved by
+  # plugin name (no OAuth token, no refresh); every other type resolves an
+  # OAuth access token. The secret read is an injectable seam
+  # (`:plugin_secret_getter`) for hermetic tests, mirroring `:plugin_token_getter`.
+  defp resolve_credential(%{auth: %{type: :api_key}} = plugin, _auth_profile, context) do
+    getter = Map.get(context, :plugin_secret_getter, &default_plugin_secret/1)
+
+    case getter.(plugin.name) do
+      {:ok, secret} -> {:ok, secret}
+      :error -> {:error, :no_secret}
+    end
+  end
+
+  defp resolve_credential(_plugin, auth_profile, context) do
+    get_token(auth_profile, context)
+  end
+
+  defp default_plugin_secret(name) do
+    case Config.plugin_secret(name) do
+      @sentinel -> :error
+      secret when is_binary(secret) and secret != "" -> {:ok, secret}
+      _missing -> :error
+    end
+  end
+
   defp get_token(auth_profile, context) do
     context
     |> Map.get(:plugin_token_getter, &TokenManager.get_token/1)
@@ -812,6 +871,10 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp format_auth_error(plugin_name, :reauthorization_required) do
     "#{plugin_name} needs reconnection. Run `fermix plugins auth reauthorize #{plugin_name}`."
+  end
+
+  defp format_auth_error(plugin_name, :no_secret) do
+    "#{plugin_name} is missing its API key. Run `fermix plugins auth set #{plugin_name}`."
   end
 
   defp format_auth_error(plugin_name, :no_auth_file) do

@@ -99,6 +99,25 @@ defmodule FermixOpik.AggregationTest do
     assert failover.metadata.reason_kind == "timeout"
   end
 
+  test "a fired timeout nests as an errored point span under the run trace" do
+    {_state, closed} =
+      run([
+        {[:fermix, :timeout, :expired], %{ms: 30_000},
+         %{name: :cu_sidecar_action, session_id: "main-1"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    wrapper = span_named(spans, "agent:main")
+    timeout = span_named(spans, "timeout:cu_sidecar_action")
+
+    assert timeout.parent_span_id == wrapper.id
+    assert timeout.trace_id == trace.id
+    assert timeout.metadata.ms == 30_000
+    assert timeout.error_info.exception_type == "Timeout"
+  end
+
   test "a main turn becomes one trace with nested llm and tool spans" do
     {_state, closed} =
       run([
@@ -202,6 +221,50 @@ defmodule FermixOpik.AggregationTest do
     assert tool.parent_span_id == sub_wrap.id
   end
 
+  test "a draft-stream :seal arriving after the turn closed does not resurrect a phantom trace" do
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_000},
+         %{provider: :openai_codex, model: "gpt-5-codex", status: :ok, session_id: "main-1"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+        # The channel seals the draft just AFTER the turn's message closed and
+        # shipped the trace — this must not spawn an empty phantom trace.
+        {[:fermix, :channel, :stream], %{total_edits: 1, dropped_snapshots: 5},
+         %{channel: "telegram", session_id: "main-1", phase: :seal, status: :ok}}
+      ])
+
+    # Exactly one trace (the real turn); the late seal is dropped, and no phantom
+    # is left open in state for the sweep to later flush.
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "telegram:c1"
+    refute Enum.any?(spans, &(&1.name == "stream:seal"))
+    assert state.traces == %{}
+  end
+
+  test "a draft-stream :block arriving after the turn closed does not resurrect a phantom trace" do
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_000},
+         %{provider: :openai_codex, model: "gpt-5-codex", status: :ok, session_id: "main-1"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+        # In block streaming a paced :block edit can flush just AFTER the turn's
+        # message closed and shipped the trace — like :seal/:discard, this must
+        # not spawn an empty phantom trace (the reported symptom: thread-less,
+        # input/output-less "agent:main" traces of only stream:* spans).
+        {[:fermix, :channel, :stream], %{duration_us: 50_000, block_index: 23},
+         %{channel: "telegram", session_id: "main-1", phase: :block, status: :ok}}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "telegram:c1"
+    refute Enum.any?(spans, &(&1.name == "stream:block"))
+    assert state.traces == %{}
+  end
+
   test "a scheduled job run is its own trace with a job thread id" do
     {_state, closed} =
       run([
@@ -241,6 +304,146 @@ defmodule FermixOpik.AggregationTest do
     assert llm.provider == "openai"
   end
 
+  test "a soul-curation draft is its own trace nesting the bounded provider call" do
+    {_state, closed} =
+      run([
+        {[:fermix, :soul_curation, :run_start], %{},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:abc",
+           mode: :suggest,
+           with_context: true
+         }},
+        {[:fermix, :provider, :call], %{duration_ms: 400},
+         %{
+           provider: :anthropic,
+           model: "claude-opus-4-8",
+           status: :ok,
+           session_id: "soul_curation:abc",
+           tokens: %{prompt: 80, completion: 20}
+         }},
+        {[:fermix, :soul_curation, :run_complete], %{byte_delta: 12, line_delta: 1},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:abc",
+           mode: :suggest,
+           status: "proposed",
+           route: "anthropic/claude-opus-4-8",
+           byte_delta: 12,
+           line_delta: 1
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "soul_curation:suggest"
+    assert "soul_curation" in trace.tags
+    assert trace.metadata.mode == "suggest"
+    assert trace.metadata.route == "anthropic/claude-opus-4-8"
+    assert trace.metadata.with_context == true
+    assert [llm] = spans_of_type(spans, "llm")
+    assert llm.provider == "anthropic"
+  end
+
+  test "a background memory review is its own memory_review trace closed by the :review event" do
+    session = "memory_review:main:telegram:c1:root:42"
+
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_000},
+         %{
+           provider: :openai_codex,
+           model: "gpt-5.5",
+           status: :ok,
+           agent: "memory_reviewer",
+           session_id: session,
+           tokens: %{prompt: 100, completion: 20}
+         }},
+        {[:fermix, :memory, :write], %{count: 1},
+         %{
+           tool: "memory_write",
+           action: :added,
+           agent: "memory_reviewer",
+           session_id: session,
+           channel: "telegram",
+           chat_id: "c1"
+         }},
+        {[:fermix, :memory, :review],
+         %{
+           duration_us: 1_500_000,
+           ops_added: 1,
+           ops_replaced: 0,
+           ops_archived: 0,
+           ops_skipped: 0,
+           input_messages: 3,
+           input_tokens: 120
+         },
+         %{
+           agent: "main",
+           owner: "default",
+           session_id: session,
+           conversation_key: "telegram:c1:root",
+           channel: "telegram",
+           chat_id: "c1",
+           status: :ok,
+           fired: true
+         }}
+      ])
+
+    # The :review event closes the run as one trace (not a TTL-swept orphan),
+    # tagged memory_review, with its llm + memory-write spans nested under it and
+    # the conversation thread backfilled from the event's channel/chat_id.
+    assert [%{trace: trace, spans: spans}] = closed
+    assert "memory_review" in trace.tags
+    assert trace.name == "memory_review:memory_reviewer"
+    assert trace.thread_id == "telegram:c1"
+    assert trace.output.value.status == "ok"
+    assert trace.output.value.added == 1
+    assert [_llm] = spans_of_type(spans, "llm")
+    assert [_write] = spans_of_type(spans, "tool")
+  end
+
+  test "a soul-curation draft's synthetic command parent keeps it a standalone root" do
+    # The draft's parent_session is the originating command id (never a registered
+    # turn session), so it resolves to its own root trace — correlatable but
+    # separate from a concurrent main turn, not collapsed into it.
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 200},
+         %{
+           provider: :anthropic,
+           model: "claude-opus-4-8",
+           status: :ok,
+           session_id: "main-1",
+           tokens: %{prompt: 5, completion: 5}
+         }},
+        {[:fermix, :soul_curation, :run_start], %{},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:def",
+           parent_session: "command:soul:telegram:c1",
+           mode: :review,
+           with_context: false
+         }},
+        {[:fermix, :soul_curation, :run_complete], %{byte_delta: 0, line_delta: 0},
+         %{
+           agent: "soul_curation",
+           session_id: "soul_curation:def",
+           mode: :review,
+           status: "no_change",
+           byte_delta: 0,
+           line_delta: 0
+         }},
+        {[:fermix, :agent, :message], %{},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+      ])
+
+    # Two distinct root traces: the draft and the turn never share a trace_id.
+    names = closed |> Enum.map(& &1.trace.name) |> Enum.sort()
+    assert names == ["agent:main", "soul_curation:review"]
+    ids = closed |> Enum.map(& &1.trace.id) |> Enum.uniq()
+    assert length(ids) == 2
+  end
+
   test "sweep force-flushes a run whose completion was never signalled" do
     agg = Aggregation.new(project: "fermix", ttl_ms: 1)
 
@@ -262,6 +465,38 @@ defmodule FermixOpik.AggregationTest do
     {_agg, closed} = Aggregation.sweep(agg, 10_000_000)
     assert [%{trace: trace}] = closed
     assert trace.name == "agent:main"
+  end
+
+  test "a scheduled run is swept by its max duration, not the idle TTL" do
+    # Tiny idle TTL so a last_seen-based sweep would fire almost immediately; the
+    # scheduled run must instead survive until its max_duration (+ grace) passes.
+    agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+    {agg, []} =
+      Aggregation.apply_event(
+        agg,
+        [:fermix, :job, :run_start],
+        %{},
+        %{
+          agent: "scheduled:job-9",
+          job_id: "job-9",
+          run_id: "run-9",
+          name: "slow",
+          session_id: "cron_job-9_1",
+          max_duration_ms: 1_000
+        },
+        %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+      )
+
+    # mono is microseconds; floor = (1_000 + 60_000) * 1_000 = 61_000_000us.
+    # Well past the 1us idle TTL but within the duration floor: NOT swept.
+    {agg, []} = Aggregation.sweep(agg, 500_000)
+
+    # Past max_duration + grace: swept as one trace on the job thread.
+    {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+    assert [%{trace: trace}] = closed
+    assert trace.thread_id == "job-9"
+    assert trace.name == "scheduled:slow"
   end
 
   test "a realtime call becomes one trace with nested llm and tool spans" do
@@ -414,7 +649,7 @@ defmodule FermixOpik.AggregationTest do
     # write must be an observable span (not invisible like the old behavior).
     {_state, drained} = Aggregation.drain(state)
     assert [%{trace: trace, spans: spans}] = drained
-    assert trace.name == "subagent:memory_reviewer"
+    assert trace.name == "memory_review:memory_reviewer"
     assert trace.thread_id == "cli:e2e-x"
 
     write = span_named(spans, "memory_write")
@@ -423,7 +658,7 @@ defmodule FermixOpik.AggregationTest do
     assert write.metadata.category == "preference"
     assert write.metadata.memory_id == 7
 
-    wrapper = span_named(spans, "subagent:memory_reviewer")
+    wrapper = span_named(spans, "memory_review:memory_reviewer")
     assert write.parent_span_id == wrapper.id
   end
 

@@ -16,9 +16,12 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
+  alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.Transient
   alias FermixCore.Telemetry
 
   @max_iterations 25
@@ -246,6 +249,7 @@ defmodule FermixCore.AgentLoop do
       |> maybe_put_adapter_opt(:session_id, Map.get(state.context, :session_id))
       |> maybe_put_adapter_opt(:parent_session, Map.get(state.context, :parent_session))
       |> maybe_put_adapter_opt(:stream_callback, state.stream.callback)
+      |> maybe_put_adapter_opt(:max_retained_screenshots, max_retained_screenshots())
       |> Keyword.merge(route_opts)
 
     %{
@@ -323,6 +327,12 @@ defmodule FermixCore.AgentLoop do
   defp context_agent(%{agent_name: agent}) when is_binary(agent) or is_atom(agent), do: agent
   defp context_agent(_context), do: nil
 
+  # How many tool-result screenshot images each adapter keeps live in the
+  # replayed history (the rest are elided to a text marker). Tool-result images
+  # come only from the browser/computer-use tools, so the cap lives in
+  # `ComputerUse.Config`; adapters receive a plain integer and stay provider-pure.
+  defp max_retained_screenshots, do: ComputerUse.Config.current().max_retained_screenshots
+
   # The initial chat is the only failover point: bounded by the route count
   # via the shared executor. Once a route answers, the whole tool loop
   # (`continue/3`) stays on it — provider_state is provider-specific.
@@ -351,13 +361,32 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
+  # Rule #12 fail-loud: a turn carrying image content must not be sent to a model
+  # that can't accept it — no silent drop, no degrade-to-text. Returns an error
+  # tuple (not a raise) so it rides the normal failover/error flow: the chain can
+  # try the next route for a vision-capable one, and the precise message reaches
+  # the user instead of a generic crash. Checked per route, so a transient
+  # failover onto a non-vision model is caught too.
+  defp ensure_image_capable(bound) do
+    if Adapter.has_image_content?(bound.messages) do
+      %{provider: provider, model: model} = bound.route_key
+
+      if ModelCatalog.vision?(provider, model),
+        do: :ok,
+        else: {:error, {:image_unsupported, provider, model}}
+    else
+      :ok
+    end
+  end
+
   defp initial_attempt(state) do
     fn route ->
       bound = bind_route(state, route)
 
-      case bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
-        {:ok, turn} -> {:ok, {turn, bound}}
-        {:error, reason} -> {:error, reason}
+      with :ok <- ensure_image_capable(bound),
+           {:ok, turn} <-
+             bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
+        {:ok, {turn, bound}}
       end
     end
   end
@@ -366,12 +395,23 @@ defmodule FermixCore.AgentLoop do
   # providers would mix outputs — the loop's emitted? flag gates eligibility
   # on top of the error's own kind/stage.
   defp failover_opts(state) do
-    [
+    opts = [
       eligible?: fn reason ->
         not stream_content_emitted?(state.stream) and Failover.eligible?(reason)
       end,
+      retryable?: fn reason ->
+        not stream_content_emitted?(state.stream) and Transient.retryable?(reason)
+      end,
       telemetry: failover_telemetry_meta(state)
     ]
+
+    # Cron opts out of the inner route-level retry (it owns its own
+    # deadline-bounded outer backoff), so the two retry loops never stack.
+    if Map.get(state.context, :route_transient_retry, true) do
+      opts
+    else
+      Keyword.put(opts, :max_retries, 0)
+    end
   end
 
   defp failover_telemetry_meta(state) do
@@ -431,17 +471,33 @@ defmodule FermixCore.AgentLoop do
   defp unwrap_bridge_call(call), do: call
 
   defp run_continuation(turn, state, warning) do
-    case execute_tool_calls(turn.tool_calls, state) do
-      {:ok, tool_results} ->
-        case continuation_call(turn.provider_state, tool_results, warning, state) do
-          {:ok, next_turn, state} -> continue_until_terminal(next_turn, state)
-          {:error, reason} -> {:error, reason}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, tool_results} <- execute_tool_calls(turn.tool_calls, state),
+         :ok <- ensure_tool_results_image_capable(tool_results, state),
+         {:ok, next_turn, state} <-
+           continuation_call(turn.provider_state, tool_results, warning, state) do
+      continue_until_terminal(next_turn, state)
     end
   end
+
+  # Continuation parallel to `ensure_image_capable/1`: a tool RESULT carrying image
+  # content (e.g. a screenshot) must not be sent back to a non-vision route — no
+  # silent drop, no degrade-to-text (Rule #12). Same `{:image_unsupported, ...}`
+  # shape so it rides the existing error flow and reaches the user verbatim. The
+  # route is fixed for the tool loop, so this checks the bound provider/model.
+  defp ensure_tool_results_image_capable(tool_results, state) do
+    if Enum.any?(tool_results, &tool_result_has_images?/1) do
+      %{provider: provider, model: model} = state.route_key
+
+      if ModelCatalog.vision?(provider, model),
+        do: :ok,
+        else: {:error, {:image_unsupported, provider, model}}
+    else
+      :ok
+    end
+  end
+
+  defp tool_result_has_images?(%{images: [_ | _]}), do: true
+  defp tool_result_has_images?(_), do: false
 
   defp continuation_call(provider_state, tool_results, _warning, state) do
     start = System.monotonic_time(:millisecond)
@@ -473,13 +529,21 @@ defmodule FermixCore.AgentLoop do
     with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
       results =
         Enum.map(tool_calls, fn tool_call ->
-          output = tool_call |> run_tool_call(state) |> sanitize_tool_output()
-          %{call_id: tool_call.call_id, output: output}
+          %{output: output, images: images} = run_tool_call(tool_call, state)
+          build_tool_result(tool_call.call_id, sanitize_tool_output(output), images)
         end)
 
       {:ok, results}
     end
   end
+
+  # Text-only results keep the exact pre-image shape (`%{call_id, output}`) so
+  # every provider encoder and existing test stays byte-identical; image content
+  # parts ride a dedicated key only when a tool actually produced them.
+  defp build_tool_result(call_id, output, []), do: %{call_id: call_id, output: output}
+
+  defp build_tool_result(call_id, output, [_ | _] = images),
+    do: %{call_id: call_id, output: output, images: images}
 
   # Tool output can carry bytes that are not valid UTF-8 — a file read of a
   # source saved in Latin-1, raw command bytes, an HTTP body with a stray byte.
@@ -520,28 +584,34 @@ defmodule FermixCore.AgentLoop do
 
     case parse_arguments(arguments_raw) do
       {:ok, arguments} ->
-        output = invoke_capability(name, arguments, state)
+        result = invoke_capability(name, arguments, state)
         emit_activity(state, {:tool_finish, name})
-        output
+        result
 
       {:error, reason} ->
         emit_activity(state, {:tool_finish, name})
-        reason
+        text_result(reason)
     end
   end
+
+  # The dispatch chain returns a uniform `%{output, images}` so an image-producing
+  # tool (e.g. a screenshot) can surface its image content parts to the provider;
+  # every text-only path — errors, missing/disallowed tools — wraps its string
+  # with no images via `text_result/1`.
+  defp text_result(output) when is_binary(output), do: %{output: output, images: []}
 
   defp invoke_capability(name, arguments, state) do
     if capability_allowed?(name, state.allowed_tools) do
       lookup_and_dispatch(name, arguments, state)
     else
-      "Error: Tool '#{name}' not available"
+      text_result("Error: Tool '#{name}' not available")
     end
   end
 
   defp lookup_and_dispatch(name, arguments, state) do
     case Map.fetch(state.capabilities_by_name, name) do
       {:ok, capability} -> dispatch_capability(capability, arguments, state.context)
-      :error -> "Error: Tool '#{name}' not found"
+      :error -> text_result("Error: Tool '#{name}' not found")
     end
   end
 
@@ -550,20 +620,23 @@ defmodule FermixCore.AgentLoop do
 
   defp dispatch_capability(%Capability{} = capability, arguments, context) do
     case Capability.execute(capability, arguments, context) do
-      {:ok, %{success: true, output: output}} ->
-        wrap_untrusted_content(output, capability)
+      {:ok, %{success: true, output: output} = result} ->
+        %{
+          output: wrap_untrusted_content(output, capability),
+          images: Map.get(result, :images, [])
+        }
 
       {:ok, %{success: false, error: error}} ->
-        "Error: #{error}"
+        text_result("Error: #{error}")
 
       {:ok, other} when is_binary(other) ->
-        wrap_untrusted_content(other, capability)
+        text_result(wrap_untrusted_content(other, capability))
 
       {:ok, other} ->
-        wrap_untrusted_content(inspect(other), capability)
+        text_result(wrap_untrusted_content(inspect(other), capability))
 
       {:error, reason} ->
-        "Error executing tool: #{inspect(reason)}"
+        text_result("Error executing tool: #{inspect(reason)}")
     end
   rescue
     e ->
@@ -572,7 +645,7 @@ defmodule FermixCore.AgentLoop do
           Exception.format_stacktrace(__STACKTRACE__)
       )
 
-      "Error: tool raised #{Exception.message(e)}"
+      text_result("Error: tool raised #{Exception.message(e)}")
   end
 
   # Provenance as architecture (M10 P2): successful results from tools that
@@ -613,6 +686,9 @@ defmodule FermixCore.AgentLoop do
 
   defp external_content?(%Capability{kind: :mcp}), do: true
   defp external_content?(%Capability{policy_class: :network}), do: true
+  # Screenshots/UI text from computer-use are attacker-controllable surfaces
+  # (screen prompt-injection, COMPUTER_USE.md §7.8) — wrap as untrusted.
+  defp external_content?(%Capability{policy_class: :gui_control}), do: true
 
   defp external_content?(%Capability{metadata: metadata}) when is_map(metadata),
     do: Map.get(metadata, :plugin_owned?, false) == true

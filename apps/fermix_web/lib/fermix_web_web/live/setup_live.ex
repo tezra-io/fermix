@@ -10,6 +10,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
@@ -29,6 +31,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
+  alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixWebWeb.SetupLive.Components
 
   @tabs [
@@ -37,6 +40,7 @@ defmodule FermixWebWeb.SetupLive do
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
     %{id: "search", label: "Search", component: nil, description: "Web search"},
+    %{id: "media", label: "Media", component: nil, description: "Image generation"},
     %{id: "sandbox", label: "Sandbox", component: nil, description: "Execution policy"},
     %{id: "memory", label: "Memory", component: nil, description: "Recall tuning"},
     %{
@@ -51,8 +55,8 @@ defmodule FermixWebWeb.SetupLive do
   @default_plugin_auth_url_timeout_ms 300_000
   # Providers the per-provider OAuth-client form supports — mirrors
   # FermixCore.Auth.OAuthProviders. Default ports: google 1455, github 1457,
-  # notion 1458, x 1459.
-  @oauth_client_providers ~w(google github notion x)
+  # notion 1458, x 1459, slack 1460.
+  @oauth_client_providers ~w(google github notion x slack)
   # Derived from the descriptor registry: every provider setup field plus
   # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
   @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
@@ -304,8 +308,33 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:parallel_api_key, params["parallel_api_key"])
       |> maybe_put_string(:brave_api_key, params["brave_api_key"])
       |> maybe_put_string(:perplexity_api_key, params["perplexity_api_key"])
+      |> maybe_put_string(:firecrawl_api_key, params["firecrawl_api_key"])
 
     {:noreply, save_answers(socket, answers, "Search saved.", Map.get(root, "__nav"))}
+  end
+
+  def handle_event("image_changed", %{"image_form" => params}, socket) do
+    backend = normalize_image_backend(Map.get(params, "backend"))
+    form = update_image_selection(socket.assigns.image_form, backend, Map.get(params, "model"))
+    {:noreply, assign(socket, :image_form, form)}
+  end
+
+  def handle_event("save_image", %{"image_form" => params} = root, socket) do
+    # The OpenAI/xAI key fields submit under their provider secret keys
+    # (openai_api_key/xai_api_key), so put_provider_field_answers folds them
+    # straight to providers.<p>.api_key — the same key those providers use for
+    # chat. google_api_key is a tool-block secret, routed on its own line.
+    answers =
+      []
+      |> maybe_put_string(:image_backend, params["backend"])
+      |> maybe_put_string(:image_model, params["model"])
+      |> maybe_put_string(:google_api_key, params["google_api_key"])
+      |> put_provider_field_answers(params)
+
+    {:noreply,
+     save_answers(socket, answers, "Media saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
   end
 
   def handle_event(
@@ -333,22 +362,23 @@ defmodule FermixWebWeb.SetupLive do
 
   # An unknown name is a not-yet-installed catalog plugin: pull it from the
   # plugin repo first (§11 install → enable), async so the page stays live.
+  # Computer use is special-cased: it registers no tools, so it never enters the
+  # plugin registry — enabling it means "ensure the sidecar binary, flip the
+  # feature flag", not the generic install→register→enable path.
   def handle_event("plugin_enable", %{"name" => name}, socket) do
-    case PluginRegistry.find(name) do
-      {:ok, plugin} ->
-        {:noreply, enable_or_connect_plugin(socket, plugin)}
-
-      :error ->
-        {:noreply, install_catalog_plugin(socket, name)}
-
-      {:error, reason} ->
-        {:noreply, flash_error(socket, "Save failed: #{Redaction.format(reason)}")}
+    if computer_use_plugin?(name) do
+      {:noreply, enable_computer_use(socket)}
+    else
+      {:noreply, enable_registry_plugin(socket, name)}
     end
   end
 
   def handle_event("plugin_disable", %{"name" => name}, socket) do
-    result = PluginConfig.disable(name)
-    {:noreply, save_config_result(result, socket, "Plugin disabled.")}
+    if computer_use_plugin?(name) do
+      {:noreply, set_computer_use_feature(socket, false)}
+    else
+      {:noreply, disable_registry_plugin(socket, name)}
+    end
   end
 
   # The §4.4 Connect-time collection: the needs_config card form posts the
@@ -375,8 +405,24 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # api_key plugins (M16): the card's secret form posts the keychained credential
+  # (Discord bot token, AgentMail key). It is set, not redirected like OAuth.
+  def handle_event(
+        "set_plugin_secret",
+        %{"name" => name, "plugin_secret_form" => %{"value" => value}},
+        socket
+      ) do
+    case PluginConfig.set_plugin_secret(name, value) do
+      {:ok, _snapshot} ->
+        {:noreply, refresh_report(socket, "Plugin connected.")}
+
+      {:error, reason} ->
+        {:noreply, flash_error(socket, "Save failed: #{Redaction.format(reason)}")}
+    end
+  end
+
   def handle_event("plugin_disconnect", %{"name" => name}, socket) do
-    case PluginAuth.logout(name) do
+    case disconnect_plugin(name) do
       :ok ->
         {:noreply, refresh_report(socket, "Plugin disconnected.")}
 
@@ -410,7 +456,7 @@ defmodule FermixWebWeb.SetupLive do
     answers =
       []
       |> maybe_put_string(:compaction_threshold, params["compaction_threshold"])
-      |> maybe_put_string(:extraction_timeout_ms, params["extraction_timeout_ms"])
+      |> maybe_put_string(:review_interval_hours, params["review_interval_hours"])
 
     {:noreply, save_answers(socket, answers, "Memory saved.", Map.get(root, "__nav"))}
   end
@@ -432,6 +478,7 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("save_personalization", %{"personalization_form" => params} = root, socket) do
     answers =
       []
+      |> maybe_put_string(:bot_name, params["bot_name"])
       |> maybe_put_string(:user_name, params["user_name"])
       |> maybe_put_string(:timezone, params["timezone"])
       |> maybe_put_string(:communication_style, params["communication_style"])
@@ -578,6 +625,7 @@ defmodule FermixWebWeb.SetupLive do
       restarting={@restarting}
       sandbox_form={@sandbox_form}
       search_form={@search_form}
+      image_form={@image_form}
       saved_flash={@saved_flash}
       skill_summary={@skill_summary}
       tabs={@tabs}
@@ -603,6 +651,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:realtime_form, build_realtime_form(snapshot))
     |> assign(:channels_form, build_channels_form(snapshot))
     |> assign(:search_form, build_search_form(snapshot))
+    |> assign(:image_form, build_image_form(snapshot))
     |> assign(:sandbox_form, build_sandbox_form(snapshot))
     |> assign(:memory_form, build_memory_form(snapshot))
     |> assign(:personalization_form, build_personalization_form(snapshot))
@@ -682,11 +731,13 @@ defmodule FermixWebWeb.SetupLive do
   defp oauth_display_name("github"), do: "GitHub"
   defp oauth_display_name("notion"), do: "Notion"
   defp oauth_display_name("x"), do: "X"
+  defp oauth_display_name("slack"), do: "Slack"
 
   defp oauth_default_port("google"), do: 1455
   defp oauth_default_port("github"), do: 1457
   defp oauth_default_port("notion"), do: 1458
   defp oauth_default_port("x"), do: 1459
+  defp oauth_default_port("slack"), do: 1460
 
   defp refresh_report(socket, message) do
     Wizard.report()
@@ -986,8 +1037,64 @@ defmodule FermixWebWeb.SetupLive do
       exa_api_key_set: secret_set?(web_search, :exa_api_key),
       parallel_api_key_set: secret_set?(web_search, :parallel_api_key),
       brave_api_key_set: secret_set?(web_search, :brave_api_key),
-      perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key)
+      perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key),
+      firecrawl_api_key_set: secret_set?(web_search, :firecrawl_api_key)
     }
+  end
+
+  defp build_image_form(snapshot) do
+    generate_image =
+      snapshot
+      |> get_fermix_core(:tools)
+      |> Keyword.get(:generate_image, [])
+
+    backend = normalize_image_backend(Keyword.get(generate_image, :backend))
+    [default | _rest] = options = image_models_for(backend)
+
+    %{
+      backend: backend,
+      model_options: options,
+      model: image_model_or_default(Keyword.get(generate_image, :model), options, default),
+      openai_api_key_set: provider_api_key_set?(snapshot, :openai),
+      xai_api_key_set: provider_api_key_set?(snapshot, :xai),
+      google_api_key_set: secret_set?(generate_image, :google_api_key)
+    }
+  end
+
+  # A backend switch resets the model to the new backend's default (a model from
+  # the prior backend is invalid here); a same-backend change keeps the selected
+  # model, snapped to a valid option.
+  defp update_image_selection(form, backend, _model) when backend != form.backend do
+    [default | _rest] = options = image_models_for(backend)
+    %{form | backend: backend, model_options: options, model: default}
+  end
+
+  defp update_image_selection(form, backend, model) do
+    [default | _rest] = form.model_options
+    %{form | backend: backend, model: image_model_or_default(model, form.model_options, default)}
+  end
+
+  # Curated model ids ship with each backend; `normalize_image_backend/1`
+  # guarantees a wired backend, so a `{:error, _}` here is a broken invariant —
+  # fail loud (Rule #12), never silently degrade to an empty dropdown.
+  defp image_models_for(backend) do
+    {:ok, models} = MediaRegistry.supported_models(:image, Atom.to_string(backend))
+    models
+  end
+
+  defp image_model_or_default(configured, options, default) do
+    case to_string(configured || "") do
+      "" -> default
+      model -> if model in options, do: model, else: default
+    end
+  end
+
+  defp provider_api_key_set?(snapshot, provider) do
+    snapshot
+    |> get_fermix_core(:providers)
+    |> Keyword.get(provider, [])
+    |> Keyword.get(:api_key)
+    |> present?()
   end
 
   defp build_memory_form(snapshot) do
@@ -996,7 +1103,7 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       compaction_threshold: safe_string(CompactionConfig.threshold(compaction)),
-      extraction_timeout_ms: safe_string(Keyword.get(memory, :extraction_timeout_ms, 90_000))
+      review_interval_hours: safe_string(Keyword.get(memory, :review_interval_hours, 24))
     }
   end
 
@@ -1004,6 +1111,9 @@ defmodule FermixWebWeb.SetupLive do
     personalization = get_fermix_core(snapshot, :personalization)
 
     %{
+      # The bot's name is identity (the agent block), surfaced here so the field
+      # shows the current name; blank on save keeps it.
+      bot_name: snapshot |> get_fermix_core(:agent) |> Keyword.get(:name, ""),
       user_name: Keyword.get(personalization, :user_name, ""),
       # Default to New York so the form is never blank; the agent reads this
       # (via Application env) to stamp each turn with the current local date.
@@ -1058,7 +1168,7 @@ defmodule FermixWebWeb.SetupLive do
     case PluginCatalog.overview(plugins_dist_opts()) do
       {:ok, overview} ->
         plugins = installed_cards(overview, snapshot)
-        catalog = Enum.map(overview.available, &catalog_card/1)
+        catalog = Enum.map(overview.available, &catalog_card(&1, snapshot))
 
         %{
           available: true,
@@ -1098,6 +1208,7 @@ defmodule FermixWebWeb.SetupLive do
       provider: Map.get(plugin.auth, :provider),
       logo: plugin_asset_data_uri(plugin, "logo") || plugin_asset_data_uri(plugin, "icon"),
       auth_type: plugin.auth.type,
+      secret_prompt: Map.get(plugin.auth, :prompt),
       account: PluginStatus.account_label(plugin),
       enabled?: enabled?,
       status: PluginStatus.status(plugin),
@@ -1118,7 +1229,7 @@ defmodule FermixWebWeb.SetupLive do
 
   # A not-yet-installed catalog entry: branding straight from the index (§6 —
   # no artifact on disk yet, so the logo is the index's inline data URI).
-  defp catalog_card(entry) do
+  defp catalog_card(entry, snapshot) do
     %{
       name: entry.name,
       display_name: entry.display_name,
@@ -1129,8 +1240,20 @@ defmodule FermixWebWeb.SetupLive do
       logo: index_logo_data_uri(entry.logo),
       latest: entry.latest,
       mcp?: "mcp" in entry.rails,
-      compat: entry.compat
+      compat: entry.compat,
+      # Computer use never installs as a registry plugin, so it lives in the catalog
+      # list even once on. These flags let the card show its real state (Disable +
+      # Ready/Needs setup) instead of a perpetual "Enable"; false for every other
+      # catalog entry (which leaves the list the moment it installs).
+      enabled?: computer_use_plugin?(entry.name) and computer_use_config_enabled?(snapshot),
+      ready?: computer_use_plugin?(entry.name) and ComputerUse.ready?()
     }
+  end
+
+  defp computer_use_config_enabled?(snapshot) do
+    snapshot
+    |> get_fermix_core(:computer_use)
+    |> Keyword.get(:enabled, false) == true
   end
 
   defp index_logo_data_uri(%{"mime" => mime, "data_base64" => data}),
@@ -1204,6 +1327,22 @@ defmodule FermixWebWeb.SetupLive do
 
   defp oauth_provider(_oauth, _provider), do: []
 
+  # OAuth plugins log out (clear the token store); api_key plugins clear their
+  # keychained credential, returning to `:needs_secret`.
+  defp disconnect_plugin(name) do
+    case PluginRegistry.find(name) do
+      {:ok, %{auth: %{type: :api_key}}} -> clear_plugin_secret(name)
+      _other -> PluginAuth.logout(name)
+    end
+  end
+
+  defp clear_plugin_secret(name) do
+    case PluginConfig.clear_plugin_secret(name) do
+      {:ok, _snapshot} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp enable_or_connect_plugin(socket, %{auth: %{type: :oauth2}} = plugin) do
     start_plugin_auth_or_explain(socket, plugin)
   end
@@ -1214,6 +1353,51 @@ defmodule FermixWebWeb.SetupLive do
       {:error, reason} -> flash_error(socket, "Save failed: #{Redaction.format(reason)}")
     end
   end
+
+  defp enable_registry_plugin(socket, name) do
+    case PluginRegistry.find(name) do
+      {:ok, plugin} -> enable_or_connect_plugin(socket, plugin)
+      :error -> install_catalog_plugin(socket, name)
+      {:error, reason} -> flash_error(socket, "Save failed: #{Redaction.format(reason)}")
+    end
+  end
+
+  defp disable_registry_plugin(socket, name) do
+    name
+    |> PluginConfig.disable()
+    |> save_config_result(socket, "Plugin disabled.")
+  end
+
+  # Computer use is NOT a registry plugin (it registers no tools, has no plugin.json),
+  # so it never flows through find→enable. Enabling it = ensure the native sidecar
+  # binary is present, then flip the feature flag. A dev_local build (or an already
+  # catalog-installed binary) means `installed?` is already true → skip the download
+  # entirely and just flip the flag. Only a fresh machine pulls the signed binary
+  # from the catalog; `continue_after_install/2` flips the flag once that lands.
+  defp enable_computer_use(socket) do
+    if SidecarInstaller.installed?() do
+      set_computer_use_feature(socket, true)
+    else
+      install_catalog_plugin(socket, SidecarInstaller.plugin_name())
+    end
+  end
+
+  # Flips `[fermix_core.computer_use] enabled` so `ComputerUse.ready?/0` (tool
+  # registration + the session supervisor) turns on/off. Re-reads the freshly
+  # committed config first so a prior write isn't clobbered, then commits the
+  # feature flag and asks for a restart (the accepted save+restart UX).
+  defp set_computer_use_feature(socket, enabled?) do
+    message =
+      if enabled?,
+        do: "Computer Use enabled — restart to apply.",
+        else: "Computer Use disabled — restart to apply."
+
+    socket
+    |> assign_report(Wizard.report())
+    |> save_answers([computer_use_enabled: enabled?], message, nil, restart_required?: true)
+  end
+
+  defp computer_use_plugin?(name), do: name == SidecarInstaller.plugin_name()
 
   defp start_plugin_auth_or_explain(socket, plugin) do
     cond do
@@ -1367,7 +1551,17 @@ defmodule FermixWebWeb.SetupLive do
 
   # Install done — continue with the same enable/connect sequence an installed
   # card uses. Config.commit hot-applies via Runtime.reload inside the daemon.
+  # The computer-use sidecar never registers as a plugin (no tools), so after its
+  # binary lands we flip the feature flag instead of looking it up in the registry.
   defp continue_after_install(socket, name) do
+    if computer_use_plugin?(name) do
+      set_computer_use_feature(socket, true)
+    else
+      continue_registry_plugin_after_install(socket, name)
+    end
+  end
+
+  defp continue_registry_plugin_after_install(socket, name) do
     case PluginRegistry.find(name) do
       {:ok, plugin} ->
         enable_or_connect_plugin(socket, plugin)
@@ -1867,13 +2061,27 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_search_backend(:parallel), do: :parallel
   defp normalize_search_backend(:brave), do: :brave
   defp normalize_search_backend(:perplexity), do: :perplexity
+  defp normalize_search_backend(:firecrawl), do: :firecrawl
   defp normalize_search_backend("duckduckgo"), do: :duckduckgo
   defp normalize_search_backend("tavily"), do: :tavily
   defp normalize_search_backend("exa"), do: :exa
   defp normalize_search_backend("parallel"), do: :parallel
   defp normalize_search_backend("brave"), do: :brave
   defp normalize_search_backend("perplexity"), do: :perplexity
+  defp normalize_search_backend("firecrawl"), do: :firecrawl
   defp normalize_search_backend(_value), do: :duckduckgo
+
+  # Image generation has no keyless default, so the form defaults its selection
+  # to OpenAI (most operators already hold an OpenAI key from the Provider tab).
+  # Nothing is written to config until the operator saves the Media tab.
+  defp normalize_image_backend(nil), do: :openai
+  defp normalize_image_backend(:openai), do: :openai
+  defp normalize_image_backend(:xai), do: :xai
+  defp normalize_image_backend(:google), do: :google
+  defp normalize_image_backend("openai"), do: :openai
+  defp normalize_image_backend("xai"), do: :xai
+  defp normalize_image_backend("google"), do: :google
+  defp normalize_image_backend(_value), do: :openai
 
   defp parse_env_allow(value) when is_binary(value) do
     value
@@ -1948,13 +2156,7 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp api_key_configured?(snapshot) do
-    snapshot
-    |> get_fermix_core(:providers)
-    |> Keyword.get(:openai, [])
-    |> Keyword.get(:api_key)
-    |> present?()
-  end
+  defp api_key_configured?(snapshot), do: provider_api_key_set?(snapshot, :openai)
 
   defp secret_set?(config, key), do: config |> Keyword.get(key) |> present?()
   defp channel_enabled?(config, default), do: Keyword.get(config, :enabled, default) == true

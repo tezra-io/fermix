@@ -127,6 +127,22 @@ defmodule FermixCore.Memory.ConversationStoreTest do
     assert ["first", "second", "third"] == Enum.map(history, & &1.content)
   end
 
+  test "drops a content-less turn of any role instead of storing it", %{store: store} do
+    ConversationStore.add_message(@key, "user", "are you there?", server: store)
+    # An empty model completion...
+    assert :ok = ConversationStore.add_message(@key, "assistant", "", server: store)
+    assert :ok = ConversationStore.add_message(@key, "assistant", "   \n  ", server: store)
+    # ...and a captionless image upload (image rides transiently, content is "").
+    assert :ok = ConversationStore.add_message(@key, "user", "", server: store)
+    ConversationStore.add_message(@key, "user", "still there?", server: store)
+    sync(store)
+
+    # No blank turn enters history (replayed, an empty text block 400s Anthropic
+    # with "text content blocks must be non-empty"); the real turns remain.
+    history = ConversationStore.get_history(@key, server: store)
+    assert ["are you there?", "still there?"] == Enum.map(history, & &1.content)
+  end
+
   test "returns empty list for unknown conversation", %{store: store} do
     assert [] == ConversationStore.get_history({"unknown", "key", :root}, server: store)
   end
@@ -436,6 +452,45 @@ defmodule FermixCore.Memory.ConversationStoreTest do
 
       history = ConversationStore.get_history(@key, 5, server: store)
       assert Enum.map(history, & &1.content) == ["visible chat"]
+    end
+
+    test "excludes content-less turns persisted before the write guard", %{
+      repo: repo,
+      store: store
+    } do
+      ConversationStore.add_message(@key, "user", "before", server: store)
+      wait_for_message_count(repo, chat_selector(@key), 1)
+
+      # Simulate poisoned rows written by an older build (the write guard would
+      # reject them today): a blank assistant completion AND a captionless image
+      # user turn. On backfill both must be dropped, not replayed.
+      for {sender, role} <- [{"main", "assistant"}, {"Sujeeth", "user"}] do
+        assert {:ok, _blank} =
+                 Repo.insert_message(
+                   %{
+                     agent_id: "main",
+                     owner_id: "default",
+                     channel: elem(@key, 0),
+                     chat_id: elem(@key, 1),
+                     thread_scope: elem(@key, 2),
+                     sender: sender,
+                     role: role,
+                     kind: "chat_message",
+                     content: ""
+                   },
+                   server: repo
+                 )
+      end
+
+      ConversationStore.add_message(@key, "user", "after", server: store)
+      wait_for_message_count(repo, chat_selector(@key), 4)
+
+      :sys.replace_state(store, fn state ->
+        %{state | conversations: %{}}
+      end)
+
+      history = ConversationStore.get_history(@key, 5, server: store)
+      assert Enum.map(history, & &1.content) == ["before", "after"]
     end
 
     test "telemetry marks durable enqueue and async sqlite persistence", %{

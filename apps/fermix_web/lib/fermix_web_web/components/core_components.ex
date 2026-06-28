@@ -77,8 +77,10 @@ defmodule FermixWebWeb.CoreComponents do
           <path d="M0,40 H17 V100 H0 Z" />
         </g>
         <g transform="translate(324 0)">
-          <path d="M0,0 H17 L60,100 H43 Z" />
-          <path d="M43,0 H60 L17,100 H0 Z" />
+          <path d="M0,0 L17,0 L30,30 L21.5,50 Z" />
+          <path d="M0,100 L17,100 L30,70 L21.5,50 Z" />
+          <path d="M60,0 L43,0 L30,30 L38.5,50 Z" />
+          <path d="M60,100 L43,100 L30,70 L38.5,50 Z" />
         </g>
       </g>
       <g transform="translate(294 0)">

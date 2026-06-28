@@ -125,7 +125,6 @@ defmodule FermixCore.Realtime.ConversationRecorder do
         conversation_key: conversation_key(device_id, Keyword.get(opts, :session_scope, :root)),
         repo: Keyword.get(opts, :repo, MemoryConfig.repo_server(opts)),
         task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
-        extraction_timeout_ms: MemoryConfig.extraction_timeout_ms(opts),
         source_type: @source_type,
         source_id: source,
         source_name: "Realtime voice",

@@ -38,6 +38,21 @@ defmodule FermixCore.Config do
     end
   end
 
+  @spec tool(atom()) :: {:ok, keyword()} | config_error()
+  def tool(name) when is_atom(name) do
+    case Application.get_env(:fermix_core, :tools, []) do
+      tools when is_list(tools) ->
+        case Keyword.get(tools, name) do
+          nil -> {:error, :not_configured}
+          config when is_list(config) -> {:ok, config}
+          _config -> {:error, :not_configured}
+        end
+
+      _tools ->
+        {:error, :not_configured}
+    end
+  end
+
   @spec channel(atom()) :: {:ok, keyword()} | config_error()
   def channel(name) when is_atom(name) do
     case Application.get_env(:fermix_channels, name) do

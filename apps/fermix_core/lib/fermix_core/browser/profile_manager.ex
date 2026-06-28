@@ -57,6 +57,21 @@ defmodule FermixCore.Browser.ProfileManager do
     )
   end
 
+  @doc """
+  Asynchronously tear down every live `ProfileServer` for `owner` (all of its
+  profiles), killing the Chrome process(es).
+
+  Reaps a finished one-shot conversation's browser at turn end so a completed
+  CLI/`ask` turn does not pin a Chrome window for the full idle TTL. Async (a
+  cast) so it never blocks the caller's reply path; a no-op when the owner has
+  no running profile.
+  """
+  @spec stop_owner(String.t(), keyword()) :: :ok
+  def stop_owner(owner, opts \\ []) when is_binary(owner) do
+    server = Keyword.get(opts, :server, __MODULE__)
+    GenServer.cast(server, {:stop_owner, owner})
+  end
+
   @spec status(String.t(), String.t(), keyword()) :: map()
   def status(owner, profile_name, opts \\ []) do
     registry = Keyword.get(opts, :registry, @registry)
@@ -85,6 +100,19 @@ defmodule FermixCore.Browser.ProfileManager do
   @impl true
   def handle_call({:start, key, profile, config}, _from, state) do
     {:reply, ensure_started(key, profile, config, state, config.start_retries), state}
+  end
+
+  @impl true
+  def handle_cast({:stop_owner, owner}, state) do
+    config = fetch_config()
+
+    state.registry
+    |> entries()
+    |> Enum.each(fn {{entry_owner, _profile_name}, pid, _last_used} ->
+      if entry_owner == owner and Process.alive?(pid), do: async_stop(pid, config)
+    end)
+
+    {:noreply, state}
   end
 
   @impl true

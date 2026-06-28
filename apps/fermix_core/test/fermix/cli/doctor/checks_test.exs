@@ -138,7 +138,11 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.routing_overrides()
       assert result.status == :fail
       assert result.detail =~ "cron_model"
-      assert result.detail =~ "not a model offered by provider :openai"
+      # The pinned model is named, and the mismatch with the openai provider is
+      # reported (now raised by the RoutingOverrides pairing guard and surfaced
+      # through the check's ArgumentError rescue).
+      assert result.detail =~ "claude-haiku-4-5"
+      assert result.detail =~ "openai"
     end
   end
 
@@ -166,6 +170,53 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "tavily"
+    end
+  end
+
+  describe "image_generation/0 (M15)" do
+    setup do
+      original = Application.get_env(:fermix_core, :tools, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :tools, original) end)
+      :ok
+    end
+
+    test "reports an unconfigured generate_image as :ok (optional capability)" do
+      Application.put_env(:fermix_core, :tools, [])
+
+      result = Checks.image_generation()
+
+      assert result.name == "image generation"
+      assert result.status == :ok
+      assert result.detail =~ "not configured"
+    end
+
+    test "reports a configured backend with a present credential as :ok" do
+      Application.put_env(:fermix_core, :tools,
+        generate_image: [backend: "google", google_api_key: "gm-secret"]
+      )
+
+      result = Checks.image_generation()
+
+      assert result.status == :ok
+      assert result.detail =~ "google_image"
+    end
+
+    test "warns when the selected backend has no credential configured" do
+      Application.put_env(:fermix_core, :tools, generate_image: [backend: "google"])
+
+      result = Checks.image_generation()
+
+      assert result.status == :warn
+      assert result.detail =~ "google_image"
+    end
+
+    test "warns when the configured backend is unknown" do
+      Application.put_env(:fermix_core, :tools, generate_image: [backend: "midjourney"])
+
+      result = Checks.image_generation()
+
+      assert result.status == :warn
+      assert result.detail =~ "Unknown"
     end
   end
 

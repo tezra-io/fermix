@@ -6,10 +6,12 @@ defmodule FermixCore.Tools.Subagents do
   (concurrency, timeout, result shape) — never `policy`, `allowed_tools`, or
   `trust`. Fermix computes the worker surface from the parent turn's
   `:source_trust`: a worker runs at the parent's trust with the parent's policy
-  classes **minus `:read_write`**, so it can read, browse the web, use MCP/plugin
-  tools, run skills, and run sandbox-bounded `shell`, but cannot directly mutate
-  local/Fermix state. The worker `tool_context` is sanitized so a subagent cannot
-  reply on Fermix's channel or reach the parent's memory.
+  classes **minus `:read_write` and `:gui_control`**, so it can read, browse the
+  web, use MCP/plugin tools, run skills, and run sandbox-bounded `shell`, but cannot
+  directly mutate local/Fermix state and can never drive the desktop/GUI (computer
+  use is attended, operator-only, and never delegated to an unwatched worker). The
+  worker `tool_context` is sanitized so a subagent cannot reply on Fermix's channel
+  or reach the parent's memory.
 
   Workers run concurrently up to a bounded cap; each is a one-shot
   `FermixCore.Agents.WorkerRun` pass with its own wall-clock timeout. The caller
@@ -41,14 +43,18 @@ defmodule FermixCore.Tools.Subagents do
 
   # Context keys stripped before a worker runs: channel-reply targeting and the
   # parent's memory/sandbox handles. The worker keeps the infra keys it needs to
-  # function (registries, supervisors, provider, journal dir).
+  # function (registries, supervisors, provider, journal dir). NOTE:
+  # `:conversation_key` is deliberately NOT stripped — it derives the browser
+  # owner scope (Browser.Scope.owner_key/1), so a worker's browser shares the
+  # parent conversation's single Chrome instead of spawning its own per-worker
+  # instance. Replying/memory stay impossible without :reply_fn/:channel/:memory_*
+  # (all stripped), so inheriting the key alone grants no parent-state access.
   @stripped_context_keys [
     :reply_fn,
     :channel,
     :source_channel,
     :source_trust,
     :sandbox_config,
-    :conversation_key,
     :memory_agent_id,
     :memory_owner_id,
     :memory_store,
@@ -334,8 +340,11 @@ defmodule FermixCore.Tools.Subagents do
     }
   end
 
+  # `:gui_control` is subtracted alongside `:read_write`: desktop/GUI control is
+  # attended + operator-only and must never be handed to an unwatched delegated
+  # worker (COMPUTER_USE.md §7).
   defp worker_policy(source_trust) do
-    CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write]
+    CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write, :gui_control]
   end
 
   defp sanitize_context(context, depth) do

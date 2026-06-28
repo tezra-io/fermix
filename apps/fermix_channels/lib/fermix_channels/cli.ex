@@ -15,7 +15,11 @@ defmodule FermixChannels.CLI do
   alias FermixCore.Telemetry
 
   @channel "cli"
-  @default_timeout_ms 120_000
+  # End-to-end wait for one CLI turn's reply. Aligned with the gateway's 300s
+  # turn budget (`Gateway.Typing`) so a long turn — e.g. reasoning that then
+  # renders an image (a 300s inner HTTP budget, see `Net.TimeoutPolicy`) — is
+  # not clipped at the CLI before the daemon finishes.
+  @default_timeout_ms 300_000
 
   @spec default_timeout_ms() :: pos_integer()
   def default_timeout_ms, do: @default_timeout_ms
@@ -30,8 +34,9 @@ defmodule FermixChannels.CLI do
 
   defp do_parse_input(input, opts) do
     content = String.trim(input)
+    media_parts = Keyword.get(opts, :media_parts, [])
 
-    if content == "" do
+    if content == "" and media_parts == [] do
       {:error, :empty_input}
     else
       sender = opts |> Keyword.get(:sender, default_sender()) |> to_string()
@@ -45,7 +50,8 @@ defmodule FermixChannels.CLI do
           channel: @channel,
           chat_id: session_id,
           reply_target: session_id,
-          metadata: %{source: :cli, user_id: "cli", chat_type: "private"}
+          metadata: %{source: :cli, user_id: "cli", chat_type: "private"},
+          media_parts: media_parts
         })
 
       {:ok, [message]}

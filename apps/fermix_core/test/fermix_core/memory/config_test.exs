@@ -33,16 +33,4 @@ defmodule FermixCore.Memory.ConfigTest do
     assert Config.review_input_token_budget() == 2_000
     assert Config.review_failure_backoff_ms() == 123
   end
-
-  test "extraction_timeout_ms/1 defaults to 90s so reasoning models have headroom" do
-    Application.put_env(:fermix_core, :memory, [])
-
-    assert Config.extraction_timeout_ms() == 90_000
-  end
-
-  test "extraction_timeout_ms/1 honors a configured override" do
-    Application.put_env(:fermix_core, :memory, extraction_timeout_ms: 30_000)
-
-    assert Config.extraction_timeout_ms() == 30_000
-  end
 end

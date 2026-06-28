@@ -119,7 +119,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       {:ok, _view, html} = live(conn, "/setup")
 
       for label <-
-            ~w(Provider Realtime Channels Plugins Search Sandbox Memory Personalization Doctor) do
+            ~w(Provider Realtime Channels Plugins Search Media Sandbox Memory Personalization Doctor) do
         assert html =~ label
       end
 
@@ -145,6 +145,7 @@ defmodule FermixWebWeb.SetupLiveTest do
             {"channels", "Channel coverage"},
             {"plugins", "Integrations"},
             {"search", "Search backend"},
+            {"media", "Image generation"},
             {"sandbox", "Sandbox policy"},
             {"memory", "Memory tuning"},
             {"doctor", "Readiness doctor"}
@@ -206,6 +207,57 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ "coming later"
       refute html =~ "data-plugin-auth-trigger"
       refute html =~ "Installed skills"
+    end
+
+    test "an api_key plugin card prompts for the credential and connects on submit", %{conn: conn} do
+      checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-apikey")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(checkout) end)
+      File.mkdir_p!(Path.join(checkout, "discord"))
+
+      File.write!(
+        Path.join([checkout, "discord", "plugin.json"]),
+        Jason.encode!(%{
+          "schema_version" => 2,
+          "name" => "discord",
+          "display_name" => "Discord",
+          "description" => "Discord api_key fixture",
+          "category" => "communication",
+          "version" => "1.0.0",
+          "min_core_version" => "0.1.0",
+          "plugin_api" => 2,
+          "auth" => %{
+            "type" => "api_key",
+            "header" => "authorization",
+            "scheme" => "Bot",
+            "prompt" => "Discord token",
+            "help_url" => "https://discord.com/developers/docs",
+            "scopes" => []
+          },
+          "tools" => [],
+          "skills" => []
+        })
+      )
+
+      Application.put_env(:fermix_core, :plugins, enabled: ["discord"], dev_local: checkout)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"plugins\"]") |> render_click()
+
+      # An api_key plugin renders the keychained-secret form, not just enable/disable.
+      assert html =~ ~s(data-plugin-name="discord")
+      assert html =~ "Needs key"
+      assert html =~ ~s(phx-submit="set_plugin_secret")
+      assert html =~ ~s(name="plugin_secret_form[value]")
+      assert html =~ "Discord token"
+
+      # Submitting the secret keychains it (via the stub) and the plugin connects.
+      view
+      |> form(~s|#plugin-secret-form-discord|, %{
+        "plugin_secret_form" => %{"value" => "xoxb-secret"}
+      })
+      |> render_submit()
+
+      assert {:ok, "xoxb-secret"} = FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
     end
 
     test "oauth plugin connect requires Google client config before enabling", %{conn: conn} do
@@ -684,6 +736,291 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ "[fermix_core.tools.web_search]"
       assert contents =~ ~s(backend = "tavily")
       assert contents =~ ~s(tavily_api_key = "@keyring")
+    end
+
+    test "selecting Firecrawl reveals only its key field and persists it", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"search\"]")
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_search\"]", search_form: %{backend: "firecrawl"})
+        |> render_change()
+
+      assert html =~ "search_form[firecrawl_api_key]"
+      refute html =~ "search_form[tavily_api_key]"
+      refute html =~ "search_form[perplexity_api_key]"
+
+      view
+      |> form("form[phx-submit=\"save_search\"]",
+        search_form: %{backend: "firecrawl", firecrawl_api_key: "fc-live-test"}
+      )
+      |> render_submit()
+
+      web_search =
+        :fermix_core
+        |> Application.get_env(:tools, [])
+        |> Keyword.get(:web_search, [])
+
+      assert Keyword.get(web_search, :backend) == :firecrawl
+      assert Keyword.get(web_search, :firecrawl_api_key) == "fc-live-test"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "firecrawl")
+      assert contents =~ ~s(firecrawl_api_key = "@keyring")
+    end
+  end
+
+  describe "Media form (M15)" do
+    test "selecting Google reveals its key field and persists it", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      # OpenAI (default) shows its own key field — no Gemini key field.
+      refute render(view) =~ "image_form[google_api_key]"
+
+      # Selecting Google reveals only the Gemini key field.
+      html =
+        view
+        |> form("form[phx-submit=\"save_image\"]", image_form: %{backend: "google"})
+        |> render_change()
+
+      assert html =~ "image_form[google_api_key]"
+
+      view
+      |> form("form[phx-submit=\"save_image\"]",
+        image_form: %{
+          backend: "google",
+          model: "gemini-2.5-flash-image",
+          google_api_key: "gm-live-test"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Media saved."
+
+      generate_image =
+        :fermix_core
+        |> Application.get_env(:tools, [])
+        |> Keyword.get(:generate_image, [])
+
+      assert Keyword.get(generate_image, :backend) == "google"
+      assert Keyword.get(generate_image, :model) == "gemini-2.5-flash-image"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.tools.generate_image]"
+      assert contents =~ ~s(backend = "google")
+      assert contents =~ ~s(google_api_key = "@keyring")
+      refute contents =~ "gm-live-test"
+    end
+
+    test "selecting OpenAI shows its own key field and persists the backend", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_image\"]", image_form: %{backend: "openai"})
+        |> render_change()
+
+      refute html =~ "image_form[google_api_key]"
+      assert html =~ "image_form[openai_api_key]"
+
+      view
+      |> form("form[phx-submit=\"save_image\"]",
+        image_form: %{backend: "openai", model: "gpt-image-2"}
+      )
+      |> render_submit()
+
+      generate_image =
+        :fermix_core
+        |> Application.get_env(:tools, [])
+        |> Keyword.get(:generate_image, [])
+
+      assert Keyword.get(generate_image, :backend) == "openai"
+      assert Keyword.get(generate_image, :model) == "gpt-image-2"
+      refute Keyword.has_key?(generate_image, :google_api_key)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "openai")
+      refute contents =~ "google_api_key"
+    end
+
+    test "the model field is a dropdown of the backend's supported models", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      # OpenAI (default): a real <select> carrying both curated entries.
+      assert html =~ ~r{<select[^>]*name="image_form\[model\]"}
+      assert html =~ "gpt-image-2"
+      assert html =~ "gpt-image-1.5"
+
+      # Switching backend swaps the options to that backend's model and drops
+      # the OpenAI-only secondary tier.
+      html =
+        view
+        |> form("form[phx-submit=\"save_image\"]", image_form: %{backend: "xai"})
+        |> render_change()
+
+      assert html =~ "grok-imagine-image-quality"
+      refute html =~ "gpt-image-1.5"
+    end
+
+    test "shows an editable OpenAI key field, marked configured when the key is set", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-live-openai"])
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      # The field name IS the provider secret key, so saving folds it straight to
+      # providers.openai.api_key — the same key OpenAI uses for chat.
+      assert html =~ "image_form[openai_api_key]"
+      assert html =~ "Already configured"
+      # The secret itself never reaches the browser.
+      refute html =~ "sk-live-openai"
+    end
+
+    test "shows an empty OpenAI key field when no key is set", %{conn: conn} do
+      # The harness forces providers to [] — OpenAI has no key.
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      assert html =~ "image_form[openai_api_key]"
+      refute html =~ "Already configured"
+    end
+
+    test "switching to xAI reveals its own editable key field", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_image\"]", image_form: %{backend: "xai"})
+        |> render_change()
+
+      assert html =~ "image_form[xai_api_key]"
+      refute html =~ "image_form[openai_api_key]"
+    end
+
+    test "saving an OpenAI key persists it to the provider block via the keyring sentinel", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_image\"]",
+        image_form: %{
+          backend: "openai",
+          model: "gpt-image-2",
+          openai_api_key: "sk-live-openai-key"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Media saved."
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.openai]"
+      assert contents =~ ~s(api_key = "@keyring")
+      # The secret lands in the keyring (stub), never the config file.
+      refute contents =~ "sk-live-openai-key"
+
+      assert {:ok, "sk-live-openai-key"} =
+               FermixTestSupport.SecretWriterStub.get(:openai_api_key)
+    end
+
+    test "saving an xAI key persists it to the xAI provider block", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      # Switch first so the model select carries the xAI option (it is validated
+      # against the rendered options on submit).
+      view
+      |> form("form[phx-submit=\"save_image\"]", image_form: %{backend: "xai"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_image\"]",
+        image_form: %{
+          backend: "xai",
+          model: "grok-imagine-image-quality",
+          xai_api_key: "xai-live-key"
+        }
+      )
+      |> render_submit()
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.providers.xai]"
+      assert contents =~ ~s(api_key = "@keyring")
+      # The key landed in the keyring (stub); OpenAI was never touched.
+      refute contents =~ "[fermix_core.providers.openai]"
+      refute contents =~ "xai-live-key"
+
+      assert {:ok, "xai-live-key"} = FermixTestSupport.SecretWriterStub.get(:xai_api_key)
+    end
+
+    test "setting an image key never flips an already-configured primary", %{conn: conn} do
+      # OpenAI is the established primary, carried by an explicit `primary = true`
+      # flag (not the legacy agent.provider) — exactly what an image save must not flip.
+      # Persisted to disk (with its keyring-backed secret) first, the way a prior setup
+      # would leave it: the save's secret-retention guard then sees openai as a real,
+      # already-configured provider rather than dropping an unbacked sentinel.
+      :ok = FermixTestSupport.SecretWriterStub.put(:openai_api_key, "sk-primary-key")
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "@keyring", primary: true])
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+      :ok = ConfigStore.save_snapshot(ConfigStore.current_snapshot())
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      # Set an xAI image key from the Media tab.
+      view |> element("button[phx-value-tab=\"media\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_image\"]", image_form: %{backend: "xai"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_image\"]",
+        image_form: %{
+          backend: "xai",
+          model: "grok-imagine-image-quality",
+          xai_api_key: "xai-live-key"
+        }
+      )
+      |> render_submit()
+
+      # OpenAI keeps its primary flag; xAI is configured but only a fallback.
+      assert {:ok, persisted} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      providers = Keyword.get(persisted.fermix_core, :providers, [])
+      assert Keyword.get(Keyword.get(providers, :openai, []), :primary) == true
+      refute Keyword.get(Keyword.get(providers, :xai, []), :primary) == true
     end
   end
 

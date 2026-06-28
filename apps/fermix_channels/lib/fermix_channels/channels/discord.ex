@@ -13,6 +13,7 @@ defmodule FermixChannels.Channels.Discord do
   require Logger
 
   alias FermixChannels.Gateway.Idempotency
+  alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -228,6 +229,46 @@ defmodule FermixChannels.Channels.Discord do
         size_bytes: Map.get(attachment, "size")
       }
     end)
+  end
+
+  @impl true
+  @spec download_attachment(FermixChannels.Gateway.Channel.message(), map()) ::
+          {:ok, String.t()} | {:error, term()}
+  def download_attachment(_message, attachment) when is_map(attachment) do
+    with :ok <- MediaDownload.preflight_cap(attachment, @max_media_bytes),
+         {:ok, url} <- attachment_url(attachment),
+         {:ok, body} <- fetch_cdn_media(url),
+         {:ok, body} <- MediaDownload.enforce_cap(body, @max_media_bytes),
+         {:ok, path} <- MediaDownload.write_temp(body, "discord", attachment) do
+      {:ok, path}
+    end
+  end
+
+  defp attachment_url(attachment) do
+    case MediaDownload.value(attachment, :url) do
+      url when is_binary(url) and url != "" -> {:ok, url}
+      _ -> {:error, :missing_attachment_reference}
+    end
+  end
+
+  # Discord CDN attachment URLs are public — no bot token needed.
+  defp fetch_cdn_media(url) do
+    case Req.new(url: url, method: :get)
+         |> Req.merge(req_options([]))
+         |> HttpClient.request("Discord media download") do
+      {:ok, %{status: 200, body: body}} when is_binary(body) ->
+        {:ok, body}
+
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, IO.iodata_to_binary(body)}
+
+      {:ok, %{status: status}} ->
+        Logger.error("Discord media download failed: status=#{status}")
+        {:error, {:download_failed, status}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp attachment_kind("audio/" <> _rest), do: :audio

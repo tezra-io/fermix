@@ -214,6 +214,34 @@ defmodule FermixOpik.Mapper do
     |> drop_nil()
   end
 
+  @doc """
+  Build a point span from a `[:fermix, :timeout, :expired]` event — a failure
+  deadline that fired. `error_info` flags it so the span surfaces as errored, not
+  silently green; the timeout `name` rides in the event metadata (the event name
+  is stable).
+  """
+  @spec timeout_span(map(), map(), keyword()) :: map()
+  def timeout_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+    name = stringify(Map.get(metadata, :name)) || "timeout"
+    ms = Map.get(measurements, :ms)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "timeout:#{name}",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata: drop_nil(%{ms: ms, context: Map.get(metadata, :context)}),
+      error_info: %{exception_type: "Timeout", message: "#{name} after #{ms}ms"}
+    }
+    |> drop_nil()
+  end
+
   @doc "OpenAI-style integer usage map, or nil when no token counts are present."
   @spec usage(map() | nil) :: map() | nil
   def usage(%{} = tokens) when map_size(tokens) > 0 do

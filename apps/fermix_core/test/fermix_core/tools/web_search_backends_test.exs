@@ -126,6 +126,41 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
     :telemetry.detach(handler_id)
   end
 
+  test "firecrawl backend sends bearer POST and normalizes data.web results" do
+    handler_id = attach_tool_telemetry()
+
+    result =
+      execute_search(
+        [backend: :firecrawl, firecrawl_api_key: "fc-secret"],
+        fn conn ->
+          {body, conn} = request_json(conn)
+          assert {"authorization", "Bearer fc-secret"} in conn.req_headers
+          assert body["query"] == "fermix"
+          assert body["sources"] == ["web"]
+          assert body["limit"] == 10
+          refute Map.has_key?(body, "scrapeOptions")
+
+          json_response(conn, %{
+            "success" => true,
+            "data" => %{
+              "web" => [
+                %{
+                  "title" => "Firecrawl",
+                  "url" => "https://firecrawl.example",
+                  "description" => "summary"
+                }
+              ]
+            }
+          })
+        end
+      )
+
+    assert_result(result, "Firecrawl", "https://firecrawl.example", "summary")
+    assert_receive {:telemetry, %{backend: "firecrawl", request_headers: headers}}
+    assert %{name: "authorization", value: "***REDACTED***"} in headers
+    :telemetry.detach(handler_id)
+  end
+
   test "perplexity backend uses Search API and normalizes structured results" do
     result =
       execute_search(
@@ -173,6 +208,25 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
     assert_error([backend: :tavily, tavily_api_key: "tvly-secret"], 429, %{}, "rate_limited")
     assert_error([backend: :tavily, tavily_api_key: "tvly-secret"], 500, %{}, "provider_error")
     assert_error([backend: :tavily, tavily_api_key: "tvly-secret"], 200, %{}, "parser_changed")
+
+    # Firecrawl: 402 (out of credits) maps to provider_error, which web_search
+    # treats as degradable — confirmed in the degrade test below.
+    assert_error([backend: :firecrawl, firecrawl_api_key: "fc-secret"], 401, %{}, "auth_failed")
+    assert_error([backend: :firecrawl, firecrawl_api_key: "fc-secret"], 429, %{}, "rate_limited")
+
+    assert_error(
+      [backend: :firecrawl, firecrawl_api_key: "fc-secret"],
+      402,
+      %{},
+      "provider_error"
+    )
+
+    assert_error(
+      [backend: :firecrawl, firecrawl_api_key: "fc-secret"],
+      200,
+      %{},
+      "parser_changed"
+    )
   end
 
   test "backend-specific query caps fail before making an HTTP request" do
@@ -191,6 +245,12 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
     assert_no_request(
       [backend: :parallel, parallel_api_key: "parallel-secret"],
       String.duplicate("x", 201),
+      "query_too_long"
+    )
+
+    assert_no_request(
+      [backend: :firecrawl, firecrawl_api_key: "fc-secret"],
+      String.duplicate("x", 501),
       "query_too_long"
     )
   end
@@ -381,6 +441,7 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
       "api.parallel.ai" -> {:ok, [{93, 184, 216, 34}]}
       "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]}
       "api.perplexity.ai" -> {:ok, [{93, 184, 216, 34}]}
+      "api.firecrawl.dev" -> {:ok, [{93, 184, 216, 34}]}
       "html.duckduckgo.com" -> {:ok, [{52, 149, 246, 39}]}
     end
   end

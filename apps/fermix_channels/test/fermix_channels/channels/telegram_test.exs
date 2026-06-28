@@ -78,6 +78,80 @@ defmodule FermixChannels.Channels.TelegramTest do
     test "returns {:ok, []} for non-message updates" do
       assert {:ok, []} = Telegram.parse_update(%{"callback_query" => %{}})
     end
+
+    test "parses a photo message into an image attachment ref (largest variant, file_id only)" do
+      update = %{
+        "message" => %{
+          "message_id" => 7,
+          "caption" => "look at this",
+          "photo" => [
+            %{"file_id" => "small", "width" => 90, "height" => 60, "file_size" => 1_000},
+            %{"file_id" => "big", "width" => 1280, "height" => 720, "file_size" => 50_000}
+          ],
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.content == "look at this"
+
+      assert [
+               %{
+                 kind: :image,
+                 file_id: "big",
+                 mime_type: "image/jpeg",
+                 size_bytes: 50_000,
+                 url: nil
+               }
+             ] =
+               msg.attachments
+    end
+
+    test "carries media_group_id into metadata for album coalescing" do
+      update = %{
+        "message" => %{
+          "message_id" => 8,
+          "media_group_id" => "alb-123",
+          "photo" => [%{"file_id" => "f1", "width" => 100, "height" => 100, "file_size" => 2_000}],
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.metadata.media_group_id == "alb-123"
+    end
+
+    test "omits media_group_id for a single (non-album) message" do
+      update = %{
+        "message" => %{
+          "message_id" => 9,
+          "text" => "hi",
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      refute Map.has_key?(msg.metadata, :media_group_id)
+    end
+  end
+
+  # -- download_attachment/2 --
+
+  describe "download_attachment/2" do
+    test "refuses an over-cap declared size before any network call (fail loud)" do
+      attachment = %{
+        kind: :image,
+        file_id: "x",
+        mime_type: "image/jpeg",
+        size_bytes: 21 * 1_024 * 1_024
+      }
+
+      assert {:error, {:byte_cap_exceeded, _actual, _allowed}} =
+               Telegram.download_attachment(%{}, attachment)
+    end
   end
 
   # -- send_message/3 --

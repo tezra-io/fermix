@@ -169,20 +169,24 @@ defmodule FermixCore.Capabilities.RegistryTest do
   end
 
   describe "default_policy_classes/1" do
-    test "operator gets the full class surface" do
+    test "operator gets the full class surface, including :gui_control" do
       assert Enum.sort(Registry.default_policy_classes(:operator)) ==
-               Enum.sort([:read_only, :read_write, :exec, :network, :external_api])
+               Enum.sort([:read_only, :read_write, :exec, :network, :external_api, :gui_control])
     end
 
-    test "guest and nil collapse to read-only" do
+    test "guest and nil collapse to read-only (never :gui_control)" do
       assert Registry.default_policy_classes(:guest) == [:read_only]
       assert Registry.default_policy_classes(nil) == [:read_only]
     end
 
-    test "operator minus :read_write is the subagent worker surface" do
-      classes = Registry.default_policy_classes(:operator) -- [:read_write]
+    test "operator minus :read_write and :gui_control is the subagent worker surface" do
+      # Mirrors Tools.Subagents.worker_policy/1: a delegated worker can read, browse,
+      # and run skills/shell but can neither mutate local state (:read_write) nor
+      # drive the desktop (:gui_control — attended, operator-only, never delegated).
+      classes = Registry.default_policy_classes(:operator) -- [:read_write, :gui_control]
       assert Enum.sort(classes) == Enum.sort([:read_only, :exec, :network, :external_api])
       refute :read_write in classes
+      refute :gui_control in classes
     end
   end
 

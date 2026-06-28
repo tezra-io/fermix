@@ -22,6 +22,7 @@ defmodule FermixCore.Agents.MainAgent do
   require Logger
 
   alias FermixCore.Agents.AgentSupervisor
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Memory.Config
@@ -108,6 +109,18 @@ defmodule FermixCore.Agents.MainAgent do
     GenServer.call(server, {:invalidate_runtime_context, reason})
   end
 
+  @doc """
+  Record the peak provider-reported `context_tokens` for a conversation so the
+  next turn's preflight auto-compaction gate reads the real measure (consistent
+  with the post-delivery gate). Best-effort cast, written off the reply path by
+  `TurnRunner.commit/4` — mirrors `clear_auto_compaction_failure`.
+  """
+  @spec record_context_tokens(GenServer.server(), ConversationKey.t(), non_neg_integer()) :: :ok
+  def record_context_tokens(server, conversation_key, tokens)
+      when is_integer(tokens) and tokens >= 0 do
+    GenServer.cast(server, {:record_context_tokens, conversation_key, tokens})
+  end
+
   # --- GenServer Callbacks ---
 
   @impl true
@@ -137,13 +150,13 @@ defmodule FermixCore.Agents.MainAgent do
       memory_reviewer: Keyword.get(opts, :memory_reviewer, Reviewer),
       memory_agent_id: Config.agent_id(opts),
       memory_owner_id: Config.owner_id(opts),
-      extraction_timeout_ms: Config.extraction_timeout_ms(opts),
       review_interval_hours: Config.review_interval_hours(opts),
       review_max_messages: Config.review_max_messages(opts),
       review_input_token_budget: Config.review_input_token_budget(opts),
       review_failure_backoff_ms: Config.review_failure_backoff_ms(opts),
       runtime_context: nil,
-      compaction_failures: %{}
+      compaction_failures: %{},
+      context_tokens: %{}
     }
 
     {:ok, state}
@@ -257,10 +270,10 @@ defmodule FermixCore.Agents.MainAgent do
   end
 
   @impl true
-  def handle_call({:checkout_turn_state, _msg}, _from, state) do
+  def handle_call({:checkout_turn_state, msg}, _from, state) do
     case ensure_runtime_context(state) do
       {:ok, state, cache_status} ->
-        {:reply, {:ok, turn_state(state), cache_status}, state}
+        {:reply, {:ok, turn_state(state, msg), cache_status}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -308,12 +321,22 @@ defmodule FermixCore.Agents.MainAgent do
     {:noreply, update_in(state.compaction_failures, &Map.delete(&1, conversation_key))}
   end
 
+  def handle_cast({:record_context_tokens, conversation_key, tokens}, state)
+      when is_integer(tokens) and tokens >= 0 do
+    {:noreply,
+     update_in(state.context_tokens, fn tracked ->
+       tracked
+       |> Map.update(conversation_key, tokens, &max(&1, tokens))
+       |> prune_context_tokens()
+     end)}
+  end
+
   # --- Internals ---
 
   # Snapshot of everything `TurnRunner.run/2` needs to execute a turn. Built
   # under the GenServer (so the runtime context is the freshly-cached one) and
   # handed to the gateway, which runs the turn in a supervised task.
-  defp turn_state(state) do
+  defp turn_state(state, msg) do
     %{
       provider: state.provider,
       capability_registry: state.capability_registry,
@@ -332,14 +355,14 @@ defmodule FermixCore.Agents.MainAgent do
       memory_reviewer: state.memory_reviewer,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
-      extraction_timeout_ms: state.extraction_timeout_ms,
       review_interval_hours: state.review_interval_hours,
       review_max_messages: state.review_max_messages,
       review_input_token_budget: state.review_input_token_budget,
       review_failure_backoff_ms: state.review_failure_backoff_ms,
       runtime_context: state.runtime_context,
       main_agent_server: self(),
-      compaction_failures: state.compaction_failures
+      compaction_failures: state.compaction_failures,
+      last_context_tokens: Map.get(state.context_tokens, ConversationKey.from(msg), 0)
     }
   end
 
@@ -417,6 +440,22 @@ defmodule FermixCore.Agents.MainAgent do
   defp prune_auto_compaction_failures(failures) do
     failures
     |> Enum.sort_by(fn {_conversation_key, failed_at} -> failed_at end, :desc)
+    |> Enum.take(@max_auto_compaction_failures)
+    |> Map.new()
+  end
+
+  # Bounds the peak context_tokens map the same way as compaction_failures
+  # (reusing @max_auto_compaction_failures) so it can't grow unbounded. Keeps
+  # the heaviest conversations — the ones most likely to need preflight
+  # compaction next turn.
+  defp prune_context_tokens(tracked)
+       when map_size(tracked) <= @max_auto_compaction_failures do
+    tracked
+  end
+
+  defp prune_context_tokens(tracked) do
+    tracked
+    |> Enum.sort_by(fn {_conversation_key, tokens} -> tokens end, :desc)
     |> Enum.take(@max_auto_compaction_failures)
     |> Map.new()
   end

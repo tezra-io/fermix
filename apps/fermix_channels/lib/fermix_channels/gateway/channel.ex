@@ -27,6 +27,16 @@ defmodule FermixChannels.Gateway.Channel do
   @typedoc "Opaque draft handle owned by the channel (Telegram: integer message_id)."
   @type stream_handle :: term()
 
+  @typedoc """
+  How an inbound message participates in album coalescing (M14).
+
+    * `{:coalesce, key}` — buffer under `key` with a reset-on-each-part debounce.
+    * `{:flush, key}` — flush a pending album under `key`, then dispatch this
+      message as its own turn (a trailing message that shares the album's key).
+    * `:passthrough` — dispatch immediately, touching no buffer.
+  """
+  @type album_classification :: {:coalesce, term()} | {:flush, term()} | :passthrough
+
   @doc """
   Parse a webhook payload into messages.
 
@@ -108,6 +118,15 @@ defmodule FermixChannels.Gateway.Channel do
   @doc "Delete the draft (turn stopped, superseded, or errored)."
   @callback discard_draft(message(), stream_handle()) :: :ok | {:error, term()}
 
+  @doc """
+  Classify an inbound message for album coalescing (`Gateway.AlbumBuffer`).
+
+  Only channels that deliver a multi-image album as several separate inbound
+  messages (Telegram media groups, WhatsApp per-image webhooks) implement this;
+  channels without it never run an album buffer.
+  """
+  @callback album_classify(message()) :: album_classification()
+
   @optional_callbacks [
     start_typing: 1,
     download_attachment: 2,
@@ -116,6 +135,7 @@ defmodule FermixChannels.Gateway.Channel do
     open_draft: 2,
     edit_draft: 3,
     seal_draft: 3,
-    discard_draft: 2
+    discard_draft: 2,
+    album_classify: 1
   ]
 end
