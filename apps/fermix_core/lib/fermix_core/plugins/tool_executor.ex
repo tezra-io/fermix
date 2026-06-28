@@ -195,13 +195,15 @@ defmodule FermixCore.Plugins.ToolExecutor do
 
   defp auth_header(cred), do: {cred.header, "#{cred.scheme} #{cred.token}"}
 
-  # Google plugins keep their machine-readable 403/401 classification
-  # (`format_forbidden`/`format_auth_error`) instead of the interpreter's
-  # generic prose; other providers (github/notion api_key) fall back to generic.
+  # Google plugins keep their machine-readable 403 classification
+  # (`format_forbidden`: scope / file-permission / organizer-only / rate-limit
+  # prose) which the interpreter's generic 403 message can't reproduce. 401 is
+  # deliberately NOT classified here — every oauth2 plugin's 401 (Google
+  # included) flows through the interpreter's auth-type 401 branch into the same
+  # `fermix plugins auth reauthorize <plugin>` guidance, so there is one path.
   defp google_error_classifier(%{auth: %{provider: "google"}}, plugin_name, tool) do
     fn
       403, _headers, body -> format_forbidden(plugin_name, tool, decode_body_or_empty(body))
-      401, _headers, _body -> format_auth_error(plugin_name, :reauthorization_required)
       _status, _headers, _body -> nil
     end
   end

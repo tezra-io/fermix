@@ -138,8 +138,11 @@ defmodule FermixCore.Plugins.Http.InterpreterTest do
       t = tool(%{"method" => "GET", "url" => "https://x/y"})
       resp = fn _ -> {:ok, %{status: 401, headers: [], body: "{}"}} end
 
-      assert {:ok, %{error: e1}} = Interpreter.run(t, %{}, http: resp, auth_type: :oauth2)
-      assert e1 =~ "reauthorize"
+      assert {:ok, %{error: e1}} =
+               Interpreter.run(t, %{}, http: resp, auth_type: :oauth2, plugin: "github")
+
+      assert e1 =~ "github needs reconnection"
+      assert e1 =~ "fermix plugins auth reauthorize github"
 
       assert {:ok, %{error: e2}} =
                Interpreter.run(t, %{}, http: resp, auth_type: :api_key, plugin: "github")
