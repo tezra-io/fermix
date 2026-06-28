@@ -285,6 +285,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       # Pre-fix this read [fermix_core.plugins] and rendered the install-time
       # "Enable" with the status pill hidden (:not_configured).
       refute card =~ ~s(phx-click="plugin_enable")
+
+      # Core owns the branding: "Computer Use" (not the manifest's "…Sidecar"),
+      # with the bundled blue-monitor logo rather than a letter fallback.
+      assert card =~ "Computer Use"
+      refute card =~ "Sidecar"
+      assert card =~ "data:image/svg+xml"
     end
 
     test "a ready computer-use sidecar card shows Ready without a registry health check",
