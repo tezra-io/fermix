@@ -92,8 +92,9 @@ def parse_yanked(text):
 def plugin_entry(name, releases, yanked, logo):
     """Catalog entry in exactly the shape FermixCore.Plugins.Dist.Index.parse/1 reads.
 
-    `releases` is [(version, published_at, manifest, artifact)] in any order;
-    versions are emitted newest-first and `latest` is the newest.
+    `releases` is [(version, published_at, manifest, artifacts)] in any order
+    (artifacts is the per-version artifact list); versions are emitted
+    newest-first and `latest` is the newest.
     """
     if not releases:
         raise SyncError("has no releases to pin")
@@ -127,9 +128,9 @@ def plugin_entry(name, releases, yanked, logo):
                 "published_at": published_at,
                 "min_core_version": manifest["min_core_version"],
                 "plugin_api": manifest["plugin_api"],
-                "artifacts": [artifact],
+                "artifacts": artifacts,
             }
-            for version, published_at, manifest, artifact in ordered
+            for version, published_at, manifest, artifacts in ordered
         ],
     }
 
@@ -195,7 +196,8 @@ def file_at_ref(repo, path, ref):
 
 
 def release_assets(repo, name, version):
-    """({asset_name: url}, published_at) for the tag's release; incomplete release → SyncError."""
+    """({asset_name: url}, published_at) for the tag's release. Per-shape asset
+    validation (single vs per-target) is left to discover_artifacts."""
     tag = f"{name}/v{version}"
     try:
         raw = run(["gh", "release", "view", tag, "-R", repo, "--json", "assets,publishedAt"])
@@ -203,10 +205,6 @@ def release_assets(repo, name, version):
         raise SyncError(f"v{version}: tag has no usable release — {err}") from None
     release = json.loads(raw)
     urls = {asset["name"]: asset["url"] for asset in release["assets"]}
-    tarball = f"{name}-{version}.tar.gz"
-    missing = [a for a in (tarball, f"{tarball}.sha256", f"{tarball}.sig", f"{tarball}.pem") if a not in urls]
-    if missing:
-        raise SyncError(f"v{version}: release is missing assets {missing}")
     if not release.get("publishedAt"):
         raise SyncError(f"v{version}: release has no publishedAt")
     return urls, release["publishedAt"]
@@ -223,23 +221,29 @@ def manifest_at_tag(repo, name, version):
     return manifest
 
 
-def verify_release(repo, name, version):
-    """Download tarball + sha256 + sig + pem, check the digest, cosign-verify. Returns the hex sha256."""
+def _require_asset_set(urls, version, tarball):
+    """The signed quartet (tarball + .sha256 + .sig + .pem) must all be present."""
+    missing = [a for a in (tarball, f"{tarball}.sha256", f"{tarball}.sig", f"{tarball}.pem") if a not in urls]
+    if missing:
+        raise SyncError(f"v{version}: release is missing assets {missing}")
+
+
+def verify_tarball(repo, name, version, tarball):
+    """Download <tarball> + sha256 + sig + pem, check the digest, cosign-verify. Returns the hex sha256."""
     tag = f"{name}/v{version}"
-    tarball = f"{name}-{version}.tar.gz"
     with tempfile.TemporaryDirectory(prefix="fermix-catalog-sync-") as tmp:
         try:
             run(["gh", "release", "download", tag, "-R", repo, "--pattern", f"{tarball}*", "--dir", tmp])
         except SyncError as err:
-            raise SyncError(f"v{version}: artifact download failed — {err}") from None
+            raise SyncError(f"v{version}: artifact download failed for {tarball} — {err}") from None
         paths = {ext: Path(tmp) / f"{tarball}{ext}" for ext in ("", ".sha256", ".sig", ".pem")}
         missing = [p.name for p in paths.values() if not p.is_file()]
         if missing:
-            raise SyncError(f"v{version}: download incomplete — missing {missing}")
+            raise SyncError(f"v{version}: download incomplete for {tarball} — missing {missing}")
         digest = hashlib.sha256(paths[""].read_bytes()).hexdigest()
         sha_words = paths[".sha256"].read_text().split()
         if not sha_words or digest != sha_words[0]:
-            raise SyncError(f"v{version}: sha256 mismatch — computed {digest}, release pins {sha_words[:1]}")
+            raise SyncError(f"v{version}: sha256 mismatch for {tarball} — computed {digest}, release pins {sha_words[:1]}")
         cosign = [
             "cosign", "verify-blob",
             "--certificate", str(paths[".pem"]),
@@ -251,8 +255,38 @@ def verify_release(repo, name, version):
         try:
             run(cosign)
         except SyncError as err:
-            raise SyncError(f"v{version}: cosign verification failed — {err}") from None
+            raise SyncError(f"v{version}: cosign verification failed for {tarball} — {err}") from None
         return digest
+
+
+def discover_artifacts(repo, name, version, urls):
+    """Verified artifact list for one version. A native plugin publishes one
+    signed tarball PER target (`<name>-<version>-<target>.tar.gz`); a declarative
+    plugin publishes a single `<name>-<version>.tar.gz` (target "any"). Every
+    tarball is sha256- and cosign-verified against the same
+    release-plugin.yml@<tag> identity (keyed on workflow + tag, not asset name)."""
+    prefix, suffix = f"{name}-{version}-", ".tar.gz"
+    targets = sorted(
+        n[len(prefix):-len(suffix)]
+        for n in urls
+        if n.startswith(prefix) and n.endswith(suffix)
+    )
+    tarballs = (
+        [(t, f"{name}-{version}-{t}{suffix}") for t in targets]
+        if targets
+        else [("any", f"{name}-{version}{suffix}")]
+    )
+    artifacts = []
+    for target, tarball in tarballs:
+        _require_asset_set(urls, version, tarball)
+        artifacts.append({
+            "target": target,
+            "url": urls[tarball],
+            "sha256": verify_tarball(repo, name, version, tarball),
+            "sig_url": urls[f"{tarball}.sig"],
+            "cert_url": urls[f"{tarball}.pem"],
+        })
+    return artifacts
 
 
 def fetch_yanked(repo, name):
@@ -287,16 +321,8 @@ def sync_plugin(repo, name, versions):
     for version in sorted(versions, key=semver_key, reverse=True):
         urls, published_at = release_assets(repo, name, version)
         manifest = manifest_at_tag(repo, name, version)
-        sha256 = verify_release(repo, name, version)
-        tarball = f"{name}-{version}.tar.gz"
-        artifact = {
-            "target": "any",
-            "url": urls[tarball],
-            "sha256": sha256,
-            "sig_url": urls[f"{tarball}.sig"],
-            "cert_url": urls[f"{tarball}.pem"],
-        }
-        releases.append((version, published_at, manifest, artifact))
+        artifacts = discover_artifacts(repo, name, version, urls)
+        releases.append((version, published_at, manifest, artifacts))
     latest_version, _, latest_manifest, _ = releases[0]
     logo = fetch_logo(repo, name, latest_version, latest_manifest)
     return plugin_entry(name, releases, fetch_yanked(repo, name), logo)

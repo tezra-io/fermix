@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-28T03:20:50Z",
+  "generated_at": "2026-06-28T15:46:18Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -34,6 +34,45 @@
               "sha256": "0f71c6eec7fc96381154bccbf4fe28a571c84d3e28feb373de04520446d7978b",
               "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/agentmail/v1.0.0/agentmail-1.0.0.tar.gz.sig",
               "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/agentmail/v1.0.0/agentmail-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "computer_use_sidecar",
+      "display_name": "Computer Use Sidecar",
+      "category": "system",
+      "description": "Signed native host-control sidecar (screenshot + input) for Fermix computer-use. Supported platforms: Apple Silicon (M-series) macOS and Linux x86_64 \u2014 Intel Macs are not supported. Off by default; requires explicit enable and OS permission grants.",
+      "short_description": null,
+      "developer_name": null,
+      "brand_color": null,
+      "logo": null,
+      "auth_type": "none",
+      "auth_provider": null,
+      "rails": [],
+      "latest": "0.1.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "0.1.0",
+          "published_at": "2026-06-28T15:44:44Z",
+          "min_core_version": "0.4.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-linux-x86_64.tar.gz",
+              "sha256": "13a2cf26d37db10f02a61b4da53dfe6fc7ef09cddfbd1f69db2ead6de571e564",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-macos-aarch64.tar.gz",
+              "sha256": "f24dadf9af25a7a5967b3a56a98351fd5c7327ab92cac5c4074bacf2d60c88db",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-macos-aarch64.tar.gz.pem"
             }
           ]
         }
