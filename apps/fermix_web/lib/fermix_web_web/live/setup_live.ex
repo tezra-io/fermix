@@ -34,6 +34,15 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixWebWeb.SetupLive.Components
 
+  # Computer use is a core feature, not a plugin whose branding we receive, so its
+  # card name + logo are owned here. The SVG is inlined as a data URI at compile
+  # time (the same shape plugin logos render as); @external_resource recompiles
+  # this module whenever the asset changes.
+  @computer_use_logo_path Path.join(__DIR__, "setup_live/computer_use_logo.svg")
+  @external_resource @computer_use_logo_path
+  @computer_use_logo_uri "data:image/svg+xml;base64," <>
+                           Base.encode64(File.read!(@computer_use_logo_path))
+
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
     %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
@@ -1202,11 +1211,11 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       name: plugin.name,
-      display_name: plugin.display_name,
+      display_name: card_display_name(plugin.name, plugin.display_name),
       description: plugin.description,
       category: plugin.category,
       provider: Map.get(plugin.auth, :provider),
-      logo: plugin_asset_data_uri(plugin, "logo") || plugin_asset_data_uri(plugin, "icon"),
+      logo: plugin_card_logo(plugin),
       auth_type: plugin.auth.type,
       secret_prompt: Map.get(plugin.auth, :prompt),
       account: PluginStatus.account_label(plugin),
@@ -1256,12 +1265,12 @@ defmodule FermixWebWeb.SetupLive do
   defp catalog_card(entry, snapshot) do
     %{
       name: entry.name,
-      display_name: entry.display_name,
+      display_name: card_display_name(entry.name, entry.display_name),
       description: entry.description,
       category: entry.category,
       auth_type: entry.auth_type,
       provider: entry.provider,
-      logo: index_logo_data_uri(entry.logo),
+      logo: catalog_card_logo(entry),
       latest: entry.latest,
       mcp?: "mcp" in entry.rails,
       compat: entry.compat,
@@ -1290,6 +1299,29 @@ defmodule FermixWebWeb.SetupLive do
     plugin.interface
     |> Map.get(key)
     |> asset_data_uri(Path.dirname(plugin.path))
+  end
+
+  # Computer use carries no plugin-supplied branding (toolless sidecar), so the
+  # card name + logo are core-owned: "Computer Use" (not "…Sidecar") and the
+  # bundled blue-monitor mark, on both the installed and not-yet-installed cards.
+  defp card_display_name(name, fallback) do
+    if computer_use_plugin?(name), do: "Computer Use", else: fallback
+  end
+
+  defp plugin_card_logo(plugin) do
+    if computer_use_plugin?(plugin.name) do
+      @computer_use_logo_uri
+    else
+      plugin_asset_data_uri(plugin, "logo") || plugin_asset_data_uri(plugin, "icon")
+    end
+  end
+
+  defp catalog_card_logo(entry) do
+    if computer_use_plugin?(entry.name) do
+      @computer_use_logo_uri
+    else
+      index_logo_data_uri(entry.logo)
+    end
   end
 
   defp asset_data_uri(nil, _plugin_dir), do: nil
