@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-06-26
+## [0.4.0] - 2026-06-27
 
 ### Added — Media Generation (M15)
 - `generate_image` built-in tool over a modular `FermixCore.Media.Backend`
@@ -141,6 +141,49 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   buffered turn — one timeout table instead of a bespoke per-feature knob. The
   review claim-lock TTL derives from that same value. Hand-edited
   `extraction_timeout_ms` entries in `config.toml` are ignored.
+
+### Changed — Reply-path performance
+- Cut redundant per-iteration work on the agent reply path, behavior-preserving
+  (telemetry, security decisions, and trace routing are unchanged): the
+  turn-invariant tool-schema byte metrics are now computed once per turn and
+  carried in `provider_state` instead of re-encoded on every provider call
+  (Anthropic / OpenAI Responses / Codex / xAI); the sandbox resolves its config
+  and symlink-resolving protected-roots list once per shell command instead of
+  twice; and `Trace.TelemetryHandler` reads each event's definition from its
+  handler config rather than rebuilding and linear-scanning the definition list
+  on every emitted event.
+
+### Changed — Auto-compaction triggers on real provider token usage
+- Preflight auto-compaction now gates on the real provider-reported
+  `context_tokens` (the same measure the post-delivery pass already uses),
+  tracked per conversation in `MainAgent` (pruned, written off the reply path)
+  and read through `turn_state` — instead of a `byte_size/4` estimate dispatched
+  through a tiktoken NIF that never existed. The dead NIF reflection is removed;
+  a single byte-length estimate remains only for the compactor's per-message
+  split. Cold conversations with no prior measurement skip the preflight
+  cleanly (the post-delivery pass still catches them).
+
+### Changed — Agent operating principles (prompt)
+- Two `FERMIX.md` rules drawn from live traces: change runtime state through the
+  owning tool or config, never by editing the source, database, or config it
+  runs on; and treat a fact tool-verified earlier in the same conversation as
+  current evidence — answer a restatement from it and re-verify only when the
+  state could have changed, rather than re-running the whole investigation.
+
+### Fixed — web_fetch crash on non-UTF-8 pages
+- `web_fetch` raised on a page served in a non-UTF-8 charset (e.g. Latin-1): the
+  unicode-flagged regex in the HTML text renderer hit invalid UTF-8 bytes and
+  crashed the tool (and would have broken JSON-encoding the result). The body is
+  now normalized to valid UTF-8 at the fetch boundary (invalid sequences →
+  U+FFFD; valid bodies pass through unchanged), so the whole pipeline and the
+  returned text are valid UTF-8.
+
+### Fixed — Phantom empty Opik traces from late stream:block events
+- In block streaming, a `stream:block` telemetry event firing after the turn's
+  trace had already closed lazily resurrected a parentless, empty trace that the
+  sweep then exported to Opik (the "empty trace after each query"). Late
+  `:block` events now attach only if the session is still open and otherwise
+  drop, mirroring the `:seal`/`:discard` handling.
 
 ### Fixed — Assistant Name reconcile on boot
 - `IDENTITY.md` was seeded once and never rewritten, so changing
