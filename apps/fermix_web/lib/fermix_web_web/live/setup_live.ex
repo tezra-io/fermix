@@ -1198,7 +1198,7 @@ defmodule FermixWebWeb.SetupLive do
   defp format_index_error(reason), do: Redaction.format(reason)
 
   defp plugin_card(plugin, snapshot, yanked_installed) do
-    enabled? = plugin.name in enabled_plugins(snapshot)
+    {enabled?, status} = plugin_card_state(plugin, snapshot)
 
     %{
       name: plugin.name,
@@ -1211,10 +1211,34 @@ defmodule FermixWebWeb.SetupLive do
       secret_prompt: Map.get(plugin.auth, :prompt),
       account: PluginStatus.account_label(plugin),
       enabled?: enabled?,
-      status: PluginStatus.status(plugin),
+      status: status,
+      checkable?: not computer_use_plugin?(plugin.name),
       missing_config: missing_config_entries(plugin),
       yanked_version: Map.get(yanked_installed, plugin.name)
     }
+  end
+
+  # Computer use is config-gated (`[fermix_core.computer_use]`), not a registry
+  # `enabled_plugins` entry, and its readiness is OS-permission based. Once its
+  # signed sidecar installs it becomes a registry plugin and lands here — so mirror
+  # the catalog card's flags instead of the generic registry status, which would
+  # read `:not_configured` + "Enable" for an already-on feature. `checkable?` is
+  # false for it too: the registry health check requires `Status.status == :ready`,
+  # which a config-gated sidecar never reaches, so the Check button would mislead.
+  defp plugin_card_state(plugin, snapshot) do
+    if computer_use_plugin?(plugin.name) do
+      computer_use_card_state(snapshot)
+    else
+      {plugin.name in enabled_plugins(snapshot), PluginStatus.status(plugin)}
+    end
+  end
+
+  defp computer_use_card_state(snapshot) do
+    cond do
+      not computer_use_config_enabled?(snapshot) -> {false, :not_configured}
+      ComputerUse.ready?() -> {true, :ready}
+      true -> {true, :partial}
+    end
   end
 
   # The card's config form (§4.4): one input per missing required manifest
@@ -1241,10 +1265,11 @@ defmodule FermixWebWeb.SetupLive do
       latest: entry.latest,
       mcp?: "mcp" in entry.rails,
       compat: entry.compat,
-      # Computer use never installs as a registry plugin, so it lives in the catalog
-      # list even once on. These flags let the card show its real state (Disable +
-      # Ready/Needs setup) instead of a perpetual "Enable"; false for every other
-      # catalog entry (which leaves the list the moment it installs).
+      # Until its sidecar installs, computer use shows here as a catalog entry; the
+      # config flag can already be on (enabled, then the binary removed), so reflect
+      # its real state (Disable + Ready/Needs setup) instead of a bare "Enable".
+      # Once installed it moves to the installed list and renders via plugin_card,
+      # which mirrors these flags. False for every other catalog entry.
       enabled?: computer_use_plugin?(entry.name) and computer_use_config_enabled?(snapshot),
       ready?: computer_use_plugin?(entry.name) and ComputerUse.ready?()
     }

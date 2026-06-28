@@ -3,7 +3,7 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
   Installs and locates the computer-use native sidecar binary through Fermix's
   existing signed plugin-distribution pipeline (docs/design/COMPUTER_USE.md §1f).
 
-  The sidecar ships as a catalog/index entry (`computer-use-sidecar`) carrying one
+  The sidecar ships as a catalog/index entry (`computer_use_sidecar`) carrying one
   signed per-target binary artifact and NO agent tools. `install/0` runs it through
   `Dist.Installer.run_install` — resolve → sha256 → cosign → extract → atomic
   activate — so a binary that injects synthetic input into the live desktop is
@@ -28,7 +28,7 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
   alias FermixCore.Plugins.Dist.Store
   alias FermixCore.Setup.ConfigStore
 
-  @plugin_name "computer-use-sidecar"
+  @plugin_name "computer_use_sidecar"
   @command "fermix-computer-use"
 
   @spec plugin_name() :: String.t()
@@ -44,7 +44,7 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
   @doc """
   Absolute path the runtime/`PortDriver` should spawn. Resolution order:
 
-    1. A `dev_local` build, if present — `<[fermix_core.plugins] dev_local>/computer-use-sidecar/bin/<target>/fermix-computer-use`.
+    1. A `dev_local` build, if present — `<[fermix_core.plugins] dev_local>/computer_use_sidecar/bin/<target>/fermix-computer-use`.
        This is the plugin-author loop: `cargo build` the sidecar (native/computer-use-sidecar/)
        into a dev_local checkout and test without a signed release.
     2. Otherwise the installed catalog binary, resolved live through the store's

@@ -1,7 +1,120 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-11T10:35:03Z",
+  "generated_at": "2026-06-28T15:46:18Z",
   "plugins": [
+    {
+      "name": "agentmail",
+      "display_name": "AgentMail",
+      "category": "productivity",
+      "description": "Create agent-owned email inboxes; send, read, and reply to mail.",
+      "short_description": "Give the agent its own email inboxes",
+      "developer_name": "Fermix",
+      "brand_color": "#000000",
+      "logo": {
+        "mime": "image/png",
+        "data_base64": "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"
+      },
+      "auth_type": "api_key",
+      "auth_provider": null,
+      "rails": [
+        "http"
+      ],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-06-28T03:19:17Z",
+          "min_core_version": "0.4.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/agentmail/v1.0.0/agentmail-1.0.0.tar.gz",
+              "sha256": "0f71c6eec7fc96381154bccbf4fe28a571c84d3e28feb373de04520446d7978b",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/agentmail/v1.0.0/agentmail-1.0.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/agentmail/v1.0.0/agentmail-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "computer_use_sidecar",
+      "display_name": "Computer Use Sidecar",
+      "category": "system",
+      "description": "Signed native host-control sidecar (screenshot + input) for Fermix computer-use. Supported platforms: Apple Silicon (M-series) macOS and Linux x86_64 \u2014 Intel Macs are not supported. Off by default; requires explicit enable and OS permission grants.",
+      "short_description": null,
+      "developer_name": null,
+      "brand_color": null,
+      "logo": null,
+      "auth_type": "none",
+      "auth_provider": null,
+      "rails": [],
+      "latest": "0.1.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "0.1.0",
+          "published_at": "2026-06-28T15:44:44Z",
+          "min_core_version": "0.4.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "linux-x86_64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-linux-x86_64.tar.gz",
+              "sha256": "13a2cf26d37db10f02a61b4da53dfe6fc7ef09cddfbd1f69db2ead6de571e564",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-linux-x86_64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-linux-x86_64.tar.gz.pem"
+            },
+            {
+              "target": "macos-aarch64",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-macos-aarch64.tar.gz",
+              "sha256": "f24dadf9af25a7a5967b3a56a98351fd5c7327ab92cac5c4074bacf2d60c88db",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-macos-aarch64.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/computer_use_sidecar/v0.1.0/computer_use_sidecar-0.1.0-macos-aarch64.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "discord",
+      "display_name": "Discord",
+      "category": "communication",
+      "description": "Read Discord servers, channels, messages, and members.",
+      "short_description": "Read your Discord servers from Fermix",
+      "developer_name": "Fermix",
+      "brand_color": "#5865F2",
+      "logo": {
+        "mime": "image/svg+xml",
+        "data_base64": "PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0iIzU4NjVGMiIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIiByb2xlPSJpbWciIGFyaWEtbGFiZWw9IkRpc2NvcmQiPgo8cGF0aCBkPSJNMjAuMzE3IDQuMzY5OGExOS43OTEzIDE5Ljc5MTMgMCAwMC00Ljg4NTEtMS41MTUyLjA3NDEuMDc0MSAwIDAwLS4wNzg1LjAzNzFjLS4yMTEuMzc1My0uNDQ0Ny44NjQ4LS42MDgzIDEuMjQ5NS0xLjg0NDctLjI3NjItMy42OC0uMjc2Mi01LjQ4NjggMC0uMTYzNi0uMzkzMy0uNDA1OC0uODc0Mi0uNjE3Ny0xLjI0OTVhLjA3Ny4wNzcgMCAwMC0uMDc4NS0uMDM3IDE5LjczNjMgMTkuNzM2MyAwIDAwLTQuODg1MiAxLjUxNS4wNjk5LjA2OTkgMCAwMC0uMDMyMS4wMjc3Qy41MzM0IDkuMDQ1OC0uMzE5IDEzLjU3OTkuMDk5MiAxOC4wNTc4YS4wODI0LjA4MjQgMCAwMC4wMzEyLjA1NjFjMi4wNTI4IDEuNTA3NiA0LjA0MTMgMi40MjI4IDUuOTkyOSAzLjAyOTRhLjA3NzcuMDc3NyAwIDAwLjA4NDItLjAyNzZjLjQ2MTYtLjYzMDQuODczMS0xLjI5NTIgMS4yMjYtMS45OTQyYS4wNzYuMDc2IDAgMDAtLjA0MTYtLjEwNTdjLS42NTI4LS4yNDc2LTEuMjc0My0uNTQ5NS0xLjg3MjItLjg5MjNhLjA3Ny4wNzcgMCAwMS0uMDA3Ni0uMTI3N2MuMTI1OC0uMDk0My4yNTE3LS4xOTIzLjM3MTgtLjI5MTRhLjA3NDMuMDc0MyAwIDAxLjA3NzYtLjAxMDVjMy45Mjc4IDEuNzkzMyA4LjE4IDEuNzkzMyAxMi4wNjE0IDBhLjA3MzkuMDczOSAwIDAxLjA3ODUuMDA5NWMuMTIwMi4wOTkuMjQ2LjE5ODEuMzcyOC4yOTI0YS4wNzcuMDc3IDAgMDEtLjAwNjYuMTI3NiAxMi4yOTg2IDEyLjI5ODYgMCAwMS0xLjg3My44OTE0LjA3NjYuMDc2NiAwIDAwLS4wNDA3LjEwNjdjLjM2MDQuNjk4Ljc3MTkgMS4zNjI4IDEuMjI1IDEuOTkzMmEuMDc2LjA3NiAwIDAwLjA4NDIuMDI4NmMxLjk2MS0uNjA2NyAzLjk0OTUtMS41MjE5IDYuMDAyMy0zLjAyOTRhLjA3Ny4wNzcgMCAwMC4wMzEzLS4wNTUyYy41MDA0LTUuMTc3LS44MzgyLTkuNjczOS0zLjU0ODUtMTMuNjYwNGEuMDYxLjA2MSAwIDAwLS4wMzEyLS4wMjg2ek04LjAyIDE1LjMzMTJjLTEuMTgyNSAwLTIuMTU2OS0xLjA4NTctMi4xNTY5LTIuNDE5IDAtMS4zMzMyLjk1NTUtMi40MTg5IDIuMTU3LTIuNDE4OSAxLjIxMDggMCAyLjE3NTcgMS4wOTUyIDIuMTU2OCAyLjQxOSAwIDEuMzMzMi0uOTU1NSAyLjQxODktMi4xNTY5IDIuNDE4OXptNy45NzQ4IDBjLTEuMTgyNSAwLTIuMTU2OS0xLjA4NTctMi4xNTY5LTIuNDE5IDAtMS4zMzMyLjk1NTQtMi40MTg5IDIuMTU2OS0yLjQxODkgMS4yMTA4IDAgMi4xNzU3IDEuMDk1MiAyLjE1NjggMi40MTkgMCAxLjMzMzItLjk0NiAyLjQxODktMi4xNTY4IDIuNDE4OVoiLz4KPC9zdmc+Cg=="
+      },
+      "auth_type": "api_key",
+      "auth_provider": null,
+      "rails": [
+        "http"
+      ],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-06-28T03:19:17Z",
+          "min_core_version": "0.4.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/discord/v1.0.0/discord-1.0.0.tar.gz",
+              "sha256": "eba2a8341d271bd0b91b9092fc1b5650633942545c702a19ed2bfa6b2f623be7",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/discord/v1.0.0/discord-1.0.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/discord/v1.0.0/discord-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
     {
       "name": "github",
       "display_name": "GitHub",
@@ -183,6 +296,43 @@
               "sha256": "35fe7d1037319d87f8704ea0e88750a6ced4f5362b539a702acb83d2cc5d9d6a",
               "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.0/obsidian-1.0.0.tar.gz.sig",
               "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/obsidian/v1.0.0/obsidian-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "slack",
+      "display_name": "Slack",
+      "category": "communication",
+      "description": "Read Slack channels, messages, threads, and members.",
+      "short_description": "Read your Slack workspace from Fermix",
+      "developer_name": "Fermix",
+      "brand_color": "#611F69",
+      "logo": {
+        "mime": "image/svg+xml",
+        "data_base64": "PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCA1MTIgNTEyIiBmaWxsPSJub25lIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIGFyaWEtbGFiZWw9IlNsYWNrIiByb2xlPSJpbWciIHN0cm9rZS13aWR0aD0iNzgiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCI+CjxwYXRoIGQ9Im0wIDBINTEyVjUxMkgwIiBmaWxsPSIjZmZmIi8+CjxwYXRoIHN0cm9rZT0iIzM2YzVmMCIgZD0ibTExMCAyMDdoOTdtMC05N2guMXYtLjEiLz4KPHBhdGggc3Ryb2tlPSIjMmViNjdkIiBkPSJtMzA1IDExMHY5N205NyAwdi4xaC4xIi8+CjxwYXRoIHN0cm9rZT0iI2VjYjIyZSIgZD0ibTQwMiAzMDVoLTk3bTAgOTdoLS4xdi4xIi8+CjxwYXRoIHN0cm9rZT0iI2UwMWU1YSIgZD0iTTExMCAzMDVoLjF2LjFtOTcgMHY5NyIvPgo8L3N2Zz4K"
+      },
+      "auth_type": "api_key",
+      "auth_provider": null,
+      "rails": [
+        "http"
+      ],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-06-28T03:19:16Z",
+          "min_core_version": "0.4.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/slack/v1.0.0/slack-1.0.0.tar.gz",
+              "sha256": "8668debd3a4f8799f4a944c867b289a05783f52f6e76eb1d8a3cd135d6193d29",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/slack/v1.0.0/slack-1.0.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/slack/v1.0.0/slack-1.0.0.tar.gz.pem"
             }
           ]
         }
