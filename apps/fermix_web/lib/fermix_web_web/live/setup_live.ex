@@ -7,6 +7,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -795,8 +796,26 @@ defmodule FermixWebWeb.SetupLive do
   defp running_doctor_result(channels) do
     %{
       provider: :running,
-      channels: Enum.map(channels, &running_channel_probe/1)
+      channels: Enum.map(channels, &running_channel_probe/1),
+      auth_tokens: auth_tokens_result()
     }
+  end
+
+  # The token-freshness check is offline and instant, so it resolves up front
+  # alongside the running provider/channel probes rather than going through the
+  # async flow. Same definition of "stale" as the per-provider badge and the CLI
+  # `fermix doctor` (FermixCore.Setup.Doctor.stale_token_profiles/0).
+  defp auth_tokens_result do
+    case Doctor.stale_token_profiles() do
+      {:ok, []} ->
+        %{status: :ok, detail: "All stored tokens are fresh."}
+
+      {:ok, names} ->
+        %{status: :warn, detail: "Reconnect needed: #{Enum.join(names, ", ")}"}
+
+      {:error, reason} ->
+        %{status: :error, detail: "Couldn't read the auth store: #{Redaction.format(reason)}"}
+    end
   end
 
   defp running_channel_probe(%{config_key: key, name: name}) do
@@ -1826,8 +1845,16 @@ defmodule FermixWebWeb.SetupLive do
 
   defp codex_auth_summary do
     case Store.read(:openai_codex) do
-      {:ok, entry} -> %{connected?: true, account: codex_account_label(entry), error: nil}
-      {:error, reason} -> %{connected?: false, account: nil, error: codex_auth_error(reason)}
+      {:ok, entry} ->
+        %{
+          connected?: true,
+          stale?: TokenExpiry.stale?(entry.expires_at),
+          account: codex_account_label(entry),
+          error: nil
+        }
+
+      {:error, reason} ->
+        %{connected?: false, account: nil, error: codex_auth_error(reason)}
     end
   rescue
     error in ArgumentError ->
@@ -1985,8 +2012,11 @@ defmodule FermixWebWeb.SetupLive do
   # connected, no error".
   defp oauth_profile_summary(profile) do
     case Store.read(profile) do
-      {:ok, _entry} -> %{connected?: true, error: nil}
-      {:error, reason} -> %{connected?: false, error: codex_auth_error(reason)}
+      {:ok, entry} ->
+        %{connected?: true, stale?: TokenExpiry.stale?(entry.expires_at), error: nil}
+
+      {:error, reason} ->
+        %{connected?: false, error: codex_auth_error(reason)}
     end
   rescue
     error in ArgumentError ->

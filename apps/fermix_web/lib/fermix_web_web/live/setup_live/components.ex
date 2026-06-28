@@ -746,10 +746,15 @@ defmodule FermixWebWeb.SetupLive.Components do
   end
 
   defp codex_auth_badge_class(_auth, true), do: "badge badge-warning badge-sm"
+
+  defp codex_auth_badge_class(%{connected?: true, stale?: true}, false),
+    do: "badge badge-warning badge-sm"
+
   defp codex_auth_badge_class(%{connected?: true}, false), do: "badge badge-success badge-sm"
   defp codex_auth_badge_class(_auth, false), do: "badge badge-warning badge-sm"
 
   defp codex_auth_badge_label(_auth, true), do: "Waiting"
+  defp codex_auth_badge_label(%{connected?: true, stale?: true}, false), do: "Reconnect needed"
   defp codex_auth_badge_label(%{connected?: true}, false), do: "Connected"
   defp codex_auth_badge_label(_auth, false), do: "Needs auth"
 
@@ -2507,6 +2512,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       assigns
       |> assign(:provider_result, provider_probe_result(assigns.result))
       |> assign(:channel_results, channel_probe_results(assigns.result))
+      |> assign(:auth_tokens, auth_tokens_probe_result(assigns.result))
 
     ~H"""
     <section class="rounded-box border border-base-300 p-4">
@@ -2550,6 +2556,21 @@ defmodule FermixWebWeb.SetupLive.Components do
             </span>
           </li>
         </ul>
+      </div>
+
+      <div class="mt-4 border-t border-base-300 pt-4">
+        <h3 class="font-semibold">Auth tokens</h3>
+        <p :if={is_nil(@auth_tokens)} class="mt-2 text-sm text-base-content/70">
+          Stored OAuth token freshness is checked with the probe.
+        </p>
+        <div :if={@auth_tokens} class="mt-2 flex items-start justify-between gap-3 text-sm">
+          <p class={["min-w-0", channel_probe_text_class(@auth_tokens.status)]}>
+            {@auth_tokens.detail}
+          </p>
+          <span class={channel_probe_badge_class(@auth_tokens.status)}>
+            {channel_probe_label(@auth_tokens.status)}
+          </span>
+        </div>
       </div>
     </section>
     """
@@ -2867,6 +2888,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp channel_probe_results(nil), do: nil
   defp channel_probe_results(%{channels: channels}) when is_list(channels), do: channels
   defp channel_probe_results(_result), do: nil
+
+  defp auth_tokens_probe_result(%{auth_tokens: result}), do: result
+  defp auth_tokens_probe_result(_result), do: nil
 
   defp channel_probe_text_class(:ok), do: "text-success"
   defp channel_probe_text_class(:warn), do: "text-warning"

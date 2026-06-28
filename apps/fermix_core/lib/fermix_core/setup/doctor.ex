@@ -19,6 +19,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Memory.CompactionConfig
@@ -112,6 +113,21 @@ defmodule FermixCore.Setup.Doctor do
     provider = active_provider()
     probe_provider(provider, opts)
   end
+
+  @doc """
+  Offline freshness sweep over the auth store: the sorted profile names whose
+  access token is stale (well past expiry — `TokenExpiry.stale?/1`), i.e. dormant
+  and likely needing re-auth. No network. Shared by `fermix doctor` and the web
+  setup doctor pane so both define "stale" the same way.
+  """
+  @spec stale_token_profiles() :: {:ok, [String.t()]} | {:error, term()}
+  def stale_token_profiles do
+    with {:ok, profiles} <- Store.list_profiles() do
+      {:ok, profiles |> Enum.filter(&stale_profile?/1) |> Enum.map(&elem(&1, 0)) |> Enum.sort()}
+    end
+  end
+
+  defp stale_profile?({_profile, entry}), do: TokenExpiry.stale?(entry.expires_at)
 
   @spec probe_readiness(keyword()) :: readiness_probe()
   def probe_readiness(opts \\ []) do

@@ -2,6 +2,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.Doctor.Checks
+  alias FermixCore.Auth.Store
 
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
@@ -815,4 +816,53 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  describe "auth_token_expiry/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-auth-expiry")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      :ok
+    end
+
+    test "ok when there is no auth file" do
+      assert %{name: "auth tokens", status: :ok} = Checks.auth_token_expiry()
+    end
+
+    test "ok when no token is stale" do
+      :ok = Store.write(:openai_codex, token_entry(3600))
+
+      assert %{status: :ok} = Checks.auth_token_expiry()
+    end
+
+    test "warns and names only the stale profiles" do
+      :ok = Store.write(:openai_codex, token_entry(-7200))
+      :ok = Store.write("gmail:primary", token_entry(3600))
+
+      assert %{status: :warn, detail: detail} = Checks.auth_token_expiry()
+      assert detail =~ "openai_codex"
+      refute detail =~ "gmail:primary"
+    end
+  end
+
+  defp token_entry(expires_in_seconds) do
+    %{
+      auth_mode: "oauth2",
+      provider: "google",
+      tokens: %{access_token: "at", refresh_token: "rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), expires_in_seconds, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
+  end
 end

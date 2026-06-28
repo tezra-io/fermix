@@ -471,6 +471,28 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @doc """
+  Offline token-expiry sweep: flags any OAuth profile in the auth store whose
+  access token is stale (well past expiry — `TokenExpiry.stale?/1`), i.e. dormant
+  and likely needing re-auth. The cheap, no-network counterpart to `auth_probe`
+  (which lives behind `--full`): a token that lapsed from disuse fails silently
+  until its provider is next selected. Used providers refresh on access, so this
+  only fires for genuinely idle ones.
+  """
+  @spec auth_token_expiry() :: result()
+  def auth_token_expiry do
+    case ProviderProbe.stale_token_profiles() do
+      {:ok, []} ->
+        ok("auth tokens", "no stale OAuth tokens")
+
+      {:ok, names} ->
+        warn("auth tokens", "stale, re-auth may be needed: #{Enum.join(names, ", ")}")
+
+      {:error, reason} ->
+        fail("auth tokens", "could not read auth store: #{inspect(reason)}")
+    end
+  end
+
   @spec auth_file_permissions() :: result()
   def auth_file_permissions do
     path = AuthStore.path()

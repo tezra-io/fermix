@@ -600,6 +600,49 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Voice companion"
     end
 
+    test "ChatGPT OAuth badge warns 'Reconnect needed' when the stored token is stale", %{
+      conn: conn
+    } do
+      Store.write(:openai_codex, %{
+        auth_mode: "chatgpt",
+        provider: "openai",
+        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), -7200, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Reconnect needed"
+    end
+
+    test "ChatGPT OAuth badge shows 'Connected' when the stored token is fresh", %{conn: conn} do
+      Store.write(:openai_codex, %{
+        auth_mode: "chatgpt",
+        provider: "openai",
+        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Connected"
+      refute html =~ "Reconnect needed"
+    end
+
     test "provider pane offers canonical reasoning effort levels (xhigh, not minimal)", %{
       conn: conn
     } do
@@ -2023,6 +2066,36 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = render_until(view, "bot @fermix_test authenticated")
       assert html =~ "openai gpt-5.5 responded"
       assert html =~ "bot @fermix_test authenticated"
+    end
+
+    test "run probe reports stale stored auth tokens", %{conn: conn} do
+      Req.Test.set_req_test_to_shared()
+      stub_setup_doctor_probe()
+
+      Store.write(:openai_codex, %{
+        auth_mode: "chatgpt",
+        provider: "openai",
+        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), -7200, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-live-test", default_model: "gpt-5.5"]
+      )
+
+      Application.put_env(:fermix_web, :doctor_probe_opts,
+        req_options: [plug: {Req.Test, :setup_doctor_probe}]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      html = view |> element("button", "Run probe") |> render_click()
+
+      assert html =~ "Auth tokens"
+      assert html =~ "Reconnect needed: openai_codex"
     end
   end
 

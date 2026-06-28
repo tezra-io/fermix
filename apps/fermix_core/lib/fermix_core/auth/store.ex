@@ -43,6 +43,32 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
+  @doc """
+  Lists every profile in the auth file with its normalized entry. Entries with no
+  usable access token are skipped — they are not live credentials, so there is
+  nothing to refresh or expiry-check. A missing auth file is the honest empty
+  result, not an error.
+  """
+  @spec list_profiles(Path.t()) :: {:ok, [{String.t(), entry()}]} | {:error, term()}
+  def list_profiles(path \\ default_path()) when is_binary(path) do
+    with {:ok, raw} <- File.read(path),
+         {:ok, data} <- Jason.decode(raw),
+         {:ok, providers} <- providers_map(data) do
+      {:ok, Enum.flat_map(providers, &normalize_listed/1)}
+    else
+      {:error, :enoent} -> {:ok, []}
+      {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+      {:error, _reason} = err -> err
+    end
+  end
+
+  defp normalize_listed({profile, entry}) do
+    case normalize(profile, entry) do
+      {:ok, normalized} -> [{profile, normalized}]
+      {:error, {:invalid_auth_entry, _profile, _reason}} -> []
+    end
+  end
+
   @spec write(provider(), entry(), Path.t()) :: :ok | {:error, term()}
   def write(provider, %{} = entry, path \\ default_path())
       when is_atom(provider) or is_binary(provider) do
