@@ -165,7 +165,7 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.success == false
 
     assert result.error =~
-             "at least one of task, schedule, description, skill_name, provider/model, or delivery"
+             "at least one of task, schedule, description, skill_name, provider/model, clear_route_pin, or delivery"
   end
 
   test "schedule_job exposes and persists runner timeout controls", %{context: context} do
@@ -638,6 +638,108 @@ defmodule FermixCore.Tools.JobsTest do
     assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
     assert job.provider == nil
     assert job.model == nil
+  end
+
+  test "update_job exposes the clear_route_pin parameter" do
+    params = UpdateJob.parameters()
+    assert Map.has_key?(params.properties, :clear_route_pin)
+    assert params.properties.clear_route_pin.type == "boolean"
+    assert params.properties.clear_route_pin.description =~ "default routing"
+  end
+
+  test "update_job clears a pinned route back to default routing", %{context: context} do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Unpin Me",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, %{provider: "anthropic", model: "claude-opus-4-8"}} =
+             Repo.get_scheduled_job(job_id, server: context.memory_repo)
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "clear_route_pin" => true}, context)
+
+    assert updated.success == true
+    payload = Jason.decode!(updated.output)
+    assert payload["provider"] == nil
+    assert payload["model"] == nil
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == nil
+    assert job.model == nil
+  end
+
+  test "update_job rejects clearing the route pin together with provider/model", %{
+    context: context
+  } do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Conflicting Pin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, result} =
+             UpdateJob.execute(
+               %{
+                 "job_id" => job_id,
+                 "clear_route_pin" => true,
+                 "provider" => "openai",
+                 "model" => "gpt-5"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "clear_route_pin cannot be combined with provider or model"
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
+  end
+
+  test "update_job leaves an existing route pin when all route fields are omitted", %{
+    context: context
+  } do
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Untouched Pin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Go.",
+                 "provider" => "anthropic",
+                 "model" => "claude-opus-4-8"
+               },
+               context
+             )
+
+    job_id = Jason.decode!(created.output)["id"]
+
+    assert {:ok, updated} =
+             UpdateJob.execute(%{"job_id" => job_id, "task" => "Go elsewhere."}, context)
+
+    assert updated.success == true
+
+    assert {:ok, job} = Repo.get_scheduled_job(job_id, server: context.memory_repo)
+    assert job.task_prompt == "Go elsewhere."
+    assert job.provider == "anthropic"
+    assert job.model == "claude-opus-4-8"
   end
 
   test "schedule_job binds a job to an existing skill and surfaces it", %{context: context} do

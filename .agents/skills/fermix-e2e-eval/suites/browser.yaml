@@ -1,0 +1,162 @@
+suite: browser
+title: "Browser — interactive web navigation, forms, and extraction"
+description: >
+  The integrated UAT for the `browser` tool's INTERACTIVE surface — open a live
+  page, read its rendered content, fill and submit a real form, click through to
+  a linked page, and extract a specific fact. This is the live-LLM complement to
+  two narrower tiers: `browser_vision` (the screenshot -> model-vision path only)
+  and the deterministic in-process unit suites (BrowserActTest, ProfileServer,
+  Policy, Snapshot), which prove the CDP plumbing without a model in the loop.
+
+  Browser is the tool for JS/dynamic/interactive pages — distinct from
+  `web_search` (static facts, no URL) and `web_fetch` (one known server-rendered
+  URL). The cases here are written so the browser is the natural route: they need
+  rendering, form interaction, or a click-through that a single fetch can't do.
+  Per the UAT discipline they state a real-user intent and let the model pick the
+  tool; the only route gates are a `tools_any: [browser]` sanity on the
+  interactive cases and a `tools_none: [browser]` discipline gate proving a plain
+  fact does NOT spin up a browser.
+
+  REQUIRES the dev daemon to have a working browser runtime (Chrome) plus
+  outbound network, AND the external test sites to be reachable
+  (example.com / iana.org, httpbin.org, en.wikipedia.org, news.ycombinator.com).
+  Cases are severity:normal because a missing/blocked browser or a down test site
+  is an environment condition, not a code defect — the deterministic act/snapshot
+  mechanics live in the unit suites. The form case is the strongest signal: the
+  submitted value is echoed back, so a matching reply proves the whole
+  open -> fill -> submit -> read chain ran, not just that a page opened.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: render_and_read
+    title: "Open a live page in the browser and report its rendered content"
+    severity: normal
+    tags: [browser, web, read]
+    cases:
+      - id: example_domain_heading
+        # Stable anchor: example.com is IANA-operated and effectively never
+        # changes, so the heading is a reliable content assertion.
+        query: "Open https://example.com in a browser and tell me the main heading on the page and what the page is for."
+        expect:
+          tools_any: [browser]
+          main_model_matches: "."
+          reply_matches: "(?i)example domain"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
+        rubric: >
+          Loads example.com in the browser and reports its actual rendered
+          content — the "Example Domain" heading and that the domain is reserved
+          for use in illustrative examples/documentation. Fails if it claims it
+          cannot browse or never opened the page.
+      - id: hacker_news_front
+        # Genuinely dynamic: proves a live read beyond training data. Content
+        # changes constantly, so gate on browser-used + non-refusal + a lenient
+        # "this is a real HN report" signal; the rubric covers quality.
+        query: "Open Hacker News (https://news.ycombinator.com) in the browser and tell me the title of one of the stories currently on the front page."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)story|news|hacker|point|comment|front|top|title|headline|posted|upvote"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Actually opens Hacker News and reports a plausible current front-page
+          story title (a real, specific headline rather than a generic placeholder
+          or a claim that it cannot browse).
+
+  - id: fill_and_submit
+    title: "Fill in a web form and submit it, then read back the result"
+    severity: normal
+    tags: [browser, web, form, interactive]
+    cases:
+      - id: httpbin_form_ada
+        # httpbin's form POSTs to /post, which echoes the submitted fields as
+        # JSON — so a reply containing the name proves fill+submit+read ran end
+        # to end, not just that the page opened.
+        query: "Go to https://httpbin.org/forms/post, set the customer name field to 'Ada Lovelace', submit the form, and tell me what the server received back for the customer name."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)ada lovelace"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse|submit)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Opens the httpbin form, fills the customer-name field with "Ada
+          Lovelace", submits it, and reports that the server echoed that same
+          value back. Fails if it fabricates a result without submitting or
+          claims it cannot interact with the form.
+      - id: httpbin_form_grace
+        query: "On https://httpbin.org/forms/post, enter 'Grace Hopper' as the customer name and submit it, then confirm what name the response shows was received."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)grace hopper"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse|submit)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Submits the form with the customer name "Grace Hopper" and reports the
+          server echoing that value back, demonstrating a real fill+submit round
+          trip.
+
+  - id: multi_step_navigate
+    title: "Navigate across pages — follow a link or search, then extract"
+    severity: normal
+    tags: [browser, web, navigate, interactive]
+    cases:
+      - id: example_follow_link
+        # Deterministic interaction: example.com's only link ("More
+        # information...") goes to iana.org, so clicking it and reporting the
+        # destination proves a real click-through, not a single fetch.
+        query: "Open https://example.com in the browser, click the 'More information' link on the page, and tell me what site you land on."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)iana|internet assigned numbers"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse|click)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Opens example.com, follows its "More information" link, and reports
+          landing on IANA (iana.org / Internet Assigned Numbers Authority) —
+          showing it actually clicked through rather than guessing.
+      - id: wikipedia_search_turing
+        query: "Go to en.wikipedia.org, use the site's search to look up 'Alan Turing', open the article, and tell me what field he is best known for."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)comput|mathematic|cryptanaly|logic|code[- ]?break"
+          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse|search)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Navigates Wikipedia (via its search), opens the Alan Turing article, and
+          reports a field grounded in the page — computer science / mathematics /
+          cryptanalysis — rather than a generic or refused answer.
+
+  - id: browser_route_discipline
+    title: "A plain fact is answered without spinning up a browser"
+    severity: normal
+    tags: [browser, discipline, route]
+    cases:
+      - id: capital_no_browser
+        # Discipline gate (mirrors computer_use/prefers_purpose_built_tools): a
+        # known fact must not launch Chrome. tools_none only forbids the browser;
+        # answering directly or via web_search is fine.
+        query: "What's the capital of France?"
+        expect:
+          tools_none: [browser]
+          reply_matches: "(?i)paris"
+          max_cost_usd: 0.5
+        rubric: >
+          Answers "Paris" directly (or via a lightweight lookup) without opening a
+          browser for a fact that needs no live page.
+      - id: percentage_no_browser
+        query: "What's 18% of 250?"
+        expect:
+          tools_none: [browser]
+          reply_matches: "(?<!\\d)45(?!\\d)"
+          max_cost_usd: 0.5
+        rubric: >
+          Computes 45 without opening a browser — a plain arithmetic question is
+          not a reason to launch Chrome.

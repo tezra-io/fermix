@@ -194,4 +194,104 @@ defmodule FermixCore.Providers.FailoverTest do
       refute_received {:attempt, :xai}
     end
   end
+
+  describe "run_chain/3 — same-provider retry" do
+    test "retries a transient connection_unavailable on a single route, then succeeds" do
+      conn = Error.transport(:openai_codex, Codex, :connection_unavailable)
+
+      {attempt, calls} =
+        stub_attempt(%{openai_codex: [{:error, conn}, {:error, conn}, {:ok, :done}]})
+
+      assert {:ok, :done} =
+               Failover.run_chain([route(:openai_codex, "m")], attempt,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      assert calls.() == %{openai_codex: 3}
+    end
+
+    test "bounds retries by max_retries then surfaces the error" do
+      conn = Error.transport(:openai_codex, Codex, :connection_unavailable)
+      {attempt, calls} = stub_attempt(%{openai_codex: [{:error, conn}]})
+
+      assert {:error, ^conn} =
+               Failover.run_chain([route(:openai_codex, "m")], attempt,
+                 max_retries: 2,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      # 1 initial attempt + 2 retries
+      assert calls.() == %{openai_codex: 3}
+    end
+
+    test "connection_unavailable retries the same route and never fails over (network-wide)" do
+      conn = Error.transport(:openai_codex, Codex, :connection_unavailable)
+
+      {attempt, calls} =
+        stub_attempt(%{openai_codex: [{:error, conn}, {:ok, :done}], openai: [{:ok, :never}]})
+
+      assert {:ok, :done} =
+               Failover.run_chain([route(:openai_codex, "m1"), route(:openai, "m2")], attempt,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      # route 2 is never attempted
+      assert calls.() == %{openai_codex: 2}
+    end
+
+    test "a retryable+eligible kind with more routes fails over instead of same-retry" do
+      timeout = Error.transport(:openai_codex, Codex, :timeout)
+
+      {attempt, calls} =
+        stub_attempt(%{openai_codex: [{:error, timeout}], openai: [{:ok, :done}]})
+
+      assert {:ok, :done} =
+               Failover.run_chain([route(:openai_codex, "m1"), route(:openai, "m2")], attempt,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      # no same-retry on route 1: one attempt each
+      assert calls.() == %{openai_codex: 1, openai: 1}
+    end
+
+    test "a vetoing retryable? predicate (e.g. content already streamed) blocks retry" do
+      conn = Error.transport(:openai_codex, Codex, :connection_unavailable)
+      {attempt, calls} = stub_attempt(%{openai_codex: [{:error, conn}]})
+
+      assert {:error, ^conn} =
+               Failover.run_chain([route(:openai_codex, "m")], attempt,
+                 retryable?: fn _reason -> false end,
+                 retry_delay_fn: fn _ms -> :ok end
+               )
+
+      assert calls.() == %{openai_codex: 1}
+    end
+  end
+
+  # Stub attempt_fn backed by an Agent: pops the next response per provider,
+  # repeats the last response once exhausted, and records call counts.
+  defp stub_attempt(responses) do
+    {:ok, agent} = start_supervised({Agent, fn -> %{remaining: responses, calls: %{}} end})
+
+    attempt = fn {route_key, _opts} ->
+      Agent.get_and_update(agent, &pop_response(&1, route_key.provider))
+    end
+
+    {attempt, fn -> Agent.get(agent, & &1.calls) end}
+  end
+
+  defp pop_response(st, provider) do
+    {result, rest} = next_response(Map.fetch!(st.remaining, provider))
+
+    st = %{
+      st
+      | remaining: Map.put(st.remaining, provider, rest),
+        calls: Map.update(st.calls, provider, 1, &(&1 + 1))
+    }
+
+    {result, st}
+  end
+
+  defp next_response([only]), do: {only, [only]}
+  defp next_response([head | tail]), do: {head, tail}
 end

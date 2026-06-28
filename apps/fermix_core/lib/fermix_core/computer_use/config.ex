@@ -201,7 +201,10 @@ defmodule FermixCore.ComputerUse.Config do
   end
 
   defp lookup(config, key) when is_map(config) do
-    Map.get(config, key) || Map.get(config, Atom.to_string(key))
+    case Map.fetch(config, key) do
+      {:ok, value} -> value
+      :error -> Map.get(config, Atom.to_string(key))
+    end
   end
 
   defp keyword_string_value(config, string_key) do

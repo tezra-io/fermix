@@ -138,7 +138,11 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.routing_overrides()
       assert result.status == :fail
       assert result.detail =~ "cron_model"
-      assert result.detail =~ "not a model offered by provider :openai"
+      # The pinned model is named, and the mismatch with the openai provider is
+      # reported (now raised by the RoutingOverrides pairing guard and surfaced
+      # through the check's ArgumentError rescue).
+      assert result.detail =~ "claude-haiku-4-5"
+      assert result.detail =~ "openai"
     end
   end
 

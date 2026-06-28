@@ -1,6 +1,19 @@
 defmodule Mix.Tasks.Fermix.Bench do
   @moduledoc """
   Run deterministic Fermix latency benchmarks.
+
+  Captures per-stage p50/p95/p99 for each scenario and writes a JSON report.
+
+      mix fermix.bench --list                                # show scenarios
+      mix fermix.bench --output bench/before.json            # capture a baseline
+      mix fermix.bench --runs 5 --output bench/after.json    # stable gating capture
+      mix fermix.bench.diff bench/before.json bench/after.json
+
+  For a trustworthy regression gate pass `--runs N`: the report is the
+  median-merge of N back-to-back runs, which collapses the run-to-run variance a
+  single run shows on the parallel-contention scenarios. The gate
+  (`mix fermix.bench.diff`) compares the p50 median with absolute floors, so
+  microsecond jitter never reads as a regression.
   """
 
   use Mix.Task
@@ -16,6 +29,7 @@ defmodule Mix.Tasks.Fermix.Bench do
     warmup: :integer,
     output: :string,
     compare: :string,
+    runs: :integer,
     list: :boolean
   ]
 
@@ -35,12 +49,37 @@ defmodule Mix.Tasks.Fermix.Bench do
   end
 
   defp run_bench(opts) do
+    runs = max(Keyword.get(opts, :runs, 1), 1)
     compare_path = opts |> Keyword.get(:compare) |> project_path()
+    output = opts |> Keyword.get(:output, "bench/current.json") |> project_path()
 
-    opts
-    |> runner_opts()
-    |> Runner.run()
-    |> print_result(compare_path)
+    # Capture each pass WITHOUT writing (output: nil returns the report instead of
+    # persisting), median-merge, then write the aggregate once with the real
+    # output path threaded back so `--compare` and the summary find it.
+    base_opts = opts |> runner_opts() |> Keyword.put(:output, nil)
+
+    case capture_runs(base_opts, runs) do
+      {:ok, reports} ->
+        report = reports |> Reporter.aggregate() |> put_output(output)
+        Reporter.write_json(report, output)
+        print_result({:ok, report}, compare_path)
+
+      {:error, reason} ->
+        Mix.raise("benchmark failed: #{inspect(reason)}")
+    end
+  end
+
+  defp capture_runs(base_opts, runs) do
+    Enum.reduce_while(1..runs, {:ok, []}, fn _i, {:ok, acc} ->
+      case Runner.run(base_opts) do
+        {:ok, report} -> {:cont, {:ok, [report | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp put_output(report, output) do
+    Map.update(report, :config, %{output: output}, &Map.put(&1, :output, output))
   end
 
   defp runner_opts(opts) do
@@ -71,10 +110,6 @@ defmodule Mix.Tasks.Fermix.Bench do
       {:ok, diff} -> print_diff(diff)
       {:error, reason} -> Mix.raise("benchmark compare failed: #{inspect(reason)}")
     end
-  end
-
-  defp print_result({:error, reason}, _compare_path) do
-    Mix.raise("benchmark failed: #{inspect(reason)}")
   end
 
   defp print_summary(report) do
@@ -116,7 +151,7 @@ defmodule Mix.Tasks.Fermix.Bench do
     |> Enum.sort_by(fn row -> {row.scenario, row.stage} end)
     |> Enum.each(fn row ->
       Mix.shell().info(
-        "  #{row.scenario}/#{row.stage}: #{row.old_p95_us}us -> #{row.new_p95_us}us #{row.status}"
+        "  #{row.scenario}/#{row.stage}: p50 #{row.old_p50_us}us -> #{row.new_p50_us}us #{row.status}"
       )
     end)
 

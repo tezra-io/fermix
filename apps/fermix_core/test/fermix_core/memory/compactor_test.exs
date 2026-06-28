@@ -75,6 +75,19 @@ defmodule FermixCore.Memory.CompactorTest do
     %{repo: repo_name}
   end
 
+  test "estimate_tokens is a byte-length heuristic (~4 bytes/token), no NIF" do
+    # There is no tokenizer NIF (FermixNif exports only hello/0); the estimate is
+    # div(byte_size + 3, 4) for both the binary and the message-list clauses.
+    assert Compactor.estimate_tokens("") == 0
+    assert Compactor.estimate_tokens("abcd") == 1
+    assert Compactor.estimate_tokens("abcde") == 2
+    assert Compactor.estimate_tokens(String.duplicate("x", 400)) == 100
+
+    # List clause joins "role: content" with "\n" before the same heuristic.
+    expected = div(byte_size("user: hi") + 3, 4)
+    assert Compactor.estimate_tokens([%{role: "user", content: "hi"}]) == expected
+  end
+
   test "passes under-budget messages through unchanged" do
     messages = [
       %{role: "system", content: "keep this system prompt"},

@@ -243,6 +243,28 @@ defmodule FermixOpik.AggregationTest do
     assert state.traces == %{}
   end
 
+  test "a draft-stream :block arriving after the turn closed does not resurrect a phantom trace" do
+    {state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 1_000},
+         %{provider: :openai_codex, model: "gpt-5-codex", status: :ok, session_id: "main-1"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+        # In block streaming a paced :block edit can flush just AFTER the turn's
+        # message closed and shipped the trace — like :seal/:discard, this must
+        # not spawn an empty phantom trace (the reported symptom: thread-less,
+        # input/output-less "agent:main" traces of only stream:* spans).
+        {[:fermix, :channel, :stream], %{duration_us: 50_000, block_index: 23},
+         %{channel: "telegram", session_id: "main-1", phase: :block, status: :ok}}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "telegram:c1"
+    refute Enum.any?(spans, &(&1.name == "stream:block"))
+    assert state.traces == %{}
+  end
+
   test "a scheduled job run is its own trace with a job thread id" do
     {_state, closed} =
       run([

@@ -170,6 +170,28 @@ with `--judge`, one judge turn per case (`cli:e2e-judge-…`). To manage the clu
   need to unset it. (Pre-`8bc080f` you did; the flag alone used to switch the
   sibling `fermix_opik` app on during the umbrella test run.)
 
+## generate_image suite (config-gated, spends image credits)
+
+`--suite generate_image` exercises the `generate_image` builtin (create + edit)
+against the OpenAI image backend. Two preconditions, both fail loud rather than
+silently mis-grade:
+
+1. The dev daemon must have the backend enabled —
+   `[fermix_core.tools.generate_image]` with `backend = "openai"` — or the tool
+   is not registered and the two labeled route-sanity scenarios fail their
+   `tools_any: [generate_image]` gate (the "wrong daemon" signal).
+2. The CLI channel has **no media reply port**: every successful generation is
+   rendered and written under the sandbox `media/` floor, then delivery fails
+   with `media_unsupported` — so the `generate_image` tool span carries
+   `error_info`. That tool error is **expected** (same as the `media` /
+   send_attachment suite), so these cases do not assert `no_tool_errors`; they
+   gate on the turn completing and an honest reply (no fabricated delivery).
+
+Image generation is modeled as a provider call with `tokens: %{}` (zero trace
+cost), but each case still spends real OpenAI image credits for the picture it
+renders before delivery fails. Run it explicitly, not in a blind `--all`:
+`uv run bin/run_eval.py --suite generate_image`.
+
 ## Cost & latency (warn the user before `--all`)
 
 The dev daemon runs `gpt-5.x` at high effort: **~$0.2–0.6 and ~15–45 s per turn**.
