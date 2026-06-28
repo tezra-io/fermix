@@ -255,7 +255,8 @@ defmodule FermixCore.Plugins.Http.Interpreter do
   defp classify(%{status: 401}, opts) do
     case Keyword.get(opts, :auth_type, :none) do
       :oauth2 ->
-        Tool.error("authorization expired or insufficient — reauthorize this plugin")
+        name = plugin(opts)
+        Tool.error("#{name} needs reconnection. Run `fermix plugins auth reauthorize #{name}`.")
 
       :api_key ->
         Tool.error("API key rejected — update it with `fermix plugins auth set #{plugin(opts)}`")
