@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-27
+
+### Added — Slack, Discord, and AgentMail plugins
+- The three M16 static-secret (`api_key`) communication plugins now ship in the
+  bundled catalog: `fermix plugins install slack | discord | agentmail`, then
+  `enable` and set the credential (`SLACK_BOT_TOKEN` / `DISCORD_BOT_TOKEN` /
+  `AGENTMAIL_API_KEY`). 0.4.0 shipped the api_key HTTP-rail runtime that runs
+  them, but the plugin packages themselves were not yet released, so they did
+  not appear in the catalog. They are now published as signed releases in
+  `fermix-plugins` and synced into the bundled plugin index (`index.json`).
+
 ## [0.4.0] - 2026-06-27
 
 ### Added — Media Generation (M15)
@@ -28,11 +39,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   also removes the ~50s Telegram album delay (the flush timer no longer sits
   behind the `getUpdates` long-poll). New CLI `ask --attach PATH`.
 
-### Added — Plugins (M16: Slack / Discord / AgentMail)
-- Three HTTP-rail `api_key` plugins — Slack, Discord, and AgentMail — with the
-  shared static-secret slice across plugin secret paths, migration, and the
-  setup CLI / wizard / doctor / web UI. Slack uses a bot token (`api_key`),
-  with OAuth scaffolding retained for deferred `search.messages`.
+### Added — Plugin runtime for static-secret (api_key) integrations (M16)
+- The HTTP-rail `api_key` plugin runtime — the shared static-secret slice across
+  plugin secret paths, migration, and the setup CLI / wizard / doctor / web UI
+  (Bearer auth by default, `Bot` for providers like Discord/Slack), with OAuth
+  scaffolding retained for deferred `search.messages`. This shipped the runtime
+  that *runs* static-secret plugins; the Slack, Discord, and AgentMail plugin
+  **packages** were not released in 0.4.0 and so did not appear in the catalog —
+  they ship in 0.4.1.
 
 ### Added — Soul Self-Curation (`/soul`)
 - Owner-only `/soul` channel command and the `SoulCuration` core module: an
