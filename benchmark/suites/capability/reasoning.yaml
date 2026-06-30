@@ -1,0 +1,48 @@
+suite: cap_reasoning
+title: "Capability — multi-step reasoning (strict numeric/exact answers)"
+description: >
+  Multi-step word problems and logic with a single verifiable answer. No tools
+  needed — this isolates the model's reasoning THROUGH Fermix's scaffold (compare
+  against the raw-model baseline via run_baseline.py for the reasoning uplift).
+  Each instructs a strict final answer so numeric/exact scoring is fair.
+defaults:
+  judge: false
+  timeout_ms: 180000
+
+scenarios:
+  - id: word_problems
+    title: "Multi-step arithmetic word problems"
+    severity: normal
+    tags: [capability, reasoning, math]
+    cases:
+      - id: age_puzzle
+        query: >
+          Alice is twice as old as Bob. In 5 years, the sum of their ages will be
+          40. How old is Bob now? Reply with ONLY the number.
+        score: { match: numeric, expected: 10, tolerance: 0 }
+      - id: widget_rate
+        query: >
+          If 5 machines make 5 widgets in 5 minutes, how many minutes do 100
+          machines take to make 100 widgets? Reply with ONLY the number.
+        score: { match: numeric, expected: 5, tolerance: 0 }
+      - id: discount_chain
+        query: >
+          A $200 item is marked up 50%, then put on sale for 40% off the marked-up
+          price. What is the final price in dollars? Reply with ONLY the number.
+        score: { match: numeric, expected: 180, tolerance: 0.01 }
+
+  - id: logic
+    title: "Short logic / deduction"
+    severity: normal
+    tags: [capability, reasoning, logic]
+    cases:
+      - id: sequence
+        query: >
+          What is the next number in the sequence 2, 6, 12, 20, 30, ...? Reply with
+          ONLY the number.
+        score: { match: numeric, expected: 42, tolerance: 0 }
+      - id: letter_count
+        query: >
+          How many times does the letter "r" appear in the word "strawberry"?
+          Reply with ONLY the number.
+        score: { match: numeric, expected: 3, tolerance: 0 }

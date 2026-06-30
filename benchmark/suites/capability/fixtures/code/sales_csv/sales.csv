@@ -1,0 +1,9 @@
+region,product,units,unit_price
+North,A,10,2.50
+North,B,3,9.99
+North,C,5,2.50
+South,A,4,9.99
+South,B,20,2.50
+West,A,7,2.50
+West,B,2,15.00
+East,A,0,9.99
