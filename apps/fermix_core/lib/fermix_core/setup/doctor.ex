@@ -22,6 +22,9 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
+  alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
@@ -128,6 +131,37 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp stale_profile?({_profile, entry}), do: TokenExpiry.stale?(entry.expires_at)
+
+  @doc """
+  Computer-use OS-permission state for the operator surfaces (`fermix doctor` and
+  the web setup card), so both define readiness the same way. Returns one structured
+  result:
+
+    * `%{state: :disabled}`      — the feature is off (nothing to check).
+    * `%{state: :not_installed}` — enabled, but the native sidecar isn't installed.
+    * `%{state: :probed, ...}`   — the live grant breakdown (`screen_capture`,
+      `input_control`, `display_server`, `platform`) from a non-prompting sidecar
+      probe.
+
+  `{:error, reason}` only when an installed sidecar could not be probed. The probe
+  is the only path that spawns the sidecar, so the disabled/not-installed cases stay
+  cheap.
+  """
+  @spec computer_use_permissions() :: {:ok, map()} | {:error, term()}
+  def computer_use_permissions do
+    cond do
+      not ComputerUse.enabled?() -> {:ok, %{state: :disabled}}
+      not SidecarInstaller.installed?() -> {:ok, %{state: :not_installed}}
+      true -> probe_computer_use()
+    end
+  end
+
+  defp probe_computer_use do
+    case ComputerUseProbe.run() do
+      {:ok, result} -> {:ok, Map.put(result, :state, :probed)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @spec probe_readiness(keyword()) :: readiness_probe()
   def probe_readiness(opts \\ []) do

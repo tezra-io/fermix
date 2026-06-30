@@ -586,6 +586,14 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Guest scoped"
     end
 
+    test "doctor pane surfaces a computer-use permission section", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      assert html =~ "Computer use"
+    end
+
     test "Save & next saves the current step and advances", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 

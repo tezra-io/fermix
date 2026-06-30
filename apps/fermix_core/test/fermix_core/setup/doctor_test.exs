@@ -92,6 +92,21 @@ defmodule FermixCore.Setup.DoctorTest do
     path
   end
 
+  describe "computer_use_permissions/0" do
+    setup do
+      original = Application.get_env(:fermix_core, :computer_use, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :computer_use, original) end)
+      :ok
+    end
+
+    test "reports :disabled without spawning the sidecar when the feature is off" do
+      # Establish the precondition rather than trusting global env (hermetic rule):
+      # disabled short-circuits before installed?/probe, so this is deterministic.
+      Application.put_env(:fermix_core, :computer_use, enabled: false)
+      assert {:ok, %{state: :disabled}} = Doctor.computer_use_permissions()
+    end
+  end
+
   describe "active_provider/0" do
     test "defaults to :openai when agent.provider is unset" do
       Application.delete_env(:fermix_core, :agent)

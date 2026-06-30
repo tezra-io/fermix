@@ -222,6 +222,7 @@ name = "fermix-computer-use"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "core-foundation",
  "enigo",
  "image 0.25.10",
  "serde",

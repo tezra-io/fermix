@@ -2513,6 +2513,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       |> assign(:provider_result, provider_probe_result(assigns.result))
       |> assign(:channel_results, channel_probe_results(assigns.result))
       |> assign(:auth_tokens, auth_tokens_probe_result(assigns.result))
+      |> assign(:computer_use, computer_use_probe_result(assigns.result))
 
     ~H"""
     <section class="rounded-box border border-base-300 p-4">
@@ -2569,6 +2570,21 @@ defmodule FermixWebWeb.SetupLive.Components do
           </p>
           <span class={channel_probe_badge_class(@auth_tokens.status)}>
             {channel_probe_label(@auth_tokens.status)}
+          </span>
+        </div>
+      </div>
+
+      <div class="mt-4 border-t border-base-300 pt-4">
+        <h3 class="font-semibold">Computer use</h3>
+        <p :if={is_nil(@computer_use)} class="mt-2 text-sm text-base-content/70">
+          Computer-use OS permissions are checked with the probe.
+        </p>
+        <div :if={@computer_use} class="mt-2 flex items-start justify-between gap-3 text-sm">
+          <p class={["min-w-0", channel_probe_text_class(@computer_use.status)]}>
+            {@computer_use.detail}
+          </p>
+          <span class={channel_probe_badge_class(@computer_use.status)}>
+            {channel_probe_label(@computer_use.status)}
           </span>
         </div>
       </div>
@@ -2891,6 +2907,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp auth_tokens_probe_result(%{auth_tokens: result}), do: result
   defp auth_tokens_probe_result(_result), do: nil
+
+  defp computer_use_probe_result(%{computer_use: result}), do: result
+  defp computer_use_probe_result(_result), do: nil
 
   defp channel_probe_text_class(:ok), do: "text-success"
   defp channel_probe_text_class(:warn), do: "text-warning"

@@ -4,8 +4,9 @@ defmodule FermixCore.ComputerUse.ProtocolTest do
   alias FermixCore.ComputerUse.Protocol
 
   describe "read_only?/1" do
-    test "screenshot, mouse_move, and wait are read-only" do
-      for action <- ~w(screenshot mouse_move wait), do: assert(Protocol.read_only?(action))
+    test "screenshot, inspect, mouse_move, and wait are read-only" do
+      for action <- ~w(screenshot inspect mouse_move wait),
+          do: assert(Protocol.read_only?(action))
     end
 
     test "clicks, type, key, drag, scroll are NOT read-only" do
@@ -23,6 +24,58 @@ defmodule FermixCore.ComputerUse.ProtocolTest do
     test "screenshot carries an optional display" do
       assert {:ok, %{"action" => "screenshot", "display" => 1}} =
                Protocol.validate(%{"action" => "screenshot", "display" => 1})
+    end
+
+    test "screenshot carries an optional zoom region" do
+      region = %{"x" => 100, "y" => 50, "w" => 300, "h" => 200}
+
+      assert {:ok, %{"action" => "screenshot", "region" => ^region}} =
+               Protocol.validate(%{"action" => "screenshot", "region" => region})
+    end
+
+    test "a click carries the same zoom region (maps coords back through the crop)" do
+      region = %{"x" => 100, "y" => 50, "w" => 300, "h" => 200}
+
+      assert {:ok, req} =
+               Protocol.validate(%{
+                 "action" => "left_click",
+                 "x" => 10,
+                 "y" => 20,
+                 "region" => region
+               })
+
+      assert req["region"] == region
+    end
+
+    test "scroll and drag also thread the zoom region through to the sidecar" do
+      region = %{"x" => 100, "y" => 50, "w" => 300, "h" => 200}
+
+      assert {:ok, scroll} =
+               Protocol.validate(%{
+                 "action" => "scroll",
+                 "x" => 1,
+                 "y" => 2,
+                 "direction" => "down",
+                 "amount" => 3,
+                 "region" => region
+               })
+
+      assert scroll["region"] == region
+
+      assert {:ok, drag} =
+               Protocol.validate(%{
+                 "action" => "left_click_drag",
+                 "from" => %{"x" => 1, "y" => 2},
+                 "to" => %{"x" => 3, "y" => 4},
+                 "region" => region
+               })
+
+      assert drag["region"] == region
+    end
+
+    test "inspect with coordinates" do
+      assert {:ok, %{"action" => "inspect", "x" => 12, "y" => 34}} =
+               Protocol.validate(%{"action" => "inspect", "x" => 12, "y" => 34})
     end
 
     test "left_click with coordinates and modifiers" do
@@ -105,6 +158,16 @@ defmodule FermixCore.ComputerUse.ProtocolTest do
 
     test "click with a non-integer coordinate" do
       assert {:error, _} = Protocol.validate(%{"action" => "left_click", "x" => 1.5, "y" => 0})
+    end
+
+    test "region with a non-positive dimension is rejected" do
+      assert {:error, msg} =
+               Protocol.validate(%{
+                 "action" => "screenshot",
+                 "region" => %{"x" => 0, "y" => 0, "w" => 0, "h" => 10}
+               })
+
+      assert msg =~ "region must be an object"
     end
 
     test "unknown modifier" do
