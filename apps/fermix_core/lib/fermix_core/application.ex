@@ -162,16 +162,27 @@ defmodule FermixCore.Application do
   # combining `:finch` with `:connect_options`.
   @http_conn_max_idle_ms 15_000
 
+  # Finch's default pool count is 1 — a single pool process per host. Right
+  # after wake-from-sleep that lone process can block ~5s tearing down a stale
+  # socket (a synchronous `:ssl.close`), and every checkout queued behind it
+  # times out as "excess queuing for connections" — which has silently dropped
+  # scheduled Telegram deliveries. Running a few pool processes per host lets a
+  # checkout be served while one process is mid-teardown, so the wider
+  # `pool_timeout` (see `FermixCore.Net.HttpClient`) is a rarely-needed floor
+  # rather than the common path.
+  @http_pool_count 2
+
   # Public (@doc false) because Finch has no API to read pool config back,
-  # so tests pin these literals here — a regression to the :infinity
-  # default would otherwise be invisible to the suite.
+  # so tests pin these literals here — a regression to the :infinity / count:1
+  # defaults would otherwise be invisible to the suite.
   @doc false
   @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
   def finch_pools do
     %{
-      :default => [conn_max_idle_time: @http_conn_max_idle_ms],
+      :default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count],
       "https://chatgpt.com" => [
         conn_max_idle_time: @http_conn_max_idle_ms,
+        count: @http_pool_count,
         conn_opts: [transport_opts: [timeout: 5_000]]
       ]
     }
