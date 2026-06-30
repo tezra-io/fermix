@@ -140,6 +140,40 @@ defmodule FermixCore.Net.HttpClientTest do
     assert pools["https://chatgpt.com"][:conn_opts] == [transport_opts: [timeout: 5_000]]
   end
 
+  test "the shared pool runs multiple pool processes so one blocked teardown can't starve checkouts" do
+    # Finch's default pool count is 1: a single per-host pool process. Right
+    # after wake-from-sleep that lone process can block ~5s tearing down a
+    # stale socket, starving the very checkout that triggered it ("excess
+    # queuing for connections"). Several pool processes mean a checkout can be
+    # served while one process is busy.
+    pools = FermixCore.Application.finch_pools()
+
+    assert pools[:default][:count] == 2
+    assert pools["https://chatgpt.com"][:count] == 2
+  end
+
+  test "request/2 widens the pool-checkout timeout so a briefly-blocked pool is waited out" do
+    # With the Finch default 5s pool_timeout, a checkout that races a ~5s
+    # post-wake stale-socket teardown has no margin and fails. A wider
+    # checkout budget waits the teardown out instead of dropping the request.
+    parent = self()
+
+    req =
+      Req.new(
+        url: "https://example.test",
+        method: :post,
+        json: %{},
+        retry: false,
+        adapter: fn request ->
+          send(parent, {:pool_timeout, request.options[:pool_timeout]})
+          {request, Req.Response.new(status: 200, body: "ok")}
+        end
+      )
+
+    assert {:ok, %Req.Response{status: 200}} = HttpClient.request(req, "test")
+    assert_received {:pool_timeout, 15_000}
+  end
+
   test "a Finch pool-exhaustion raise is returned as {:error, exception}, not propagated" do
     # Finch reraises a RuntimeError (not an {:error, _} tuple) when a pool
     # checkout exceeds its queue timeout ("excess queuing for connections").

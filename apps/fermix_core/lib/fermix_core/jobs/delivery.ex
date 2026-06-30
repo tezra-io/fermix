@@ -7,6 +7,8 @@ defmodule FermixCore.Jobs.Delivery do
   contract dynamically.
   """
 
+  require Logger
+
   alias FermixCore.Net.HttpClient
 
   @type delivery_result :: {:ok, String.t()} | {:error, term()}
@@ -122,14 +124,38 @@ defmodule FermixCore.Jobs.Delivery do
       # its delivery. Retry the send with bounded backoff — but only on the
       # transient connection-unavailable error, which means the request never
       # obtained a connection (so a retry cannot duplicate a sent message).
-      # Every other error fails fast.
+      # Every other error fails fast. Each attempt also waits out the shared
+      # 15s pool-checkout budget (see `FermixCore.Net.HttpClient`), so this
+      # loop is a wide-enough floor for a residual post-wake checkout timeout.
+      # Keep `max_attempts × pool_timeout + backoffs` under the outer
+      # `deliver_with_timeout` ceiling (`timeout_ms`) so a retry is never killed
+      # mid-flight into the no-retry `:delivery_timeout` path.
       Enum.reduce_while(1..max_attempts, {:error, :not_attempted}, fn attempt, _acc ->
-        adapter.send_message(target.destination, text, send_opts)
+        send_with_rescue(adapter, target.destination, text, send_opts)
         |> decide_delivery_attempt(attempt, max_attempts, backoff_ms)
       end)
     else
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # Some channel send paths surface the Finch pool-checkout timeout as a raised
+  # RuntimeError rather than an {:error, _} tuple (mirrors
+  # `FermixCore.Net.HttpClient.run/2`). Unwrapped inside the spawned delivery
+  # process, that raise crashes the run and silently drops the message — the
+  # `{:delivery_crashed, %RuntimeError{}}` failures seen in the live DB.
+  # Convert it to the {:error, exception} the retry loop already classifies, so
+  # a transient pool timeout is retried, not lost. Only RuntimeError is rescued
+  # — a programming error (ArgumentError, …) still crashes loud. Log before
+  # returning (mirrors `HttpClient.run/2`) so a genuine non-transient
+  # RuntimeError leaves a trace instead of being silently surfaced as a plain
+  # delivery failure.
+  defp send_with_rescue(adapter, destination, text, opts) do
+    adapter.send_message(destination, text, opts)
+  rescue
+    exception in [RuntimeError] ->
+      Logger.warning("Delivery send raised: #{Exception.message(exception)}")
+      {:error, exception}
   end
 
   defp decide_delivery_attempt(:ok, _attempt, _max_attempts, _backoff_ms) do

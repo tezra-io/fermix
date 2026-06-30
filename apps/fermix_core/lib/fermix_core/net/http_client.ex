@@ -52,9 +52,19 @@ defmodule FermixCore.Net.HttpClient do
   # to excess queuing for connections").
   @connection_unavailable_marker "unable to provide a connection"
 
+  # Pool-checkout (queue) timeout. Finch's default is 5_000ms, but the single
+  # per-host pool process can block ~5s tearing down a stale keep-alive socket
+  # right after the host wakes from sleep (a synchronous `:ssl.close` on a
+  # half-open socket) — starving the very checkout that triggered the teardown
+  # and surfacing as "excess queuing for connections". A wider checkout budget
+  # waits that teardown out instead of failing the request; paired with a
+  # `count > 1` pool (see `FermixCore.Application.finch_pools/0`) so the wait is
+  # the exception, not the rule. Applied to every shared-pool request.
+  @pool_checkout_timeout_ms 15_000
+
   @spec request(Req.Request.t(), String.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
   def request(%Req.Request{} = req, label) when is_binary(label) do
-    req = Req.merge(req, finch: FermixCore.Finch)
+    req = Req.merge(req, finch: FermixCore.Finch, pool_timeout: @pool_checkout_timeout_ms)
 
     case run(req, label) do
       {:error, %Req.TransportError{reason: reason}} when reason in @retry_reasons ->
