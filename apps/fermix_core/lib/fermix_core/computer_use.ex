@@ -19,19 +19,19 @@ defmodule FermixCore.ComputerUse do
   def enabled?, do: Config.enabled?()
 
   @doc """
-  Whether computer-use can actually run: enabled, the sidecar binary installed
-  (existing + executable, resolved through the plugin store), and OS permissions
-  granted. Drives the supervisor and tool registration.
+  Whether computer-use can actually run: enabled and the sidecar binary installed
+  (existing + executable, resolved through the plugin store). Drives the supervisor
+  and tool registration.
+
+  OS-permission state is deliberately NOT part of this gate. It is surfaced as an
+  operator-facing diagnostic instead (`ComputerUse.Probe`, shown in `fermix doctor`
+  and the setup card) for two reasons: probing requires spawning the sidecar — too
+  heavy for this hot path — and a read-only `screenshot` works without the
+  Accessibility grant, so a missing grant must INFORM the operator, not silently
+  hide the tool. See docs/design/COMPUTER_USE_V2.md, Phase A.
   """
   @spec ready?() :: boolean()
   def ready? do
-    config = Config.current()
-    config.enabled? and SidecarInstaller.installed?() and permissions_ok?(config)
+    Config.current().enabled? and SidecarInstaller.installed?()
   end
-
-  # Phase-1e TODO: a real readiness probe — macOS TCC (Screen Recording +
-  # Accessibility, both user-approval-only and silently-failing without) and the
-  # Linux/X11 dependency check. Until that lands the gate still holds, because
-  # `enabled?` is false by default and the sidecar binary is absent.
-  defp permissions_ok?(%Config{}), do: true
 end

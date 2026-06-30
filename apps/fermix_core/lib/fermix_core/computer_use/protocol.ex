@@ -10,8 +10,8 @@ defmodule FermixCore.ComputerUse.Protocol do
   a clear reason rather than forwarded to a process that drives real input.
   """
 
-  @actions ~w(screenshot left_click right_click double_click mouse_move left_click_drag scroll type key wait)
-  @read_only ~w(screenshot mouse_move wait)
+  @actions ~w(screenshot left_click right_click double_click mouse_move left_click_drag scroll type key wait inspect)
+  @read_only ~w(screenshot mouse_move wait inspect)
   @modifiers ~w(cmd ctrl alt shift)
   @scroll_directions ~w(up down left right)
   @max_type_bytes 10_000
@@ -74,8 +74,10 @@ defmodule FermixCore.ComputerUse.Protocol do
   end
 
   defp validate_action("screenshot", params) do
-    with {:ok, display} <- opt_display(params) do
-      {:ok, put_display(%{"action" => "screenshot"}, display)}
+    with {:ok, display} <- opt_display(params),
+         {:ok, region} <- opt_region(params) do
+      request = put_display(%{"action" => "screenshot"}, display)
+      {:ok, put_region(request, region)}
     end
   end
 
@@ -84,18 +86,31 @@ defmodule FermixCore.ComputerUse.Protocol do
     with {:ok, x} <- coord(params, "x"),
          {:ok, y} <- coord(params, "y"),
          {:ok, modifiers} <- opt_modifiers(params),
-         {:ok, display} <- opt_display(params) do
+         {:ok, display} <- opt_display(params),
+         {:ok, region} <- opt_region(params) do
       request = %{"action" => action, "x" => x, "y" => y}
       request = if modifiers == [], do: request, else: Map.put(request, "modifiers", modifiers)
-      {:ok, put_display(request, display)}
+      {:ok, put_region(put_display(request, display), region)}
+    end
+  end
+
+  defp validate_action("inspect", params) do
+    with {:ok, x} <- coord(params, "x"),
+         {:ok, y} <- coord(params, "y"),
+         {:ok, display} <- opt_display(params),
+         {:ok, region} <- opt_region(params) do
+      request = put_display(%{"action" => "inspect", "x" => x, "y" => y}, display)
+      {:ok, put_region(request, region)}
     end
   end
 
   defp validate_action("left_click_drag", params) do
     with {:ok, from} <- point(params, "from"),
          {:ok, to} <- point(params, "to"),
-         {:ok, display} <- opt_display(params) do
-      {:ok, put_display(%{"action" => "left_click_drag", "from" => from, "to" => to}, display)}
+         {:ok, display} <- opt_display(params),
+         {:ok, region} <- opt_region(params) do
+      request = put_display(%{"action" => "left_click_drag", "from" => from, "to" => to}, display)
+      {:ok, put_region(request, region)}
     end
   end
 
@@ -104,7 +119,8 @@ defmodule FermixCore.ComputerUse.Protocol do
          {:ok, y} <- coord(params, "y"),
          {:ok, direction} <- scroll_direction(params),
          {:ok, amount} <- positive(params, "amount"),
-         {:ok, display} <- opt_display(params) do
+         {:ok, display} <- opt_display(params),
+         {:ok, region} <- opt_region(params) do
       request = %{
         "action" => "scroll",
         "x" => x,
@@ -113,7 +129,7 @@ defmodule FermixCore.ComputerUse.Protocol do
         "amount" => amount
       }
 
-      {:ok, put_display(request, display)}
+      {:ok, put_region(put_display(request, display), region)}
     end
   end
 
@@ -203,4 +219,36 @@ defmodule FermixCore.ComputerUse.Protocol do
 
   defp put_display(request, nil), do: request
   defp put_display(request, display), do: Map.put(request, "display", display)
+
+  # A zoom rectangle in the full-screenshot pixel space — the coordinates the model
+  # reads off a normal screenshot. Passing the same `region` on a `screenshot` and the
+  # follow-up click maps the click back through the crop (COMPUTER_USE_V2.md Phase B).
+  defp opt_region(params) do
+    case Map.get(params, "region") do
+      nil -> {:ok, nil}
+      %{"x" => x, "y" => y, "w" => w, "h" => h} -> validate_region(x, y, w, h)
+      _other -> region_error()
+    end
+  end
+
+  defp validate_region(x, y, w, h) do
+    if region_dims_valid?(x, y, w, h) do
+      {:ok, %{"x" => x, "y" => y, "w" => w, "h" => h}}
+    else
+      region_error()
+    end
+  end
+
+  defp region_dims_valid?(x, y, w, h) do
+    Enum.all?([x, y, w, h], &is_integer/1) and x >= 0 and y >= 0 and w > 0 and h > 0
+  end
+
+  defp region_error do
+    {:error,
+     "region must be an object with non-negative integer x,y and positive integer w,h " <>
+       "(in the full-screenshot pixel space)"}
+  end
+
+  defp put_region(request, nil), do: request
+  defp put_region(request, region), do: Map.put(request, "region", region)
 end

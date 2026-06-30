@@ -38,6 +38,12 @@ xcap = "0.4"
 image = { version = "0.25", default-features = false, features = ["png"] }
 base64 = "0.22"
 
+# macOS Accessibility query (`inspect`): read the element under a point.
+# core-foundation handles CFString/CFType memory safety for the AX FFI. Already in
+# the tree transitively via xcap, so this adds no new compilation.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
 [profile.release]
 strip = true
 opt-level = "z"

@@ -797,7 +797,50 @@ defmodule FermixWebWeb.SetupLive do
     %{
       provider: :running,
       channels: Enum.map(channels, &running_channel_probe/1),
-      auth_tokens: auth_tokens_result()
+      auth_tokens: auth_tokens_result(),
+      computer_use: computer_use_permissions_result()
+    }
+  end
+
+  # Computer-use OS-permission state — same definition as the CLI `fermix doctor`
+  # `computer use` check (FermixCore.Setup.Doctor.computer_use_permissions/0). Only
+  # the enabled+installed case spawns the sidecar to probe; off/uninstalled resolve
+  # cheaply, so this stays on the synchronous up-front path like the token check.
+  defp computer_use_permissions_result do
+    case Doctor.computer_use_permissions() do
+      {:ok, %{state: :disabled}} ->
+        %{status: :ok, detail: "Off — computer use is disabled."}
+
+      {:ok, %{state: :not_installed}} ->
+        %{status: :warn, detail: "Enabled, but the helper isn't installed yet."}
+
+      {:ok, %{state: :probed} = probe} ->
+        computer_use_probe_detail(probe)
+
+      {:error, reason} ->
+        %{status: :error, detail: "Couldn't probe the helper: #{Redaction.format(reason)}"}
+    end
+  end
+
+  defp computer_use_probe_detail(%{screen_capture: true, input_control: true}) do
+    %{status: :ok, detail: "Screen capture and input control are granted."}
+  end
+
+  defp computer_use_probe_detail(%{screen_capture: true, input_control: false}) do
+    %{
+      status: :warn,
+      detail:
+        "Input control isn't granted — clicks and keystrokes are silently dropped. " <>
+          "On macOS, grant Accessibility in System Settings → Privacy & Security."
+    }
+  end
+
+  defp computer_use_probe_detail(%{screen_capture: false}) do
+    %{
+      status: :warn,
+      detail:
+        "Screen capture isn't granted. On macOS, grant Screen Recording in " <>
+          "System Settings → Privacy & Security."
     }
   end
 

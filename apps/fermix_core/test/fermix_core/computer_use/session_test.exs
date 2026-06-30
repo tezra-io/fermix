@@ -77,7 +77,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       assert {:error, {:host_start_refused, :scheduled}} =
                Session.start_link(
-                 config: Config.normalize(enabled: true, mode: :host),
+                 config: Config.normalize(enabled: true),
                  driver: {StubDriver, [test_pid: self()]},
                  origin: :scheduled
                )
@@ -99,7 +99,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      start_session(config: Config.normalize(enabled: true, mode: :host), origin: :voice)
+      start_session(config: Config.normalize(enabled: true), origin: :voice)
 
       assert_receive {:started, meta}
       assert meta.session_id == "cua_test"
@@ -184,6 +184,35 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       assert {:ok, result} = Session.execute(session, request)
       assert result == %{summary: "ok", image: nil}
+    end
+
+    test "an inspect response becomes a text summary describing the element (no image)" do
+      response = %{
+        "ok" => true,
+        "found" => true,
+        "role" => "AXButton",
+        "title" => "Delete",
+        "description" => nil,
+        "value" => nil
+      }
+
+      session = start_session(driver_opts: [response: response])
+
+      assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == nil
+      assert result.summary =~ "AXButton"
+      assert result.summary =~ "Delete"
+    end
+
+    test "an inspect miss reports no element" do
+      response = %{"ok" => true, "found" => false}
+      session = start_session(driver_opts: [response: response])
+
+      assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result == %{summary: "no UI element at that point", image: nil}
     end
 
     test "the action count increments per executed action" do

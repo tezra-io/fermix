@@ -80,13 +80,12 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   # The Session re-checks the origin gate in init; prechecking here returns a clean
   # `{:error, _}` instead of a supervisor `{:stop, _}` for the common refusal.
-  defp precheck_host_origin(%Config{mode: :host}, origin) do
+  # Computer-use is host-desktop control only, so the gate applies uniformly.
+  defp precheck_host_origin(%Config{}, origin) do
     if Safety.host_start_allowed?(origin),
       do: :ok,
       else: {:error, {:host_start_refused, origin}}
   end
-
-  defp precheck_host_origin(%Config{}, _origin), do: :ok
 
   defp default_driver do
     case SidecarInstaller.binary_path() do
