@@ -1,0 +1,83 @@
+suite: cap_web_research
+title: "Capability — live web research (single verifiable answer)"
+description: >
+  Realistic info-seeking tasks (the ~21% of real assistant use that needs live
+  data) — each reverse-designed (GAIA/AssistantBench style) to have ONE short,
+  stable, verifiable answer, with a built-in trap (offset fiscal calendars, a
+  common memory-vs-reality flip, set boundaries) so frontier models actually
+  diverge instead of all scoring 100%. Every gold was verified against a primary
+  source on 2026-06-30 (provenance below each case). A correct answer requires the
+  model to actually fetch/ground, not recall stale parametric memory.
+
+  PRECONDITION: the dev daemon's web_search + web_fetch must work, or ALL of these
+  fail uniformly (a daemon gap, not a model difference). Answers are stable
+  (closed fiscal years, fixed model-year EPA ratings, set-membership), but re-verify
+  if re-using much later.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: quant_lookup
+    title: "Find a specific current/quantitative figure"
+    severity: normal
+    tags: [capability, web, research]
+    cases:
+      - id: nvidia_rev_growth_fy24_fy25
+        query: >
+          NVIDIA's data-center boom blew up its top line. By how many billions of
+          US dollars did NVIDIA's TOTAL annual revenue grow from its fiscal year
+          2024 to its fiscal year 2025 (use the full-year revenue figures from its
+          annual results)? Reply with ONLY the number in billions, as a plain
+          decimal (e.g. 12.3) — no units, no commas, nothing else.
+        # FY2025 $130.5B − FY2024 $60.9B = $69.6B. Trap: NVIDIA's offset fiscal
+        # calendar invites the wrong year-pair. Source: nvidianews.nvidia.com
+        # "Financial Results for Fourth Quarter and Fiscal 2025". tol rejects "70".
+        score: { match: numeric, expected: 69.6, tolerance: 0.3 }
+
+      - id: irs_401k_limit_2026
+        query: >
+          What is the IRS employee elective-deferral contribution limit for a
+          401(k) plan, for someone under age 50, for tax year 2026? Reply with ONLY
+          the dollar amount as a plain number, no commas and no symbols
+          (e.g. 12345).
+        # $24,500 (up from $23,500 in 2025). Fresh fact (announced Nov 2025, Notice
+        # 2025-67) — correct answer is strong evidence of a live lookup. Source:
+        # irs.gov/newsroom "401(k) limit increases to $24,500 for 2026".
+        score: { match: numeric, expected: 24500, tolerance: 0 }
+
+      - id: rav4_crv_awd_hybrid_mpg
+        query: >
+          I'm cross-shopping the all-wheel-drive HYBRID versions of the 2024 Toyota
+          RAV4 and the 2024 Honda CR-V. According to the EPA's official ratings
+          (fueleconomy.gov), which of the two has the higher COMBINED MPG, and what
+          is that combined MPG figure? Reply with ONLY the winning model name and
+          its combined MPG, in the form 'RAV4: 39'.
+        # RAV4 Hybrid AWD = 39 combined (41/38) beats CR-V Hybrid AWD = 37 (40/34).
+        # Trap: the CR-V hybrid is commonly assumed the efficiency leader (memory vs
+        # live data). Sources: fueleconomy.gov IDs 47392 (RAV4), 46716 (CR-V).
+        score: { match: regex, expected: '(?i)(rav[\s-]?4[\s\S]{0,40}\b39\b|\b39\b[\s\S]{0,40}rav[\s-]?4)' }
+
+  - id: research_set_reasoning
+    title: "Reason over a researched set to a single member"
+    severity: normal
+    tags: [capability, web, research, reasoning]
+    cases:
+      - id: nato_21c_largest_population
+        query: >
+          Of all the countries that joined NATO in 2004 or later, which one has the
+          largest population today? Reply with ONLY the country name, nothing else.
+        # Romania (~19M) — most populous of the 2004+ accession set (Sweden ~10.6M,
+        # Bulgaria, Finland, ...). Trap: Poland/Czechia/Hungary joined in 1999, so
+        # excluded. Sources: NATO member-countries page, en.wikipedia Enlargement_of_NATO.
+        score: { match: contains, expected: "Romania" }
+
+      - id: eu_lowest_gdp_per_capita_top5
+        query: >
+          Take the five most populous member states of the European Union. Of those
+          five, which one has the LOWEST nominal GDP per capita according to the
+          latest IMF estimates? Reply with ONLY the country name, nothing else.
+        # Poland — the 5 most populous are DE, FR, IT, ES, PL (Romania/Netherlands
+        # are 6th/7th); Poland (~$31k) is lowest of those five. Sources: IMF WEO /
+        # en.wikipedia GDP-per-capita + EU demographics.
+        score: { match: contains, expected: "Poland" }

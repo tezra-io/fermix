@@ -1,16 +1,3 @@
----
-name: fermix-e2e-eval
-description: >
-  Run Fermix end-to-end behavioral evals. Drives realistic user queries into the
-  live Opik-enabled Fermix dev daemon (fermix ask → ~/.fermix-dev), pulls each
-  resulting trace from the local Opik instance, grades the trace against the
-  expected flow declared in YAML suites (structural gates + optional LLM judge),
-  and writes Markdown + HTML + JSON reports. Use when asked to "run the e2e eval",
-  "run the eval suites", "check the assistant end-to-end", grade behavior against
-  Opik traces, or verify a feature still works through the real agent path.
-allowed-tools: Bash, Read, Write, Edit
----
-
 # Fermix E2E Eval (Opik trace-based)
 
 This skill grades the **real** assistant: it sends realistic queries through the
@@ -33,6 +20,58 @@ YAML case  ──►  fermix ask --json --session <unique>   (FERMIX_HOME=~/.fer
 Correlation is exact: each case gets a unique `--session`, which becomes the Opik
 `thread_id` (`<channel>:<session>`). The runner polls Opik for that thread's trace.
 
+## Capability eval & cross-model ranking (`run_capability.py`)
+
+A second tier, distinct from the behavioral suites above. The behavioral runner
+asks *"did the agent use the right tools / stay in budget"* (pass/fail gates); the
+capability runner asks *"how good is the model at getting tasks done with Fermix's
+tools"* — an objective **task-success score**, ranked across models.
+
+```sh
+# Score the model the dev daemon currently serves (auto-detected from the trace):
+uv run bin/run_capability.py --trials 5                   # all public capability suites
+uv run bin/run_capability.py --suite cap_core --trials 3  # one suite
+uv run bin/run_capability.py --estimate --trials 5        # turn-count/cost plan, no spend
+uv run bin/run_capability.py --private --trials 5         # + the held-out split (gap check)
+uv run bin/run_capability.py --rank-only                  # re-render the leaderboard
+uv run bin/run_capability.py --check                      # preconditions only
+```
+
+A cadence `Makefile` wraps these (`make capability`, `make rank`, `make tests`, …);
+external public benchmarks (GAIA / Terminal-Bench / HAL / lm-eval) have their own
+runbook at `bench/RUNBOOK.md`. Phase 2 uplift: `bin/run_baseline.py` (raw arm) +
+`bin/run_uplift.py` (paired McNemar delta vs the Fermix arm).
+
+How it scores (see `docs/design/EVAL_CAPABILITY_SCORING.md`):
+- **Ground-truth tasks** live in `suites/capability/*.yaml` (knowledge, reasoning,
+  instruction-following, web, safety) — each case carries a `score:` block
+  (`match: exact|numeric|contains|regex|f1`, `expected`, optional `tolerance`)
+  graded by `evallib/scoring.py`. Closed-form tasks must instruct a strict final
+  answer (`exact`/`numeric` compare the whole reply; regexes are single-quoted in
+  YAML so backslashes survive). The private held-out split is **operator-supplied
+  OUTSIDE the repo** (`FERMIX_EVAL_HOLDOUT_DIR` / `--private-data`, run with
+  `--private`) — answers are never shipped in the skill (they'd be readable by any
+  agent iterating the eval); see `suites/capability/private/holdout.example.yaml`.
+- Rubric-only tasks use the LLM judge with `--judge`. **For a FAIR cross-model
+  ranking, the judge must be independent of the model under test** — set
+  `EVAL_JUDGE_BACKEND=openai` + `EVAL_JUDGE_API_KEY` (the default `fermix` backend
+  judges via the daemon = circular; the runner warns).
+- Each task runs **k trials**; results aggregate to **pass@1** (capability),
+  **pass^k** (reliability — all k pass), **tokens/✓** and **$/✓** (efficiency),
+  **p95 latency**, with **safety as a hard gate** (a `tools_none`/`reply_not_matches`
+  violation zeroes the task). `evallib/aggregate.py`.
+- Per run, results write to an **Opik experiment** (one per config, linked to the
+  existing traces by `trace_id`) + **feedback scores** on the traces, and upsert
+  into a cross-config **leaderboard** (`reports/capability/leaderboard.json`),
+  ranked by composite = 0.7·success + 0.3·efficiency (axis: `tokens` default,
+  provider-neutral; `cost` only where Opik priced the trace — OpenAI/Google).
+
+**Cross-MODEL sweep (operator-driven — we never restart your daemon):** point the
+dev daemon at the next provider+model in `~/.fermix-dev/config.toml`, restart it,
+run `run_capability.py` again. Each run auto-detects the served model and adds a
+leaderboard row; the board re-ranks. The matrix of rankable configs comes from
+`mix fermix.eval.matrix` (provider×model, generated from the live catalog).
+
 ## Preconditions (check these first, fail loud if missing)
 
 1. **Opik up**: `curl -s -m5 http://localhost:5173/api/v1/private/projects` returns JSON.
@@ -52,7 +91,7 @@ Run from the skill dir via `uv run` (or `./bin/run_eval.py` directly — its she
 invokes uv). The first run auto-fetches PyYAML:
 
 ```sh
-cd .claude/skills/fermix-e2e-eval
+cd benchmark
 uv run bin/run_eval.py --check              # verify preconditions only
 
 # Validate suites without spending tokens (no daemon calls):
