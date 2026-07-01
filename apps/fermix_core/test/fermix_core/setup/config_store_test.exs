@@ -820,7 +820,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
         providers: [openai: []],
         computer_use: [
           enabled: true,
-          display_width_px: 1366,
           screenshot_after: false,
           max_retained_screenshots: 5,
           max_actions: 25
@@ -845,7 +844,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(computer_use, :enabled) == true
     refute Keyword.has_key?(computer_use, :mode)
     refute Keyword.has_key?(computer_use, :access)
-    assert Keyword.get(computer_use, :display_width_px) == 1366
     # the `?`-suffix struct fields must round-trip under their TOML key names
     assert Keyword.get(computer_use, :screenshot_after) == false
     assert Keyword.get(computer_use, :max_retained_screenshots) == 5

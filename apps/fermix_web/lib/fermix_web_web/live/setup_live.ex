@@ -1290,10 +1290,9 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # Computer use is config-gated (`[fermix_core.computer_use]`), not a registry
-  # `enabled_plugins` entry, and its readiness is OS-permission based. Once its
-  # signed sidecar installs it becomes a registry plugin and lands here — so mirror
-  # the catalog card's flags instead of the generic registry status, which would
-  # read `:not_configured` + "Enable" for an already-on feature. `checkable?` is
+  # `enabled_plugins` entry, and it never registers as a plugin (no tools). Its card
+  # mirrors the catalog card's flags instead of the generic registry status, which
+  # would read `:not_configured` + "Enable" for an already-on feature. `checkable?` is
   # false for it too: the registry health check requires `Status.status == :ready`,
   # which a config-gated sidecar never reaches, so the Check button would mislead.
   defp plugin_card_state(plugin, snapshot) do
@@ -1490,9 +1489,9 @@ defmodule FermixWebWeb.SetupLive do
   # Computer use is NOT a registry plugin (it registers no tools, has no plugin.json),
   # so it never flows through find→enable. Enabling it = ensure the native sidecar
   # binary is present, then flip the feature flag. A dev_local build (or an already
-  # catalog-installed binary) means `installed?` is already true → skip the download
-  # entirely and just flip the flag. Only a fresh machine pulls the signed binary
-  # from the catalog; `continue_after_install/2` flips the flag once that lands.
+  # downloaded binary) means `installed?` is already true → skip the fetch and just
+  # flip the flag. Otherwise a fresh machine downloads the sidecar via the compux
+  # library (`install_work`); `continue_after_install/2` flips the flag once it lands.
   defp enable_computer_use(socket) do
     if SidecarInstaller.installed?() do
       set_computer_use_feature(socket, true)
@@ -1638,18 +1637,28 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp start_plugin_install(socket, name) do
-    opts = plugins_dist_opts()
-
-    task =
-      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
-        DistInstaller.run_install(name, opts)
-      end)
-
+    {work, message} = install_work(name)
+    task = Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, work)
     tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, %{name: name})
 
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> flash_info("Installing #{name} from the plugin catalog…")
+    |> flash_info(message)
+  end
+
+  # Computer-use installs its native helper via the compux library — a direct,
+  # sha256-verified download of the compux release binary, NOT the signed plugin
+  # catalog. Every other plugin uses the catalog pipeline. Both return the same
+  # {:ok, _} | {:error, reason} shape, so the finish/continue machinery is shared.
+  defp install_work(name) do
+    if computer_use_plugin?(name) do
+      {fn -> SidecarInstaller.install() end, "Downloading the Computer Use helper…"}
+    else
+      opts = plugins_dist_opts()
+
+      {fn -> DistInstaller.run_install(name, opts) end,
+       "Installing #{name} from the plugin catalog…"}
+    end
   end
 
   defp finish_plugin_install(socket, task, tasks, {:ok, _status}) do
@@ -1719,6 +1728,28 @@ defmodule FermixWebWeb.SetupLive do
     do: "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
 
   defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
+
+  # Computer-use (compux library) download errors.
+  defp install_error({:no_checksum_for_target, _target}),
+    do: "the Computer Use helper isn't published for this Fermix version yet."
+
+  defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:http_status, status}), do: "download failed (HTTP #{status})."
+  defp install_error({:http_error, _reason}), do: "download failed (network or timeout)."
+  defp install_error({:untar, _reason}), do: "the downloaded Computer Use archive was invalid."
+
+  defp install_error({:binary_not_in_archive, _name}),
+    do: "the downloaded Computer Use archive was invalid."
+
+  defp install_error({:unsupported_target, os, arch}),
+    do: "no Computer Use build for this machine (#{os}-#{arch})."
+
+  defp install_error({:unsupported_os, _os}),
+    do: "Computer Use isn't supported on this operating system."
+
+  defp install_error({:unsupported_arch, _arch}),
+    do: "Computer Use isn't supported on this CPU architecture."
+
   defp install_error(reason), do: Redaction.format(reason)
 
   defp plugins_dist_opts do

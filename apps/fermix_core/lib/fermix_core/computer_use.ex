@@ -1,15 +1,16 @@
 defmodule FermixCore.ComputerUse do
   @moduledoc """
-  Top-level entry points for the computer-use subsystem (GUI control of a desktop
-  or browser — docs/design/COMPUTER_USE.md).
+  Top-level entry points for the computer-use subsystem (GUI control of the host
+  desktop — docs/design/COMPUTER_USE_V2.md).
 
   `ready?/0` is the single gate that decides whether the session supervisor boots
   and whether the `computer_use` tool is registered for the model: the feature must
-  be enabled, the OS-driver sidecar binary must be installed (via the signed plugin
-  catalog — see `SidecarInstaller`), and OS permissions must be granted. It is false
-  by default (the feature is off), so nothing boots and the tool is never advertised
-  until an operator turns it on AND the sidecar is installed — wiring the subsystem
-  in activates nothing on its own.
+  be enabled AND the OS-driver sidecar binary installed (downloaded via the `compux`
+  library — see `SidecarInstaller`). It is false by default (the feature is off), so
+  nothing boots and the tool is never advertised until an operator turns it on AND
+  the sidecar is installed — wiring the subsystem in activates nothing on its own.
+
+  OS-permission state is deliberately NOT part of this gate (see `ready?/0`).
   """
 
   alias FermixCore.ComputerUse.Config

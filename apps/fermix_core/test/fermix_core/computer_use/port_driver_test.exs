@@ -29,9 +29,11 @@ defmodule FermixCore.ComputerUse.PortDriverTest do
   end
 
   test "maps a sidecar-action timeout to the fermix Timeouts shape" do
-    {:ok, state} = PortDriver.start(binary_path: @fake, timeout: 100, session_id: "cua_test")
+    # 500ms (not a tight 100) so the handshake round-trip has headroom under
+    # concurrent test load; the "hang" (10s sleep) still trips the deadline.
+    {:ok, state} = PortDriver.start(binary_path: @fake, timeout: 500, session_id: "cua_test")
 
-    assert {:error, {:timeout, :cu_sidecar_action, 100}} =
+    assert {:error, {:timeout, :cu_sidecar_action, 500}} =
              PortDriver.execute(state, %{"action" => "hang"})
 
     PortDriver.stop(state)
