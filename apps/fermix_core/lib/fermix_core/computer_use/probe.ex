@@ -32,7 +32,7 @@ defmodule FermixCore.ComputerUse.Probe do
   Probe the installed sidecar. Returns the grant breakdown, or `{:error, reason}`
   when the sidecar is unavailable or the probe action fails.
 
-  Options (tests only): `:driver` (a `ComputerUse.Driver` module, default
+  Options (tests only): `:driver` (a `Compux.Driver` module, default
   `PortDriver`) and `:binary_path` (skip the installer lookup).
   """
   @spec run(keyword()) :: {:ok, result()} | {:error, term()}

@@ -7,7 +7,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
   # A stub Driver: no native code, speaks the Protocol response shape. It records
   # execute/stop calls to the test pid and returns a configurable response.
   defmodule StubDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts) do
@@ -38,7 +38,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
   # FermixCore.Timeouts.expired/3 returns) — exercises the poison-reset path
   # without a 30s wall-clock wait.
   defmodule TimeoutDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}

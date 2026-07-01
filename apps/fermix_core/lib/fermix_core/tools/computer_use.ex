@@ -18,9 +18,9 @@ defmodule FermixCore.Tools.ComputerUse do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias Compux.Protocol
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry

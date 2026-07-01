@@ -7,7 +7,7 @@ defmodule FermixCore.ComputerUse.ProbeTest do
   # nothing), so `self()` inside a callback is the test pid — messages land here.
 
   defmodule MacStub do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts) do
@@ -37,7 +37,7 @@ defmodule FermixCore.ComputerUse.ProbeTest do
   end
 
   defmodule SparseStub do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
     @impl true
     def start(_opts), do: {:ok, %{}}
     @impl true
@@ -47,7 +47,7 @@ defmodule FermixCore.ComputerUse.ProbeTest do
   end
 
   defmodule ErroringStub do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
     @impl true
     def start(_opts), do: {:ok, %{}}
     @impl true
@@ -60,7 +60,7 @@ defmodule FermixCore.ComputerUse.ProbeTest do
   end
 
   defmodule UnstartableStub do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
     @impl true
     def start(_opts), do: {:error, {:sidecar_missing, "/nope"}}
     @impl true
