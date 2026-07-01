@@ -1,10 +1,10 @@
 defmodule FermixCore.Tools.ComputerUse do
   @moduledoc """
-  Control a desktop (`:host`) or browser (`:browser`) GUI by screenshot +
-  mouse/keyboard, one action per call (docs/design/COMPUTER_USE.md).
+  Control the host desktop GUI by screenshot + mouse/keyboard, one action per call
+  (docs/design/COMPUTER_USE_V2.md).
 
-  Off by default and dangerous in `:host` mode (it drives the real logged-in
-  desktop). The tool is thin: it resolves the per-conversation `ComputerUse.Session`
+  Off by default and dangerous: it drives the real logged-in desktop. The tool is
+  thin: it resolves the per-conversation `ComputerUse.Session`
   from the call context (started lazily by the session manager), then runs each
   action through the session's classify → execute flow and returns the post-action
   screenshot as an image the model can see (the Phase-0 `success_with_images` path).
@@ -18,9 +18,9 @@ defmodule FermixCore.Tools.ComputerUse do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias Compux.Protocol
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -33,11 +33,18 @@ defmodule FermixCore.Tools.ComputerUse do
 
   @impl true
   def description do
-    "Drive a desktop or browser GUI by screenshot + mouse/keyboard, one action per call. " <>
+    "Drive the host desktop GUI by screenshot + mouse/keyboard, one action per call. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
-      "pixel coordinates from the latest screenshot. Honor the access mode shown on the `action` " <>
-      "parameter: standard confirms before anything irreversible; open acts autonomously but still " <>
-      "confirms a truly dangerous/catastrophic action; strict is look-only."
+      "pixel coordinates from the latest screenshot. For a SMALL or dense target, zoom first: " <>
+      "`screenshot` with a `region` around it, then click/drag with the SAME region using the " <>
+      "coordinates you read in the magnified crop — clicks land far more accurately. Every " <>
+      "mutating action returns a fresh screenshot: CHECK it and retry if the click missed. " <>
+      "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
+      "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
+      "before a consequential action. Honor " <>
+      "the access mode shown on the `action` parameter: standard confirms before anything " <>
+      "irreversible; open acts autonomously but still confirms a truly dangerous/catastrophic " <>
+      "action; strict is look-only."
   end
 
   @impl true
@@ -54,11 +61,11 @@ defmodule FermixCore.Tools.ComputerUse do
         },
         "x" => %{
           "type" => "integer",
-          "description" => "X pixel for click/move/scroll (screenshot space)"
+          "description" => "X pixel for click/move/scroll/inspect (screenshot space)"
         },
         "y" => %{
           "type" => "integer",
-          "description" => "Y pixel for click/move/scroll (screenshot space)"
+          "description" => "Y pixel for click/move/scroll/inspect (screenshot space)"
         },
         "display" => %{
           "type" => "integer",
@@ -82,7 +89,22 @@ defmodule FermixCore.Tools.ComputerUse do
           "type" => "string",
           "description" => "Key chord for action=key, e.g. \"ctrl+s\""
         },
-        "ms" => %{"type" => "integer", "description" => "Milliseconds to wait (for action=wait)"}
+        "ms" => %{"type" => "integer", "description" => "Milliseconds to wait (for action=wait)"},
+        "region" => %{
+          "type" => "object",
+          "properties" => %{
+            "x" => %{"type" => "integer"},
+            "y" => %{"type" => "integer"},
+            "w" => %{"type" => "integer"},
+            "h" => %{"type" => "integer"}
+          },
+          "required" => ["x", "y", "w", "h"],
+          "description" =>
+            "Optional zoom: a rectangle {x,y,w,h} in the CURRENT full screenshot's pixel space. " <>
+              "On `screenshot` it returns a magnified crop of that rectangle; on a " <>
+              "click/move/drag/scroll, pass the SAME region and give x,y in the magnified image " <>
+              "to act precisely on a small target."
+        }
       }
     }
   end
@@ -110,7 +132,7 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   defp base_action_description do
-    "The GUI action. Read-only: screenshot, mouse_move, wait. Mutating: left_click, " <>
+    "The GUI action. Read-only: screenshot, inspect, mouse_move, wait. Mutating: left_click, " <>
       "right_click, double_click, left_click_drag, scroll, type, key."
   end
 
@@ -141,6 +163,10 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         args: %{"action" => "left_click", "x" => 640, "y" => 360},
         note: "click at a screenshot pixel"
+      },
+      %{
+        args: %{"action" => "inspect", "x" => 640, "y" => 360},
+        note: "check what UI element is under a point before clicking it"
       },
       %{args: %{"action" => "type", "text" => "hello"}, note: "type into the focused field"}
     ]

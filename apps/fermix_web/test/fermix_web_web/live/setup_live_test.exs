@@ -586,6 +586,14 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Guest scoped"
     end
 
+    test "doctor pane surfaces a computer-use permission section", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      assert html =~ "Computer use"
+    end
+
     test "Save & next saves the current step and advances", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
@@ -2664,7 +2672,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     {:ok, {os, arch}} = Manifest.target_for_host()
     bin_dir = Path.join([checkout, "computer_use_sidecar", "bin", "#{os}-#{arch}"])
     File.mkdir_p!(bin_dir)
-    binary = Path.join(bin_dir, "fermix-computer-use")
+    binary = Path.join(bin_dir, "compux")
     File.write!(binary, "#!/bin/sh\n")
     File.chmod!(binary, 0o755)
   end

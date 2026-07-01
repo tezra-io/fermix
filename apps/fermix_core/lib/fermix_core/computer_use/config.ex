@@ -1,10 +1,14 @@
 defmodule FermixCore.ComputerUse.Config do
   @moduledoc """
-  Runtime configuration for the computer-use subsystem — GUI control of a desktop
-  (`:host`) or a browser context (`:browser`).
+  Runtime configuration for the computer-use subsystem — GUI control of the host
+  desktop (docs/design/COMPUTER_USE_V2.md).
 
-  Off by default. `:host` mode drives the real logged-in desktop and is dangerous
-  (ambient authority, no rollback, unsolved screenshot prompt-injection).
+  Off by default. It drives the real logged-in desktop and is dangerous (ambient
+  authority, no rollback, unsolved screenshot prompt-injection). There is no
+  `mode` knob: computer-use is host-desktop control only — web automation is the
+  separate `browser` tool. A lingering `mode` key in an old config is ignored (it
+  self-heals on the next save); the behavior is uniformly the stricter
+  attended-origin gate that the removed `browser` mode used to relax.
 
   The safety posture, `access`, is DERIVED 1:1 from `[sandbox] mode` — there is NO
   separate computer-use posture knob (COMPUTER_USE.md §14): an `open` sandbox is an
@@ -26,19 +30,15 @@ defmodule FermixCore.ComputerUse.Config do
 
   alias FermixCore.Sandbox.Config, as: SandboxConfig
 
-  @modes [:browser, :host]
-
   # Long-edge cap per design §5 (oversized captures 400 on Anthropic and ground
   # worse); a sane floor so a typo can't request a 1px display.
   @min_dimension_px 320
   @max_dimension_px 1366
 
-  @type mode :: :browser | :host
   @type access :: :strict | :standard | :open
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
-          mode: mode(),
           access: access(),
           display: non_neg_integer(),
           display_width_px: pos_integer(),
@@ -49,13 +49,12 @@ defmodule FermixCore.ComputerUse.Config do
         }
 
   defstruct enabled?: false,
-            mode: :browser,
             access: :standard,
             display: 0,
             display_width_px: 1280,
             display_height_px: 800,
             screenshot_after?: true,
-            max_actions: 40,
+            max_actions: 80,
             max_retained_screenshots: 3
 
   @spec current() :: t()
@@ -78,12 +77,11 @@ defmodule FermixCore.ComputerUse.Config do
   def normalize(config) when is_list(config) or is_map(config) do
     cu = %__MODULE__{
       enabled?: bool(config, :enabled, false),
-      mode: mode(config, :mode, :browser),
       display: non_neg_int(config, :display, 0),
       display_width_px: dimension(config, :display_width_px, 1280),
       display_height_px: dimension(config, :display_height_px, 800),
       screenshot_after?: bool(config, :screenshot_after, true),
-      max_actions: positive_int(config, :max_actions, 40),
+      max_actions: positive_int(config, :max_actions, 80),
       max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3)
     }
 
@@ -99,7 +97,6 @@ defmodule FermixCore.ComputerUse.Config do
   def to_keyword(%__MODULE__{} = cu) do
     [
       enabled: cu.enabled?,
-      mode: cu.mode,
       display: cu.display,
       display_width_px: cu.display_width_px,
       display_height_px: cu.display_height_px,
@@ -113,26 +110,6 @@ defmodule FermixCore.ComputerUse.Config do
   # screenshot is actually sendable; both dimensions are bounded already. Nothing
   # else is cross-field, so validation is mostly per-field (above).
   defp validate!(%__MODULE__{} = cu), do: cu
-
-  defp mode(config, key, default) do
-    case lookup(config, key) do
-      nil ->
-        default
-
-      value when value in @modes ->
-        value
-
-      "browser" ->
-        :browser
-
-      "host" ->
-        :host
-
-      value ->
-        raise ArgumentError,
-              "computer_use.#{key} must be one of #{inspect(@modes)}, got: #{inspect(value)}"
-    end
-  end
 
   defp dimension(config, key, default) do
     value = positive_int(config, key, default)

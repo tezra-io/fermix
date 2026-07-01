@@ -17,8 +17,8 @@ defmodule FermixCore.ComputerUse.Session do
 
   use GenServer
 
+  alias Compux.Protocol
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
   alias FermixCore.Timeouts
@@ -186,13 +186,13 @@ defmodule FermixCore.ComputerUse.Session do
     end
   end
 
-  # Host mode against a real session may only start from an attended owner origin
-  # (§7.6); browser mode (fresh context) accepts any origin.
-  defp ensure_host_start_allowed(%Config{mode: :host}, origin) do
+  # Computer-use drives the host desktop, so a session may only start from an
+  # attended owner origin (§7.6). There is no relaxed "browser" mode anymore — the
+  # gate applies uniformly, closing the hole where the old default silently allowed
+  # an unattended origin to drive the host.
+  defp ensure_host_start_allowed(%Config{}, origin) do
     if Safety.host_start_allowed?(origin), do: :ok, else: {:error, {:host_start_refused, origin}}
   end
-
-  defp ensure_host_start_allowed(%Config{}, _origin), do: :ok
 
   defp check_budget(state) do
     if Safety.within_action_budget?(state.action_count, state.config),
@@ -230,7 +230,33 @@ defmodule FermixCore.ComputerUse.Session do
     end
   end
 
+  # An `inspect` result carries the accessibility element under the point (no image);
+  # surface its role/label as text the model can reason over (and apply its own
+  # confirm judgment to). The agent loop wraps gui_control output as untrusted, so an
+  # element title carrying injection is already framed as data.
+  defp normalize_response(%{"found" => _} = response) do
+    {:ok, %{summary: inspect_summary(response), image: nil}}
+  end
+
   defp normalize_response(_response), do: {:ok, %{summary: "ok", image: nil}}
+
+  defp inspect_summary(%{"found" => false}), do: "no UI element at that point"
+
+  defp inspect_summary(response) do
+    fields =
+      ["role", "title", "description", "value"]
+      |> Enum.map(&inspect_field(&1, response[&1]))
+      |> Enum.reject(&is_nil/1)
+
+    case fields do
+      [] -> "UI element found (no role or label)"
+      _ -> "UI element — " <> Enum.join(fields, ", ")
+    end
+  end
+
+  defp inspect_field(_label, nil), do: nil
+  defp inspect_field(label, value) when is_binary(value), do: ~s(#{label}="#{value}")
+  defp inspect_field(label, value), do: "#{label}=#{inspect(value)}"
 
   # The screenshot IMAGE is the attacker-controllable surface (on-screen text can carry
   # prompt-injection, §14.4) and cannot itself be defanged — providers take raw image
@@ -260,12 +286,16 @@ defmodule FermixCore.ComputerUse.Session do
     end
   end
 
+  # `mode` is a constant `:host` now (computer-use is host-desktop control only),
+  # kept in the meta because the `cua_<id>` run-kind telemetry/Opik aggregation
+  # reads it (docs/TELEMETRY_CONTRACT.md). It is a truthful label of what the
+  # session does, not a config branch.
   defp meta(state) do
     %{
       session_id: state.session_id,
       parent_session: state.parent_session,
       agent: state.agent,
-      mode: state.config.mode,
+      mode: :host,
       origin: state.origin
     }
   end

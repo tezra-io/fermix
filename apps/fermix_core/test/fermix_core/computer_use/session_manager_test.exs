@@ -6,7 +6,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
 
   defmodule StubDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
@@ -30,7 +30,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   end
 
   test "ensure starts a session and reuses it for the same conversation", %{config: config} do
-    ctx = context()
+    ctx = context(%{computer_use_origin: :interactive})
 
     assert {:ok, pid} = SessionManager.ensure(config, ctx, driver: stub_driver())
     assert is_pid(pid)
@@ -40,12 +40,16 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
 
   test "different conversations get different sessions", %{config: config} do
     {:ok, p1} =
-      SessionManager.ensure(config, context(%{conversation_key: {"cli", "a", :root}}),
+      SessionManager.ensure(
+        config,
+        context(%{conversation_key: {"cli", "a", :root}, computer_use_origin: :interactive}),
         driver: stub_driver()
       )
 
     {:ok, p2} =
-      SessionManager.ensure(config, context(%{conversation_key: {"cli", "b", :root}}),
+      SessionManager.ensure(
+        config,
+        context(%{conversation_key: {"cli", "b", :root}, computer_use_origin: :interactive}),
         driver: stub_driver()
       )
 
@@ -53,7 +57,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   end
 
   test "host mode fails closed for an unattended origin and starts no session" do
-    config = Config.normalize(enabled: true, mode: :host)
+    config = Config.normalize(enabled: true)
     ctx = context(%{computer_use_origin: :scheduled})
 
     assert {:error, {:host_start_refused, :scheduled}} =
@@ -63,7 +67,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   end
 
   test "host mode fails closed when no origin is set (unattended is the safe default)" do
-    config = Config.normalize(enabled: true, mode: :host)
+    config = Config.normalize(enabled: true)
     # A context that never declared an origin (e.g. a scheduled job) must NOT inherit
     # an attended origin — it defaults to :unattended and is refused.
     ctx = context()
@@ -75,7 +79,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   end
 
   test "host mode starts a session from an attended origin" do
-    config = Config.normalize(enabled: true, mode: :host)
+    config = Config.normalize(enabled: true)
     ctx = context(%{computer_use_origin: :voice})
 
     assert {:ok, pid} = SessionManager.ensure(config, ctx, driver: stub_driver())
