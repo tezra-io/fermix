@@ -37,7 +37,7 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     version_dir = Path.join([home, "plugins", "installed", "computer_use_sidecar", "0.1.0"])
     bin_dir = Path.join([version_dir, "bin", target])
     File.mkdir_p!(bin_dir)
-    binary = Path.join(bin_dir, "fermix-computer-use")
+    binary = Path.join(bin_dir, "compux")
     File.write!(binary, "#!/bin/sh\n")
     File.chmod!(binary, mode)
     File.ln_s!(version_dir, current_dir(home))
@@ -57,7 +57,7 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
                "current",
                "bin",
                target,
-               "fermix-computer-use"
+               "compux"
              ])
   end
 
@@ -98,7 +98,7 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     test "a dev_local build wins over the installed store path", %{home: home, target: target} do
       bin_dir = Path.join([home, "dev-plugins", "computer_use_sidecar", "bin", target])
       File.mkdir_p!(bin_dir)
-      binary = Path.join(bin_dir, "fermix-computer-use")
+      binary = Path.join(bin_dir, "compux")
       File.write!(binary, "#!/bin/sh\n")
       File.chmod!(binary, 0o755)
       Application.put_env(:fermix_core, :plugins, dev_local: Path.join(home, "dev-plugins"))

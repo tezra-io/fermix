@@ -90,7 +90,7 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
       Path.join([home, "dev-plugins", "computer_use_sidecar", "bin", target])
 
     File.mkdir_p!(bin_dir)
-    binary = Path.join(bin_dir, "fermix-computer-use")
+    binary = Path.join(bin_dir, "compux")
     File.write!(binary, "#!/bin/sh\n")
     File.chmod!(binary, 0o755)
     binary

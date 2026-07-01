@@ -17,8 +17,8 @@ defmodule FermixCore.ComputerUse.Session do
 
   use GenServer
 
+  alias Compux.Protocol
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
   alias FermixCore.Timeouts

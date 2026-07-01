@@ -19,8 +19,8 @@ defmodule FermixCore.ComputerUse.Safety do
   agent out of asking (§14.4). Only `:strict` and the attended-origin gate are hard.
   """
 
+  alias Compux.Protocol
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
 
   # Origins that have a live, two-way owner surface able to confirm a consequential
   # action and to tear the session down: an interactive chat (`/stop` reaches it)

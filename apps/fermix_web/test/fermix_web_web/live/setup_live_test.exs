@@ -2672,7 +2672,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     {:ok, {os, arch}} = Manifest.target_for_host()
     bin_dir = Path.join([checkout, "computer_use_sidecar", "bin", "#{os}-#{arch}"])
     File.mkdir_p!(bin_dir)
-    binary = Path.join(bin_dir, "fermix-computer-use")
+    binary = Path.join(bin_dir, "compux")
     File.write!(binary, "#!/bin/sh\n")
     File.chmod!(binary, 0o755)
   end

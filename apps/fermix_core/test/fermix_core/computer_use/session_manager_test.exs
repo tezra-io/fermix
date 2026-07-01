@@ -6,7 +6,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
 
   defmodule StubDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
