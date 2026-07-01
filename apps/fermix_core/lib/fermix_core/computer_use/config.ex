@@ -30,19 +30,12 @@ defmodule FermixCore.ComputerUse.Config do
 
   alias FermixCore.Sandbox.Config, as: SandboxConfig
 
-  # Long-edge cap per design §5 (oversized captures 400 on Anthropic and ground
-  # worse); a sane floor so a typo can't request a 1px display.
-  @min_dimension_px 320
-  @max_dimension_px 1366
-
   @type access :: :strict | :standard | :open
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
           access: access(),
           display: non_neg_integer(),
-          display_width_px: pos_integer(),
-          display_height_px: pos_integer(),
           screenshot_after?: boolean(),
           max_actions: pos_integer(),
           max_retained_screenshots: pos_integer()
@@ -51,8 +44,6 @@ defmodule FermixCore.ComputerUse.Config do
   defstruct enabled?: false,
             access: :standard,
             display: 0,
-            display_width_px: 1280,
-            display_height_px: 800,
             screenshot_after?: true,
             max_actions: 80,
             max_retained_screenshots: 3
@@ -78,8 +69,6 @@ defmodule FermixCore.ComputerUse.Config do
     cu = %__MODULE__{
       enabled?: bool(config, :enabled, false),
       display: non_neg_int(config, :display, 0),
-      display_width_px: dimension(config, :display_width_px, 1280),
-      display_height_px: dimension(config, :display_height_px, 800),
       screenshot_after?: bool(config, :screenshot_after, true),
       max_actions: positive_int(config, :max_actions, 80),
       max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3)
@@ -98,30 +87,15 @@ defmodule FermixCore.ComputerUse.Config do
     [
       enabled: cu.enabled?,
       display: cu.display,
-      display_width_px: cu.display_width_px,
-      display_height_px: cu.display_height_px,
       screenshot_after: cu.screenshot_after?,
       max_actions: cu.max_actions,
       max_retained_screenshots: cu.max_retained_screenshots
     ]
   end
 
-  # Host mode against a real session must keep the long edge within the cap so a
-  # screenshot is actually sendable; both dimensions are bounded already. Nothing
-  # else is cross-field, so validation is mostly per-field (above).
+  # No cross-field constraints today, so validation is per-field (above). Kept as a
+  # normalization seam for any future cross-field rule.
   defp validate!(%__MODULE__{} = cu), do: cu
-
-  defp dimension(config, key, default) do
-    value = positive_int(config, key, default)
-
-    if value < @min_dimension_px or value > @max_dimension_px do
-      raise ArgumentError,
-            "computer_use.#{key} must be between #{@min_dimension_px} and #{@max_dimension_px} px " <>
-              "(design §5 caps the long edge so a capture stays sendable), got: #{value}"
-    end
-
-    value
-  end
 
   defp bool(config, key, default) do
     case lookup(config, key) do

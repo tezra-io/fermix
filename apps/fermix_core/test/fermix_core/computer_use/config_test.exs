@@ -11,8 +11,6 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       assert config.enabled? == false
       assert config.access == :standard
       assert config.display == 0
-      assert config.display_width_px == 1280
-      assert config.display_height_px == 800
       assert config.screenshot_after? == true
       assert config.max_actions == 80
       assert config.max_retained_screenshots == 3
@@ -84,18 +82,6 @@ defmodule FermixCore.ComputerUse.ConfigTest do
     test "rejects a non-positive max_actions" do
       assert_raise ArgumentError, ~r/computer_use.max_actions must be a positive integer/, fn ->
         Config.normalize(max_actions: 0)
-      end
-    end
-
-    test "rejects a display dimension over the long-edge cap" do
-      assert_raise ArgumentError, ~r/computer_use.display_width_px must be between/, fn ->
-        Config.normalize(display_width_px: 4000)
-      end
-    end
-
-    test "rejects a display dimension under the floor" do
-      assert_raise ArgumentError, ~r/computer_use.display_height_px must be between/, fn ->
-        Config.normalize(display_height_px: 100)
       end
     end
 

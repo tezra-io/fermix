@@ -41,7 +41,10 @@ defmodule FermixCore.Tools.ComputerUse do
       "mutating action returns a fresh screenshot: CHECK it and retry if the click missed. " <>
       "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
       "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
-      "before a consequential action. Honor " <>
+      "before a consequential action. `elements` (read-only) lists the clickable UI elements — " <>
+      "each with a click point — so you target by element instead of guessing pixels; " <>
+      "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
+      "of repeated screenshots. Honor " <>
       "the access mode shown on the `action` parameter: standard confirms before anything " <>
       "irreversible; open acts autonomously but still confirms a truly dangerous/catastrophic " <>
       "action; strict is look-only."
@@ -84,12 +87,24 @@ defmodule FermixCore.Tools.ComputerUse do
           "description" => "Scroll direction"
         },
         "amount" => %{"type" => "integer", "description" => "Scroll amount (positive)"},
-        "text" => %{"type" => "string", "description" => "Text to type (for action=type)"},
+        "text" => %{
+          "type" => "string",
+          "description" => "Text to type or paste (for action=type/paste)"
+        },
         "chord" => %{
           "type" => "string",
           "description" => "Key chord for action=key, e.g. \"ctrl+s\""
         },
         "ms" => %{"type" => "integer", "description" => "Milliseconds to wait (for action=wait)"},
+        "timeout_ms" => %{
+          "type" => "integer",
+          "description" =>
+            "Max ms to wait for a change (for action=wait_for_change; default 10000)"
+        },
+        "poll_ms" => %{
+          "type" => "integer",
+          "description" => "Check interval in ms (for action=wait_for_change; default 250)"
+        },
         "region" => %{
           "type" => "object",
           "properties" => %{
@@ -132,8 +147,11 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   defp base_action_description do
-    "The GUI action. Read-only: screenshot, inspect, mouse_move, wait. Mutating: left_click, " <>
-      "right_click, double_click, left_click_drag, scroll, type, key."
+    "The GUI action. Read-only: screenshot, inspect, elements (list the clickable UI " <>
+      "elements with a click point each — prefer this over guessing pixels), " <>
+      "wait_for_change (block until the screen changes, then return the new frame), " <>
+      "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
+      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key."
   end
 
   defp action_description(:strict) do
