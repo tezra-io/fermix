@@ -29,7 +29,7 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
   alias FermixCore.Setup.ConfigStore
 
   @plugin_name "computer_use_sidecar"
-  @command "fermix-computer-use"
+  @command "compux"
 
   @spec plugin_name() :: String.t()
   def plugin_name, do: @plugin_name
@@ -44,8 +44,8 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
   @doc """
   Absolute path the runtime/`PortDriver` should spawn. Resolution order:
 
-    1. A `dev_local` build, if present — `<[fermix_core.plugins] dev_local>/computer_use_sidecar/bin/<target>/fermix-computer-use`.
-       This is the plugin-author loop: `cargo build` the sidecar (native/computer-use-sidecar/)
+    1. A `dev_local` build, if present — `<[fermix_core.plugins] dev_local>/computer_use_sidecar/bin/<target>/compux`.
+       This is the plugin-author loop: `cargo build` the sidecar crate (native/compux/ in the compux repo)
        into a dev_local checkout and test without a signed release.
     2. Otherwise the installed catalog binary, resolved live through the store's
        `current` symlink (so an upgrade's atomic version-swap is picked up).

@@ -1,73 +1,39 @@
 defmodule FermixCore.ComputerUse.PortDriverTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias FermixCore.ComputerUse.PortDriver
 
-  setup do
-    dir =
-      Path.join([
-        System.tmp_dir!(),
-        "fermix-cu-portdriver",
-        "run-#{System.unique_integer([:positive])}"
-      ])
+  @fake Path.expand("fake_compux_sidecar.pl", __DIR__)
 
-    File.mkdir_p!(dir)
-    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf(dir) end)
-    %{dir: dir}
+  test "fails loud when the sidecar binary is absent" do
+    assert {:error, {:sidecar_missing, "/no/such/compux"}} =
+             PortDriver.start(binary_path: "/no/such/compux")
   end
 
-  # A benign fake sidecar: read each request line, echo a canned JSON response
-  # (from $FAKE_RESPONSE) back. Exercises the Port framing/round-trip without the
-  # native Rust binary; it mutates no host state.
-  defp fake_sidecar(dir) do
-    path = Path.join(dir, "fake-sidecar.sh")
+  test "handshakes, keeps :port in state, and round-trips an action" do
+    {:ok, state} = PortDriver.start(binary_path: @fake)
+    # :port at the top level is what Session's handle_info matches on.
+    assert %{port: _port, session_id: nil} = state
 
-    File.write!(
-      path,
-      ~s(#!/bin/sh\nwhile IFS= read -r line; do printf '%s\\n' "$FAKE_RESPONSE"; done\n)
-    )
-
-    File.chmod!(path, 0o755)
-    path
-  end
-
-  defp env(json), do: [env: [{~c"FAKE_RESPONSE", String.to_charlist(json)}]]
-
-  test "start fails loud when the sidecar binary is absent (no degrade)" do
-    assert {:error, {:sidecar_missing, "/no/such/fermix-cu"}} =
-             PortDriver.start(binary_path: "/no/such/fermix-cu")
-  end
-
-  test "execute round-trips a request through the Port and decodes the response", %{dir: dir} do
-    path = fake_sidecar(dir)
-
-    assert {:ok, state} =
-             PortDriver.start(
-               [binary_path: path] ++ env(~s({"ok":true,"width":1280,"height":800}))
-             )
-
-    assert {:ok, %{"ok" => true, "width" => 1280}} =
+    assert {:ok, %{"ok" => true, "pong" => true}} =
              PortDriver.execute(state, %{"action" => "screenshot"})
 
     assert :ok = PortDriver.stop(state)
   end
 
-  test "a sidecar error response is surfaced as an error", %{dir: dir} do
-    path = fake_sidecar(dir)
+  test "refuses a protocol-version mismatch" do
+    assert {:error, {:protocol_mismatch, %{library: lib, sidecar: 999}}} =
+             PortDriver.start(binary_path: @fake, env: [{~c"FAKE_PROTO", ~c"999"}])
 
-    {:ok, state} =
-      PortDriver.start([binary_path: path] ++ env(~s({"ok":false,"error":"permission denied"})))
-
-    assert {:error, "permission denied"} =
-             PortDriver.execute(state, %{"action" => "left_click", "x" => 0, "y" => 0})
-
-    PortDriver.stop(state)
+    assert lib == Compux.Protocol.protocol_version()
   end
 
-  test "stop is idempotent / safe after the port is gone", %{dir: dir} do
-    path = fake_sidecar(dir)
-    {:ok, state} = PortDriver.start([binary_path: path] ++ env(~s({"ok":true})))
-    assert :ok = PortDriver.stop(state)
-    assert :ok = PortDriver.stop(state)
+  test "maps a sidecar-action timeout to the fermix Timeouts shape" do
+    {:ok, state} = PortDriver.start(binary_path: @fake, timeout: 100, session_id: "cua_test")
+
+    assert {:error, {:timeout, :cu_sidecar_action, 100}} =
+             PortDriver.execute(state, %{"action" => "hang"})
+
+    PortDriver.stop(state)
   end
 end
