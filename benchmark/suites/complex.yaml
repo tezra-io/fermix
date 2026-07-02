@@ -28,8 +28,9 @@ scenarios:
         query: "I need the three largest national economies by GDP right now — drop a one-line
           summary of them into eval_scratch/economies.txt for me."
         expect:
-          tools_any: [web_search]
-          min_tool_calls: 2
+          # assert the WRITE actually fired, not just "2 tool calls" — a model that
+          # searches twice and hallucinates "saved" (never writing the file) used to pass.
+          tools_all: [web_search, file_write]
           reply_matches: "(?i)saved|wrote|written|economies\\.txt|file"
           max_cost_usd: 1.5
           max_duration_ms: 200000
@@ -38,8 +39,7 @@ scenarios:
         query: "What's Japan's population these days? Jot the number into a note at
           eval_scratch/japan_pop.txt and let me know once it's there."
         expect:
-          tools_any: [web_search]
-          min_tool_calls: 2
+          tools_all: [web_search, file_write]
           reply_matches: "(?i)saved|wrote|written|japan_pop|file|note"
           max_cost_usd: 1.5
           max_duration_ms: 200000

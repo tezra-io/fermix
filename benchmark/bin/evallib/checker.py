@@ -52,7 +52,10 @@ def rel_scoped(task_id: str, trial: int) -> str:
 def seed_workspace(scoped: str, fixtures_dir: str | None) -> None:
     """Fresh per-trial dir; copy seed fixtures in (if the task has any)."""
     if os.path.exists(scoped):
-        shutil.rmtree(scoped)
+        # Guard the pre-clean like teardown does — never an unguarded rmtree on a
+        # computed path (CLAUDE.md host-wipe rule). `scoped` is eval/<task>/t<i> by
+        # construction, so its grandparent IS eval_root; refuse anything shallower.
+        safe_rm.rm_rf(scoped, os.path.dirname(os.path.dirname(scoped)), min_below=2)
     os.makedirs(scoped, exist_ok=True)
     if fixtures_dir and os.path.isdir(fixtures_dir):
         for name in os.listdir(fixtures_dir):
@@ -105,10 +108,14 @@ def run_checker(skill_dir: str, spec: dict, scoped_dir: str, reply: str,
         tail = (proc.stdout or proc.stderr or "").strip()[:200]
         return CheckerResult(1.0 if proc.returncode == 0 else 0.0, f"exit={proc.returncode} {tail}")
 
-    # json mode: the checker prints {"score": 0..1, "detail": "..."} on its last line
+    # json mode: the checker prints {"score": 0..1, "detail": "..."} on its last line.
+    # A bare number / null / list is valid JSON but not a score object — reject it as
+    # a recorded error, never an uncaught TypeError that would crash the whole sweep.
     try:
         data = json.loads(proc.stdout.strip().splitlines()[-1])
+        if not isinstance(data, dict):
+            raise TypeError(f"checker output must be a JSON object, got {type(data).__name__}")
         score = float(data["score"])
-    except (ValueError, KeyError, IndexError, json.JSONDecodeError) as exc:
+    except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         return CheckerResult(0.0, "", f"checker json parse failed: {exc}; out={proc.stdout[:160]!r}")
     return CheckerResult(max(0.0, min(1.0, score)), str(data.get("detail", ""))[:200])

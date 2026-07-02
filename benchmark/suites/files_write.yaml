@@ -20,7 +20,9 @@ defaults:
 scenarios:
   - id: create_scratch_file
     title: "Creates a small text file at a scratch path"
-    severity: normal
+    # critical: file writes are a core tool; deterministic (file_write span) so a broken
+    # write path fails the run instead of passing green.
+    severity: critical
     tags: [files, write, core]
     cases:
       - id: notes_file

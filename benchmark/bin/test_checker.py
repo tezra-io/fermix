@@ -108,6 +108,18 @@ def test_checker_bad_json_records_error(tmp_path):
     assert r.score == 0.0 and r.error
 
 
+@pytest.mark.parametrize("line", ["0.5", "null", "[1, 2]", '"done"'])
+def test_checker_non_object_json_records_error_not_crash(tmp_path, line):
+    # Valid JSON that isn't a {score,...} object must be a recorded 0-score, NOT an
+    # uncaught TypeError that discards the whole (expensive) sweep. Regression for
+    # the crash where `float(data["score"])` on a bare number/null/list raised.
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    _script(tmp_path, "checkers/bare.sh", f"#!/bin/sh\necho '{line}'\n")
+    r = checker.run_checker(str(tmp_path), {"script": "checkers/bare.sh", "mode": "json"},
+                            scoped_dir=str(tmp_path), reply="")
+    assert r.score == 0.0 and r.error and "parse failed" in r.error
+
+
 # --- suite `checker:` validation --------------------------------------------
 
 def test_validate_checker_ok():
@@ -182,6 +194,68 @@ def test_anchor_landlord_email_oracle_accepts_sparse_rejects(tmp_path):
     with open(os.path.join(scoped, "email.txt"), "w") as fh:
         fh.write("fix the heat")                     # negative: misses ~all constraints
     assert checker.run_checker(BENCH, spec, scoped, "").score < 1.0
+
+
+def test_landlord_keyword_stuffing_is_gated(tmp_path):
+    # A blob that name-drops every constraint token but is NOT an email must score far
+    # below a real email — regression for the structure gate (this used to score 1.0).
+    spec = {"script": "suites/capability/checkers/landlord_email.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    with open(os.path.join(scoped, "email.txt"), "w") as fh:
+        fh.write("heating november 3 clause 14.2 dear mr adeyemi 14 days sincerely please")
+    assert checker.run_checker(BENCH, spec, scoped, "").score < 0.5
+
+
+def test_landlord_accepts_idiomatic_phrasing(tmp_path):
+    # "November 3rd" and "14-day deadline" are correct phrasings the old regexes wrongly
+    # rejected (biasing against models that write naturally). They must now count.
+    spec = {"script": "suites/capability/checkers/landlord_email.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    good = ("Dear Mr. Adeyemi,\n\nI am writing to request that the broken heating be repaired; "
+            "it has not worked since November 3rd. As set out in lease clause 14.2, please "
+            "arrange a fix within a 14-day deadline. I would appreciate your prompt "
+            "attention.\n\nSincerely,\nSam")
+    with open(os.path.join(scoped, "email.txt"), "w") as fh:
+        fh.write(good)
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+
+
+def test_expense_total_checker_oracle_and_negative(tmp_path):
+    spec = {"script": "suites/capability/checkers/expense_total.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    with open(os.path.join(scoped, "answer.txt"), "w") as fh:
+        fh.write("1419.35")
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    with open(os.path.join(scoped, "answer.txt"), "w") as fh:
+        fh.write("1438.10")                          # forgot the refund is negative
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+
+
+def test_order_extract_checker_oracle_and_negative(tmp_path):
+    spec = {"script": "suites/capability/checkers/order_extract.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    with open(os.path.join(scoped, "answer.txt"), "w") as fh:
+        fh.write("NW-48213|94.74|6|2026-03-03")
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    with open(os.path.join(scoped, "answer.txt"), "w") as fh:
+        fh.write("NW-48213|80.50|3|2026-03-03")      # subtotal + line-count traps
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+
+
+def test_anchor_invoice_bug_oracle_accepts_bug_rejects(tmp_path):
+    spec = {"script": "suites/capability/checkers/pytest_invoice.sh", "mode": "exit"}
+    scoped = _seed(tmp_path, "suites/capability/fixtures/code/invoice")
+    # negative: the planted discount-dropping bug -> visible + hidden tests fail
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    # oracle: route the subtotal through line_total (applies the discount) -> all pass
+    mod = os.path.join(scoped, "invoice.py")
+    with open(mod) as fh:
+        fixed = fh.read().replace(
+            'subtotal = sum(ln["qty"] * ln["unit_price"] for ln in lines)',
+            'subtotal = sum(line_total(ln["qty"], ln["unit_price"], ln["discount_pct"]) for ln in lines)')
+    with open(mod, "w") as fh:
+        fh.write(fixed)
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
 
 
 if __name__ == "__main__":

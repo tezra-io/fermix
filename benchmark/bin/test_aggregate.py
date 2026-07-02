@@ -148,6 +148,28 @@ def test_rank_orders_by_composite_success_dominant():
     assert ranked[0].composite > ranked[1].composite
 
 
+def _config_tok(cid, task_specs, tokens_each):
+    """Like _config but pins each trial's token count so efficiency differs."""
+    stats = []
+    for i, (npass, ntot) in enumerate(task_specs):
+        trials = [trial(task_id=f"{cid}-t{i}", success=1.0, tokens=tokens_each) for _ in range(npass)]
+        trials += [trial(task_id=f"{cid}-t{i}", success=0.0, tokens=tokens_each) for _ in range(ntot - npass)]
+        stats.append(agg.aggregate_task(trials, k=ntot, threshold=1.0))
+    return agg.aggregate_config(cid, stats)
+
+
+def test_efficiency_cannot_override_a_real_capability_gap():
+    # The core ranking bug: a LESS capable model that is maximally token-lean must
+    # NOT out-rank a MORE capable but chattier one. capable=0.75 success (heavy
+    # tokens) vs lean=0.50 success (tiny tokens). Under the old 0.7/0.3 blend the
+    # lean model won on efficiency; capability-first ranking puts capable first.
+    capable = _config_tok("capable", [(2, 2), (1, 2)], tokens_each=10000)   # mean success 0.75
+    lean = _config_tok("lean", [(2, 2), (0, 2)], tokens_each=100)           # mean success 0.50
+    ranked = agg.rank_configs([lean, capable])   # default tokens axis; lean is far more efficient
+    assert [r.config.config_id for r in ranked] == ["capable", "lean"]
+    assert ranked[0].efficiency_norm < ranked[1].efficiency_norm  # winner is the LESS efficient one
+
+
 def test_rank_breaks_tie_on_cost_axis():
     cheap = _config("cheap", [(2, 2, 0.01), (2, 2, 0.01)])
     pricey = _config("pricey", [(2, 2, 1.00), (2, 2, 1.00)])

@@ -30,7 +30,9 @@ def main(argv=None) -> int:
     p.add_argument("--fermix", required=True, help="run_capability.py results.json (tools-on arm)")
     p.add_argument("--baseline", required=True, help="run_baseline.py results.json (raw arm)")
     p.add_argument("--threshold", type=float, default=None,
-                   help="per-task pass bar (default: the Fermix arm's recorded threshold)")
+                   help="per-task pass bar for binarizing each arm (default 0.5 = a task "
+                        "passes when the MAJORITY of its trials succeed; NOT the capability "
+                        "arm's all-perfect 1.0, which erases real partial uplift)")
     p.add_argument("--out", default=None, help="also write the claim markdown here")
     args = p.parse_args(argv)
 
@@ -41,7 +43,12 @@ def main(argv=None) -> int:
 
     fermix = uplift.load_arm(args.fermix)
     baseline = uplift.load_arm(args.baseline)
-    threshold = args.threshold if args.threshold is not None else float(fermix.get("threshold", 1.0))
+    # Binarize each arm's per-task mean_success at this bar. Default 0.5 — a task
+    # "passes" when the majority of its trials succeed. Inheriting the capability arm's
+    # recorded 1.0 (all trials perfect) erased real partial uplift: a task that is 4/5
+    # with Fermix and 0/5 raw binarizes to fail-vs-fail and contributes NOTHING to the
+    # paired McNemar test, so a genuine large gain reads as "+0pp, not significant".
+    threshold = args.threshold if args.threshold is not None else 0.5
     if not 0 < threshold <= 1:
         print(f"--threshold must be in (0, 1], got {threshold}", file=sys.stderr)
         return 2

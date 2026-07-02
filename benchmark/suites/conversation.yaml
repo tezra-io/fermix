@@ -26,7 +26,9 @@ defaults:
 scenarios:
   - id: fresh_turn_not_continuation
     title: "A new short message is answered itself, not as a continuation of the prior turn"
-    severity: normal
+    # critical: conversation-turn routing is core; deterministic (reply_not_matches on the
+    # prior topic) so a regression to treating every turn as a continuation fails the run.
+    severity: critical
     tags: [conversation, routing, context]
     cases:
       - id: greeting_after_fact

@@ -1,0 +1,53 @@
+suite: cap_memory
+title: "Capability — cross-session durable memory (store in A, recall in fresh B)"
+description: >
+  Fermix's headline differentiator: owner-scoped memory that persists across SEPARATE
+  conversations ("Always yours"). Each task stores a distinctive fact in one session,
+  then recalls it in a BRAND-NEW session (same owner, no shared context) — so a correct
+  recall can ONLY come from durable memory, never the conversation window. A raw model
+  (or a broken memory subsystem) scores 0 here, which is exactly the uplift signal the
+  single-thread `memory` behavioral suite structurally cannot produce.
+
+  The planted fact carries a per-RUN token ({token}, templated by the runner into both
+  the store turn and the expected answer), so a value left in the durable store by an
+  EARLIER run can't false-green a broken store — a stale token won't match this run's
+  expected value.
+
+  PRECONDITION: run against the owner-scoped dev daemon (the CLI caller is the owner).
+  Leaves a few tokened facts in ~/.fermix-dev durable memory (harmless dev residue).
+  No `requires_tools` gate: memory_store/memory_recall emit no span on the CLI path, so
+  the FRESH recall session is itself the provenance — context can't carry the fact.
+defaults:
+  judge: false
+  timeout_ms: 180000
+
+scenarios:
+  - id: store_then_recall_fresh_session
+    title: "Recall a fact in a new conversation it was never told in"
+    severity: critical
+    tags: [capability, memory, cross_session]
+    cases:
+      - id: durable_pet_name
+        # A deliberately BENIGN, memorable fact — not a credential. "Access codeword"
+        # / password-flavored phrasing invites a cautious assistant to decline storing
+        # it, confounding a memory test with secret-handling policy; a pet's name does not.
+        cross_session: true
+        turns:
+          - query: >
+              Remember this for later — I've decided to name my new pet goldfish {token}.
+              Just acknowledge that you've noted it.
+          - query: >
+              What did I say I named my new pet goldfish? Reply with ONLY the name,
+              nothing else.
+        score: { match: contains, expected: "{token}" }
+
+      - id: durable_project_codename
+        cross_session: true
+        turns:
+          - query: >
+              For future reference, please remember that my current project's internal
+              codename is {token}. Just confirm you'll keep it in mind.
+          - query: >
+              Remind me — what is my current project's internal codename? Reply with
+              ONLY the codename, nothing else.
+        score: { match: contains, expected: "{token}" }

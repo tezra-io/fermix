@@ -30,7 +30,7 @@ tools"* — an objective **task-success score**, ranked across models.
 ```sh
 # Score the model the dev daemon currently serves (auto-detected from the trace):
 uv run bin/run_capability.py --trials 5                   # all public capability suites
-uv run bin/run_capability.py --suite cap_core --trials 3  # one suite
+uv run bin/run_capability.py --suite cap_web_research --trials 3  # one suite
 uv run bin/run_capability.py --estimate --trials 5        # turn-count/cost plan, no spend
 uv run bin/run_capability.py --private --trials 5         # + the held-out split (gap check)
 uv run bin/run_capability.py --rank-only                  # re-render the leaderboard
@@ -142,34 +142,32 @@ uv run bin/run_eval.py --suite streaming --tag safety          # just the CLI-ne
 Note: operator-case traces live on your real `telegram:*` thread — `--purge`
 never touches them (it only deletes `e2e-*` threads).
 
-## Provider parity suites (one daemon, one provider, run separately)
+## Provider parity suite (one daemon, one provider, cycle to compare)
 
-`suites/provider_*.yaml` are seven byte-identical task batteries — one per
-provider (`openai`, `openai_codex`, `anthropic`, `xai`, `openrouter`, `mistral`,
-`ollama`) — that run the **same** six scenarios (plain reasoning, web_search tool
-use, a local shell call, a memory store→recall round-trip, strict
-instruction-following, harmful-request refusal) so behaviour can be compared
-**task-for-task across providers**.
+`suites/provider_parity.yaml` is a single behavioural battery — it runs the same
+seven scenarios (plain reasoning, web_search tool use, a local shell call, a
+parallel-subagent fan-out, a memory store→recall round-trip, strict
+instruction-following, harmful-request refusal) against **whatever provider the dev
+daemon currently serves as primary**, so behaviour can be compared task-for-task.
+(It replaces the seven byte-identical `provider_*` suites that differed only by a
+model-slug pin and failed six-at-a-time under `--all`.)
 
 There is **no per-call provider override**: `fermix ask` has no `--provider` /
 `--model` flag, and the daemon serves the single provider in its config. So the
-matrix is run by **cycling the daemon**, one provider at a time:
+matrix is run by **cycling the daemon**, one provider at a time — exactly like the
+capability sweep:
 
 1. Set the primary provider + model in `~/.fermix-dev/config.toml`.
 2. Restart the dev daemon (`FERMIX_HOME=~/.fermix-dev`).
-3. Run only that provider's suite: `uv run bin/run_eval.py --suite provider_anthropic`.
+3. Run the parity suite: `uv run bin/run_eval.py --suite provider_parity`.
 4. Repeat for the next provider.
 
-**Model-pin integrity guard.** Each suite's `defaults.expect.main_model_matches`
-pins every turn to that provider's model slug (`^`-anchored: bare slugs like
-`claude-`, `gpt-5`, `grok-`, `mistral-`, `qwen3` for direct providers; the
-slash-prefixed `vendor/model` form for OpenRouter). If a *different* provider
-served the turn — wrong config, or an OpenRouter failover leaking a direct slug —
-the suite **fails loudly** instead of silently grading the wrong backend.
-
-**Do NOT bundle them into a blind `--all` or `--suite provider_*`.** Only one
-provider is active per daemon, so the other six would all fail the model pin. Run
-exactly the one suite matching the currently-configured provider.
+**No model-slug pin.** The suite deliberately drops the old
+`defaults.expect.main_model_matches` pin: only one provider is active per daemon,
+the harness already auto-detects the served model, and pinning here only produced
+seven copies that failed six-at-a-time. To assert a specific daemon's model (e.g.
+to catch an OpenRouter failover leaking a direct slug), add a case- or
+scenario-level `main_model_matches` override for that run.
 
 **Daemon preconditions for full coverage** (else those scenarios fail *uniformly*
 across providers — a daemon gap, not a provider difference): shell enabled with a
