@@ -89,6 +89,20 @@ def test_uplift_significance_wording_from_exact_p(capsys):
     assert "not significant" in md
 
 
+def test_partial_uplift_is_erased_at_1_but_significant_at_half():
+    # A flaky-but-dramatically-better arm: 0.8 mean_success with Fermix vs 0.0 raw.
+    # At the OLD threshold 1.0 BOTH arms binarize to fail (0.8 < 1.0) -> concordant ->
+    # p=1.0, a real large gain wrongly reads "not significant". At the new 0.5 default
+    # the win is discordant fermix-only -> significant. Regression for the uplift bug.
+    fermix = {f"t{i}": 0.8 for i in range(10)}
+    baseline = {f"t{i}": 0.0 for i in range(10)}
+    erased = uplift.paired_uplift(fermix, baseline, threshold=1.0)
+    assert erased.discordant_fermix_only == 0 and erased.p_value == 1.0
+    real = uplift.paired_uplift(fermix, baseline, threshold=0.5)
+    assert real.discordant_fermix_only == 10 and real.p_value < 0.01
+    assert real.uplift == pytest.approx(1.0)
+
+
 def test_paired_uplift_no_difference():
     fermix = {f"t{i}": 1.0 for i in range(6)}
     baseline = {f"t{i}": 1.0 for i in range(6)}
@@ -126,7 +140,7 @@ def test_render_md_has_claim_template():
     fermix = {f"t{i}": 1.0 for i in range(10)}
     baseline = {f"t{i}": (1.0 if i < 4 else 0.0) for i in range(10)}
     r = uplift.paired_uplift(fermix, baseline, threshold=1.0)
-    md = uplift.render_md(r, label="gpt-5.5", suite="cap_core", k=3)
+    md = uplift.render_md(r, label="gpt-5.5", suite="cap_web_research", k=3)
     assert "uplift" in md.lower()
     assert "95% CI" in md
     assert "%" in md
@@ -135,7 +149,7 @@ def test_render_md_has_claim_template():
 def test_arm_io_roundtrip(tmp_path):
     p = str(tmp_path / "arm.json")
     tasks = {"cap/a": {"mean_success": 1.0, "pass_hat_k": 1.0, "n": 3}}
-    uplift.write_arm(p, arm="fermix", config_id="gpt-5.5", suite="cap_core", k=3,
+    uplift.write_arm(p, arm="fermix", config_id="gpt-5.5", suite="cap_web_research", k=3,
                      threshold=1.0, tasks=tasks)
     payload = uplift.load_arm(p)
     assert payload["arm"] == "fermix"
@@ -145,10 +159,10 @@ def test_arm_io_roundtrip(tmp_path):
 def test_run_uplift_cli_end_to_end(tmp_path, capsys):
     import run_uplift
     f, b = str(tmp_path / "fermix.json"), str(tmp_path / "baseline.json")
-    uplift.write_arm(f, arm="fermix", config_id="gpt-5.5", suite="cap_core", k=3, threshold=1.0,
+    uplift.write_arm(f, arm="fermix", config_id="gpt-5.5", suite="cap_web_research", k=3, threshold=1.0,
                      tasks={"cap/a": {"mean_success": 1.0, "pass_hat_k": 1.0, "n": 3},
                             "cap/b": {"mean_success": 1.0, "pass_hat_k": 1.0, "n": 3}})
-    uplift.write_arm(b, arm="baseline", config_id="gpt-5.5", suite="cap_core", k=3, threshold=1.0,
+    uplift.write_arm(b, arm="baseline", config_id="gpt-5.5", suite="cap_web_research", k=3, threshold=1.0,
                      tasks={"cap/a": {"mean_success": 0.0, "pass_hat_k": 0.0, "n": 3},
                             "cap/b": {"mean_success": 1.0, "pass_hat_k": 1.0, "n": 3}})
     assert run_uplift.main(["--fermix", f, "--baseline", b]) == 0

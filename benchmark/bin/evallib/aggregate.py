@@ -8,7 +8,9 @@ EVAL_CAPABILITY_SCORING.md §4):
   * pass^k   — reliability: ALL k trials pass (tau-bench convention); the honest
                headline for an always-on agent. pass^k < pass@1 is the gap.
   * $/success, p95 latency — efficiency, straight off the traces
-  * composite + rank — task-success-dominant, efficiency as a tie-breaker
+  * composite + rank — CAPABILITY-first: success dominates, then pass^k, and
+    efficiency only breaks a genuine near-tie (it can never buy back a real
+    capability gap)
 
 Safety is a HARD gate: a trial that trips a safety boundary scores 0 regardless of
 task success (folded in at `score_trial`, never averaged away).
@@ -18,11 +20,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-
-# Composite weights (pre-registered — task success dominates; efficiency breaks
-# ties among equally-correct configs). See §4.
-W_SUCCESS = 0.7
-W_EFFICIENCY = 0.3
 
 
 @dataclass
@@ -179,12 +176,14 @@ def aggregate_config(config_id: str, task_stats: list[TaskStats]) -> ConfigScore
 EFFICIENCY_AXES = ("tokens", "cost")
 
 
-def rank_configs(configs: list[ConfigScore], axis: str = "tokens",
-                 w_success: float = W_SUCCESS, w_efficiency: float = W_EFFICIENCY) -> list[RankedConfig]:
-    """Rank configs by a task-success-dominant composite, efficiency as the
-    tie-breaker. Efficiency is normalized against the most-efficient config that
-    actually resolved something, so a perfect-but-expensive config still leads a
-    cheap-but-wrong one, while two equally-correct configs sort more-efficient-first.
+def rank_configs(configs: list[ConfigScore], axis: str = "tokens") -> list[RankedConfig]:
+    """Rank configs CAPABILITY-FIRST: task success is the headline, pass^k
+    reliability breaks a success tie, and efficiency only breaks a further tie.
+    A more-capable-but-chattier model ALWAYS outranks a cheaper-but-weaker one —
+    efficiency can never buy back a real capability gap (the old 0.7·success +
+    0.3·efficiency blend let a ~0.43 capability gap be reversed on token count,
+    the exact mis-ranking this prevents). Efficiency is normalized against the
+    most-efficient config that actually resolved something.
 
     `axis` selects the efficiency metric: "tokens" (default, provider-neutral) or
     "cost" (only meaningful where Opik priced the trace)."""
@@ -198,10 +197,13 @@ def rank_configs(configs: list[ConfigScore], axis: str = "tokens",
     ranked: list[RankedConfig] = []
     for c in configs:
         eff = _efficiency_norm(per_success(c), best)
-        composite = w_success * c.mean_task_success + w_efficiency * eff
+        # Capability-dominant scalar: success is the integer-and-hundredths headline;
+        # pass^k and efficiency live in the sub-milli decimals so they order true
+        # ties without reversing any success difference we care to resolve.
+        composite = c.mean_task_success + c.mean_pass_hat_k * 1e-3 + eff * 1e-6
         ranked.append(RankedConfig(config=c, composite=composite, efficiency_norm=eff, rank=0))
 
-    ranked.sort(key=lambda r: (r.composite, r.config.mean_task_success), reverse=True)
+    ranked.sort(key=lambda r: r.composite, reverse=True)
     for i, r in enumerate(ranked, start=1):
         r.rank = i
     return ranked

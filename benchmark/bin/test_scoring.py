@@ -51,12 +51,22 @@ def test_numeric_no_number_in_reply_is_zero():
     assert scoring.score_answer("no idea", {"match": "numeric", "expected": 5}).score == 0.0
 
 
-def test_numeric_uses_last_number_after_cot():
-    # CoT preamble: first number is a premise (6), the answer is the last (65).
+def test_numeric_any_match_finds_answer_despite_distractors():
+    # The answer can appear after chain-of-thought OR before a trailing distractor.
+    # Any extracted number within tolerance counts, so neither position defeats it.
     reply = "We have 6 shelves, each holds 12, plus 5 on top. Total: 65"
     assert scoring.score_answer(reply, {"match": "numeric", "expected": 65}).score == 1.0
-    # the old first-number behavior would have wrongly read 6
-    assert scoring.score_answer(reply, {"match": "numeric", "expected": 6}).score == 0.0
+    # trailing-context distractor (the OLD 'last number' rule read 60.9 and scored 0):
+    trailing = "Revenue was $130.5B, up from $60.9B last year."
+    assert scoring.score_answer(trailing, {"match": "numeric", "expected": 130.5, "tolerance": 0.1}).score == 1.0
+    # a number genuinely absent still fails
+    assert scoring.score_answer(reply, {"match": "numeric", "expected": 999}).score == 0.0
+
+
+def test_numeric_accepts_scientific_notation():
+    # a physics constant in sci-notation used to score 0 (exponent grabbed separately)
+    reply = "The speed of light is about 2.99792458e8 m/s."
+    assert scoring.score_answer(reply, {"match": "numeric", "expected": 299792458, "tolerance": 0}).score == 1.0
 
 
 # --- contains ---------------------------------------------------------------

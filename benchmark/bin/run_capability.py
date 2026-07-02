@@ -27,7 +27,7 @@ import re
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILL_DIR = os.path.dirname(HERE)
@@ -54,15 +54,35 @@ def sess(*parts: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", "-".join(parts))[:90]
 
 
+def _checker_fingerprint(case) -> str:
+    """Grading identity of a checker task: its spec PLUS a content hash of the checker
+    script, so editing a checker's grading LOGIC (not just its path) changes the task
+    hash — a re-graded run can't then silently compare as the same task set."""
+    if not case.checker_spec:
+        return ""
+    script = case.checker_spec.get("script") or ""
+    digest = "no-script"
+    if script:
+        try:
+            with open(os.path.join(SKILL_DIR, script), "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()[:12]
+        except OSError:
+            pass
+    return f"{script}:{case.checker_spec.get('mode')}:{case.checker_spec.get('seed')}:{digest}"
+
+
 def tasks_hash(cases) -> str:
-    """Content hash of the SELECTED tasks (id + query + score spec) — the
-    reproducibility pin. Hashing the actual selected cases (not the suite files)
-    means a `--max-tasks`/`--tag`/`--suite` subset gets a DISTINCT hash (so a
-    partial smoke run can't masquerade as a full run for the same model), while a
-    prose/description-only edit that changes no task leaves it unchanged."""
+    """Content hash of the SELECTED tasks — the reproducibility pin. Covers the query,
+    the scorer (score spec / checker spec + script CONTENT / rubric), the provenance
+    requirement and the cross-session flag, so any change that alters what's asked or how
+    it's graded yields a DISTINCT hash (a `--max-tasks`/`--suite` subset, or a re-graded
+    run, can't masquerade as a prior full run), while a prose-only edit leaves it
+    unchanged. Hashes the selected cases, not the suite files."""
     h = hashlib.sha256()
-    rows = sorted(f"{s.name}/{c.id}|{c.turns[-1].query}|{c.score_spec}|{c.rubric}"
-                  for s, _scn, c in cases)
+    rows = sorted(
+        f"{s.name}/{c.id}|{c.turns[-1].query}|{c.score_spec}|{_checker_fingerprint(c)}|"
+        f"{c.rubric}|{sorted(c.requires_tools)}|{c.cross_session}"
+        for s, _scn, c in cases)
     for row in rows:
         h.update(row.encode("utf-8"))
     return h.hexdigest()[:16]
@@ -122,6 +142,13 @@ def _safety_ok(trace, spans, expect) -> bool:
     return all(g.passed for g in grade.grade(trace, spans, relevant))
 
 
+def _provenance_ok(requires_tools, tool_names) -> bool:
+    """A task that DECLARES required tools passes provenance only if ≥1 of them
+    fired on the trace. A task that declares none always passes. Keeps a correct
+    answer reached from parametric recall (no tool span) from earning credit."""
+    return not requires_tools or bool(set(requires_tools) & set(tool_names))
+
+
 def _task_success(cfg, case, reply, want_judge, tag) -> tuple[float, str]:
     if case.score_spec:
         s = scoring.score_answer(reply, case.score_spec)
@@ -134,8 +161,130 @@ def _task_success(cfg, case, reply, want_judge, tag) -> tuple[float, str]:
     return 0.0, "no score_spec and judge off (skip-scored 0)"
 
 
+@dataclass
+class _Captured:
+    """One driven turn's graded projection (or the reason it couldn't be graded)."""
+    status: str                          # graded | no_trace | opik_error | not_running | crashed
+    view: "grade.TurnView | None"
+    trace: dict | None
+    spans: list | None
+    elapsed_ms: float
+
+
+def _capture_turn(cfg, opik, session, query, timeout_ms, label) -> _Captured:
+    """Drive ONE turn and return its graded view. Daemon down / binary missing →
+    no server-side trace, hard fail. A CLI timeout or daemon-side error still polls
+    the completed server-side trace (latency != capability). An Opik read failure is
+    recorded, never raised, so one flake can't abort a multi-minute sweep."""
+    res = driver.drive_query(cfg, session, query, timeout_ms)
+    if res.status in ("not_running", "crashed"):
+        return _Captured(res.status, None, None, None, res.elapsed_ms)
+    try:
+        # 10s clock-skew slack (daemon vs harness clock), mirroring run_eval; the
+        # unique per-trial session already prevents grabbing a stale trace.
+        after = res.sent_at - timedelta(seconds=10)
+        hit = opik.poll_for_turn(session, query, after, set(),
+                                 cfg.opik.poll_timeout_s, cfg.opik.poll_interval_s)
+        if hit is None:
+            return _Captured("no_trace" if res.ok else res.status, None, None, None, res.elapsed_ms)
+        if res.status == "timeout":
+            print(f"    · {label}: CLI wait elapsed; graded from the completed server-side "
+                  f"trace (latency, not a failure)", file=sys.stderr)
+        trace, spans = opik.await_complete(hit)
+        return _Captured("graded", grade.TurnView.build(trace, spans), trace, spans, res.elapsed_ms)
+    except OpikError as exc:
+        print(f"    ! opik read failed for {label}: {exc}", file=sys.stderr)
+        return _Captured("opik_error", None, None, None, res.elapsed_ms)
+
+
+def _models_of(view) -> list[str]:
+    """provider/model/effort labels off the main-agent llm spans (config detection)."""
+    return [f"{p}/{m}/{e}"
+            for p, m, e in zip(view.main_providers, view.main_models, view.main_efforts)]
+
+
+def _fail_trial(case_id, cap) -> tuple[aggregate.TrialResult, None, list]:
+    return (aggregate.score_trial(case_id, task_success=0.0, safety_ok=True, cost=0.0,
+            duration_ms=cap.elapsed_ms, tokens=0, tool_calls=0, status=cap.status), None, [])
+
+
+def _score_trial(case, cap, succ) -> tuple[aggregate.TrialResult, str | None, list]:
+    view = cap.view
+    ok = _safety_ok(cap.trace, cap.spans, case.expect)
+    tr = aggregate.score_trial(case.id, task_success=succ, safety_ok=ok, cost=view.cost,
+        duration_ms=cap.elapsed_ms, tokens=view.tokens, tool_calls=len(view.tool_spans),
+        status=view.status, trace_id=cap.trace.get("id"))
+    return (tr, cap.trace.get("id"), _models_of(view))
+
+
+def _xsession_token(s_name, case_id, run_id, i) -> str:
+    """A distinctive, deterministic, per-RUN-unique fact to plant and recall. Unique
+    per run so a token left in durable memory by an earlier run can't false-green a
+    broken store; deterministic so a resumed run reproduces it."""
+    h = hashlib.sha256(f"{s_name}/{case_id}/{run_id}/t{i}".encode()).hexdigest()[:6]
+    return f"kestrel-{h}"
+
+
+def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge):
+    session = sess("e2e-cap", run_id, s.name, case.id, f"t{i}")
+    query, scoped = case.turns[-1].query, None
+    if is_checker:
+        # fresh per-trial scoped dir under the agent's sandbox; the absolute `{ws}`
+        # resolves under workspace_root in ANY sandbox mode.
+        scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i)
+        checker.seed_workspace(scoped, fixtures_dir)
+        query = query.replace("{ws}", scoped)
+    try:
+        cap = _capture_turn(cfg, opik, session, query, case.timeout_ms, f"{case.id} t{i}")
+        if cap.view is None:
+            return _fail_trial(case.id, cap)
+        if is_checker:
+            cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, cap.view.reply)
+            if cr.error:
+                print(f"    ! checker error {case.id} t{i}: {cr.error}", file=sys.stderr)
+            succ = cr.score
+        else:
+            succ, _detail = _task_success(cfg, case, cap.view.reply, want_judge, session)
+        # Tool-provenance gate: a task that DECLARES required tools scores 0 unless ≥1
+        # fired — a right answer reached WITHOUT the tool is parametric recall, not tool
+        # use, and earns no credit. This is what makes uplift vs a tool-less arm real.
+        if not _provenance_ok(case.requires_tools, cap.view.tool_names):
+            print(f"    · {case.id} t{i}: no required tool {case.requires_tools} fired "
+                  f"(ran={sorted(set(cap.view.tool_names))}) — provenance fail", file=sys.stderr)
+            succ = 0.0
+        return _score_trial(case, cap, succ)
+    finally:
+        if scoped:                       # always clean the seeded dir (SafeRm-guarded)
+            try:
+                checker.teardown_workspace(cfg.daemon.fermix_home, scoped)
+            except safe_rm.SafeRmError as exc:
+                print(f"    ! teardown refused for {case.id} t{i}: {exc}", file=sys.stderr)
+
+
+def _cross_session_trial(cfg, opik, s, case, run_id, i):
+    """Store a tokened fact in session A, then recall it in a FRESH session B (same
+    owner). Because B shares NO conversation context, a correct recall can only come
+    from owner-scoped DURABLE memory carried across sessions — the one thing the
+    single-thread memory suite can't test, and where a raw/tool-less model scores 0
+    (the uplift signal)."""
+    token = _xsession_token(s.name, case.id, run_id, i)
+    store_q = case.turns[0].query.replace("{token}", token)
+    recall_q = case.turns[1].query.replace("{token}", token)
+    sess_a = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "store")
+    sess_b = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "recall")
+
+    store = _capture_turn(cfg, opik, sess_a, store_q, case.timeout_ms, f"{case.id} t{i} store")
+    if store.status in ("not_running", "crashed"):
+        return _fail_trial(case.id, store)   # infra failure on store → recall is meaningless
+    cap = _capture_turn(cfg, opik, sess_b, recall_q, case.timeout_ms, f"{case.id} t{i} recall")
+    if cap.view is None:
+        return _fail_trial(case.id, cap)
+    spec = {**case.score_spec, "expected": str(case.score_spec["expected"]).replace("{token}", token)}
+    succ = scoring.score_answer(cap.view.reply, spec).score
+    return _score_trial(case, cap, succ)
+
+
 def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> TaskOutcome:
-    base_query = case.turns[-1].query
     is_checker = case.checker_spec is not None
     task_key = f"{s.name}-{case.id}"
     fixtures_dir = (os.path.join(SKILL_DIR, case.checker_spec["seed"])
@@ -146,69 +295,16 @@ def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> Ta
     repr_trace_id = None
 
     for i in range(trials):
-        session = sess("e2e-cap", run_id, s.name, case.id, f"t{i}")
-        scoped = None
-        if is_checker:
-            # fresh per-trial scoped dir under the agent's sandbox; `{ws}` in the
-            # query is the workspace-relative path the agent must operate in.
-            scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i)
-            checker.seed_workspace(scoped, fixtures_dir)
-            # Absolute scoped path: under workspace_root (always an allowed sandbox
-            # root) so it resolves in ANY sandbox mode, not just strict.
-            query = base_query.replace("{ws}", scoped)
+        if case.cross_session:
+            tr, trace_id, tmodels = _cross_session_trial(cfg, opik, s, case, run_id, i)
         else:
-            query = base_query
-        try:
-            res = driver.drive_query(cfg, session, query, case.timeout_ms)
-            if not res.ok:
-                results.append(aggregate.score_trial(case.id, task_success=0.0, safety_ok=True,
-                    cost=0.0, duration_ms=res.elapsed_ms, tokens=0, tool_calls=0, status=res.status))
-                continue
-            # A transient Opik read failure must NOT abort a multi-minute run — record
-            # the trial as an opik_error zero and move on, like the not-ok branches.
-            try:
-                hit = opik.poll_for_turn(session, query, res.sent_at, set(),
-                                         cfg.opik.poll_timeout_s, cfg.opik.poll_interval_s)
-                if hit is None:
-                    results.append(aggregate.score_trial(case.id, task_success=0.0, safety_ok=True,
-                        cost=0.0, duration_ms=res.elapsed_ms, tokens=0, tool_calls=0, status="no_trace"))
-                    continue
-                trace, spans = opik.await_complete(hit)
-                view = grade.TurnView.build(trace, spans)
-                if is_checker:
-                    # grade the sandbox END-STATE, not the reply text
-                    cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, view.reply)
-                    if cr.error:
-                        print(f"    ! checker error {case.id} t{i}: {cr.error}", file=sys.stderr)
-                    succ = cr.score
-                else:
-                    succ, _detail = _task_success(cfg, case, view.reply, want_judge, session)
-                ok = _safety_ok(trace, spans, case.expect)
-            except OpikError as exc:
-                print(f"    ! opik read failed for {case.id} t{i}: {exc}", file=sys.stderr)
-                results.append(aggregate.score_trial(case.id, task_success=0.0, safety_ok=True,
-                    cost=0.0, duration_ms=res.elapsed_ms, tokens=0, tool_calls=0, status="opik_error"))
-                continue
-            # Latency = the driver's end-to-end wall-clock (the trace's own duration is
-            # ~0; the Opik exporter stamps start==end on the agent:main trace).
-            tr = aggregate.score_trial(case.id, task_success=succ, safety_ok=ok, cost=view.cost,
-                duration_ms=res.elapsed_ms, tokens=view.tokens, tool_calls=len(view.tool_spans),
-                status=view.status, trace_id=trace.get("id"))
-            results.append(tr)
-            # Label the config by provider/model/effort so configs sharing a slug
-            # (openai vs openai_codex) AND the same model at a different effort each
-            # get their own leaderboard row, not a silent collision.
-            models += [f"{p}/{m}/{e}"
-                       for p, m, e in zip(view.main_providers, view.main_models, view.main_efforts)]
-            if trace.get("id"):
-                trial_traces.append((trace["id"], tr.effective_success))
-                repr_trace_id = repr_trace_id or trace["id"]
-        finally:
-            if scoped:                       # always clean the seeded dir (guarded)
-                try:
-                    checker.teardown_workspace(cfg.daemon.fermix_home, scoped)
-                except safe_rm.SafeRmError as exc:
-                    print(f"    ! teardown refused for {case.id} t{i}: {exc}", file=sys.stderr)
+            tr, trace_id, tmodels = _standard_trial(
+                cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge)
+        results.append(tr)
+        models += tmodels
+        if trace_id:
+            trial_traces.append((trace_id, tr.effective_success))
+            repr_trace_id = repr_trace_id or trace_id
 
     if is_checker:                       # drop the now-empty eval/<task> parent
         try:
@@ -218,8 +314,9 @@ def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> Ta
 
     stats = aggregate.aggregate_task(results, k=k, threshold=threshold)
     method = (f"checker:{os.path.basename(case.checker_spec['script'])}" if is_checker
+              else "cross_session" if case.cross_session
               else case.score_spec.get("match") if case.score_spec else "judge")
-    item = {"input": base_query, "expected": _expected(case), "suite": s.name, "method": method}
+    item = {"input": case.turns[-1].query, "expected": _expected(case), "suite": s.name, "method": method}
     return TaskOutcome(stats=stats, repr_trace_id=repr_trace_id, item_data=item,
                        trial_traces=trial_traces, models=models)
 

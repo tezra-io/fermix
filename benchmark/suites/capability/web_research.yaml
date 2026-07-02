@@ -34,6 +34,9 @@ scenarios:
         # calendar invites the wrong year-pair. Source: nvidianews.nvidia.com
         # "Financial Results for Fourth Quarter and Fiscal 2025". tol rejects "70".
         score: { match: numeric, expected: 69.6, tolerance: 0.3 }
+        # Provenance gate: a no-fetch answer (parametric recall of closed FYs) scores
+        # 0 even if the number is right — this task must be answered by live retrieval.
+        requires_tools: [web_search, web_fetch]
 
       - id: irs_401k_limit_2026
         query: >
@@ -45,6 +48,7 @@ scenarios:
         # 2025-67) — correct answer is strong evidence of a live lookup. Source:
         # irs.gov/newsroom "401(k) limit increases to $24,500 for 2026".
         score: { match: numeric, expected: 24500, tolerance: 0 }
+        requires_tools: [web_search, web_fetch]
 
       - id: rav4_crv_awd_hybrid_mpg
         query: >
@@ -57,6 +61,7 @@ scenarios:
         # Trap: the CR-V hybrid is commonly assumed the efficiency leader (memory vs
         # live data). Sources: fueleconomy.gov IDs 47392 (RAV4), 46716 (CR-V).
         score: { match: regex, expected: '(?i)(rav[\s-]?4[\s\S]{0,40}\b39\b|\b39\b[\s\S]{0,40}rav[\s-]?4)' }
+        requires_tools: [web_search, web_fetch]
 
   - id: research_set_reasoning
     title: "Reason over a researched set to a single member"
@@ -71,6 +76,7 @@ scenarios:
         # Bulgaria, Finland, ...). Trap: Poland/Czechia/Hungary joined in 1999, so
         # excluded. Sources: NATO member-countries page, en.wikipedia Enlargement_of_NATO.
         score: { match: contains, expected: "Romania" }
+        requires_tools: [web_search, web_fetch]
 
       - id: eu_lowest_gdp_per_capita_top5
         query: >
@@ -81,3 +87,4 @@ scenarios:
         # are 6th/7th); Poland (~$31k) is lowest of those five. Sources: IMF WEO /
         # en.wikipedia GDP-per-capita + EU demographics.
         score: { match: contains, expected: "Poland" }
+        requires_tools: [web_search, web_fetch]

@@ -24,7 +24,10 @@ MATCH_METHODS: tuple[str, ...] = ("exact", "numeric", "contains", "regex", "f1")
 
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 _WS_RE = re.compile(r"\s+")
-_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+# integers, decimals, thousands-separated, AND scientific notation (2.998e8) — a
+# physics constant written in sci-notation used to score 0 because the exponent was
+# grabbed as a separate number.
+_NUMBER_RE = re.compile(r"-?\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
 
 @dataclass
@@ -69,15 +72,21 @@ def _exact(reply: str, expected) -> AnswerScore:
 
 def _numeric(reply: str, expected, tolerance) -> AnswerScore:
     want = _parse_number(_as_text(expected))
-    got = _parse_number(reply)
     if want is None:
         return AnswerScore(0.0, "numeric", f"numeric: expected {expected!r} is not a number")
-    if got is None:
-        return AnswerScore(0.0, "numeric", f"numeric: no number found in reply")
+    nums = _all_numbers(reply)
+    if not nums:
+        return AnswerScore(0.0, "numeric", "numeric: no number found in reply")
+    # ANY extracted number within tolerance counts — a correct answer followed by a
+    # parenthetical ("$130.5B, up from $60.9B") or shown work no longer scores 0 just
+    # because a trailing distractor is the last token. A premise number that happens to
+    # equal the exact expected answer is far rarer than such distractors.
     tol = float(tolerance or 0)
-    hit = abs(got - want) <= tol
+    hit = any(abs(n - want) <= tol for n in nums)
+    close = min(nums, key=lambda n: abs(n - want))
     return AnswerScore(1.0 if hit else 0.0, "numeric",
-                       f"numeric: got {got} vs {want} (tol {tol}) -> {'ok' if hit else 'off'}")
+                       f"numeric: want {want} (tol {tol}); closest of {len(nums)} = {close} -> "
+                       f"{'ok' if hit else 'off'}")
 
 
 def _contains(reply: str, expected) -> AnswerScore:
@@ -126,15 +135,19 @@ def _tokens(s: str) -> list[str]:
     return _normalize(s).split()
 
 
+def _all_numbers(s: str) -> list[float]:
+    """Every number in the text (thousands-separators stripped, sci-notation kept)."""
+    out: list[float] = []
+    for tok in _NUMBER_RE.findall(s or ""):
+        try:
+            out.append(float(tok.replace(",", "")))
+        except ValueError:
+            pass
+    return out
+
+
 def _parse_number(s: str) -> float | None:
-    """The LAST number in the text. Models present a final answer after any
-    chain-of-thought, so the last number is the answer; the first is usually a
-    premise ("If 5 machines... → 5 minutes"). "Reply with ONLY the number" is a
-    request, not a guarantee — this scorer does not assume the reply is bare."""
-    matches = _NUMBER_RE.findall(s or "")
-    if not matches:
-        return None
-    try:
-        return float(matches[-1].replace(",", ""))
-    except ValueError:
-        return None
+    """The LAST number in the text — used to read a clean single `expected` value.
+    Reply-side scoring uses `_all_numbers` (any-match), not this."""
+    nums = _all_numbers(s)
+    return nums[-1] if nums else None

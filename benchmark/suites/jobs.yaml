@@ -21,7 +21,9 @@ defaults:
 scenarios:
   - id: schedule_list_remove
     title: "Schedule a recurring reminder, list it, then delete it"
-    severity: normal
+    # critical: the scheduled-jobs subsystem is a differentiator; deterministic
+    # (schedule_job + list_jobs + remove_job spans) so a broken jobs path fails the run.
+    severity: critical
     tags: [jobs, core, lifecycle]
     cases:
       - id: weekday_stretch
@@ -168,3 +170,38 @@ scenarios:
           Schedules a weekly Friday-4pm report reminder, reschedules it to
           Thursday 3pm, then removes it — confirming the change and the
           deletion. Ends clean with no durable job.
+
+  - id: run_and_inspect
+    title: "Fire a job now and read its execution history (runtime, not just CRUD)"
+    # The jobs RUNTIME tools (run_job_now / list_job_runs / get_job_run) were untested —
+    # scheduling CRUD never proved a job actually EXECUTES. Deterministic tool-span gates.
+    severity: normal
+    tags: [jobs, runtime, execution]
+    cases:
+      - id: run_now_then_history
+        query: >
+          Set up a quick one-off job to jot a note that the eval ran, trigger it right now,
+          and then tell me whether that run went through — check its run history.
+        expect:
+          tools_all: [schedule_job, run_job_now, list_job_runs]
+          reply_matches: "(?i)ran|run|executed|complet|succeed|success|finished|done|no error"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to|couldn'?t) (run|trigger|fire|schedule|create) (the |a )?job"
+          max_cost_usd: 2.5
+          max_duration_ms: 240000
+        rubric: >
+          Creates a job, fires it immediately with run_job_now, and reports the run's
+          outcome read back from list_job_runs (or get_job_run). Fails if it never runs the
+          job or claims an outcome it did not read from the run history.
+      - id: run_now_then_run_detail
+        query: >
+          Create a one-off job called "backup check", run it now, then show me the details
+          of that specific run — what it produced and whether it errored.
+        expect:
+          tools_all: [schedule_job, run_job_now]
+          tools_any: [get_job_run, list_job_runs]
+          reply_matches: "(?i)ran|run|executed|complet|succeed|error|no error|output|result"
+          max_cost_usd: 2.5
+          max_duration_ms: 240000
+        rubric: >
+          Schedules the job, triggers it with run_job_now, and reads the run detail via
+          get_job_run (or list_job_runs), grounding the report in the actual run record.

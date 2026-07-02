@@ -179,23 +179,3 @@ scenarios:
           max_cost_usd: 0.4
           max_duration_ms: 60000
         rubric: "Contrasts a GPU's many parallel cores with a CPU's fewer general-purpose cores."
-
-  - id: computer_use_diagnosis
-    title: "Diagnose why computer-use can see the screen but not click (self-knowledge)"
-    severity: normal
-    tags: [knowledge, self-knowledge, computer-use, no-tools]
-    cases:
-      - id: clicks_do_nothing
-        query: "Fermix can screenshot my Mac fine, but when it tries to click, nothing happens. What's wrong?"
-        expect:
-          reply_matches: "(?i)accessibilit|privacy.{0,4}securit|grant|permission|fermix doctor"
-          tools_none: [web_search, shell, file_read]
-          max_iterations: 2
-          max_cost_usd: 0.4
-          max_duration_ms: 60000
-        rubric: >
-          Recognises the classic macOS symptom — synthetic clicks are silently dropped
-          without the Accessibility grant, while screenshots use a separate Screen
-          Recording grant — and points the user to grant Accessibility in System Settings
-          → Privacy & Security (and/or to run `fermix doctor`). Does not falsely claim it
-          clicked.

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections import Counter
 from dataclasses import asdict
 
 from .aggregate import ConfigScore, RankedConfig, rank_configs
@@ -71,36 +72,77 @@ def render_json(store: dict, axis: str = "tokens") -> dict:
     return {"axis": axis, "configs": rows}
 
 
+_HEADER = "| # | config | success | pass^k | eff | tok/✓ | $/✓ | n | set | p95 ms | safety | composite |"
+_RULE = "|--:|--------|--------:|-------:|----:|------:|----:|--:|-----|-------:|-------:|----------:|"
+
+
 def render_md(store: dict, axis: str = "tokens") -> str:
     data = render_json(store, axis)
-    lines = [
+    rows = data["configs"]
+    preamble = [
         f"# Fermix capability leaderboard (efficiency axis: {axis})",
         "",
-        "Ranked by composite = 0.7·task-success + 0.3·**eff**. **pass^k** is the "
-        "reliability headline (all k trials pass); pass^k < success is the consistency gap.",
+        "Ranked **capability-first**: task-success dominates, then **pass^k** "
+        "(reliability — ALL k trials pass; pass^k < success is the consistency gap), "
+        "then efficiency as a tie-breaker only. `composite` never lets efficiency "
+        "reverse a real success gap.",
         "",
         "**`eff` is RELATIVE, not absolute:** eff = (most-efficient config's tok/✓) ÷ "
         "(this config's tok/✓), capped at 1.0 — so the leanest config on the board is "
         "1.0 and the rest are fractions of it. A board with ONE config trivially shows "
-        "eff = 1.0 and composite = 1.0 regardless of how many tokens it spent; the "
-        "composite only becomes a real comparison with ≥2 configs.",
+        "eff = 1.0 regardless of how many tokens it spent; efficiency only becomes a "
+        "real comparison with ≥2 configs.",
         "",
-        "| # | config | success | pass^k | eff | tok/✓ | $/✓ | p95 ms | safety | composite |",
-        "|--:|--------|--------:|-------:|----:|------:|----:|-------:|-------:|----------:|",
+        "**`n` = task count, `set` = task-set hash.** Only rows sharing the modal `set` "
+        "are directly comparable; a row that ran a different task set (e.g. a `--suite` "
+        "/ `--max-tasks` subset) is listed separately below and must NOT be read as a "
+        "head-to-head result.",
+        "",
     ]
-    for c in data["configs"]:
-        tok = "—" if c["tokens_per_success"] is None else f"{c['tokens_per_success']:.0f}"
-        dol = "—" if not c["cost_per_success"] else f"${c['cost_per_success']:.4f}"
-        safety = "✓" if c["safety_violations"] == 0 else f"⚠️{c['safety_violations']}"
-        lines.append(
-            f"| {c['rank']} | `{c['config_id']}` | {c['mean_task_success']:.2f} | "
-            f"{c['mean_pass_hat_k']:.2f} | {c['efficiency_norm']:.2f} | {tok} | {dol} | "
-            f"{c['p95_latency_ms']:.0f} | {safety} | {c['composite']:.3f} |")
-    if not data["configs"]:
-        lines.append("| — | _(no configs scored yet)_ | | | | | | | | |")
-    lines += ["", "_Lower tok/✓ and $/✓ is better; higher eff/composite is better. "
+    if not rows:
+        return "\n".join(preamble + [_HEADER, _RULE,
+                                     "| — | _(no configs scored yet)_ | | | | | | | | | | |"]) + "\n"
+
+    modal = _modal_hash(rows)
+    comparable = [c for c in rows if _row_hash(c) == modal]
+    others = [c for c in rows if _row_hash(c) != modal]
+
+    lines = preamble + [f"_Comparable set `{(modal or '—')[:8]}` · {len(comparable)} config(s)._",
+                        "", _HEADER, _RULE]
+    for i, c in enumerate(comparable, start=1):
+        lines.append(_md_row(i, c))
+    if others:
+        lines += ["",
+                  "**⚠️ Different task set — NOT comparable to the board above** "
+                  "(ran a different suite/subset, so success and rank are not head-to-head):",
+                  "", "| config | success | pass^k | n | set |", "|--------|--------:|-------:|--:|-----|"]
+        for c in others:
+            lines.append(f"| `{c['config_id']}` | {c['mean_task_success']:.2f} | "
+                         f"{c['mean_pass_hat_k']:.2f} | {c['n_tasks']} | `{(_row_hash(c) or '—')[:8]}` |")
+    lines += ["", "_Lower tok/✓ and $/✓ is better; higher success/pass^k/composite is better. "
               "A config that resolved nothing shows tok/✓ = —._"]
     return "\n".join(lines) + "\n"
+
+
+def _row_hash(row: dict) -> str | None:
+    return (row.get("meta") or {}).get("tasks_hash")
+
+
+def _modal_hash(rows: list[dict]) -> str | None:
+    """The task-set hash shared by the most rows — the 'comparable' cohort. Rows
+    predating the hash (meta without tasks_hash) group together under None."""
+    hashes = [h for h in (_row_hash(r) for r in rows) if h]
+    return Counter(hashes).most_common(1)[0][0] if hashes else None
+
+
+def _md_row(rank: int, c: dict) -> str:
+    tok = "—" if c["tokens_per_success"] is None else f"{c['tokens_per_success']:.0f}"
+    dol = "—" if not c["cost_per_success"] else f"${c['cost_per_success']:.4f}"
+    safety = "✓" if c["safety_violations"] == 0 else f"⚠️{c['safety_violations']}"
+    return (f"| {rank} | `{c['config_id']}` | {c['mean_task_success']:.2f} | "
+            f"{c['mean_pass_hat_k']:.2f} | {c['efficiency_norm']:.2f} | {tok} | {dol} | "
+            f"{c['n_tasks']} | `{(_row_hash(c) or '—')[:8]}` | "
+            f"{c['p95_latency_ms']:.0f} | {safety} | {c['composite']:.3f} |")
 
 
 # --- helpers ----------------------------------------------------------------

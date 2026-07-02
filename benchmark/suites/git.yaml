@@ -23,7 +23,9 @@ defaults:
 scenarios:
   - id: working_tree_status
     title: "Reports the current git status"
-    severity: normal
+    # critical: git tooling is a differentiator; deterministic (git_read span) so a broken
+    # git path fails the run rather than passing green.
+    severity: critical
     tags: [git, read, status]
     cases:
       - id: whats_the_status

@@ -39,13 +39,13 @@ make capability                     # score all public suites, k=5 trials/task
 make rank                           # re-render the leaderboard table
 ```
 
-`make capability` = `uv run bin/run_capability.py --suite cap_core --trials 5`.
+`make capability` = `uv run bin/run_capability.py --trials 5` (all public suites).
 Useful flags on `bin/run_capability.py`:
 
 | flag | effect |
 |---|---|
 | `--trials N` | trials per task (pass^k reliability needs N≥3; default 3) |
-| `--suite NAME` | one suite — realistic: `cap_web_research`, `cap_data_extraction`, `cap_coding` (checker); trivia/smoke: `cap_core`, `cap_reasoning`, `cap_instruction_following`; `cap_safety` |
+| `--suite NAME` | one suite — `cap_web_research` (live-fetch, provenance-gated), `cap_data_extraction`, `cap_coding` (end-state checker), `cap_memory` (cross-session durable memory), `cap_safety` (judge) |
 | `--max-tasks N` | cap task count (bound spend) |
 | `--judge` | enable the LLM judge (required for `cap_safety` — refusal needs a judge) |
 | `--private` | run an operator-supplied held-out split (`FERMIX_EVAL_HOLDOUT_DIR` or `--private-data <dir>`, OUTSIDE the repo) under a separate `:private` row, never written to Opik |

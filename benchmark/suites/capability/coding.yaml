@@ -45,6 +45,19 @@ scenarios:
           seed: "suites/capability/fixtures/code/sales_csv"
           timeout_ms: 60000
 
+      - id: invoice_discount_bug
+        query: >
+          In {ws} there's a small pricing module (invoice.py, discounts.py) with a
+          failing test — run `python -m pytest tests/` from {ws} to see it.
+          invoice_total(lines, tax_pct) is supposed to return the sum of the DISCOUNTED
+          line totals with tax applied, but it's dropping the per-line discounts. Fix the
+          bug in {ws} so ALL tests pass. Do not edit the tests or the test file.
+        checker:
+          script: "suites/capability/checkers/pytest_invoice.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/invoice"
+          timeout_ms: 120000
+
       - id: landlord_email
         query: >
           Write a formal email to my landlord, Mr. Adeyemi, and save it to

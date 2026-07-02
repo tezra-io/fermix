@@ -79,7 +79,9 @@ scenarios:
 
   - id: list_then_view
     title: "Discovers a skill from the list, then opens it"
-    severity: normal
+    # critical: the skill subsystem is a differentiator; deterministic (skill_list +
+    # skill_view spans) so a broken skill path fails the regression run, not silently green.
+    severity: critical
     tags: [skills, list, view]
     cases:
       - id: list_then_open_self_knowledge
@@ -110,3 +112,40 @@ scenarios:
           max_cost_usd: 1.0
           max_duration_ms: 150000
         rubric: "Enumerates the skills, then views browser_guidance and reports its contents."
+
+  - id: create_and_reload
+    title: "Author a new skill and hot-reload it into the running agent"
+    # skill_create + skill_reload were untested (only list/view were). skill_create is
+    # unambiguously the tool for "create a skill", so tools_any:[skill_create] is a
+    # deterministic gate. Leaves stable-named skills in ~/.fermix/skills (re-runs overwrite).
+    severity: normal
+    tags: [skills, create, reload]
+    cases:
+      - id: create_then_reload
+        query: >
+          Create a new skill called "eval-widget" whose instructions are simply to always
+          reply with the word WIDGET, then reload your skills so it's live and confirm it's
+          available now.
+        expect:
+          tools_any: [skill_create]
+          reply_matches: "(?i)eval[-_]?widget|created|added|reload|available|new skill"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Writes the skill with skill_create (to ~/.fermix/skills) and reloads it
+          (skill_reload) so it registers without a restart, confirming the new skill name.
+          Fails if it claims it cannot create skills or fabricates a creation it didn't do.
+      - id: create_then_verify_in_list
+        query: >
+          Make me a skill named "eval-greeter" that greets people in French, then show me
+          your current skill list so I can see it landed.
+        expect:
+          tools_any: [skill_create]
+          reply_matches: "(?i)eval[-_]?greeter|created|added|skill"
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Creates the skill and then reloads + lists skills so the new "eval-greeter"
+          appears in the listing; grounds the confirmation in the real skill list, not a
+          fabricated success.

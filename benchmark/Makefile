@@ -28,13 +28,13 @@ capability-judged:  ## capability incl. the judge-scored safety suite (needs EVA
 	$(UV) bin/run_capability.py --trials 5 --judge
 
 estimate:     ## print the capability turn-count/cost plan (no spend)
-	$(UV) bin/run_capability.py --suite cap_core --trials 5 --estimate
+	$(UV) bin/run_capability.py --trials 5 --estimate
 
 rank:         ## re-render the cross-model leaderboard
 	$(UV) bin/run_capability.py --rank-only
 
 baseline:     ## raw-model arm (needs EVAL_BASELINE_API_KEY + EVAL_BASELINE_MODEL)
-	$(UV) bin/run_baseline.py --suite cap_core --trials 5
+	$(UV) bin/run_baseline.py --suite cap_data_extraction --trials 5
 
 uplift:       ## paired uplift (set FERMIX_RESULTS=... BASELINE_RESULTS=...)
 	$(UV) bin/run_uplift.py --fermix "$(FERMIX_RESULTS)" --baseline "$(BASELINE_RESULTS)"

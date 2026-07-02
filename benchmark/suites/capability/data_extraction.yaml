@@ -1,70 +1,53 @@
 suite: cap_data_extraction
-title: "Capability — data extraction & transformation (realistic, inline input)"
+title: "Capability — data extraction from a seeded file (checker-scored)"
 description: >
-  Realistic "make sense of my messy data" tasks — the kind people paste into
-  ChatGPT/Claude daily. Input is INLINE in the prompt (no workspace file), graded
-  by ground-truth on the final reply, so these need no new eval infra. Each is
-  engineered with planted traps so frontier models actually diverge (the answer is
-  NOT the first salient number). Golds verified by computation. NOT trivia — see
-  EVAL_REALISTIC_TASKS.md. (File-based data tasks that read a seeded workspace file
-  land in the checker tier.)
+  Realistic "make sense of my messy data" tasks — the kind people paste into an
+  assistant daily — but the data lives in a SEEDED workspace file the agent must READ
+  (file tools) rather than inline in the prompt. That makes the answer unreachable
+  without Fermix's tools, so a tool-less baseline scores 0 and the gap is measurable
+  UPLIFT (the inline version measured none). Each payload keeps its planted traps so
+  frontier models diverge, and is graded by a checker over the answer the agent writes.
+
+  PRECONDITION: shell/file tools enabled + a sandbox rooted at the workspace (the
+  absolute {ws} resolves in any mode). Checkers grade the written answer.txt end-state.
 defaults:
   judge: false
   timeout_ms: 180000
 
 scenarios:
-  - id: messy_extraction
-    title: "Extract/compute the right value from messy real-world data"
+  - id: file_extraction
+    title: "Extract/compute the right value from a messy seeded file"
     severity: normal
-    tags: [capability, data, extraction]
+    tags: [capability, data, extraction, checker]
     cases:
       - id: expense_groceries_total
-        query: |
-          Here's my expense log for January. Treat amounts in parentheses as
-          refunds (i.e. negative). Counting every row whose Category is "Groceries"
-          — matching case- and whitespace-insensitively — what did I spend on
-          groceries in total? Reply with ONLY the number (two decimals, no currency
-          symbol).
-
-          Date,Category,Description,Amount
-          2026-01-03,Groceries,Whole Foods,84.20
-          2026-01-05,groceries ,Trader Joe's,52.10
-          2026-01-07,Dining,Chipotle,14.50
-          2026-01-09,Groceries,Costco,210.00
-          2026-01-12,Transport,Uber,23.40
-          Date,Category,Description,Amount
-          2026-01-15,Groceries,Safeway refund,(18.75)
-          2026-01-18,GROCERIES,Kroger,67.30
-          2026-01-20,Grocery,corner store,9.99
-          2026-01-22,Groceries,"Whole Foods, organic","1,024.50"
-        # 84.20+52.10+210.00-18.75+67.30+1024.50 = 1419.35 (excludes Dining,
-        # Transport, the repeated header, and singular "Grocery"). Traps: refund
-        # sign, quoted thousands-separator, duplicate header, case/space collision.
-        score: { match: numeric, expected: 1419.35, tolerance: 0.01 }
+        query: >
+          In {ws} there's a file expenses.csv (columns Date,Category,Description,Amount).
+          Treat amounts in parentheses as refunds (i.e. negative). Counting every row
+          whose Category is "Groceries" — matching case- and whitespace-insensitively —
+          what did I spend on groceries in total? Write ONLY the number (two decimals, no
+          currency symbol) to {ws}/answer.txt.
+        # gold 1419.35. Traps: refund sign, quoted thousands-separator, a duplicate
+        # header row, "GROCERIES"/"groceries " case+space collisions, singular "Grocery"
+        # excluded, Dining/Transport excluded.
+        checker:
+          script: "suites/capability/checkers/expense_total.py"
+          mode: json
+          seed: "suites/capability/fixtures/data/expenses"
+          timeout_ms: 60000
 
       - id: order_email_extract
-        query: |
-          I forwarded an order confirmation below. Extract these fields and reply
-          with EXACTLY one line and nothing else, in this format:
-          <order_id>|<total_charged>|<item_count>|<delivery_date>
-          where order_id is the bare order number, total_charged is the final
-          amount actually charged (a number, no symbol), item_count is the TOTAL
-          number of physical items (sum of quantities), and delivery_date is
-          YYYY-MM-DD.
-
-          From: orders@northwind.example
-          Subject: Your Northwind order #NW-48213 is confirmed
-          Hi Sam, thanks for your order! Here's your summary:
-          2x Stainless Water Bottle (32oz) .... $25.00 each
-          1x Insulated Lunch Bag ............... $18.50
-          3x Reusable Straw (set) ............. $4.00 each
-          Subtotal: $80.50
-          Shipping: $6.99
-          Tax: $7.25
-          -------------------------------
-          Total charged: $94.74
-          Estimated delivery: Tuesday, March 3, 2026
-          Ships to: 12 Maple St, Austin, TX
-        # NW-48213|94.74|6|2026-03-03. Traps: total (94.74) not subtotal (80.50);
-        # item_count = 2+1+3 = 6 not 3 line items; date normalization.
-        score: { match: regex, expected: '(?i)\bNW-48213\s*\|\s*\$?\s*94\.74\s*\|\s*6\s*\|\s*2026-03-03\b' }
+        query: >
+          In {ws} there's a file order.txt — a forwarded order confirmation. Extract the
+          fields and write EXACTLY one line (and nothing else) to {ws}/answer.txt in the
+          format <order_id>|<total_charged>|<item_count>|<delivery_date>, where order_id
+          is the bare order number, total_charged is the final amount actually charged
+          (a number, no symbol), item_count is the TOTAL number of physical items (sum of
+          quantities), and delivery_date is YYYY-MM-DD.
+        # gold NW-48213|94.74|6|2026-03-03. Traps: total (94.74) not subtotal (80.50);
+        # item_count = 2+1+3 = 6 (sum of quantities) not 3 line items; date normalization.
+        checker:
+          script: "suites/capability/checkers/order_extract.py"
+          mode: json
+          seed: "suites/capability/fixtures/data/order"
+          timeout_ms: 60000

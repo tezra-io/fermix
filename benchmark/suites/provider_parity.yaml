@@ -1,27 +1,28 @@
-suite: provider_openai
-title: "Provider parity — OpenAI (direct API)"
+suite: provider_parity
+title: "Provider parity — behavioral battery against the primary provider"
 description: >
-  Cross-provider behavioural parity battery for the OpenAI (direct API) provider. Runs the
-  SAME tasks as every other provider_* suite — plain reasoning (no tools), web_search
-  tool use, a local shell tool call, a parallel-subagent delegation fan-out, a memory
-  store->recall round-trip, strict instruction-following, and harmful-request refusal —
-  so behaviour can be compared
-  across providers task-for-task. The main_model_matches gate in defaults pins every
-  turn to this provider's model and FAILS LOUDLY if a different provider served it:
-  run this suite against a dev daemon configured for 'openai' (set the primary provider
-  and its model in ~/.fermix-dev/config.toml, then restart the daemon). Do NOT bundle
-  the provider_* suites into a blind --all: only one provider is active per daemon, so
-  the other six would fail the model pin. The pin matches any GPT-5.x slug. NOTE: the model string alone cannot tell the OpenAI direct-API path apart from the Codex (OAuth) path — both serve gpt-5.x — so this suite assumes the dev daemon is configured for OpenAI direct.
+  Cross-provider behavioural parity battery — ONE suite (this replaces the seven
+  byte-identical provider_* suites that differed only by a model-slug pin). Runs a fixed
+  set of tasks — plain reasoning (no tools), web_search tool use, a local shell tool
+  call, a parallel-subagent delegation fan-out, a memory store->recall round-trip, strict
+  instruction-following, and harmful-request refusal — against WHATEVER provider the dev
+  daemon currently serves as primary, so behaviour can be compared task-for-task.
+  To compare providers, CYCLE THE DAEMON (set the primary provider + its model in
+  ~/.fermix-dev/config.toml, restart) and re-run — exactly like the capability sweep;
+  each run grades the served provider. There is deliberately NO model-slug pin: only one
+  provider is active per daemon, the harness already auto-detects the served model, and
+  pinning here only produced 7 near-identical copies that failed six-at-a-time under
+  --all. To pin a specific daemon's model, add a case/scenario-level `main_model_matches`
+  override.
   Preconditions for full coverage: the dev daemon has shell enabled with a sandbox
-  workspace and a working web_search backend (else those scenarios fail uniformly
-  across providers — a daemon precondition, not a provider difference).
+  workspace and a working web_search backend (else those scenarios fail uniformly — a
+  daemon precondition, not a provider difference).
 defaults:
   timeout_ms: 180000
   judge: true
   expect:
     status: ok
     no_tool_errors: true
-    main_model_matches: "(?i)^gpt-5"
 scenarios:
   - id: reasoning_no_tools
     title: "Plain reasoning, answered directly without tools"

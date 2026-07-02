@@ -23,6 +23,8 @@ EXPECT_SPEC: dict[str, tuple] = {
     "tools_any": (list,),
     "tools_all": (list,),
     "tools_none": (list,),
+    "tools_none_succeeded": (list,),   # safety: tool must be absent OR errored (blocked) — a
+    #   working sandbox/NetGuard block PASSES; only a SUCCESSFUL harmful call fails.
     "tools_in_order": (list,),
     "min_tool_calls": (int,),
     "max_tool_calls": (int,),
@@ -71,6 +73,11 @@ class Case:
     images: list[str] = field(default_factory=list)  # ask-only: absolute paths to --attach
     score_spec: dict | None = None  # capability tier: ground-truth answer scoring (scoring.py)
     checker_spec: dict | None = None  # capability tier: end-state checker scoring (checker.py)
+    requires_tools: list[str] = field(default_factory=list)  # capability tier: provenance gate
+    #   — the trial scores 0 unless ≥1 of these tool spans fired, so an answer reached
+    #     from parametric recall (no real tool use) can't score. Makes uplift real.
+    cross_session: bool = False     # capability tier: store in turn-1's session, recall in
+    #   a FRESH session (turn-2) — tests owner-scoped durable memory across conversations.
 
 
 @dataclass
@@ -107,7 +114,7 @@ def _validate_expect(expect, where: str, problems: list[str]) -> None:
         if not isinstance(val, EXPECT_SPEC[key]) or isinstance(val, bool) and EXPECT_SPEC[key] == (int,):
             problems.append(f"{where}: expect `{key}` must be {EXPECT_SPEC[key]}, got {type(val).__name__}")
             continue
-        if key in ("tools_any", "tools_all", "tools_none", "tools_in_order"):
+        if key in ("tools_any", "tools_all", "tools_none", "tools_none_succeeded", "tools_in_order"):
             if not all(isinstance(t, str) for t in val):
                 problems.append(f"{where}: expect `{key}` must be a list of tool-name strings")
         if key in ("reply_matches", "reply_not_matches", "main_model_matches", "subagent_model_matches"):
@@ -320,6 +327,17 @@ def _load_one(path: str, problems: list[str]) -> Suite | None:
             present = [k for k in ("score", "checker", "rubric") if cs.get(k) is not None]
             if len(present) > 1:
                 problems.append(f"{cloc}: a case may carry only one of score/checker/rubric, got {present}")
+            requires_tools = cs.get("requires_tools") or []
+            if not isinstance(requires_tools, list) or not all(isinstance(t, str) and t for t in requires_tools):
+                problems.append(f"{cloc}: `requires_tools` must be a list of tool-name strings")
+                requires_tools = []
+            # cross_session: store the fact in turn 1's session, recall in a fresh
+            # session (turn 2) — needs exactly 2 turns + a `score` block on the recall.
+            cross_session = bool(cs.get("cross_session", False))
+            if cross_session and len(turns) != 2:
+                problems.append(f"{cloc}: `cross_session` requires exactly 2 turns (store, recall)")
+            if cross_session and score_spec is None:
+                problems.append(f"{cloc}: `cross_session` requires a `score` block (grades the recall reply)")
             judge = bool(cs.get("judge", default_judge))
             ctimeout = _timeout(cs["timeout_ms"], cloc) if "timeout_ms" in cs else default_timeout
 
@@ -364,7 +382,8 @@ def _load_one(path: str, problems: list[str]) -> Suite | None:
 
             cases.append(Case(id=cid, turns=turns, expect=case_expect, rubric=rubric,
                               judge=judge, timeout_ms=ctimeout, drive=drive, images=images,
-                              score_spec=score_spec, checker_spec=checker_spec))
+                              score_spec=score_spec, checker_spec=checker_spec,
+                              requires_tools=requires_tools, cross_session=cross_session))
 
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags, cases=cases))
 

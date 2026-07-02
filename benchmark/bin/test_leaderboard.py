@@ -84,5 +84,33 @@ def test_render_md_empty_store():
     assert "no configs scored yet" in md
 
 
+def test_render_md_flags_non_comparable_task_set():
+    # Two configs ran the SAME 27-task set (hash AAA); a third ran a cherry-picked
+    # subset (hash BBB). The subset must be segregated as NOT comparable, not
+    # ranked head-to-head above the full-set rows.
+    store = {}
+    store = lb.upsert(store, cfg("full-a", 0.90, 700), {"tasks_hash": "AAA", "tasks": 27})
+    store = lb.upsert(store, cfg("full-b", 0.85, 900), {"tasks_hash": "AAA", "tasks": 27})
+    store = lb.upsert(store, cfg("subset", 0.98, 300), {"tasks_hash": "BBB", "tasks": 5})
+    md = lb.render_md(store)
+    assert "NOT comparable" in md
+    # the high-scoring subset row must sit in the flagged section, below the board
+    # (match the backticked config id so the word "subset" in the preamble prose
+    # doesn't create a false earlier hit)
+    assert md.index("`full-a`") < md.index("NOT comparable")
+    assert md.index("NOT comparable") < md.index("`subset`")
+    # comparable cohort is the modal (AAA) set of 2 configs
+    assert "Comparable set `AAA`" in md and "2 config(s)" in md
+
+
+def test_render_md_all_same_task_set_no_warning():
+    store = {}
+    store = lb.upsert(store, cfg("a", 0.9, 700), {"tasks_hash": "AAA"})
+    store = lb.upsert(store, cfg("b", 0.6, 600), {"tasks_hash": "AAA"})
+    md = lb.render_md(store)
+    assert "NOT comparable" not in md
+    assert md.index("a") < md.index("b")
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

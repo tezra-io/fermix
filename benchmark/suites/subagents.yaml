@@ -29,7 +29,9 @@ defaults:
 scenarios:
   - id: model_routing
     title: "Explicit fan-out spawns workers and synthesizes across all branches"
-    severity: normal
+    # critical: delegation is a headline differentiator — a broken fan-out must FAIL
+    # the regression run (the exit code trips only on critical scenarios).
+    severity: critical
     tags: [subagents, delegation, routing]
     cases:
       - id: default_subagent_model
@@ -40,7 +42,9 @@ scenarios:
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 2
-          reply_matches: "(?i)espresso|tide|bookbind"
+          # lookaheads: the summary must cover EVERY branch — a fan-out that spawns
+          # workers but drops 2 of 3 results (a real synthesis regression) must fail.
+          reply_matches: "(?is)(?=.*espresso)(?=.*tide)(?=.*bookbind)"
           max_cost_usd: 30
           max_duration_ms: 900000
         rubric: >
@@ -61,7 +65,7 @@ scenarios:
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 2
-          reply_matches: "(?i)cricket|vaccine|jazz"
+          reply_matches: "(?is)(?=.*cricket)(?=.*vaccine)(?=.*jazz)"
           max_cost_usd: 30
           max_duration_ms: 900000
         rubric: >
