@@ -225,6 +225,7 @@ defmodule FermixCore.Tools.ComputerUse do
 
     ToolTelemetry.exec("computer_use", context, success, duration,
       metadata: %{action: Map.get(params, "action")},
+      input: params,
       result: result
     )
 
