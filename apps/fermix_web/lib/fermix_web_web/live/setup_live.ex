@@ -1672,9 +1672,14 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp fail_plugin_install(socket, task, tasks, reason) do
+    # Use the card's display name ("Computer Use"), not the raw registry name
+    # ("computer_use_sidecar"), so the one place a user sees an error matches the
+    # card they clicked.
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> flash_error("#{task.name} install failed: #{install_error(reason)}")
+    |> flash_error(
+      "#{card_display_name(task.name, task.name)} install failed: #{install_error(reason)}"
+    )
   end
 
   # Install done — continue with the same enable/connect sequence an installed
