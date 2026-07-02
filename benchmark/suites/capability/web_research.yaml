@@ -63,28 +63,37 @@ scenarios:
         score: { match: regex, expected: '(?i)(rav[\s-]?4[\s\S]{0,40}\b39\b|\b39\b[\s\S]{0,40}rav[\s-]?4)' }
         requires_tools: [web_search, web_fetch]
 
-  - id: research_set_reasoning
-    title: "Reason over a researched set to a single member"
+  - id: precise_figure_lookup
+    title: "Look up a precise, verify-worthy figure (financial / regulatory)"
+    # Replaces the old name-answer 'reason over a set' cases (nato/eu_gdp): those were
+    # answerable from parametric memory (Romania/Poland), so a frontier model answered
+    # WITHOUT fetching and the provenance gate correctly zeroed a right-but-unretrieved
+    # answer — a bad retrieval test. A PRECISE numeric answer reliably induces a fetch
+    # (the model verifies the exact figure rather than risk misremembering), matching the
+    # nvidia/irs/rav4 cases above. Golds verified against primary sources 2026-07-02.
     severity: normal
-    tags: [capability, web, research, reasoning]
+    tags: [capability, web, research]
     cases:
-      - id: nato_21c_largest_population
+      - id: apple_fy24_total_revenue
         query: >
-          Of all the countries that joined NATO in 2004 or later, which one has the
-          largest population today? Reply with ONLY the country name, nothing else.
-        # Romania (~19M) — most populous of the 2004+ accession set (Sweden ~10.6M,
-        # Bulgaria, Finland, ...). Trap: Poland/Czechia/Hungary joined in 1999, so
-        # excluded. Sources: NATO member-countries page, en.wikipedia Enlargement_of_NATO.
-        score: { match: contains, expected: "Romania" }
+          What was Apple's TOTAL net sales (total revenue) for its full FISCAL year 2024
+          (the fiscal year that ended in September 2024)? Reply with ONLY the number in
+          billions of US dollars, as a plain decimal (e.g. 12.3) — no units, no commas.
+        # $391.0B (precisely $391.035B), up from $383.3B in FY2023. Trap: Apple's fiscal
+        # year ends late September, so FY2024 != calendar 2024, and the FY2023 $383.3B
+        # figure is the near-miss. Source: apple.com/newsroom Q4 FY2024 results + the
+        # FY2024 10-K (aapl-20240928). tol 1.0 accepts 391 / 391.0 / 391.04.
+        score: { match: numeric, expected: 391, tolerance: 1.0 }
         requires_tools: [web_search, web_fetch]
 
-      - id: eu_lowest_gdp_per_capita_top5
+      - id: ss_wage_base_2026
         query: >
-          Take the five most populous member states of the European Union. Of those
-          five, which one has the LOWEST nominal GDP per capita according to the
-          latest IMF estimates? Reply with ONLY the country name, nothing else.
-        # Poland — the 5 most populous are DE, FR, IT, ES, PL (Romania/Netherlands
-        # are 6th/7th); Poland (~$31k) is lowest of those five. Sources: IMF WEO /
-        # en.wikipedia GDP-per-capita + EU demographics.
-        score: { match: contains, expected: "Poland" }
+          What is the Social Security taxable maximum for the year 2026 — the "wage base",
+          i.e. the maximum annual earnings subject to Social Security (OASDI) tax? Reply
+          with ONLY the dollar amount as a plain number, no commas and no symbols
+          (e.g. 12345).
+        # $184,500 for 2026 (up from $176,100 in 2025), announced by the SSA on 2025-10-24
+        # — a fresh figure the model must look up. Trap: the 2025 value $176,100. Source:
+        # ssa.gov/oact/cola/cbb.html + payroll.org.
+        score: { match: numeric, expected: 184500, tolerance: 0 }
         requires_tools: [web_search, web_fetch]
