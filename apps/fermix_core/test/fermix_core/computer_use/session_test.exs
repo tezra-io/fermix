@@ -370,7 +370,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       # poisoned Port → session stops so the next action gets a clean driver,
       # and terminate still tears the driver down (releasing held input).
-      assert_receive {:DOWN, ^ref, :process, ^session, :sidecar_timeout}
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_timeout}}
       assert_receive :driver_stop
     end
   end

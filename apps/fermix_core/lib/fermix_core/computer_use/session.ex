@@ -179,7 +179,10 @@ defmodule FermixCore.ComputerUse.Session do
         # structured error AND stop, so the next action starts a clean driver;
         # terminate/2 closes the Port (releasing any held input). The generous
         # 30s budget makes a real firing rare, so resetting is acceptable.
-        {:stop, :sidecar_timeout, {:error, reason}, state}
+        # {:shutdown, _}: an EXPECTED stop — the timeout warning is already
+        # logged; a bare atom here additionally dumps a full GenServer crash
+        # report for what is a designed reset.
+        {:stop, {:shutdown, :sidecar_timeout}, {:error, reason}, state}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
