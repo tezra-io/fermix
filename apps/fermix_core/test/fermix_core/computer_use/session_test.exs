@@ -215,6 +215,104 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert result == %{summary: "no UI element at that point", image: nil}
     end
 
+    test "an elements response becomes a text list of clickable elements (no image)" do
+      response = %{
+        "ok" => true,
+        "elements" => [
+          %{"role" => "AXButton", "title" => "Send", "x" => 100, "y" => 200},
+          %{"role" => "AXTextField", "title" => nil, "x" => 50, "y" => 60}
+        ]
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == nil
+      assert result.summary =~ "2 interactive element"
+      assert result.summary =~ "AXButton \"Send\" at (100,200)"
+      assert result.summary =~ "AXTextField at (50,60)"
+    end
+
+    test "an empty elements response reports none found" do
+      session = start_session(driver_opts: [response: %{"ok" => true, "elements" => []}])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result == %{summary: "no interactive UI elements found", image: nil}
+    end
+
+    test "a malformed elements entry is skipped, never crashed on" do
+      response = %{
+        "ok" => true,
+        "elements" => [
+          %{"role" => "AXButton", "title" => "OK", "x" => 1, "y" => 2},
+          %{"role" => "AXButton"},
+          %{"x" => "nope", "y" => 5}
+        ]
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.summary =~ "AXButton \"OK\" at (1,2)"
+      assert result.summary =~ "1 interactive element"
+    end
+
+    test "a wait_for_change response returns the new frame with a change note" do
+      png = <<137, 80, 78, 71>>
+
+      response = %{
+        "ok" => true,
+        "data" => Base.encode64(png),
+        "mime" => "image/png",
+        "width" => 1280,
+        "height" => 800,
+        "changed" => true
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "wait_for_change"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == %{type: :image, mime_type: "image/png", data: png}
+      assert result.summary =~ "screen changed"
+    end
+
+    test "a wait_for_change timeout frame notes no change" do
+      png = <<137, 80, 78, 71>>
+
+      response = %{
+        "ok" => true,
+        "data" => Base.encode64(png),
+        "mime" => "image/png",
+        "changed" => false
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "wait_for_change"})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result.summary =~ "no change before the wait timed out"
+    end
+
+    test "a screenshot cursor position is surfaced in the summary" do
+      png = <<137, 80, 78, 71>>
+
+      response = %{
+        "ok" => true,
+        "data" => Base.encode64(png),
+        "mime" => "image/png",
+        "width" => 1280,
+        "height" => 800,
+        "cursor" => %{"x" => 640, "y" => 400}
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "screenshot"})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result.summary =~ "Cursor at (640,400)"
+    end
+
     test "the action count increments per executed action" do
       session = start_session([])
       assert Session.action_count(session) == 0

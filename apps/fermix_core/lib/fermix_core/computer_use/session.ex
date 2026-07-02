@@ -302,7 +302,7 @@ defmodule FermixCore.ComputerUse.Session do
           "screenshot captured."
       end
 
-    "#{change_prefix(response)}#{dims} #{@untrusted_image_notice}"
+    "#{change_prefix(response)}#{dims}#{cursor_suffix(response)} #{@untrusted_image_notice}"
   end
 
   # `wait_for_change` sets `changed`: tell the model whether the screen actually
@@ -310,6 +310,13 @@ defmodule FermixCore.ComputerUse.Session do
   defp change_prefix(%{"changed" => true}), do: "screen changed — "
   defp change_prefix(%{"changed" => false}), do: "no change before the wait timed out — "
   defp change_prefix(_other), do: ""
+
+  # The sidecar reports the cursor position (in sent-image coords) when it's inside
+  # the captured region — surface it so the model can reason about drag/hover.
+  defp cursor_suffix(%{"cursor" => %{"x" => x, "y" => y}}) when is_integer(x) and is_integer(y),
+    do: " Cursor at (#{x},#{y})."
+
+  defp cursor_suffix(_other), do: ""
 
   defp emit_lifecycle_end(reason, state) do
     measurements = %{actions: state.action_count, duration_ms: now_ms() - state.started_at}

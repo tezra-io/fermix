@@ -30,7 +30,7 @@ defmodule FermixCore.MixProject do
       {:anubis_mcp, "~> 1.6"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
-      {:compux, github: "tezra-io/compux", ref: "34def6960b97aed4bd5d1c2a65e01f278cd76b14"},
+      {:compux, github: "tezra-io/compux", ref: "d46521fba979fe197d9f6107803e2dd372feaf27"},
       {:plug, "~> 1.15", only: :test},
       # Explicit because FermixCore.Application supervises the shared
       # FermixCore.Finch pool directly (req would only pull it transitively).
