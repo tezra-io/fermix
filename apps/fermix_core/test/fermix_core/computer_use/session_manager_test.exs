@@ -89,4 +89,39 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   test "lookup returns :error when no session exists for the conversation" do
     assert :error = SessionManager.lookup(context())
   end
+
+  test "abort tears down a running session and it does NOT restart", %{config: config} do
+    ctx = context(%{computer_use_origin: :voice})
+    {:ok, pid} = SessionManager.ensure(config, ctx, driver: stub_driver())
+    ref = Process.monitor(pid)
+
+    assert :ok = SessionManager.abort(ctx)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+
+    # A :permanent child would be RESTARTED by the :one_for_one supervisor here,
+    # re-registering under the same key — the teardown-defeating blocker. Session
+    # is :temporary and abort goes through terminate_child, so it stays down.
+    assert :error = SessionManager.lookup(ctx)
+    Process.sleep(150)
+    assert :error = SessionManager.lookup(ctx)
+    assert [] = DynamicSupervisor.which_children(CuSupervisor.session_supervisor())
+  end
+
+  test "abort is a no-op when no session exists for the conversation" do
+    assert :ok = SessionManager.abort(context(%{conversation_key: {"cli", "nope", :root}}))
+  end
+
+  test "abort is a no-op when the context carries no conversation key" do
+    assert :ok = SessionManager.abort(%{agent_name: "realtime"})
+  end
+
+  test "abort is a clean no-op when the registry is not running (CU disabled)" do
+    # Its whole supervisor is gated on ComputerUse.ready?/0, so when CU is
+    # disabled the registry does not exist — the voice teardown backstop that
+    # calls abort on EVERY call end must not crash there.
+    :ok = stop_supervised(CuSupervisor)
+    refute is_pid(Process.whereis(CuSupervisor.registry()))
+
+    assert :ok = SessionManager.abort(context(%{computer_use_origin: :voice}))
+  end
 end
