@@ -20,7 +20,7 @@ defmodule FermixCore.Tools.Browser do
   @impl true
   @spec description() :: String.t()
   def description do
-    "Control a supervised local browser (navigate, snapshot, fill/click/submit forms, tabs, screenshots). USE FOR JavaScript/dynamic/interactive pages and live data (flight prices, dashboards, logins); do NOT use for a static fact (use web_search) or one readable page (use web_fetch)."
+    "Control a supervised local browser (navigate, snapshot, fill/click/submit forms, tabs, screenshots OF ITS OWN PAGE) — this is its OWN managed browser instance, NOT the page/app/session the user has open on their screen (for that, use computer_use; to screenshot the user's actual desktop that is a computer_use action). USE FOR JavaScript/dynamic/interactive pages and live data (flight prices, dashboards, logins); do NOT use for a static fact (use web_search) or one readable page (use web_fetch)."
   end
 
   @impl true
@@ -151,7 +151,7 @@ defmodule FermixCore.Tools.Browser do
 
   @impl true
   def when_to_use do
-    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — not static text (use web_search/web_fetch)."
+    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — not static text (use web_search/web_fetch), and not the page/app the user already has open on their screen (use computer_use for that; browser drives its own instance)."
   end
 
   @impl true

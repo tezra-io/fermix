@@ -38,6 +38,8 @@ defmodule FermixCore.Application do
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
+  alias FermixCore.Watch
+  alias FermixCore.Watch.Supervisor, as: WatchSupervisor
 
   @impl true
   def start(_type, _args) do
@@ -142,7 +144,8 @@ defmodule FermixCore.Application do
         {JobScheduler, jobs_scheduler_opts()},
         maybe_daemon_socket(),
         maybe_realtime_supervisor(),
-        maybe_computer_use_supervisor()
+        maybe_computer_use_supervisor(),
+        maybe_watch_supervisor()
       ]
       |> List.flatten()
 
@@ -237,6 +240,17 @@ defmodule FermixCore.Application do
   defp maybe_computer_use_supervisor do
     if ComputerUse.ready?() do
       [ComputerUseSupervisor]
+    else
+      []
+    end
+  end
+
+  # Watch mode: the registry + session supervisor boot only when watch is enabled
+  # (`Watch.enabled?/0`, off by default) — so a disabled install starts nothing and
+  # the tools are never seeded. Off by default = untouched in tests.
+  defp maybe_watch_supervisor do
+    if Watch.enabled?() do
+      [WatchSupervisor]
     else
       []
     end
