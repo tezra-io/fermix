@@ -58,6 +58,25 @@ scenarios:
           seed: "suites/capability/fixtures/code/invoice"
           timeout_ms: 120000
 
+      - id: order_pipeline_boundary_bug
+        query: >
+          In {ws} there's an order-pricing package (catalog.py, pricing.py, report.py) with
+          a failing test — run `python -m pytest tests/` from {ws} to see it.
+          order_total_dollars is returning the wrong total for a 50-unit order: it's applying
+          the wrong volume-discount tier. Trace the bug to its ROOT cause and fix it in {ws}
+          so ALL tests pass. Do not edit the tests or the test file, and don't just special-case
+          the failing input — fix the actual defect.
+        # Root cause is a `>` vs `>=` off-by-one in catalog.bulk_tier (tier boundaries),
+        # manifesting two modules away in report.order_total_dollars. Hidden tests exercise
+        # the OTHER boundaries (10, 100) + tax, so a symptom-level patch in pricing/report
+        # fails. Discriminates: a weak model patches where the symptom shows, a strong one
+        # traces report -> pricing -> catalog.
+        checker:
+          script: "suites/capability/checkers/pytest_order.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/order_pipeline"
+          timeout_ms: 180000
+
       - id: landlord_email
         query: >
           Write a formal email to my landlord, Mr. Adeyemi, and save it to
