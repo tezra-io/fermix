@@ -13,9 +13,17 @@ defmodule FermixCore.ComputerUse.Session do
 
   `terminate/2` always stops the driver (releasing held input) — the load-bearing
   teardown guarantee — and emits the lifecycle bookend.
+
+  `restart: :temporary`: an on-demand, per-conversation resource must NOT be
+  auto-restarted by its `:one_for_one` supervisor. On abort (conversation/call
+  end), poison-reset (a sidecar timeout `:stop`), or crash it stays DOWN — the
+  next action that needs it calls `SessionManager.ensure/3` to start a clean one.
+  A `:permanent` restart would resurrect a host-control session for a conversation
+  that may be over (and, on abort, defeat the §7.6 "never outlive the attended
+  human" teardown by immediately restarting it).
   """
 
-  use GenServer
+  use GenServer, restart: :temporary
 
   alias Compux.Protocol
   alias FermixCore.ComputerUse.Config

@@ -8,6 +8,7 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
   alias FermixCore.Realtime.Config
@@ -93,6 +94,11 @@ defmodule FermixCore.Realtime.SessionServer do
       |> Map.put_new(:capability_registry, capability_registry)
       |> Map.put_new(:skill_registry, skill_registry)
       |> Map.put_new(:session_id, to_string(session_scope))
+      # The voice call IS the attended human (COMPUTER_USE.md §7.6) — tag its tool
+      # context so computer-use can start a host session, exactly as the text turn
+      # tags `:interactive` in TurnRunner. `:voice` is already whitelisted in
+      # `ComputerUse.Safety`. put_new so a test can override.
+      |> Map.put_new(:computer_use_origin, :voice)
 
     prompt_loader = Keyword.get(opts, :prompt_loader)
 
@@ -339,6 +345,18 @@ defmodule FermixCore.Realtime.SessionServer do
     {:noreply, drop_session(state)}
   end
 
+  @impl true
+  def terminate(_reason, %{tool_context: context}) do
+    # Backstop for the §7.6 guarantee on any process exit (crash, supervisor
+    # shutdown, disconnect) that never reached `:call_stop`: never let a host
+    # computer-use session outlive the attended voice call. Idempotent — a no-op
+    # when the model didn't use computer-use this call.
+    ComputerUseSessionManager.abort(context)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
+
   defp open_openai_session(state) do
     with {:ok, api_key} <- require_binary(state.api_key, :api_key),
          {:ok, safety_identifier} <- require_binary(state.safety_identifier, :safety_identifier),
@@ -436,6 +454,14 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp drop_session(state) do
+    # Losing the provider connection — for ANY reason: call end, max-session
+    # duration, exhausted reconnect, fatal error, usage limit, even a transient
+    # blip before a reconnect — means the model can no longer see or react, so a
+    # host computer-use session must not persist (COMPUTER_USE.md §7.6). Tear it
+    # down before dropping the socket; idempotent, and a reconnect's next action
+    # re-opens a fresh session via SessionManager.ensure. `terminate/2` is the
+    # backstop for a process death that never runs drop_session.
+    ComputerUseSessionManager.abort(state.tool_context)
     close_openai(state)
 
     state

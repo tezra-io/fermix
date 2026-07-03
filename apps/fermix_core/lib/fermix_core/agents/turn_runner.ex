@@ -225,8 +225,8 @@ defmodule FermixCore.Agents.TurnRunner do
       # Main interactive turns (a human in a chat, or `fermix ask`) are an ATTENDED
       # computer-use origin: a present owner who can abort. This lets the tool start a
       # host session (COMPUTER_USE.md §7.6); scheduled-job and other paths never set
-      # this and so fail closed (SessionManager's `:unattended` default). Voice sets
-      # `:voice` on its own path.
+      # this and so fail closed (SessionManager's `:unattended` default). The voice
+      # session tags `:voice` the same way (Realtime.SessionServer.init/1).
       computer_use_origin: :interactive,
       reply_fn: deliver,
       channel: msg.channel,

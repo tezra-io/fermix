@@ -41,6 +41,35 @@ defmodule FermixCore.ComputerUse.SessionManager do
     end
   end
 
+  @doc """
+  Tear down the computer-use session for `context`'s conversation, if one is
+  running. Idempotent — a no-op when none exists (or the context carries no
+  conversation key). An attended surface (e.g. the realtime voice session) calls
+  this on end-of-call so a host session never outlives the attended human (§7.6).
+  """
+  @spec abort(map()) :: :ok
+  def abort(context) when is_map(context) do
+    with true <- registry_running?(),
+         true <- Map.has_key?(context, :conversation_key),
+         {:ok, pid} <- lookup(context) do
+      # Tear down through the supervisor, NOT `Session.abort/1` (GenServer.stop):
+      # `terminate_child` removes the child (runs `Session.terminate/2` to release
+      # held input) and — unlike a pid `GenServer.stop` — returns `{:error,
+      # :not_found}` rather than EXITING if the pid already died in a teardown
+      # race, so this backstop never crashes its caller.
+      DynamicSupervisor.terminate_child(CuSupervisor.session_supervisor(), pid)
+      :ok
+    else
+      _ -> :ok
+    end
+  end
+
+  # The registry only exists while computer-use is enabled + ready — its whole
+  # supervisor is gated on `ComputerUse.ready?/0`. A teardown backstop runs on
+  # EVERY attended-surface exit (incl. when CU is disabled), so it must be a clean
+  # no-op — not an `ArgumentError` from `Registry.lookup` — when it isn't running.
+  defp registry_running?, do: is_pid(Process.whereis(CuSupervisor.registry()))
+
   defp start_session(key, config, context, opts) do
     origin = origin(context)
 
