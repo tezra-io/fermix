@@ -163,18 +163,19 @@ defmodule FermixWebWeb.PageControllerTest do
     assert body =~ "Active sessions"
     assert body =~ "realtime.sock"
     assert body =~ "Open setup"
+    # F-1: the unauthenticated home page must NOT mint or embed a launch token.
+    # The setup link is bare `/setup`; an unauthenticated visitor is refused by
+    # SetupAuth (a launch token is only ever minted by the `fermix setup` CLI).
     assert setup_href = setup_href(body)
-    assert setup_href =~ ~r{^/setup\?t=}
+    assert setup_href == "/setup"
+    refute setup_href =~ "t="
     assert body =~ ~s(href="/health/ready?pretty=1")
     assert body =~ ~s(href="/health/live?pretty=1")
     refute body =~ "Phoenix Framework"
     refute body =~ "Peace of mind from prototype to production"
 
-    setup_conn = build_conn() |> get(setup_href)
-    assert redirected_to(setup_conn) == ~p"/setup"
-
-    authorized_conn = setup_conn |> recycle() |> get(~p"/setup")
-    assert html_response(authorized_conn, 200) =~ "Fermix setup"
+    forbidden_conn = build_conn() |> get(setup_href)
+    assert response(forbidden_conn, 403) =~ "setup authorization required"
   end
 
   test "GET / renders a safe error when runtime snapshot fails", %{conn: conn} do
