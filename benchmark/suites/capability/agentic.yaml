@@ -91,7 +91,7 @@ scenarios:
           script: "suites/capability/checkers/skill_created.py"
           mode: json
           timeout_ms: 60000
-        requires_tools: [skill_create]
+        requires_tools: [skill_create, skill_reload]
 
       - id: create_and_confirm_skill_alt
         query: >
@@ -102,4 +102,4 @@ scenarios:
           script: "suites/capability/checkers/skill_created.py"
           mode: json
           timeout_ms: 60000
-        requires_tools: [skill_create]
+        requires_tools: [skill_create, skill_reload]
