@@ -115,9 +115,10 @@ scenarios:
 
   - id: create_and_reload
     title: "Author a new skill and hot-reload it into the running agent"
-    # skill_create + skill_reload were untested (only list/view were). skill_create is
-    # unambiguously the tool for "create a skill", so tools_any:[skill_create] is a
-    # deterministic gate. Leaves stable-named skills in ~/.fermix/skills (re-runs overwrite).
+    # skill_create + skill_reload were untested (only list/view were). A skill can be
+    # authored two valid ways — the skill_create tool, OR file_write of the SKILL.md to disk
+    # + skill_reload (observed live) — so the gate accepts either (skill_reload is the common
+    # registration step). Leaves stable-named skills in ~/.fermix/skills (re-runs overwrite).
     severity: normal
     tags: [skills, create, reload]
     cases:
@@ -127,7 +128,9 @@ scenarios:
           reply with the word WIDGET, then reload your skills so it's live and confirm it's
           available now.
         expect:
-          tools_any: [skill_create]
+          # skill_create OR file_write-to-disk + skill_reload both validly author a skill;
+          # gate on either so the file-write route doesn't falsely fail a real creation.
+          tools_any: [skill_create, skill_reload]
           reply_matches: "(?i)eval[-_]?widget|created|added|reload|available|new skill"
           reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
           max_cost_usd: 1.5

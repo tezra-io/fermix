@@ -28,22 +28,28 @@ scenarios:
         query: "I need the three largest national economies by GDP right now — drop a one-line
           summary of them into eval_scratch/economies.txt for me."
         expect:
-          # assert the WRITE actually fired, not just "2 tool calls" — a model that
-          # searches twice and hallucinates "saved" (never writing the file) used to pass.
-          tools_all: [web_search, file_write]
+          # Gate on the WRITE actually firing (the load-bearing check — a model that
+          # hallucinates "saved" without writing used to pass). The top-3 GDP ranking is
+          # largely knowable from memory, so we do NOT hard-gate web_search: that would
+          # falsely fail a correct-from-memory answer (the parametric-shortcut trap). The
+          # rubric soft-checks the lookup.
+          tools_any: [file_write]
           reply_matches: "(?i)saved|wrote|written|economies\\.txt|file"
           max_cost_usd: 1.5
           max_duration_ms: 200000
-        rubric: "Finds the largest economies and writes a summary file; confirms the save."
+        rubric: "Reports the three largest economies (from a lookup or knowledge) and writes a summary file; confirms the save."
       - id: weather_note
-        query: "What's Japan's population these days? Jot the number into a note at
-          eval_scratch/japan_pop.txt and let me know once it's there."
+        query: "What's the current temperature in Tokyo right now? Jot the number into a note
+          at eval_scratch/tokyo_weather.txt and let me know once it's there."
         expect:
+          # Current weather is genuinely fresh — the model CANNOT answer from memory, so it
+          # must web_search. (The old query asked Japan's population, a textbook fact the
+          # model answers from memory, falsely failing the web_search gate.)
           tools_all: [web_search, file_write]
-          reply_matches: "(?i)saved|wrote|written|japan_pop|file|note"
+          reply_matches: "(?i)saved|wrote|written|tokyo_weather|weather|temperature|file|note"
           max_cost_usd: 1.5
           max_duration_ms: 200000
-        rubric: "Looks up Japan's population and writes it to the note file, then confirms."
+        rubric: "Looks up the current Tokyo weather and writes it to the note file, then confirms."
 
   - id: multi_tool_shell_then_file
     title: "Inspects the host, then persists the result"
