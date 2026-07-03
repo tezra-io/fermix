@@ -1,62 +1,26 @@
 suite: cap_web_app
-title: "Capability — drive a JS web app in the browser (multi-step, end-state checked)"
+title: "Capability — multi-step browser navigation of a real website"
 description: >
-  A genuinely agentic BROWSER task: a seeded local web app (quote.html) computes a total
-  in JavaScript when you enter a quantity and click a button, so the answer is NOT a static
-  value in the page source — the agent must actually open the page in the browser, fill the
-  field, click, read the JS-rendered result, and write it to {ws}/answer.txt. `requires_tools:
-  [browser]` gates provenance so shell-reading the HTML source can't shortcut it. This is the
-  kind of multi-step tool-use that separates a flagship from a mini (single-shot lookups
-  don't): navigate -> fill -> click -> read -> write.
+  A genuinely agentic BROWSER task: drive a REAL public site (Wikipedia) via search ->
+  open the article -> read a specific value. Multi-step tool use (navigate -> read) that a
+  single-shot answer can't fake; `requires_tools:[browser]` gates provenance so answering
+  from memory can't pass.
 
-  PRECONDITION: the eval daemon has the `browser` tool enabled with Chrome available, and the
-  display stays awake for the run. Verified file:// local fixtures load. The seeded {ws} is an
-  absolute sandbox path, so `file://{ws}/quote.html` resolves. Checkers grade answer.txt.
+  Why a real site and NOT a local fixture: a seeded local page still has to be reached, and
+  models inconsistently spin up a loopback HTTP server (http://127.0.0.1:PORT) that 404s or
+  is blocked instead of using file:// — infra noise, not capability (observed live). A real
+  site is what the browser is actually for. Trade-off: the gold can ROT if the site changes,
+  so re-verify the facts periodically.
+
+  PRECONDITION: the eval daemon has the `browser` tool enabled with Chrome available, the
+  display stays awake for the run, and the network can reach the target site.
 defaults:
   judge: false
   timeout_ms: 240000
 
 scenarios:
-  - id: quote_web_app
-    title: "Get a JS-computed quote by driving the web-app form"
-    severity: normal
-    tags: [capability, browser, agentic, web]
-    cases:
-      - id: quote_qty_60
-        query: >
-          In {ws} there's a file quote.html — a small pricing web app. Open it in the browser
-          (file://{ws}/quote.html), type a quantity of 60 into the Quantity field, click the
-          "Get Quote" button, and write ONLY the total price it then shows — just the number,
-          no dollar sign or words — to {ws}/answer.txt.
-        # qty 60 -> 12% tier -> 60 * 12.50 * 0.88 = 660.00 (computed by the page's JS on click).
-        checker:
-          script: "suites/capability/checkers/browser_quote_60.py"
-          mode: json
-          seed: "suites/capability/fixtures/web/quote"
-          timeout_ms: 90000
-        requires_tools: [browser]
-
-      - id: quote_qty_100
-        query: >
-          In {ws} there's a file quote.html — a small pricing web app. Open it in the browser
-          (file://{ws}/quote.html), enter a quantity of 100, click "Get Quote", and write ONLY
-          the total price shown (just the number, no dollar sign) to {ws}/answer.txt.
-        # qty 100 -> 20% tier -> 100 * 12.50 * 0.80 = 1000.00.
-        checker:
-          script: "suites/capability/checkers/browser_quote_100.py"
-          mode: json
-          seed: "suites/capability/fixtures/web/quote"
-          timeout_ms: 90000
-        requires_tools: [browser]
-
   - id: real_site_navigation
     title: "Multi-step navigation of a real public website (realism; rot-flagged)"
-    # REALISM complement to the deterministic local fixture above. Drives a REAL site
-    # (Wikipedia) via search -> article -> read. Trade-offs vs the local fixture: (a) the
-    # gold can ROT if the site changes — re-verify periodically; (b) a strong model may
-    # KNOW the fact and answer without browsing, which requires_tools:[browser] then
-    # correctly zeroes (it didn't demonstrate the browser). Facts chosen to be stable and
-    # lookup-worthy. Verified 2026-07-03; Elixir first-appeared confirmed live.
     severity: normal
     tags: [capability, browser, web, real-site]
     cases:
@@ -65,6 +29,8 @@ scenarios:
           Use the browser to go to en.wikipedia.org, search for the Elixir programming
           language, open its article, and read the year it first appeared from the infobox.
           Reply with ONLY that year (a 4-digit number, nothing else).
+        # Elixir first appeared 2012 (confirmed live 2026-07-03). requires_tools:[browser]
+        # so answering from memory is provenance-zeroed. Re-verify if the infobox changes.
         score: { match: numeric, expected: 2012, tolerance: 0 }
         requires_tools: [browser]
 
@@ -73,5 +39,6 @@ scenarios:
           Using the browser, open the Wikipedia article for the Elixir programming language
           (en.wikipedia.org) and find who created / designed it. Reply with ONLY the
           creator's full name.
+        # José Valim. Matches on surname to tolerate accents/formatting.
         score: { match: contains, expected: "Valim" }
         requires_tools: [browser]

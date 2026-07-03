@@ -291,18 +291,6 @@ def test_order_pipeline_symptom_patch_still_fails_hidden(tmp_path):
     assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0   # hidden tests still fail
 
 
-def test_browser_quote_checkers_grade_written_total(tmp_path):
-    scoped = _seed(tmp_path, None)
-    for q, right, wrong in [("60", "660.00", "700"), ("100", "Total: $1000.00", "999")]:
-        spec = {"script": f"suites/capability/checkers/browser_quote_{q}.py", "mode": "json"}
-        with open(os.path.join(scoped, "answer.txt"), "w") as fh:
-            fh.write(right)
-        assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
-        with open(os.path.join(scoped, "answer.txt"), "w") as fh:
-            fh.write(wrong)
-        assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
-
-
 def test_subagent_synthesis_checker_grades_coverage(tmp_path):
     spec = {"script": "suites/capability/checkers/subagent_synthesis.py", "mode": "json"}
     scoped = _seed(tmp_path, None)
