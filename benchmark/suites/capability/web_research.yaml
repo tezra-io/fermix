@@ -23,19 +23,20 @@ scenarios:
     severity: normal
     tags: [capability, web, research]
     cases:
-      - id: nvidia_rev_growth_fy24_fy25
+      - id: irs_std_deduction_single_2026
         query: >
-          NVIDIA's data-center boom blew up its top line. By how many billions of
-          US dollars did NVIDIA's TOTAL annual revenue grow from its fiscal year
-          2024 to its fiscal year 2025 (use the full-year revenue figures from its
-          annual results)? Reply with ONLY the number in billions, as a plain
-          decimal (e.g. 12.3) — no units, no commas, nothing else.
-        # FY2025 $130.5B − FY2024 $60.9B = $69.6B. Trap: NVIDIA's offset fiscal
-        # calendar invites the wrong year-pair. Source: nvidianews.nvidia.com
-        # "Financial Results for Fourth Quarter and Fiscal 2025". tol rejects "70".
-        score: { match: numeric, expected: 69.6, tolerance: 0.3 }
-        # Provenance gate: a no-fetch answer (parametric recall of closed FYs) scores
-        # 0 even if the number is right — this task must be answered by live retrieval.
+          What is the IRS standard deduction for a SINGLE filer for tax year 2026?
+          Reply with ONLY the dollar amount as a plain number, no commas and no
+          symbols (e.g. 12345).
+        # $16,100 for 2026 (up from $15,750 in 2025), Rev. Proc. 2025-32 (released
+        # Oct 2025) — a fresh figure the model must look up rather than a closed-year
+        # headline it already knows. Trap: the 2025 value $15,750. Source:
+        # irs.gov/newsroom "IRS releases tax inflation adjustments for tax year 2026".
+        # Verified 2026-07-03. (Replaced nvidia_rev_growth: an old closed-FY figure the
+        # model knows, so it flakily answered without fetching -> provenance-flaky.)
+        score: { match: numeric, expected: 16100, tolerance: 0 }
+        # Provenance gate: a no-fetch answer (parametric recall) scores 0 even if the
+        # number is right — this task must be answered by live retrieval.
         requires_tools: [web_search, web_fetch]
 
       - id: irs_401k_limit_2026
@@ -65,25 +66,25 @@ scenarios:
 
   - id: precise_figure_lookup
     title: "Look up a precise, verify-worthy figure (financial / regulatory)"
-    # Replaces the old name-answer 'reason over a set' cases (nato/eu_gdp): those were
-    # answerable from parametric memory (Romania/Poland), so a frontier model answered
-    # WITHOUT fetching and the provenance gate correctly zeroed a right-but-unretrieved
-    # answer — a bad retrieval test. A PRECISE numeric answer reliably induces a fetch
-    # (the model verifies the exact figure rather than risk misremembering), matching the
-    # nvidia/irs/rav4 cases above. Golds verified against primary sources 2026-07-02.
+    # FRESH, precise regulatory figures that reliably force a live lookup — the model isn't
+    # confident enough to answer from memory. This is the KEY property for a retrieval task:
+    # closed-FY headline financials (nvidia/apple revenue) and stable trivia (nato/eu_gdp)
+    # the model already knows get answered WITHOUT fetching, making the provenance gate flaky
+    # or unfair. A precise, recently-announced number the model must verify, each with a
+    # prior-year trap. Golds verified against IRS/SSA primary sources 2026-07-03.
     severity: normal
     tags: [capability, web, research]
     cases:
-      - id: apple_fy24_total_revenue
+      - id: hsa_self_only_limit_2026
         query: >
-          What was Apple's TOTAL net sales (total revenue) for its full FISCAL year 2024
-          (the fiscal year that ended in September 2024)? Reply with ONLY the number in
-          billions of US dollars, as a plain decimal (e.g. 12.3) — no units, no commas.
-        # $391.0B (precisely $391.035B), up from $383.3B in FY2023. Trap: Apple's fiscal
-        # year ends late September, so FY2024 != calendar 2024, and the FY2023 $383.3B
-        # figure is the near-miss. Source: apple.com/newsroom Q4 FY2024 results + the
-        # FY2024 10-K (aapl-20240928). tol 1.0 accepts 391 / 391.0 / 391.04.
-        score: { match: numeric, expected: 391, tolerance: 1.0 }
+          What is the maximum HSA (Health Savings Account) contribution limit for someone
+          with SELF-ONLY high-deductible coverage, for the year 2026? Reply with ONLY the
+          dollar amount as a plain number, no commas and no symbols (e.g. 12345).
+        # $4,400 for 2026 (up from $4,300 in 2025), Rev. Proc. 2025-19 (released May 2025)
+        # — a fresh figure the model must look up. Trap: the 2025 value $4,300. Source:
+        # irs.gov Rev. Proc. 2025-19. Verified 2026-07-03. (Replaced apple_fy24_total_revenue:
+        # an old closed-FY headline figure the model knows -> provenance-flaky, like nvidia.)
+        score: { match: numeric, expected: 4400, tolerance: 0 }
         requires_tools: [web_search, web_fetch]
 
       - id: ss_wage_base_2026
