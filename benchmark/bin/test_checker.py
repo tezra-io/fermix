@@ -258,5 +258,85 @@ def test_anchor_invoice_bug_oracle_accepts_bug_rejects(tmp_path):
     assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
 
 
+def test_anchor_order_pipeline_oracle_accepts_bug_rejects(tmp_path):
+    spec = {"script": "suites/capability/checkers/pytest_order.sh", "mode": "exit"}
+    scoped = _seed(tmp_path, "suites/capability/fixtures/code/order_pipeline")
+    # negative: the `>` boundary bug -> visible + hidden boundary tests fail
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+    # oracle: fix the tier boundaries in catalog (> -> >=) -> all pass, incl. hidden
+    cat = os.path.join(scoped, "catalog.py")
+    with open(cat) as fh:
+        fixed = (fh.read().replace("if qty > 100:", "if qty >= 100:")
+                 .replace("elif qty > 50:", "elif qty >= 50:")
+                 .replace("elif qty > 10:", "elif qty >= 10:"))
+    with open(cat, "w") as fh:
+        fh.write(fixed)
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+
+
+def test_order_pipeline_symptom_patch_still_fails_hidden(tmp_path):
+    # a symptom-level "fix" (special-case the failing qty=50 in report) must NOT pass —
+    # the hidden boundary tests (10/100) catch it. Guards the anti-shortcut discipline.
+    spec = {"script": "suites/capability/checkers/pytest_order.sh", "mode": "exit"}
+    scoped = _seed(tmp_path, "suites/capability/fixtures/code/order_pipeline")
+    rep = os.path.join(scoped, "report.py")
+    with open(rep) as fh:
+        body = fh.read()
+    hack = body.replace(
+        "    subtotal_cents = sum(line_total_cents(sku, qty) for sku, qty in lines)",
+        "    if lines == [(\"A\", 50)] and tax_percent == 0:\n        return 450.00\n"
+        "    subtotal_cents = sum(line_total_cents(sku, qty) for sku, qty in lines)")
+    with open(rep, "w") as fh:
+        fh.write(hack)
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0   # hidden tests still fail
+
+
+def test_browser_quote_checkers_grade_written_total(tmp_path):
+    scoped = _seed(tmp_path, None)
+    for q, right, wrong in [("60", "660.00", "700"), ("100", "Total: $1000.00", "999")]:
+        spec = {"script": f"suites/capability/checkers/browser_quote_{q}.py", "mode": "json"}
+        with open(os.path.join(scoped, "answer.txt"), "w") as fh:
+            fh.write(right)
+        assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+        with open(os.path.join(scoped, "answer.txt"), "w") as fh:
+            fh.write(wrong)
+        assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+
+
+def test_subagent_synthesis_checker_grades_coverage(tmp_path):
+    spec = {"script": "suites/capability/checkers/subagent_synthesis.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    sp = os.path.join(scoped, "summary.txt")
+    with open(sp, "w") as fh:
+        fh.write("FALCON-G7 OTTER-M3 HERON-S9 BADGER-X2 — all four covered")
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    with open(sp, "w") as fh:
+        fh.write("FALCON-G7 OTTER-M3 HERON-S9")   # dropped one branch
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.75
+
+
+def test_cron_job_output_checker(tmp_path):
+    spec = {"script": "suites/capability/checkers/cron_job_output.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    fp = os.path.join(scoped, "job_out.txt")
+    with open(fp, "w") as fh:
+        fh.write("CRON-OK-7731\n")
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    os.remove(fp)                                  # job didn't run / agent didn't wait
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+
+
+def test_skill_created_checker(tmp_path):
+    spec = {"script": "suites/capability/checkers/skill_created.py", "mode": "json"}
+    scoped = _seed(tmp_path, None)
+    sp = os.path.join(scoped, "skills.txt")
+    with open(sp, "w") as fh:
+        fh.write("self-knowledge\nbrowser-guidance\neval-echo\n")
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 1.0
+    with open(sp, "w") as fh:
+        fh.write("self-knowledge\nbrowser-guidance\n")   # skill not created
+    assert checker.run_checker(BENCH, spec, scoped, "").score == 0.0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

@@ -1,0 +1,105 @@
+suite: cap_agentic
+title: "Capability — complex agentic tasks (delegation, scheduling, self-modification)"
+description: >
+  Multi-step agentic tasks that a single-shot answer can't fake — the kind that separate a
+  flagship from a mini. Each is checker-graded over the sandbox end-state and gates on tool
+  provenance so the intended mechanism (subagent fan-out, a scheduled run, skill authoring)
+  actually happened. EXPENSIVE: subagent fan-out spawns multiple workers; keep trials modest.
+
+  PRECONDITION: an eval daemon with shell/file tools + subagents + jobs + skills enabled and
+  a sandbox rooted at the workspace. Checkers grade the written end-state; the seeded {ws} is
+  an absolute sandbox path.
+defaults:
+  judge: false
+  timeout_ms: 600000
+
+scenarios:
+  - id: delegate_and_synthesize
+    title: "Fan out to parallel subagents, then synthesize covering every branch"
+    severity: normal
+    tags: [capability, agentic, subagents, delegation]
+    cases:
+      - id: summarize_four_subsystems
+        query: >
+          In {ws} there are four files (gateway.txt, memory.txt, scheduler.txt, sandbox.txt),
+          each describing a different subsystem with its internal codename. Use PARALLEL
+          SUBAGENTS to read and summarize each file, then combine their results into
+          {ws}/summary.txt — one combined summary that covers all four subsystems, including
+          each subsystem's internal codename and its role.
+        checker:
+          script: "suites/capability/checkers/subagent_synthesis.py"
+          mode: json
+          seed: "suites/capability/fixtures/agentic/subsystems"
+          timeout_ms: 60000
+        requires_tools: [subagents]
+
+      - id: catalog_four_subsystems
+        query: >
+          In {ws} there are four subsystem files (gateway.txt, memory.txt, scheduler.txt,
+          sandbox.txt). Spin up parallel subagents — one per file — to extract each
+          subsystem's internal codename and owner team, then write {ws}/summary.txt as a
+          combined list of all four subsystems with their codename and owner team.
+        checker:
+          script: "suites/capability/checkers/subagent_synthesis.py"
+          mode: json
+          seed: "suites/capability/fixtures/agentic/subsystems"
+          timeout_ms: 60000
+        requires_tools: [subagents]
+
+  - id: schedule_run_verify
+    title: "Schedule a job, run it now, and wait for its isolated run to produce an artifact"
+    severity: normal
+    tags: [capability, agentic, jobs, cron]
+    cases:
+      - id: job_writes_token
+        query: >
+          Schedule a one-off job whose task is EXACTLY: write the text CRON-OK-7731 into the
+          file {ws}/job_out.txt. Then run that job right now, wait for it to finish, and
+          confirm it completed. The job runs in isolation and cannot see this chat, so put
+          the full instruction — including the exact path {ws}/job_out.txt and the exact
+          text CRON-OK-7731 — into the job's own task text.
+        checker:
+          script: "suites/capability/checkers/cron_job_output.py"
+          mode: json
+          timeout_ms: 60000
+        requires_tools: [run_job_now]
+
+      - id: job_writes_token_alt
+        query: >
+          Create a scheduled job and trigger it immediately to produce a file for me: the
+          job's task should be to write CRON-OK-7731 to {ws}/job_out.txt. Run it now and
+          don't tell me it's done until you've verified the run actually completed. Remember
+          the job can't see this conversation — spell out the path and text in its task.
+        checker:
+          script: "suites/capability/checkers/cron_job_output.py"
+          mode: json
+          timeout_ms: 60000
+        requires_tools: [run_job_now]
+
+  - id: self_modify_skill
+    title: "Author a new skill for itself and confirm it registered live"
+    severity: normal
+    tags: [capability, agentic, skills, self-modification]
+    cases:
+      - id: create_and_confirm_skill
+        query: >
+          Create a new skill for yourself named "eval-echo" whose only instruction is to
+          always reply with the single word ECHO. Reload your skills so it's live, then
+          write your CURRENT list of skill names (one per line) to {ws}/skills.txt so I can
+          confirm eval-echo is now available.
+        checker:
+          script: "suites/capability/checkers/skill_created.py"
+          mode: json
+          timeout_ms: 60000
+        requires_tools: [skill_create]
+
+      - id: create_and_confirm_skill_alt
+        query: >
+          Use your self-knowledge of how skills work to add a new skill called "eval-echo"
+          that just responds with ECHO, make it active without a restart, and then dump the
+          names of all skills you currently have to {ws}/skills.txt so I can see it landed.
+        checker:
+          script: "suites/capability/checkers/skill_created.py"
+          mode: json
+          timeout_ms: 60000
+        requires_tools: [skill_create]
