@@ -34,6 +34,9 @@ defmodule FermixCore.Tools.ComputerUse do
   @impl true
   def description do
     "Drive the host desktop GUI by screenshot + mouse/keyboard, one action per call. " <>
+      "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
+      "session they already have open; a `browser`/`shell` action runs in its own context and " <>
+      "won't touch their screen. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
       "pixel coordinates from the latest screenshot. For a SMALL or dense target, zoom first: " <>
       "`screenshot` with a `region` around it, then click/drag with the SAME region using the " <>
@@ -142,7 +145,12 @@ defmodule FermixCore.Tools.ComputerUse do
   def when_to_use do
     "When a task needs eyes-and-hands on a GUI that has no API — clicking, typing, or " <>
       "reading rendered visual state in a desktop app or browser. Screenshot first, then act. " <>
-      "Prefer the dedicated browser/file/web tools when they cover the task; this is the last resort. " <>
+      "It is the ONLY tool that sees and acts on the user's OWN live screen or the session they " <>
+      "are watching. Still prefer a purpose-built tool when the target is addressable — a file " <>
+      "path (file_read), a URL/query (web_fetch/web_search/browser), a system fact (shell) — even " <>
+      "if it is also open on screen; reach for computer_use only for state that exists solely as " <>
+      "pixels, or a task that must act on the very session the user is looking at (browser/shell " <>
+      "use their own isolated context and desync). " <>
       "In standard access, ask the owner and wait for their go-ahead before any irreversible action."
   end
 

@@ -52,7 +52,15 @@ defmodule FermixCore.Capabilities.Builtin do
     # Operator-only (registry.ex), never delegated to subagents (subagents.ex). Only
     # seeded when `ComputerUse.ready?()` (BuiltinSeeder), so an unready/disabled
     # daemon never advertises it.
-    "computer_use" => %{policy_class: :gui_control, hidden_from_agent?: false}
+    "computer_use" => %{policy_class: :gui_control, hidden_from_agent?: false},
+    # Watch mode. `watch` starts a live loop that drives computer-use/browser to
+    # observe the screen. Both `watch` and its paired `stop_watch` are
+    # `:gui_control` — operator-only, never delegated to subagents — so a worker
+    # (which keeps `:exec` but has `:gui_control` subtracted by `worker_policy`)
+    # can neither START nor STOP the operator's live watch. Seeded only when
+    # `Watch.enabled?()` (BuiltinSeeder), off by default.
+    "watch" => %{policy_class: :gui_control, hidden_from_agent?: false},
+    "stop_watch" => %{policy_class: :gui_control, hidden_from_agent?: false}
   }
 
   @doc """

@@ -13,6 +13,7 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
   setup do
     prev_home = System.get_env("FERMIX_HOME")
     prev_cu = Application.get_env(:fermix_core, :computer_use)
+    prev_watch = Application.get_env(:fermix_core, :watch)
     prev_plugins = Application.get_env(:fermix_core, :plugins)
 
     home =
@@ -27,6 +28,7 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
 
     on_exit(fn ->
       restore_env(:computer_use, prev_cu)
+      restore_env(:watch, prev_watch)
       restore_env(:plugins, prev_plugins)
 
       case prev_home do
@@ -83,6 +85,28 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
     assert {:ok, cap} = CapabilityRegistry.find(reg, "computer_use")
     assert cap.policy_class == :gui_control
     assert cap.metadata.category == :computer
+  end
+
+  test "does NOT seed watch/stop_watch when the feature is disabled (default)", %{registry: reg} do
+    Application.put_env(:fermix_core, :watch, enabled: false)
+
+    :ignore = seed(reg)
+
+    assert CapabilityRegistry.find(reg, "watch") == :error
+    assert CapabilityRegistry.find(reg, "stop_watch") == :error
+  end
+
+  test "seeds watch + stop_watch (both :gui_control) when enabled", %{registry: reg} do
+    Application.put_env(:fermix_core, :watch, enabled: true)
+
+    :ignore = seed(reg)
+
+    assert {:ok, watch} = CapabilityRegistry.find(reg, "watch")
+    assert watch.policy_class == :gui_control
+    # stop_watch is :gui_control too so a subagent (which keeps :exec but not
+    # :gui_control) can't stop the operator's live watch.
+    assert {:ok, stop} = CapabilityRegistry.find(reg, "stop_watch")
+    assert stop.policy_class == :gui_control
   end
 
   defp install_dev_local_sidecar(home, target) do

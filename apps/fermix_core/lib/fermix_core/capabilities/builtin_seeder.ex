@@ -16,6 +16,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse
+  alias FermixCore.Watch
 
   require Logger
 
@@ -100,6 +101,11 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   # which (with the save+restart enable flow) is the readiness-transition trigger.
   @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
 
+  # Watch mode: the `watch`/`stop_watch` tools are seeded only when
+  # `Watch.enabled?()` (off by default) — same zero-residue property as
+  # computer-use, re-evaluated each boot.
+  @watch_tool_modules [FermixCore.Tools.Watch, FermixCore.Tools.StopWatch]
+
   @doc """
   Every built-in tool module that can be seeded into the capability registry —
   the unconditional ones plus the conditionally-seeded bridge and computer-use
@@ -109,12 +115,17 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
   @spec builtin_tool_modules() :: [module()]
   def builtin_tool_modules,
-    do: @builtin_tool_modules ++ @bridge_tool_modules ++ @computer_use_tool_modules
+    do:
+      @builtin_tool_modules ++
+        @bridge_tool_modules ++ @computer_use_tool_modules ++ @watch_tool_modules
 
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do
-      {:ok, modules} -> modules
-      :error -> @builtin_tool_modules ++ bridge_modules() ++ computer_use_modules()
+      {:ok, modules} ->
+        modules
+
+      :error ->
+        @builtin_tool_modules ++ bridge_modules() ++ computer_use_modules() ++ watch_modules()
     end
   end
 
@@ -124,5 +135,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
 
   defp computer_use_modules do
     if ComputerUse.ready?(), do: @computer_use_tool_modules, else: []
+  end
+
+  defp watch_modules do
+    if Watch.enabled?(), do: @watch_tool_modules, else: []
   end
 end
