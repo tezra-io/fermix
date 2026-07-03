@@ -34,8 +34,11 @@ judge:
   # Judge runs only when enabled here OR `--judge` is passed. Off by default to
   # control cost (each fermix-backed rubric is another real turn).
   enabled: false
-  # Model for the openai backend (ignored by the fermix backend).
-  model: "gpt-5.4-mini"
+  # Model for the openai backend — a fixed, independent judge (recommended for
+  # cross-model sweeps so the grader doesn't float with the daemon). IGNORED by the
+  # fermix backend; to actually use this, set backend: "openai" above + export
+  # EVAL_JUDGE_API_KEY (and EVAL_JUDGE_BASE_URL if not api.openai.com).
+  model: "gpt-5.5"
 
 budgets:
   # Default per-case ceilings; a case may override either in its `expect:` block.
