@@ -4,6 +4,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse.Safety
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Error, as: ProviderError
 
@@ -214,6 +215,23 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end)
 
     :ok
+  end
+
+  describe "computer_use_origin/1 — attended-origin derivation" do
+    test "a detached /background run is unattended and fails closed at the host gate" do
+      # BackgroundRun.run/1 issues its turn on the "background" channel with no
+      # live reply surface, so it must NOT be labelled attended — otherwise a
+      # host computer-use session could start with no owner present to abort.
+      assert TurnRunner.computer_use_origin(%{channel: "background"}) == :unattended
+      refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(%{channel: "background"}))
+    end
+
+    test "a foreground chat / `fermix ask` turn is interactive and passes the host gate" do
+      for channel <- ["telegram", "discord", "slack", "cli"] do
+        assert TurnRunner.computer_use_origin(%{channel: channel}) == :interactive
+        assert Safety.host_start_allowed?(TurnRunner.computer_use_origin(%{channel: channel}))
+      end
+    end
   end
 
   describe "commit/4" do
