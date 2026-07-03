@@ -117,6 +117,37 @@ defmodule FermixCore.Tools.GitToolsTest do
     end
   end
 
+  test "git_write pull refuses the ext:: transport even under a permissive host git config", %{
+    dir: dir,
+    context: context
+  } do
+    # git's `ext::<program>` smart-transport helper runs an arbitrary program
+    # before any handshake — argument-injection-to-RCE that never touches the
+    # command classifier. Modern git refuses `ext` by default, but a permissive
+    # host config (`protocol.ext.allow=user`) re-enables it, so the sandbox must
+    # not depend on the ambient git config. GitCommand pins GIT_ALLOW_PROTOCOL,
+    # which overrides that config. `% ` is the ext URL's literal-space escape, so
+    # the payload is `sh -c "touch <marker>"`; the marker lives under `dir`
+    # (SafeRm-cleaned) and must never be created.
+    System.cmd("git", ["config", "protocol.ext.allow", "user"], cd: dir)
+    marker = Path.join(dir, "pwned_#{System.unique_integer([:positive])}")
+    refute File.exists?(marker)
+
+    assert {:ok, result} =
+             GitWrite.execute(
+               %{"repo" => dir, "command" => "pull", "args" => ["ext::sh -c touch% #{marker}"]},
+               context
+             )
+
+    assert result.success == false
+
+    refute File.exists?(marker),
+           "ext:: transport executed the payload — command-classification sandbox bypassed"
+
+    assert result.error =~ "not allowed",
+           "expected git to refuse the ext transport, got: #{result.error}"
+  end
+
   test "git_write does not over-reject commit messages that resemble paths", %{
     dir: dir,
     context: context
