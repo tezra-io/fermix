@@ -128,6 +128,28 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  # A terminal channel side-effect (react-like): its successful delivery ends the
+  # turn without a continuation call. `execute(%{"fail" => true})` simulates a
+  # rejected delivery, which must NOT be treated as terminal.
+  defmodule TerminalTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "terminal_tool"
+    @impl true
+    def description, do: "A terminal channel side-effect"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+    @impl true
+    def category, do: :channel
+
+    def terminal?, do: true
+
+    @impl true
+    def execute(%{"fail" => true}, _ctx), do: {:ok, Tool.error("delivery rejected")}
+    def execute(_args, _ctx), do: {:ok, Tool.success("reacted")}
+  end
+
   defmodule InvalidUtf8Tool do
     @behaviour Tool
 
@@ -449,6 +471,119 @@ defmodule FermixCore.AgentLoopTest do
       [{_messages, [cap], _opts}] = mock_calls()
       assert cap.parameters == real_schema
       assert cap.parameters["required"] == ["to", "subject", "body"]
+    end
+  end
+
+  # -- Per-turn advertisement gate (advertise?/1) --
+
+  describe "run/1 per-turn advertisement gate" do
+    test "hides a tool that opts out for this turn's context", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      react_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.React)
+
+      # No reaction_spec ⇒ React.advertise?/1 is false ⇒ filtered from the wire.
+      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [react_cap])
+
+      [{_messages, advertised, _opts}] = mock_calls()
+      assert advertised == []
+    end
+
+    test "advertises a tool that opts in for this turn's context", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      react_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.React)
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [react_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   reaction_spec: %{emoji_set: :any}
+                 }
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.name == "react"
+    end
+
+    test "leaves a tool without advertise?/1 untouched", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      file_read_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.FileRead)
+
+      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [file_read_cap])
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.name == "file_read"
+    end
+  end
+
+  # -- Terminal side-effect short-circuit (react latency optimization) --
+
+  describe "run/1 terminal side-effect short-circuit" do
+    defp terminal_cap, do: BuiltinCapability.from_tool_module(TerminalTool)
+
+    test "a delivered terminal tool with no text ends the turn without a continuation call" do
+      set_mock_responses([turn("", tool_calls: [tool_call("c1", "terminal_tool", %{})])])
+
+      assert {:ok, result} =
+               run_loop(
+                 capabilities: [terminal_cap()],
+                 dispatchable_capabilities: [terminal_cap()]
+               )
+
+      assert result.response == ""
+      assert length(mock_calls()) == 1
+      # The continuation LLM call was skipped — this is the whole optimization.
+      assert mock_continues() == []
+    end
+
+    test "a FAILED terminal tool still continues so the model can recover" do
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "terminal_tool", %{"fail" => true})]),
+        turn("a text ack instead")
+      ])
+
+      assert {:ok, result} =
+               run_loop(
+                 capabilities: [terminal_cap()],
+                 dispatchable_capabilities: [terminal_cap()]
+               )
+
+      assert result.response == "a text ack instead"
+      assert length(mock_continues()) == 1
+    end
+
+    test "a terminal tool alongside model text is not short-circuited" do
+      set_mock_responses([
+        turn("here you go", tool_calls: [tool_call("c1", "terminal_tool", %{})]),
+        turn("final")
+      ])
+
+      assert {:ok, result} =
+               run_loop(
+                 capabilities: [terminal_cap()],
+                 dispatchable_capabilities: [terminal_cap()]
+               )
+
+      assert result.response == "final"
+      assert length(mock_continues()) == 1
+    end
+
+    test "a non-terminal channel tool with no text still continues (trait scopes the skip)" do
+      chan_cap = BuiltinCapability.from_tool_module(ChannelSpyTool)
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "channel_spy", %{})]),
+        turn("done")
+      ])
+
+      assert {:ok, result} =
+               run_loop(capabilities: [chan_cap], dispatchable_capabilities: [chan_cap])
+
+      assert_received :channel_spy_executed
+      assert result.response == "done"
+      assert length(mock_continues()) == 1
     end
   end
 

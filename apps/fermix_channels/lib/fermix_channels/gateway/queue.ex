@@ -45,6 +45,18 @@ defmodule FermixChannels.Gateway.Queue do
   # replayed history; the user gets an honest prompt to retry.
   @empty_completion_reply "I didn't get a response — please try again."
 
+  # Closes a turn that returned no final text because a channel side-effect WAS
+  # the reply (an emoji reaction ack, or an attachment). The user message is
+  # persisted before the loop, so an empty turn must commit *something* or leave
+  # a dangling user turn the next turn would replay. These compact assistant
+  # markers close it (never "" — ConversationStore drops blank turns as history
+  # poison) and, on replay, tell the model it already answered
+  # (docs/design/EMOJI_REACTION_ACKS.md §7). §17 open question: whether to embed
+  # the specific emoji (`(reacted 🙏)`) — kept generic for now.
+  @reacted_marker "(Reacted to the previous message.)"
+  @attachment_marker "(Sent an attachment in reply.)"
+  @reacted_and_attachment_marker "(Reacted and sent an attachment in reply.)"
+
   @type status :: %{
           active_conversations: non_neg_integer(),
           pending_conversations: non_neg_integer(),
@@ -229,7 +241,8 @@ defmodule FermixChannels.Gateway.Queue do
         state.turn_runner,
         conversation_key,
         request_id,
-        msg
+        msg,
+        state.conversation_store
       )
 
     case Task.Supervisor.start_child(state.task_supervisor, fun) do
@@ -259,7 +272,7 @@ defmodule FermixChannels.Gateway.Queue do
   # runs, then deliver its reply and commit the assistant history. Checkout runs
   # HERE, in the task (not the queue loop), so a slow runtime-context build never
   # blocks other conversations.
-  defp turn_task(owner, main_agent, runner, conversation_key, request_id, msg) do
+  defp turn_task(owner, main_agent, runner, conversation_key, request_id, msg, conversation_store) do
     typing_fn = Map.get(msg, :typing_fn)
 
     typing_opts = [
@@ -267,13 +280,21 @@ defmodule FermixChannels.Gateway.Queue do
       timeout_ms: Map.get(msg, :typing_timeout_ms)
     ]
 
+    # Per-turn side-effect ledger (EMOJI_REACTION_ACKS §7). Created here and
+    # closed over in the wrapped deliver closure; both the closure (called deep
+    # inside `run_turn` when a tool delivers) and `run_and_deliver` run in THIS
+    # one task process, so the tally is visible when the empty branch reads it.
+    side_effect_ledger = :counters.new(2, [])
+
     turn = %{
       owner: owner,
       main_agent: main_agent,
       runner: runner,
       conversation_key: conversation_key,
       request_id: request_id,
-      deliver: Map.fetch!(msg, :reply_fn),
+      deliver: wrap_deliver(Map.fetch!(msg, :reply_fn), side_effect_ledger),
+      side_effect_ledger: side_effect_ledger,
+      conversation_store: conversation_store,
       msg: msg
     }
 
@@ -356,14 +377,15 @@ defmodule FermixChannels.Gateway.Queue do
               discard_draft(turn)
               :stopped
 
-            # An empty model completion (the provider returned blank content):
-            # never deliver a blank bubble and never commit it (committing would
-            # poison replayed history). Surface it honestly and let the user
-            # retry. Provider-agnostic — guards the returned text, not an adapter.
+            # An empty final completion. Two cases the side-effect ledger tells
+            # apart (EMOJI_REACTION_ACKS §7): if the turn already delivered a
+            # channel side-effect (a reaction ack, or an attachment), THAT was the
+            # reply — suppress the canned retry and close the turn with a compact
+            # marker. Otherwise the provider genuinely returned nothing — surface
+            # it honestly and let the user retry. Neither commits `response`.
             String.trim(response) == "" ->
               discard_draft(turn)
-              emit_empty_completion_telemetry(turn)
-              turn.deliver.({:text, @empty_completion_reply})
+              handle_empty_completion(turn)
 
             true ->
               deliver_final(turn, response)
@@ -462,6 +484,58 @@ defmodule FermixChannels.Gateway.Queue do
     GenServer.call(owner, {:final_reply_delivered, conversation_key, self()})
   catch
     :exit, _reason -> :ok
+  end
+
+  # Wrap the raw channel reply closure so each SUCCESSFULLY-delivered mid-turn
+  # non-text side-effect (media, reaction) is tallied in the per-turn ledger.
+  # Records only on `:ok` — a channel-rejected side-effect must not suppress the
+  # honest empty-completion retry. Text deliveries (terminal reply, canned retry,
+  # compaction notice) are never side-effects, so they never record.
+  defp wrap_deliver(reply_fn, ledger) when is_function(reply_fn, 1) do
+    fn part ->
+      result = reply_fn.(part)
+      if result == :ok, do: record_side_effect(ledger, part)
+      result
+    end
+  end
+
+  defp record_side_effect(ledger, {:react, _emoji}), do: :counters.add(ledger, 1, 1)
+  defp record_side_effect(ledger, {:media, _part}), do: :counters.add(ledger, 2, 1)
+  defp record_side_effect(_ledger, _part), do: :ok
+
+  # Empty final text: a delivered side-effect WAS the reply → suppress the canned
+  # retry and close the turn with a compact marker (EMOJI_REACTION_ACKS §7).
+  # Nothing delivered → the provider returned blank; keep today's honest retry.
+  defp handle_empty_completion(turn) do
+    case side_effect_marker(turn) do
+      nil ->
+        emit_empty_completion_telemetry(turn)
+        turn.deliver.({:text, @empty_completion_reply})
+
+      marker ->
+        append_marker(turn, marker)
+    end
+  end
+
+  defp side_effect_marker(%{side_effect_ledger: ledger}) do
+    marker_for(:counters.get(ledger, 1) > 0, :counters.get(ledger, 2) > 0)
+  end
+
+  defp marker_for(false, false), do: nil
+  defp marker_for(true, false), do: @reacted_marker
+  defp marker_for(false, true), do: @attachment_marker
+  defp marker_for(true, true), do: @reacted_and_attachment_marker
+
+  # Close the orphaned user turn with the assistant marker, straight from the turn
+  # task (the store ref is threaded in), so the Queue GenServer is never blocked on
+  # a store call. Reuses the guarded stopped-marker path (appends only when the last
+  # stored message is the user turn) — lighter than a full `runner.commit`, so an
+  # emoji ack triggers no memory review or auto-compaction. Best-effort: a down
+  # store must not crash the turn task's reply path.
+  defp append_marker(%{conversation_store: store, conversation_key: conversation_key}, marker) do
+    ConversationStore.append_stopped_marker(conversation_key, marker, server: store)
+  catch
+    :exit, _reason -> :skipped
   end
 
   # `commit/4` returns `:compacted` when it summarized the history; surface a

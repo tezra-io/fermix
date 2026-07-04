@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.SlackTest do
 
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway.Message
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Memory.ConversationStore
 
@@ -73,6 +74,72 @@ defmodule FermixChannels.Channels.SlackTest do
     on_exit(fn -> Application.delete_env(:fermix_channels, :slack) end)
 
     :ok
+  end
+
+  describe "reactions" do
+    defp slack_react_message do
+      Message.new!(%{
+        id: "1714000000.000100",
+        content: "thanks",
+        sender: "Alice",
+        channel: "slack",
+        chat_id: "D12345",
+        reply_target: "D12345"
+      })
+    end
+
+    test "reaction_capability advertises Slack shortcode names" do
+      assert {:restricted, names} = Slack.reaction_capability()
+      assert "thumbsup" in names
+    end
+
+    test "react posts reactions.add with the channel, ts, and shortcode name" do
+      test_pid = self()
+
+      Req.Test.stub(:slack, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:slack_request, conn.request_path, Jason.decode!(body)})
+        Req.Test.json(conn, %{"ok" => true})
+      end)
+
+      assert :ok = Slack.react(slack_react_message(), "thumbsup")
+
+      assert_receive {:slack_request, path, body}
+      assert path =~ "reactions.add"
+      assert body["channel"] == "D12345"
+      assert body["timestamp"] == "1714000000.000100"
+      assert body["name"] == "thumbsup"
+    end
+
+    test "an off-allowlist name is refused loudly without hitting the API" do
+      test_pid = self()
+
+      Req.Test.stub(:slack, fn conn ->
+        send(test_pid, {:slack_request, conn.request_path})
+        Req.Test.json(conn, %{"ok" => true})
+      end)
+
+      assert {:error, {:unsupported_emoji, "banana"}} =
+               Slack.react(slack_react_message(), "banana")
+
+      refute_received {:slack_request, _path}
+    end
+
+    test "surfaces a Slack API error (ok:false)" do
+      Req.Test.stub(:slack, fn conn ->
+        Req.Test.json(conn, %{"ok" => false, "error" => "message_not_found"})
+      end)
+
+      assert {:error, "message_not_found"} = Slack.react(slack_react_message(), "thumbsup")
+    end
+
+    test "treats already_reacted as success (idempotent under retry)" do
+      Req.Test.stub(:slack, fn conn ->
+        Req.Test.json(conn, %{"ok" => false, "error" => "already_reacted"})
+      end)
+
+      assert :ok = Slack.react(slack_react_message(), "thumbsup")
+    end
   end
 
   describe "parse_webhook/1" do

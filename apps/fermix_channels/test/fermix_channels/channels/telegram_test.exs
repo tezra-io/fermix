@@ -806,4 +806,63 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert {:error, _reason} = Telegram.discard_draft(draft_message(), 777)
     end
   end
+
+  describe "reactions" do
+    defp react_message(message_id \\ "42") do
+      Message.new!(%{
+        id: message_id,
+        content: "thanks",
+        sender: "user",
+        channel: "telegram",
+        chat_id: "123",
+        reply_target: "123"
+      })
+    end
+
+    test "reaction_capability advertises a restricted allowlist" do
+      assert {:restricted, set} = Telegram.reaction_capability()
+      assert is_list(set)
+      assert "👍" in set
+    end
+
+    test "react posts setMessageReaction with an integer message_id" do
+      stub_telegram(self(), 200, %{"ok" => true, "result" => true})
+
+      assert :ok =
+               Telegram.react(react_message(), "🙏", req_options: [plug: {Req.Test, :telegram}])
+
+      assert_receive {:telegram_request, path, body}
+      assert path =~ "/setMessageReaction"
+      assert body["chat_id"] == "123"
+      assert body["message_id"] == 42
+      assert body["reaction"] == [%{"type" => "emoji", "emoji" => "🙏"}]
+    end
+
+    test "an off-allowlist emoji is refused loudly without hitting the API" do
+      stub_telegram(self(), 200, %{"ok" => true, "result" => true})
+
+      assert {:error, {:unsupported_emoji, "🦄"}} =
+               Telegram.react(react_message(), "🦄", req_options: [plug: {Req.Test, :telegram}])
+
+      refute_received {:telegram_request, _path, _body}
+    end
+
+    test "a non-numeric message id fails loud before any API call" do
+      stub_telegram(self(), 200, %{"ok" => true, "result" => true})
+
+      assert {:error, {:invalid_message_id, "abc"}} =
+               Telegram.react(react_message("abc"), "👍",
+                 req_options: [plug: {Req.Test, :telegram}]
+               )
+
+      refute_received {:telegram_request, _path, _body}
+    end
+
+    test "surfaces a Telegram API error" do
+      stub_telegram(self(), 400, %{"ok" => false, "description" => "REACTION_INVALID"})
+
+      assert {:error, _reason} =
+               Telegram.react(react_message(), "👍", req_options: [plug: {Req.Test, :telegram}])
+    end
+  end
 end

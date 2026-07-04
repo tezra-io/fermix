@@ -69,9 +69,10 @@ defmodule FermixCore.Agents.BackgroundRun do
     :exit, reason -> {:error, {:checkout_unavailable, reason}}
   end
 
-  # No channel here: fail media so `send_attachment` surfaces an error instead of
-  # silently losing it. Text mid-turn parts are a no-op (the gateway delivers the
-  # final result).
+  # No channel here: fail media/reaction side-effects so `send_attachment`/`react`
+  # surface an error instead of silently losing them. Text mid-turn parts are a
+  # no-op (the gateway delivers the final result).
   defp deliver({:media, _part}), do: {:error, :no_background_channel}
+  defp deliver({:react, _emoji}), do: {:error, :no_background_channel}
   defp deliver(_part), do: :ok
 end

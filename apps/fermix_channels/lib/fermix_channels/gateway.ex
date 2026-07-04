@@ -63,6 +63,22 @@ defmodule FermixChannels.Gateway do
     end
   end
 
+  # Reaction capability resolved once per turn (EMOJI_REACTION_ACKS §5.4): the
+  # gateway is the only layer holding the channel module, so it flattens the
+  # capability to plain data (the allowed emoji set) here and hands that to core.
+  # `nil` ⇒ the `react` tool is not advertised; the model just sends a short text
+  # ack. Never a runtime react-then-degrade branch — this is the one computed
+  # decision (CLAUDE.md #12).
+  defp build_reaction_spec(channel) do
+    if function_exported?(channel, :reaction_capability, 0) do
+      reaction_spec_for(channel.reaction_capability())
+    end
+  end
+
+  defp reaction_spec_for(:any_emoji), do: %{emoji_set: :any}
+  defp reaction_spec_for({:restricted, set}) when is_list(set), do: %{emoji_set: set}
+  defp reaction_spec_for(:none), do: nil
+
   # Streaming eligibility (docs/design/CHANNEL_STREAMING.md §5.6): resolved
   # once per turn, HERE — the only layer holding the channel module. Returns a
   # closure spec the queue's turn task drives, or nil (typing-only, today's
@@ -157,6 +173,7 @@ defmodule FermixChannels.Gateway do
          :actionable <- ensure_actionable(reply_message, reply_fn) do
       typing_fn = build_typing_fn(channel, reply_message)
       stream_spec = build_stream_spec(channel, reply_message, reply_fn)
+      reaction_spec = build_reaction_spec(channel)
 
       context =
         command_context(
@@ -190,7 +207,7 @@ defmodule FermixChannels.Gateway do
             authorization,
             agent,
             agent_server,
-            {reply_fn, typing_fn, stream_spec}
+            {reply_fn, typing_fn, stream_spec, reaction_spec}
           )
 
         :passthrough ->
@@ -199,7 +216,7 @@ defmodule FermixChannels.Gateway do
             authorization,
             agent,
             agent_server,
-            {reply_fn, typing_fn, stream_spec}
+            {reply_fn, typing_fn, stream_spec, reaction_spec}
           )
       end
     else
@@ -251,7 +268,7 @@ defmodule FermixChannels.Gateway do
          authorization,
          agent,
          agent_server,
-         {reply_fn, typing_fn, stream_spec}
+         {reply_fn, typing_fn, stream_spec, reaction_spec}
        ) do
     if agent_alive?(agent_server) do
       agent_message =
@@ -261,6 +278,7 @@ defmodule FermixChannels.Gateway do
         |> Map.put(:source_trust, authorization.trust)
         |> maybe_put_typing_fn(typing_fn)
         |> maybe_put_stream_spec(stream_spec)
+        |> maybe_put_reaction_spec(reaction_spec)
 
       handle_agent_delivery(agent.handle_message(agent_message, agent_server))
     else
@@ -353,6 +371,16 @@ defmodule FermixChannels.Gateway do
   end
 
   defp maybe_put_typing_fn(message, _typing_fn), do: message
+
+  # Reaction spec is core-facing plain data (unlike the closures/stream spec,
+  # which the queue strips before building `core_msg`) — the `react` tool reads
+  # it from the turn context. Attached only when the channel resolved a
+  # capability; absent otherwise, so `advertise?/1` sees `nil` and hides the tool.
+  defp maybe_put_reaction_spec(message, nil), do: message
+
+  defp maybe_put_reaction_spec(message, reaction_spec) when is_map(reaction_spec) do
+    Map.put(message, :reaction_spec, reaction_spec)
+  end
 
   defp maybe_put_stream_spec(message, %DraftStream.Spec{} = stream_spec) do
     Map.put(message, :stream_spec, stream_spec)

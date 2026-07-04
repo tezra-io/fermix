@@ -169,6 +169,9 @@ defmodule FermixChannels.Bench.AdapterRunner do
         result = send_media(channel, message.reply_target, media_part, env)
         send(parent, {:adapter_e2e_reply, ref, result})
         result
+
+      {:react, _emoji} ->
+        {:error, :reaction_unsupported}
     end
 
     :ok =
