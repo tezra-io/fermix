@@ -6,6 +6,55 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-04
+
+### Added
+
+- **Computer Use is now backed by the standalone `compux` library.** The native
+  computer-use sidecar was extracted into a separate signed binary (mechanism in
+  `compux`, policy in Fermix). This release wires Fermix to it, ships the compux
+  v0.2/v0.3 action set, surfaces the screenshot cursor, and gives the Computer
+  Use setup card its own name and logo. Computer use can also run over realtime
+  voice now, across one shared untrusted boundary. Still experimental and off by
+  default.
+- **Emoji-reaction acknowledgements.** A pure acknowledgement ("ok", "thanks",
+  👍) is answered with a message-level emoji reaction instead of a text bubble,
+  across all reaction-capable channels (Telegram, Discord, WhatsApp, Signal,
+  Slack). A delivered reaction with no accompanying text ends the turn without a
+  continuation LLM call, roughly halving ack latency.
+- **Chief-of-staff prompt surgery (safe subset)** landed in the operating prompt.
+- **Plugin auth failures are agent-actionable**, and stale OAuth tokens are now
+  flagged in the provider badge and `fermix doctor`.
+
+### Performance
+
+- **Sandbox path checks no longer recompute their invariant root sets.**
+  `read_path`/`write_path`/`working_dir` resolve the protected and effective root
+  sets once per call instead of ~3×, and `content_search`/`glob_search` validate
+  their candidates through a single batched `Sandbox.read_paths/3` instead of a
+  per-file `lstat`/`ls` syscall storm. Behavior-preserving: identical allow/deny
+  decisions, `cond` order, and deny audit traces.
+- **Album image downloads run concurrently.** Multi-image attachments (e.g. a
+  Telegram media group of up to 10 images) are fetched in parallel (bounded)
+  instead of serially, cutting pre-turn latency from the sum of the downloads
+  toward the slowest single one. Ordering, all-or-nothing fail-loud, and
+  temp-file cleanup are preserved.
+
+### Fixed
+
+- **Security:** `git_write` can no longer reach an `ext::` RCE — `GIT_ALLOW_PROTOCOL`
+  is pinned so a `git pull` cannot invoke an external protocol helper.
+- **Security:** the home page no longer mints a `/setup` launch token to any
+  visitor.
+- **Computer use fails closed on host control for detached `/background` runs**,
+  and picks up the compux stop-kill and display-asleep fail-fast paths.
+- **Scheduled deliveries no longer drop on a Finch pool-checkout timeout**
+  (wake-from-sleep pool starvation).
+
+### Changed
+
+- **Removed the `watch` construct**, parked pending a redesign.
+
 ## [0.4.2] - 2026-06-28
 
 ### Added — Computer Use is now installable (signed catalog plugin)
