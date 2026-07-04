@@ -50,10 +50,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and picks up the compux stop-kill and display-asleep fail-fast paths.
 - **Scheduled deliveries no longer drop on a Finch pool-checkout timeout**
   (wake-from-sleep pool starvation).
+- **FermixPet stays in its speaking look for the whole spoken reply.** The macOS
+  voice companion previously flipped back to the listening face as soon as the
+  model finished *generating*, even though the buffered voice kept playing for
+  seconds after; it now tracks actual audio playback (face, glow, controls, and
+  motion), leaving the microphone/turn-taking state machine untouched.
 
 ### Changed
 
 - **Removed the `watch` construct**, parked pending a redesign.
+- **FermixPet mascot animation feels more alive** on the existing art — no new
+  assets or dependencies: eye blinks on the open-eyed states, motion that eases
+  between states instead of snapping, a smoothed audio-reactive speaking pulse,
+  and a corrected speaking-face offset. The animation timeline now pauses when
+  the pet window is hidden to save energy.
 
 ## [0.4.2] - 2026-06-28
 
