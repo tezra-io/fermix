@@ -28,6 +28,11 @@ defmodule FermixChannels.Gateway.MediaIngest do
   @type attachment :: map()
   @type message :: map()
 
+  # Bounded fan-out for album downloads: parallel enough to collapse a 10-image
+  # album's latency toward max(download) instead of sum(download), capped so we
+  # never hammer a channel's file API.
+  @download_concurrency 4
+
   @spec maybe_attach_images(module(), message(), keyword()) ::
           {:ok, message()} | {:error, term()}
   def maybe_attach_images(channel, message, opts \\ [])
@@ -52,17 +57,58 @@ defmodule FermixChannels.Gateway.MediaIngest do
     result
   end
 
+  # Album images are independent network fetches, so we materialize them
+  # concurrently (bounded) instead of summing their latency serially. Three
+  # deliberate choices keep this behavior-identical to the old serial fold:
+  #
+  #   * `async_stream_nolink` (not plain `async_stream`) — a raise inside
+  #     `download_attachment` surfaces as an `{:exit, _}` stream element for THIS
+  #     stream rather than a linked crash that would take down the caller (the
+  #     AlbumBuffer GenServer, which holds other conversations' buffered parts).
+  #   * `timeout: :infinity` — the HTTP client already bounds each fetch; a finite
+  #     stream timeout would kill a slow-but-succeeding download and, via
+  #     `on_timeout`, skip its temp-file `after` cleanup.
+  #   * drain the whole ordered stream before inspecting results, so every spawned
+  #     task runs its own `after cleanup_download` (an early halt would brutally
+  #     kill in-flight tasks and leak their temp files).
   defp do_attach_images(channel, message, images, _opts) do
-    images
-    |> Enum.reduce_while({:ok, []}, fn attachment, {:ok, acc} ->
-      case materialize_image(channel, message, normalize_attachment(attachment)) do
-        {:ok, part} -> {:cont, {:ok, [part | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    results =
+      FermixCore.TaskSupervisor
+      |> Task.Supervisor.async_stream_nolink(
+        images,
+        fn attachment ->
+          materialize_image(channel, message, normalize_attachment(attachment))
+        end,
+        max_concurrency: @download_concurrency,
+        timeout: :infinity,
+        on_timeout: :kill_task,
+        ordered: true
+      )
+      |> Enum.to_list()
+
+    case collect_parts(results) do
+      {:ok, parts} -> {:ok, put_media_parts(message, parts)}
+      {:error, reason} -> {:error, {:attachment_download_failed, reason}}
+    end
+  end
+
+  # Fold the drained (input-ordered) stream: keep parts in album order and
+  # surface the FIRST failure — an `{:error, _}` from a download/read or an
+  # `{:exit, _}` from a task crash. All-or-nothing fail-loud, matching the serial
+  # contract. The stream is already fully drained, so this fold only inspects
+  # completed results; it never tears down an in-flight task.
+  defp collect_parts(results) do
+    results
+    |> Enum.reduce_while({:ok, []}, fn element, {:ok, acc} ->
+      case element do
+        {:ok, {:ok, part}} -> {:cont, {:ok, [part | acc]}}
+        {:ok, {:error, reason}} -> {:halt, {:error, reason}}
+        {:exit, reason} -> {:halt, {:error, {:download_crashed, reason}}}
       end
     end)
     |> case do
-      {:ok, parts} -> {:ok, put_media_parts(message, Enum.reverse(parts))}
-      {:error, reason} -> {:error, {:attachment_download_failed, reason}}
+      {:ok, parts} -> {:ok, Enum.reverse(parts)}
+      error -> error
     end
   end
 
