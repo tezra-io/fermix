@@ -151,7 +151,7 @@ defmodule FermixCore.ComputerUse.Session do
 
   def handle_info({port, {:exit_status, status}}, %{driver_state: %{port: port}} = state) do
     Logger.warning("computer_use: sidecar exited (status #{status}); stopping session")
-    {:stop, {:sidecar_exited, status}, state}
+    {:stop, sidecar_exit_reason(status), state}
   end
 
   def handle_info({:EXIT, _pid, reason}, state) do
@@ -196,6 +196,15 @@ defmodule FermixCore.ComputerUse.Session do
         {:reply, {:error, reason}, state}
     end
   end
+
+  # EX_TEMPFAIL (75) is compux's INTENTIONAL capture-stall fail-fast: the sidecar
+  # already flushed a typed `capture_stalled` reply to the in-flight action, then
+  # exited so a fresh sidecar respawns on the next action. Wrap it `{:shutdown, _}`
+  # — an EXPECTED reset like the timeout path above — so it emits `session_complete`
+  # (not `session_error`) and does not dump a GenServer crash report. Any other
+  # non-zero status is a genuine sidecar crash and stays a bare error reason.
+  defp sidecar_exit_reason(75), do: {:shutdown, {:sidecar_exited, 75}}
+  defp sidecar_exit_reason(status), do: {:sidecar_exited, status}
 
   # Computer-use drives the host desktop, so a session may only start from an
   # attended owner origin (§7.6). There is no relaxed "browser" mode anymore — the

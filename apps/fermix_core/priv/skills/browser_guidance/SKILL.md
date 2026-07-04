@@ -15,7 +15,7 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - `browser`: JavaScript-rendered pages, forms, clicks, login checks, live/interactive data, dashboards, seat maps — in `browser`'s OWN managed instance, NOT the page/app the user has open on their screen.
 - `computer_use`: when the task is about the user's OWN live screen or a session they are watching (a page/app/game they already have open) — `browser` can't see or act on that (separate context; it desyncs). Reserve for live-screen work; a nameable URL is still `web_fetch`/`browser`.
 - Never shell-scrape JavaScript sites. Empty/partial `web_search` or `web_fetch` output on dynamic content means switch to `browser`.
-- To wait for a page to change (an opponent's move, a result to load), use `browser`'s `wait`/`wait_until` on THIS session — don't switch to `computer_use` to watch a page you are already driving here.
+- To wait for a page to change (an opponent's move, a result to load), use the browser's `act` action with `kind: "wait"` (and a `wait_until` target) on THIS session — there is no top-level `wait` action; don't switch to `computer_use` to watch a page you are already driving here.
 
 ## Operating Loop
 
