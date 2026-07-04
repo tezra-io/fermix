@@ -21,9 +21,22 @@ final class CompanionState: ObservableObject {
     @Published private(set) var muted = false
     @Published private(set) var statusText = "offline"
 
-    /// Normalized RMS (0...1) of the model's voice output, updated as
-    /// PCM chunks are scheduled for playback. Drives the speaking pulse.
-    @Published private(set) var audioLevel: Float = 0
+    /// Normalized RMS (0...1) of the model's voice output, updated as PCM
+    /// chunks are scheduled for playback; drives the speaking pulse. Plain
+    /// var (not @Published) — the pet's TimelineView samples it every frame,
+    /// so per-chunk updates need not invalidate the SwiftUI tree.
+    private(set) var audioLevel: Float = 0
+
+    /// Whether the pet window is on-screen (not occluded, minimized, or on
+    /// another Space). Drives pausing the animation timeline when hidden.
+    @Published private(set) var windowVisible = true
+
+    /// True while the pet is actually playing voice audio. Set when a delta
+    /// arrives, cleared when playback drains. The daemon flips `mode` back to
+    /// listening as soon as the model stops *generating*, but the buffered
+    /// audio keeps playing for seconds after — this tracks that real tail so
+    /// the pet keeps its speaking look until the voice actually stops.
+    @Published private(set) var audioActive = false
 
     private let socket = RealtimeSocketClient()
     private let audio = AudioController()
@@ -39,10 +52,20 @@ final class CompanionState: ObservableObject {
             Task { @MainActor in self?.handlePeerClose() }
         }
         audio.onOutputLevel = { [weak self] level in
-            // AudioController dispatches to main; assume isolation to
-            // write the @Published value without a Task hop.
+            // AudioController dispatches to main; assume isolation to write
+            // without a Task hop. Exponential smoothing turns chunk-quantized
+            // RMS into a smooth swell so the speaking pulse doesn't jitter.
             MainActor.assumeIsolated {
-                self?.audioLevel = level
+                guard let self else { return }
+                self.audioLevel = 0.65 * self.audioLevel + 0.35 * level
+            }
+        }
+        audio.onPlaybackDrained = { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if !self.audio.isPlayingBack {
+                    self.audioActive = false
+                }
             }
         }
 
@@ -73,6 +96,10 @@ final class CompanionState: ObservableObject {
     func quitApplication() {
         shutdown()
         NSApp.terminate(nil)
+    }
+
+    func setWindowVisible(_ visible: Bool) {
+        windowVisible = visible
     }
 
     nonisolated private static func defaultSocketPath() -> String {
@@ -116,8 +143,16 @@ final class CompanionState: ObservableObject {
         }
     }
 
+    /// Mode for presentation only. While voice audio is still playing out, the
+    /// pet reads as speaking even though `mode` (server turn state) has already
+    /// returned to listening/idle. `mode` itself — and all mic/turn logic keyed
+    /// off it — is deliberately left untouched.
+    var visualMode: Mode {
+        (callActive && audioActive) ? .speaking : mode
+    }
+
     var petExpression: PetExpression {
-        PetExpression.resolve(for: mode, callActive: callActive)
+        PetExpression.resolve(for: visualMode, callActive: callActive)
     }
 
     func toggleConnection() {
@@ -285,15 +320,23 @@ final class CompanionState: ObservableObject {
             if previous == .speaking && mode != .speaking {
                 audio.resetUtteranceAnchor()
             }
+
+            // The visual "speaking" tail is owned by real playback; once the
+            // server has moved on and no audio remains, drop it.
+            if !audio.isPlayingBack {
+                audioActive = false
+            }
         case "audio_delta":
             if let encoded = event["audio"] as? String {
                 mode = .speaking
                 statusText = "speaking"
+                audioActive = true
                 audio.play(base64PCM16: encoded)
             }
         case "playback_stop":
             audio.stopPlayback()
             audio.resetUtteranceAnchor()
+            audioActive = false
             if callActive {
                 mode = activeInputMode
                 statusText = mode.rawValue
@@ -357,6 +400,7 @@ final class CompanionState: ObservableObject {
     private func sendInterruptForCurrentPlayback() {
         let playedMs = audio.currentUtterancePlayedMs()
         audio.stopPlayback()
+        audioActive = false
 
         if connected {
             var payload: [String: Any] = ["type": "interrupt"]
@@ -401,5 +445,6 @@ final class CompanionState: ObservableObject {
     private func shutdownAudio() {
         audio.shutdown()
         audioLevel = 0
+        audioActive = false
     }
 }
