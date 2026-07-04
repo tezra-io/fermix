@@ -15,9 +15,19 @@ and the `Makefile` wraps the common commands.
 ## 1. Prerequisites (once)
 
 - **Opik** running locally (`http://localhost:5173`).
-- The **Opik-enabled dev daemon** running against `~/.fermix-dev` (started with
-  `FERMIX_OPIK_ENABLED=1` — the brew daemon at `~/.fermix` does NOT export to Opik
-  and can't be used).
+- The **Opik-enabled dev daemon** running against `~/.fermix-dev`. Start it with
+  both eval flags set (the brew daemon at `~/.fermix` does NOT export to Opik and
+  can't be used):
+
+  ```sh
+  FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 FERMIX_BROWSER_HEADLESS=1 mix fermix.dev
+  ```
+
+  `FERMIX_OPIK_ENABLED=1` turns on trace export. `FERMIX_BROWSER_HEADLESS=1` runs the
+  browser tool's Chrome in `--headless=new`, so browser/web eval turns stop opening
+  (and stealing focus with) visible Chrome windows on your Mac — screenshots and
+  vision still work. Without it the daemon launches a real, visible window per
+  browser turn (macOS default; the `:auto` profile only goes headless on Linux).
 - **uv** installed (`brew install uv`). The runners are self-contained `uv run`
   scripts — no venv to set up.
 
