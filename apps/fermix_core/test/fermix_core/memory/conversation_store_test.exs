@@ -589,6 +589,14 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       repo = start_supervised!({FlakyRepo, test_pid: self(), failures_remaining: 10})
       store = :"conversation_store_flaky_#{System.unique_integer([:positive])}"
 
+      # Own the durable-write task supervisor so the test can wait for the async
+      # write to actually finish instead of sleeping. The failure is logged from
+      # inside that task, so a fixed sleep races the log under CI load.
+      durable_sup =
+        start_supervised!(
+          {Task.Supervisor, name: :"flaky_durable_sup_#{System.unique_integer([:positive])}"}
+        )
+
       start_supervised!(%{
         id: store,
         start:
@@ -599,7 +607,8 @@ defmodule FermixCore.Memory.ConversationStoreTest do
                max_messages: 5,
                repo: repo,
                durable_max_attempts: 1,
-               durable_retry_initial_ms: 0
+               durable_retry_initial_ms: 0,
+               durable_task_supervisor: durable_sup
              ]
            ]}
       })
@@ -615,7 +624,12 @@ defmodule FermixCore.Memory.ConversationStoreTest do
                    ConversationStore.get_history(@key, server: store)
 
           assert_receive {:insert_attempt, "user", "do not block reply"}
-          Process.sleep(10)
+
+          # The durable write (and its failure log) runs inside durable_sup's
+          # task; wait for that task to terminate, then flush the Logger into the
+          # capture handler. Deterministic where Process.sleep/1 flaked.
+          wait_for_no_children(durable_sup)
+          Logger.flush()
         end)
 
       assert log =~ "conversation durable write failed after 1 attempts"
@@ -694,6 +708,23 @@ defmodule FermixCore.Memory.ConversationStoreTest do
         end)
 
       assert log =~ "conversation durable write failed; retrying attempt 2/2"
+    end
+  end
+
+  # Bounded poll until the supervisor has no live children — i.e. every durable
+  # write task has finished (and so emitted its failure log). Deterministic
+  # replacement for Process.sleep/1 when waiting on the async durable write.
+  defp wait_for_no_children(supervisor, attempts \\ 200) do
+    cond do
+      Task.Supervisor.children(supervisor) == [] ->
+        :ok
+
+      attempts <= 0 ->
+        flunk("durable-write task did not finish within the deadline")
+
+      true ->
+        Process.sleep(5)
+        wait_for_no_children(supervisor, attempts - 1)
     end
   end
 end
