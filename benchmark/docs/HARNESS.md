@@ -76,7 +76,10 @@ leaderboard row; the board re-ranks. The matrix of rankable configs comes from
 
 1. **Opik up**: `curl -s -m5 http://localhost:5173/api/v1/private/projects` returns JSON.
 2. **Opik-enabled dev daemon up**: the daemon at `~/.fermix-dev` must be running
-   **with `FERMIX_OPIK_ENABLED=1`** (the brew daemon at `~/.fermix` does NOT export).
+   **with `FERMIX_OPIK_ENABLED=1`** (trace export) **and `FERMIX_BROWSER_HEADLESS=1`**
+   (runs the browser tool's Chrome in `--headless=new` so browser/web eval turns don't
+   open focus-stealing windows on your Mac; screenshots/vision unaffected). The brew
+   daemon at `~/.fermix` does NOT export, so it can't be used.
    Verify: `FERMIX_HOME=~/.fermix-dev fermix status --json` is reachable (not `not_running`).
    If it is down, tell the user to start it; do not silently fall back to `~/.fermix`.
 3. **uv installed** (`brew install uv`, or the Astral installer). The runner is a
