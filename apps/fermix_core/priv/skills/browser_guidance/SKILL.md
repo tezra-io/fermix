@@ -1,7 +1,7 @@
 ---
 name: browser-guidance
 description: Use when operating websites or local web apps through the built-in browser tool.
-allowed_tools: ["browser"]
+allowed_tools: ["browser", "web_fetch", "web_search"]
 ---
 
 # Browser Guidance
@@ -36,7 +36,7 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - Reuse one tab target per flow. If popups or retries create extras, use `tabs`, then `focus` or `close`.
 - On stale/missing refs: snapshot the same target, retry once with the new ref, then report the blocker.
 - Avoid snapshot churn; do not snapshot after every successful `fill`.
-- Treat screenshots, PDFs, and downloads as artifacts. Do not claim the model saw screenshot pixels unless the runtime feeds image bytes back to the model.
+- The `screenshot` action returns the page as an image the model actually sees — use it to inspect rendered/visual state. Treat PDFs and downloads as saved artifacts (a path, not seen); read them with `file_read`.
 
 ## Stop Conditions
 

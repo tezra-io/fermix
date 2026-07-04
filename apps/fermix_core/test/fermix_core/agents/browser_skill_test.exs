@@ -26,7 +26,7 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
 
     assert {:ok, definition} = SkillRegistry.load(registry, "browser-guidance")
     assert definition.trust == :operator
-    assert definition.allowed_tools == ["browser"]
+    assert definition.allowed_tools == ["browser", "web_fetch", "web_search"]
     assert definition.system_prompt =~ "Use `browser`"
     assert definition.system_prompt =~ "Use the default profile"
     assert definition.system_prompt =~ "not proof that async navigation"
