@@ -1,8 +1,8 @@
 defmodule FermixCore.Tools.ComputerUseTest do
   use ExUnit.Case, async: false
 
-  alias FermixCore.ComputerUse.Config
   alias Compux.Protocol
+  alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
   alias FermixCore.Sandbox.Config, as: SandboxConfig
