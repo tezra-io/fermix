@@ -165,6 +165,52 @@ defmodule FermixChannels.Channels.WhatsApp do
     fn media_part -> send_media(reply_target, media_part, []) end
   end
 
+  # -- Reactions (docs/design/EMOJI_REACTION_ACKS.md §9) --
+
+  @impl true
+  @spec reaction_capability() :: :any_emoji
+  def reaction_capability, do: :any_emoji
+
+  @impl true
+  @spec react(FermixChannels.Gateway.Channel.message(), String.t()) :: :ok | {:error, term()}
+  def react(message, emoji, opts \\ [])
+
+  def react(%Message{id: message_id, reply_target: to}, emoji, opts) when is_binary(emoji) do
+    with {:ok, config} <- send_config(opts) do
+      url = "#{@graph_api_base}/#{config.graph_version}/#{config.phone_number_id}/messages"
+
+      # The reaction targets the inbound message by its wamid (`Message.id`). The
+      # 24-hour customer window is enforced by WhatsApp itself: outside it, the
+      # API rejects and `handle_reaction_response` fails loud — no local guard.
+      body = %{
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: to,
+        type: "reaction",
+        reaction: %{message_id: message_id, emoji: emoji}
+      }
+
+      Req.new(url: url, method: :post, json: body, auth: {:bearer, config.access_token})
+      |> Req.merge(config.req_options)
+      |> HttpClient.request("WhatsApp reaction")
+      |> handle_reaction_response()
+    end
+  end
+
+  # No ChannelTelemetry.emit_message here — a reaction is not an outbound message;
+  # the delivery layer already emits the `:reaction` channel-reply event.
+  defp handle_reaction_response({:ok, %{status: status}}) when status in [200, 201], do: :ok
+
+  defp handle_reaction_response({:ok, %{status: status, body: body} = response}) do
+    Logger.error("WhatsApp reaction failed: #{status} - #{inspect(body)}")
+    whatsapp_api_error(response)
+  end
+
+  defp handle_reaction_response({:error, reason}) do
+    Logger.error("WhatsApp reaction request failed: #{inspect(reason)}")
+    {:error, reason}
+  end
+
   @impl true
   @spec download_attachment(FermixChannels.Gateway.Channel.message(), map()) ::
           {:ok, String.t()} | {:error, term()}

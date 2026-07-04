@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.DiscordTest do
 
   alias FermixChannels.Channels.Discord
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway.Message
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Memory.ConversationStore
 
@@ -180,6 +181,31 @@ defmodule FermixChannels.Channels.DiscordTest do
       assert body["message_reference"]["message_id"] == "message-1"
       assert body["allowed_mentions"] == %{"parse" => []}
       assert {"authorization", "Bot discord-bot-token"} in headers
+    end
+
+    test "attaches the channel reaction_spec and delivers a reaction through the same reply_fn" do
+      Req.Test.stub(:discord, fn conn ->
+        send(self(), {:discord_reaction, conn.method, conn.request_path})
+        Plug.Conn.send_resp(conn, 204, "")
+      end)
+
+      assert {:ok, messages} = Discord.parse_gateway_event(dm_event("thanks"))
+
+      assert :ok =
+               Dispatcher.dispatch(messages,
+                 channel: Discord,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:agent_message, agent_message}
+      # Discord is :any_emoji → the gateway flattens the capability to plain data.
+      assert agent_message.reaction_spec == %{emoji_set: :any}
+
+      # The very same reply_fn dispatches a reaction to the channel's react/2.
+      assert :ok = agent_message.reply_fn.({:react, "👍"})
+      assert_receive {:discord_reaction, "PUT", path}
+      assert path =~ "/channels/dm-channel-1/messages/message-1/reactions/"
     end
 
     test "routes inbound direct text through MainAgent and sends the agent reply" do
@@ -370,6 +396,48 @@ defmodule FermixChannels.Channels.DiscordTest do
 
       assert {:error, {:network, %Req.TransportError{reason: :closed}}} =
                Discord.health_check()
+    end
+  end
+
+  describe "reactions" do
+    defp react_message do
+      Message.new!(%{
+        id: "555",
+        content: "thanks",
+        sender: "user",
+        channel: "discord",
+        chat_id: "999999",
+        reply_target: "999999"
+      })
+    end
+
+    test "reaction_capability is any_emoji" do
+      assert Discord.reaction_capability() == :any_emoji
+    end
+
+    test "react PUTs a @me reaction and succeeds on 204" do
+      test_pid = self()
+
+      Req.Test.stub(:discord, fn conn ->
+        send(test_pid, {:discord_request, conn.method, conn.request_path})
+        Plug.Conn.send_resp(conn, 204, "")
+      end)
+
+      assert :ok = Discord.react(react_message(), "👍")
+
+      assert_receive {:discord_request, "PUT", path}
+      assert path =~ "/channels/999999/messages/555/reactions/"
+      assert path =~ "/@me"
+    end
+
+    test "react surfaces an API error on a non-2xx status" do
+      Req.Test.stub(:discord, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(403, Jason.encode!(%{"message" => "Missing Permissions"}))
+      end)
+
+      assert {:error, {:discord_api_error, 403, _body}} = Discord.react(react_message(), "👍")
     end
   end
 

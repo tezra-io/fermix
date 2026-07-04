@@ -93,6 +93,9 @@ defmodule FermixChannels.CLI do
                {:media, _media_part} ->
                  {:error, :media_unsupported}
 
+               {:react, _emoji} ->
+                 {:error, :reaction_unsupported}
+
                other ->
                  {:error, {:invalid_reply_part, other}}
              end

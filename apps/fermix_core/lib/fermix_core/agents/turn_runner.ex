@@ -244,6 +244,10 @@ defmodule FermixCore.Agents.TurnRunner do
       computer_use_origin: computer_use_origin(msg),
       reply_fn: deliver,
       channel: msg.channel,
+      # Reaction capability resolved by the gateway (nil on no-reaction channels).
+      # Plain data, never the channel module — the `react` tool reads it to gate
+      # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
+      reaction_spec: Map.get(msg, :reaction_spec),
       # This-turn inbound channel images (M14), so `generate_image` edit can
       # reference `inbound:last`. Transient like `:image_parts`, never persisted.
       inbound_images: Map.get(msg, :media_parts) || []

@@ -105,6 +105,53 @@ defmodule FermixChannels.Gateway.QueueTest do
     def error_reply(_reason), do: "error reply"
   end
 
+  # Delivers a configured mid-turn channel side-effect (a reaction or media)
+  # through the wrapped `deliver`, then returns an EMPTY final completion — the
+  # react-then-empty / attachment-then-empty shape the §7 ledger must recognize.
+  defmodule SideEffectRunner do
+    def run(msg, turn_state, deliver), do: run(msg, turn_state, deliver, nil)
+
+    def run(msg, turn_state, deliver, _stream_callback) do
+      send(turn_state.test_pid, {:turn_started, msg.content, self()})
+
+      receive do
+        {:proceed, {:deliver_then_empty, part}} ->
+          deliver.(part)
+          {:ok, "", 0}
+
+        {:proceed, :empty} ->
+          {:ok, "", 0}
+      after
+        15_000 -> {:ok, "", 0}
+      end
+    end
+
+    def commit(_msg, turn_state, response, _context_tokens) do
+      send(turn_state.test_pid, {:committed, response})
+      :ok
+    end
+
+    def error_reply(_reason), do: "error reply"
+  end
+
+  # Stands in for ConversationStore, capturing the marker the queue appends to
+  # close an emoji-only / attachment-only empty turn (§7). Bypasses the real
+  # last-message-user? guard, which is ConversationStore's own tested concern.
+  defmodule StubStore do
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, Map.new(opts))
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def handle_call({:append_stopped_marker, _key, content, _opts}, _from, opts) do
+      send(opts.test_pid, {:marker_appended, content})
+      {:reply, :marked, opts}
+    end
+  end
+
   setup do
     task_supervisor = start_supervised!({Task.Supervisor, []})
     {:ok, %{test_pid: self(), task_supervisor: task_supervisor}}
@@ -170,6 +217,70 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:reply, "I didn't get a response — please try again."}, 5_000
       # The blank completion is dropped pre-commit, so it cannot poison history.
       refute_received {:committed, _response}
+    end
+  end
+
+  describe "side-effect acks (§7 EMOJI_REACTION_ACKS)" do
+    # reply_fn forwards every delivered part to the test and lets a caller pick
+    # the result for a reaction (so the "records only on :ok" path is testable).
+    defp make_side_effect_msg(content, chat_id, test_pid, react_result \\ :ok) do
+      %{
+        content: content,
+        sender: "user",
+        channel: "telegram",
+        chat_id: chat_id,
+        reply_fn: fn
+          {:react, _emoji} = part ->
+            send(test_pid, {:delivered, part})
+            react_result
+
+          part ->
+            send(test_pid, {:delivered, part})
+            :ok
+        end
+      }
+    end
+
+    test "a reaction-then-empty turn suppresses the retry and appends a reacted marker", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, turn_runner: SideEffectRunner, conversation_store: store)
+
+      Queue.enqueue(queue, make_side_effect_msg("thanks", "cr", ctx.test_pid))
+      assert_receive {:turn_started, "thanks", turn_pid}, 5_000
+      send(turn_pid, {:proceed, {:deliver_then_empty, {:react, "🙏"}}})
+
+      assert_receive {:delivered, {:react, "🙏"}}, 5_000
+      assert_receive {:marker_appended, "(Reacted to the previous message.)"}, 5_000
+      # No canned retry text, and the empty response is never committed.
+      refute_receive {:delivered, {:text, _}}, 300
+      refute_received {:committed, _response}
+    end
+
+    test "an attachment-then-empty turn also suppresses the retry (regression)", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, turn_runner: SideEffectRunner, conversation_store: store)
+
+      Queue.enqueue(queue, make_side_effect_msg("here", "cm", ctx.test_pid))
+      assert_receive {:turn_started, "here", turn_pid}, 5_000
+      send(turn_pid, {:proceed, {:deliver_then_empty, {:media, %{kind: :document, path: "x"}}}})
+
+      assert_receive {:delivered, {:media, _part}}, 5_000
+      assert_receive {:marker_appended, "(Sent an attachment in reply.)"}, 5_000
+      refute_receive {:delivered, {:text, _}}, 300
+    end
+
+    test "a side-effect the channel REJECTS still yields the honest retry", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, turn_runner: SideEffectRunner, conversation_store: store)
+
+      msg = make_side_effect_msg("thanks", "cf", ctx.test_pid, {:error, :reaction_unsupported})
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "thanks", turn_pid}, 5_000
+      send(turn_pid, {:proceed, {:deliver_then_empty, {:react, "🙏"}}})
+
+      # Delivery failed → ledger unrecorded → the empty turn is genuinely empty.
+      assert_receive {:delivered, {:text, "I didn't get a response — please try again."}}, 5_000
+      refute_received {:marker_appended, _marker}
     end
 
     test "sends a compaction notice after the reply when the turn compacted", ctx do

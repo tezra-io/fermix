@@ -102,6 +102,70 @@ defmodule FermixChannels.Channels.Slack do
     fn media_part -> send_media(reply_target, media_part, opts) end
   end
 
+  # -- Reactions (docs/design/EMOJI_REACTION_ACKS.md §9) --
+
+  # Slack's `reactions.add` takes an emoji NAME (shortcode), not a unicode glyph,
+  # so the capability is expressed as Slack's shortcode set — the `react` tool's
+  # enum is exactly these names, and the model picks one (no unicode→shortcode
+  # conversion needed). All are built-in Slack aliases present in every workspace.
+  @reaction_shortcodes ~w(thumbsup thumbsdown tada heart fire pray eyes clap 100 rocket
+                          white_check_mark joy thinking_face wave ok_hand raised_hands sob
+                          sunglasses sparkles smile)
+
+  @impl true
+  @spec reaction_capability() :: {:restricted, [String.t()]}
+  def reaction_capability, do: {:restricted, @reaction_shortcodes}
+
+  @impl true
+  @spec react(FermixChannels.Gateway.Channel.message(), String.t()) :: :ok | {:error, term()}
+  def react(message, name, opts \\ [])
+
+  def react(%Message{id: ts, reply_target: channel_id}, name, opts) when is_binary(name) do
+    with :ok <- validate_reaction_name(name),
+         {:ok, token} <- bot_token() do
+      body = %{channel: channel_id, timestamp: ts, name: name}
+
+      Req.new(url: "#{@api_base}/reactions.add", method: :post, json: body)
+      |> Req.Request.put_header("authorization", "Bearer #{token}")
+      |> Req.merge(req_options(opts))
+      |> HttpClient.request("Slack reactions.add")
+      |> handle_reaction_response()
+    end
+  end
+
+  defp validate_reaction_name(name) do
+    if name in @reaction_shortcodes, do: :ok, else: {:error, {:unsupported_emoji, name}}
+  end
+
+  # Slack returns HTTP 200 even for API errors, gated on the `ok` field. No
+  # ChannelTelemetry.emit_message here — a reaction is not an outbound message;
+  # the delivery layer already emits the `:reaction` channel-reply event.
+  defp handle_reaction_response({:ok, %{status: 200, body: %{"ok" => true}}}), do: :ok
+
+  # `already_reacted` is the desired end state (the reaction is on the message),
+  # not a failure — normalize to :ok so it matches the idempotent success of
+  # Telegram/Discord. Reachable when HttpClient retries a request whose first
+  # attempt landed but whose response was lost (wake-from-sleep pool RST).
+  defp handle_reaction_response(
+         {:ok, %{status: 200, body: %{"ok" => false, "error" => "already_reacted"}}}
+       ),
+       do: :ok
+
+  defp handle_reaction_response({:ok, %{status: 200, body: %{"ok" => false} = body}}) do
+    Logger.error("Slack reaction failed: #{inspect(body)}")
+    {:error, Map.get(body, "error", "slack_api_error")}
+  end
+
+  defp handle_reaction_response({:ok, %{status: status, body: body} = response}) do
+    Logger.error("Slack reaction failed: #{status} - #{inspect(body)}")
+    slack_api_error(response)
+  end
+
+  defp handle_reaction_response({:error, reason}) do
+    Logger.error("Slack reaction request failed: #{inspect(reason)}")
+    {:error, reason}
+  end
+
   @impl true
   @spec verify_webhook(Plug.Conn.t()) :: :ok | {:error, term()}
   def verify_webhook(conn) do

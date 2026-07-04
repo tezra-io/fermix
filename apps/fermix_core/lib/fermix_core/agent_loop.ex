@@ -115,6 +115,7 @@ defmodule FermixCore.AgentLoop do
             excluded_categories: excluded_categories
           )
 
+        advertised = filter_advertised(advertised, context)
         {refresh_dynamic_schemas(advertised, context), dispatchable}
       end)
 
@@ -175,6 +176,24 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp refresh_schema(capability, _context), do: capability
+
+  # Per-turn advertisement gate. A tool whose backing module exports
+  # `advertise?/1` is dropped from the LLM-visible surface when it opts out for
+  # this turn's context (e.g. `react` on a channel with no reaction capability —
+  # docs/design/EMOJI_REACTION_ACKS.md §6). Discovered via `function_exported?`,
+  # like `dynamic_parameters/1`: capabilities without the hook always advertise.
+  # This is the one context-keyed filter the trust-cached profile can't express
+  # (reaction capability varies per channel within a trust). Dispatch is
+  # unaffected — an un-advertised tool is simply never called.
+  defp filter_advertised(capabilities, context) when is_list(capabilities) do
+    Enum.filter(capabilities, &advertised?(&1, context))
+  end
+
+  defp advertised?(%Capability{executor: {mod, _fun, _args}}, context) when is_atom(mod) do
+    not function_exported?(mod, :advertise?, 1) or mod.advertise?(context)
+  end
+
+  defp advertised?(_capability, _context), do: true
 
   defp index_by_name(capabilities) do
     Map.new(capabilities, fn %Capability{name: name} = capability -> {name, capability} end)
@@ -425,13 +444,7 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp continue_until_terminal(%{tool_calls: []} = turn, state) do
-    {:ok,
-     %{
-       response: turn.content,
-       iterations: state.iteration,
-       total_tokens: state.total_tokens,
-       context_tokens: state.context_tokens
-     }}
+    {:ok, terminal_result(turn.content, state)}
   end
 
   defp continue_until_terminal(_turn, %{iteration: i, max_iter: max}) when i >= max do
@@ -472,13 +485,40 @@ defmodule FermixCore.AgentLoop do
   defp unwrap_bridge_call(call), do: call
 
   defp run_continuation(turn, state, warning) do
-    with {:ok, tool_results} <- execute_tool_calls(turn.tool_calls, state),
-         :ok <- ensure_tool_results_image_capable(tool_results, state),
-         {:ok, next_turn, state} <-
+    with {:ok, tool_results, sole_terminal?} <- execute_tool_calls(turn.tool_calls, state),
+         :ok <- ensure_tool_results_image_capable(tool_results, state) do
+      if sole_terminal? and blank?(turn.content) do
+        # The terminal side-effect (react) delivered and IS the reply; the model
+        # added no text and called no other tool. Skip the continuation LLM call —
+        # nothing left to ask. The turn ends empty and the queue's §7 ledger
+        # commits the marker + suppresses the retry, exactly as after a normal
+        # empty continuation, but a full model round-trip cheaper.
+        {:ok, terminal_result("", state)}
+      else
+        continue_turn(turn, tool_results, warning, state)
+      end
+    end
+  end
+
+  defp continue_turn(turn, tool_results, warning, state) do
+    with {:ok, next_turn, state} <-
            continuation_call(turn.provider_state, tool_results, warning, state) do
       continue_until_terminal(next_turn, state)
     end
   end
+
+  defp terminal_result(response, state) do
+    %{
+      response: response,
+      iterations: state.iteration,
+      total_tokens: state.total_tokens,
+      context_tokens: state.context_tokens
+    }
+  end
+
+  defp blank?(nil), do: true
+  defp blank?(content) when is_binary(content), do: String.trim(content) == ""
+  defp blank?(_content), do: false
 
   # Continuation parallel to `ensure_image_capable/1`: a tool RESULT carrying image
   # content (e.g. a screenshot) must not be sent back to a non-vision route — no
@@ -528,15 +568,21 @@ defmodule FermixCore.AgentLoop do
 
   defp execute_tool_calls(tool_calls, state) do
     with :ok <- enforce_channel_side_effect_bound(tool_calls, state) do
-      results =
+      outcomes =
         Enum.map(tool_calls, fn tool_call ->
-          %{output: output, images: images} = run_tool_call(tool_call, state)
-          build_tool_result(tool_call.call_id, sanitize_tool_output(output), images)
+          %{output: output, images: images, terminal: terminal} = run_tool_call(tool_call, state)
+          {build_tool_result(tool_call.call_id, sanitize_tool_output(output), images), terminal}
         end)
 
-      {:ok, results}
+      {:ok, Enum.map(outcomes, &elem(&1, 0)), sole_terminal?(outcomes)}
     end
   end
+
+  # A turn ends without a continuation LLM call only when its ONE tool call was a
+  # terminal side-effect that delivered (react). More than one call, or a
+  # non-terminal call, always continues.
+  defp sole_terminal?([{_result, true}]), do: true
+  defp sole_terminal?(_outcomes), do: false
 
   # Text-only results keep the exact pre-image shape (`%{call_id, output}`) so
   # every provider encoder and existing test stays byte-identical; image content
@@ -580,6 +626,16 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
+  # A tool that declares itself terminal (react) — its successful delivery ends
+  # the turn without a continuation call. Discovered via `function_exported?`,
+  # the same convention as `advertise?/1` / `dynamic_parameters/1`; tools without
+  # the hook are never terminal.
+  defp terminal_capability?(%Capability{executor: {mod, _fun, _args}}) when is_atom(mod) do
+    function_exported?(mod, :terminal?, 0) and mod.terminal?()
+  end
+
+  defp terminal_capability?(_capability), do: false
+
   defp run_tool_call(%{name: name, arguments: arguments_raw}, state) do
     emit_activity(state, {:tool_start, name})
 
@@ -599,7 +655,8 @@ defmodule FermixCore.AgentLoop do
   # tool (e.g. a screenshot) can surface its image content parts to the provider;
   # every text-only path — errors, missing/disallowed tools — wraps its string
   # with no images via `text_result/1`.
-  defp text_result(output) when is_binary(output), do: %{output: output, images: []}
+  defp text_result(output) when is_binary(output),
+    do: %{output: output, images: [], terminal: false}
 
   defp invoke_capability(name, arguments, state) do
     if capability_allowed?(name, state.allowed_tools) do
@@ -624,7 +681,12 @@ defmodule FermixCore.AgentLoop do
       {:ok, %{success: true, output: output} = result} ->
         %{
           output: wrap_untrusted_content(output, capability),
-          images: Map.get(result, :images, [])
+          images: Map.get(result, :images, []),
+          # `terminal` is loop metadata (never sent to the provider): true only
+          # when the tool succeeded AND declares itself terminal (react). Every
+          # other branch flows through `text_result/1` (terminal: false), so a
+          # failed reaction is never terminal and the loop continues.
+          terminal: terminal_capability?(capability)
         }
 
       {:ok, %{success: false, error: error}} ->

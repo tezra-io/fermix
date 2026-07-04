@@ -52,6 +52,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.MemorySourcesList,
     FermixCore.Tools.Browser,
     FermixCore.Tools.SendAttachment,
+    FermixCore.Tools.React,
     FermixCore.Tools.GenerateImage
   ]
 
