@@ -21,14 +21,22 @@ defmodule FermixCore.Sandbox.Mode do
 
   @spec default_working_dir(Config.t() | map() | keyword()) :: String.t()
   def default_working_dir(config) do
+    default_working_dir(config, effective_roots(config))
+  end
+
+  # Precomputed-roots variant: the caller already resolved `effective_roots`
+  # once for this operation and threads it in, so a single `working_dir`/path
+  # check does not re-run the effective-root filesystem walk. Byte-identical to
+  # the self-computing arity when given that arity's own `effective_roots`.
+  @spec default_working_dir(Config.t() | map() | keyword(), [String.t()]) :: String.t()
+  def default_working_dir(config, effective_roots) when is_list(effective_roots) do
     config = Config.normalize(config)
-    roots = effective_roots(config)
     launch = launch_cwd()
 
     cond do
-      allowed_root?(launch, roots) -> launch
+      allowed_root?(launch, effective_roots) -> launch
       File.dir?(config.workspace_root) -> config.workspace_root
-      true -> hd(roots)
+      true -> hd(effective_roots)
     end
   end
 

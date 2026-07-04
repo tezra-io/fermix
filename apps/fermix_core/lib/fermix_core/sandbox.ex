@@ -8,6 +8,7 @@ defmodule FermixCore.Sandbox do
   alias FermixCore.Sandbox.Decision
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.Hardline
+  alias FermixCore.Sandbox.Mode
   alias FermixCore.Sandbox.PathPolicy
 
   @type decision :: Decision.decision()
@@ -43,9 +44,21 @@ defmodule FermixCore.Sandbox do
   def write_path(path, operation, context)
       when is_binary(path) and is_atom(operation) and is_map(context) do
     config = config_from(context)
+    protected_roots = PathPolicy.protected_paths(config)
+    effective_roots = Mode.effective_roots(config)
 
-    with {:ok, resolved} <- PathPolicy.resolve_write_path(path, config, context),
-         :allow <- enforce(:read_write, %{operation: operation, path: resolved}, context) do
+    with {:ok, resolved} <-
+           PathPolicy.resolve_write_path(path, config, context, protected_roots, effective_roots),
+         :allow <-
+           path_enforce(
+             :read_write,
+             operation,
+             resolved,
+             context,
+             config,
+             protected_roots,
+             effective_roots
+           ) do
       {:ok, resolved}
     else
       {:deny, reason} -> {:error, reason}
@@ -57,9 +70,21 @@ defmodule FermixCore.Sandbox do
   def read_path(path, operation, context)
       when is_binary(path) and is_atom(operation) and is_map(context) do
     config = config_from(context)
+    protected_roots = PathPolicy.protected_paths(config)
+    effective_roots = Mode.effective_roots(config)
 
-    with {:ok, resolved} <- PathPolicy.resolve_read_path(path, config, context),
-         :allow <- enforce(:read_only, %{operation: operation, path: resolved}, context) do
+    with {:ok, resolved} <-
+           PathPolicy.resolve_read_path(path, config, context, protected_roots, effective_roots),
+         :allow <-
+           path_enforce(
+             :read_only,
+             operation,
+             resolved,
+             context,
+             config,
+             protected_roots,
+             effective_roots
+           ) do
       {:ok, resolved}
     else
       {:deny, reason} -> {:error, reason}
@@ -67,12 +92,77 @@ defmodule FermixCore.Sandbox do
     end
   end
 
+  @doc """
+  Batch read-path gate for tools that validate many candidates from one search
+  (`content_search`/`glob_search`). Resolves config, protected roots, effective
+  roots, and the working-dir base ONCE, then validates each candidate against
+  them — the batch form of `read_path/3` that removes the per-candidate root-set
+  recompute (the L-2b syscall storm) without weakening the gate.
+
+  Returns the input paths that pass, in input order. Each candidate is still
+  individually symlink/case resolved and containment-checked, and still fails
+  CLOSED on a canonicalization error. Denied candidates still emit a
+  `[:fermix, :sandbox, :decision]` deny, preserving the `:sandbox_event`
+  security-audit trace; the per-candidate ALLOW emit is intentionally dropped
+  (`DecisionTelemetry` ignores allow, and it is the redundant per-file dispatch
+  this batch path exists to remove).
+  """
+  @spec read_paths([String.t()], atom(), map()) :: [String.t()]
+  def read_paths(paths, operation, context)
+      when is_list(paths) and is_atom(operation) and is_map(context) do
+    config = config_from(context)
+    protected_roots = PathPolicy.protected_paths(config)
+    effective_roots = Mode.effective_roots(config)
+
+    case PathPolicy.resolve_working_dir(
+           Map.get(context, :cwd),
+           config,
+           context,
+           protected_roots,
+           effective_roots
+         ) do
+      {:ok, base} ->
+        Enum.filter(
+          paths,
+          &candidate_allowed?(
+            &1,
+            base,
+            operation,
+            context,
+            config,
+            protected_roots,
+            effective_roots
+          )
+        )
+
+      {:error, _reason} ->
+        # The working-dir base is unresolvable (e.g. a missing configured cwd),
+        # so every candidate would be denied — return none. This omits the N
+        # identical per-candidate working-dir denies the self-resolving path
+        # would emit; that reason is operational (missing_working_dir), not a
+        # protected/outside-root security signal.
+        []
+    end
+  end
+
   @spec working_dir(String.t() | nil, atom(), map()) :: {:ok, String.t()} | {:error, term()}
   def working_dir(path, operation, context) when is_atom(operation) and is_map(context) do
     config = config_from(context)
+    protected_roots = PathPolicy.protected_paths(config)
+    effective_roots = Mode.effective_roots(config)
 
-    with {:ok, resolved} <- PathPolicy.resolve_working_dir(path, config, context),
-         :allow <- enforce(:read_write, %{operation: operation, path: resolved}, context) do
+    with {:ok, resolved} <-
+           PathPolicy.resolve_working_dir(path, config, context, protected_roots, effective_roots),
+         :allow <-
+           path_enforce(
+             :read_write,
+             operation,
+             resolved,
+             context,
+             config,
+             protected_roots,
+             effective_roots
+           ) do
       {:ok, resolved}
     else
       {:deny, reason} -> {:error, reason}
@@ -111,6 +201,57 @@ defmodule FermixCore.Sandbox do
     case PathPolicy.allowed_path?(path, config, protected_roots) do
       :ok -> :allow
       {:error, reason} -> {:deny, reason}
+    end
+  end
+
+  # Enforcement for read/write/working-dir reusing the config + root sets the
+  # caller already resolved for this call, instead of re-deriving them via
+  # enforce/3 → config_from → allowed_path?/2 (which recomputes both root sets).
+  # Same decision, same single Decision.emit — the shell_plan/enforce_exec
+  # precomputed-roots pattern applied to the path tools.
+  defp path_enforce(
+         policy_class,
+         operation,
+         path,
+         context,
+         config,
+         protected_roots,
+         effective_roots
+       ) do
+    request = %{operation: operation, path: path}
+
+    path
+    |> path_decision(config, protected_roots, effective_roots)
+    |> Decision.emit(metadata(policy_class, request, context))
+  end
+
+  defp path_decision(path, config, protected_roots, effective_roots) do
+    case PathPolicy.allowed_path?(path, config, protected_roots, effective_roots) do
+      :ok -> :allow
+      {:error, reason} -> {:deny, reason}
+    end
+  end
+
+  # One candidate of a batch `read_paths/3`: resolve it under the already-resolved
+  # base and gate it against the hoisted root sets. Preserves read_path's
+  # fail-closed behavior (a canonicalization error → deny → excluded) and its
+  # deny telemetry; the allow branch skips the emit (see read_paths/3 doc).
+  defp candidate_allowed?(
+         path,
+         base,
+         operation,
+         context,
+         config,
+         protected_roots,
+         effective_roots
+       ) do
+    case PathPolicy.check_under_base(path, base, config, protected_roots, effective_roots) do
+      {:ok, _resolved} ->
+        true
+
+      {:error, reason} ->
+        Decision.emit({:deny, reason}, metadata(:read_only, %{operation: operation}, context))
+        false
     end
   end
 
