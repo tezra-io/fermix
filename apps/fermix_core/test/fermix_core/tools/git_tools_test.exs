@@ -85,7 +85,7 @@ defmodule FermixCore.Tools.GitToolsTest do
              GitWrite.execute(%{"repo" => dir, "command" => "push", "args" => []}, context)
 
     assert push_result.success == false
-    assert push_result.error =~ "M10"
+    assert push_result.error =~ "cannot push"
   end
 
   test "git_write rejects sandbox-escaping flags incl. abbreviations (argument injection)", %{
