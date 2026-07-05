@@ -1,5 +1,10 @@
 suite: cap_response_quality
 title: "Capability — response quality / taste (judge-scored, SOFT axis)"
+# SOFT axis: the runner EXCLUDES this suite from the correctness sweep (`make capability`,
+# `make capability-judged`) so its noisy 0..1 judge scores never fold into task-success or
+# share the capability tasks_hash. Run it deliberately on its own axis:
+#   uv run bin/run_capability.py --suite cap_response_quality --judge --threshold 0.5
+soft: true
 description: >
   "Taste" — the quality of the reply itself (judgment, concision, directness, structure,
   honesty), not whether a fact is correct or a tool fired. There is no ground truth for

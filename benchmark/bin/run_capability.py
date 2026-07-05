@@ -118,7 +118,13 @@ def capability_cases(suites, want_suites, want_tags, max_tasks, want_judge):
     an un-evaluated task as a failure."""
     out, skipped = [], 0
     for s in suites:
-        if want_suites and s.name not in want_suites:
+        explicit = bool(want_suites) and s.name in want_suites
+        if want_suites and not explicit:
+            continue
+        if s.soft and not explicit:
+            # A soft/taste suite (judge-scored 0..1, no ground truth) must never fold into
+            # the correctness composite or share its tasks_hash — its scores are noisy and
+            # directional. Run it on its OWN axis with `--suite <name>` (see the suite doc).
             continue
         for scn in s.scenarios:
             if want_tags and not (set(want_tags) & set(scn.tags)):
@@ -225,6 +231,16 @@ def _xsession_token(s_name, case_id, run_id, i) -> str:
     return f"kestrel-{h}"
 
 
+def _xsession_subject(s_name, case_id, run_id, i) -> str:
+    """A per-trial-unique ENTITY KEY the recall turn references, so a fresh recall
+    targets THIS trial's fact instead of colliding with a near-identical fact left in the
+    shared durable store by an EARLIER run — the reused-subject collision that made the
+    memory tasks score a deterministic 0 even though durable memory works. Distinct
+    derivation from `_xsession_token` so the entity and the value never coincide."""
+    h = hashlib.sha256(f"subj/{s_name}/{case_id}/{run_id}/t{i}".encode()).hexdigest()[:6]
+    return f"ref-{h}"
+
+
 def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge):
     session = sess("e2e-cap", run_id, s.name, case.id, f"t{i}")
     query, scoped = case.turns[-1].query, None
@@ -268,8 +284,9 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i):
     single-thread memory suite can't test, and where a raw/tool-less model scores 0
     (the uplift signal)."""
     token = _xsession_token(s.name, case.id, run_id, i)
-    store_q = case.turns[0].query.replace("{token}", token)
-    recall_q = case.turns[1].query.replace("{token}", token)
+    subject = _xsession_subject(s.name, case.id, run_id, i)
+    store_q = case.turns[0].query.replace("{subject}", subject).replace("{token}", token)
+    recall_q = case.turns[1].query.replace("{subject}", subject).replace("{token}", token)
     sess_a = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "store")
     sess_b = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "recall")
 
@@ -410,6 +427,9 @@ def build_args(argv):
     p.add_argument("--config-id", help="override config label (default: auto-detect served model)")
     p.add_argument("--axis", choices=("tokens", "cost"), default="tokens", help="efficiency axis")
     p.add_argument("--max-tasks", type=int, default=None, help="cap task count (bound spend)")
+    p.add_argument("--candidates", action="store_true",
+                   help="also load UNVALIDATED hard-tier drafts under suites/capability/candidates/ "
+                        "(pair with --suite <name> to validate one in isolation)")
     p.add_argument("--no-opik", action="store_true", help="skip Opik writeback (local scores only)")
     p.add_argument("--private", action="store_true",
                    help="run an operator-supplied held-out split (FERMIX_EVAL_HOLDOUT_DIR / --private-data)")
@@ -468,7 +488,7 @@ def main(argv=None) -> int:
                 return 2
             suites = load_all(holdout_dir)
         else:
-            suites = load_all(CAP_DIR)
+            suites = load_all(CAP_DIR, include_candidates=args.candidates)
     except SuiteError as exc:
         print("capability suites invalid:\n  - " + "\n  - ".join(exc.problems), file=sys.stderr)
         return 2

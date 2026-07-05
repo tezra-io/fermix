@@ -96,6 +96,9 @@ class Suite:
     description: str
     path: str
     scenarios: list[Scenario]
+    soft: bool = False               # judge/taste axis: EXCLUDED from the correctness
+    #   composite unless named explicitly with --suite (a noisy 0..1 taste score must not
+    #   be averaged into task-success or share its tasks_hash — see run_capability).
 
     def turn_count(self) -> int:
         return sum(len(c.turns) for s in self.scenarios for c in s.cases)
@@ -388,20 +391,29 @@ def _load_one(path: str, problems: list[str]) -> Suite | None:
         scenarios.append(Scenario(id=sid, title=stitle, severity=severity, tags=tags, cases=cases))
 
     return Suite(name=name, title=title, description=raw.get("description", "") or "",
-                 path=path, scenarios=scenarios)
+                 path=path, scenarios=scenarios, soft=bool(raw.get("soft", False)))
 
 
-def load_all(suites_dir: str, include_dangerous: bool = False) -> list[Suite]:
+def load_all(suites_dir: str, include_dangerous: bool = False,
+             include_candidates: bool = False) -> list[Suite]:
     """Load + validate suites/*.yaml.
 
     Suites under suites/dangerous/ are intentionally excluded from normal runs
     (--all, --dry-run) and only loaded when include_dangerous=True (--dangerous
     flag).  They exercise the sandbox by issuing commands that would cause real
     harm if the sandbox failed — never run in a shared or production environment.
+
+    Suites under suites/**/candidates/ are UNVALIDATED hard-tier drafts: excluded
+    from the default glob (so they never taint a headline sweep) and only loaded
+    when include_candidates=True (--candidates flag), so you can run them in
+    isolation to check they actually discriminate before promoting them into a
+    real suite.
     """
     patterns = [os.path.join(suites_dir, "*.yaml")]
     if include_dangerous:
         patterns.append(os.path.join(suites_dir, "dangerous", "*.yaml"))
+    if include_candidates:
+        patterns.append(os.path.join(suites_dir, "candidates", "*.yaml"))
 
     problems: list[str] = []
     suites: list[Suite] = []

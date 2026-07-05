@@ -79,7 +79,7 @@ def load(skill_dir: str, path: str | None = None) -> Config:
     daemon = DaemonCfg(
         fermix_home=_expand(os.environ.get("FERMIX_EVAL_HOME", d.get("fermix_home", "~/.fermix-dev"))),
         fermix_bin=fermix_bin,
-        default_timeout_ms=int(os.environ.get("FERMIX_EVAL_TIMEOUT_MS", d.get("default_timeout_ms", 180000))),
+        default_timeout_ms=int(os.environ.get("FERMIX_EVAL_TIMEOUT_MS", d.get("default_timeout_ms", 300000))),
     )
     opik = OpikCfg(
         base_url=os.environ.get("OPIK_BASE_URL", o.get("base_url", "http://localhost:5173/api/v1/private")).rstrip("/"),
@@ -95,7 +95,7 @@ def load(skill_dir: str, path: str | None = None) -> Config:
     )
     budgets = BudgetCfg(
         max_cost_usd=float(b.get("max_cost_usd", 2.0)),
-        max_duration_ms=int(b.get("max_duration_ms", 240000)),
+        max_duration_ms=int(b.get("max_duration_ms", 300000)),
     )
     return Config(
         daemon=daemon,
