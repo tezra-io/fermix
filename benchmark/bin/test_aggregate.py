@@ -213,5 +213,46 @@ def test_aggregate_task_rejects_nonpositive_or_oversized_threshold():
         agg.aggregate_task(trials, k=1, threshold=1.5)
 
 
+# --- bootstrap CI on mean_task_success --------------------------------------
+
+def test_bootstrap_ci_is_deterministic():
+    vals = [1.0, 0.0, 1.0, 0.5, 0.8, 0.2, 1.0]
+    assert agg.bootstrap_ci(vals) == agg.bootstrap_ci(vals)   # fixed seed -> reproducible
+
+
+def test_bootstrap_ci_single_value_is_point_interval():
+    assert agg.bootstrap_ci([0.7]) == (0.7, 0.7)
+
+
+def test_bootstrap_ci_all_equal_collapses_to_the_value():
+    lo, hi = agg.bootstrap_ci([0.4, 0.4, 0.4, 0.4])
+    assert lo == pytest.approx(0.4) and hi == pytest.approx(0.4)
+
+
+def test_bootstrap_ci_brackets_mean_within_unit():
+    vals = [1.0, 1.0, 1.0, 0.0, 0.0, 0.5]
+    lo, hi = agg.bootstrap_ci(vals)
+    mean = sum(vals) / len(vals)
+    assert 0.0 <= lo <= mean <= hi <= 1.0
+    assert lo < hi                                   # heterogeneous tasks -> a real band
+
+
+def test_bootstrap_ci_rejects_empty():
+    with pytest.raises(ValueError):
+        agg.bootstrap_ci([])
+
+
+def test_aggregate_config_populates_success_ci():
+    # Heterogeneous per-task success -> a non-degenerate CI bracketing the mean.
+    mixed = _config("mixed", [(2, 2, 0.1), (0, 2, 0.1), (1, 2, 0.1), (2, 2, 0.1)])
+    assert mixed.mean_task_success_ci_lo is not None
+    assert mixed.mean_task_success_ci_lo <= mixed.mean_task_success <= mixed.mean_task_success_ci_hi
+    assert mixed.mean_task_success_ci_lo < mixed.mean_task_success_ci_hi
+    # A uniformly-perfect config -> the CI collapses onto 1.0 (no uncertainty).
+    perfect = _config("perfect", [(2, 2, 0.1), (2, 2, 0.1)])
+    assert perfect.mean_task_success_ci_lo == pytest.approx(1.0)
+    assert perfect.mean_task_success_ci_hi == pytest.approx(1.0)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

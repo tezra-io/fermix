@@ -60,6 +60,9 @@ def render_json(store: dict, axis: str = "tokens") -> dict:
             "composite": round(r.composite, 4),
             "efficiency_norm": round(r.efficiency_norm, 4),
             "mean_task_success": round(c.mean_task_success, 4),
+            "mean_task_success_ci": (None if c.mean_task_success_ci_lo is None
+                                     else [round(c.mean_task_success_ci_lo, 4),
+                                           round(c.mean_task_success_ci_hi, 4)]),
             "mean_pass_hat_k": round(c.mean_pass_hat_k, 4),
             "tokens_per_success": _finite(c.tokens_per_success),
             "cost_per_success": _finite(c.cost_per_success),
@@ -72,8 +75,8 @@ def render_json(store: dict, axis: str = "tokens") -> dict:
     return {"axis": axis, "configs": rows}
 
 
-_HEADER = "| # | config | success | pass^k | eff | tok/✓ | $/✓ | n | set | p95 ms | safety | composite |"
-_RULE = "|--:|--------|--------:|-------:|----:|------:|----:|--:|-----|-------:|-------:|----------:|"
+_HEADER = "| # | config | success | 95% CI | pass^k | eff | tok/✓ | $/✓ | n | set | p95 ms | safety | composite |"
+_RULE = "|--:|--------|--------:|:------:|-------:|----:|------:|----:|--:|-----|-------:|-------:|----------:|"
 
 
 def render_md(store: dict, axis: str = "tokens") -> str:
@@ -98,10 +101,17 @@ def render_md(store: dict, axis: str = "tokens") -> str:
         "/ `--max-tasks` subset) is listed separately below and must NOT be read as a "
         "head-to-head result.",
         "",
+        "**`95% CI`** is a percentile bootstrap over TASKS on the `success` column — the "
+        "honest uncertainty band on the headline. Two configs whose CIs OVERLAP are a "
+        "statistical tie on this task sample: the point gap between them is noise, not a "
+        "real capability difference, so don't rank on it. A wide CI means too few or too "
+        "heterogeneous tasks to separate models confidently. `—` = scored before the CI "
+        "existed (re-run to populate).",
+        "",
     ]
     if not rows:
         return "\n".join(preamble + [_HEADER, _RULE,
-                                     "| — | _(no configs scored yet)_ | | | | | | | | | | |"]) + "\n"
+                                     "| — | _(no configs scored yet)_ | | | | | | | | | | | |"]) + "\n"
 
     modal = _modal_hash(rows)
     comparable = [c for c in rows if _row_hash(c) == modal]
@@ -139,7 +149,9 @@ def _md_row(rank: int, c: dict) -> str:
     tok = "—" if c["tokens_per_success"] is None else f"{c['tokens_per_success']:.0f}"
     dol = "—" if not c["cost_per_success"] else f"${c['cost_per_success']:.4f}"
     safety = "✓" if c["safety_violations"] == 0 else f"⚠️{c['safety_violations']}"
-    return (f"| {rank} | `{c['config_id']}` | {c['mean_task_success']:.2f} | "
+    ci = c.get("mean_task_success_ci")
+    ci_txt = "—" if not ci else f"[{ci[0]:.2f}, {ci[1]:.2f}]"
+    return (f"| {rank} | `{c['config_id']}` | {c['mean_task_success']:.2f} | {ci_txt} | "
             f"{c['mean_pass_hat_k']:.2f} | {c['efficiency_norm']:.2f} | {tok} | {dol} | "
             f"{c['n_tasks']} | `{(_row_hash(c) or '—')[:8]}` | "
             f"{c['p95_latency_ms']:.0f} | {safety} | {c['composite']:.3f} |")

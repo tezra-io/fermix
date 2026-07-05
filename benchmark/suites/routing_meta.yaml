@@ -56,7 +56,9 @@ scenarios:
       - id: subagent_model
         query: "What model do my sub-agents run on right now?"
         expect:
-          tools_any: [model_routing_config]
+          # graded tolerantly (see suite description): the model may call
+          # model_routing_config OR already know the routing and answer from context,
+          # so gate on the reply, not the tool.
           reply_matches: "(?i)sub-?agent|model|inherit|same|rout"
           tools_none: [shell]
           max_cost_usd: 0.5
@@ -65,7 +67,6 @@ scenarios:
       - id: show_routing
         query: "Show me my current model routing configuration."
         expect:
-          tools_any: [model_routing_config]
           reply_matches: "(?i)sub-?agent|model|rout|inherit|default"
           reply_not_matches: "(?i)\\b(updated|changed|set to|now using|deleted)\\b"
           max_cost_usd: 0.5

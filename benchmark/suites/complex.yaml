@@ -43,9 +43,10 @@ scenarios:
           at eval_scratch/tokyo_weather.txt and let me know once it's there."
         expect:
           # Current weather is genuinely fresh — the model CANNOT answer from memory, so it
-          # must web_search. (The old query asked Japan's population, a textbook fact the
-          # model answers from memory, falsely failing the web_search gate.)
-          tools_all: [web_search, file_write]
+          # must look it up live. Hard-gate the write; accept any retrieval tool for the
+          # lookup (web_fetch/browser are equally valid routes to a live number).
+          tools_all: [file_write]
+          tools_any: [web_search, web_fetch, browser]
           reply_matches: "(?i)saved|wrote|written|tokyo_weather|weather|temperature|file|note"
           max_cost_usd: 1.5
           max_duration_ms: 200000

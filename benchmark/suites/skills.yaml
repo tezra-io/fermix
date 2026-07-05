@@ -144,7 +144,9 @@ scenarios:
           Make me a skill named "eval-greeter" that greets people in French, then show me
           your current skill list so I can see it landed.
         expect:
-          tools_any: [skill_create]
+          # skill_create OR file_write-to-disk + skill_reload both validly author a skill
+          # (same as create_then_reload); don't pin the create tool.
+          tools_any: [skill_create, skill_reload]
           reply_matches: "(?i)eval[-_]?greeter|created|added|skill"
           max_cost_usd: 1.5
           max_duration_ms: 150000

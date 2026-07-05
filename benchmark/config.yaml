@@ -12,7 +12,10 @@ daemon:
   # binary catches up.
   fermix_bin: "bin/fermix-shim"
   # Per-turn timeout handed to `fermix ask --timeout`. Env: FERMIX_EVAL_TIMEOUT_MS.
-  default_timeout_ms: 180000
+  # Matches the Fermix `ask`/`chat` default (FermixChannels.CLI.default_timeout_ms/0
+  # = 300_000ms), so a slow thinking model isn't cut off mid-turn and scored a
+  # failure for being slow rather than wrong.
+  default_timeout_ms: 300000
 
 opik:
   # Local Opik REST base (no trailing slash). Env: OPIK_BASE_URL.
@@ -44,7 +47,10 @@ budgets:
   # Default per-case ceilings; a case may override either in its `expect:` block.
   # A turn exceeding these is a structural gate failure (not a crash).
   max_cost_usd: 2.0
-  max_duration_ms: 240000
+  # Matches `default_timeout_ms` (the Fermix turn timeout): the duration gate must
+  # not be stricter than the timeout Fermix itself allows, or a slow-but-correct
+  # turn fails on speed rather than on the answer.
+  max_duration_ms: 300000
 
 report:
   # Run outputs go to <dir>/<UTC-timestamp>/. Relative to the skill dir. Gitignored.

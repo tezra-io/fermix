@@ -20,7 +20,7 @@ and the `Makefile` wraps the common commands.
   can't be used):
 
   ```sh
-  FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 FERMIX_BROWSER_HEADLESS=1 mix fermix.dev
+  FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 FERMIX_BROWSER_HEADLESS=1 PORT=4031 mix fermix.dev
   ```
 
   `FERMIX_OPIK_ENABLED=1` turns on trace export. `FERMIX_BROWSER_HEADLESS=1` runs the
