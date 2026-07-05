@@ -33,8 +33,23 @@ defmodule FermixChannels.Gateway.Delivery do
       {:media, %{kind: kind} = media_part} ->
         observe_reply(fn -> media_reply.(media_part) end, :media, kind, message)
 
+      {:react, emoji} when is_binary(emoji) ->
+        deliver_reaction(channel, message, emoji)
+
       other ->
         {:error, {:invalid_reply_part, other}}
+    end
+  end
+
+  # `message` is closed over by build_deliver, so the platform reaction target is
+  # available with no new plumbing. Defense-in-depth gate: a non-reaction channel
+  # is never advertised the `react` tool, but if a `{:react,_}` ever reaches one,
+  # fail loud instead of dispatching to an undefined callback.
+  defp deliver_reaction(channel, message, emoji) do
+    if function_exported?(channel, :react, 2) do
+      observe_reply(fn -> channel.react(message, emoji) end, :reaction, nil, message)
+    else
+      {:error, :reaction_unsupported}
     end
   end
 
@@ -57,7 +72,7 @@ defmodule FermixChannels.Gateway.Delivery do
 
   @spec observe_reply(
           (-> term()),
-          :override | :text | :media,
+          :override | :text | :media | :reaction,
           Reply.media_kind() | nil,
           Message.t()
         ) :: :ok | {:error, term()}

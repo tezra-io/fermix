@@ -7,6 +7,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenExpiry
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -33,6 +34,15 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.Wizard
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixWebWeb.SetupLive.Components
+
+  # Computer use is a core feature, not a plugin whose branding we receive, so its
+  # card name + logo are owned here. The SVG is inlined as a data URI at compile
+  # time (the same shape plugin logos render as); @external_resource recompiles
+  # this module whenever the asset changes.
+  @computer_use_logo_path Path.join(__DIR__, "setup_live/computer_use_logo.svg")
+  @external_resource @computer_use_logo_path
+  @computer_use_logo_uri "data:image/svg+xml;base64," <>
+                           Base.encode64(File.read!(@computer_use_logo_path))
 
   @tabs [
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
@@ -786,8 +796,69 @@ defmodule FermixWebWeb.SetupLive do
   defp running_doctor_result(channels) do
     %{
       provider: :running,
-      channels: Enum.map(channels, &running_channel_probe/1)
+      channels: Enum.map(channels, &running_channel_probe/1),
+      auth_tokens: auth_tokens_result(),
+      computer_use: computer_use_permissions_result()
     }
+  end
+
+  # Computer-use OS-permission state — same definition as the CLI `fermix doctor`
+  # `computer use` check (FermixCore.Setup.Doctor.computer_use_permissions/0). Only
+  # the enabled+installed case spawns the sidecar to probe; off/uninstalled resolve
+  # cheaply, so this stays on the synchronous up-front path like the token check.
+  defp computer_use_permissions_result do
+    case Doctor.computer_use_permissions() do
+      {:ok, %{state: :disabled}} ->
+        %{status: :ok, detail: "Off — computer use is disabled."}
+
+      {:ok, %{state: :not_installed}} ->
+        %{status: :warn, detail: "Enabled, but the helper isn't installed yet."}
+
+      {:ok, %{state: :probed} = probe} ->
+        computer_use_probe_detail(probe)
+
+      {:error, reason} ->
+        %{status: :error, detail: "Couldn't probe the helper: #{Redaction.format(reason)}"}
+    end
+  end
+
+  defp computer_use_probe_detail(%{screen_capture: true, input_control: true}) do
+    %{status: :ok, detail: "Screen capture and input control are granted."}
+  end
+
+  defp computer_use_probe_detail(%{screen_capture: true, input_control: false}) do
+    %{
+      status: :warn,
+      detail:
+        "Input control isn't granted — clicks and keystrokes are silently dropped. " <>
+          "On macOS, grant Accessibility in System Settings → Privacy & Security."
+    }
+  end
+
+  defp computer_use_probe_detail(%{screen_capture: false}) do
+    %{
+      status: :warn,
+      detail:
+        "Screen capture isn't granted. On macOS, grant Screen Recording in " <>
+          "System Settings → Privacy & Security."
+    }
+  end
+
+  # The token-freshness check is offline and instant, so it resolves up front
+  # alongside the running provider/channel probes rather than going through the
+  # async flow. Same definition of "stale" as the per-provider badge and the CLI
+  # `fermix doctor` (FermixCore.Setup.Doctor.stale_token_profiles/0).
+  defp auth_tokens_result do
+    case Doctor.stale_token_profiles() do
+      {:ok, []} ->
+        %{status: :ok, detail: "All stored tokens are fresh."}
+
+      {:ok, names} ->
+        %{status: :warn, detail: "Reconnect needed: #{Enum.join(names, ", ")}"}
+
+      {:error, reason} ->
+        %{status: :error, detail: "Couldn't read the auth store: #{Redaction.format(reason)}"}
+    end
   end
 
   defp running_channel_probe(%{config_key: key, name: name}) do
@@ -1202,11 +1273,11 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       name: plugin.name,
-      display_name: plugin.display_name,
+      display_name: card_display_name(plugin.name, plugin.display_name),
       description: plugin.description,
       category: plugin.category,
       provider: Map.get(plugin.auth, :provider),
-      logo: plugin_asset_data_uri(plugin, "logo") || plugin_asset_data_uri(plugin, "icon"),
+      logo: plugin_card_logo(plugin),
       auth_type: plugin.auth.type,
       secret_prompt: Map.get(plugin.auth, :prompt),
       account: PluginStatus.account_label(plugin),
@@ -1219,10 +1290,9 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   # Computer use is config-gated (`[fermix_core.computer_use]`), not a registry
-  # `enabled_plugins` entry, and its readiness is OS-permission based. Once its
-  # signed sidecar installs it becomes a registry plugin and lands here — so mirror
-  # the catalog card's flags instead of the generic registry status, which would
-  # read `:not_configured` + "Enable" for an already-on feature. `checkable?` is
+  # `enabled_plugins` entry, and it never registers as a plugin (no tools). Its card
+  # mirrors the catalog card's flags instead of the generic registry status, which
+  # would read `:not_configured` + "Enable" for an already-on feature. `checkable?` is
   # false for it too: the registry health check requires `Status.status == :ready`,
   # which a config-gated sidecar never reaches, so the Check button would mislead.
   defp plugin_card_state(plugin, snapshot) do
@@ -1256,12 +1326,12 @@ defmodule FermixWebWeb.SetupLive do
   defp catalog_card(entry, snapshot) do
     %{
       name: entry.name,
-      display_name: entry.display_name,
+      display_name: card_display_name(entry.name, entry.display_name),
       description: entry.description,
       category: entry.category,
       auth_type: entry.auth_type,
       provider: entry.provider,
-      logo: index_logo_data_uri(entry.logo),
+      logo: catalog_card_logo(entry),
       latest: entry.latest,
       mcp?: "mcp" in entry.rails,
       compat: entry.compat,
@@ -1290,6 +1360,29 @@ defmodule FermixWebWeb.SetupLive do
     plugin.interface
     |> Map.get(key)
     |> asset_data_uri(Path.dirname(plugin.path))
+  end
+
+  # Computer use carries no plugin-supplied branding (toolless sidecar), so the
+  # card name + logo are core-owned: "Computer Use" (not "…Sidecar") and the
+  # bundled blue-monitor mark, on both the installed and not-yet-installed cards.
+  defp card_display_name(name, fallback) do
+    if computer_use_plugin?(name), do: "Computer Use", else: fallback
+  end
+
+  defp plugin_card_logo(plugin) do
+    if computer_use_plugin?(plugin.name) do
+      @computer_use_logo_uri
+    else
+      plugin_asset_data_uri(plugin, "logo") || plugin_asset_data_uri(plugin, "icon")
+    end
+  end
+
+  defp catalog_card_logo(entry) do
+    if computer_use_plugin?(entry.name) do
+      @computer_use_logo_uri
+    else
+      index_logo_data_uri(entry.logo)
+    end
   end
 
   defp asset_data_uri(nil, _plugin_dir), do: nil
@@ -1396,9 +1489,9 @@ defmodule FermixWebWeb.SetupLive do
   # Computer use is NOT a registry plugin (it registers no tools, has no plugin.json),
   # so it never flows through find→enable. Enabling it = ensure the native sidecar
   # binary is present, then flip the feature flag. A dev_local build (or an already
-  # catalog-installed binary) means `installed?` is already true → skip the download
-  # entirely and just flip the flag. Only a fresh machine pulls the signed binary
-  # from the catalog; `continue_after_install/2` flips the flag once that lands.
+  # downloaded binary) means `installed?` is already true → skip the fetch and just
+  # flip the flag. Otherwise a fresh machine downloads the sidecar via the compux
+  # library (`install_work`); `continue_after_install/2` flips the flag once it lands.
   defp enable_computer_use(socket) do
     if SidecarInstaller.installed?() do
       set_computer_use_feature(socket, true)
@@ -1544,18 +1637,28 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp start_plugin_install(socket, name) do
-    opts = plugins_dist_opts()
-
-    task =
-      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
-        DistInstaller.run_install(name, opts)
-      end)
-
+    {work, message} = install_work(name)
+    task = Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, work)
     tasks = Map.put(socket.assigns.plugin_install_tasks, task.ref, %{name: name})
 
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> flash_info("Installing #{name} from the plugin catalog…")
+    |> flash_info(message)
+  end
+
+  # Computer-use installs its native helper via the compux library — a direct,
+  # sha256-verified download of the compux release binary, NOT the signed plugin
+  # catalog. Every other plugin uses the catalog pipeline. Both return the same
+  # {:ok, _} | {:error, reason} shape, so the finish/continue machinery is shared.
+  defp install_work(name) do
+    if computer_use_plugin?(name) do
+      {fn -> SidecarInstaller.install() end, "Downloading the Computer Use helper…"}
+    else
+      opts = plugins_dist_opts()
+
+      {fn -> DistInstaller.run_install(name, opts) end,
+       "Installing #{name} from the plugin catalog…"}
+    end
   end
 
   defp finish_plugin_install(socket, task, tasks, {:ok, _status}) do
@@ -1569,9 +1672,14 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp fail_plugin_install(socket, task, tasks, reason) do
+    # Use the card's display name ("Computer Use"), not the raw registry name
+    # ("computer_use_sidecar"), so the one place a user sees an error matches the
+    # card they clicked.
     socket
     |> assign(:plugin_install_tasks, tasks)
-    |> flash_error("#{task.name} install failed: #{install_error(reason)}")
+    |> flash_error(
+      "#{card_display_name(task.name, task.name)} install failed: #{install_error(reason)}"
+    )
   end
 
   # Install done — continue with the same enable/connect sequence an installed
@@ -1625,6 +1733,28 @@ defmodule FermixWebWeb.SetupLive do
     do: "not in the plugin catalog — run `fermix upgrade` to get the latest catalog."
 
   defp install_error({:no_build_for_target, target}), do: "no build for this machine (#{target})."
+
+  # Computer-use (compux library) download errors.
+  defp install_error({:no_checksum_for_target, _target}),
+    do: "the Computer Use helper isn't published for this Fermix version yet."
+
+  defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch — refusing."
+  defp install_error({:http_status, status}), do: "download failed (HTTP #{status})."
+  defp install_error({:http_error, _reason}), do: "download failed (network or timeout)."
+  defp install_error({:untar, _reason}), do: "the downloaded Computer Use archive was invalid."
+
+  defp install_error({:binary_not_in_archive, _name}),
+    do: "the downloaded Computer Use archive was invalid."
+
+  defp install_error({:unsupported_target, os, arch}),
+    do: "no Computer Use build for this machine (#{os}-#{arch})."
+
+  defp install_error({:unsupported_os, _os}),
+    do: "Computer Use isn't supported on this operating system."
+
+  defp install_error({:unsupported_arch, _arch}),
+    do: "Computer Use isn't supported on this CPU architecture."
+
   defp install_error(reason), do: Redaction.format(reason)
 
   defp plugins_dist_opts do
@@ -1794,8 +1924,16 @@ defmodule FermixWebWeb.SetupLive do
 
   defp codex_auth_summary do
     case Store.read(:openai_codex) do
-      {:ok, entry} -> %{connected?: true, account: codex_account_label(entry), error: nil}
-      {:error, reason} -> %{connected?: false, account: nil, error: codex_auth_error(reason)}
+      {:ok, entry} ->
+        %{
+          connected?: true,
+          stale?: TokenExpiry.stale?(entry.expires_at),
+          account: codex_account_label(entry),
+          error: nil
+        }
+
+      {:error, reason} ->
+        %{connected?: false, account: nil, error: codex_auth_error(reason)}
     end
   rescue
     error in ArgumentError ->
@@ -1953,8 +2091,11 @@ defmodule FermixWebWeb.SetupLive do
   # connected, no error".
   defp oauth_profile_summary(profile) do
     case Store.read(profile) do
-      {:ok, _entry} -> %{connected?: true, error: nil}
-      {:error, reason} -> %{connected?: false, error: codex_auth_error(reason)}
+      {:ok, entry} ->
+        %{connected?: true, stale?: TokenExpiry.stale?(entry.expires_at), error: nil}
+
+      {:error, reason} ->
+        %{connected?: false, error: codex_auth_error(reason)}
     end
   rescue
     error in ArgumentError ->

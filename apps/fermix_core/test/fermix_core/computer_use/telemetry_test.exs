@@ -41,7 +41,7 @@ defmodule FermixCore.ComputerUse.TelemetryTest do
   end
 
   test "session_start omits parent_session when absent (a root session)" do
-    Telemetry.session_start(%{session_id: "cua_root", agent: "main", mode: :browser})
+    Telemetry.session_start(%{session_id: "cua_root", agent: "main", mode: :host})
 
     assert_receive {:cu, [:fermix, :computer_use, :session_start], %{}, meta}
     refute Map.has_key?(meta, :parent_session)

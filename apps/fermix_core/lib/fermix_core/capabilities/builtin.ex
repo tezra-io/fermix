@@ -46,6 +46,7 @@ defmodule FermixCore.Capabilities.Builtin do
     "memory_sources_list" => %{policy_class: :read_only, hidden_from_agent?: false},
     "browser" => %{policy_class: :network, hidden_from_agent?: false},
     "send_attachment" => %{policy_class: :read_only, hidden_from_agent?: false},
+    "react" => %{policy_class: :read_only, hidden_from_agent?: false},
     "generate_image" => %{policy_class: :external_api, hidden_from_agent?: false},
     # Computer use. `:gui_control` buys ZERO sandbox enforcement (COMPUTER_USE.md
     # §7.1) — it labels the blast class and routes to the §7 action-boundary layer.

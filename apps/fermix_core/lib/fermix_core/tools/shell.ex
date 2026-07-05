@@ -23,7 +23,8 @@ defmodule FermixCore.Tools.Shell do
   @spec description() :: String.t()
   def description do
     "Execute a shell command and return its output. " <>
-      "Use for file operations, git commands, and system queries. " <>
+      "Use for commands no built-in owns (builds, package managers, one-off system queries); " <>
+      "prefer file_read/file_write/file_edit for files and git_read/git_write for git. " <>
       "Do NOT scrape JavaScript-rendered web pages — curl/urllib/requests return empty or partial markup; use the browser tool."
   end
 

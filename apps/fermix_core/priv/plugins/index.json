@@ -43,7 +43,7 @@
       "name": "computer_use_sidecar",
       "display_name": "Computer Use Sidecar",
       "category": "system",
-      "description": "Signed native host-control sidecar (screenshot + input) for Fermix computer-use. Supported platforms: Apple Silicon (M-series) macOS and Linux x86_64 \u2014 Intel Macs are not supported. Off by default; requires explicit enable and OS permission grants.",
+      "description": "Native host-control helper (screenshot + input) for Fermix computer use, delivered as a sha256-verified download. Supported platforms: Apple Silicon (M-series) macOS and Linux x86_64 \u2014 Intel Macs are not supported. Off by default; requires explicit enable and OS permission grants.",
       "short_description": null,
       "developer_name": null,
       "brand_color": null,

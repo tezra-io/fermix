@@ -31,6 +31,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installApplicationIcon()
         NSApp.setActivationPolicy(.regular)
+        observeWindowOcclusion()
+    }
+
+    // Pause the pet's animation timeline whenever the window isn't actually
+    // on-screen (other Space, minimized, fully covered). object: nil is safe
+    // here — FermixPet has a single window.
+    private func observeWindowOcclusion() {
+        _ = NotificationCenter.default.addObserver(
+            forName: NSWindow.didChangeOcclusionStateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let window = note.object as? NSWindow else { return }
+            MainActor.assumeIsolated {
+                self?.companionState?.setWindowVisible(window.occlusionState.contains(.visible))
+            }
+        }
     }
 
     private func installApplicationIcon() {

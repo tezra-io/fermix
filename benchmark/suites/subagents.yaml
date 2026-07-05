@@ -1,0 +1,75 @@
+suite: subagents
+title: "Subagents — fan-out mechanism + model routing"
+description: >
+  Tests the delegation MECHANISM, deterministically: when the model is asked to
+  run parallel workers it fans out (the `subagents` tool span + nested
+  `subagent:*` worker spans) and the reply synthesizes every branch.
+
+  It deliberately does NOT test the model's *autonomous* "decide to fan out"
+  behavior. For small/medium tasks the model correctly answers in one pass
+  (cheaper and just as good), so a fan-out assertion on a natural query would be
+  testing a non-deterministic, task-size-dependent judgment call — and broad
+  outcome quality is already covered by `complex` and `knowledge_qa`. So the
+  gated subagents coverage is the explicit, deterministic fan-out below.
+
+  Model routing gates (`main_model_matches`, `subagent_model_matches`) are
+  deliberately omitted here — they are daemon-config-specific and would fail any
+  time the daemon runs a different provider. Add them as case-level overrides in
+  a daemon-specific test run when you want to pin and verify exact model slugs
+  (e.g. `subagent_model_matches: "gpt-4o-mini"` when the daemon is on OpenAI).
+defaults:
+  # No `no_tool_errors` default: a worker's occasional failed web_fetch among many
+  # tool calls is normal and must not fail the case. timeout_ms is generous; the
+  # explicit small-task fan-outs here are actually cheap.
+  timeout_ms: 900000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: model_routing
+    title: "Explicit fan-out spawns workers and synthesizes across all branches"
+    # critical: delegation is a headline differentiator — a broken fan-out must FAIL
+    # the regression run (the exit code trips only on critical scenarios).
+    severity: critical
+    tags: [subagents, delegation, routing]
+    cases:
+      - id: default_subagent_model
+        query: >
+          Use parallel subagents to research three things at once — the history of
+          espresso, how ocean tides work, and the basics of bookbinding — then give
+          me one short combined summary.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          # lookaheads: the summary must cover EVERY branch — a fan-out that spawns
+          # workers but drops 2 of 3 results (a real synthesis regression) must fail.
+          reply_matches: "(?is)(?=.*espresso)(?=.*tide)(?=.*bookbind)"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Fans out into at least two parallel workers and returns a combined summary
+          covering all three topics (espresso, tides, bookbinding).
+      - id: per_call_model_override
+        # Tests the on-the-fly worker model override path: the user asks workers
+        # to use a smaller/faster model than the main agent. We verify fan-out
+        # happened and the reply covers all topics; the actual model slug used is
+        # daemon-config-dependent so we don't assert it here — add
+        # `subagent_model_matches` as a case-level override when running against
+        # a pinned daemon config.
+        query: >
+          Spin up parallel subagents to look into three separate topics — the rules
+          of cricket, how vaccines work, and the basics of jazz harmony. For each
+          worker, use a smaller or faster model than the main agent if your config
+          supports it. Bring the results back as one combined summary.
+        expect:
+          tools_any: [subagents]
+          min_subagent_spawns: 2
+          reply_matches: "(?is)(?=.*cricket)(?=.*vaccine)(?=.*jazz)"
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Honors the request to use lighter worker models (passes a model param to
+          the subagents tool or uses the configured sub-agent model), fans out into
+          at least two parallel workers, and returns a summary covering all three
+          topics (cricket, vaccines, jazz).

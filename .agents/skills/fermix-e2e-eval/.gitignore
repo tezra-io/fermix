@@ -1,7 +1,0 @@
-# Run artifacts are never committed. uv resolves the inline PyYAML dep into its
-# own cache (no project venv); .venv/ kept ignored in case someone runs `uv venv`.
-reports/
-.venv/
-__pycache__/
-*.pyc
-bin/

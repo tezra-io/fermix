@@ -1,0 +1,13 @@
+From: orders@northwind.example
+Subject: Your Northwind order #NW-48213 is confirmed
+Hi Sam, thanks for your order! Here's your summary:
+2x Stainless Water Bottle (32oz) .... $25.00 each
+1x Insulated Lunch Bag ............... $18.50
+3x Reusable Straw (set) ............. $4.00 each
+Subtotal: $80.50
+Shipping: $6.99
+Tax: $7.25
+-------------------------------
+Total charged: $94.74
+Estimated delivery: Tuesday, March 3, 2026
+Ships to: 12 Maple St, Austin, TX

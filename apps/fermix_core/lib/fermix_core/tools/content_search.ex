@@ -105,7 +105,7 @@ defmodule FermixCore.Tools.ContentSearch do
   defp search(root, matcher, opts, context) do
     root
     |> candidate_files()
-    |> Enum.filter(&sandbox_allows?(&1, context))
+    |> then(&Sandbox.read_paths(&1, :content_search, context))
     |> collect_matches(matcher, opts, [])
     |> case do
       {:ok, matches, truncated?} ->
@@ -113,13 +113,6 @@ defmodule FermixCore.Tools.ContentSearch do
 
       {:error, reason} ->
         Support.error(reason)
-    end
-  end
-
-  defp sandbox_allows?(path, context) do
-    case Sandbox.read_path(path, :content_search, context) do
-      {:ok, _resolved} -> true
-      {:error, _reason} -> false
     end
   end
 

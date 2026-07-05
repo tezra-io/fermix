@@ -49,6 +49,41 @@ defmodule FermixCore.Sandbox.PathPolicy do
   def resolve_working_dir(_dir, _config, _context, _protected_roots),
     do: {:error, :invalid_working_dir}
 
+  @doc """
+  Working-dir resolution with both root sets precomputed by the caller.
+
+  Mirrors `resolve_working_dir/4` but also threads the `effective_roots` so a
+  single call never re-runs `Mode.effective_roots/1`. Byte-identical to `/3`
+  when given that arity's own `protected_roots`/`effective_roots`.
+  """
+  @spec resolve_working_dir(String.t() | nil, Config.t(), map(), [String.t()], [String.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def resolve_working_dir(nil, config, context, protected_roots, effective_roots)
+      when is_map(context) and is_list(protected_roots) and is_list(effective_roots) do
+    base = Map.get(context, :cwd)
+
+    if is_binary(base) and allowed_path?(base, config, protected_roots, effective_roots) == :ok do
+      {:ok, Path.expand(base)}
+    else
+      {:ok, Mode.default_working_dir(config, effective_roots)}
+    end
+  end
+
+  def resolve_working_dir(dir, config, _context, protected_roots, effective_roots)
+      when is_binary(dir) and is_list(protected_roots) and is_list(effective_roots) do
+    with {:ok, resolved} <- resolve(dir, Mode.default_working_dir(config, effective_roots)),
+         :ok <- allowed_path?(resolved, config, protected_roots, effective_roots),
+         true <- File.dir?(resolved) do
+      {:ok, resolved}
+    else
+      false -> {:error, {:missing_working_dir, dir}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def resolve_working_dir(_dir, _config, _context, _protected_roots, _effective_roots),
+    do: {:error, :invalid_working_dir}
+
   @spec resolve_write_path(String.t(), Config.t(), map()) :: {:ok, String.t()} | {:error, term()}
   def resolve_write_path(path, config, context) when is_binary(path),
     do: resolve_constrained_path(path, config, context)
@@ -61,11 +96,70 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
   def resolve_read_path(_path, _config, _context), do: {:error, :invalid_path}
 
+  @doc """
+  Read/write path resolution with both root sets precomputed by the caller.
+
+  Same resolution and containment decision as `resolve_read_path/3` /
+  `resolve_write_path/3`, but the invariant root sets are computed once by the
+  caller instead of 2–3× per call. The requested target is still symlink/case
+  resolved per call.
+  """
+  @spec resolve_read_path(String.t(), Config.t(), map(), [String.t()], [String.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def resolve_read_path(path, config, context, protected_roots, effective_roots)
+      when is_binary(path),
+      do: resolve_constrained_path(path, config, context, protected_roots, effective_roots)
+
+  def resolve_read_path(_path, _config, _context, _protected_roots, _effective_roots),
+    do: {:error, :invalid_path}
+
+  @spec resolve_write_path(String.t(), Config.t(), map(), [String.t()], [String.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def resolve_write_path(path, config, context, protected_roots, effective_roots)
+      when is_binary(path),
+      do: resolve_constrained_path(path, config, context, protected_roots, effective_roots)
+
+  def resolve_write_path(_path, _config, _context, _protected_roots, _effective_roots),
+    do: {:error, :invalid_path}
+
+  @doc """
+  Resolve `path` under an already-resolved `base` and apply the containment
+  gate with precomputed root sets — the per-candidate step for batch callers
+  (e.g. `Sandbox.read_paths/3`) that resolved config/roots/base once.
+
+  Fail-closed like `resolve_constrained_path/3`: a symlink/canonicalization
+  error propagates and the caller must exclude the path (never fall back to the
+  unresolved literal, which would be fail-open).
+  """
+  @spec check_under_base(String.t(), String.t(), Config.t(), [String.t()], [String.t()]) ::
+          {:ok, String.t()} | {:error, term()}
+  def check_under_base(path, base, config, protected_roots, effective_roots)
+      when is_binary(path) and is_binary(base) and is_list(protected_roots) and
+             is_list(effective_roots) do
+    with {:ok, resolved} <- resolve(path, base),
+         :ok <- allowed_path?(resolved, config, protected_roots, effective_roots) do
+      {:ok, resolved}
+    end
+  end
+
   defp resolve_constrained_path(path, config, context) do
     with {:ok, base} <- resolve_working_dir(Map.get(context, :cwd), config, context),
          {:ok, resolved} <- resolve(path, base),
          :ok <- allowed_path?(resolved, config) do
       {:ok, resolved}
+    end
+  end
+
+  defp resolve_constrained_path(path, config, context, protected_roots, effective_roots) do
+    with {:ok, base} <-
+           resolve_working_dir(
+             Map.get(context, :cwd),
+             config,
+             context,
+             protected_roots,
+             effective_roots
+           ) do
+      check_under_base(path, base, config, protected_roots, effective_roots)
     end
   end
 
@@ -90,6 +184,31 @@ defmodule FermixCore.Sandbox.PathPolicy do
   end
 
   def allowed_path?(_path, _config, _protected_roots), do: {:error, :invalid_path}
+
+  @doc """
+  Containment gate with both root sets precomputed by the caller.
+
+  Same decision and identical `cond` order (protected → blocked → effective →
+  outside) as `allowed_path?/3`, but the effective roots are supplied instead of
+  recomputed via `Mode.effective_roots/1`. The deny *reason* is order-dependent,
+  so this order must stay in lockstep with `/3`.
+  """
+  @spec allowed_path?(String.t(), Config.t(), [String.t()], [String.t()]) ::
+          :ok | {:error, term()}
+  def allowed_path?(path, config, protected_roots, effective_roots)
+      when is_binary(path) and is_list(protected_roots) and is_list(effective_roots) do
+    expanded = canonical_path(path)
+
+    cond do
+      inside_any?(expanded, protected_roots) -> {:error, {:protected_path, expanded}}
+      blocked_path?(expanded, config.blocked_roots) -> {:error, {:blocked_root, expanded}}
+      inside_any?(expanded, effective_roots) -> :ok
+      true -> {:error, {:outside_root, expanded}}
+    end
+  end
+
+  def allowed_path?(_path, _config, _protected_roots, _effective_roots),
+    do: {:error, :invalid_path}
 
   @spec protected_paths(Config.t()) :: [String.t()]
   def protected_paths(config) do

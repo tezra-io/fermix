@@ -370,6 +370,70 @@ defmodule Fermix.CLI.Doctor.Checks do
     ok("image generation", "backend #{backend} configured")
   end
 
+  @doc """
+  Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
+  load-bearing case is macOS: a GRANTED screen capture but DENIED input control is
+  the silent-dropped-click symptom — `CGEventPost` is discarded without Accessibility,
+  so a click returns ok yet nothing moves. The check names the exact fix. Probes the
+  sidecar only when the feature is enabled and installed (otherwise it stays cheap).
+  """
+  @spec computer_use_permissions({:ok, map()} | {:error, term()}) :: result()
+  def computer_use_permissions(result \\ ProviderProbe.computer_use_permissions()) do
+    case result do
+      {:ok, %{state: :disabled}} ->
+        ok("computer use", "disabled")
+
+      {:ok, %{state: :not_installed}} ->
+        warn("computer use", "enabled but the helper isn't installed — install it from setup")
+
+      {:ok, %{state: :probed} = probe} ->
+        format_computer_use_probe(probe)
+
+      {:error, reason} ->
+        fail("computer use", "could not probe the helper: #{inspect(reason)}")
+    end
+  end
+
+  defp format_computer_use_probe(%{screen_capture: true, input_control: true} = probe) do
+    ok("computer use", "screen capture and input control granted (#{probe.display_server})")
+  end
+
+  defp format_computer_use_probe(%{screen_capture: true, input_control: false} = probe) do
+    warn("computer use", computer_use_input_hint(probe))
+  end
+
+  defp format_computer_use_probe(%{screen_capture: false} = probe) do
+    warn("computer use", computer_use_capture_hint(probe))
+  end
+
+  # Platform-specific remediation: name the exact pane (macOS) or the X11 requirement
+  # (Linux/Wayland) so the fix is one step, not a hunt.
+  defp computer_use_input_hint(%{platform: "macos"}) do
+    "screen capture OK but input control is NOT granted — clicks and keystrokes are " <>
+      "silently dropped. Grant Accessibility: System Settings → Privacy & Security → Accessibility."
+  end
+
+  defp computer_use_input_hint(%{display_server: "wayland"}) do
+    "input control unavailable on Wayland — global input injection is blocked; use an X11 session."
+  end
+
+  defp computer_use_input_hint(probe) do
+    "input control is not available (#{probe.platform}/#{probe.display_server})."
+  end
+
+  defp computer_use_capture_hint(%{platform: "macos"}) do
+    "screen capture is NOT granted — captures return wallpaper only. Grant Screen " <>
+      "Recording: System Settings → Privacy & Security → Screen Recording."
+  end
+
+  defp computer_use_capture_hint(%{display_server: "wayland"}) do
+    "screen capture unavailable on Wayland — use an X11 session (Wayland is unsupported)."
+  end
+
+  defp computer_use_capture_hint(probe) do
+    "screen capture is not available (#{probe.platform}/#{probe.display_server})."
+  end
+
   defp format_channel_health([]), do: ok("channel health", "no enabled channels configured")
 
   defp format_channel_health(probes) do
@@ -468,6 +532,28 @@ defmodule Fermix.CLI.Doctor.Checks do
     case suggestions do
       [] -> ok("sandbox traces", "no recent sandbox roadblocks")
       targets -> warn("sandbox traces", format_grant_suggestions(targets))
+    end
+  end
+
+  @doc """
+  Offline token-expiry sweep: flags any OAuth profile in the auth store whose
+  access token is stale (well past expiry — `TokenExpiry.stale?/1`), i.e. dormant
+  and likely needing re-auth. The cheap, no-network counterpart to `auth_probe`
+  (which lives behind `--full`): a token that lapsed from disuse fails silently
+  until its provider is next selected. Used providers refresh on access, so this
+  only fires for genuinely idle ones.
+  """
+  @spec auth_token_expiry() :: result()
+  def auth_token_expiry do
+    case ProviderProbe.stale_token_profiles() do
+      {:ok, []} ->
+        ok("auth tokens", "no stale OAuth tokens")
+
+      {:ok, names} ->
+        warn("auth tokens", "stale, re-auth may be needed: #{Enum.join(names, ", ")}")
+
+      {:error, reason} ->
+        fail("auth tokens", "could not read auth store: #{inspect(reason)}")
     end
   end
 

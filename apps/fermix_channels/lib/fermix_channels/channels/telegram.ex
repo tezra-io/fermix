@@ -187,6 +187,58 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # -- Reactions (docs/design/EMOJI_REACTION_ACKS.md §9) --
+
+  # Telegram's setMessageReaction accepts only a fixed set of standard emoji.
+  # This mirrors the common, unambiguous entries of Telegram's documented
+  # reaction set; VS16/ZWJ-ambiguous glyphs (❤, ⚡, 🕊, ✍, ☃) are omitted so
+  # every entry round-trips as an exact string, pending a live smoke test. The
+  # gateway turns this into the `react` tool's emoji enum, so the model can only
+  # propose a supported glyph; `react/2` re-validates at the boundary and fails
+  # loud on anything off-set — input validation, not a rule-#12 fallback.
+  @reaction_emoji ~w(👍 👎 🔥 🥰 👏 😁 🤔 🤯 😱 🎉 🤩 🙏 👌 💯 🤣 😢 😍 🙈 🤝 👀 🫡 🤗 😎 😭)
+
+  @impl true
+  @spec reaction_capability() :: {:restricted, [String.t()]}
+  def reaction_capability, do: {:restricted, @reaction_emoji}
+
+  @impl true
+  @spec react(Message.t(), String.t()) :: :ok | {:error, term()}
+  def react(message, emoji, opts \\ [])
+
+  def react(%Message{id: message_id, reply_target: chat_id}, emoji, opts) when is_binary(emoji) do
+    with :ok <- validate_reaction_emoji(emoji),
+         {:ok, message_id_int} <- parse_message_id(message_id),
+         {:ok, token} <- get_bot_token() do
+      url = "#{@bot_api_base}/bot#{token}/setMessageReaction"
+
+      body = %{
+        chat_id: chat_id,
+        message_id: message_id_int,
+        reaction: [%{type: "emoji", emoji: emoji}]
+      }
+
+      case Req.new(url: url, method: :post, json: body)
+           |> Req.merge(req_options(opts))
+           |> HttpClient.request("Telegram setMessageReaction") do
+        {:ok, %{status: 200}} -> :ok
+        {:ok, api_response} -> telegram_api_error(api_response)
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  defp validate_reaction_emoji(emoji) do
+    if emoji in @reaction_emoji, do: :ok, else: {:error, {:unsupported_emoji, emoji}}
+  end
+
+  defp parse_message_id(message_id) do
+    case Integer.parse(message_id) do
+      {int, ""} -> {:ok, int}
+      _ -> {:error, {:invalid_message_id, message_id}}
+    end
+  end
+
   # -- Draft streaming (docs/design/CHANNEL_STREAMING.md §6) --
 
   @impl true

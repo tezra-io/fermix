@@ -297,4 +297,64 @@ defmodule FermixCore.Auth.StoreTest do
       assert {:error, {:provider_missing, :openai}} = Store.read(:openai, path)
     end
   end
+
+  describe "list_profiles/1" do
+    test "returns an empty list when the auth file is missing" do
+      assert {:ok, []} = Store.list_profiles(tmp_path())
+    end
+
+    test "returns every profile with a normalized entry" do
+      path = tmp_path()
+
+      File.write!(
+        path,
+        Jason.encode!(%{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "AT1", "refresh_token" => "RT1"},
+              "expires_at" => future_iso8601(3600)
+            },
+            "gmail:primary" => %{
+              "auth_mode" => "oauth2",
+              "tokens" => %{"access_token" => "AT2", "refresh_token" => "RT2"},
+              "expires_at" => future_iso8601(-7200)
+            }
+          }
+        })
+      )
+
+      assert {:ok, profiles} = Store.list_profiles(path)
+      by_name = Map.new(profiles)
+
+      assert Map.has_key?(by_name, "openai_codex")
+      assert Map.has_key?(by_name, "gmail:primary")
+      assert %DateTime{} = by_name["openai_codex"].expires_at
+    end
+
+    test "skips entries without a usable access token" do
+      path = tmp_path()
+
+      File.write!(
+        path,
+        Jason.encode!(%{
+          "version" => 1,
+          "providers" => %{
+            "openai" => %{
+              "tokens" => %{"access_token" => "AT"},
+              "expires_at" => future_iso8601(3600)
+            },
+            "broken" => %{"tokens" => %{"access_token" => ""}}
+          }
+        })
+      )
+
+      assert {:ok, profiles} = Store.list_profiles(path)
+      names = Enum.map(profiles, &elem(&1, 0))
+
+      assert "openai" in names
+      refute "broken" in names
+    end
+  end
 end

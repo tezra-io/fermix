@@ -107,6 +107,35 @@ defmodule FermixChannels.Channels.Signal do
     fn media_part -> send_media(reply_target, media_part, reply_opts) end
   end
 
+  # -- Reactions (docs/design/EMOJI_REACTION_ACKS.md §9) --
+
+  @impl true
+  @spec reaction_capability() :: :any_emoji
+  def reaction_capability, do: :any_emoji
+
+  @impl true
+  @spec react(FermixChannels.Gateway.Channel.message(), String.t()) :: :ok | {:error, term()}
+  def react(message, emoji, opts \\ [])
+
+  def react(%Message{id: timestamp, reply_target: recipient, metadata: metadata}, emoji, opts)
+      when is_binary(emoji) do
+    # A Signal reaction targets a message by (author, timestamp). For a 1:1 chat
+    # both the author and the recipient are the inbound sender; `Message.id` is
+    # the message timestamp. `metadata.sender_id` carries the author (§9).
+    author = Map.get(metadata, :sender_id) || recipient
+
+    react_opts =
+      opts
+      |> put_if_present(:client, Map.get(metadata, :signal_client))
+      |> put_if_present(:client_opts, Map.get(metadata, :signal_client_opts))
+
+    with {:ok, account} <- account(),
+         {:ok, :ok, duration_us} <-
+           timed_signal_reaction(account, recipient, author, timestamp, emoji, react_opts) do
+      emit_outbound_telemetry(duration_us)
+    end
+  end
+
   @impl true
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
 
@@ -231,6 +260,25 @@ defmodule FermixChannels.Channels.Signal do
           recipient,
           media_caption(media_part),
           media_part.path,
+          client_opts(opts)
+        )
+      end)
+
+    case result do
+      :ok -> {:ok, :ok, duration_us}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp timed_signal_reaction(account, recipient, author, timestamp, emoji, opts) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        send_client(opts).send_reaction(
+          account,
+          recipient,
+          author,
+          timestamp,
+          emoji,
           client_opts(opts)
         )
       end)
@@ -452,6 +500,41 @@ defmodule FermixChannels.Channels.Signal.CLI do
 
       {:error, {:timeout, ms}} ->
         {:error, "signal-cli attachment send timed out after #{ms}ms"}
+
+      {:error, {:executable_not_found, path}} ->
+        {:error, "signal-cli executable not found at #{path}"}
+    end
+  end
+
+  # Long flags only: within the `sendReaction` subcommand, `-a` would be read as
+  # --target-author, not the account (which is the global `-a` before the
+  # subcommand), so target-author/timestamp use their unambiguous long forms.
+  def send_reaction(account, recipient, author, timestamp, emoji, opts) do
+    cli_path = resolve_cli(opts)
+    timeout_ms = Keyword.get(opts, :timeout_ms, @send_timeout_ms)
+
+    args = [
+      "-a",
+      account,
+      "sendReaction",
+      "-e",
+      emoji,
+      "--target-author",
+      author,
+      "--target-timestamp",
+      to_string(timestamp),
+      recipient
+    ]
+
+    case CommandRunner.run(cli_path, args, timeout_ms: timeout_ms) do
+      {:ok, %{exit: 0}} ->
+        :ok
+
+      {:ok, %{exit: status, stdout: output}} ->
+        {:error, "signal-cli sendReaction failed: #{status}: #{String.trim(output)}"}
+
+      {:error, {:timeout, ms}} ->
+        {:error, "signal-cli sendReaction timed out after #{ms}ms"}
 
       {:error, {:executable_not_found, path}} ->
         {:error, "signal-cli executable not found at #{path}"}

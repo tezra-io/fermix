@@ -1,0 +1,44 @@
+suite: cap_web_app
+title: "Capability — multi-step browser navigation of a real website"
+description: >
+  A genuinely agentic BROWSER task: drive a REAL public site (Wikipedia) via search ->
+  open the article -> read a specific value. Multi-step tool use (navigate -> read) that a
+  single-shot answer can't fake; `requires_tools:[browser]` gates provenance so answering
+  from memory can't pass.
+
+  Why a real site and NOT a local fixture: a seeded local page still has to be reached, and
+  models inconsistently spin up a loopback HTTP server (http://127.0.0.1:PORT) that 404s or
+  is blocked instead of using file:// — infra noise, not capability (observed live). A real
+  site is what the browser is actually for. Trade-off: the gold can ROT if the site changes,
+  so re-verify the facts periodically.
+
+  PRECONDITION: the eval daemon has the `browser` tool enabled with Chrome available, the
+  display stays awake for the run, and the network can reach the target site.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: real_site_navigation
+    title: "Multi-step navigation of a real public website (realism; rot-flagged)"
+    severity: normal
+    tags: [capability, browser, web, real-site]
+    cases:
+      - id: wiki_elixir_year
+        query: >
+          Use the browser to go to en.wikipedia.org, search for the Elixir programming
+          language, open its article, and read the year it first appeared from the infobox.
+          Reply with ONLY that year (a 4-digit number, nothing else).
+        # Elixir first appeared 2012 (confirmed live 2026-07-03). requires_tools:[browser]
+        # so answering from memory is provenance-zeroed. Re-verify if the infobox changes.
+        score: { match: numeric, expected: 2012, tolerance: 0 }
+        requires_tools: [browser]
+
+      - id: wiki_elixir_creator
+        query: >
+          Using the browser, open the Wikipedia article for the Elixir programming language
+          (en.wikipedia.org) and find who created / designed it. Reply with ONLY the
+          creator's full name.
+        # José Valim. Matches on surname to tolerate accents/formatting.
+        score: { match: contains, expected: "Valim" }
+        requires_tools: [browser]

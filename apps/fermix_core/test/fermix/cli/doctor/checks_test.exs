@@ -2,6 +2,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.Doctor.Checks
+  alias FermixCore.Auth.Store
 
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
@@ -17,6 +18,67 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.name == "workspace"
       assert result.status in [:ok, :warn]
       assert is_binary(result.detail)
+    end
+  end
+
+  describe "computer_use_permissions/1" do
+    test "disabled is a quiet ok" do
+      result = Checks.computer_use_permissions({:ok, %{state: :disabled}})
+      assert result.name == "computer use"
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+
+    test "enabled but no sidecar warns to install" do
+      result = Checks.computer_use_permissions({:ok, %{state: :not_installed}})
+      assert result.status == :warn
+      assert result.detail =~ "install"
+    end
+
+    test "both grants present is ok" do
+      probe = probed(screen_capture: true, input_control: true)
+      result = Checks.computer_use_permissions({:ok, probe})
+      assert result.status == :ok
+      assert result.detail =~ "granted"
+    end
+
+    test "macOS screen-ok input-denied names the Accessibility pane (the silent-drop case)" do
+      probe = probed(screen_capture: true, input_control: false)
+      result = Checks.computer_use_permissions({:ok, probe})
+      assert result.status == :warn
+      assert result.detail =~ "Accessibility"
+      assert result.detail =~ "silently dropped"
+    end
+
+    test "macOS capture denied names Screen Recording" do
+      probe = probed(screen_capture: false, input_control: false)
+      result = Checks.computer_use_permissions({:ok, probe})
+      assert result.status == :warn
+      assert result.detail =~ "Screen Recording"
+    end
+
+    test "wayland is refused with the X11 hint" do
+      probe = probed(platform: "linux", display_server: "wayland", screen_capture: false)
+      result = Checks.computer_use_permissions({:ok, probe})
+      assert result.status == :warn
+      assert result.detail =~ "X11"
+    end
+
+    test "probe error fails the check" do
+      result = Checks.computer_use_permissions({:error, :sidecar_unavailable})
+      assert result.status == :fail
+      assert result.detail =~ "could not probe"
+    end
+
+    defp probed(overrides) do
+      %{
+        state: :probed,
+        platform: "macos",
+        display_server: "quartz",
+        screen_capture: false,
+        input_control: false
+      }
+      |> Map.merge(Map.new(overrides))
     end
   end
 
@@ -815,4 +877,53 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  describe "auth_token_expiry/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-auth-expiry")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      :ok
+    end
+
+    test "ok when there is no auth file" do
+      assert %{name: "auth tokens", status: :ok} = Checks.auth_token_expiry()
+    end
+
+    test "ok when no token is stale" do
+      :ok = Store.write(:openai_codex, token_entry(3600))
+
+      assert %{status: :ok} = Checks.auth_token_expiry()
+    end
+
+    test "warns and names only the stale profiles" do
+      :ok = Store.write(:openai_codex, token_entry(-7200))
+      :ok = Store.write("gmail:primary", token_entry(3600))
+
+      assert %{status: :warn, detail: detail} = Checks.auth_token_expiry()
+      assert detail =~ "openai_codex"
+      refute detail =~ "gmail:primary"
+    end
+  end
+
+  defp token_entry(expires_in_seconds) do
+    %{
+      auth_mode: "oauth2",
+      provider: "google",
+      tokens: %{access_token: "at", refresh_token: "rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), expires_in_seconds, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
+  end
 end

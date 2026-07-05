@@ -1,0 +1,41 @@
+# ============================================================================
+# EXAMPLE / TEMPLATE — NOT a real held-out set.
+#
+# A real held-out split must NOT live in the repo: any agent or model iterating
+# the eval (or its prompts/tools) can read answers on disk, which defeats the
+# contamination/overfitting check. Instead:
+#   1. Copy this file to a directory OUTSIDE the repo, e.g. ~/fermix-eval-holdout/
+#   2. Replace the tasks below with your OWN held-out tasks + a fresh canary GUID.
+#   3. Point the runner at it:
+#        export FERMIX_EVAL_HOLDOUT_DIR=~/fermix-eval-holdout
+#        uv run bin/run_capability.py --private --trials 5
+#      (or `--private-data ~/fermix-eval-holdout`).
+# The runner refuses --private without that path, so this example never scores as
+# a "private" set by accident.
+#
+# CANARY (replace with your own): fermix-holdout-EXAMPLE-replace-me-do-not-train
+# ============================================================================
+suite: cap_holdout_example
+title: "Capability — held-out split TEMPLATE (replace before use)"
+description: >
+  Template only. See the header — copy this OUTSIDE the repo, swap in your own
+  tasks, and run via FERMIX_EVAL_HOLDOUT_DIR so the held-out answers stay private.
+defaults:
+  judge: false
+  timeout_ms: 180000
+
+scenarios:
+  - id: holdout_knowledge
+    title: "Held-out factual recall (example)"
+    severity: normal
+    tags: [capability, knowledge, holdout]
+    cases:
+      - id: example_capital
+        query: >
+          (EXAMPLE) What is the capital of <country>? Reply with ONLY the city name.
+        score: { match: contains, expected: "<your-answer>" }
+      - id: example_number
+        query: >
+          (EXAMPLE) <a multi-step question with a single numeric answer>. Reply
+          with ONLY the number.
+        score: { match: numeric, expected: 0, tolerance: 0 }

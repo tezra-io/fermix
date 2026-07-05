@@ -27,13 +27,28 @@ defmodule FermixCore.Tools.GitCommand do
     --info-path
   )
 
+  # git's smart-transport helper `ext::<program>` executes an arbitrary program
+  # for the transport before any handshake — argument-injection-to-RCE that never
+  # reaches the command classifier. Modern git already refuses `ext` by default,
+  # but the sandbox must not depend on the ambient git config: a permissive host
+  # `protocol.ext.allow = user` re-enables it. GIT_ALLOW_PROTOCOL pins the
+  # transports git may use to the ones `pull`/`fetch` legitimately need and
+  # overrides any host `protocol.*.allow`, so ext/fd/file transports are refused
+  # regardless of config. This is an allowlist, not a flag denylist — it cannot
+  # be bypassed by quoting, abbreviation, or a transport we forgot to enumerate.
+  @allowed_protocols "https:ssh:git"
+
   @spec run(String.t(), String.t(), [String.t()]) ::
           {:ok, String.t()} | {:error, String.t()}
   def run(repo, command, args) when is_binary(repo) and is_binary(command) and is_list(args) do
     with :ok <- validate_repo(repo),
          :ok <- validate_args(args),
          :ok <- validate_flags(args) do
-      case System.cmd("git", [command | args], cd: repo, stderr_to_stdout: true) do
+      case System.cmd("git", [command | args],
+             cd: repo,
+             stderr_to_stdout: true,
+             env: [{"GIT_ALLOW_PROTOCOL", @allowed_protocols}]
+           ) do
         {output, 0} -> {:ok, output}
         {output, exit_code} -> {:error, "git #{command} failed (exit #{exit_code}):\n#{output}"}
       end

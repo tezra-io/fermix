@@ -820,8 +820,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
         providers: [openai: []],
         computer_use: [
           enabled: true,
-          mode: :host,
-          display_width_px: 1366,
           screenshot_after: false,
           max_retained_screenshots: 5,
           max_actions: 25
@@ -836,7 +834,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     contents = File.read!(Path.join(tmp_home, "config.toml"))
     assert contents =~ "[fermix_core.computer_use]"
     assert contents =~ "enabled = true"
-    assert contents =~ ~s(mode = "host")
     assert contents =~ "screenshot_after = false"
     # access is derived from [sandbox] mode — it is NEVER persisted in this section.
     refute contents =~ "access ="
@@ -845,9 +842,8 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     computer_use = Keyword.get(loaded.fermix_core, :computer_use, [])
 
     assert Keyword.get(computer_use, :enabled) == true
-    assert Keyword.get(computer_use, :mode) == :host
+    refute Keyword.has_key?(computer_use, :mode)
     refute Keyword.has_key?(computer_use, :access)
-    assert Keyword.get(computer_use, :display_width_px) == 1366
     # the `?`-suffix struct fields must round-trip under their TOML key names
     assert Keyword.get(computer_use, :screenshot_after) == false
     assert Keyword.get(computer_use, :max_retained_screenshots) == 5
@@ -855,7 +851,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   end
 
   test "apply_snapshot writes computer_use config into Application env" do
-    Application.put_env(:fermix_core, :computer_use, enabled: true, mode: :host)
+    Application.put_env(:fermix_core, :computer_use, enabled: true, max_actions: 25)
 
     ConfigStore.apply_snapshot(%{
       fermix_core: [
@@ -867,10 +863,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
 
-    # Replace (not merge): a disabled snapshot must not leave the prior `mode: :host`
+    # Replace (not merge): a disabled snapshot must not leave the prior `max_actions: 25`
     # / `enabled: true` behind — the section is fully normalized to the intended state.
     assert Keyword.get(computer_use, :enabled) == false
-    assert Keyword.get(computer_use, :mode) == :browser
+    assert Keyword.get(computer_use, :max_actions) == 80
   end
 
   test "load_runtime_config rejects negative review_interval_hours from hand-edited TOML" do

@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.ToolBridge do
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.UntrustedContent
 
   @type t :: %__MODULE__{
           capabilities: %{String.t() => Capability.t()},
@@ -33,7 +34,7 @@ defmodule FermixCore.Realtime.ToolBridge do
   end
 
   @spec execute_call(t(), map()) ::
-          {:ok, %{call_id: String.t(), output: String.t()}}
+          {:ok, %{call_id: String.t(), output: String.t(), images: [map()]}}
           | {:error, %{call_id: String.t(), reason: term()}}
   def execute_call(%__MODULE__{} = bridge, %{} = call) do
     call_id = Map.get(call, "call_id") || Map.get(call, :call_id) || ""
@@ -42,11 +43,29 @@ defmodule FermixCore.Realtime.ToolBridge do
     with {:ok, capability} <- fetch_capability(bridge, name),
          {:ok, args} <- decode_arguments(call),
          {:ok, result} <- execute_capability(capability, args, bridge.context) do
-      {:ok, %{call_id: call_id, output: Jason.encode!(sanitize_result(result))}}
+      {text_result, images} = pop_images(result)
+
+      output =
+        text_result
+        |> sanitize_result()
+        |> Jason.encode!()
+        |> UntrustedContent.wrap(capability)
+
+      {:ok, %{call_id: call_id, output: output, images: images}}
     else
       {:error, reason} -> {:error, %{call_id: call_id, reason: reason}}
     end
   end
+
+  # Image parts (e.g. a computer-use screenshot) ride a dedicated `:images` field;
+  # the caller delivers them as separate Realtime `input_image` items (the
+  # `function_call_output` channel is text-only). They are pulled OUT of the text
+  # output — JSON-encoding raw image bytes would scrub them to garbage and bloat
+  # the wire.
+  defp pop_images(%{images: images} = result) when is_list(images),
+    do: {Map.delete(result, :images), images}
+
+  defp pop_images(result), do: {result, []}
 
   # Capability output can carry bytes that are not valid UTF-8 — a Latin-1 file
   # read, raw command bytes, a stray byte in an HTTP body. Jason raises on

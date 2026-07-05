@@ -63,6 +63,20 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   @doc """
+  The computer-use origin for a turn, derived from its channel and consumed by the
+  attended-origin gate (`ComputerUse.Safety.host_start_allowed?/1`).
+
+  A detached `/background` run (`BackgroundRun.run/1`, channel `"background"`) has
+  no live owner surface to observe or abort a host action, so it is `:unattended`
+  and fails closed. Every other turn reaching `run/3` is a foreground interaction —
+  a human in a chat or `fermix ask` — and is `:interactive`. Voice tags `:voice` on
+  its own path; scheduled jobs bypass `run/3` and default to `:unattended`.
+  """
+  @spec computer_use_origin(map()) :: :interactive | :unattended
+  def computer_use_origin(%{channel: "background"}), do: :unattended
+  def computer_use_origin(_msg), do: :interactive
+
+  @doc """
   Commit a delivered turn: persist the assistant message, dispatch a background
   memory review, and run auto-compaction. The gateway calls this only after the
   reply was delivered. Auto-compaction is synchronous; running it here keeps it
@@ -222,14 +236,18 @@ defmodule FermixCore.Agents.TurnRunner do
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
-      # Main interactive turns (a human in a chat, or `fermix ask`) are an ATTENDED
-      # computer-use origin: a present owner who can abort. This lets the tool start a
-      # host session (COMPUTER_USE.md §7.6); scheduled-job and other paths never set
-      # this and so fail closed (SessionManager's `:unattended` default). Voice sets
-      # `:voice` on its own path.
-      computer_use_origin: :interactive,
+      # Attended-origin gate (COMPUTER_USE.md §7.6): only a turn with a live owner
+      # surface who can abort may start a host session. Derived from the channel via
+      # computer_use_origin/1 so a detached `/background` run fails closed instead of
+      # being mislabelled attended. Scheduled jobs bypass TurnRunner (SessionManager's
+      # `:unattended` default); voice tags `:voice` on its own path.
+      computer_use_origin: computer_use_origin(msg),
       reply_fn: deliver,
       channel: msg.channel,
+      # Reaction capability resolved by the gateway (nil on no-reaction channels).
+      # Plain data, never the channel module — the `react` tool reads it to gate
+      # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
+      reaction_spec: Map.get(msg, :reaction_spec),
       # This-turn inbound channel images (M14), so `generate_image` edit can
       # reference `inbound:last`. Transient like `:image_parts`, never persisted.
       inbound_images: Map.get(msg, :media_parts) || []

@@ -7,7 +7,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
   # A stub Driver: no native code, speaks the Protocol response shape. It records
   # execute/stop calls to the test pid and returns a configurable response.
   defmodule StubDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts) do
@@ -38,7 +38,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
   # FermixCore.Timeouts.expired/3 returns) — exercises the poison-reset path
   # without a 30s wall-clock wait.
   defmodule TimeoutDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
@@ -77,7 +77,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       assert {:error, {:host_start_refused, :scheduled}} =
                Session.start_link(
-                 config: Config.normalize(enabled: true, mode: :host),
+                 config: Config.normalize(enabled: true),
                  driver: {StubDriver, [test_pid: self()]},
                  origin: :scheduled
                )
@@ -99,7 +99,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      start_session(config: Config.normalize(enabled: true, mode: :host), origin: :voice)
+      start_session(config: Config.normalize(enabled: true), origin: :voice)
 
       assert_receive {:started, meta}
       assert meta.session_id == "cua_test"
@@ -186,6 +186,133 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert result == %{summary: "ok", image: nil}
     end
 
+    test "an inspect response becomes a text summary describing the element (no image)" do
+      response = %{
+        "ok" => true,
+        "found" => true,
+        "role" => "AXButton",
+        "title" => "Delete",
+        "description" => nil,
+        "value" => nil
+      }
+
+      session = start_session(driver_opts: [response: response])
+
+      assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == nil
+      assert result.summary =~ "AXButton"
+      assert result.summary =~ "Delete"
+    end
+
+    test "an inspect miss reports no element" do
+      response = %{"ok" => true, "found" => false}
+      session = start_session(driver_opts: [response: response])
+
+      assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result == %{summary: "no UI element at that point", image: nil}
+    end
+
+    test "an elements response becomes a text list of clickable elements (no image)" do
+      response = %{
+        "ok" => true,
+        "elements" => [
+          %{"role" => "AXButton", "title" => "Send", "x" => 100, "y" => 200},
+          %{"role" => "AXTextField", "title" => nil, "x" => 50, "y" => 60}
+        ]
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == nil
+      assert result.summary =~ "2 interactive element"
+      assert result.summary =~ "AXButton \"Send\" at (100,200)"
+      assert result.summary =~ "AXTextField at (50,60)"
+    end
+
+    test "an empty elements response reports none found" do
+      session = start_session(driver_opts: [response: %{"ok" => true, "elements" => []}])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result == %{summary: "no interactive UI elements found", image: nil}
+    end
+
+    test "a malformed elements entry is skipped, never crashed on" do
+      response = %{
+        "ok" => true,
+        "elements" => [
+          %{"role" => "AXButton", "title" => "OK", "x" => 1, "y" => 2},
+          %{"role" => "AXButton"},
+          %{"x" => "nope", "y" => 5}
+        ]
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.summary =~ "AXButton \"OK\" at (1,2)"
+      assert result.summary =~ "1 interactive element"
+    end
+
+    test "a wait_for_change response returns the new frame with a change note" do
+      png = <<137, 80, 78, 71>>
+
+      response = %{
+        "ok" => true,
+        "data" => Base.encode64(png),
+        "mime" => "image/png",
+        "width" => 1280,
+        "height" => 800,
+        "changed" => true
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "wait_for_change"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == %{type: :image, mime_type: "image/png", data: png}
+      assert result.summary =~ "screen changed"
+    end
+
+    test "a wait_for_change timeout frame notes no change" do
+      png = <<137, 80, 78, 71>>
+
+      response = %{
+        "ok" => true,
+        "data" => Base.encode64(png),
+        "mime" => "image/png",
+        "changed" => false
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "wait_for_change"})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result.summary =~ "no change before the wait timed out"
+    end
+
+    test "a screenshot cursor position is surfaced in the summary" do
+      png = <<137, 80, 78, 71>>
+
+      response = %{
+        "ok" => true,
+        "data" => Base.encode64(png),
+        "mime" => "image/png",
+        "width" => 1280,
+        "height" => 800,
+        "cursor" => %{"x" => 640, "y" => 400}
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "screenshot"})
+      assert {:ok, result} = Session.execute(session, request)
+      assert result.summary =~ "Cursor at (640,400)"
+    end
+
     test "the action count increments per executed action" do
       session = start_session([])
       assert Session.action_count(session) == 0
@@ -243,7 +370,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       # poisoned Port → session stops so the next action gets a clean driver,
       # and terminate still tears the driver down (releasing held input).
-      assert_receive {:DOWN, ^ref, :process, ^session, :sidecar_timeout}
+      assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :sidecar_timeout}}
       assert_receive :driver_stop
     end
   end

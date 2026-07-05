@@ -127,6 +127,32 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback album_classify(message()) :: album_classification()
 
+  @typedoc """
+  Reaction support this channel offers (docs/design/EMOJI_REACTION_ACKS.md §5.2).
+
+    * `:none` — no reactions (or the callback is unimplemented). The gateway
+      never advertises the `react` tool for this channel.
+    * `:any_emoji` — any single emoji is accepted (Discord, WhatsApp, Signal).
+    * `{:restricted, set}` — a fixed allowed set (Telegram); the gateway builds
+      the tool's emoji enum from it so the model can only pick a supported glyph.
+  """
+  @type reaction_capability :: :none | :any_emoji | {:restricted, [String.t()]}
+
+  @doc """
+  Place a single-emoji reaction on an inbound message. The full `message()` is
+  passed so the adapter reads the exact platform reaction target from it
+  (Telegram `message_id` + `chat_id`, Discord snowflake, …). Only channels that
+  support reactions implement this; the gateway gates on `function_exported?`.
+  """
+  @callback react(message(), emoji :: String.t()) :: :ok | {:error, term()}
+
+  @doc """
+  The reaction capability the gateway resolves once per turn into plain data
+  (the allowed emoji set) and hands to core — never the channel module itself.
+  Unimplemented is treated as `:none`.
+  """
+  @callback reaction_capability() :: reaction_capability()
+
   @optional_callbacks [
     start_typing: 1,
     download_attachment: 2,
@@ -136,6 +162,8 @@ defmodule FermixChannels.Gateway.Channel do
     edit_draft: 3,
     seal_draft: 3,
     discard_draft: 2,
-    album_classify: 1
+    album_classify: 1,
+    react: 2,
+    reaction_capability: 0
   ]
 end
