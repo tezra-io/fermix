@@ -1,15 +1,15 @@
 defmodule FermixCore.Tools.ComputerUseTest do
   use ExUnit.Case, async: false
 
+  alias Compux.Protocol
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
 
   defmodule StubDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @png <<137, 80, 78, 71>>
     def png, do: @png
@@ -39,7 +39,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
   # action-failure messaging path (the real driver decodes `{"ok": false, ...}`
   # into the same `{:error, reason}` this returns).
   defmodule ErrorDriver do
-    @behaviour FermixCore.ComputerUse.Driver
+    @behaviour Compux.Driver
 
     @impl true
     def start(opts), do: {:ok, %{error: Keyword.fetch!(opts, :error)}}

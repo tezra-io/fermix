@@ -1,0 +1,3 @@
+Subsystem: Sandbox. Internal codename: BADGER-X2.
+Role: gates shell/file/git built-ins; modes strict/standard/open; protected paths always denied.
+Owner team: Security. Default mode: standard.

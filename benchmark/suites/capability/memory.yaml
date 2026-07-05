@@ -1,0 +1,66 @@
+suite: cap_memory
+title: "Capability — cross-session durable memory (store in A, recall in fresh B)"
+description: >
+  Fermix's headline differentiator: owner-scoped memory that persists across SEPARATE
+  conversations ("Always yours"). Each task stores a distinctive fact in one session,
+  then recalls it in a BRAND-NEW session (same owner, no shared context) — so a correct
+  recall can ONLY come from durable memory, never the conversation window. A raw model
+  (or a broken memory subsystem) scores 0 here, which is exactly the uplift signal the
+  single-thread `memory` behavioral suite structurally cannot produce.
+
+  Each trial keys its fact on a per-trial-unique REFERENCE ({subject}) paired with a
+  per-trial-unique VALUE ({token}): the store turn plants "reference {subject} = {token}"
+  and the recall turn asks for the value of {subject}. The reference is the SOLE salient
+  anchor — there is deliberately no shared noun ("my goldfish", "my project") — so a fresh
+  recall resolves to THIS trial's fact and cannot be dragged to a stale one. That is what
+  makes the test residue-immune: earlier runs leave many "reference ref-X = kestrel-Y"
+  facts in the shared durable store, but each recall names a distinct {subject}, so it
+  matches its own fact (validated live: two coexisting ref-keyed facts recall correctly).
+  (The original bug was the opposite — every trial reused a SHARED entity like "my
+  goldfish", so retrieval anchored on that noun and returned an OLD token regardless of the
+  trial's tag: a deterministic 0 that looked like a broken memory subsystem but was durable
+  memory working correctly on a poisoned test.)
+
+  PRECONDITION: run against the owner-scoped dev daemon (the CLI caller is the owner).
+  Leaves per-trial tokened facts in ~/.fermix-dev durable memory; each is uniquely keyed so
+  they don't collide, but they accumulate — a periodic `memory` purge is recommended hygiene.
+  No `requires_tools` gate: memory_store/memory_recall emit no span on the CLI path, so
+  the FRESH recall session is itself the provenance — context can't carry the fact.
+defaults:
+  judge: false
+  timeout_ms: 180000
+
+scenarios:
+  - id: store_then_recall_fresh_session
+    title: "Recall a fact in a new conversation it was never told in"
+    severity: critical
+    tags: [capability, memory, cross_session]
+    cases:
+      - id: durable_reference_value
+        # A deliberately BENIGN, arbitrary label->value pairing — not a credential.
+        # "Access codeword"/password phrasing invites a cautious assistant to decline
+        # storing it, confounding a memory test with secret-handling policy. The unique
+        # {subject} is the SOLE anchor (no shared noun), so a fresh recall resolves to THIS
+        # trial's fact, never a stale one from an earlier run (see the suite header).
+        cross_session: true
+        turns:
+          - query: >
+              Please remember this exact pairing for later: the value assigned to reference
+              code {subject} is {token}. Just acknowledge that you've noted it.
+          - query: >
+              What value did I assign to reference code {subject}? Reply with ONLY the
+              value, nothing else.
+        score: { match: contains, expected: "{token}" }
+
+      - id: durable_ledger_marker
+        # Same residue-immune shape (unique {subject} is the sole anchor), different surface
+        # wording so the two cases aren't verbatim twins.
+        cross_session: true
+        turns:
+          - query: >
+              For my records, please remember that ledger entry {subject} is tagged with the
+              marker {token}. Just confirm you'll keep it in mind.
+          - query: >
+              What marker did I say ledger entry {subject} is tagged with? Reply with ONLY
+              the marker, nothing else.
+        score: { match: contains, expected: "{token}" }

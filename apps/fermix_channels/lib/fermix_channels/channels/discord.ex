@@ -100,6 +100,37 @@ defmodule FermixChannels.Channels.Discord do
     fn media_part -> send_media(reply_target, media_part, reply_to: message_id) end
   end
 
+  # -- Reactions (docs/design/EMOJI_REACTION_ACKS.md §9) --
+
+  @impl true
+  @spec reaction_capability() :: :any_emoji
+  def reaction_capability, do: :any_emoji
+
+  @impl true
+  @spec react(FermixChannels.Gateway.Channel.message(), String.t()) :: :ok | {:error, term()}
+  def react(message, emoji, opts \\ [])
+
+  def react(%Message{id: message_id, reply_target: channel_id}, emoji, opts)
+      when is_binary(emoji) do
+    with {:ok, token} <- bot_token() do
+      encoded = URI.encode(emoji, &URI.char_unreserved?/1)
+      url = "#{@api_base}/channels/#{channel_id}/messages/#{message_id}/reactions/#{encoded}/@me"
+
+      Req.new(url: url, method: :put)
+      |> Req.Request.put_header("authorization", "Bot #{token}")
+      |> Req.merge(req_options(opts))
+      |> HttpClient.request("Discord addReaction")
+      |> handle_reaction_response()
+    end
+  end
+
+  defp handle_reaction_response({:ok, %{status: status}}) when status in [200, 204], do: :ok
+
+  defp handle_reaction_response({:ok, %{status: status, body: body}}),
+    do: {:error, {:discord_api_error, status, body}}
+
+  defp handle_reaction_response({:error, reason}), do: {:error, reason}
+
   @impl true
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
 

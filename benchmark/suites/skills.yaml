@@ -1,0 +1,156 @@
+suite: skills
+title: "Skills — list and view installed skills"
+description: >
+  Exercises the read side of the skills subsystem: enumerating installed skills
+  (skill_list) and opening a named skill to read its contents (skill_view). Gates
+  are tolerant of the model's route — a "what skills do you have" request may be
+  served by skill_list, while opening a specific skill by name may use skill_view
+  (often after a skill_list to discover the exact id). The two installed builtin
+  skills are browser-guidance and self-knowledge, so list scenarios assert at
+  least one of those names appears in the reply, and view scenarios assert the
+  requested skill's name plus a snippet of what it covers.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: list_installed_skills
+    title: "Lists the installed skills on request"
+    severity: normal
+    tags: [skills, list]
+    cases:
+      - id: what_skills_do_you_have
+        query: "What skills do you have installed?"
+        expect:
+          # The skill catalog is in the prompt — the model can answer directly
+          # without calling skill_list, and that is correct. Gate on the reply
+          # naming a real skill rather than pinning the route.
+          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Lists the installed skills, naming at least browser_guidance or self_knowledge, without inventing skills that aren't installed."
+      - id: list_your_skills
+        query: "Can you list your installed skills for me?"
+        expect:
+          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Enumerates the available skills, mentioning at least one of the real installed skill names."
+      - id: which_capabilities_skills
+        query: "Which skills are available to you right now? Just give me the names."
+        expect:
+          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Reports the installed skill names without inventing any."
+
+  - id: view_named_skill
+    title: "Opens a named skill and describes its contents"
+    severity: normal
+    tags: [skills, view]
+    cases:
+      - id: show_browser_guidance
+        query: "Show me your browser guidance skill."
+        expect:
+          tools_any: [skill_view, skill_list]
+          reply_matches: "(?i)browser"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: "Opens the browser_guidance skill and summarizes or quotes its content, mentioning browser-related guidance."
+      - id: open_self_knowledge
+        query: "Open your self knowledge skill and tell me what it covers."
+        expect:
+          tools_any: [skill_view, skill_list]
+          reply_matches: "(?i)self.?knowledge|fermix"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: "Reads the self_knowledge skill and explains what it covers, grounded in the skill's actual content rather than guessing."
+      - id: read_browser_skill_natural
+        query: "I want to read what the browser guidance skill says — can you pull it up?"
+        expect:
+          tools_any: [skill_view, skill_list]
+          reply_matches: "(?i)browser"
+          max_cost_usd: 0.6
+          max_duration_ms: 120000
+        rubric: "Locates and views the browser_guidance skill, then relays what it says about browser usage."
+
+  - id: list_then_view
+    title: "Discovers a skill from the list, then opens it"
+    # critical: the skill subsystem is a differentiator; deterministic (skill_list +
+    # skill_view spans) so a broken skill path fails the regression run, not silently green.
+    severity: critical
+    tags: [skills, list, view]
+    cases:
+      - id: list_then_open_self_knowledge
+        turns:
+          - query: "First, what skills do you have?"
+            expect:
+              tools_any: [skill_list]
+              reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          - query: "Great — now open the self_knowledge one and tell me what it's for."
+            expect:
+              tools_any: [skill_view]
+              reply_matches: "(?i)self.?knowledge|fermix"
+        expect:
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: "Lists the installed skills, then opens self_knowledge and explains its purpose using the skill's real content."
+      - id: list_then_open_browser_guidance
+        turns:
+          - query: "List the skills you've got available."
+            expect:
+              tools_any: [skill_list]
+              reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
+          - query: "Pull up the browser_guidance one so I can see what's in it."
+            expect:
+              tools_any: [skill_view]
+              reply_matches: "(?i)browser"
+        expect:
+          max_cost_usd: 1.0
+          max_duration_ms: 150000
+        rubric: "Enumerates the skills, then views browser_guidance and reports its contents."
+
+  - id: create_and_reload
+    title: "Author a new skill and hot-reload it into the running agent"
+    # skill_create + skill_reload were untested (only list/view were). A skill can be
+    # authored two valid ways — the skill_create tool, OR file_write of the SKILL.md to disk
+    # + skill_reload (observed live) — so the gate accepts either (skill_reload is the common
+    # registration step). Leaves stable-named skills in ~/.fermix/skills (re-runs overwrite).
+    severity: normal
+    tags: [skills, create, reload]
+    cases:
+      - id: create_then_reload
+        query: >
+          Create a new skill called "eval-widget" whose instructions are simply to always
+          reply with the word WIDGET, then reload your skills so it's live and confirm it's
+          available now.
+        expect:
+          # skill_create OR file_write-to-disk + skill_reload both validly author a skill;
+          # gate on either so the file-write route doesn't falsely fail a real creation.
+          tools_any: [skill_create, skill_reload]
+          reply_matches: "(?i)eval[-_]?widget|created|added|reload|available|new skill"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Writes the skill with skill_create (to ~/.fermix/skills) and reloads it
+          (skill_reload) so it registers without a restart, confirming the new skill name.
+          Fails if it claims it cannot create skills or fabricates a creation it didn't do.
+      - id: create_then_verify_in_list
+        query: >
+          Make me a skill named "eval-greeter" that greets people in French, then show me
+          your current skill list so I can see it landed.
+        expect:
+          # skill_create OR file_write-to-disk + skill_reload both validly author a skill
+          # (same as create_then_reload); don't pin the create tool.
+          tools_any: [skill_create, skill_reload]
+          reply_matches: "(?i)eval[-_]?greeter|created|added|skill"
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+        rubric: >
+          Creates the skill and then reloads + lists skills so the new "eval-greeter"
+          appears in the listing; grounds the confirmation in the real skill list, not a
+          fabricated success.

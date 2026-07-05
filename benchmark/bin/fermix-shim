@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""
+Fermix eval shim — speaks {packet, 4} framing to the daemon socket.
+
+Drop-in replacement for the installed `fermix` binary for eval purposes.
+Set FERMIX_EVAL_BIN to this file's path so the eval runner uses it instead
+of the Homebrew binary, which may be behind on protocol changes.
+
+Supports: fermix status [--json]
+          fermix ask --json --session ID --timeout MS <query>
+"""
+import base64
+import json
+import mimetypes
+import os
+import socket
+import struct
+import sys
+
+_IMAGE_MIME = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+FERMIX_HOME = os.environ.get("FERMIX_HOME", os.path.expanduser("~/.fermix"))
+SOCKET_PATH = os.path.join(FERMIX_HOME, "daemon.sock")
+
+
+def call_daemon(method, params=None, timeout_s=5.0):
+    msg = {"method": method}
+    if params:
+        msg["params"] = params
+    payload = json.dumps(msg).encode()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout_s)
+        sock.connect(SOCKET_PATH)
+        sock.sendall(struct.pack(">I", len(payload)) + payload)
+        header = sock.recv(4)
+        if len(header) < 4:
+            raise OSError("daemon closed connection before length header")
+        length = struct.unpack(">I", header)[0]
+        chunks, received = [], 0
+        while received < length:
+            chunk = sock.recv(min(65536, length - received))
+            if not chunk:
+                raise OSError("connection closed mid-response")
+            chunks.append(chunk)
+            received += len(chunk)
+        return json.loads(b"".join(chunks).decode())
+
+
+def cmd_status(args):
+    as_json = "--json" in args
+    try:
+        resp = call_daemon("status", timeout_s=5.0)
+        if as_json:
+            print(json.dumps(resp))
+        else:
+            print(f"fermix {resp.get('version','?')} "
+                  f"(pid {resp.get('pid','?')}, uptime {resp.get('uptime_ms','?')}ms)")
+        sys.exit(0)
+    except (ConnectionRefusedError, FileNotFoundError, OSError):
+        if as_json:
+            print(json.dumps({"status": "error", "error": "not_running"}))
+        else:
+            print("fermix status: :not_running", file=sys.stderr)
+        sys.exit(3)
+    except TimeoutError:
+        if as_json:
+            print(json.dumps({"status": "error", "error": "timeout"}))
+        else:
+            print("fermix status: :timeout", file=sys.stderr)
+        sys.exit(1)
+
+
+def _read_image(path):
+    ext = os.path.splitext(path)[1].lower()
+    mime = _IMAGE_MIME.get(ext)
+    if mime is None:
+        print(f"fermix-shim: unsupported attachment type: {path}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as exc:
+        print(f"fermix-shim: cannot read attachment {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return {"mime_type": mime, "data_base64": base64.b64encode(data).decode()}
+
+
+def cmd_ask(args):
+    session_id, timeout_ms = "cli", 120000
+    query_parts, attach_paths, i = [], [], 0
+    while i < len(args):
+        if args[i] == "--session" and i + 1 < len(args):
+            session_id = args[i + 1]; i += 2
+        elif args[i] == "--timeout" and i + 1 < len(args):
+            timeout_ms = int(args[i + 1]); i += 2
+        elif args[i] == "--attach" and i + 1 < len(args):
+            attach_paths.append(args[i + 1]); i += 2
+        elif args[i] in ("--json",):
+            i += 1
+        else:
+            query_parts.append(args[i]); i += 1
+    query = " ".join(query_parts)
+    images = [_read_image(p) for p in attach_paths]
+    params = {"content": query, "session_id": session_id, "timeout_ms": timeout_ms}
+    if images:
+        params["images"] = images
+    try:
+        resp = call_daemon("agent_message", params=params,
+                           timeout_s=timeout_ms / 1000.0 + 10.0)
+        print(json.dumps(resp))
+        sys.exit(0 if resp.get("status") == "ok" else 1)
+    except (ConnectionRefusedError, FileNotFoundError, OSError):
+        print(json.dumps({"status": "error", "error": "not_running"}))
+        sys.exit(3)
+    except TimeoutError:
+        print(json.dumps({"status": "error", "error": "timeout"}))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    subcmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    rest = sys.argv[2:]
+    if subcmd == "status":
+        cmd_status(rest)
+    elif subcmd == "ask":
+        cmd_ask(rest)
+    else:
+        print(f"fermix-shim: unknown command {subcmd!r}", file=sys.stderr)
+        sys.exit(1)

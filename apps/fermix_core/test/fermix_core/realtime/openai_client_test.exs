@@ -99,6 +99,37 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
              )
   end
 
+  test "function_output_events emits an input_image item per image, before response.create" do
+    events =
+      OpenAIClient.function_output_events(
+        %{
+          call_id: "call-1",
+          output: "screenshot text",
+          images: [%{type: :image, mime_type: "image/png", data: <<137, 80, 78, 71>>}]
+        },
+        Config.normalize([])
+      )
+
+    assert [
+             %{item: %{type: "function_call_output", call_id: "call-1"}},
+             %{
+               type: "conversation.item.create",
+               item: %{
+                 type: "message",
+                 role: "user",
+                 content: [
+                   %{type: "input_text", text: notice},
+                   %{type: "input_image", image_url: image_url}
+                 ]
+               }
+             },
+             %{type: "response.create"}
+           ] = events
+
+    assert notice =~ "untrusted"
+    assert image_url == "data:image/png;base64," <> Base.encode64(<<137, 80, 78, 71>>)
+  end
+
   test "decodes provider events into internal event tuples" do
     assert {:ok, {:audio_delta, "item-1", "abc"}} =
              OpenAIClient.decode_server_event(%{

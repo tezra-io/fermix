@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.WhatsAppTest do
 
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway.Message
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Memory.ConversationStore
 
@@ -86,6 +87,51 @@ defmodule FermixChannels.Channels.WhatsAppTest do
     on_exit(fn -> Application.delete_env(:fermix_channels, :whatsapp) end)
 
     :ok
+  end
+
+  describe "reactions" do
+    defp whatsapp_react_message do
+      Message.new!(%{
+        id: "wamid.123",
+        content: "thanks",
+        sender: "15551234567",
+        channel: "whatsapp",
+        chat_id: "15551234567",
+        reply_target: "15551234567"
+      })
+    end
+
+    test "reaction_capability is any_emoji" do
+      assert WhatsApp.reaction_capability() == :any_emoji
+    end
+
+    test "react posts a type:reaction message targeting the inbound wamid" do
+      test_pid = self()
+
+      Req.Test.stub(:whatsapp, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:whatsapp_request, conn.request_path, Jason.decode!(body)})
+        Req.Test.json(conn, %{"messages" => [%{"id" => "wamid.reply"}]})
+      end)
+
+      assert :ok = WhatsApp.react(whatsapp_react_message(), "👍")
+
+      assert_receive {:whatsapp_request, path, body}
+      assert path =~ "/messages"
+      assert body["type"] == "reaction"
+      assert body["to"] == "15551234567"
+      assert body["reaction"] == %{"message_id" => "wamid.123", "emoji" => "👍"}
+    end
+
+    test "surfaces an API error (e.g. outside the 24h window)" do
+      Req.Test.stub(:whatsapp, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(400, Jason.encode!(%{"error" => %{"message" => "re-engagement"}}))
+      end)
+
+      assert {:error, _reason} = WhatsApp.react(whatsapp_react_message(), "👍")
+    end
   end
 
   describe "parse_webhook/1" do

@@ -1,11 +1,11 @@
 defmodule FermixCore.ComputerUse.SidecarInstallerTest do
   use ExUnit.Case, async: false
 
-  alias Fermix.CLI.Upgrade.Manifest
   alias FermixCore.ComputerUse.SidecarInstaller
 
   setup do
-    prev = System.get_env("FERMIX_HOME")
+    prev_home = System.get_env("FERMIX_HOME")
+    prev_plugins = Application.get_env(:fermix_core, :plugins)
 
     home =
       Path.join([
@@ -18,101 +18,90 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     System.put_env("FERMIX_HOME", home)
 
     on_exit(fn ->
-      case prev do
+      case prev_home do
         nil -> System.delete_env("FERMIX_HOME")
         value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      case prev_plugins do
+        nil -> Application.delete_env(:fermix_core, :plugins)
+        value -> Application.put_env(:fermix_core, :plugins, value)
       end
 
       FermixTestSupport.SafeRm.rm_rf(home)
     end)
 
-    {:ok, {os, arch}} = Manifest.target_for_host()
-    %{home: home, target: "#{os}-#{arch}"}
+    {:ok, target} = Compux.Binary.target()
+    %{home: home, target: target, version: to_string(Application.spec(:compux, :vsn))}
   end
 
-  defp current_dir(home),
-    do: Path.join([home, "plugins", "installed", "computer_use_sidecar", "current"])
-
-  defp fake_install(home, target, mode) do
-    version_dir = Path.join([home, "plugins", "installed", "computer_use_sidecar", "0.1.0"])
-    bin_dir = Path.join([version_dir, "bin", target])
-    File.mkdir_p!(bin_dir)
-    binary = Path.join(bin_dir, "fermix-computer-use")
-    File.write!(binary, "#!/bin/sh\n")
-    File.chmod!(binary, mode)
-    File.ln_s!(version_dir, current_dir(home))
-    binary
+  defp write_bin(path, mode) do
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "#!/bin/sh\n")
+    File.chmod!(path, mode)
+    path
   end
 
-  test "binary_path resolves through the store's current symlink (no fabricated path)",
-       %{home: home, target: target} do
-    assert {:ok, path} = SidecarInstaller.binary_path()
+  # A fermix `[fermix_core.plugins] dev_local` checkout of the sidecar.
+  defp dev_local_binary(home, target, mode) do
+    Application.put_env(:fermix_core, :plugins, dev_local: Path.join(home, "dev-plugins"))
 
-    assert path ==
-             Path.join([
-               home,
-               "plugins",
-               "installed",
-               "computer_use_sidecar",
-               "current",
-               "bin",
-               target,
-               "fermix-computer-use"
-             ])
+    write_bin(
+      Path.join([home, "dev-plugins", "computer_use_sidecar", "bin", target, "compux"]),
+      mode
+    )
   end
 
-  test "installed? is false when no version is installed" do
+  # The compux download cache under FERMIX_HOME/plugins/compux/<vsn>/<target>/compux.
+  defp cache_binary(home, version, target, mode) do
+    write_bin(Path.join([home, "plugins", "compux", version, target, "compux"]), mode)
+  end
+
+  test "plugin_name is the stable card identifier" do
+    assert SidecarInstaller.plugin_name() == "computer_use_sidecar"
+  end
+
+  test "installed? is false with neither a dev_local build nor a cached binary" do
     refute SidecarInstaller.installed?()
   end
 
-  test "installed? is true once a 0755 binary is present under current/", %{
-    home: home,
-    target: target
-  } do
-    fake_install(home, target, 0o755)
-    assert SidecarInstaller.installed?()
-  end
-
-  test "installed? is false when the binary is present but NOT executable", %{
-    home: home,
-    target: target
-  } do
-    fake_install(home, target, 0o644)
-    refute SidecarInstaller.installed?()
-  end
-
-  describe "dev_local resolution" do
-    setup do
-      prev = Application.get_env(:fermix_core, :plugins)
-
-      on_exit(fn ->
-        case prev do
-          nil -> Application.delete_env(:fermix_core, :plugins)
-          value -> Application.put_env(:fermix_core, :plugins, value)
-        end
-      end)
-
-      :ok
-    end
-
-    test "a dev_local build wins over the installed store path", %{home: home, target: target} do
-      bin_dir = Path.join([home, "dev-plugins", "computer_use_sidecar", "bin", target])
-      File.mkdir_p!(bin_dir)
-      binary = Path.join(bin_dir, "fermix-computer-use")
-      File.write!(binary, "#!/bin/sh\n")
-      File.chmod!(binary, 0o755)
-      Application.put_env(:fermix_core, :plugins, dev_local: Path.join(home, "dev-plugins"))
-
+  describe "dev_local build (the plugin-author loop)" do
+    test "binary_path + installed? resolve a 0755 dev_local build", %{home: home, target: target} do
+      binary = dev_local_binary(home, target, 0o755)
       assert {:ok, ^binary} = SidecarInstaller.binary_path()
       assert SidecarInstaller.installed?()
     end
 
-    test "no dev_local build falls back to the installed store path", %{home: home} do
-      Application.put_env(:fermix_core, :plugins, dev_local: Path.join(home, "empty-dev"))
-
-      assert {:ok, path} = SidecarInstaller.binary_path()
-      assert path =~ "installed/computer_use_sidecar/current"
+    test "installed? is false when the dev_local binary is not executable", %{
+      home: home,
+      target: target
+    } do
+      dev_local_binary(home, target, 0o644)
       refute SidecarInstaller.installed?()
     end
+  end
+
+  describe "compux download cache" do
+    test "installed? + binary_path resolve a cached 0755 binary", %{
+      home: home,
+      target: target,
+      version: version
+    } do
+      binary = cache_binary(home, version, target, 0o755)
+      assert SidecarInstaller.installed?()
+      assert {:ok, ^binary} = SidecarInstaller.binary_path()
+    end
+
+    test "installed? on an empty cache stays false WITHOUT downloading", %{home: _home} do
+      # The readiness hot path must never trigger a network fetch. With no cached
+      # binary and no dev_local build, installed? is a pure false.
+      refute SidecarInstaller.installed?()
+    end
+  end
+
+  test "install fails loud, with no network, until compux cuts a release" do
+    # checksum-compux.exs is a placeholder %{} until the compux release CI populates
+    # it, so the download fails at the checksum gate BEFORE any fetch.
+    assert {:error, {:no_checksum_for_target, _target}} = SidecarInstaller.install()
   end
 end

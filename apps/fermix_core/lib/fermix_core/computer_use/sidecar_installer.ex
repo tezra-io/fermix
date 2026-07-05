@@ -1,69 +1,63 @@
 defmodule FermixCore.ComputerUse.SidecarInstaller do
   @moduledoc """
-  Installs and locates the computer-use native sidecar binary through Fermix's
-  existing signed plugin-distribution pipeline (docs/design/COMPUTER_USE.md §1f).
+  Installs and locates the computer-use native sidecar binary via the `compux`
+  library (`Compux.Binary`).
 
-  The sidecar ships as a catalog/index entry (`computer_use_sidecar`) carrying one
-  signed per-target binary artifact and NO agent tools. `install/0` runs it through
-  `Dist.Installer.run_install` — resolve → sha256 → cosign → extract → atomic
-  activate — so a binary that injects synthetic input into the live desktop is
-  installed only after mandatory signature verification.
+  compux owns the binary distribution: `install/0` downloads the per-target
+  executable from the compux GitHub release and verifies it against the sha256
+  baked into the compux dependency (`checksum-compux.exs`), caching it under
+  `FERMIX_HOME/plugins/compux/` so it stays inside the user's fermix home. No
+  fermix-plugins catalog tarball, no cosign — the sidecar is a plain library
+  artifact now.
 
-  `install/0` deliberately takes **no options**: it must never let a caller thread
-  a `:verifier`/`:fetcher` seam into a production install (a per-call verifier
-  override would be a desktop-takeover vector). Tests that need a fake artifact
-  call `Dist.Installer.run_install/2` directly with their own seams — never through
-  this wrapper.
+  **Trust model:** the sidecar injects synthetic input into the live desktop, so
+  it is off by default and installed only on explicit enable. It is gated by the
+  baked sha256 (integrity — it pins the exact bytes the shipped build was cut
+  against) plus compux's own Developer-ID signing + notarization (macOS OS-trust).
+  This is integrity, not independent signer provenance — a deliberate trade for
+  making the library the single source of the binary.
 
-  The pipeline extracts into the plugin store, not `FERMIX_HOME/bin`, so this module
-  is also the single source of truth for the binary's path: it resolves live through
-  the store's `current` symlink (an upgrade's atomic version-swap is picked up with
-  no copy), and never fabricates a sentinel path.
+  Resolution prefers a `dev_local` build (the plugin-author loop) so a locally
+  built sidecar can be tested without a release.
   """
 
   import Bitwise, only: [&&&: 2]
 
-  alias Fermix.CLI.Upgrade.Manifest
-  alias FermixCore.Plugins.Dist.Installer
-  alias FermixCore.Plugins.Dist.Store
   alias FermixCore.Setup.ConfigStore
 
+  @command "compux"
   @plugin_name "computer_use_sidecar"
-  @command "fermix-computer-use"
 
+  @doc "The stable identifier the setup card keys off (unchanged for UX continuity)."
   @spec plugin_name() :: String.t()
   def plugin_name, do: @plugin_name
 
   @doc """
-  Install the signed sidecar through the catalog pipeline. No options — cosign +
-  sha256 verification are mandatory and non-overridable on this path.
+  Download + cache the sidecar via `Compux.Binary` (sha256-verified against the
+  baked checksum). No options — verification is baked in and non-overridable.
   """
-  @spec install() :: {:ok, term()} | {:error, term()}
-  def install, do: Installer.run_install(@plugin_name)
+  @spec install() :: {:ok, Path.t()} | {:error, term()}
+  def install, do: Compux.Binary.path(cache_dir: cache_root())
 
   @doc """
-  Absolute path the runtime/`PortDriver` should spawn. Resolution order:
-
-    1. A `dev_local` build, if present — `<[fermix_core.plugins] dev_local>/computer_use_sidecar/bin/<target>/fermix-computer-use`.
-       This is the plugin-author loop: `cargo build` the sidecar (native/computer-use-sidecar/)
-       into a dev_local checkout and test without a signed release.
-    2. Otherwise the installed catalog binary, resolved live through the store's
-       `current` symlink (so an upgrade's atomic version-swap is picked up).
-
-  The path is well-defined whenever the host target is supported (existence is
-  checked separately by `installed?/0` and by `PortDriver.start/1`, so neither a
-  missing dev build nor a missing install fabricates a runnable path); `{:error, _}`
-  only when the host arch/OS is unsupported.
+  Resolve the installed sidecar path **without downloading** — a `dev_local` build
+  first (the plugin-author loop), else the compux-cached binary. `install/0` is the
+  sole path that fetches; resolving is side-effect-free, so it is safe on the spawn
+  and readiness hot paths. Returns `{:error, :not_installed}` when neither exists,
+  or a typed error on an unsupported host.
   """
   @spec binary_path() :: {:ok, Path.t()} | {:error, term()}
   def binary_path do
-    with {:ok, target} <- host_target() do
-      rel = Path.join(["bin", target, @command])
-      {:ok, dev_local_build(rel) || Path.join(Store.current_link(root(), @plugin_name), rel)}
+    case dev_local_build() do
+      path when is_binary(path) -> {:ok, path}
+      nil -> cached_path()
     end
   end
 
-  @doc "True when the installed sidecar binary exists and is executable for this host."
+  @doc """
+  True when the sidecar is present + executable, without downloading — this runs on
+  the boot/readiness hot path, so a status read must never trigger a network fetch.
+  """
   @spec installed?() :: boolean()
   def installed? do
     case binary_path() do
@@ -72,27 +66,24 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
     end
   end
 
-  # Reuse the exact "<os>-<arch>" target string the installer resolves artifacts
-  # by (installer.ex host_target/0), so the install target and the lookup target
-  # are one convention.
-  defp host_target do
-    case Manifest.target_for_host() do
-      {:ok, {os, arch}} -> {:ok, "#{os}-#{arch}"}
-      {:error, reason} -> {:error, {:host_unsupported, reason}}
+  # The compux-cached binary, or a typed error — never a download.
+  defp cached_path do
+    case Compux.Binary.cached_path(cache_dir: cache_root()) do
+      {:ok, path} -> {:ok, path}
+      {:error, :not_cached} -> {:error, :not_installed}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  # A dev_local checkout of the sidecar, only when the binary actually exists there
-  # (so the installed path stays the production default). Reuses the existing
-  # `[fermix_core.plugins] dev_local` key — the same dev folder plugin authors use.
-  defp dev_local_build(rel) do
-    case dev_local_root() do
-      root when is_binary(root) and root != "" ->
-        candidate = Path.join([root, @plugin_name, rel])
-        if File.regular?(candidate), do: candidate, else: nil
-
-      _ ->
-        nil
+  # A `dev_local` checkout of the sidecar, only when the binary actually exists:
+  # `<[fermix_core.plugins] dev_local>/computer_use_sidecar/bin/<target>/compux`.
+  defp dev_local_build do
+    with root when is_binary(root) and root != "" <- dev_local_root(),
+         {:ok, target} <- Compux.Binary.target() do
+      candidate = Path.join([root, @plugin_name, "bin", target, @command])
+      if File.regular?(candidate), do: candidate, else: nil
+    else
+      _ -> nil
     end
   end
 
@@ -100,10 +91,9 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
     :fermix_core |> Application.get_env(:plugins, []) |> Keyword.get(:dev_local)
   end
 
-  # Same root `Dist.Installer.run_install/1` defaults to (resolve_root/1), so the
-  # install location and the lookup location always agree. `workspace_paths/0` is
-  # a stable read; we never write config_store.
-  defp root, do: ConfigStore.workspace_paths().plugins
+  # Cache the compux binary under FERMIX_HOME/plugins so it stays inside fermix home
+  # (not the OS user-cache default). `workspace_paths/0` is a stable read.
+  defp cache_root, do: Path.join(ConfigStore.workspace_paths().plugins, "compux")
 
   defp executable?(path) do
     case File.stat(path) do

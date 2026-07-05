@@ -1,7 +1,7 @@
 ---
 name: browser-guidance
 description: Use when operating websites or local web apps through the built-in browser tool.
-allowed_tools: ["browser"]
+allowed_tools: ["browser", "web_fetch", "web_search"]
 ---
 
 # Browser Guidance
@@ -12,8 +12,10 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 
 - `web_search`: static facts, no known URL.
 - `web_fetch`: one known URL with readable server HTML.
-- `browser`: JavaScript-rendered pages, forms, clicks, login checks, live/interactive data, dashboards, seat maps.
+- `browser`: JavaScript-rendered pages, forms, clicks, login checks, live/interactive data, dashboards, seat maps — in `browser`'s OWN managed instance, NOT the page/app the user has open on their screen.
+- `computer_use`: when the task is about the user's OWN live screen or a session they are watching (a page/app/game they already have open) — `browser` can't see or act on that (separate context; it desyncs). Reserve for live-screen work; a nameable URL is still `web_fetch`/`browser`.
 - Never shell-scrape JavaScript sites. Empty/partial `web_search` or `web_fetch` output on dynamic content means switch to `browser`.
+- To wait for a page to change (an opponent's move, a result to load), use the browser's `act` action with `kind: "wait"` (and a `wait_until` target) on THIS session — there is no top-level `wait` action; don't switch to `computer_use` to watch a page you are already driving here.
 
 ## Operating Loop
 
@@ -34,7 +36,7 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - Reuse one tab target per flow. If popups or retries create extras, use `tabs`, then `focus` or `close`.
 - On stale/missing refs: snapshot the same target, retry once with the new ref, then report the blocker.
 - Avoid snapshot churn; do not snapshot after every successful `fill`.
-- Treat screenshots, PDFs, and downloads as artifacts. Do not claim the model saw screenshot pixels unless the runtime feeds image bytes back to the model.
+- The `screenshot` action returns the page as an image the model actually sees — use it to inspect rendered/visual state. Treat PDFs and downloads as saved artifacts (a path, not seen); read them with `file_read`.
 
 ## Stop Conditions
 

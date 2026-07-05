@@ -285,6 +285,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       # Pre-fix this read [fermix_core.plugins] and rendered the install-time
       # "Enable" with the status pill hidden (:not_configured).
       refute card =~ ~s(phx-click="plugin_enable")
+
+      # Core owns the branding: "Computer Use" (not the manifest's "…Sidecar"),
+      # with the bundled blue-monitor logo rather than a letter fallback.
+      assert card =~ "Computer Use"
+      refute card =~ "Sidecar"
+      assert card =~ "data:image/svg+xml"
     end
 
     test "a ready computer-use sidecar card shows Ready without a registry health check",
@@ -580,6 +586,14 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Guest scoped"
     end
 
+    test "doctor pane surfaces a computer-use permission section", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      assert html =~ "Computer use"
+    end
+
     test "Save & next saves the current step and advances", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
@@ -592,6 +606,49 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Provider saved."
       assert html =~ "Voice companion"
+    end
+
+    test "ChatGPT OAuth badge warns 'Reconnect needed' when the stored token is stale", %{
+      conn: conn
+    } do
+      Store.write(:openai_codex, %{
+        auth_mode: "chatgpt",
+        provider: "openai",
+        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), -7200, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Reconnect needed"
+    end
+
+    test "ChatGPT OAuth badge shows 'Connected' when the stored token is fresh", %{conn: conn} do
+      Store.write(:openai_codex, %{
+        auth_mode: "chatgpt",
+        provider: "openai",
+        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
+        |> render_change()
+
+      assert html =~ "Connected"
+      refute html =~ "Reconnect needed"
     end
 
     test "provider pane offers canonical reasoning effort levels (xhigh, not minimal)", %{
@@ -2018,6 +2075,36 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "openai gpt-5.5 responded"
       assert html =~ "bot @fermix_test authenticated"
     end
+
+    test "run probe reports stale stored auth tokens", %{conn: conn} do
+      Req.Test.set_req_test_to_shared()
+      stub_setup_doctor_probe()
+
+      Store.write(:openai_codex, %{
+        auth_mode: "chatgpt",
+        provider: "openai",
+        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), -7200, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+      Application.put_env(:fermix_core, :providers,
+        openai: [api_key: "sk-live-test", default_model: "gpt-5.5"]
+      )
+
+      Application.put_env(:fermix_web, :doctor_probe_opts,
+        req_options: [plug: {Req.Test, :setup_doctor_probe}]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element("button[phx-value-tab=\"doctor\"]") |> render_click()
+
+      html = view |> element("button", "Run probe") |> render_click()
+
+      assert html =~ "Auth tokens"
+      assert html =~ "Reconnect needed: openai_codex"
+    end
   end
 
   describe "restart" do
@@ -2585,7 +2672,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     {:ok, {os, arch}} = Manifest.target_for_host()
     bin_dir = Path.join([checkout, "computer_use_sidecar", "bin", "#{os}-#{arch}"])
     File.mkdir_p!(bin_dir)
-    binary = Path.join(bin_dir, "fermix-computer-use")
+    binary = Path.join(bin_dir, "compux")
     File.write!(binary, "#!/bin/sh\n")
     File.chmod!(binary, 0o755)
   end

@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.SignalTest do
 
   alias FermixChannels.Channels.Signal
   alias FermixChannels.Channels.Signal.Listener
+  alias FermixChannels.Gateway.Message
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Memory.ConversationStore
 
@@ -77,6 +78,15 @@ defmodule FermixChannels.Channels.SignalTest do
 
       :ok
     end
+
+    def send_reaction(account, recipient, author, timestamp, emoji, opts) do
+      send(
+        Keyword.fetch!(opts, :test_pid),
+        {:signal_reaction, account, recipient, author, timestamp, emoji}
+      )
+
+      :ok
+    end
   end
 
   setup do
@@ -91,6 +101,34 @@ defmodule FermixChannels.Channels.SignalTest do
     on_exit(fn -> Application.delete_env(:fermix_channels, :signal) end)
 
     :ok
+  end
+
+  describe "reactions" do
+    test "reaction_capability is any_emoji" do
+      assert Signal.reaction_capability() == :any_emoji
+    end
+
+    test "react sends a signal-cli reaction targeting the message author + timestamp" do
+      message =
+        Message.new!(%{
+          id: "1714000000000",
+          content: "thanks",
+          sender: "+15551234567",
+          channel: "signal",
+          chat_id: "+15551234567",
+          reply_target: "+15551234567",
+          metadata: %{
+            sender_id: "+15551234567",
+            signal_client: FakeSignalClient,
+            signal_client_opts: [test_pid: self()]
+          }
+        })
+
+      assert :ok = Signal.react(message, "👍")
+
+      assert_receive {:signal_reaction, "+15550001111", "+15551234567", "+15551234567",
+                      "1714000000000", "👍"}
+    end
   end
 
   describe "listener receive loop" do

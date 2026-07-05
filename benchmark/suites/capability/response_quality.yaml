@@ -1,0 +1,73 @@
+suite: cap_response_quality
+title: "Capability — response quality / taste (judge-scored, SOFT axis)"
+# SOFT axis: the runner EXCLUDES this suite from the correctness sweep (`make capability`,
+# `make capability-judged`) so its noisy 0..1 judge scores never fold into task-success or
+# share the capability tasks_hash. Run it deliberately on its own axis:
+#   uv run bin/run_capability.py --suite cap_response_quality --judge --threshold 0.5
+soft: true
+description: >
+  "Taste" — the quality of the reply itself (judgment, concision, directness, structure,
+  honesty), not whether a fact is correct or a tool fired. There is no ground truth for
+  taste, so every case here is RUBRIC-scored by an LLM judge (0..1), never a checker.
+
+  IMPORTANT — how to run this honestly:
+   * Run it SEPARATELY, never as part of `make capability`:
+       EVAL_JUDGE_BACKEND=openai EVAL_JUDGE_API_KEY=sk-... \
+         uv run bin/run_capability.py --suite cap_response_quality --judge --trials 3
+   * Use an INDEPENDENT judge (a model NOT under test) — a model judging its own family
+     self-prefers. Never let the daemon's own model grade this.
+   * Read it as its OWN soft axis, on `mean_success` (the judge's average 0..1 quality
+     score) — NOT pass^k, which binarizes at the pass threshold and is meaningless for a
+     fractional taste score (add `--threshold 0.5` if you want a pass^k at all). It has a
+     distinct tasks_hash, so the leaderboard keeps it in a separate row from the capability
+     composite — do NOT average taste into the correctness score; judge scores are noisy
+     (LLM judges favour length / their own style), so this is a DIRECTIONAL signal, a trend,
+     not a hard gate.
+
+  The rubric below encodes ONE opinionated taste profile (concise, answer-first, direct,
+  honest, no filler). Taste is per-user — REWRITE these rubrics in your own voice; that
+  authored rubric IS your definition of taste. To compare models' taste head-to-head, a
+  pairwise/Elo harness is the right tool (this absolute-score tier is the cheap first cut).
+defaults:
+  judge: true
+  timeout_ms: 120000
+
+scenarios:
+  - id: clarity_and_concision
+    title: "Answers the question directly, no filler, right depth"
+    severity: normal
+    tags: [quality, taste, concision]
+    cases:
+      - id: explain_to_non_technical
+        query: "Explain what a database index is to a non-technical founder — why it matters, plainly."
+        rubric: >
+          Rewards: a clear, plain-language explanation with a concrete analogy or example,
+          right-sized to the ask (a short paragraph or two — enough to land, not an essay),
+          leads with the point. Penalizes: jargon left unexplained, a preamble ("Great
+          question!"), padding, or ballooning into a tutorial the founder didn't ask for.
+      - id: decision_not_survey
+        query: "Postgres or SQLite for a small side-project with maybe 100 users? Just tell me which and why."
+        rubric: >
+          Rewards: leads with a clear recommendation, then a brief, specific justification
+          tied to the actual constraints (small, side-project). Penalizes: a both-sides
+          survey that never commits, a comparison table when a sentence would do, hedging
+          that dodges the decision the user explicitly asked for.
+
+  - id: tone_and_honesty
+    title: "Direct but kind; honest about uncertainty without waffling"
+    severity: normal
+    tags: [quality, taste, tone, honesty]
+    cases:
+      - id: deliver_hard_feedback
+        query: "Draft a short Slack message telling a teammate their PR needs significant rework before it can merge."
+        rubric: >
+          Rewards: direct and respectful, specific about what needs work, brief, actionable,
+          human. Penalizes: corporate fluff and hedging that buries the message, cruelty or
+          bluntness with no care, or a wall of text for what should be a few lines.
+      - id: honest_it_depends
+        query: "What's the single best programming language?"
+        rubric: >
+          Rewards: names honestly that there's no single best, then gives a crisp decision
+          FRAMEWORK (pick by task/ecosystem/team) and maybe a concrete default — useful, not
+          evasive. Penalizes: a wishy-washy non-answer, a laundry list of every language, or
+          refusing to give any guidance at all.

@@ -1,0 +1,96 @@
+suite: cap_hard
+title: "Capability — hard discriminating tier (CANDIDATES, unvalidated)"
+description: >
+  UNVALIDATED candidate tasks aimed at the saturation gap: the current deterministic tier is
+  maxed (a mini clears ~all of it), so it can't separate models. These probe reasoning DEPTH —
+  precise execution of buggy code, multi-constraint aggregation over distractors, and
+  cross-referencing to find a conflict — where a small slip compounds into a wrong final
+  answer, so a weaker model lands below a flagship instead of tying at 1.0.
+
+  STATUS: drafts. They live under candidates/ so they NEVER enter a headline sweep (excluded
+  from the default glob; only loaded with --candidates). Validate before promoting them into a
+  real suite: run against BOTH a flagship and a mini at --trials 10+, and KEEP a task only if
+  the flagship is high + stable (pass^k ~ 1) AND the mini is meaningfully lower AND a failing
+  trace shows a real capability miss (not a scorer quirk). Cut anything both models ace
+  (saturated) or that the flagship can't do reliably (that's noise, not difficulty).
+
+    uv run bin/run_capability.py --candidates --suite cap_hard --trials 10 --threshold 1.0
+
+  These are SELF-CONTAINED (the answer is in the prompt, no tools) so they run today. The
+  higher-signal form of a hard tier is checker-graded END-TO-END tool use (real multi-file
+  fixes, subagent fan-out, scheduled runs over a seeded sandbox) — add those once these prove
+  they discriminate.
+defaults:
+  judge: false
+  timeout_ms: 120000
+
+scenarios:
+  - id: depth_probes
+    title: "Reasoning depth where a small slip compounds into a wrong final answer"
+    severity: normal
+    tags: [capability, hard, candidate]
+    cases:
+      - id: buggy_code_exact_trace
+        # Forces precise execution of BUGGY code over the domain-knowledge shortcut: the loop
+        # is exclusive-end (off-by-one), which also flips the `> 3` bonus. Correct trace = 30;
+        # the "business sense" shortcut (5 inclusive weekdays, bonus applies) yields 65/75.
+        query: |
+          Trace this Python EXACTLY as written — it may contain bugs; do NOT fix them, just
+          execute it in your head. Tell me the integer it prints. Reply with ONLY the number.
+
+          from datetime import date, timedelta
+
+          def weekdays_between(start, end):
+              n = 0
+              d = start
+              while d < end:
+                  if d.weekday() < 5:
+                      n += 1
+                  d += timedelta(days=1)
+              return n
+
+          def fee(start, end):
+              base = weekdays_between(start, end)
+              return base * 10 + (25 if base > 3 else 0)
+
+          print(fee(date(2026, 3, 2), date(2026, 3, 5)))
+        score: { match: numeric, expected: 30, tolerance: 0 }
+
+      - id: noisy_expense_aggregate
+        # Multi-constraint aggregation over distractors: drop the duplicate 03/12 Whole Foods
+        # charge, ignore the refund LINE (don't net it), and exclude non-grocery merchants.
+        # Correct = 286.15; common slips: 368.30 (kept the duplicate), 248.75 (netted the
+        # refund), or higher (counted Shell/Netflix).
+        query: |
+          Here is a statement. What is my total spending on GROCERIES, excluding refunds and
+          excluding the duplicated Whole Foods charge on 03/12? Reply with ONLY the dollar
+          amount (for example 12.34).
+
+          03/04  Whole Foods Market       82.15
+          03/07  Shell Gas Station        45.00
+          03/09  Trader Joe's             37.40
+          03/12  Whole Foods Market       82.15
+          03/14  Safeway                  63.28
+          03/15  Netflix                  15.99
+          03/18  Sprouts Farmers Market   54.60
+          03/20  Refund: Trader Joe's    -37.40
+          03/22  Kroger                   48.72
+        score: { match: numeric, expected: 286.15, tolerance: 0 }
+
+      - id: codename_collision_reconcile
+        # Cross-reference all six and report the ONE duplicated-codename pair (Gateway +
+        # Scheduler both = Falcon). The regex requires BOTH names in either order, so naming
+        # one, or the wrong pair, scores 0.
+        query: |
+          Each subsystem below has a codename. Exactly two subsystems were mistakenly given the
+          SAME codename. Which two subsystems collide? Name both.
+
+          - Gateway   — codename Falcon,  owner Platform
+          - Memory    — codename Otter,   owner Data
+          - Scheduler — codename Falcon,  owner Infra
+          - Sandbox   — codename Badger,  owner Security
+          - Router    — codename Heron,   owner Platform
+          - Indexer   — codename Marmot,  owner Data
+        score:
+          match: regex
+          expected: "(?is)(gateway.*scheduler|scheduler.*gateway)"

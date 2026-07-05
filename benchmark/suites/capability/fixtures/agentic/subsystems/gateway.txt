@@ -1,0 +1,3 @@
+Subsystem: Gateway. Internal codename: FALCON-G7.
+Role: it serializes one FIFO turn per conversation and routes channel messages to the agent.
+Owner team: Platform. On-call rotation: weekly.

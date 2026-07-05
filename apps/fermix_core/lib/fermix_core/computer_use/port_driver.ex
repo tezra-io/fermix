@@ -1,96 +1,79 @@
 defmodule FermixCore.ComputerUse.PortDriver do
   @moduledoc """
-  The production `ComputerUse.Driver`: an Elixir Port to the vendored OS-driver
-  sidecar binary (docs/design/COMPUTER_USE.md §5). One newline-delimited JSON
-  request to the sidecar's stdin, one newline-delimited JSON response back.
+  The production computer-use `Driver`: a thin fermix adapter over
+  `Compux.PortDriver` (the crash-isolated Rust sidecar spawned over a Port).
 
-  Only the Port plumbing lives here and is unit-tested against a benign fake echo
-  sidecar; the REAL Rust `enigo`+`xcap` binary (actual screen capture + input
-  injection + macOS TCC) is Phase-1e and needs real-Mac verification — it is NOT
-  shipped or claimed here. `start/1` fails loud if the configured binary is absent
-  rather than degrading.
+  compux owns the MECHANISM — transport framing, coordinate math, the wire
+  protocol. This adapter adds fermix POLICY on top:
 
-  Framing note: the design says "line-framed JSON". A base64 screenshot response
-  can be multiple MB, so this reader sets a large line limit and still accumulates
-  `:noeol` fragments up to a hard cap — newline-delimited (JSON has no embedded
-  newlines) but robust to large single responses.
+    * **version handshake** — `start/1` performs the `hello` round-trip and refuses
+      a sidecar whose `protocol_version` differs from
+      `Compux.Protocol.protocol_version/0`, so the compiled-in encoder and the
+      separately-installed binary can never silently drift.
+    * **timeout telemetry** — a sidecar-action timeout is surfaced through the
+      centralized `Timeouts.expired/3` (correlated by `:session_id`) and returns the
+      `{:error, {:timeout, :cu_sidecar_action, ms}}` shape the `Session` poison-resets
+      on. compux itself stays policy-free and only returns `{:error, {:timeout, ms}}`.
+
+  The state keeps `:port` at the top level so the owning `Session`'s `handle_info`
+  can match stale-response / exit-status messages by port.
   """
 
-  @behaviour FermixCore.ComputerUse.Driver
+  @behaviour Compux.Driver
 
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.Timeouts
-
-  require Logger
-
-  @max_response_bytes 16_777_216
 
   @impl true
   def start(opts) do
     path = Keyword.fetch!(opts, :binary_path)
 
-    if File.regular?(path) do
-      port = Port.open({:spawn_executable, path}, port_options(opts))
-      # session_id (optional) rides in the driver state so a sidecar-action
-      # timeout firing in receive_response/2 can correlate via Timeouts.expired/3.
-      {:ok, %{port: port, session_id: Keyword.get(opts, :session_id)}}
-    else
-      {:error, {:sidecar_missing, path}}
-    end
-  end
-
-  @impl true
-  def execute(%{port: port} = state, request) when is_map(request) do
-    Port.command(port, Protocol.encode_request(request))
-    receive_response(port, Map.get(state, :session_id))
-  rescue
-    # Port.command raises if the port is already closed (sidecar died).
-    ArgumentError -> {:error, :sidecar_unavailable}
-  end
-
-  @impl true
-  def stop(%{port: port}) do
-    if Port.info(port), do: Port.close(port)
-    :ok
-  rescue
-    ArgumentError -> :ok
-  end
-
-  defp port_options(opts) do
-    [
-      {:line, @max_response_bytes},
-      :binary,
-      :exit_status,
-      :use_stdio,
-      {:args, Keyword.get(opts, :args, [])},
-      {:env, Keyword.get(opts, :env, [])}
+    compux_opts = [
+      binary_path: path,
+      timeout: Keyword.get(opts, :timeout, Timeouts.cu_sidecar_action()),
+      args: Keyword.get(opts, :args, []),
+      env: Keyword.get(opts, :env, [])
     ]
-  end
 
-  defp receive_response(port, session_id, acc \\ [], size \\ 0) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        Protocol.decode_response(IO.iodata_to_binary([acc, chunk]))
-
-      {^port, {:data, {:noeol, chunk}}} ->
-        accumulate(port, session_id, acc, size, chunk)
-
-      {^port, {:exit_status, status}} ->
-        {:error, {:sidecar_exited, status}}
-    after
-      Timeouts.cu_sidecar_action() ->
-        ms = Timeouts.cu_sidecar_action()
-        Timeouts.expired(:cu_sidecar_action, ms, %{session_id: session_id})
+    with {:ok, cstate} <- Compux.PortDriver.start(compux_opts),
+         :ok <- handshake(cstate) do
+      {:ok, Map.put(cstate, :session_id, Keyword.get(opts, :session_id))}
     end
   end
 
-  defp accumulate(port, session_id, acc, size, chunk) do
-    new_size = size + byte_size(chunk)
+  @impl true
+  def execute(state, request) when is_map(request) do
+    case Compux.PortDriver.execute(state, request) do
+      {:error, {:timeout, ms}} ->
+        Timeouts.expired(:cu_sidecar_action, ms, %{session_id: state.session_id})
 
-    if new_size > @max_response_bytes do
-      {:error, :sidecar_response_too_large}
-    else
-      receive_response(port, session_id, [acc, chunk], new_size)
+      other ->
+        other
+    end
+  end
+
+  @impl true
+  def stop(state), do: Compux.PortDriver.stop(state)
+
+  # One hello round-trip: refuse a binary whose wire version we don't speak, and
+  # tear the freshly-started sidecar down on refusal so no orphaned Port leaks.
+  defp handshake(cstate) do
+    ours = Compux.Protocol.protocol_version()
+
+    case Compux.PortDriver.execute(cstate, %{"action" => "hello"}) do
+      {:ok, %{"protocol_version" => ^ours}} ->
+        :ok
+
+      {:ok, %{"protocol_version" => theirs}} ->
+        Compux.PortDriver.stop(cstate)
+        {:error, {:protocol_mismatch, %{library: ours, sidecar: theirs}}}
+
+      {:ok, _other} ->
+        Compux.PortDriver.stop(cstate)
+        {:error, {:protocol_mismatch, %{library: ours, sidecar: nil}}}
+
+      {:error, reason} ->
+        Compux.PortDriver.stop(cstate)
+        {:error, reason}
     end
   end
 end

@@ -92,6 +92,21 @@ defmodule FermixCore.Setup.DoctorTest do
     path
   end
 
+  describe "computer_use_permissions/0" do
+    setup do
+      original = Application.get_env(:fermix_core, :computer_use, [])
+      on_exit(fn -> Application.put_env(:fermix_core, :computer_use, original) end)
+      :ok
+    end
+
+    test "reports :disabled without spawning the sidecar when the feature is off" do
+      # Establish the precondition rather than trusting global env (hermetic rule):
+      # disabled short-circuits before installed?/probe, so this is deterministic.
+      Application.put_env(:fermix_core, :computer_use, enabled: false)
+      assert {:ok, %{state: :disabled}} = Doctor.computer_use_permissions()
+    end
+  end
+
   describe "active_provider/0" do
     test "defaults to :openai when agent.provider is unset" do
       Application.delete_env(:fermix_core, :agent)
@@ -1004,4 +1019,48 @@ defmodule FermixCore.Setup.DoctorTest do
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)
   defp restore_env(app, key, value), do: Application.put_env(app, key, value)
+
+  describe "stale_token_profiles/0" do
+    setup do
+      previous_home = System.get_env("FERMIX_HOME")
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-stale-tokens")
+      System.put_env("FERMIX_HOME", home)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "returns only the stale profile names, sorted" do
+      :ok = Store.write("xai_oauth", token_entry(-7200))
+      :ok = Store.write(:openai_codex, token_entry(-7200))
+      :ok = Store.write("gmail:primary", token_entry(3600))
+
+      assert {:ok, ["openai_codex", "xai_oauth"]} = Doctor.stale_token_profiles()
+    end
+
+    test "propagates a read error instead of swallowing it", %{home: home} do
+      File.write!(Path.join(home, "auth.json"), "{ not json")
+
+      assert {:error, {:invalid_json, _}} = Doctor.stale_token_profiles()
+    end
+  end
+
+  defp token_entry(expires_in_seconds) do
+    %{
+      auth_mode: "oauth2",
+      provider: "google",
+      tokens: %{access_token: "at", refresh_token: "rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), expires_in_seconds, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
+  end
 end

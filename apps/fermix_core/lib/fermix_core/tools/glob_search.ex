@@ -68,19 +68,12 @@ defmodule FermixCore.Tools.GlobSearch do
       |> Path.wildcard(match_dot: true)
       |> Enum.filter(&File.regular?/1)
       |> Enum.map(&Path.expand/1)
-      |> Enum.filter(&sandbox_allows?(&1, context))
+      |> then(&Sandbox.read_paths(&1, :glob_search, context))
       |> Enum.sort()
       |> Enum.take(max_results)
       |> Support.success_json()
     else
       {:error, reason} -> Support.error(reason)
-    end
-  end
-
-  defp sandbox_allows?(path, context) do
-    case Sandbox.read_path(path, :glob_search, context) do
-      {:ok, _resolved} -> true
-      {:error, _reason} -> false
     end
   end
 end

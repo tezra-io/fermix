@@ -1,10 +1,10 @@
 defmodule FermixCore.Tools.ComputerUse do
   @moduledoc """
-  Control a desktop (`:host`) or browser (`:browser`) GUI by screenshot +
-  mouse/keyboard, one action per call (docs/design/COMPUTER_USE.md).
+  Control the host desktop GUI by screenshot + mouse/keyboard, one action per call
+  (docs/design/COMPUTER_USE_V2.md).
 
-  Off by default and dangerous in `:host` mode (it drives the real logged-in
-  desktop). The tool is thin: it resolves the per-conversation `ComputerUse.Session`
+  Off by default and dangerous: it drives the real logged-in desktop. The tool is
+  thin: it resolves the per-conversation `ComputerUse.Session`
   from the call context (started lazily by the session manager), then runs each
   action through the session's classify → execute flow and returns the post-action
   screenshot as an image the model can see (the Phase-0 `success_with_images` path).
@@ -18,9 +18,9 @@ defmodule FermixCore.Tools.ComputerUse do
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
+  alias Compux.Protocol
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.Protocol
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -33,11 +33,24 @@ defmodule FermixCore.Tools.ComputerUse do
 
   @impl true
   def description do
-    "Drive a desktop or browser GUI by screenshot + mouse/keyboard, one action per call. " <>
+    "Drive the host desktop GUI by screenshot + mouse/keyboard, one action per call. " <>
+      "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
+      "session they already have open; a `browser`/`shell` action runs in its own context and " <>
+      "won't touch their screen. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
-      "pixel coordinates from the latest screenshot. Honor the access mode shown on the `action` " <>
-      "parameter: standard confirms before anything irreversible; open acts autonomously but still " <>
-      "confirms a truly dangerous/catastrophic action; strict is look-only."
+      "pixel coordinates from the latest screenshot. For a SMALL or dense target, zoom first: " <>
+      "`screenshot` with a `region` around it, then click/drag with the SAME region using the " <>
+      "coordinates you read in the magnified crop — clicks land far more accurately. Every " <>
+      "mutating action returns a fresh screenshot: CHECK it and retry if the click missed. " <>
+      "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
+      "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
+      "before a consequential action. `elements` (read-only) lists the clickable UI elements — " <>
+      "each with a click point — so you target by element instead of guessing pixels; " <>
+      "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
+      "of repeated screenshots. Honor " <>
+      "the access mode shown on the `action` parameter: standard confirms before anything " <>
+      "irreversible; open acts autonomously but still confirms a truly dangerous/catastrophic " <>
+      "action; strict is look-only."
   end
 
   @impl true
@@ -54,11 +67,11 @@ defmodule FermixCore.Tools.ComputerUse do
         },
         "x" => %{
           "type" => "integer",
-          "description" => "X pixel for click/move/scroll (screenshot space)"
+          "description" => "X pixel for click/move/scroll/inspect (screenshot space)"
         },
         "y" => %{
           "type" => "integer",
-          "description" => "Y pixel for click/move/scroll (screenshot space)"
+          "description" => "Y pixel for click/move/scroll/inspect (screenshot space)"
         },
         "display" => %{
           "type" => "integer",
@@ -77,12 +90,39 @@ defmodule FermixCore.Tools.ComputerUse do
           "description" => "Scroll direction"
         },
         "amount" => %{"type" => "integer", "description" => "Scroll amount (positive)"},
-        "text" => %{"type" => "string", "description" => "Text to type (for action=type)"},
+        "text" => %{
+          "type" => "string",
+          "description" => "Text to type or paste (for action=type/paste)"
+        },
         "chord" => %{
           "type" => "string",
           "description" => "Key chord for action=key, e.g. \"ctrl+s\""
         },
-        "ms" => %{"type" => "integer", "description" => "Milliseconds to wait (for action=wait)"}
+        "ms" => %{"type" => "integer", "description" => "Milliseconds to wait (for action=wait)"},
+        "timeout_ms" => %{
+          "type" => "integer",
+          "description" =>
+            "Max ms to wait for a change (for action=wait_for_change; default 10000)"
+        },
+        "poll_ms" => %{
+          "type" => "integer",
+          "description" => "Check interval in ms (for action=wait_for_change; default 250)"
+        },
+        "region" => %{
+          "type" => "object",
+          "properties" => %{
+            "x" => %{"type" => "integer"},
+            "y" => %{"type" => "integer"},
+            "w" => %{"type" => "integer"},
+            "h" => %{"type" => "integer"}
+          },
+          "required" => ["x", "y", "w", "h"],
+          "description" =>
+            "Optional zoom: a rectangle {x,y,w,h} in the CURRENT full screenshot's pixel space. " <>
+              "On `screenshot` it returns a magnified crop of that rectangle; on a " <>
+              "click/move/drag/scroll, pass the SAME region and give x,y in the magnified image " <>
+              "to act precisely on a small target."
+        }
       }
     }
   end
@@ -105,13 +145,21 @@ defmodule FermixCore.Tools.ComputerUse do
   def when_to_use do
     "When a task needs eyes-and-hands on a GUI that has no API — clicking, typing, or " <>
       "reading rendered visual state in a desktop app or browser. Screenshot first, then act. " <>
-      "Prefer the dedicated browser/file/web tools when they cover the task; this is the last resort. " <>
+      "It is the ONLY tool that sees and acts on the user's OWN live screen or the session they " <>
+      "are watching. Still prefer a purpose-built tool when the target is addressable — a file " <>
+      "path (file_read), a URL/query (web_fetch/web_search/browser), a system fact (shell) — even " <>
+      "if it is also open on screen; reach for computer_use only for state that exists solely as " <>
+      "pixels, or a task that must act on the very session the user is looking at (browser/shell " <>
+      "use their own isolated context and desync). " <>
       "In standard access, ask the owner and wait for their go-ahead before any irreversible action."
   end
 
   defp base_action_description do
-    "The GUI action. Read-only: screenshot, mouse_move, wait. Mutating: left_click, " <>
-      "right_click, double_click, left_click_drag, scroll, type, key."
+    "The GUI action. Read-only: screenshot, inspect, elements (list the clickable UI " <>
+      "elements with a click point each — prefer this over guessing pixels), " <>
+      "wait_for_change (block until the screen changes, then return the new frame), " <>
+      "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
+      "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key."
   end
 
   defp action_description(:strict) do
@@ -141,6 +189,10 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         args: %{"action" => "left_click", "x" => 640, "y" => 360},
         note: "click at a screenshot pixel"
+      },
+      %{
+        args: %{"action" => "inspect", "x" => 640, "y" => 360},
+        note: "check what UI element is under a point before clicking it"
       },
       %{args: %{"action" => "type", "text" => "hello"}, note: "type into the focused field"}
     ]
@@ -181,6 +233,7 @@ defmodule FermixCore.Tools.ComputerUse do
 
     ToolTelemetry.exec("computer_use", context, success, duration,
       metadata: %{action: Map.get(params, "action")},
+      input: params,
       result: result
     )
 

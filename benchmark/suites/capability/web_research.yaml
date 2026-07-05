@@ -1,0 +1,100 @@
+suite: cap_web_research
+title: "Capability — live web research (single verifiable answer)"
+description: >
+  Realistic info-seeking tasks (the ~21% of real assistant use that needs live
+  data) — each reverse-designed (GAIA/AssistantBench style) to have ONE short,
+  stable, verifiable answer, with a built-in trap (offset fiscal calendars, a
+  common memory-vs-reality flip, set boundaries) so frontier models actually
+  diverge instead of all scoring 100%. Every gold was verified against a primary
+  source on 2026-06-30 (provenance below each case). A correct answer requires the
+  model to actually fetch/ground, not recall stale parametric memory.
+
+  PRECONDITION: the dev daemon's web_search + web_fetch must work, or ALL of these
+  fail uniformly (a daemon gap, not a model difference). Answers are stable
+  (closed fiscal years, fixed model-year EPA ratings, set-membership), but re-verify
+  if re-using much later.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: quant_lookup
+    title: "Find a specific current/quantitative figure"
+    severity: normal
+    tags: [capability, web, research]
+    cases:
+      - id: irs_std_deduction_single_2026
+        query: >
+          What is the IRS standard deduction for a SINGLE filer for tax year 2026?
+          Reply with ONLY the dollar amount as a plain number, no commas and no
+          symbols (e.g. 12345).
+        # $16,100 for 2026 (up from $15,750 in 2025), Rev. Proc. 2025-32 (released
+        # Oct 2025) — a fresh figure the model must look up rather than a closed-year
+        # headline it already knows. Trap: the 2025 value $15,750. Source:
+        # irs.gov/newsroom "IRS releases tax inflation adjustments for tax year 2026".
+        # Verified 2026-07-03. (Replaced nvidia_rev_growth: an old closed-FY figure the
+        # model knows, so it flakily answered without fetching -> provenance-flaky.)
+        score: { match: numeric, expected: 16100, tolerance: 0 }
+        # Provenance gate: a no-fetch answer (parametric recall) scores 0 even if the
+        # number is right — this task must be answered by live retrieval.
+        requires_tools: [web_search, web_fetch]
+
+      - id: irs_401k_limit_2026
+        query: >
+          What is the IRS employee elective-deferral contribution limit for a
+          401(k) plan, for someone under age 50, for tax year 2026? Reply with ONLY
+          the dollar amount as a plain number, no commas and no symbols
+          (e.g. 12345).
+        # $24,500 (up from $23,500 in 2025). Fresh fact (announced Nov 2025, Notice
+        # 2025-67) — correct answer is strong evidence of a live lookup. Source:
+        # irs.gov/newsroom "401(k) limit increases to $24,500 for 2026".
+        score: { match: numeric, expected: 24500, tolerance: 0 }
+        requires_tools: [web_search, web_fetch]
+
+      - id: rav4_crv_awd_hybrid_mpg
+        query: >
+          I'm cross-shopping the all-wheel-drive HYBRID versions of the 2024 Toyota
+          RAV4 and the 2024 Honda CR-V. According to the EPA's official ratings
+          (fueleconomy.gov), which of the two has the higher COMBINED MPG, and what
+          is that combined MPG figure? Reply with ONLY the winning model name and
+          its combined MPG, in the form 'RAV4: 39'.
+        # RAV4 Hybrid AWD = 39 combined (41/38) beats CR-V Hybrid AWD = 37 (40/34).
+        # Trap: the CR-V hybrid is commonly assumed the efficiency leader (memory vs
+        # live data). Sources: fueleconomy.gov IDs 47392 (RAV4), 46716 (CR-V).
+        score: { match: regex, expected: '(?i)(rav[\s-]?4[\s\S]{0,40}\b39\b|\b39\b[\s\S]{0,40}rav[\s-]?4)' }
+        requires_tools: [web_search, web_fetch]
+
+  - id: precise_figure_lookup
+    title: "Look up a precise, verify-worthy figure (financial / regulatory)"
+    # FRESH, precise regulatory figures that reliably force a live lookup — the model isn't
+    # confident enough to answer from memory. This is the KEY property for a retrieval task:
+    # closed-FY headline financials (nvidia/apple revenue) and stable trivia (nato/eu_gdp)
+    # the model already knows get answered WITHOUT fetching, making the provenance gate flaky
+    # or unfair. A precise, recently-announced number the model must verify, each with a
+    # prior-year trap. Golds verified against IRS/SSA primary sources 2026-07-03.
+    severity: normal
+    tags: [capability, web, research]
+    cases:
+      - id: hsa_self_only_limit_2026
+        query: >
+          What is the maximum HSA (Health Savings Account) contribution limit for someone
+          with SELF-ONLY high-deductible coverage, for the year 2026? Reply with ONLY the
+          dollar amount as a plain number, no commas and no symbols (e.g. 12345).
+        # $4,400 for 2026 (up from $4,300 in 2025), Rev. Proc. 2025-19 (released May 2025)
+        # — a fresh figure the model must look up. Trap: the 2025 value $4,300. Source:
+        # irs.gov Rev. Proc. 2025-19. Verified 2026-07-03. (Replaced apple_fy24_total_revenue:
+        # an old closed-FY headline figure the model knows -> provenance-flaky, like nvidia.)
+        score: { match: numeric, expected: 4400, tolerance: 0 }
+        requires_tools: [web_search, web_fetch]
+
+      - id: ss_wage_base_2026
+        query: >
+          What is the Social Security taxable maximum for the year 2026 — the "wage base",
+          i.e. the maximum annual earnings subject to Social Security (OASDI) tax? Reply
+          with ONLY the dollar amount as a plain number, no commas and no symbols
+          (e.g. 12345).
+        # $184,500 for 2026 (up from $176,100 in 2025), announced by the SSA on 2025-10-24
+        # — a fresh figure the model must look up. Trap: the 2025 value $176,100. Source:
+        # ssa.gov/oact/cola/cbb.html + payroll.org.
+        score: { match: numeric, expected: 184500, tolerance: 0 }
+        requires_tools: [web_search, web_fetch]

@@ -284,6 +284,25 @@ defmodule FermixCore.Realtime.SessionServerTest do
     refute state.session_update_event.session.instructions =~ "late_skill"
   end
 
+  test "the voice tool context is tagged as an attended computer-use origin (:voice)" do
+    fixture = runtime_session_fixture([])
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: fixture.capability_registry,
+        skill_registry: fixture.skill_registry
+      )
+
+    # This is the handoff that lets computer-use start a host session from voice,
+    # mirroring TurnRunner's `:interactive` tag for the text path.
+    assert :sys.get_state(server).tool_context.computer_use_origin == :voice
+  end
+
   test "audio_chunk forwards provider append event and tracks usage", %{server: server} do
     assert :ok = SessionServer.call_start(server)
     assert :ok = SessionServer.audio_chunk(server, "1234")

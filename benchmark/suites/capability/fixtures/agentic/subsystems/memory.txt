@@ -1,0 +1,3 @@
+Subsystem: Memory. Internal codename: OTTER-M3.
+Role: durable SQLite store with an ETS cache; consolidates facts on a ~24h "dreaming" gate.
+Owner team: Knowledge. Retention: indefinite for owner-scoped facts.

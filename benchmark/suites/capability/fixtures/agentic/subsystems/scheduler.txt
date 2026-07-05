@@ -1,0 +1,3 @@
+Subsystem: Scheduler. Internal codename: HERON-S9.
+Role: runs cron/interval jobs as isolated bounded agent loops that cannot see the creating chat.
+Owner team: Automation. Freshness window: 3600s.

@@ -2,6 +2,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.Mode
   alias FermixCore.Sandbox.PathPolicy
 
   test "an empty FERMIX_HOME yields absolute protected paths, not cwd-relative ones" do
@@ -116,6 +117,48 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
              PathPolicy.resolve_working_dir(root, config, context)
 
     assert PathPolicy.resolve_working_dir(nil, config, context, roots) ==
+             PathPolicy.resolve_working_dir(nil, config, context)
+
+    FermixTestSupport.SafeRm.rm_rf!(root)
+  end
+
+  test "allowed_path?/4 with both root sets precomputed matches allowed_path?/2 decisions" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-eff")
+    File.mkdir_p!(Path.join(home, ".ssh"))
+    File.mkdir_p!(Path.join(home, "work"))
+    config = Config.normalize(mode: :open, home: home, workspace_root: home)
+
+    # The effective-roots walk now happens once; the precomputed pair must yield
+    # the exact same allow/deny (and deny reason) as the self-computing /2 arity.
+    protected = PathPolicy.protected_paths(config)
+    effective = Mode.effective_roots(config)
+
+    paths = [
+      Path.join(home, ".ssh/id_rsa"),
+      Path.join(home, "work/file.txt"),
+      "/etc/passwd",
+      Path.join(System.tmp_dir!(), "path-policy-eff-elsewhere/file.txt")
+    ]
+
+    for path <- paths do
+      assert PathPolicy.allowed_path?(path, config, protected, effective) ==
+               PathPolicy.allowed_path?(path, config)
+    end
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
+  test "resolve_working_dir/5 with both root sets precomputed matches resolve_working_dir/3" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-rwd5")
+    config = Config.normalize(mode: :strict, workspace_root: root)
+    protected = PathPolicy.protected_paths(config)
+    effective = Mode.effective_roots(config)
+    context = %{cwd: root}
+
+    assert PathPolicy.resolve_working_dir(root, config, context, protected, effective) ==
+             PathPolicy.resolve_working_dir(root, config, context)
+
+    assert PathPolicy.resolve_working_dir(nil, config, context, protected, effective) ==
              PathPolicy.resolve_working_dir(nil, config, context)
 
     FermixTestSupport.SafeRm.rm_rf!(root)

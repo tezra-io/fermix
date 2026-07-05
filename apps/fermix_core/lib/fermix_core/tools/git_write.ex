@@ -17,7 +17,7 @@ defmodule FermixCore.Tools.GitWrite do
 
   @impl true
   def description,
-    do: "Stage, commit, checkout, or pull changes. Push is deferred to M10 approval."
+    do: "Stage, commit, checkout, or pull changes. This tool cannot push."
 
   @impl true
   def parameters do
@@ -44,7 +44,7 @@ defmodule FermixCore.Tools.GitWrite do
   def failure_modes do
     [
       %{tag: "unknown_command", description: "command is not in the mutating whitelist"},
-      %{tag: "push_deferred", description: "push is not available until M10 approval flow"},
+      %{tag: "push_deferred", description: "this tool cannot push"},
       %{tag: "git_failed", description: "git returned a non-zero exit code"}
     ]
   end
@@ -97,8 +97,7 @@ defmodule FermixCore.Tools.GitWrite do
   end
 
   defp validate_command("push") do
-    {:error,
-     "push_deferred: git_push lands in M10 with the approval flow; use shell only if explicitly authorized."}
+    {:error, "push_deferred: this tool cannot push."}
   end
 
   defp validate_command(command) when command in @commands, do: :ok

@@ -1,8 +1,8 @@
 defmodule FermixCore.Reply do
   @moduledoc """
-  Outbound reply contract: the text/media reply shape that core produces
-  (agent turns, the `send_attachment` and media-generation tools) and the
-  channel layer delivers.
+  Outbound reply contract: the text/media/reaction reply shape that core
+  produces (agent turns, the `send_attachment`, `react`, and media-generation
+  tools) and the channel layer delivers.
   """
 
   @type media_kind :: :image | :document | :audio | :video | :voice
@@ -15,7 +15,7 @@ defmodule FermixCore.Reply do
           optional(:mime_type) => String.t()
         }
 
-  @type outbound :: {:text, String.t()} | {:media, media_part()}
+  @type outbound :: {:text, String.t()} | {:media, media_part()} | {:react, String.t()}
   @type reply_fn :: (outbound() -> :ok | {:error, term()})
 
   @doc """

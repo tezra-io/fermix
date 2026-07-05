@@ -1,0 +1,91 @@
+suite: cap_coding
+title: "Capability — coding & artifact tasks (end-state checker scored)"
+description: >
+  Realistic agent tasks graded by a programmatic CHECKER over the sandbox
+  END-STATE after the turn (SWE-bench/tau-bench style), not the reply text. The
+  runner seeds a fresh per-trial scoped dir under the agent's workspace and templates
+  its relative path in as {ws}; the checker runs over it afterward. These force the
+  read→edit→run / write-a-correct-artifact loop that real coding use is.
+
+  PRECONDITION: an eval daemon with shell enabled + a strict sandbox confined to its
+  workspace (see docs/HARNESS.md "checker tier"). Checkers grade end-state only.
+defaults:
+  judge: false
+  timeout_ms: 300000
+
+scenarios:
+  - id: end_state_checker
+    title: "Fix code / produce a correct artifact, verified by end-state"
+    severity: normal
+    tags: [capability, coding, checker]
+    cases:
+      - id: bugfix_business_days
+        query: >
+          In {ws} there's a Python module business_days.py with a failing test — run
+          `python -m pytest tests/` from {ws} to see it. business_days_between(start,
+          end) should count Monday–Friday business days from start (inclusive) to end
+          (exclusive). Fix the bug in {ws}/business_days.py so ALL tests pass. Do not
+          edit the tests.
+        checker:
+          script: "suites/capability/checkers/pytest_business_days.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/business_days"
+          timeout_ms: 120000
+
+      - id: csv_to_region_json
+        query: >
+          In {ws} there's a sales.csv with columns region,product,units,unit_price.
+          Write {ws}/sales_by_region.json mapping each region to its total revenue
+          (sum of units × unit_price across that region's rows), with the regions
+          ordered from highest revenue to lowest. Include every region, even one whose
+          total is 0.
+        checker:
+          script: "suites/capability/checkers/csv_to_json.py"
+          mode: json
+          seed: "suites/capability/fixtures/code/sales_csv"
+          timeout_ms: 60000
+
+      - id: invoice_discount_bug
+        query: >
+          In {ws} there's a small pricing module (invoice.py, discounts.py) with a
+          failing test — run `python -m pytest tests/` from {ws} to see it.
+          invoice_total(lines, tax_pct) is supposed to return the sum of the DISCOUNTED
+          line totals with tax applied, but it's dropping the per-line discounts. Fix the
+          bug in {ws} so ALL tests pass. Do not edit the tests or the test file.
+        checker:
+          script: "suites/capability/checkers/pytest_invoice.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/invoice"
+          timeout_ms: 120000
+
+      - id: order_pipeline_boundary_bug
+        query: >
+          In {ws} there's an order-pricing package (catalog.py, pricing.py, report.py) with
+          a failing test — run `python -m pytest tests/` from {ws} to see it.
+          order_total_dollars is returning the wrong total for a 50-unit order: it's applying
+          the wrong volume-discount tier. Trace the bug to its ROOT cause and fix it in {ws}
+          so ALL tests pass. Do not edit the tests or the test file, and don't just special-case
+          the failing input — fix the actual defect.
+        # Root cause is a `>` vs `>=` off-by-one in catalog.bulk_tier (tier boundaries),
+        # manifesting two modules away in report.order_total_dollars. Hidden tests exercise
+        # the OTHER boundaries (10, 100) + tax, so a symptom-level patch in pricing/report
+        # fails. Discriminates: a weak model patches where the symptom shows, a strong one
+        # traces report -> pricing -> catalog.
+        checker:
+          script: "suites/capability/checkers/pytest_order.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/order_pipeline"
+          timeout_ms: 180000
+
+      - id: landlord_email
+        query: >
+          Write a formal email to my landlord, Mr. Adeyemi, and save it to
+          {ws}/email.txt. It must: be under 150 words; request that the broken heating
+          be repaired; note it hasn't worked since November 3; cite lease clause 14.2;
+          open with "Dear Mr. Adeyemi"; give a 14-day deadline; end with a polite
+          closing (e.g. "Sincerely"); and make the request explicit (e.g.
+          "please"/"kindly").
+        checker:
+          script: "suites/capability/checkers/landlord_email.py"
+          mode: json
+          timeout_ms: 60000
