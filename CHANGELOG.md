@@ -6,6 +6,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-05
+
+### Fixed
+
+- **The daemon no longer crashes at boot when the login keychain is locked.** A
+  required secret stored under `@keyring` (e.g. `OPENAI_API_KEY`) whose keychain
+  read timed out — common when the login keychain is locked or slow at daemon
+  launch — raised during config hydration and took down the whole node, leaving
+  the setup UI (the very surface used to fix it) unreachable. Boot now leaves the
+  `@keyring` sentinel in place and logs the failure (the same graceful handling
+  optional secrets already had) instead of crashing; the secret resolves on the
+  next boot once the keychain is reachable.
+- **`fermix setup` no longer opens the browser before the endpoint is live.** On a
+  readiness timeout the launcher printed the URL but still opened the browser,
+  landing on "Safari can't connect to the server". It now opens the browser only
+  once the endpoint actually answers; on timeout it hands back the URL to open
+  manually.
+- **The setup 403 page is now actionable.** Reaching the token-gated `/setup` page
+  without an authorized session returns `setup authorization required` plus a line
+  telling you to run `fermix setup` (the only thing that authorizes a browser
+  session), instead of a bare error.
+
 ## [0.5.0] - 2026-07-04
 
 ### Added
