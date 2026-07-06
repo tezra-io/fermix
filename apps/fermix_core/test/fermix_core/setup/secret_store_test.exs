@@ -157,6 +157,36 @@ defmodule FermixCore.Setup.SecretStoreTest do
     end
   end
 
+  describe "resolve_sentinels/2 when a required secret cannot be resolved at boot" do
+    setup do
+      Application.put_env(:fermix_core, :secret_writer, ReadFailsWriter)
+      :ok
+    end
+
+    test "leaves the sentinel instead of raising, so the daemon still boots" do
+      # 0.5.0 regression: a locked/slow login keychain makes `security` time out;
+      # resolving a REQUIRED @keyring secret then raised inside BootReport.init and
+      # crashed the whole daemon at boot — leaving the setup UI (the recovery
+      # surface) unreachable. It must leave the sentinel in place (like optional
+      # secrets), so the daemon boots and the secret resolves on the next boot once
+      # the keychain is reachable — and a save meanwhile round-trips the sentinel
+      # rather than orphaning the stored key.
+      assert resolve(snapshot_with(SecretWriter.sentinel())) == SecretWriter.sentinel()
+    end
+
+    test "logs an actionable error naming the secret and how to recover" do
+      log =
+        capture_log(fn ->
+          SecretStore.resolve_sentinels(snapshot_with(SecretWriter.sentinel()),
+            warn_plaintext: true
+          )
+        end)
+
+      assert log =~ "TELEGRAM_BOT_TOKEN"
+      assert log =~ "Unlock"
+    end
+  end
+
   describe "secrets are namespaced per profile" do
     test "a named profile stores and resolves under its own keychain coordinate" do
       # The same secret key, written under two profiles, must not collide — and
