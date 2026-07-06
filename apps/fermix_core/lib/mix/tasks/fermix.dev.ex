@@ -22,6 +22,7 @@ defmodule Mix.Tasks.Fermix.Dev do
 
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.LocalVoiceSocket
+  alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.ConfigStore
 
   @shortdoc "Run the full Fermix daemon from source"
@@ -115,6 +116,7 @@ defmodule Mix.Tasks.Fermix.Dev do
 
     if web? do
       Mix.shell().info("  Phoenix endpoint: http://127.0.0.1:#{phoenix_port()}")
+      Mix.shell().info("  Open setup:       #{setup_url()}")
     else
       Mix.shell().info("  Phoenix endpoint: (skipped — --no-web)")
     end
@@ -123,6 +125,21 @@ defmodule Mix.Tasks.Fermix.Dev do
     Mix.shell().info("  Channels:         #{channels_status(channels?)}")
     Mix.shell().info("")
     Mix.shell().info("Ctrl-C twice to stop.")
+  end
+
+  # Dev-only convenience: mint a one-time setup session token and print the
+  # authorized URL so web setup is one click from the terminal. F-1-safe — the
+  # token goes to the operator's own terminal, never into a served page (which is
+  # exactly what the packaged binary refuses to do). This lives only in the dev
+  # Mix task, so it never ships. Falls back to a hint if the token can't be minted.
+  defp setup_url do
+    case AccessToken.mint_launch_token() do
+      {:ok, %{token: token}} ->
+        "http://127.0.0.1:#{phoenix_port()}/setup?t=#{URI.encode_www_form(token)}"
+
+      {:error, reason} ->
+        "unavailable (#{inspect(reason)}) — run `mix fermix.setup`"
+    end
   end
 
   defp daemon_socket_path do
