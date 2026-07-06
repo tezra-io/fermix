@@ -44,6 +44,12 @@ final class AudioController {
     /// played PCM chunk. Drives the mascot's speaking-pulse visual.
     var onOutputLevel: ((Float) -> Void)?
 
+    /// Invoked on the main thread when the last scheduled playback buffer
+    /// finishes — i.e. audio has actually stopped leaving the speaker, which
+    /// is seconds after the model finished generating it. Lets the pet read as
+    /// speaking for the true audio duration, not just the delivery window.
+    var onPlaybackDrained: (() -> Void)?
+
     var isPlayingBack: Bool {
         playbackCounterLock.lock()
         defer { playbackCounterLock.unlock() }
@@ -303,7 +309,12 @@ final class AudioController {
             guard let self else { return }
             self.playbackCounterLock.lock()
             self.pendingPlaybackBuffers = max(0, self.pendingPlaybackBuffers - 1)
+            let drained = self.pendingPlaybackBuffers == 0
             self.playbackCounterLock.unlock()
+
+            if drained {
+                DispatchQueue.main.async { self.onPlaybackDrained?() }
+            }
         })
 
         if !wasPlaying {

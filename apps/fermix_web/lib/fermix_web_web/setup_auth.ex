@@ -43,7 +43,19 @@ defmodule FermixWebWeb.SetupAuth do
   defp forbidden(conn) do
     conn
     |> put_resp_content_type("text/plain")
-    |> send_resp(403, "setup authorization required\n")
+    |> send_resp(403, forbidden_body())
     |> halt()
+  end
+
+  # Keep the machine-readable "setup authorization required" phrase, but tell a
+  # human operator the one action that actually works: the `fermix setup` CLI is
+  # the only launch-token minter (a browser link is never trusted to unlock the
+  # secret-writing setup surface — SECURITY_REVIEW F-1).
+  defp forbidden_body do
+    """
+    setup authorization required
+
+    Run `fermix setup` in your terminal to open configuration in your browser.
+    """
   end
 end

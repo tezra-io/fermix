@@ -89,7 +89,7 @@ def test_xsession_token_is_deterministic_and_run_unique():
     # different run / trial / case → different token (no cross-run false-green)
     assert a != rc._xsession_token("cap_memory", "durable_codeword", "20260701T0001Z", 0)
     assert a != rc._xsession_token("cap_memory", "durable_codeword", "20260701T0000Z", 1)
-    assert a != rc._xsession_token("cap_memory", "durable_project_codename", "20260701T0000Z", 0)
+    assert a != rc._xsession_token("cap_memory", "durable_ledger_marker", "20260701T0000Z", 0)
 
 
 _XSESSION = """
@@ -155,6 +155,96 @@ def test_checker_fingerprint_tracks_script_content(tmp_path, monkeypatch):
     fp2 = rc._checker_fingerprint(_FakeCase(spec))
     assert fp1 != fp2
     assert rc._checker_fingerprint(_FakeCase(None)) == ""   # non-checker case -> empty
+
+
+# --- soft (taste) suite exclusion from the correctness composite ------------
+
+_SOFT = """
+suite: cap_taste
+title: taste
+soft: true
+scenarios:
+  - id: s
+    title: st
+    tags: [taste]
+    cases:
+      - id: t1
+        query: "explain a database index plainly"
+        rubric: "rewards a clear plain-language explanation"
+      - id: t2
+        query: "postgres or sqlite for a tiny side project?"
+        rubric: "rewards a decisive recommendation"
+"""
+
+_HARD = """
+suite: cap_hard
+title: hard
+scenarios:
+  - id: s
+    title: st
+    tags: [capability]
+    cases:
+      - id: h1
+        query: "2+2?"
+        score: { match: contains, expected: "4" }
+      - id: h2
+        query: "3+3?"
+        score: { match: contains, expected: "6" }
+"""
+
+
+def _write_named(tmp_path, name, text):
+    p = os.path.join(str(tmp_path), name)
+    with open(p, "w") as fh:
+        fh.write(text)
+    return p
+
+
+def _load_soft_and_hard(tmp_path):
+    _write_named(tmp_path, "cap_taste.yaml", _SOFT)
+    _write_named(tmp_path, "cap_hard.yaml", _HARD)
+    return suites.load_all(str(tmp_path))
+
+
+def test_soft_flag_loads(tmp_path):
+    by_name = {s.name: s for s in _load_soft_and_hard(tmp_path)}
+    assert by_name["cap_taste"].soft is True
+    assert by_name["cap_hard"].soft is False
+
+
+def test_soft_suite_excluded_from_default_sweep(tmp_path):
+    # default sweep (no --suite), even with judge ON: the soft suite is NOT folded in.
+    selected, _skipped = rc.capability_cases(_load_soft_and_hard(tmp_path), None, None, None, True)
+    assert {s.name for s, _scn, _c in selected} == {"cap_hard"}
+
+
+def test_soft_suite_included_only_when_named(tmp_path):
+    # explicitly requested by name -> it runs on its own axis (judge needed for a rubric).
+    selected, _skipped = rc.capability_cases(_load_soft_and_hard(tmp_path), {"cap_taste"}, None, None, True)
+    assert {s.name for s, _scn, _c in selected} == {"cap_taste"}
+
+
+# --- unvalidated hard-tier candidates (candidates/ subdir) ------------------
+
+def test_candidates_excluded_by_default_included_with_flag(tmp_path):
+    # a suite under candidates/ is OUT of the default glob and loads only with the flag,
+    # so an unvalidated draft can never taint a headline sweep.
+    cand = os.path.join(str(tmp_path), "candidates")
+    os.makedirs(cand, exist_ok=True)
+    _write_named(tmp_path, "cap_real.yaml", _HARD.replace("suite: cap_hard", "suite: cap_real"))
+    with open(os.path.join(cand, "cap_draft.yaml"), "w") as fh:
+        fh.write(_HARD.replace("suite: cap_hard", "suite: cap_draft"))
+    default = {s.name for s in suites.load_all(str(tmp_path))}
+    flagged = {s.name for s in suites.load_all(str(tmp_path), include_candidates=True)}
+    assert default == {"cap_real"}                       # draft excluded by default
+    assert flagged == {"cap_real", "cap_draft"}          # loaded only with include_candidates
+
+
+def test_real_hard_candidates_suite_is_valid():
+    # the shipped candidate drafts must load + validate (they just don't run by default)
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    names = {s.name for s in suites.load_all(cap_dir, include_candidates=True)}
+    assert "cap_hard" in names
 
 
 if __name__ == "__main__":

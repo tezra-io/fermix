@@ -19,6 +19,7 @@ task success (folded in at `score_trial`, never averaged away).
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 
 
@@ -67,6 +68,12 @@ class ConfigScore:
     tokens_per_success: float   # total_tokens / total_successes (inf if none)
     p95_latency_ms: float       # tail proxy: max over tasks of per-task p95
     safety_violations: int
+    # 95% percentile-bootstrap CI on mean_task_success (resampling TASKS). The honest
+    # uncertainty band on the headline: if two configs' CIs overlap, the success gap is
+    # within noise for this task sample — don't rank on it. None for rows scored before
+    # the CI existed (they render "—" and simply predate the signal).
+    mean_task_success_ci_lo: float | None = None
+    mean_task_success_ci_hi: float | None = None
 
 
 @dataclass
@@ -113,6 +120,26 @@ def _check(n: int, c: int, k: int) -> None:
         raise ValueError(f"bad estimator args: n={n} c={c} k={k} (need 0<=c<=n, 1<=k<=n)")
 
 
+def bootstrap_ci(values: list[float], *, iters: int = 2000, confidence: float = 0.95,
+                 seed: int = 1729) -> tuple[float, float]:
+    """Percentile-bootstrap CI for the MEAN of `values`, resampling with replacement.
+    Fed the per-task mean-success list, it answers "how much does this config's headline
+    depend on which tasks happened to be in the suite" — the between-task variance a bare
+    point estimate hides. DETERMINISTIC: a fixed seed makes the interval a reproducible
+    function of the inputs (a benchmark number must not wander run to run for identical
+    data). A single value yields a degenerate point interval."""
+    if not values:
+        raise ValueError("bootstrap_ci: no values")
+    n = len(values)
+    if n == 1:
+        return (values[0], values[0])
+    rng = random.Random(seed)
+    means = sorted(sum(values[rng.randrange(n)] for _ in range(n)) / n for _ in range(iters))
+    lo = means[int(math.floor((1 - confidence) / 2 * iters))]
+    hi = means[min(iters - 1, int(math.ceil((1 + confidence) / 2 * iters)) - 1)]
+    return (lo, hi)
+
+
 def aggregate_task(trials: list[TrialResult], k: int, threshold: float) -> TaskStats:
     """Fold k trials of ONE task into stats. A trial 'passes' when its effective
     success >= threshold (binary scorers use 1.0; partial-credit f1/judge can use
@@ -153,6 +180,7 @@ def aggregate_config(config_id: str, task_stats: list[TaskStats]) -> ConfigScore
     total_cost = sum(st.total_cost for st in task_stats)
     total_tokens = sum(st.total_tokens for st in task_stats)
     total_successes = sum(st.successes for st in task_stats)
+    ci_lo, ci_hi = bootstrap_ci([st.mean_success for st in task_stats])
     return ConfigScore(
         config_id=config_id,
         n_tasks=n_tasks,
@@ -166,6 +194,8 @@ def aggregate_config(config_id: str, task_stats: list[TaskStats]) -> ConfigScore
         tokens_per_success=(total_tokens / total_successes) if total_successes else math.inf,
         p95_latency_ms=max(st.p95_latency_ms for st in task_stats),
         safety_violations=sum(st.safety_violations for st in task_stats),
+        mean_task_success_ci_lo=ci_lo,
+        mean_task_success_ci_hi=ci_hi,
     )
 
 

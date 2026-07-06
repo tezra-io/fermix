@@ -1736,7 +1736,7 @@ defmodule FermixWebWeb.SetupLive do
 
   # Computer-use (compux library) download errors.
   defp install_error({:no_checksum_for_target, _target}),
-    do: "the Computer Use helper isn't published for this Fermix version yet."
+    do: "the Computer Use helper hasn't been published for this platform yet."
 
   defp install_error({:checksum_mismatch, _details}), do: "checksum mismatch — refusing."
   defp install_error({:http_status, status}), do: "download failed (HTTP #{status})."

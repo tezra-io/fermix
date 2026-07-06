@@ -6,6 +6,116 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-07-06
+
+### Fixed
+
+- **A slow keychain read can no longer crash the setup page or leak a secret to
+  the log.** When `security` returned a secret just after its timeout,
+  `CommandRunner` left that output — the raw secret — in the calling process's
+  mailbox; a GenServer caller (the setup LiveView, `BootReport`) then crashed on
+  the unexpected port message and the secret was written into the crash log. The
+  runner now drains and flushes any late child output on timeout, so it never
+  reaches the caller.
+- **Honest Computer Use install error.** A failed Computer Use install now says
+  the native helper "hasn't been published for this platform yet" rather than
+  "…for this Fermix version yet", which wrongly implied a `fermix upgrade` would
+  help. (The helper's first release is still pending.)
+
+### Changed
+
+- **macOS keychain secrets are stored with an open access list (`-A`).** Without
+  it, each item's ACL is pinned to the exact code signature of the writing
+  binary; the daemon — an ad-hoc-signed, per-version binary the keychain can't
+  reliably match — is then treated as an untrusted app and macOS blocks every
+  read on an authorization prompt the headless service can't answer, so reads
+  hang and time out (slow boot, slow/failed setup). `-A` lets the daemon read
+  headlessly. Trade-off: any process running as the same user can read the item
+  without a prompt — no weaker than the pre-keychain plaintext-in-config
+  baseline, and still keychain-stored. The proper long-term fix is Developer-ID
+  signing the release binary. Existing secrets keep their old ACL until
+  re-stored (re-enter them in `fermix setup`, or `security add-generic-password
+  -U -A …`).
+
+### Fixed
+
+- **The daemon no longer crashes at boot when the login keychain is locked.** A
+  required secret stored under `@keyring` (e.g. `OPENAI_API_KEY`) whose keychain
+  read timed out — common when the login keychain is locked or slow at daemon
+  launch — raised during config hydration and took down the whole node, leaving
+  the setup UI (the very surface used to fix it) unreachable. Boot now leaves the
+  `@keyring` sentinel in place and logs the failure (the same graceful handling
+  optional secrets already had) instead of crashing; the secret resolves on the
+  next boot once the keychain is reachable.
+- **`fermix setup` no longer opens the browser before the endpoint is live.** On a
+  readiness timeout the launcher printed the URL but still opened the browser,
+  landing on "Safari can't connect to the server". It now opens the browser only
+  once the endpoint actually answers; on timeout it hands back the URL to open
+  manually.
+- **The setup 403 page is now actionable.** Reaching the token-gated `/setup` page
+  without an authorized session returns `setup authorization required` plus a line
+  telling you to run `fermix setup` (the only thing that authorizes a browser
+  session), instead of a bare error.
+
+## [0.5.0] - 2026-07-04
+
+### Added
+
+- **Computer Use is now backed by the standalone `compux` library.** The native
+  computer-use sidecar was extracted into a separate signed binary (mechanism in
+  `compux`, policy in Fermix). This release wires Fermix to it, ships the compux
+  v0.2/v0.3 action set, surfaces the screenshot cursor, and gives the Computer
+  Use setup card its own name and logo. Computer use can also run over realtime
+  voice now, across one shared untrusted boundary. Still experimental and off by
+  default.
+- **Emoji-reaction acknowledgements.** A pure acknowledgement ("ok", "thanks",
+  👍) is answered with a message-level emoji reaction instead of a text bubble,
+  across all reaction-capable channels (Telegram, Discord, WhatsApp, Signal,
+  Slack). A delivered reaction with no accompanying text ends the turn without a
+  continuation LLM call, roughly halving ack latency.
+- **Chief-of-staff prompt surgery (safe subset)** landed in the operating prompt.
+- **Plugin auth failures are agent-actionable**, and stale OAuth tokens are now
+  flagged in the provider badge and `fermix doctor`.
+
+### Performance
+
+- **Sandbox path checks no longer recompute their invariant root sets.**
+  `read_path`/`write_path`/`working_dir` resolve the protected and effective root
+  sets once per call instead of ~3×, and `content_search`/`glob_search` validate
+  their candidates through a single batched `Sandbox.read_paths/3` instead of a
+  per-file `lstat`/`ls` syscall storm. Behavior-preserving: identical allow/deny
+  decisions, `cond` order, and deny audit traces.
+- **Album image downloads run concurrently.** Multi-image attachments (e.g. a
+  Telegram media group of up to 10 images) are fetched in parallel (bounded)
+  instead of serially, cutting pre-turn latency from the sum of the downloads
+  toward the slowest single one. Ordering, all-or-nothing fail-loud, and
+  temp-file cleanup are preserved.
+
+### Fixed
+
+- **Security:** `git_write` can no longer reach an `ext::` RCE — `GIT_ALLOW_PROTOCOL`
+  is pinned so a `git pull` cannot invoke an external protocol helper.
+- **Security:** the home page no longer mints a `/setup` launch token to any
+  visitor.
+- **Computer use fails closed on host control for detached `/background` runs**,
+  and picks up the compux stop-kill and display-asleep fail-fast paths.
+- **Scheduled deliveries no longer drop on a Finch pool-checkout timeout**
+  (wake-from-sleep pool starvation).
+- **FermixPet stays in its speaking look for the whole spoken reply.** The macOS
+  voice companion previously flipped back to the listening face as soon as the
+  model finished *generating*, even though the buffered voice kept playing for
+  seconds after; it now tracks actual audio playback (face, glow, controls, and
+  motion), leaving the microphone/turn-taking state machine untouched.
+
+### Changed
+
+- **Removed the `watch` construct**, parked pending a redesign.
+- **FermixPet mascot animation feels more alive** on the existing art — no new
+  assets or dependencies: eye blinks on the open-eyed states, motion that eases
+  between states instead of snapping, a smoothed audio-reactive speaking pulse,
+  and a corrected speaking-face offset. The animation timeline now pauses when
+  the pet window is hidden to save energy.
+
 ## [0.4.2] - 2026-06-28
 
 ### Added — Computer Use is now installable (signed catalog plugin)

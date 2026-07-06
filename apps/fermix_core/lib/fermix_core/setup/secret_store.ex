@@ -216,8 +216,18 @@ defmodule FermixCore.Setup.SecretStore do
     snapshot
   end
 
-  defp handle_keyring_resolution_error(_snapshot, secret, reason, _warn?) do
-    raise ArgumentError, SecretWriter.format_error(secret.key, reason)
+  # A REQUIRED secret that cannot be resolved (locked/slow login keychain →
+  # `security` timeout, or a momentarily-unreadable entry) must NOT crash the
+  # daemon at boot. Resolving this used to raise, and because it runs inside
+  # BootReport.init / runtime.exs config hydration, the raise took down the whole
+  # node — leaving the setup UI (the recovery surface) unreachable. Warn loudly and
+  # leave the @keyring sentinel in place (exactly what optional secrets do): the
+  # daemon boots, and the secret resolves on the next boot once the keychain is
+  # reachable. Leaving the sentinel (vs blanking it) means a config save while the
+  # keychain is down round-trips it untouched instead of orphaning the stored key.
+  defp handle_keyring_resolution_error(snapshot, secret, reason, warn?) do
+    if warn?, do: warn_required_secret(secret, reason)
+    snapshot
   end
 
   defp warn_plaintext_secret(secret) do
@@ -231,6 +241,14 @@ defmodule FermixCore.Setup.SecretStore do
       "#{SecretWriter.format_error(secret.key, reason)} #{secret.functionality} will fail until " <>
         "the secret is available. Run `fermix setup` to re-save it, or remove the stale " <>
         "@keyring value from #{ConfigStore.path()} if you do not use that functionality."
+    )
+  end
+
+  defp warn_required_secret(secret, reason) do
+    Logger.error(
+      "#{SecretWriter.format_error(secret.key, reason)} Fermix started without #{secret.env}; " <>
+        "the capability that needs it is unavailable until the keychain is reachable. Unlock " <>
+        "your login keychain and restart, or re-save it with `fermix setup`."
     )
   end
 

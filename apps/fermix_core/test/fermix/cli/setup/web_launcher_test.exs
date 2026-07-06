@@ -85,9 +85,51 @@ defmodule Fermix.CLI.Setup.WebLauncherTest do
                  )
       end)
 
-    assert output =~ "readiness did not answer before the timeout"
+    assert output =~ "not reachable yet"
     assert output =~ "http://127.0.0.1:4030/setup?t="
     assert output =~ "fermix status"
+  end
+
+  test "run does NOT open the browser when the endpoint never becomes reachable" do
+    # Regression guard: opening the browser before the endpoint binds lands the
+    # operator on "Safari can't connect to the server". On a live-wait timeout the
+    # opener must never be invoked — the URL is handed back for a manual open.
+    parent = self()
+
+    output =
+      capture_io(fn ->
+        assert :ok =
+                 WebLauncher.run(
+                   scope: :user,
+                   service: fake_service(installed?: true),
+                   standalone?: fn -> true end,
+                   live_probe: fn -> {:error, :not_ready} end,
+                   sleep: fn _ms -> :ok end,
+                   max_attempts: 1,
+                   opener: fn _url -> send(parent, :browser_opened) && :ok end
+                 )
+      end)
+
+    refute_received :browser_opened
+    assert output =~ "not reachable yet"
+    assert output =~ "http://127.0.0.1:4030/setup?t="
+  end
+
+  test "run opens the browser once the endpoint is live" do
+    parent = self()
+
+    capture_io(fn ->
+      assert :ok =
+               WebLauncher.run(
+                 scope: :user,
+                 service: fake_service(installed?: true),
+                 standalone?: fn -> true end,
+                 live_probe: fn -> :ok end,
+                 opener: fn _url -> send(parent, :browser_opened) && :ok end
+               )
+    end)
+
+    assert_received :browser_opened
   end
 
   test "run uses PORT when no explicit setup port is passed" do
