@@ -21,16 +21,32 @@ defmodule Fermix.CLI.Setup.WebLauncher do
          {:ok, launch} <- mint_launch(opts),
          {:ok, port} <- setup_port(opts),
          url <- setup_url(port, launch.token),
-         :ok <- announce_url(url, port, opts, puts),
-         :ok <- wait_or_warn(opts, url, puts) do
-      maybe_open(url, opts, puts)
-      print_handoff(opts, puts)
-      :ok
+         :ok <- announce_url(url, port, opts, puts) do
+      finish_launch(wait_for_live(opts), url, opts, puts)
     else
       {:error, reason} when is_binary(reason) -> {:error, reason}
       {:error, reason} -> {:error, format_error(reason)}
       {:skipped, reason} -> {:error, format_skipped(reason)}
     end
+  end
+
+  # The endpoint answered — it is safe to point a browser at it.
+  defp finish_launch(:ok, url, opts, puts) do
+    maybe_open(url, opts, puts)
+    print_handoff(opts, puts)
+    :ok
+  end
+
+  # The endpoint is not reachable yet. Do NOT open a browser — a premature open
+  # lands on "Safari can't connect to the server", the exact symptom operators
+  # hit. Hand the URL back so they open it once the daemon finishes coming up.
+  defp finish_launch({:error, :timeout}, url, opts, puts) do
+    puts.("Fermix started, but the setup page is not reachable yet.")
+    puts.("It is still coming up — open this URL in your browser once it is ready:")
+    puts.("  #{url}")
+    puts.("Check with `fermix status` or `fermix logs -n 80`.")
+    print_handoff(opts, puts)
+    :ok
   end
 
   defp mint_launch(opts) do
@@ -52,22 +68,6 @@ defmodule Fermix.CLI.Setup.WebLauncher do
       |> Keyword.put(:no_service, Keyword.get(opts, :no_service, false))
 
     ServiceActivation.ensure_running(scope, activation_opts)
-  end
-
-  defp wait_or_warn(opts, url, puts) do
-    case wait_for_live(opts) do
-      :ok ->
-        :ok
-
-      {:error, :timeout} ->
-        puts.("Fermix service was started, but readiness did not answer before the timeout.")
-        puts.("Setup may still come up shortly: #{url}")
-        puts.("Check with `fermix status` or `fermix logs -n 80`.")
-        :ok
-
-      {:error, reason} ->
-        {:error, reason}
-    end
   end
 
   @spec wait_for_live(keyword()) :: :ok | {:error, :timeout | term()}
