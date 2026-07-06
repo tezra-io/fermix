@@ -104,7 +104,7 @@ Computer use is **experimental and off by default**, enabled from the setup Plug
 
 ## Observability
 
-Traces are JSONL under `~/.fermix/traces/YYYY-MM-DD/<type>.jsonl`: `llm_call`, `tool_exec`, `agent_event`, `channel_msg`, `error`, `sandbox_event`; logs are `~/.fermix/logs/fermix.log`. No `fermix traces` verb.
+Traces are JSONL under `~/.fermix/traces/YYYY-MM-DD/<type>.jsonl`: `llm_call`, `tool_exec`, `agent_event`, `channel_msg`, `error`, `sandbox_event`; logs are `~/.fermix/logs/fermix.log`. No `fermix traces` verb. All log output (file and console, crash reports included) passes through a secret-redaction formatter: credential-shaped tokens (OpenAI/Anthropic `sk-…`, GitHub, Slack, xAI, Google, Telegram bot tokens, AWS key ids, bearer headers) are replaced with `[REDACTED:<vendor>]` markers — a marker in the log means the redactor caught a secret, not that data was lost.
 
 `llm_call` and `tool_exec` carry `session_id`: main turns (`main-<n>`), subagents (random hex linked by parent session events), scheduled jobs (`cron_<job>_<ts>`), or realtime voice calls (`session:<n>`). Content capture is off by default; `FERMIX_OPIK_ENABLED=1` enables it unless `FERMIX_TRACE_CONTENT=0`; `FERMIX_TRACE_CONTENT=1` captures locally without Opik. Capture on means full-fidelity traces: input/output bodies are attached **whole** (no 2k truncation, no inspect eliding), and a failed browser action additionally carries the profile's recent console/JS-exception buffer in its error details — the trace is the one place to look when debugging. Capture off keeps traces bounded and body-free. The in-repo `fermix_opik` exporter (`apps/fermix_opik`, bundled in dev/prod, inert unless `FERMIX_OPIK_ENABLED`) exports nested traces and provides `mix opik.replay`.
 
