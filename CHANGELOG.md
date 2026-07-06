@@ -6,6 +6,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-06
+
+### Fixed
+
+- **The setup page no longer reads the OS keychain on every load.** Computing
+  the "restart required" banner reloaded the persisted config with secret
+  resolution on, spawning one `security` subprocess per stored secret on every
+  page mount (twice per load — LiveView mounts a page twice). On a keychain
+  that answers slowly this made the setup page take minutes; on 0.4.2's
+  plaintext config it was instant, which is why the slowdown only appeared
+  after the keychain move. The comparison now happens at the `@keyring`
+  sentinel level — pure, in-memory, zero keychain reads on the web path.
+
+### Added
+
+- **Global log secret redaction.** All log output — file and console, crash
+  reports included — now passes through a redacting formatter that replaces
+  credential-shaped tokens (OpenAI/Anthropic `sk-…`, GitHub, Slack, xAI,
+  Google, Telegram bot tokens, AWS key ids, bearer headers) with
+  `[REDACTED:<vendor>]` markers. Defense-in-depth for the 0.5.2 crash-report
+  leak class: existing redaction was path-specific and could not see what an
+  unforeseen crash dump carries.
+
+### Changed
+
+- **`fermix setup` waits up to 60s (was 30s) for the daemon before giving up
+  on opening the browser.** A healthy boot opens the browser the moment the
+  endpoint answers; the longer window only helps a slow-but-healthy boot
+  auto-open instead of printing the URL.
+
 ## [0.5.2] - 2026-07-06
 
 ### Fixed
