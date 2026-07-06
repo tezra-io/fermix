@@ -17,7 +17,15 @@ Elixir-native multi-agent AI platform that runs as a local daemon and reaches yo
 
 ## What is Fermix
 
-Fermix is a persistent multi-agent runtime that survives reboots and talks to you through Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI — all terminating in the same agent loop. Everything is one BEAM VM under OTP supervision: there are no HTTP bridges between components, no separate worker pool, no broker. The runtime drives seven providers — OpenAI (API key), `openai_codex` (Codex OAuth), Anthropic (API key or Claude subscription OAuth), xAI (API key or Grok OAuth), OpenRouter, Mistral (API key), and a keyless local Ollama — selected as a primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own (typically smaller, cheaper) model. Fermix also runs scheduled background jobs for digests, watchers, reminders, and checks; each run is isolated, bounded, stored durably, and delivered through the configured channel layer. Fermix ships as a single self-extracting binary per platform, installs an OS service unit on first run, and writes its config, traces, and logs under `~/.fermix`.
+Fermix is a personal, self-hosted AI agent: it runs as a background service on your own machine and reaches you through the chat apps you already use. You bring your own model provider key — there is no Fermix cloud, and your config, history, and logs stay under `~/.fermix`.
+
+- **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
+- **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI all terminate in the same agent loop.
+- **Bring your own model.** Seven providers — OpenAI, OpenAI Codex, Anthropic, xAI, OpenRouter, Mistral, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
+- **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots.
+- **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
+
+Provider auth modes (API key vs. OAuth), channel setup, and scheduling are covered in [Configure](#configure) and [Use](#use) below.
 
 ## Quick start
 
@@ -159,32 +167,11 @@ The unit calls `fermix run`, which boots the OTP supervision tree, binds the Pho
 
 ### Local voice companion
 
-Realtime voice is an optional local mode. When enabled, `fermix run` starts a `0600` Unix-domain socket at `~/.fermix/realtime.sock`; the native macOS companion connects to that socket and the daemon owns provider auth, prompt composition, tools, memory, and cost caps.
+Realtime voice is an optional local mode: **FermixPet**, a native macOS app (macOS 13+) that lets you talk to the agent by voice. The daemon owns provider auth, prompts, tools, memory, and cost caps; the app only captures and plays audio, over a `0600` Unix socket at `~/.fermix/realtime.sock`.
 
-```bash
-fermix setup --reconfigure --realtime-enabled \
-  --realtime-model gpt-realtime-2 \
-  --realtime-voice marin \
-  --realtime-max-session-minutes 15 \
-  --realtime-max-cost-cents 100
+Enable it on the **setup page** under the *Realtime* tab (it needs an OpenAI API key), then restart the daemon. Check it with `fermix voice status`.
 
-fermix voice status
-```
-
-The setup snapshot writes the Realtime block to `FERMIX_HOME/config.toml`:
-
-```toml
-[fermix_core.realtime]
-enabled = true
-provider = "openai"
-model = "gpt-realtime-2"
-voice = "marin"
-max_session_minutes = 15
-max_estimated_cost_cents_per_session = 100
-persist_transcripts = false
-```
-
-The companion is a native macOS app (SwiftUI, macOS 13+) — there is no iOS version and no prebuilt download yet, so build and install it from source (requires Xcode or its command-line tools). Source and full instructions live at [`clients/macos/FermixPet`](clients/macos/FermixPet/README.md). Use the build script (not `swift run`) — it stages a proper `.app` bundle so Dock, Quit, and microphone permissions work:
+FermixPet has no prebuilt download yet, so build and install it from source (Xcode or its command-line tools required):
 
 ```bash
 cd clients/macos/FermixPet
@@ -192,39 +179,7 @@ cd clients/macos/FermixPet
 open "$HOME/Applications/FermixPet.app"
 ```
 
-For source-only development, skip Burrito and run the full daemon from Mix:
-
-```bash
-FERMIX_HOME=$HOME/.fermix-dev \
-OPENAI_API_KEY=sk-... \
-FERMIX_REALTIME_ENABLED=true \
-FERMIX_REALTIME_MODEL=gpt-realtime-2 \
-mix fermix.dev
-```
-
-`mix fermix.dev` is the dev mirror of `fermix run`: one BEAM node hosts the daemon control socket, the Realtime voice socket, the Phoenix endpoint, and the channels app. Pass `--no-realtime`, `--no-channels`, or `--no-web` to skip a layer when iterating on one subsystem in isolation.
-
-Then launch the companion against the same home directory:
-
-```bash
-cd clients/macos/FermixPet
-FERMIX_HOME=$HOME/.fermix-dev ./script/build_and_run.sh
-```
-
-V1 opens a local call explicitly from the companion. While the call is open,
-the mic streams continuously and OpenAI server VAD owns turn boundaries; when
-no call is open, audio is not streamed. Fermix does not persist raw audio, and
-transcript persistence defaults to off. If transcript persistence is enabled,
-final spoken user/assistant transcript text is stored locally as `voice_turn`
-memory rows with `source_type = "realtime"` and
-`source_id = "local:<device_id>"`.
-
-Troubleshooting:
-
-- `fermix voice status` shows `daemon: offline`: start Fermix with `fermix start` or `fermix run`.
-- Realtime is `setup_required`: set `OPENAI_API_KEY` or persist an OpenAI API key through setup.
-- The companion cannot use the mic: grant microphone access in macOS Privacy & Security settings, or reset the prompt with `tccutil reset Microphone io.tezra.FermixPet`.
-- A shared local app is quarantined: remove Gatekeeper quarantine with `xattr -dr com.apple.quarantine FermixPet.app`.
+Full setup options, the dev workflow, and troubleshooting are in the [FermixPet README](clients/macos/FermixPet/README.md).
 
 ### Channels
 

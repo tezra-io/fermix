@@ -56,4 +56,38 @@ enum MascotMotion {
         case .offline, .idle, .listening, .muted, .speaking, .toolUse: return 0
         }
     }
+
+    // MARK: Blink
+
+    /// Opacity of the closed-eye (idle) face cross-faded over the open-eye
+    /// listening/thinking faces to fake an eyelid blink. Deterministic and
+    /// stateless: a jittered ~4.6s cadence with a fast close, brief hold, and
+    /// slightly slower open, so it reads as a natural blink, not a flicker.
+    /// Returns 0 outside the blink window.
+    static func blinkOpacity(at t: TimeInterval) -> Double {
+        let period = 2.8
+        let closeDur = 0.06
+        let holdDur = 0.05
+        let openDur = 0.10
+        let span = closeDur + holdDur + openDur
+
+        let bucket = (t / period).rounded(.down)
+        let jitter = fract(sin(bucket * 12.9898) * 43_758.5453)
+        let start = bucket * period + jitter * (period - span)
+        let age = t - start
+
+        if age < 0 || age >= span { return 0 }
+        if age < closeDur { return smoothstep(age / closeDur) }
+        if age < closeDur + holdDur { return 1 }
+        return 1 - smoothstep((age - closeDur - holdDur) / openDur)
+    }
+
+    private static func smoothstep(_ x: Double) -> Double {
+        let c = min(max(x, 0), 1)
+        return c * c * (3 - 2 * c)
+    }
+
+    private static func fract(_ x: Double) -> Double {
+        x - x.rounded(.down)
+    }
 }

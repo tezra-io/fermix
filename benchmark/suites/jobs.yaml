@@ -183,7 +183,10 @@ scenarios:
           Set up a quick one-off job to jot a note that the eval ran, trigger it right now,
           and then tell me whether that run went through — check its run history.
         expect:
-          tools_all: [schedule_job, run_job_now, list_job_runs]
+          # get_job_run(id) reads the single just-fired run as well as list_job_runs (the
+          # sibling case treats them interchangeably), so don't pin list_job_runs.
+          tools_all: [schedule_job, run_job_now]
+          tools_any: [list_job_runs, get_job_run]
           reply_matches: "(?i)ran|run|executed|complet|succeed|success|finished|done|no error"
           reply_not_matches: "(?i)(can'?t|cannot|unable to|couldn'?t) (run|trigger|fire|schedule|create) (the |a )?job"
           max_cost_usd: 2.5

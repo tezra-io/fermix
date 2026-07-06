@@ -20,14 +20,16 @@ from evallib import leaderboard as lb  # noqa: E402
 from evallib.aggregate import ConfigScore  # noqa: E402
 
 
-def cfg(config_id, success, tok_per_success, n_succ=10):
+def cfg(config_id, success, tok_per_success, n_succ=10, ci=None):
     total_tokens = int(tok_per_success * n_succ) if n_succ else 0
     return ConfigScore(
         config_id=config_id, n_tasks=5, n_trials=10,
         mean_task_success=success, mean_pass_hat_k=success * 0.9,
         total_cost=0.0, total_tokens=total_tokens, total_successes=n_succ,
         cost_per_success=math.inf, tokens_per_success=(total_tokens / n_succ if n_succ else math.inf),
-        p95_latency_ms=1500.0, safety_violations=0)
+        p95_latency_ms=1500.0, safety_violations=0,
+        mean_task_success_ci_lo=(ci[0] if ci else None),
+        mean_task_success_ci_hi=(ci[1] if ci else None))
 
 
 def test_upsert_keeps_latest_per_config():
@@ -82,6 +84,35 @@ def test_render_json_sanitizes_inf():
 def test_render_md_empty_store():
     md = lb.render_md({})
     assert "no configs scored yet" in md
+
+
+def test_render_md_shows_success_ci_when_present():
+    store = lb.upsert({}, cfg("a", 0.90, 700, ci=(0.81, 0.97)), {"tasks_hash": "AAA"})
+    md = lb.render_md(store)
+    assert "95% CI" in md                 # column header
+    assert "[0.81, 0.97]" in md           # the interval cell
+
+
+def test_render_md_ci_dash_when_absent_does_not_crash():
+    # A row scored before the CI existed renders "—" in the CI cell, never a bracket.
+    store = lb.upsert({}, cfg("a", 0.90, 700), {"tasks_hash": "AAA"})
+    md = lb.render_md(store)
+    assert "95% CI" in md
+    assert "[0." not in md
+
+
+def test_render_json_includes_ci():
+    store = lb.upsert({}, cfg("a", 0.9, 700, ci=(0.8, 0.98)), {})
+    j = lb.render_json(store)
+    assert j["configs"][0]["mean_task_success_ci"] == [0.8, 0.98]
+
+
+def test_ci_survives_save_load_roundtrip(tmp_path):
+    store = lb.upsert({}, cfg("a", 0.9, 700, ci=(0.82, 0.96)), {})
+    path = os.path.join(tmp_path, "lb.json")
+    lb.save_store(path, store)
+    j = lb.render_json(lb.load_store(path))
+    assert j["configs"][0]["mean_task_success_ci"] == [0.82, 0.96]
 
 
 def test_render_md_flags_non_comparable_task_set():
