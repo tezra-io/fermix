@@ -53,6 +53,94 @@ defmodule FermixCore.Setup.SecretStoreTest do
     %{fermix_core: [profile: profile], fermix_channels: [telegram: [bot_token: value]]}
   end
 
+  # Records which process performed each read, so tests can pin that keyring
+  # resolution fans out to tasks instead of blocking the caller sequentially.
+  defmodule RecordingWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @table __MODULE__
+
+    def start do
+      if :ets.whereis(@table) == :undefined do
+        :ets.new(@table, [:named_table, :public, :bag])
+      end
+
+      :ets.delete_all_objects(@table)
+      :ok
+    end
+
+    def reader_pids do
+      @table |> :ets.tab2list() |> Enum.map(fn {_key, pid} -> pid end)
+    end
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def get(key, _opts \\ []) do
+      :ets.insert(@table, {key, self()})
+
+      case key do
+        :exa_api_key -> {:error, {:helper_timeout, "/usr/bin/security", 3_000}}
+        other -> {:ok, "resolved-" <> Atom.to_string(other)}
+      end
+    end
+
+    @impl true
+    def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
+
+    @impl true
+    def command_source(key, _opts \\ []) do
+      %{source: :command, command: "recording", args: [Atom.to_string(key)]}
+    end
+  end
+
+  describe "resolve_sentinels/2 keyring fan-out" do
+    setup do
+      :ok = RecordingWriter.start()
+      Application.put_env(:fermix_core, :secret_writer, RecordingWriter)
+      :ok
+    end
+
+    @multi_snapshot %{
+      fermix_core: [
+        providers: [openai: [api_key: "@keyring"]],
+        tools: [web_search: [exa_api_key: "@keyring"]]
+      ],
+      fermix_channels: [telegram: [bot_token: "@keyring"]]
+    }
+
+    test "keyring reads run in tasks, not the calling process" do
+      SecretStore.resolve_sentinels(@multi_snapshot, warn_plaintext: false)
+
+      pids = RecordingWriter.reader_pids()
+      assert length(pids) == 3
+      refute self() in pids, "keyring reads still run sequentially in the caller"
+    end
+
+    test "resolved values land on their paths; a failed read leaves its sentinel" do
+      resolved = SecretStore.resolve_sentinels(@multi_snapshot, warn_plaintext: false)
+
+      assert SecretStore.get_snapshot_value(resolved, [
+               :fermix_core,
+               :providers,
+               :openai,
+               :api_key
+             ]) == "resolved-openai_api_key"
+
+      assert SecretStore.get_snapshot_value(resolved, [:fermix_channels, :telegram, :bot_token]) ==
+               "resolved-telegram_bot_token"
+
+      # exa fails: optional secret keeps its sentinel, isolated from the others.
+      assert SecretStore.get_snapshot_value(resolved, [
+               :fermix_core,
+               :tools,
+               :web_search,
+               :exa_api_key
+             ]) == SecretWriter.sentinel()
+    end
+  end
+
   describe "mask_resolved_secrets/2" do
     test "masks a resolved value back to the sentinel when persisted holds it" do
       masked =

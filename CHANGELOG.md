@@ -41,6 +41,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Daemon boot resolves keychain secrets in parallel.** Boot previously read
+  each `@keyring` secret sequentially — one `security`/`secret-tool`
+  subprocess at a time. A config with 15 stored secrets paid ~0.6s at every
+  start (measured: 71ms parallel), and a degraded keychain (3s timeout per
+  read) paid 45 seconds where it now pays ~6. Reads fan out over a bounded
+  task pool; failure semantics are unchanged (warn loudly, keep the sentinel,
+  never crash boot).
 - **`fermix setup` waits up to 60s (was 30s) for the daemon before giving up
   on opening the browser.** A healthy boot opens the browser the moment the
   endpoint answers; the longer window only helps a slow-but-healthy boot
