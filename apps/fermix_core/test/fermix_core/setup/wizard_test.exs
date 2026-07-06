@@ -127,6 +127,52 @@ defmodule FermixCore.Setup.WizardTest do
     assert Wizard.report().restart_required?
   end
 
+  test "report computes restart_required? without resolving keyring secrets" do
+    # apply_snapshot/1 hydrates more env keys than the shared setup restores.
+    extra_keys = [
+      :jobs,
+      :routing,
+      :compaction,
+      :memory,
+      :computer_use,
+      :tools,
+      :plugins,
+      :oauth,
+      :plugin_secrets,
+      :profile,
+      :sandbox
+    ]
+
+    saved = Enum.map(extra_keys, fn key -> {key, Application.fetch_env(:fermix_core, key)} end)
+
+    on_exit(fn ->
+      Enum.each(saved, fn {key, value} -> restore_env(:fermix_core, key, value) end)
+    end)
+
+    start_memory_repo!()
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(openai_api_key: "sk-boot-resolved")
+
+    # Simulate boot: hydrate app env from disk while the stub can resolve.
+    {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    refute Wizard.report().restart_required?
+
+    # Disk stores `@keyring`; app env holds the boot-resolved value. The
+    # comparison must not depend on reading the OS keychain, so an
+    # unavailable backend must not flip the answer.
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.UnavailableSecretWriter)
+
+    {report, _log} = with_log(fn -> Wizard.report() end)
+
+    refute report.restart_required?
+  end
+
   test "report surfaces enabled whatsapp, discord, slack, and signal channel failures" do
     Application.put_env(:fermix_core, :providers,
       openai: [auth_mode: :api_key, api_key: "sk-test-123"]

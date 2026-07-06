@@ -39,6 +39,32 @@ defmodule FermixCore.Setup.SecretStore do
     end)
   end
 
+  @doc """
+  Rewrites each secret in `snapshot` back to the keyring sentinel wherever
+  `persisted` holds the sentinel, so a snapshot carrying boot-resolved
+  values can be compared against the persisted config without reading the
+  OS keychain. Pure — no keychain access.
+
+  A secret that is absent from `snapshot` is left absent: the persisted
+  config then still differs, which correctly signals a restart.
+  """
+  @spec mask_resolved_secrets(snapshot(), snapshot()) :: snapshot()
+  def mask_resolved_secrets(snapshot, persisted)
+      when is_map(snapshot) and is_map(persisted) do
+    sentinel = SecretWriter.sentinel()
+
+    Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
+      persisted_value = get_snapshot_value(persisted, secret.path)
+      current_value = get_snapshot_value(acc, secret.path)
+
+      if persisted_value == sentinel and not is_nil(current_value) do
+        put_snapshot_value(acc, secret.path, sentinel)
+      else
+        acc
+      end
+    end)
+  end
+
   @spec plaintext_secrets(snapshot()) :: [map()]
   def plaintext_secrets(snapshot) when is_map(snapshot) do
     SecretPaths.all()

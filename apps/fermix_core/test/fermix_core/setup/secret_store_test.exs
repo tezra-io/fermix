@@ -53,6 +53,38 @@ defmodule FermixCore.Setup.SecretStoreTest do
     %{fermix_core: [profile: profile], fermix_channels: [telegram: [bot_token: value]]}
   end
 
+  describe "mask_resolved_secrets/2" do
+    test "masks a resolved value back to the sentinel when persisted holds it" do
+      masked =
+        SecretStore.mask_resolved_secrets(
+          snapshot_with("resolved-token"),
+          snapshot_with(SecretWriter.sentinel())
+        )
+
+      assert SecretStore.get_snapshot_value(masked, @path) == SecretWriter.sentinel()
+    end
+
+    test "leaves the value alone when persisted holds plaintext" do
+      masked =
+        SecretStore.mask_resolved_secrets(
+          snapshot_with("env-token"),
+          snapshot_with("disk-token")
+        )
+
+      assert SecretStore.get_snapshot_value(masked, @path) == "env-token"
+    end
+
+    test "leaves an absent value absent so the diff still signals a restart" do
+      masked =
+        SecretStore.mask_resolved_secrets(
+          snapshot_with(nil),
+          snapshot_with(SecretWriter.sentinel())
+        )
+
+      assert SecretStore.get_snapshot_value(masked, @path) == nil
+    end
+  end
+
   describe "secure_snapshot/2 when the persisted value is the @keyring sentinel" do
     test "keeps the sentinel when the snapshot value matches the stored secret" do
       :ok = SecretWriter.put(:telegram_bot_token, "stored-token")
