@@ -353,8 +353,17 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
     }
   end
 
+  # `-A` stores the item with NO per-application ACL. Without it, macOS pins the
+  # item's ACL to the exact code signature of the writing binary; the daemon —
+  # an ad-hoc-signed, per-version burrito extraction whose signature the keychain
+  # cannot reliably match — is then treated as an untrusted app on every read and
+  # macOS blocks on an authorization prompt the headless service can never answer,
+  # so the read hangs and times out. `-A` lets the daemon read headlessly. The
+  # trade-off (any process running as this user can read the item without a
+  # prompt) is no weaker than the pre-0.4.x plaintext-in-config baseline, and the
+  # secret is still keychain-stored rather than on disk.
   defp put_args(key, value, opts) do
-    ["add-generic-password", "-a", @account, "-s", service(key, opts), "-w", value, "-U"]
+    ["add-generic-password", "-a", @account, "-s", service(key, opts), "-w", value, "-U", "-A"]
   end
 
   defp get_args(key, opts) do
