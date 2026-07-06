@@ -21,6 +21,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Computer Use now installs.** The `compux` native helper has its first
+  published release (v0.3.0): Developer-ID signed and notarized for
+  Apple-Silicon macOS, plus Linux x86_64. Enabling Computer Use downloads the
+  helper, verifies its sha256 against the pinned checksum map, and — on macOS
+  — Gatekeeper accepts it as a notarized Developer ID binary, so the
+  Accessibility/Screen Recording grants survive upgrades. Also fixes a latent
+  TLS bug in the helper download (Erlang `:httpc` rejected GitHub's wildcard
+  release-asset certificate), which would have failed the install for every
+  user. Intel-mac and ARM-Linux remain unpublished for now and keep the
+  honest "not published for this platform" message.
 - **Global log secret redaction.** All log output — file and console, crash
   reports included — now passes through a redacting formatter that replaces
   credential-shaped tokens (OpenAI/Anthropic `sk-…`, GitHub, Slack, xAI,
