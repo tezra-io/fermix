@@ -106,6 +106,7 @@ defmodule FermixCore.CommandRunner do
     after
       remaining ->
         _ = safe_port_close(port)
+        flush_port_messages(port)
         {:error, {:timeout, limits.timeout_ms}}
     end
   end
@@ -136,21 +137,38 @@ defmodule FermixCore.CommandRunner do
   defp kill_and_drain(port, os_pid, %{kill_grace_ms: grace_ms}) do
     _ = os_signal(os_pid, "TERM")
 
-    receive do
-      {^port, {:exit_status, _}} -> :ok
-    after
-      grace_ms ->
-        _ = os_signal(os_pid, "KILL")
+    unless await_exit(port, grace_ms) do
+      _ = os_signal(os_pid, "KILL")
+      _ = await_exit(port, grace_ms)
+    end
 
-        receive do
-          {^port, {:exit_status, _}} -> :ok
-        after
-          grace_ms ->
-            # SIGKILL is non-blockable by the child; if we did not receive
-            # the exit_status it means the port has already been reaped
-            # elsewhere. Close defensively and move on.
-            _ = safe_port_close(port)
-        end
+    # SIGKILL is non-blockable; whether or not exit_status arrived, close the
+    # port (no more messages after this) and flush anything already queued.
+    _ = safe_port_close(port)
+    flush_port_messages(port)
+  end
+
+  # Wait up to grace_ms for the child's exit_status, DISCARDING any late output
+  # in the meantime. For a secret helper (`security`) that late output is the
+  # secret value itself — it must never be left in the caller's mailbox, where it
+  # would crash a GenServer caller (SetupLive/BootReport) and leak the secret
+  # into the crash log. Returns true once the exit_status arrives.
+  defp await_exit(port, grace_ms) do
+    receive do
+      {^port, {:exit_status, _}} -> true
+      {^port, {:data, _discard}} -> await_exit(port, grace_ms)
+    after
+      grace_ms -> false
+    end
+  end
+
+  # Final non-blocking sweep after Port.close: discard any {port, _} that raced
+  # the close so a synchronous caller never receives a stray port message.
+  defp flush_port_messages(port) do
+    receive do
+      {^port, _} -> flush_port_messages(port)
+    after
+      0 -> :ok
     end
   end
 

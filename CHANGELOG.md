@@ -6,7 +6,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.5.1] - 2026-07-05
+## [0.5.2] - 2026-07-06
+
+### Fixed
+
+- **A slow keychain read can no longer crash the setup page or leak a secret to
+  the log.** When `security` returned a secret just after its timeout,
+  `CommandRunner` left that output — the raw secret — in the calling process's
+  mailbox; a GenServer caller (the setup LiveView, `BootReport`) then crashed on
+  the unexpected port message and the secret was written into the crash log. The
+  runner now drains and flushes any late child output on timeout, so it never
+  reaches the caller.
+- **Honest Computer Use install error.** A failed Computer Use install now says
+  the native helper "hasn't been published for this platform yet" rather than
+  "…for this Fermix version yet", which wrongly implied a `fermix upgrade` would
+  help. (The helper's first release is still pending.)
+
+### Changed
+
+- **macOS keychain secrets are stored with an open access list (`-A`).** Without
+  it, each item's ACL is pinned to the exact code signature of the writing
+  binary; the daemon — an ad-hoc-signed, per-version binary the keychain can't
+  reliably match — is then treated as an untrusted app and macOS blocks every
+  read on an authorization prompt the headless service can't answer, so reads
+  hang and time out (slow boot, slow/failed setup). `-A` lets the daemon read
+  headlessly. Trade-off: any process running as the same user can read the item
+  without a prompt — no weaker than the pre-keychain plaintext-in-config
+  baseline, and still keychain-stored. The proper long-term fix is Developer-ID
+  signing the release binary. Existing secrets keep their old ACL until
+  re-stored (re-enter them in `fermix setup`, or `security add-generic-password
+  -U -A …`).
 
 ### Fixed
 
