@@ -176,6 +176,8 @@ defmodule FermixWebWeb.PageControllerTest do
 
     forbidden_conn = build_conn() |> get(setup_href)
     assert response(forbidden_conn, 403) =~ "setup authorization required"
+    # The 403 is actionable: it names the one path that works.
+    assert response(forbidden_conn, 403) =~ "fermix setup"
   end
 
   test "GET / renders a safe error when runtime snapshot fails", %{conn: conn} do
