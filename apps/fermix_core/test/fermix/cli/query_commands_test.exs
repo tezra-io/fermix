@@ -25,9 +25,14 @@ defmodule Fermix.CLI.QueryCommandsTest do
         task_supervisor: task_sup
       )
 
+    # FERMIX_HOME restoration is registered separately so it runs even if the
+    # daemon teardown callback fails (ExUnit runs every on_exit callback
+    # independently). Restoring env is what keeps this test hermetic; it must
+    # not depend on the daemon stopping cleanly.
+    on_exit(fn -> restore_env("FERMIX_HOME", previous_home) end)
+
     on_exit(fn ->
       stop_daemon(daemon)
-      restore_env("FERMIX_HOME", previous_home)
       FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
 
@@ -86,6 +91,34 @@ defmodule Fermix.CLI.QueryCommandsTest do
     assert Enum.any?(decoded["skills"], &(&1["name"] == "self-knowledge"))
   end
 
+  # Blocks in terminate past the stop timeout, so GenServer.stop exits
+  # {:timeout, ...} — a non-:noproc exit, the same class a concurrently-dying
+  # daemon produced as :shutdown in CI. Unlinked (start, not start_link) so it
+  # can't disturb the test process.
+  defmodule SlowTerminatingDaemon do
+    use GenServer
+
+    def start, do: GenServer.start(__MODULE__, :ok)
+
+    @impl true
+    def init(:ok) do
+      Process.flag(:trap_exit, true)
+      {:ok, :ok}
+    end
+
+    @impl true
+    def terminate(_reason, _state), do: Process.sleep(2_000)
+  end
+
+  test "stop_daemon tolerates a non-:noproc exit so teardown never aborts before restore_env" do
+    {:ok, daemon} = SlowTerminatingDaemon.start()
+
+    # Old catch matched only :noproc, so this {:timeout, ...} propagated and
+    # aborted on_exit before FERMIX_HOME was restored, leaking it into later
+    # tests. The teardown only needs the daemon gone — any exit is tolerable.
+    assert stop_daemon(daemon) == :ok
+  end
+
   defp run_command(fun) do
     test_self = self()
 
@@ -112,17 +145,17 @@ defmodule Fermix.CLI.QueryCommandsTest do
     path
   end
 
-  # The daemon can die between an aliveness check and the stop (it owns a
-  # socket task tree that tears down on test exit), so a `Process.alive?` guard
-  # is a TOCTOU race — the `:noproc` exit then aborts on_exit before
-  # `restore_env`/`rm_rf!` run, leaking this test's FERMIX_HOME into every
-  # later test in the suite (seen as flaky CI failures in unrelated sandbox
-  # tests). Tolerate exactly the already-dead case; the teardown only needs
-  # the daemon gone.
+  # The daemon owns a socket task tree that tears down concurrently on test
+  # exit, so `GenServer.stop` can observe it already dead (`:noproc`), dying
+  # from the cascade (`:shutdown`), or unresponsive past the timeout
+  # (`:timeout`). Any of those, uncaught, aborts on_exit before
+  # `restore_env`/`rm_rf!` run and leaks this test's FERMIX_HOME into every
+  # later test (flaky CI failures in unrelated sandbox tests). The teardown
+  # only needs the daemon gone, so tolerate any exit — not just `:noproc`.
   defp stop_daemon(daemon) do
     GenServer.stop(daemon, :normal, 1_000)
   catch
-    :exit, {:noproc, _} -> :ok
+    :exit, _reason -> :ok
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)
