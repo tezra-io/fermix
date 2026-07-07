@@ -46,6 +46,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   had no timeout; a stuck runtime blocked the page render indefinitely. The
   probe is now bounded and reaps a stuck process.
 
+### Added
+
+- **The voice companion's model, voice, and reasoning effort are now selectable
+  in setup.** The web setup Voice pane has dropdowns for the Realtime model
+  (`gpt-realtime-2.1-mini`, `gpt-realtime-2.1`, `gpt-realtime-2`), the voice
+  (Marin, Sage, Verse, Cedar), and a new **reasoning effort** setting
+  (`minimal`/`low`/`medium`/`high`/`xhigh`). Reasoning effort is sent on the
+  OpenAI Realtime `session.update` (`[fermix_core.realtime] reasoning_effort`,
+  default `low` — OpenAI's recommended starting point for a voice agent); it was
+  previously left to the API default. The model/voice/effort option lists have a
+  single source of truth (`FermixCore.Realtime.Config`) that both the config
+  validator and the setup dropdowns read.
+
+### Changed
+
+- **The realtime voice is now chosen from a dropdown** (Marin, Sage, Verse,
+  Cedar) instead of a free-text field, and the config validates the voice
+  against that list.
+
 ## [0.5.3] - 2026-07-06
 
 ### Fixed
