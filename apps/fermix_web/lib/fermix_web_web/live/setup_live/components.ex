@@ -1002,7 +1002,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp realtime_primary_fields(assigns) do
     ~H"""
-    <div class="grid items-start gap-4 lg:grid-cols-4">
+    <div class="grid items-start gap-4 sm:grid-cols-2">
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Realtime status</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
