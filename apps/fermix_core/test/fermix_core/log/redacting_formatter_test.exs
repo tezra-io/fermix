@@ -72,6 +72,22 @@ defmodule FermixCore.Log.RedactingFormatterTest do
       assert formatted =~ "[REDACTED:openai]"
     end
 
+    test "preserves non-ASCII codepoints the inner formatter emits as chardata" do
+      # :logger_formatter emits chardata where µ (in LiveView's "Replied in
+      # 89µs") is the bare codepoint integer 181 inside a charlist. Treating
+      # that as a byte produces invalid UTF-8 and the handler drops the line.
+      event = %{
+        level: :debug,
+        msg: {:string, ["Replied in 89", [181], "s"]},
+        meta: %{time: 0}
+      }
+
+      formatted = format_with_wrapped(event)
+
+      assert String.valid?(formatted)
+      assert formatted =~ "Replied in 89µs"
+    end
+
     test "redacts a crash-report-shaped event" do
       event = %{
         level: :error,
