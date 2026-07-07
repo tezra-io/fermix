@@ -9,6 +9,29 @@ defmodule FermixCore.Setup.WizardTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
+  # Reports every keychain read to the pid in `:wizard_test_reporter`, so a test
+  # can assert a code path resolves ZERO `@keyring` secrets from the OS keychain.
+  defmodule ReadRecordingWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def get(key, _opts \\ []) do
+      send(Application.get_env(:fermix_core, :wizard_test_reporter), {:secret_read, key})
+      {:ok, "resolved-" <> to_string(key)}
+    end
+
+    @impl true
+    def put(_key, _value, _opts \\ []), do: :ok
+
+    @impl true
+    def command_source(key, _opts \\ []) do
+      %{source: :command, command: "recording", args: [to_string(key)]}
+    end
+  end
+
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
@@ -171,6 +194,33 @@ defmodule FermixCore.Setup.WizardTest do
     {report, _log} = with_log(fn -> Wizard.report() end)
 
     refute report.restart_required?
+  end
+
+  test "building reconfigure prompts does not resolve @keyring secrets from the keychain" do
+    # Setup-latency regression: prompt building calls persisted_snapshot/0, which
+    # resolved every @keyring sentinel through the OS keychain (one `security`
+    # subprocess per secret) on every setup-page load — even though the prompt
+    # logic only tests PRESENCE, and an @keyring sentinel is already non-blank.
+    start_memory_repo!()
+
+    {:ok, _} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        openai_api_key: "sk-test-123",
+        telegram_bot_token: "bot-token",
+        telegram_owner_user_id: "111"
+      )
+
+    state = Wizard.report().wizard
+
+    on_exit(fn -> Application.delete_env(:fermix_core, :wizard_test_reporter) end)
+    Application.put_env(:fermix_core, :wizard_test_reporter, self())
+    Application.put_env(:fermix_core, :secret_writer, ReadRecordingWriter)
+
+    _prompts = Wizard.reconfigure_prompts(state)
+
+    refute_received {:secret_read, _},
+                    "prompt building resolved an @keyring secret via the keychain"
   end
 
   test "report surfaces enabled whatsapp, discord, slack, and signal channel failures" do

@@ -1,0 +1,46 @@
+defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host.SystemTest do
+  # async: false — exercises the real production Host.System (not the stubbed
+  # host) and sets a global app-env timeout override, so it must not run
+  # concurrently with tests that read the same env.
+  use ExUnit.Case, async: false
+
+  alias FermixCore.Plugins.Dist.RuntimeProbe.Host.System, as: HostSystem
+
+  test "version_output returns the command output on success" do
+    echo = System.find_executable("echo")
+
+    assert {:ok, output} = HostSystem.version_output(echo)
+    assert is_binary(output)
+  end
+
+  test "version_output maps a non-zero exit to a probe failure" do
+    false_bin = System.find_executable("false")
+
+    assert {:error, {:version_probe_failed, status, _output}} =
+             HostSystem.version_output(false_bin)
+
+    assert status != 0
+  end
+
+  test "version_output is bounded — a wedged runtime cannot hang the render path" do
+    # Regression: the probe used raw `System.cmd` with no timeout, so a host
+    # runtime that never returns from `--version` hung the setup page (this runs
+    # on the dead-render path). It must be bounded and reap the process group.
+    Application.put_env(:fermix_core, :runtime_probe_version_timeout_ms, 200)
+    on_exit(fn -> Application.delete_env(:fermix_core, :runtime_probe_version_timeout_ms) end)
+
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("runtime-probe-hang")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    script = Path.join(dir, "wedged")
+    File.write!(script, "#!/bin/sh\nsleep 30\n")
+    File.chmod!(script, 0o755)
+
+    started = System.monotonic_time(:millisecond)
+    result = HostSystem.version_output(script)
+    elapsed = System.monotonic_time(:millisecond) - started
+
+    assert {:error, {:version_probe_failed, _reason}} = result
+    assert elapsed < 3_000, "version_output did not return within the bound (took #{elapsed}ms)"
+  end
+end
