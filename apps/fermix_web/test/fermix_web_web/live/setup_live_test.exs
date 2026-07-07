@@ -293,6 +293,21 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert card =~ "data:image/svg+xml"
     end
 
+    test "the computer-use catalog card shows the compux release version, not the catalog entry",
+         %{conn: conn} do
+      # The sidecar ships via the pinned compux release; the bundled catalog
+      # still carries the pre-compux 0.1.0 entry, whose version must not leak
+      # onto the card (name and logo are already core-owned the same way).
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-catalog-name="computer_use_sidecar"]|) |> render()
+
+      compux_vsn = to_string(Application.spec(:compux, :vsn))
+      assert card =~ "v" <> compux_vsn
+      refute card =~ "v0.1.0"
+    end
+
     test "a ready computer-use sidecar card shows Ready without a registry health check",
          %{conn: conn} do
       checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-cu-ready")
