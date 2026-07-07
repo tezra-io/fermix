@@ -57,6 +57,7 @@ defmodule FermixCore.Realtime.OpenAIClient do
       session: %{
         type: "realtime",
         model: config.model,
+        reasoning_effort: config.reasoning_effort,
         instructions: instructions,
         output_modalities: ["audio"],
         audio: %{

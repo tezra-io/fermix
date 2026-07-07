@@ -1364,6 +1364,12 @@ defmodule FermixCore.Setup.Wizard do
       [
         enabled:
           normalize_realtime_bool(Keyword.get(answers, :realtime_enabled), :realtime_enabled),
+        model: normalize_realtime_string(Keyword.get(answers, :realtime_model), :realtime_model),
+        reasoning_effort:
+          normalize_realtime_string(
+            Keyword.get(answers, :realtime_reasoning_effort),
+            :realtime_reasoning_effort
+          ),
         voice: normalize_realtime_string(Keyword.get(answers, :realtime_voice), :realtime_voice),
         max_session_minutes:
           normalize_realtime_positive_int(

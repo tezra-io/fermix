@@ -32,6 +32,7 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
     assert event.type == "session.update"
     assert event.session.type == "realtime"
     assert event.session.model == config.model
+    assert event.session.reasoning_effort == config.reasoning_effort
     assert event.session.instructions == "system instructions"
     assert event.session.output_modalities == ["audio"]
 
@@ -63,6 +64,13 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
     event = OpenAIClient.session_update_event(config, "ins", [])
 
     assert event.session.audio.input.transcription == %{model: "gpt-4o-transcribe"}
+  end
+
+  test "session.update carries the configured reasoning effort" do
+    event =
+      OpenAIClient.session_update_event(Config.normalize(reasoning_effort: "high"), "ins", [])
+
+    assert event.session.reasoning_effort == "high"
   end
 
   test "builds audio append, cancel, truncate, response, and function output events" do
