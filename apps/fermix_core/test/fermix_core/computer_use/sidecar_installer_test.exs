@@ -99,9 +99,15 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     end
   end
 
-  test "install fails loud, with no network, until compux cuts a release" do
-    # checksum-compux.exs is a placeholder %{} until the compux release CI populates
-    # it, so the download fails at the checksum gate BEFORE any fetch.
-    assert {:error, {:no_checksum_for_target, _target}} = SidecarInstaller.install()
+  test "the checksum gate passes for this host now that compux v0.3.0 shipped", %{home: home} do
+    # The pinned compux ref ships a populated checksum map for both released
+    # targets (macos-aarch64, linux-x86_64), so the download no longer fails at
+    # the checksum gate. The stub fetcher keeps the test hermetic: reaching it
+    # proves the gate passed for this host's target; no bytes are fetched.
+    assert {:error, :network_disabled_in_tests} =
+             Compux.Binary.path(
+               cache_dir: Path.join(home, "cache"),
+               fetcher: fn _url -> {:error, :network_disabled_in_tests} end
+             )
   end
 end

@@ -10,7 +10,7 @@ defmodule Fermix.CLI.Setup.WebLauncher do
   alias FermixCore.Setup.ServiceActivation
 
   @default_port 4030
-  @default_attempts 60
+  @default_attempts 120
   @default_interval_ms 500
 
   @spec run(keyword()) :: :ok | {:error, String.t()}

@@ -6,6 +6,53 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-07-06
+
+### Fixed
+
+- **The setup page no longer reads the OS keychain on every load.** Computing
+  the "restart required" banner reloaded the persisted config with secret
+  resolution on, spawning one `security` subprocess per stored secret on every
+  page mount (twice per load — LiveView mounts a page twice). On a keychain
+  that answers slowly this made the setup page take minutes; on 0.4.2's
+  plaintext config it was instant, which is why the slowdown only appeared
+  after the keychain move. The comparison now happens at the `@keyring`
+  sentinel level — pure, in-memory, zero keychain reads on the web path.
+
+### Added
+
+- **Computer Use now installs.** The `compux` native helper has its first
+  published release (v0.3.0): Developer-ID signed and notarized for
+  Apple-Silicon macOS, plus Linux x86_64. Enabling Computer Use downloads the
+  helper, verifies its sha256 against the pinned checksum map, and — on macOS
+  — Gatekeeper accepts it as a notarized Developer ID binary, so the
+  Accessibility/Screen Recording grants survive upgrades. Also fixes a latent
+  TLS bug in the helper download (Erlang `:httpc` rejected GitHub's wildcard
+  release-asset certificate), which would have failed the install for every
+  user. Intel-mac and ARM-Linux remain unpublished for now and keep the
+  honest "not published for this platform" message.
+- **Global log secret redaction.** All log output — file and console, crash
+  reports included — now passes through a redacting formatter that replaces
+  credential-shaped tokens (OpenAI/Anthropic `sk-…`, GitHub, Slack, xAI,
+  Google, Telegram bot tokens, AWS key ids, bearer headers) with
+  `[REDACTED:<vendor>]` markers. Defense-in-depth for the 0.5.2 crash-report
+  leak class: existing redaction was path-specific and could not see what an
+  unforeseen crash dump carries.
+
+### Changed
+
+- **Daemon boot resolves keychain secrets in parallel.** Boot previously read
+  each `@keyring` secret sequentially — one `security`/`secret-tool`
+  subprocess at a time. A config with 15 stored secrets paid ~0.6s at every
+  start (measured: 71ms parallel), and a degraded keychain (3s timeout per
+  read) paid 45 seconds where it now pays ~6. Reads fan out over a bounded
+  task pool; failure semantics are unchanged (warn loudly, keep the sentinel,
+  never crash boot).
+- **`fermix setup` waits up to 60s (was 30s) for the daemon before giving up
+  on opening the browser.** A healthy boot opens the browser the moment the
+  endpoint answers; the longer window only helps a slow-but-healthy boot
+  auto-open instead of printing the URL.
+
 ## [0.5.2] - 2026-07-06
 
 ### Fixed
