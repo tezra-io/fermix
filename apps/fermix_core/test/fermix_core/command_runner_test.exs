@@ -66,6 +66,30 @@ defmodule FermixCore.CommandRunnerTest do
     refute File.exists?(marker), "child outlived the BEAM task — sleep ran to completion"
   end
 
+  test "kills the whole process group on timeout so a forked grandchild cannot orphan", %{sh: sh} do
+    # Production incident: skill scripts run via the shell tool as `sh -c "...uv
+    # run python..."` fork a python grandchild. On timeout the runner killed only
+    # the direct child (the wrapper sh); the grandchild was reparented to launchd
+    # (PID 1) and ran for days at high CPU. The runner must signal the child's
+    # PROCESS GROUP so every descendant dies with it. Erlang starts each port in
+    # its own session, so the group == the child tree and never the BEAM.
+    marker =
+      Path.join(System.tmp_dir!(), "fermix_runner_group_#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(marker) end)
+
+    # The direct child (group leader) backgrounds an inner sh that touches the
+    # marker AFTER a delay, then waits. Killing only the leader leaves the inner
+    # sh alive to create the marker; a group kill takes the whole tree.
+    assert {:error, {:timeout, 100}} =
+             CommandRunner.run(sh, ["-c", "sh -c 'sleep 1; touch #{marker}' & wait"],
+               timeout_ms: 100
+             )
+
+    Process.sleep(2_000)
+    refute File.exists?(marker), "grandchild outlived the group kill — process group not reaped"
+  end
+
   test "discards late child output on timeout so it never leaks to the caller", %{sh: sh} do
     # Regression: a secret helper (`security`) that finishes just after the
     # timeout used to leave its output — the raw secret — in the caller's mailbox,
