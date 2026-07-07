@@ -1332,7 +1332,7 @@ defmodule FermixWebWeb.SetupLive do
       auth_type: entry.auth_type,
       provider: entry.provider,
       logo: catalog_card_logo(entry),
-      latest: entry.latest,
+      latest: card_latest(entry),
       mcp?: "mcp" in entry.rails,
       compat: entry.compat,
       # Until its sidecar installs, computer use shows here as a catalog entry; the
@@ -1343,6 +1343,17 @@ defmodule FermixWebWeb.SetupLive do
       enabled?: computer_use_plugin?(entry.name) and computer_use_config_enabled?(snapshot),
       ready?: computer_use_plugin?(entry.name) and ComputerUse.ready?()
     }
+  end
+
+  # The sidecar ships via the pinned compux release, not the plugin catalog;
+  # the catalog entry predates that move, so its version is core-owned like
+  # the card's name and logo.
+  defp card_latest(entry) do
+    if computer_use_plugin?(entry.name) do
+      to_string(Application.spec(:compux, :vsn))
+    else
+      entry.latest
+    end
   end
 
   defp computer_use_config_enabled?(snapshot) do

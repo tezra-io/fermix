@@ -956,10 +956,15 @@ defmodule FermixCore.Setup.Wizard do
   defp blank?(""), do: true
   defp blank?(_), do: false
 
+  # Loads the persisted config WITHOUT resolving `@keyring` sentinels and
+  # masks the boot-resolved values back to the sentinel for the comparison.
+  # Resolving here would spawn one `security` subprocess per secret on every
+  # setup-page mount (the 0.5.x setup-latency regression).
   defp restart_required?(snapshot) do
-    case ConfigStore.load_runtime_config() do
+    case ConfigStore.load_runtime_config(resolve_secrets: false) do
       {:ok, persisted} ->
-        ConfigStore.persistable_snapshot(snapshot) != ConfigStore.persistable_snapshot(persisted)
+        masked = SecretStore.mask_resolved_secrets(snapshot, persisted)
+        ConfigStore.persistable_snapshot(masked) != ConfigStore.persistable_snapshot(persisted)
 
       {:error, _reason} ->
         true

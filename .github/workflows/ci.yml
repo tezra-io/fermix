@@ -53,3 +53,65 @@ jobs:
 
       - name: Test
         run: mix test
+
+  checksum-integrity:
+    # The baked checksums are the trust root for everything Fermix downloads
+    # at runtime (plugin tarballs, the compux Computer Use sidecar). Runtime
+    # verifies installs against them; this job verifies THEM against the
+    # actually-published assets, so a republished/tampered/mispinned artifact
+    # fails the PR instead of surfacing as a user-facing install error.
+    name: catalog + compux checksum integrity
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify plugin catalog sha256s against published assets
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS=$'\t' read -r name version url sha; do
+            if ! curl -fsSL --retry 3 "$url" -o /tmp/artifact; then
+              echo "::error title=Catalog artifact unreachable::$name@$version $url"
+              fail=1
+              continue
+            fi
+            actual=$(sha256sum /tmp/artifact | awk '{print $1}')
+            if [ "$actual" != "$sha" ]; then
+              echo "::error title=Catalog checksum mismatch::$name@$version expected=$sha actual=$actual ($url)"
+              fail=1
+            else
+              echo "ok: $name@$version"
+            fi
+          done < <(jq -r '.plugins[] | .name as $n | .versions[] | .version as $v | .artifacts[] | [$n, $v, .url, .sha256] | @tsv' apps/fermix_core/priv/plugins/index.json)
+          exit "$fail"
+
+      - name: Verify compux checksum map against its published release
+        run: |
+          set -euo pipefail
+          ref=$(grep '"compux"' mix.lock | grep -oE '[a-f0-9]{40}' | head -1)
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/tezra-io/compux/$ref/checksum-compux.exs" -o /tmp/checksum-compux.exs
+          curl -fsSL --retry 3 "https://raw.githubusercontent.com/tezra-io/compux/$ref/mix.exs" -o /tmp/compux-mix.exs
+          version=$(grep -oE '@version "[0-9.]+"' /tmp/compux-mix.exs | grep -oE '[0-9.]+')
+          fail=0
+          found=0
+          while read -r target sha; do
+            found=1
+            url="https://github.com/tezra-io/compux/releases/download/v${version}/compux-${version}-${target}.tar.gz"
+            if ! curl -fsSL --retry 3 "$url" -o /tmp/compux-artifact; then
+              echo "::error title=compux artifact unreachable::$target $url"
+              fail=1
+              continue
+            fi
+            actual=$(sha256sum /tmp/compux-artifact | awk '{print $1}')
+            if [ "$actual" != "$sha" ]; then
+              echo "::error title=compux checksum mismatch::$target expected=$sha actual=$actual"
+              fail=1
+            else
+              echo "ok: compux $target v$version"
+            fi
+          done < <(grep -oE '"[a-z0-9_-]+" => "[a-f0-9]{64}"' /tmp/checksum-compux.exs | sed -E 's/"([^"]+)" => "([^"]+)"/\1 \2/')
+          if [ "$found" = 0 ]; then
+            echo "::error title=Empty compux checksum map::the pinned ref ships no checksums — Computer Use cannot install"
+            fail=1
+          fi
+          exit "$fail"
