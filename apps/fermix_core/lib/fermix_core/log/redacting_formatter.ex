@@ -65,8 +65,23 @@ defmodule FermixCore.Log.RedactingFormatter do
   def format(event, %{inner: {inner_module, inner_config}}) do
     event
     |> inner_module.format(inner_config)
-    |> IO.iodata_to_binary()
+    |> to_utf8_binary()
     |> redact()
+  end
+
+  # Formatter output is unicode chardata: codepoints above 127 can appear as
+  # bare list integers (e.g. µ = 181 in LiveView's "Replied in 89µs").
+  # IO.iodata_to_binary/1 would encode those as raw BYTES — invalid UTF-8
+  # that makes the handler reject and drop the whole log line.
+  defp to_utf8_binary(chardata) do
+    case :unicode.characters_to_binary(chardata) do
+      binary when is_binary(binary) ->
+        binary
+
+      other ->
+        raise ArgumentError,
+              "inner log formatter returned invalid chardata: #{inspect(other)}"
+    end
   end
 
   @doc """
