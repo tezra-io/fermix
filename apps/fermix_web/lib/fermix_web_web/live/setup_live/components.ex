@@ -52,6 +52,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     <main class="min-h-screen bg-base-200/40 text-base-content">
       <div
         :if={@restarting}
+        id="restart-reconnect"
+        phx-hook="RestartReconnect"
         class="fixed inset-0 z-50 grid place-items-center bg-base-300/80 backdrop-blur-sm"
       >
         <div class="flex items-center gap-4 rounded-box border border-base-300 bg-base-100 px-6 py-5 shadow-lg">
