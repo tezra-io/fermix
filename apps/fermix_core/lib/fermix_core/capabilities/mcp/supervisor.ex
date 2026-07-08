@@ -189,11 +189,19 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
     %{children: anubis_children, client_name: anubis_client} =
       config.anubis_starter.child_specs_for(server)
 
+    # `:transient` + `significant: true` (paired with the sub-supervisor's
+    # `auto_shutdown: :any_significant`) makes the server's own give-up terminal:
+    # after exhausting discovery retries it exits `:normal`, which a transient
+    # child is not restarted from, and the auto_shutdown tears the whole subtree
+    # (Anubis client included) down instead of respawning it forever. A genuine
+    # abnormal crash (transport blip) is still restarted — transient recovers on
+    # abnormal exits, and one_for_all re-runs discovery when the client bounces.
     server_spec =
       Supervisor.child_spec(
         {McpServer, server_opts(server, config, anubis_client)},
         id: {:mcp_server, server.name},
-        restart: :permanent
+        restart: :transient,
+        significant: true
       )
 
     children = anubis_children ++ [server_spec]
@@ -202,7 +210,15 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
       id: id,
       start:
         {Supervisor, :start_link,
-         [children, [strategy: :one_for_all, max_restarts: 3, max_seconds: 60]]},
+         [
+           children,
+           [
+             strategy: :one_for_all,
+             max_restarts: 3,
+             max_seconds: 60,
+             auto_shutdown: :any_significant
+           ]
+         ]},
       type: :supervisor,
       restart: :temporary
     }
@@ -224,6 +240,8 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
     |> maybe_put(:caller, Map.get(server, :caller))
     |> maybe_put(:name_prefix, Map.get(server, :prefix))
     |> maybe_put(:extra_metadata, Map.get(server, :capability_metadata))
+    |> maybe_put(:max_discovery_attempts, Map.get(server, :max_discovery_attempts))
+    |> maybe_put(:retry_base_ms, Map.get(server, :retry_base_ms))
   end
 
   defp maybe_put(opts, _key, nil), do: opts

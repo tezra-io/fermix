@@ -28,14 +28,82 @@ defmodule FermixCore.Setup.SecretStore do
     end)
   end
 
+  # Each keyring read shells out one `security`/`secret-tool` subprocess
+  # (~40 ms healthy, 3 s timeout degraded); a config with 15 sentinels paid
+  # ~0.5 s sequentially at every boot — minutes when the keychain hangs.
+  @keyring_read_concurrency 8
+  # SecretWriter bounds each read at 3 s + kill grace; this only backstops
+  # a stuck task. Hitting it means the read failed: the sentinel stays.
+  @keyring_read_timeout_ms 10_000
+
   @spec resolve_sentinels(snapshot(), keyword()) :: snapshot()
   def resolve_sentinels(snapshot, opts) when is_map(snapshot) and is_list(opts) do
     warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
     profile = profile_of(snapshot)
+    sentinel = SecretWriter.sentinel()
+
+    {keyring, plain} =
+      Enum.split_with(SecretPaths.all(), &(get_snapshot_value(snapshot, &1.path) == sentinel))
+
+    if warn_plaintext? do
+      plain
+      |> Enum.filter(&plaintext_secret?(get_snapshot_value(snapshot, &1.path)))
+      |> Enum.each(&warn_plaintext_secret/1)
+    end
+
+    resolve_keyring_secrets(snapshot, keyring, warn_plaintext?, profile)
+  end
+
+  # Reads are independent, so fan out over a bounded task pool and merge
+  # deterministically (ordered stream zipped back to its input). Failure
+  # semantics stay in handle_keyring_resolution_error: warn, keep sentinel.
+  defp resolve_keyring_secrets(snapshot, [], _warn?, _profile), do: snapshot
+
+  defp resolve_keyring_secrets(snapshot, secrets, warn?, profile) do
+    secrets
+    |> Task.async_stream(
+      fn secret -> SecretWriter.get(secret.key, profile: profile) end,
+      max_concurrency: @keyring_read_concurrency,
+      timeout: @keyring_read_timeout_ms,
+      on_timeout: :kill_task,
+      ordered: true
+    )
+    |> Enum.zip(secrets)
+    |> Enum.reduce(snapshot, fn
+      {{:ok, {:ok, value}}, secret}, acc ->
+        put_snapshot_value(acc, secret.path, value)
+
+      {{:ok, {:error, reason}}, secret}, acc ->
+        handle_keyring_resolution_error(acc, secret, reason, warn?)
+
+      {{:exit, reason}, secret}, acc ->
+        handle_keyring_resolution_error(acc, secret, {:task_exit, reason}, warn?)
+    end)
+  end
+
+  @doc """
+  Rewrites each secret in `snapshot` back to the keyring sentinel wherever
+  `persisted` holds the sentinel, so a snapshot carrying boot-resolved
+  values can be compared against the persisted config without reading the
+  OS keychain. Pure — no keychain access.
+
+  A secret that is absent from `snapshot` is left absent: the persisted
+  config then still differs, which correctly signals a restart.
+  """
+  @spec mask_resolved_secrets(snapshot(), snapshot()) :: snapshot()
+  def mask_resolved_secrets(snapshot, persisted)
+      when is_map(snapshot) and is_map(persisted) do
+    sentinel = SecretWriter.sentinel()
 
     Enum.reduce(SecretPaths.all(), snapshot, fn secret, acc ->
-      value = get_snapshot_value(acc, secret.path)
-      resolve_secret_value(acc, secret, value, warn_plaintext?, profile)
+      persisted_value = get_snapshot_value(persisted, secret.path)
+      current_value = get_snapshot_value(acc, secret.path)
+
+      if persisted_value == sentinel and not is_nil(current_value) do
+        put_snapshot_value(acc, secret.path, sentinel)
+      else
+        acc
+      end
     end)
   end
 
@@ -187,27 +255,6 @@ defmodule FermixCore.Setup.SecretStore do
     case get_snapshot_value(snapshot, [:fermix_core, :profile]) do
       name when is_binary(name) and name != "" -> name
       _ -> SecretWriter.default_profile()
-    end
-  end
-
-  defp resolve_secret_value(snapshot, secret, value, warn_plaintext?, profile) do
-    cond do
-      value == SecretWriter.sentinel() ->
-        resolve_keyring_secret(snapshot, secret, warn_plaintext?, profile)
-
-      plaintext_secret?(value) ->
-        if warn_plaintext?, do: warn_plaintext_secret(secret)
-        snapshot
-
-      true ->
-        snapshot
-    end
-  end
-
-  defp resolve_keyring_secret(snapshot, secret, warn?, profile) do
-    case SecretWriter.get(secret.key, profile: profile) do
-      {:ok, value} -> put_snapshot_value(snapshot, secret.path, value)
-      {:error, reason} -> handle_keyring_resolution_error(snapshot, secret, reason, warn?)
     end
   end
 
