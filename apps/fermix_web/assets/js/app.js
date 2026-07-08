@@ -47,11 +47,55 @@ const UnsavedHint = {
   },
 }
 
+// Robust recovery for the "Restarting Fermix…" overlay. Apply & Restart stops
+// the daemon (System.stop) and relies on the OS supervisor to relaunch it. The
+// LiveView socket alone does not reliably bring the page back across a full
+// server restart: a reconnect during the ~seconds of downtime hits a refused
+// connection and the browser strands on a terminal "can't connect" page. This
+// hook (mounted only while the overlay is shown) waits for the daemon to
+// actually go DOWN, then polls it back UP, and only then reloads — surviving
+// the downtime window instead of racing it.
+const RestartReconnect = {
+  mounted() {
+    const url = window.location.pathname + window.location.search
+    let sawDown = false
+    const deadline = Date.now() + 90_000
+
+    const reachable = async () => {
+      try {
+        await fetch(url, {method: "GET", cache: "no-store"})
+        return true
+      } catch (_error) {
+        return false
+      }
+    }
+
+    const poll = async () => {
+      if (Date.now() > deadline) return
+      const up = await reachable()
+      if (!sawDown) {
+        if (!up) sawDown = true
+      } else if (up) {
+        window.location.reload()
+        return
+      }
+      this.timer = setTimeout(poll, 500)
+    }
+
+    // Small initial delay so the first probe lands after System.stop begins,
+    // not against the still-up server in the moment before it drains.
+    this.timer = setTimeout(poll, 800)
+  },
+  destroyed() {
+    if (this.timer) clearTimeout(this.timer)
+  },
+}
+
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, UnsavedHint},
+  hooks: {...colocatedHooks, UnsavedHint, RestartReconnect},
 })
 
 // Show progress bar on live navigation and form submits
