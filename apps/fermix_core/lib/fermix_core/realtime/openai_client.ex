@@ -57,6 +57,10 @@ defmodule FermixCore.Realtime.OpenAIClient do
       session: %{
         type: "realtime",
         model: config.model,
+        # Realtime GA nests effort under a `reasoning` object; the flat
+        # `reasoning_effort` (the Chat Completions shape) is rejected as an
+        # unknown parameter.
+        reasoning: %{effort: config.reasoning_effort},
         instructions: instructions,
         output_modalities: ["audio"],
         audio: %{

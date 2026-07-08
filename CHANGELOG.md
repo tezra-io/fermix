@@ -6,6 +6,75 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-07
+
+### Fixed
+
+- **Hung skill and shell commands are fully terminated instead of leaking.** A
+  command that spawned a subprocess (a skill running `python`/`node`/`uv`) and
+  then timed out had only its direct shell child killed — the grandchild was
+  orphaned to the operating system and kept running, in one case for days at
+  high CPU. The command runner now signals the whole process group, so every
+  descendant is reaped with the timeout.
+- **The installed daemon no longer runs at background CPU priority.** Its
+  service definition requested macOS's `Background` (`darwinbg`) QoS band, which
+  throttles the daemon and everything it spawns whenever the machine is under
+  load — so the setup page, keychain reads, and restarts crawled in the
+  brew-installed daemon while the foreground development process (unthrottled)
+  stayed fast under the same load. The service now runs at `Standard` priority;
+  the change reconciles onto an already-installed unit on the next `fermix
+  setup`.
+- **`fermix restart` and `fermix upgrade` no longer hard-kill the daemon.** They
+  kicked the service with launchctl's `-k` (an immediate `SIGKILL`) and the unit
+  had no shutdown grace, so a restart could kill the daemon mid-drain and — with
+  KeepAlive — bounce it in a relaunch loop (the setup page appearing to "keep
+  reloading"). Restart is now a graceful `SIGTERM` plus a shutdown-timeout
+  headroom, so in-flight work drains first.
+- **A permanently-unreachable MCP server no longer respawns forever.** After a
+  server exhausted its discovery retries and logged "giving up", it was
+  immediately restarted and tried again — an endless loop that spawned a new
+  helper process every few seconds. A server that gives up is now quarantined
+  until the next configuration or plugin change, while a genuine transport blip
+  still reconnects.
+- **The setup page no longer reads the OS keychain to build its prompts.**
+  Prompt building resolved every stored secret from the keychain on each page
+  load, though it only needs to know whether each secret is present. It now
+  tests presence without resolving, removing another batch of `security`
+  subprocesses from the setup path.
+- **A wedged host runtime can no longer hang the setup page.** The probe that
+  runs `<runtime> --version` (for plugins that need `node`/`python` on the host)
+  had no timeout; a stuck runtime blocked the page render indefinitely. The
+  probe is now bounded and reaps a stuck process.
+
+### Added
+
+- **The voice companion's model, voice, and reasoning effort are now selectable
+  in setup.** The web setup Voice pane has dropdowns for the Realtime model
+  (`gpt-realtime-2.1-mini`, `gpt-realtime-2.1`, `gpt-realtime-2`), the voice
+  (Marin, Sage, Verse, Cedar), and a new **reasoning effort** setting
+  (`minimal`/`low`/`medium`/`high`/`xhigh`). Reasoning effort is sent on the
+  OpenAI Realtime `session.update` (`[fermix_core.realtime] reasoning_effort`,
+  default `low` — OpenAI's recommended starting point for a voice agent); it was
+  previously left to the API default. The model/voice/effort option lists have a
+  single source of truth (`FermixCore.Realtime.Config`) that both the config
+  validator and the setup dropdowns read.
+
+### Changed
+
+- **The realtime voice is now chosen from a dropdown** (Marin, Sage, Verse,
+  Cedar) instead of a free-text field, and the config validates the voice
+  against that list.
+- **The default live-voice instructions (`REALTIME.md`) were rewritten to
+  OpenAI's realtime prompting guidelines.** Labeled sections and tighter rules:
+  lead with the answer in one or two sentences, no filler openers, and no
+  trailing "anything else?" / "let me know if you want more" offers; a
+  truthfulness rule (report only what a tool actually returned, say plainly when
+  one fails, never present a guess as fact); an explicit act-by-default stance
+  that still confirms by voice only before irreversible actions; and a rule to
+  look up current or changeable facts (news, live results, prices, schedules)
+  with a tool instead of answering from stale training data. Ships as the seeded
+  default for new setups; an existing `REALTIME.md` is left untouched.
+
 ## [0.5.3] - 2026-07-06
 
 ### Fixed
