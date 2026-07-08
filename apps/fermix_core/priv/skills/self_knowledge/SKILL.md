@@ -84,7 +84,7 @@ For plugin authors, `[fermix_core.plugins] dev_local = "<path>"` points at a dir
 
 ## Voice (macOS, off by default)
 
-OpenAI Realtime voice companion is local and off by default (`[fermix_core.realtime] enabled=true` + OpenAI key). FermixPet connects over `$FERMIX_HOME/realtime.sock`. Channel audio attachments are transcribed before the agent sees them. CLI: `fermix voice status`.
+OpenAI Realtime voice companion is local and off by default (`[fermix_core.realtime] enabled=true` + OpenAI key). The Realtime model, voice, and reasoning effort are each chosen from a dropdown in the web setup Voice pane (config keys `model`/`voice`/`reasoning_effort` under `[fermix_core.realtime]`); their supported values live in one place — `FermixCore.Realtime.Config` (`valid_models/0`, `valid_voices/0`, `valid_reasoning_efforts/0`) — which both the config validator and the setup dropdowns read, and `reasoning_effort` is sent on the OpenAI `session.update` (its levels are the Realtime API's, which differ from the main agent's effort vocabulary). FermixPet connects over `$FERMIX_HOME/realtime.sock`. Channel audio attachments are transcribed before the agent sees them. CLI: `fermix voice status`.
 
 ## Computer use (experimental, off by default)
 
@@ -104,7 +104,7 @@ Computer use is **experimental and off by default**, enabled from the setup Plug
 
 ## Observability
 
-Traces are JSONL under `~/.fermix/traces/YYYY-MM-DD/<type>.jsonl`: `llm_call`, `tool_exec`, `agent_event`, `channel_msg`, `error`, `sandbox_event`; logs are `~/.fermix/logs/fermix.log`. No `fermix traces` verb.
+Traces are JSONL under `~/.fermix/traces/YYYY-MM-DD/<type>.jsonl`: `llm_call`, `tool_exec`, `agent_event`, `channel_msg`, `error`, `sandbox_event`; logs are `~/.fermix/logs/fermix.log`. No `fermix traces` verb. All log output (file and console, crash reports included) passes through a secret-redaction formatter: credential-shaped tokens (OpenAI/Anthropic `sk-…`, GitHub, Slack, xAI, Google, Telegram bot tokens, AWS key ids, bearer headers) are replaced with `[REDACTED:<vendor>]` markers — a marker in the log means the redactor caught a secret, not that data was lost.
 
 `llm_call` and `tool_exec` carry `session_id`: main turns (`main-<n>`), subagents (random hex linked by parent session events), scheduled jobs (`cron_<job>_<ts>`), or realtime voice calls (`session:<n>`). Content capture is off by default; `FERMIX_OPIK_ENABLED=1` enables it unless `FERMIX_TRACE_CONTENT=0`; `FERMIX_TRACE_CONTENT=1` captures locally without Opik. Capture on means full-fidelity traces: input/output bodies are attached **whole** (no 2k truncation, no inspect eliding), and a failed browser action additionally carries the profile's recent console/JS-exception buffer in its error details — the trace is the one place to look when debugging. Capture off keeps traces bounded and body-free. The in-repo `fermix_opik` exporter (`apps/fermix_opik`, bundled in dev/prod, inert unless `FERMIX_OPIK_ENABLED`) exports nested traces and provides `mix opik.replay`.
 

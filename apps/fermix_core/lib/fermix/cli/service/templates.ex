@@ -29,7 +29,8 @@ defmodule Fermix.CLI.Service.Templates do
       <key>Label</key><string>#{label}</string>
       <key>RunAtLoad</key><true/>
       <key>KeepAlive</key><true/>
-      <key>ProcessType</key><string>Background</string>
+      <key>ProcessType</key><string>Standard</string>
+      <key>ExitTimeOut</key><integer>30</integer>
       <key>EnvironmentVariables</key>
       <dict>
     #{render_plist_env(service_env)}

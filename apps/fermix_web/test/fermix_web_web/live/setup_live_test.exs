@@ -293,6 +293,21 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert card =~ "data:image/svg+xml"
     end
 
+    test "the computer-use catalog card shows the compux release version, not the catalog entry",
+         %{conn: conn} do
+      # The sidecar ships via the pinned compux release; the bundled catalog
+      # still carries the pre-compux 0.1.0 entry, whose version must not leak
+      # onto the card (name and logo are already core-owned the same way).
+      {:ok, view, _html} = live(conn, "/setup")
+      view |> element(~s|button[phx-value-tab="plugins"]|) |> render_click()
+
+      card = view |> element(~s|section[data-catalog-name="computer_use_sidecar"]|) |> render()
+
+      compux_vsn = to_string(Application.spec(:compux, :vsn))
+      assert card =~ "v" <> compux_vsn
+      refute card =~ "v0.1.0"
+    end
+
     test "a ready computer-use sidecar card shows Ready without a registry health check",
          %{conn: conn} do
       checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-cu-ready")
@@ -1139,14 +1154,31 @@ defmodule FermixWebWeb.SetupLiveTest do
     } do
       {:ok, view, _html} = live(conn, "/setup")
 
-      view
-      |> element("button[phx-value-tab=\"realtime\"]")
-      |> render_click()
+      realtime_html =
+        view
+        |> element("button[phx-value-tab=\"realtime\"]")
+        |> render_click()
+
+      # The model, voice, and reasoning-effort dropdowns display their supported
+      # values (model: mini at the top; voice: the curated list; effort: the
+      # Realtime levels) — all sourced from the common Config lists.
+      assert realtime_html =~ ~s(name="realtime_form[model]")
+      assert realtime_html =~ ~s(name="realtime_form[voice]")
+      assert realtime_html =~ ~s(name="realtime_form[reasoning_effort]")
+
+      for value <-
+            FermixCore.Realtime.Config.valid_models() ++
+              FermixCore.Realtime.Config.valid_voices() ++
+              FermixCore.Realtime.Config.valid_reasoning_efforts() do
+        assert realtime_html =~ value
+      end
 
       view
       |> form("form[phx-submit=\"save_realtime\"]",
         realtime_form: %{
           enabled: "true",
+          model: "gpt-realtime-2.1-mini",
+          reasoning_effort: "high",
           voice: "cedar",
           max_session_minutes: "20",
           max_cost_cents: "125",
@@ -1160,12 +1192,16 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       realtime = Application.get_env(:fermix_core, :realtime, [])
       assert Keyword.get(realtime, :enabled) == true
+      assert Keyword.get(realtime, :model) == "gpt-realtime-2.1-mini"
+      assert Keyword.get(realtime, :reasoning_effort) == "high"
       assert Keyword.get(realtime, :voice) == "cedar"
       assert Keyword.get(realtime, :max_session_minutes) == 20
       assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 125
       assert Keyword.get(realtime, :persist_transcripts) == true
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(model = "gpt-realtime-2.1-mini")
+      assert contents =~ ~s(reasoning_effort = "high")
       assert contents =~ ~s(voice = "cedar")
       assert contents =~ "max_session_minutes = 20"
     end

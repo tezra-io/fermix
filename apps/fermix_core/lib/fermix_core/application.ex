@@ -22,6 +22,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
+  alias FermixCore.Log.RedactingFormatter
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
@@ -114,6 +115,7 @@ defmodule FermixCore.Application do
     :ok = IdentityName.reconcile()
     :ok = AuthStore.validate_permissions!()
     setup_file_logger()
+    redact_default_logger()
     Trace.TelemetryHandler.attach()
     DecisionTelemetry.attach()
 
@@ -278,13 +280,26 @@ defmodule FermixCore.Application do
                max_no_bytes: max_bytes,
                max_no_files: max_files
              },
-             formatter: {:logger_formatter, %{template: [:time, ~c" ", :level, ~c" ", :msg, ~c"
+             formatter:
+               RedactingFormatter.wrap(
+                 {:logger_formatter, %{template: [:time, ~c" ", :level, ~c" ", :msg, ~c"
 "]}}
+               )
            }) do
         :ok -> :ok
         {:error, {:already_exist, _}} -> :ok
         {:error, reason} -> Logger.warning("Failed to add file logger: #{inspect(reason)}")
       end
+    end
+  end
+
+  defp redact_default_logger do
+    case RedactingFormatter.install(:default) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to install log redaction on default handler: #{inspect(reason)}")
     end
   end
 

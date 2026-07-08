@@ -9,6 +9,29 @@ defmodule FermixCore.Setup.WizardTest do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
 
+  # Reports every keychain read to the pid in `:wizard_test_reporter`, so a test
+  # can assert a code path resolves ZERO `@keyring` secrets from the OS keychain.
+  defmodule ReadRecordingWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def get(key, _opts \\ []) do
+      send(Application.get_env(:fermix_core, :wizard_test_reporter), {:secret_read, key})
+      {:ok, "resolved-" <> to_string(key)}
+    end
+
+    @impl true
+    def put(_key, _value, _opts \\ []), do: :ok
+
+    @impl true
+    def command_source(key, _opts \\ []) do
+      %{source: :command, command: "recording", args: [to_string(key)]}
+    end
+  end
+
   setup do
     providers = Application.fetch_env(:fermix_core, :providers)
     telegram = Application.fetch_env(:fermix_channels, :telegram)
@@ -125,6 +148,79 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :telegram, enabled: false)
 
     assert Wizard.report().restart_required?
+  end
+
+  test "report computes restart_required? without resolving keyring secrets" do
+    # apply_snapshot/1 hydrates more env keys than the shared setup restores.
+    extra_keys = [
+      :jobs,
+      :routing,
+      :compaction,
+      :memory,
+      :computer_use,
+      :tools,
+      :plugins,
+      :oauth,
+      :plugin_secrets,
+      :profile,
+      :sandbox
+    ]
+
+    saved = Enum.map(extra_keys, fn key -> {key, Application.fetch_env(:fermix_core, key)} end)
+
+    on_exit(fn ->
+      Enum.each(saved, fn {key, value} -> restore_env(:fermix_core, key, value) end)
+    end)
+
+    start_memory_repo!()
+    Application.put_env(:fermix_core, :providers, [])
+    Application.delete_env(:fermix_channels, :telegram)
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(openai_api_key: "sk-boot-resolved")
+
+    # Simulate boot: hydrate app env from disk while the stub can resolve.
+    {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    :ok = ConfigStore.apply_snapshot(snapshot)
+
+    refute Wizard.report().restart_required?
+
+    # Disk stores `@keyring`; app env holds the boot-resolved value. The
+    # comparison must not depend on reading the OS keychain, so an
+    # unavailable backend must not flip the answer.
+    Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.UnavailableSecretWriter)
+
+    {report, _log} = with_log(fn -> Wizard.report() end)
+
+    refute report.restart_required?
+  end
+
+  test "building reconfigure prompts does not resolve @keyring secrets from the keychain" do
+    # Setup-latency regression: prompt building calls persisted_snapshot/0, which
+    # resolved every @keyring sentinel through the OS keychain (one `security`
+    # subprocess per secret) on every setup-page load — even though the prompt
+    # logic only tests PRESENCE, and an @keyring sentinel is already non-blank.
+    start_memory_repo!()
+
+    {:ok, _} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        openai_api_key: "sk-test-123",
+        telegram_bot_token: "bot-token",
+        telegram_owner_user_id: "111"
+      )
+
+    state = Wizard.report().wizard
+
+    on_exit(fn -> Application.delete_env(:fermix_core, :wizard_test_reporter) end)
+    Application.put_env(:fermix_core, :wizard_test_reporter, self())
+    Application.put_env(:fermix_core, :secret_writer, ReadRecordingWriter)
+
+    _prompts = Wizard.reconfigure_prompts(state)
+
+    refute_received {:secret_read, _},
+                    "prompt building resolved an @keyring secret via the keychain"
   end
 
   test "report surfaces enabled whatsapp, discord, slack, and signal channel failures" do

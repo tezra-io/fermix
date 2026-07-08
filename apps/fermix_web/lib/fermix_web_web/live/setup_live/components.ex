@@ -1002,7 +1002,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp realtime_primary_fields(assigns) do
     ~H"""
-    <div class="grid items-start gap-4 lg:grid-cols-2">
+    <div class="grid items-start gap-4 sm:grid-cols-2">
       <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Realtime status</span>
         <select name="realtime_form[enabled]" class="select select-bordered w-full bg-base-100">
@@ -1012,13 +1012,37 @@ defmodule FermixWebWeb.SetupLive.Components do
       </label>
 
       <label class="form-control w-full">
+        <span class="label pb-1 text-sm font-medium">Model</span>
+        <select name="realtime_form[model]" class="select select-bordered w-full bg-base-100">
+          <option :for={model <- @form.models} value={model} selected={model == @form.model}>
+            {model}
+          </option>
+        </select>
+      </label>
+
+      <label class="form-control w-full">
         <span class="label pb-1 text-sm font-medium">Voice</span>
-        <input
-          type="text"
-          name="realtime_form[voice]"
-          value={@form.voice}
-          class="input input-bordered w-full bg-base-100"
-        />
+        <select name="realtime_form[voice]" class="select select-bordered w-full bg-base-100">
+          <option :for={voice <- @form.voices} value={voice} selected={voice == @form.voice}>
+            {voice}
+          </option>
+        </select>
+      </label>
+
+      <label class="form-control w-full">
+        <span class="label pb-1 text-sm font-medium">Reasoning effort</span>
+        <select
+          name="realtime_form[reasoning_effort]"
+          class="select select-bordered w-full bg-base-100"
+        >
+          <option
+            :for={effort <- @form.reasoning_efforts}
+            value={effort}
+            selected={effort == @form.reasoning_effort}
+          >
+            {effort}
+          </option>
+        </select>
       </label>
     </div>
     """

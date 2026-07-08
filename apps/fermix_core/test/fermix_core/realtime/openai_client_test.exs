@@ -32,6 +32,9 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
     assert event.type == "session.update"
     assert event.session.type == "realtime"
     assert event.session.model == config.model
+    # Realtime GA nests effort under a `reasoning` object (NOT the Chat
+    # Completions flat `reasoning_effort`, which the API rejects as unknown).
+    assert event.session.reasoning == %{effort: config.reasoning_effort}
     assert event.session.instructions == "system instructions"
     assert event.session.output_modalities == ["audio"]
 
@@ -63,6 +66,15 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
     event = OpenAIClient.session_update_event(config, "ins", [])
 
     assert event.session.audio.input.transcription == %{model: "gpt-4o-transcribe"}
+  end
+
+  test "session.update carries the configured reasoning effort under a reasoning object" do
+    event =
+      OpenAIClient.session_update_event(Config.normalize(reasoning_effort: "high"), "ins", [])
+
+    assert event.session.reasoning == %{effort: "high"}
+    # Guard the exact bug: the flat Chat-Completions key is rejected by Realtime.
+    refute Map.has_key?(event.session, :reasoning_effort)
   end
 
   test "builds audio append, cancel, truncate, response, and function output events" do

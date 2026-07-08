@@ -33,6 +33,18 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     def list_tools(_client), do: {:error, :transport_closed}
   end
 
+  # Always fails, and reports each attempt to the pid passed as the client. Lets
+  # a test count how many times discovery re-runs before the subtree quarantines.
+  defmodule CountingSadDiscoverer do
+    @behaviour FermixCore.Capabilities.MCP.Discoverer
+
+    @impl true
+    def list_tools(reporter) when is_pid(reporter) do
+      send(reporter, :broken_discovery_attempt)
+      {:error, :transport_closed}
+    end
+  end
+
   defmodule FakeAnubis do
     @moduledoc false
     use GenServer
@@ -177,6 +189,52 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
 
     assert Process.alive?(sup_pid)
     refute Enum.any?(cap_names(cap_registry), &String.starts_with?(&1, "mcp_broken_"))
+  end
+
+  test "a server that gives up on discovery is quarantined after ONE cycle, not respawned", %{
+    cap_registry: cap_registry,
+    suffix: suffix
+  } do
+    # Production incident: a permanently-unreachable MCP server (obsidian, whose
+    # vault path did not exist) logged "giving up" but was a :permanent child, so
+    # it respawned forever — ~20-40 node spawns/min feeding the machine load. The
+    # give-up must be terminal for the boot: after the server exhausts its
+    # discovery retries once, its whole subtree (client + discovery) is torn down
+    # and NOT respawned until an explicit reload. `:permanent` re-ran discovery
+    # ~4x (until the sub-supervisor's restart intensity tripped); the fix stops
+    # it after the first cycle.
+    Process.flag(:trap_exit, true)
+    sup_name = :"mcp_sup_giveup_#{suffix}"
+    reporter = self()
+
+    {:ok, sup_pid} =
+      McpSupervisor.start_link(
+        name: sup_name,
+        mcp_registry: :"mcp_sup_giveup_reg_#{suffix}",
+        capability_registry: cap_registry,
+        servers: [
+          %{name: "github", discoverer: HappyDiscoverer, caller: StubCaller},
+          %{
+            name: "broken",
+            discoverer: CountingSadDiscoverer,
+            caller: StubCaller,
+            client: reporter,
+            max_discovery_attempts: 1,
+            retry_base_ms: 1
+          }
+        ]
+      )
+
+    on_exit(fn -> if Process.alive?(sup_pid), do: Process.exit(sup_pid, :shutdown) end)
+
+    # Exactly one discovery cycle runs, then silence — no respawn re-attempts.
+    assert_receive :broken_discovery_attempt, 500
+    refute_receive :broken_discovery_attempt, 300
+
+    # The broken subtree is gone; the healthy peer and top supervisor are intact.
+    assert server_child_pid(sup_name, "broken") == nil
+    assert Process.alive?(sup_pid)
+    assert eventually(fn -> "mcp_github_create_issue" in cap_names(cap_registry) end)
   end
 
   test "spawns the configured Anubis starter once per server with command/args/env", %{

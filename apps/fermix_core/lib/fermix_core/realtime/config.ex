@@ -5,12 +5,30 @@ defmodule FermixCore.Realtime.Config do
 
   alias FermixCore.Setup.ConfigStore
 
-  @valid_models ~w(gpt-realtime-2)
+  # The one source of truth for realtime model slugs: the API validation
+  # (`validate!/1`) and the setup dropdown (`RealtimeConfig.valid_models/0`)
+  # both read this. Ordered for the dropdown — the first entry is shown at the
+  # top. The struct default below stays `gpt-realtime-2` so an existing config
+  # is untouched; new setups pick a model in the dropdown.
+  @valid_models ~w(gpt-realtime-2.1-mini gpt-realtime-2.1 gpt-realtime-2)
+
+  # Curated Realtime voices (a subset of OpenAI's list) surfaced in the setup
+  # dropdown and validated on the API path. Ordered for the dropdown; `marin`
+  # (OpenAI's recommended voice) stays first and is the default.
+  @valid_voices ~w(marin sage verse cedar)
+
+  # Realtime reasoning-effort levels, exactly as the Realtime `session.update`
+  # accepts them (note: `minimal`, no `none`/`max` — this differs from the main
+  # agent's `ReasoningEffort` vocabulary, so it is validated separately here).
+  # Ordered low→high for the dropdown; `low` is OpenAI's recommended default for
+  # a voice agent (responsiveness plus basic reasoning).
+  @valid_reasoning_efforts ~w(minimal low medium high xhigh)
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
           provider: String.t(),
           model: String.t(),
+          reasoning_effort: String.t(),
           voice: String.t(),
           input_audio_format: String.t(),
           output_audio_format: String.t(),
@@ -26,6 +44,7 @@ defmodule FermixCore.Realtime.Config do
   defstruct enabled?: false,
             provider: "openai",
             model: "gpt-realtime-2",
+            reasoning_effort: "low",
             voice: "marin",
             input_audio_format: "pcm16",
             output_audio_format: "pcm16",
@@ -46,6 +65,18 @@ defmodule FermixCore.Realtime.Config do
 
   @spec enabled?() :: boolean()
   def enabled?, do: current().enabled?
+
+  @doc "Supported realtime model slugs, ordered for the setup dropdown (first = top)."
+  @spec valid_models() :: [String.t()]
+  def valid_models, do: @valid_models
+
+  @doc "Curated realtime voices, ordered for the setup dropdown (first = default)."
+  @spec valid_voices() :: [String.t()]
+  def valid_voices, do: @valid_voices
+
+  @doc "Realtime reasoning-effort levels, ordered low→high for the setup dropdown."
+  @spec valid_reasoning_efforts() :: [String.t()]
+  def valid_reasoning_efforts, do: @valid_reasoning_efforts
 
   @spec normalize(keyword() | map() | nil) :: t()
   def normalize(nil), do: normalize([])
@@ -73,6 +104,7 @@ defmodule FermixCore.Realtime.Config do
       enabled?: bool(config, :enabled, false),
       provider: string(config, :provider, "openai"),
       model: string(config, :model, "gpt-realtime-2"),
+      reasoning_effort: string(config, :reasoning_effort, "low"),
       voice: string(config, :voice, "marin"),
       input_audio_format: string(config, :input_audio_format, "pcm16"),
       output_audio_format: string(config, :output_audio_format, "pcm16"),
@@ -95,6 +127,7 @@ defmodule FermixCore.Realtime.Config do
       enabled: config.enabled?,
       provider: config.provider,
       model: config.model,
+      reasoning_effort: config.reasoning_effort,
       voice: config.voice,
       max_session_minutes: config.max_session_minutes,
       max_estimated_cost_cents_per_session: config.max_estimated_cost_cents_per_session,
@@ -116,6 +149,8 @@ defmodule FermixCore.Realtime.Config do
   defp validate!(%__MODULE__{} = config) do
     assert_equal!(config.provider, "openai", :provider)
     assert_one_of!(config.model, @valid_models, :model)
+    assert_one_of!(config.reasoning_effort, @valid_reasoning_efforts, :reasoning_effort)
+    assert_one_of!(config.voice, @valid_voices, :voice)
     assert_equal!(config.input_audio_format, "pcm16", :input_audio_format)
     assert_equal!(config.output_audio_format, "pcm16", :output_audio_format)
 

@@ -6,6 +6,122 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-07-07
+
+### Fixed
+
+- **Hung skill and shell commands are fully terminated instead of leaking.** A
+  command that spawned a subprocess (a skill running `python`/`node`/`uv`) and
+  then timed out had only its direct shell child killed — the grandchild was
+  orphaned to the operating system and kept running, in one case for days at
+  high CPU. The command runner now signals the whole process group, so every
+  descendant is reaped with the timeout.
+- **The installed daemon no longer runs at background CPU priority.** Its
+  service definition requested macOS's `Background` (`darwinbg`) QoS band, which
+  throttles the daemon and everything it spawns whenever the machine is under
+  load — so the setup page, keychain reads, and restarts crawled in the
+  brew-installed daemon while the foreground development process (unthrottled)
+  stayed fast under the same load. The service now runs at `Standard` priority;
+  the change reconciles onto an already-installed unit on the next `fermix
+  setup`.
+- **`fermix restart` and `fermix upgrade` no longer hard-kill the daemon.** They
+  kicked the service with launchctl's `-k` (an immediate `SIGKILL`) and the unit
+  had no shutdown grace, so a restart could kill the daemon mid-drain and — with
+  KeepAlive — bounce it in a relaunch loop (the setup page appearing to "keep
+  reloading"). Restart is now a graceful `SIGTERM` plus a shutdown-timeout
+  headroom, so in-flight work drains first.
+- **A permanently-unreachable MCP server no longer respawns forever.** After a
+  server exhausted its discovery retries and logged "giving up", it was
+  immediately restarted and tried again — an endless loop that spawned a new
+  helper process every few seconds. A server that gives up is now quarantined
+  until the next configuration or plugin change, while a genuine transport blip
+  still reconnects.
+- **The setup page no longer reads the OS keychain to build its prompts.**
+  Prompt building resolved every stored secret from the keychain on each page
+  load, though it only needs to know whether each secret is present. It now
+  tests presence without resolving, removing another batch of `security`
+  subprocesses from the setup path.
+- **A wedged host runtime can no longer hang the setup page.** The probe that
+  runs `<runtime> --version` (for plugins that need `node`/`python` on the host)
+  had no timeout; a stuck runtime blocked the page render indefinitely. The
+  probe is now bounded and reaps a stuck process.
+
+### Added
+
+- **The voice companion's model, voice, and reasoning effort are now selectable
+  in setup.** The web setup Voice pane has dropdowns for the Realtime model
+  (`gpt-realtime-2.1-mini`, `gpt-realtime-2.1`, `gpt-realtime-2`), the voice
+  (Marin, Sage, Verse, Cedar), and a new **reasoning effort** setting
+  (`minimal`/`low`/`medium`/`high`/`xhigh`). Reasoning effort is sent on the
+  OpenAI Realtime `session.update` (`[fermix_core.realtime] reasoning_effort`,
+  default `low` — OpenAI's recommended starting point for a voice agent); it was
+  previously left to the API default. The model/voice/effort option lists have a
+  single source of truth (`FermixCore.Realtime.Config`) that both the config
+  validator and the setup dropdowns read.
+
+### Changed
+
+- **The realtime voice is now chosen from a dropdown** (Marin, Sage, Verse,
+  Cedar) instead of a free-text field, and the config validates the voice
+  against that list.
+- **The default live-voice instructions (`REALTIME.md`) were rewritten to
+  OpenAI's realtime prompting guidelines.** Labeled sections and tighter rules:
+  lead with the answer in one or two sentences, no filler openers, and no
+  trailing "anything else?" / "let me know if you want more" offers; a
+  truthfulness rule (report only what a tool actually returned, say plainly when
+  one fails, never present a guess as fact); an explicit act-by-default stance
+  that still confirms by voice only before irreversible actions; and a rule to
+  look up current or changeable facts (news, live results, prices, schedules)
+  with a tool instead of answering from stale training data. Ships as the seeded
+  default for new setups; an existing `REALTIME.md` is left untouched.
+
+## [0.5.3] - 2026-07-06
+
+### Fixed
+
+- **The setup page no longer reads the OS keychain on every load.** Computing
+  the "restart required" banner reloaded the persisted config with secret
+  resolution on, spawning one `security` subprocess per stored secret on every
+  page mount (twice per load — LiveView mounts a page twice). On a keychain
+  that answers slowly this made the setup page take minutes; on 0.4.2's
+  plaintext config it was instant, which is why the slowdown only appeared
+  after the keychain move. The comparison now happens at the `@keyring`
+  sentinel level — pure, in-memory, zero keychain reads on the web path.
+
+### Added
+
+- **Computer Use now installs.** The `compux` native helper has its first
+  published release (v0.3.0): Developer-ID signed and notarized for
+  Apple-Silicon macOS, plus Linux x86_64. Enabling Computer Use downloads the
+  helper, verifies its sha256 against the pinned checksum map, and — on macOS
+  — Gatekeeper accepts it as a notarized Developer ID binary, so the
+  Accessibility/Screen Recording grants survive upgrades. Also fixes a latent
+  TLS bug in the helper download (Erlang `:httpc` rejected GitHub's wildcard
+  release-asset certificate), which would have failed the install for every
+  user. Intel-mac and ARM-Linux remain unpublished for now and keep the
+  honest "not published for this platform" message.
+- **Global log secret redaction.** All log output — file and console, crash
+  reports included — now passes through a redacting formatter that replaces
+  credential-shaped tokens (OpenAI/Anthropic `sk-…`, GitHub, Slack, xAI,
+  Google, Telegram bot tokens, AWS key ids, bearer headers) with
+  `[REDACTED:<vendor>]` markers. Defense-in-depth for the 0.5.2 crash-report
+  leak class: existing redaction was path-specific and could not see what an
+  unforeseen crash dump carries.
+
+### Changed
+
+- **Daemon boot resolves keychain secrets in parallel.** Boot previously read
+  each `@keyring` secret sequentially — one `security`/`secret-tool`
+  subprocess at a time. A config with 15 stored secrets paid ~0.6s at every
+  start (measured: 71ms parallel), and a degraded keychain (3s timeout per
+  read) paid 45 seconds where it now pays ~6. Reads fan out over a bounded
+  task pool; failure semantics are unchanged (warn loudly, keep the sentinel,
+  never crash boot).
+- **`fermix setup` waits up to 60s (was 30s) for the daemon before giving up
+  on opening the browser.** A healthy boot opens the browser the moment the
+  endpoint answers; the longer window only helps a slow-but-healthy boot
+  auto-open instead of printing the URL.
+
 ## [0.5.2] - 2026-07-06
 
 ### Fixed

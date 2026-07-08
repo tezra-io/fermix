@@ -12,19 +12,37 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host do
 end
 
 defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host.System do
-  @moduledoc "Production host lookups: real `PATH` resolution + `--version` run."
+  @moduledoc "Production host lookups: real `PATH` resolution + a bounded `--version` run."
 
   @behaviour FermixCore.Plugins.Dist.RuntimeProbe.Host
+
+  alias FermixCore.CommandRunner
+
+  # A `--version` probe is near-instant, but it runs on the setup render path, so
+  # a wedged host runtime must not hang the page. CommandRunner bounds the wait
+  # and kills the whole process group on timeout, so no child orphans. Overridable
+  # via `:runtime_probe_version_timeout_ms` (mirrors the `:runtime_probe_host`
+  # seam) for tests; production keeps the default.
+  @default_version_timeout_ms 5_000
 
   @impl true
   def find_executable(command) when is_binary(command), do: System.find_executable(command)
 
   @impl true
   def version_output(command) when is_binary(command) do
-    case System.cmd(command, ["--version"], stderr_to_stdout: true) do
-      {output, 0} -> {:ok, output}
-      {output, status} -> {:error, {:version_probe_failed, status, output}}
+    case CommandRunner.run(command, ["--version"], timeout_ms: version_timeout_ms()) do
+      {:ok, %{exit: 0, stdout: output}} -> {:ok, output}
+      {:ok, %{exit: status, stdout: output}} -> {:error, {:version_probe_failed, status, output}}
+      {:error, reason} -> {:error, {:version_probe_failed, reason}}
     end
+  end
+
+  defp version_timeout_ms do
+    Application.get_env(
+      :fermix_core,
+      :runtime_probe_version_timeout_ms,
+      @default_version_timeout_ms
+    )
   end
 end
 

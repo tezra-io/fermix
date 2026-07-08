@@ -178,8 +178,17 @@ defmodule FermixCore.CommandRunner do
     ArgumentError -> :ok
   end
 
+  # Signal the child's whole PROCESS GROUP (the negative pid), not just the direct
+  # child. Erlang starts each spawned port in its own session, so the group leader
+  # is the port child (os_pid) and the group contains every descendant it forked
+  # (e.g. `sh -c "uv run python"` → python) — but never the BEAM, which lives in a
+  # different group. Killing only os_pid orphaned those grandchildren to launchd,
+  # where they ran for days (audit F-05 follow-up). `--` stops the leading
+  # `-<pgid>` from being parsed as an option by `kill`.
   defp os_signal(pid, signal) when is_integer(pid) and is_binary(signal) do
-    case System.cmd("kill", ["-" <> signal, Integer.to_string(pid)], stderr_to_stdout: true) do
+    group = "-" <> Integer.to_string(pid)
+
+    case System.cmd("kill", ["-" <> signal, "--", group], stderr_to_stdout: true) do
       {_out, 0} -> :ok
       {_out, _code} -> :no_such_process
     end
