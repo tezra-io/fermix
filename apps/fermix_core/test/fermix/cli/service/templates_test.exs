@@ -16,7 +16,14 @@ defmodule Fermix.CLI.Service.TemplatesTest do
       assert plist =~ "<key>Label</key><string>io.tezra.fermix</string>"
       assert plist =~ "<key>RunAtLoad</key><true/>"
       assert plist =~ "<key>KeepAlive</key><true/>"
-      assert plist =~ "<key>ProcessType</key><string>Background</string>"
+      # Standard (not Background): Background puts the daemon in macOS's darwinbg
+      # QoS band — CPU/IO/timer throttled under load, which starved the
+      # user-facing HTTP daemon while the foreground dev process stayed fast.
+      assert plist =~ "<key>ProcessType</key><string>Standard</string>"
+
+      # ExitTimeOut > launchd's 20s default so a graceful shutdown (Phoenix
+      # connection drain) on SIGTERM/bootout is not escalated to SIGKILL.
+      assert plist =~ "<key>ExitTimeOut</key><integer>30</integer>"
       assert plist =~ "<key>FERMIX_HOME</key><string>/Users/dev/.fermix</string>"
       assert plist =~ "<string>/usr/local/bin/fermix</string>"
       assert plist =~ "<string>run</string>"

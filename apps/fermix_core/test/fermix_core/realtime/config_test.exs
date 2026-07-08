@@ -9,6 +9,7 @@ defmodule FermixCore.Realtime.ConfigTest do
     assert config.enabled? == false
     assert config.provider == "openai"
     assert config.model == "gpt-realtime-2"
+    assert config.reasoning_effort == "low"
     assert config.voice == "marin"
     refute Map.has_key?(config, :activation)
     refute Map.has_key?(config, :turn_detection)
@@ -37,6 +38,7 @@ defmodule FermixCore.Realtime.ConfigTest do
              enabled: true,
              provider: "openai",
              model: "gpt-realtime-2",
+             reasoning_effort: "low",
              voice: "cedar",
              max_session_minutes: 20,
              max_estimated_cost_cents_per_session: 35,
@@ -70,6 +72,51 @@ defmodule FermixCore.Realtime.ConfigTest do
   test "rejects unsupported realtime model" do
     assert_raise ArgumentError, ~r/model/, fn ->
       Config.normalize(model: "gpt-realtime")
+    end
+  end
+
+  test "valid_models is the common source, mini first for the dropdown" do
+    assert Config.valid_models() == [
+             "gpt-realtime-2.1-mini",
+             "gpt-realtime-2.1",
+             "gpt-realtime-2"
+           ]
+  end
+
+  test "accepts every model in the common valid list" do
+    for model <- Config.valid_models() do
+      assert Config.normalize(model: model).model == model
+    end
+  end
+
+  test "valid_voices is the common source, marin first for the dropdown" do
+    assert Config.valid_voices() == ["marin", "sage", "verse", "cedar"]
+  end
+
+  test "valid_reasoning_efforts is the common source, ordered low to high" do
+    assert Config.valid_reasoning_efforts() == ["minimal", "low", "medium", "high", "xhigh"]
+  end
+
+  test "accepts every voice and reasoning effort in the common lists" do
+    for voice <- Config.valid_voices() do
+      assert Config.normalize(voice: voice).voice == voice
+    end
+
+    for effort <- Config.valid_reasoning_efforts() do
+      assert Config.normalize(reasoning_effort: effort).reasoning_effort == effort
+    end
+  end
+
+  test "rejects an unsupported voice" do
+    assert_raise ArgumentError, ~r/voice/, fn ->
+      Config.normalize(voice: "robotic")
+    end
+  end
+
+  test "rejects an unsupported reasoning effort" do
+    # `max` is valid in the main-agent vocabulary but not the Realtime API's.
+    assert_raise ArgumentError, ~r/reasoning_effort/, fn ->
+      Config.normalize(reasoning_effort: "max")
     end
   end
 

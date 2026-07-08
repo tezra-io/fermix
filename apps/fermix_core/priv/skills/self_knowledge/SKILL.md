@@ -84,7 +84,7 @@ For plugin authors, `[fermix_core.plugins] dev_local = "<path>"` points at a dir
 
 ## Voice (macOS, off by default)
 
-OpenAI Realtime voice companion is local and off by default (`[fermix_core.realtime] enabled=true` + OpenAI key). FermixPet connects over `$FERMIX_HOME/realtime.sock`. Channel audio attachments are transcribed before the agent sees them. CLI: `fermix voice status`.
+OpenAI Realtime voice companion is local and off by default (`[fermix_core.realtime] enabled=true` + OpenAI key). The Realtime model, voice, and reasoning effort are each chosen from a dropdown in the web setup Voice pane (config keys `model`/`voice`/`reasoning_effort` under `[fermix_core.realtime]`); their supported values live in one place — `FermixCore.Realtime.Config` (`valid_models/0`, `valid_voices/0`, `valid_reasoning_efforts/0`) — which both the config validator and the setup dropdowns read, and `reasoning_effort` is sent on the OpenAI `session.update` (its levels are the Realtime API's, which differ from the main agent's effort vocabulary). FermixPet connects over `$FERMIX_HOME/realtime.sock`. Channel audio attachments are transcribed before the agent sees them. CLI: `fermix voice status`.
 
 ## Computer use (experimental, off by default)
 

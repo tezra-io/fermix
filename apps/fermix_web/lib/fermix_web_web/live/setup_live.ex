@@ -80,6 +80,8 @@ defmodule FermixWebWeb.SetupLive do
   @realtime_restart_keys [
     :realtime_enabled,
     :realtime_api_key,
+    :realtime_model,
+    :realtime_reasoning_effort,
     :realtime_voice,
     :realtime_max_session_minutes,
     :realtime_max_cost_cents,
@@ -257,6 +259,8 @@ defmodule FermixWebWeb.SetupLive do
       []
       |> maybe_put_string(:realtime_enabled, params["enabled"])
       |> maybe_put_string(:realtime_api_key, params["api_key"])
+      |> maybe_put_string(:realtime_model, params["model"])
+      |> maybe_put_string(:realtime_reasoning_effort, params["reasoning_effort"])
       |> maybe_put_string(:realtime_voice, params["voice"])
       |> maybe_put_string(:realtime_max_session_minutes, params["max_session_minutes"])
       |> maybe_put_string(:realtime_max_cost_cents, params["max_cost_cents"])
@@ -1010,7 +1014,12 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       enabled: config.enabled?,
+      model: config.model,
+      models: RealtimeConfig.valid_models(),
+      reasoning_effort: config.reasoning_effort,
+      reasoning_efforts: RealtimeConfig.valid_reasoning_efforts(),
       voice: config.voice,
+      voices: RealtimeConfig.valid_voices(),
       max_session_minutes: config.max_session_minutes,
       max_cost_cents: config.max_estimated_cost_cents_per_session,
       persist_transcripts: config.persist_transcripts?,
