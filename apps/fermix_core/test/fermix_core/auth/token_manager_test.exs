@@ -624,4 +624,113 @@ defmodule FermixCore.Auth.TokenManagerTest do
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
   end
+
+  describe "proactive refresh" do
+    test "refreshes in the background before expiry without an explicit token request" do
+      dir = tmp_dir()
+
+      path =
+        write_auth_file(dir, "auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
+              "expires_at" => future_iso8601(5)
+            }
+          }
+        })
+
+      # ~500ms of headroom before the margin — the one-shot timer fires well
+      # before the 5s expiry, and nothing calls get_token (so this is purely the
+      # proactive path, not a lazy on-use refresh).
+      start_manager(
+        fermix_auth_path: path,
+        req_options: [plug: &__MODULE__.refresh_plug/1],
+        proactive_refresh_margin_ms: 4_500
+      )
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{tokens: %{access_token: "new_at"}}},
+                 FermixCore.Auth.Store.read(:openai_codex, path)
+               )
+             end)
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+
+    test "refresh uses the latest refresh token from the store, not a stale in-memory copy" do
+      dir = tmp_dir()
+
+      path =
+        write_auth_file(dir, "auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "at", "refresh_token" => "rt_A"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      test_pid = self()
+
+      capture_plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:refresh_body, body})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "new_at",
+            "refresh_token" => "new_rt",
+            "expires_in" => 3600
+          })
+        )
+      end
+
+      name = start_manager(fermix_auth_path: path, req_options: [plug: capture_plug])
+
+      # A doctor/CLI probe rotates the refresh token in the store out-of-band.
+      write_auth_file(dir, "auth.json", %{
+        "version" => 1,
+        "providers" => %{
+          "openai_codex" => %{
+            "auth_mode" => "chatgpt",
+            "tokens" => %{"access_token" => "at", "refresh_token" => "rt_B"},
+            "expires_at" => future_iso8601(3600)
+          }
+        }
+      })
+
+      assert {:ok, _} = TokenManager.refresh(name)
+      assert_receive {:refresh_body, body}
+      assert body =~ "rt_B", "refresh must use the latest stored token"
+      refute body =~ "rt_A", "refresh must not reuse the stale in-memory token"
+
+      FermixTestSupport.SafeRm.rm_rf!(dir)
+    end
+  end
+
+  defp eventually(fun, deadline_ms \\ 2_000) do
+    poll(fun, System.monotonic_time(:millisecond) + deadline_ms)
+  end
+
+  defp poll(fun, deadline) do
+    cond do
+      fun.() ->
+        true
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        false
+
+      true ->
+        Process.sleep(20)
+        poll(fun, deadline)
+    end
+  end
 end

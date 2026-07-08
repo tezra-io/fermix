@@ -26,6 +26,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is persisted, not regenerated per boot). The "Restarting…" overlay now waits
   for the daemon to go down and come back, then reloads, so the page returns on
   its own instead of needing a manual `fermix setup`.
+- **OAuth tokens refresh proactively, and a rotated refresh token is never
+  reused.** The daemon refreshed tokens only lazily — on use, within 10 seconds
+  of expiry, with no background timer — and refreshed from an in-memory copy of
+  the refresh token. If that token was rotated out-of-band (by a `fermix
+  doctor`/setup auth probe, or a second daemon on the same account), the daemon
+  could reuse the now-consumed token, and providers like Codex invalidate the
+  entire session when a rotated refresh token is reused ("your session has
+  ended"). `TokenManager` now (a) schedules a single proactive refresh a few
+  minutes before expiry — one timer per token, no polling — so an idle daemon
+  keeps its token warm, and (b) always refreshes from the latest token persisted
+  on disk, so a rotated token is never reused. Recovery from an already-ended
+  session is still `fermix auth login`.
 
 ## [0.5.4] - 2026-07-07
 
