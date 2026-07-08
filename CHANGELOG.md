@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.5.4] - 2026-07-06
+## [0.5.4] - 2026-07-07
 
 ### Fixed
 
@@ -64,6 +64,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The realtime voice is now chosen from a dropdown** (Marin, Sage, Verse,
   Cedar) instead of a free-text field, and the config validates the voice
   against that list.
+- **The default live-voice instructions (`REALTIME.md`) were rewritten to
+  OpenAI's realtime prompting guidelines.** Labeled sections and tighter rules:
+  lead with the answer in one or two sentences, no filler openers, and no
+  trailing "anything else?" / "let me know if you want more" offers; a
+  truthfulness rule (report only what a tool actually returned, say plainly when
+  one fails, never present a guess as fact); an explicit act-by-default stance
+  that still confirms by voice only before irreversible actions; and a rule to
+  look up current or changeable facts (news, live results, prices, schedules)
+  with a tool instead of answering from stale training data. Ships as the seeded
+  default for new setups; an existing `REALTIME.md` is left untouched.
 
 ## [0.5.3] - 2026-07-06
 
