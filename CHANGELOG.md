@@ -6,6 +6,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-07-08
+
+### Fixed
+
+- **Upgraded voice configs with any official OpenAI voice no longer crash the
+  daemon.** 0.5.4 validated the Realtime `voice` against only the four curated
+  dropdown options (marin/sage/verse/cedar), but earlier Fermix accepted any
+  voice — so a config carrying `alloy`, `echo`, or another official voice raised
+  during config normalization, which runs on both setup render and daemon
+  boot/readiness. Validation now accepts the full official OpenAI voice set
+  (alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar); the
+  setup dropdown still lists the recommended voices first.
+- **The setup page reconnects itself after "Apply & restart".** Restarting the
+  daemon from the setup UI briefly stops the web server; the page had relied on
+  LiveView's default reconnect, which could strand the browser on a terminal
+  "can't connect" error during the few seconds of downtime — even though the
+  daemon comes back fine (the setup session survives because `secret_key_base`
+  is persisted, not regenerated per boot). The "Restarting…" overlay now waits
+  for the daemon to go down and come back, then reloads, so the page returns on
+  its own instead of needing a manual `fermix setup`.
+
 ## [0.5.4] - 2026-07-07
 
 ### Fixed
