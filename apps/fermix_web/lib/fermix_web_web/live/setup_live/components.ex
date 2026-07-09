@@ -52,6 +52,8 @@ defmodule FermixWebWeb.SetupLive.Components do
     <main class="min-h-screen bg-base-200/40 text-base-content">
       <div
         :if={@restarting}
+        id="restart-reconnect"
+        phx-hook="RestartReconnect"
         class="fixed inset-0 z-50 grid place-items-center bg-base-300/80 backdrop-blur-sm"
       >
         <div class="flex items-center gap-4 rounded-box border border-base-300 bg-base-100 px-6 py-5 shadow-lg">
@@ -2611,6 +2613,14 @@ defmodule FermixWebWeb.SetupLive.Components do
             {channel_probe_label(@computer_use.status)}
           </span>
         </div>
+        <button
+          :if={@computer_use && @computer_use.grant?}
+          type="button"
+          phx-click="computer_use_grant"
+          class="btn btn-sm btn-primary mt-3"
+        >
+          Grant macOS permissions
+        </button>
       </div>
     </section>
     """

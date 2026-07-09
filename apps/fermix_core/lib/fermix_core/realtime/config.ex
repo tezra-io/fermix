@@ -12,10 +12,13 @@ defmodule FermixCore.Realtime.Config do
   # is untouched; new setups pick a model in the dropdown.
   @valid_models ~w(gpt-realtime-2.1-mini gpt-realtime-2.1 gpt-realtime-2)
 
-  # Curated Realtime voices (a subset of OpenAI's list) surfaced in the setup
-  # dropdown and validated on the API path. Ordered for the dropdown; `marin`
-  # (OpenAI's recommended voice) stays first and is the default.
-  @valid_voices ~w(marin sage verse cedar)
+  # The full official OpenAI Realtime voice set, ordered for the setup dropdown
+  # with the recommended voices first (`marin`/`cedar` are OpenAI's picks).
+  # Validation accepts ALL of them: a config upgraded from an earlier Fermix
+  # (which took any voice) may carry `alloy`, `echo`, etc., and normalization
+  # runs on both setup render and daemon boot/readiness — rejecting those would
+  # crash the upgrade. The dropdown just recommends the curated four up top.
+  @valid_voices ~w(marin sage verse cedar alloy ash ballad coral echo shimmer)
 
   # Realtime reasoning-effort levels, exactly as the Realtime `session.update`
   # accepts them (note: `minimal`, no `none`/`max` — this differs from the main

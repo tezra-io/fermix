@@ -14,10 +14,21 @@ defmodule FermixCore.ComputerUse do
   """
 
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.Grant
   alias FermixCore.ComputerUse.SidecarInstaller
 
   @spec enabled?() :: boolean()
   def enabled?, do: Config.enabled?()
+
+  @doc """
+  Actively PROMPT for the macOS Screen Recording + Accessibility grants and report the
+  resulting state. Registers the sidecar bundle with LaunchServices, then raises the OS
+  dialogs (see `Grant`). Called from the setup card / `fermix doctor` at enable time so
+  permissions register up front rather than on the model's first screenshot. A no-op
+  prompt off macOS. Returns `{:error, reason}` if the sidecar is unavailable.
+  """
+  @spec request_permissions() :: {:ok, Grant.result()} | {:error, term()}
+  def request_permissions, do: Grant.request()
 
   @doc """
   Whether computer-use can actually run: enabled and the sidecar binary installed
