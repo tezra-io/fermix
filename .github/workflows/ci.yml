@@ -96,7 +96,14 @@ jobs:
           found=0
           while read -r target sha; do
             found=1
-            url="https://github.com/tezra-io/compux/releases/download/v${version}/compux-${version}-${target}.tar.gz"
+            # Artifact extension mirrors Compux.Binary.artifact_name/2: a zipped
+            # .app on macOS (its code signature must survive), a bare-binary
+            # tarball elsewhere.
+            case "$target" in
+              macos-*) ext="zip" ;;
+              *) ext="tar.gz" ;;
+            esac
+            url="https://github.com/tezra-io/compux/releases/download/v${version}/compux-${version}-${target}.${ext}"
             if ! curl -fsSL --retry 3 "$url" -o /tmp/compux-artifact; then
               echo "::error title=compux artifact unreachable::$target $url"
               fail=1

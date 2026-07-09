@@ -22,6 +22,11 @@ defmodule FermixCore.Auth.TokenManager do
 
   require Logger
 
+  # One proactive refresh per token, this long before expiry. A single re-armed
+  # timer — not polling. Tokens with less than this margin left (or none) skip
+  # the proactive refresh and fall back to the lazy on-use / reactive-401 path.
+  @default_proactive_refresh_margin_ms 5 * 60 * 1000
+
   # --- Client API ---
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -82,7 +87,10 @@ defmodule FermixCore.Auth.TokenManager do
       entry: nil,
       fermix_path: fermix_path,
       req_options: req_options,
-      invalidated: false
+      invalidated: false,
+      refresh_timer: nil,
+      refresh_margin_ms:
+        Keyword.get(opts, :proactive_refresh_margin_ms, @default_proactive_refresh_margin_ms)
     }
 
     case Store.read(auth_profile, fermix_path) do
@@ -157,14 +165,41 @@ defmodule FermixCore.Auth.TokenManager do
     end
   end
 
+  @impl true
+  def handle_info(:proactive_refresh, %{invalidated: true} = state), do: {:noreply, state}
+  def handle_info(:proactive_refresh, %{refresh_token: nil} = state), do: {:noreply, state}
+
+  def handle_info(:proactive_refresh, state) do
+    # Best-effort keep-warm. On success `do_refresh` → `apply_entry` re-arms the
+    # next timer; on a transient failure we don't re-arm — the token is still
+    # valid and the lazy on-use / reactive-401 refresh stays the safety net.
+    case do_refresh(state) do
+      {:ok, state} -> {:noreply, state}
+      {:error, _reason, state} -> {:noreply, state}
+    end
+  end
+
   # --- Internals ---
+
+  # A single one-shot timer per token, re-armed whenever the token changes.
+  defp schedule_proactive_refresh(state) do
+    if is_reference(state.refresh_timer), do: Process.cancel_timer(state.refresh_timer)
+    %{state | refresh_timer: arm_refresh(state.expires_at, state.refresh_margin_ms)}
+  end
+
+  defp arm_refresh(nil, _margin_ms), do: nil
+
+  defp arm_refresh(%DateTime{} = expires_at, margin_ms) do
+    delay = DateTime.diff(expires_at, DateTime.utc_now(), :millisecond) - margin_ms
+    if delay > 0, do: Process.send_after(self(), :proactive_refresh, delay), else: nil
+  end
 
   defp do_refresh(%{refresh_token: nil} = state) do
     {:error, :no_refresh_token, state}
   end
 
   defp do_refresh(state) do
-    entry = entry_from_state(state)
+    entry = latest_entry(state)
 
     case refresh_entry(state.auth_profile, entry, state.fermix_path, state.req_options) do
       {:ok, entry} ->
@@ -195,6 +230,18 @@ defmodule FermixCore.Auth.TokenManager do
         # (anthropic/google), which a tokens-only merge silently dropped.
         entry: Map.merge(state.entry || %{}, entry)
     }
+    |> schedule_proactive_refresh()
+  end
+
+  # Refresh from the newest persisted entry, not the in-memory copy. Another
+  # refresher (a CLI/doctor probe, or a prior refresh) may have rotated the
+  # refresh token in the store; Codex invalidates the whole session if a
+  # rotated (consumed) refresh token is reused, so always start from disk.
+  defp latest_entry(state) do
+    case Store.read(state.auth_profile, state.fermix_path) do
+      {:ok, entry} -> Map.merge(state.entry || %{}, entry)
+      {:error, _reason} -> entry_from_state(state)
+    end
   end
 
   defp entry_from_state(state) do
