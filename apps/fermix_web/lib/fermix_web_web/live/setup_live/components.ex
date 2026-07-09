@@ -2613,6 +2613,14 @@ defmodule FermixWebWeb.SetupLive.Components do
             {channel_probe_label(@computer_use.status)}
           </span>
         </div>
+        <button
+          :if={@computer_use && @computer_use.grant?}
+          type="button"
+          phx-click="computer_use_grant"
+          class="btn btn-sm btn-primary mt-3"
+        >
+          Grant macOS permissions
+        </button>
       </div>
     </section>
     """
