@@ -1,6 +1,7 @@
 defmodule FermixCore.Auth.TokenManagerTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
 
   @moduletag :token_manager
@@ -653,7 +654,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert eventually(fn ->
                match?(
                  {:ok, %{tokens: %{access_token: "new_at"}}},
-                 FermixCore.Auth.Store.read(:openai_codex, path)
+                 Store.read(:openai_codex, path)
                )
              end)
 
