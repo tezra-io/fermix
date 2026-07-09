@@ -10,6 +10,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Computer Use permissions now attribute to one stable, signed "Fermix" app on
+  macOS.** The screen-capture sidecar used to inherit the ad-hoc, per-version
+  identity of the daemon that launched it, so macOS Screen Recording /
+  Accessibility grants never persisted — every screenshot re-prompted, and each
+  upgrade left a new "Fermix" row in System Settings. The sidecar now runs as its
+  own Developer-ID-signed, notarized `Fermix.app` (a permanent bundle identity)
+  that disclaims TCC responsibility from its parent, so a grant sticks across
+  upgrades and every macOS permission Fermix needs — Screen Recording,
+  Accessibility, and the voice companion's Microphone — shows as a single
+  **Fermix** app with its icon. The setup Plugins page gains a **Grant macOS
+  permissions** button that raises the prompts up front (and registers the app in
+  System Settings) instead of surprising you on the first screenshot.
+  - _Upgrading from a pre-release build:_ if Computer Use reports a missing
+    permission even though the "Fermix" box looks checked, a stale grant from the
+    old build is shadowing the signed one — remove the "Fermix" row under System
+    Settings ▸ Screen Recording (or run `tccutil reset ScreenCapture
+    io.tezra.fermix.computer-use`) and grant again. First-time installs are
+    unaffected.
+  - _Icon cache:_ the new row may briefly show a generic icon until macOS
+    refreshes its icon cache (a relogin, or `killall Dock`).
 - **Upgraded voice configs with any official OpenAI voice no longer crash the
   daemon.** 0.5.4 validated the Realtime `voice` against only the four curated
   dropdown options (marin/sage/verse/cedar), but earlier Fermix accepted any

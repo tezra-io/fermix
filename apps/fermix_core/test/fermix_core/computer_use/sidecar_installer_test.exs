@@ -60,7 +60,7 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     write_bin(Path.join(root, cache_exec_relpath(target)), mode)
   end
 
-  defp cache_exec_relpath("macos-" <> _), do: Path.join(["Fermix.app", "Contents", "MacOS", "compux"])
+  defp cache_exec_relpath("macos-" <> _), do: "Fermix.app/Contents/MacOS/compux"
   defp cache_exec_relpath(_target), do: "compux"
 
   test "plugin_name is the stable card identifier" do
