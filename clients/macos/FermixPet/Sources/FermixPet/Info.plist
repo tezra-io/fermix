@@ -5,8 +5,11 @@
 <dict>
   <key>CFBundleIdentifier</key>
   <string>io.tezra.FermixPet</string>
+  <!-- Display name unified to "Fermix" so the Microphone privacy entry reads the
+       same as the computer-use Screen Recording / Accessibility entries. Bundle id
+       stays io.tezra.FermixPet (a rename would orphan the existing mic grant). -->
   <key>CFBundleName</key>
-  <string>FermixPet</string>
+  <string>Fermix</string>
   <key>CFBundleIconFile</key>
   <string>FermixPet.icns</string>
   <key>NSMicrophoneUsageDescription</key>
