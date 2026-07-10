@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections import Counter
 from dataclasses import asdict
 
 from .aggregate import ConfigScore, RankedConfig, rank_configs
@@ -77,6 +76,8 @@ def render_json(store: dict, axis: str = "tokens") -> dict:
 
 _HEADER = "| # | config | success | 95% CI | pass^k | eff | tok/✓ | $/✓ | n | set | p95 ms | safety | composite |"
 _RULE = "|--:|--------|--------:|:------:|-------:|----:|------:|----:|--:|-----|-------:|-------:|----------:|"
+_FOOTER = ("_Lower tok/✓ and $/✓ is better; higher success/pass^k/composite is better. "
+           "A config that resolved nothing shows tok/✓ = —._")
 
 
 def render_md(store: dict, axis: str = "tokens") -> str:
@@ -96,10 +97,11 @@ def render_md(store: dict, axis: str = "tokens") -> str:
         "eff = 1.0 regardless of how many tokens it spent; efficiency only becomes a "
         "real comparison with ≥2 configs.",
         "",
-        "**`n` = task count, `set` = task-set hash.** Only rows sharing the modal `set` "
-        "are directly comparable; a row that ran a different task set (e.g. a `--suite` "
-        "/ `--max-tasks` subset) is listed separately below and must NOT be read as a "
-        "head-to-head result.",
+        "**`n` = task count, `set` = task-set hash.** Configs are grouped by `set`: only "
+        "rows that ran the SAME tasks are ranked head-to-head. A config that ran its own "
+        "set (a different `--suite` / `--judge` / `--max-tasks` selection, or an older "
+        "suite version) is shown separately below — same metrics, but ordered by success, "
+        "NOT a validated ranking.",
         "",
         "**`95% CI`** is a percentile bootstrap over TASKS on the `success` column — the "
         "honest uncertainty band on the headline. Two configs whose CIs OVERLAP are a "
@@ -113,24 +115,42 @@ def render_md(store: dict, axis: str = "tokens") -> str:
         return "\n".join(preamble + [_HEADER, _RULE,
                                      "| — | _(no configs scored yet)_ | | | | | | | | | | | |"]) + "\n"
 
-    modal = _modal_hash(rows)
-    comparable = [c for c in rows if _row_hash(c) == modal]
-    others = [c for c in rows if _row_hash(c) != modal]
+    # A lone config is trivially the board — rank it; there's nothing to compare to.
+    if len(rows) == 1:
+        return "\n".join(preamble + ["_Single config on the board (nothing to compare against yet)._",
+                                     "", _HEADER, _RULE, _md_row(1, rows[0]), "", _FOOTER]) + "\n"
 
-    lines = preamble + [f"_Comparable set `{(modal or '—')[:8]}` · {len(comparable)} config(s)._",
-                        "", _HEADER, _RULE]
-    for i, c in enumerate(comparable, start=1):
-        lines.append(_md_row(i, c))
-    if others:
-        lines += ["",
-                  "**⚠️ Different task set — NOT comparable to the board above** "
-                  "(ran a different suite/subset, so success and rank are not head-to-head):",
-                  "", "| config | success | pass^k | n | set |", "|--------|--------:|-------:|--:|-----|"]
-        for c in others:
-            lines.append(f"| `{c['config_id']}` | {c['mean_task_success']:.2f} | "
-                         f"{c['mean_pass_hat_k']:.2f} | {c['n_tasks']} | `{(_row_hash(c) or '—')[:8]}` |")
-    lines += ["", "_Lower tok/✓ and $/✓ is better; higher success/pass^k/composite is better. "
-              "A config that resolved nothing shows tok/✓ = —._"]
+    # Group by task-set hash: only configs that ran the SAME set are head-to-head. A
+    # group of >=2 is a ranked "comparable set"; a config that ran its own set is a
+    # standalone run — shown with the same full metrics but NOT ranked against the
+    # others (so a lone run never gets demoted to a stub just because every set differs).
+    groups: dict = {}
+    for r in rows:                         # rows arrive composite-sorted from ranked()
+        groups.setdefault(_row_hash(r), []).append(r)
+    cohorts = sorted((g for g in groups.values() if len(g) >= 2), key=len, reverse=True)
+    solos = [r for g in groups.values() if len(g) == 1 for r in g]
+    solos.sort(key=lambda c: c["mean_task_success"], reverse=True)
+
+    lines = list(preamble)
+    for g in cohorts:
+        h = (_row_hash(g[0]) or "—")[:8]
+        lines += ["", f"_Comparable set `{h}` · {len(g)} config(s) (same task set, ranked head-to-head)._",
+                  "", _HEADER, _RULE]
+        for i, c in enumerate(g, start=1):
+            lines.append(_md_row(i, c))
+    if solos:
+        head = (
+            "**⚠️ Different task set — NOT comparable to the board above** (each ran its own "
+            "suite/judge/subset; shown with full metrics, ordered by success, but NOT a head-to-head rank):"
+            if cohorts else
+            "**⚠️ No two configs share a task set — NOT comparable to each other.** Each ran its own "
+            "suite/judge/subset (see `set`); rows are ordered by success, but that is NOT a validated "
+            "ranking — re-run them with one identical command to rank them head-to-head."
+        )
+        lines += ["", head, "", _HEADER, _RULE]
+        for c in solos:
+            lines.append(_md_row("·", c))
+    lines += ["", _FOOTER]
     return "\n".join(lines) + "\n"
 
 
@@ -138,14 +158,7 @@ def _row_hash(row: dict) -> str | None:
     return (row.get("meta") or {}).get("tasks_hash")
 
 
-def _modal_hash(rows: list[dict]) -> str | None:
-    """The task-set hash shared by the most rows — the 'comparable' cohort. Rows
-    predating the hash (meta without tasks_hash) group together under None."""
-    hashes = [h for h in (_row_hash(r) for r in rows) if h]
-    return Counter(hashes).most_common(1)[0][0] if hashes else None
-
-
-def _md_row(rank: int, c: dict) -> str:
+def _md_row(rank: int | str, c: dict) -> str:
     tok = "—" if c["tokens_per_success"] is None else f"{c['tokens_per_success']:.0f}"
     dol = "—" if not c["cost_per_success"] else f"${c['cost_per_success']:.4f}"
     safety = "✓" if c["safety_violations"] == 0 else f"⚠️{c['safety_violations']}"
