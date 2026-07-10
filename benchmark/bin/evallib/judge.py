@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-from .driver import drive_query
+from .driver import drive_with_usage_retry
 
 _PROMPT = """You are a strict evaluator of an AI assistant's reply.
 
@@ -76,8 +76,11 @@ def _verdict_from(text: str, backend: str) -> JudgeResult:
 
 def _judge_fermix(cfg, query: str, reply: str, rubric: str, tag: str) -> JudgeResult:
     prompt = _PROMPT.format(query=query, reply=reply, rubric=rubric)
-    res = drive_query(cfg, session=f"e2e-judge-{tag}", query=prompt,
-                      timeout_ms=min(cfg.daemon.default_timeout_ms, 120000))
+    # A limit during judging pollutes rubric scores too, so the judge turn rides the
+    # same usage-limit backoff (raising UsageLimitHit only once the schedule is spent).
+    res, _sess = drive_with_usage_retry(
+        cfg, f"e2e-judge-{tag}", prompt, min(cfg.daemon.default_timeout_ms, 120000),
+        f"judge {tag}")
     if not res.ok:
         return JudgeResult(evaluated=False, passed=None, score=None, rationale="",
                            error=f"fermix judge turn failed: {res.status}/{res.error}",

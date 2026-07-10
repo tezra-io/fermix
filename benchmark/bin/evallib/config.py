@@ -12,6 +12,18 @@ def _expand(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+def _backoff_minutes(raw_value, default: list[int]) -> list[int]:
+    """Resolve the usage-limit retry schedule. `EVAL_USAGE_RETRY_BACKOFF_MIN` (a
+    comma list like "30,60,120,180", or empty to disable) overrides the yaml list.
+    A malformed value raises at load — fail loud rather than silently mis-scheduling."""
+    env = os.environ.get("EVAL_USAGE_RETRY_BACKOFF_MIN")
+    src = env if env is not None else raw_value
+    if src is None:
+        return list(default)
+    parts = ([p for p in src.split(",")] if isinstance(src, str) else list(src))
+    return [int(str(p).strip()) for p in parts if str(p).strip()]
+
+
 @dataclass
 class DaemonCfg:
     fermix_home: str
@@ -42,11 +54,21 @@ class BudgetCfg:
 
 
 @dataclass
+class UsageLimitCfg:
+    # Minutes to wait (in order) before each retry after a usage/rate/quota limit,
+    # then give up (abort at the pointer). Escalating backoff rides out a
+    # subscription session-limit window (hours long, with an unreliable self-report).
+    # Empty list = fail-fast: abort on the first limit without waiting.
+    retry_backoff_min: list[int] = field(default_factory=lambda: [30, 60, 120, 180])
+
+
+@dataclass
 class Config:
     daemon: DaemonCfg
     opik: OpikCfg
     judge: JudgeCfg
     budgets: BudgetCfg
+    usage_limit: UsageLimitCfg
     report_dir: str
     rubric_failures: str  # warn | fail
     skill_dir: str
@@ -97,11 +119,16 @@ def load(skill_dir: str, path: str | None = None) -> Config:
         max_cost_usd=float(b.get("max_cost_usd", 2.0)),
         max_duration_ms=int(b.get("max_duration_ms", 300000)),
     )
+    u = raw.get("usage_limit", {})
+    usage_limit = UsageLimitCfg(
+        retry_backoff_min=_backoff_minutes(u.get("retry_backoff_min"), [30, 60, 120, 180]),
+    )
     return Config(
         daemon=daemon,
         opik=opik,
         judge=judge,
         budgets=budgets,
+        usage_limit=usage_limit,
         report_dir=os.path.join(skill_dir, r.get("dir", "reports")),
         rubric_failures=p.get("rubric_failures", "warn"),
         skill_dir=skill_dir,

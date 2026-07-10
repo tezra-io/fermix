@@ -9,7 +9,7 @@ help:
 	@echo "targets: tests check dry regression capability estimate rank baseline uplift gaia lmeval purge"
 
 tests:        ## all capability-eval unit/integration tests
-	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia; do \
+	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)

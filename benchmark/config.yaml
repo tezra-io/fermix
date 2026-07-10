@@ -43,6 +43,16 @@ judge:
   # EVAL_JUDGE_API_KEY (and EVAL_JUDGE_BASE_URL if not api.openai.com).
   model: "gpt-5.5"
 
+usage_limit:
+  # When the daemon's model hits a usage/rate/quota limit mid-sweep, Fermix returns
+  # a canned "try again" reply — scoring it would count Fermix's own limit as a task
+  # failure. Instead the runner WAITS these many minutes (in order) and retries the
+  # turn, then gives up (exit 4, stops at the pointer) if the last wait still fails.
+  # Escalating backoff rides out a subscription session-limit (hours long, and whose
+  # "~N min" self-report is unreliable). Env: EVAL_USAGE_RETRY_BACKOFF_MIN ("30,60,..").
+  # Set to [] for fail-fast (abort on the first limit, no waiting).
+  retry_backoff_min: [30, 60, 120, 180]
+
 budgets:
   # Default per-case ceilings; a case may override either in its `expect:` block.
   # A turn exceeding these is a structural gate failure (not a crash).

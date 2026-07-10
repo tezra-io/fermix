@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -245,6 +247,154 @@ def test_real_hard_candidates_suite_is_valid():
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     names = {s.name for s in suites.load_all(cap_dir, include_candidates=True)}
     assert "cap_hard" in names
+
+
+# --- usage-limit fail-fast (stop the sweep instead of scoring Fermix's limit) ---
+
+# Fermix's actual rate-limit / quota / usage-limit replies (agents/turn_runner.ex).
+_LIMIT_REPLIES = [
+    "You've hit your OpenAI usage limit (pro plan). Try again in ~7 min.",
+    "You've hit your Codex usage limit. Try again in ~15 min.",
+    "xAI rate-limited this request. Wait briefly and retry.",
+    "Anthropic quota or credits are exhausted. Check the provider account, billing, "
+    "or model access, then retry.",
+]
+
+
+def _cfg_backoff(mins):
+    return SimpleNamespace(usage_limit=SimpleNamespace(retry_backoff_min=list(mins)))
+
+
+def _drive_result(usage_limited, response):
+    from evallib import driver
+    return driver.DriveResult(
+        ok=True, status="ok", response=response, error=None, session_id="s",
+        exit_code=0, sent_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        usage_limited=usage_limited)
+
+
+def _limited(response="You've hit your Codex usage limit. Try again in ~15 min."):
+    return _drive_result(True, response)
+
+
+def _ok(response="done"):
+    return _drive_result(False, response)
+
+
+def test_is_usage_limit_reply_matches_fermix_wordings():
+    from evallib import driver
+    for r in _LIMIT_REPLIES:
+        assert driver.is_usage_limit_reply(r) is True, r
+
+
+def test_is_usage_limit_reply_rejects_normal_replies_and_none():
+    from evallib import driver
+    assert driver.is_usage_limit_reply("The capital of France is Paris.") is False
+    # "usage limit" ALONE must not trigger — the anchor also needs "try again in ~",
+    # so a task that merely discusses limits doesn't false-abort the sweep.
+    assert driver.is_usage_limit_reply("The API has a usage limit of 100 req/min.") is False
+    assert driver.is_usage_limit_reply("Rate limiting caps request throughput.") is False
+    assert driver.is_usage_limit_reply("") is False
+    assert driver.is_usage_limit_reply(None) is False
+
+
+def test_usage_limit_reset_hint_extracts_minutes():
+    from evallib import driver
+    assert driver.usage_limit_reset_hint("… usage limit. Try again in ~15 min.") == "~15 min"
+    assert driver.usage_limit_reset_hint("xAI rate-limited this request.") is None
+
+
+def test_usage_limit_hit_locate_and_excerpt():
+    from evallib import driver
+    e = driver.UsageLimitHit("You've hit your Codex usage limit. Try again in ~15 min.", "~15 min")
+    assert e.suite is None and e.case_id is None and e.trial is None
+    e.locate("cap_coding", "impl_fn", 2)
+    assert (e.suite, e.case_id, e.trial) == ("cap_coding", "impl_fn", 2)
+    long = driver.UsageLimitHit("word " * 200)
+    assert len(long.reply_excerpt()) <= 161 and long.reply_excerpt().endswith("…")
+
+
+def test_drive_with_usage_retry_succeeds_after_backoff(monkeypatch):
+    from evallib import driver
+    seq = [_limited(), _limited(), _ok()]           # limited twice, then clears
+    calls, slept = [], []
+    monkeypatch.setattr(driver, "drive_query",
+                        lambda cfg, sess, q, t: (calls.append(sess) or seq.pop(0)))
+    monkeypatch.setattr(driver, "_sleep", lambda s: slept.append(s))
+    res, used = driver.drive_with_usage_retry(_cfg_backoff([30, 60, 120, 180]), "S", "q", 1, "lbl")
+    assert res.usage_limited is False and used == "S-r2"
+    assert slept == [1800, 3600]                    # waited 30 min then 60 min (in minutes→seconds)
+    assert calls == ["S", "S-r1", "S-r2"]           # a FRESH session per retry
+
+
+def test_drive_with_usage_retry_exhausts_then_raises(monkeypatch):
+    from evallib import driver
+    slept = []
+    monkeypatch.setattr(driver, "drive_query", lambda *a: _limited())
+    monkeypatch.setattr(driver, "_sleep", lambda s: slept.append(s))
+    with pytest.raises(driver.UsageLimitHit) as ei:
+        driver.drive_with_usage_retry(_cfg_backoff([30, 60]), "S", "q", 1, "lbl")
+    assert slept == [1800, 3600]
+    assert ei.value.retries == 2 and ei.value.waited_min == 90
+
+
+def test_drive_with_usage_retry_empty_schedule_is_failfast(monkeypatch):
+    from evallib import driver
+    slept = []
+    monkeypatch.setattr(driver, "drive_query", lambda *a: _limited())
+    monkeypatch.setattr(driver, "_sleep", lambda s: slept.append(s))
+    with pytest.raises(driver.UsageLimitHit) as ei:
+        driver.drive_with_usage_retry(_cfg_backoff([]), "S", "q", 1, "lbl")
+    assert slept == [] and ei.value.retries == 0    # no wait, abort on the first limit
+
+
+def test_capture_turn_raises_when_backoff_exhausted(monkeypatch):
+    from evallib import driver
+    monkeypatch.setattr(driver, "drive_query",
+                        lambda *a: _limited("You've hit your Codex usage limit. Try again in ~12 min."))
+    monkeypatch.setattr(driver, "_sleep", lambda s: None)
+    with pytest.raises(driver.UsageLimitHit) as ei:
+        rc._capture_turn(_cfg_backoff([]), None, "sess", "q", 1, "lbl")   # []=fail-fast; opik unused
+    assert ei.value.reset_hint == "~12 min"
+
+
+def test_backoff_minutes_default_env_and_disable(monkeypatch):
+    from evallib import config as cfgmod
+    monkeypatch.delenv("EVAL_USAGE_RETRY_BACKOFF_MIN", raising=False)
+    assert cfgmod._backoff_minutes([30, 60, 120, 180], [1]) == [30, 60, 120, 180]  # yaml list
+    assert cfgmod._backoff_minutes(None, [30, 60]) == [30, 60]                      # default
+    monkeypatch.setenv("EVAL_USAGE_RETRY_BACKOFF_MIN", "15, 45 , 90")
+    assert cfgmod._backoff_minutes([30], [1]) == [15, 45, 90]                       # env overrides yaml
+    monkeypatch.setenv("EVAL_USAGE_RETRY_BACKOFF_MIN", "")
+    assert cfgmod._backoff_minutes([30, 60], [1]) == []                             # empty env = fail-fast
+
+
+def test_run_task_stamps_resume_pointer_on_usage_limit(tmp_path, monkeypatch):
+    from evallib import driver
+    suite = suites.load_all(_write(tmp_path, _HARD))[0]     # cap_hard / h1 (standard, non-checker)
+    case = suite.scenarios[0].cases[0]
+
+    def boom(*a, **k):
+        raise driver.UsageLimitHit("Codex usage limit. Try again in ~9 min.", "~9 min")
+
+    monkeypatch.setattr(rc, "_standard_trial", boom)
+    with pytest.raises(driver.UsageLimitHit) as ei:
+        rc.run_task(None, None, suite, case, trials=1, k=1, threshold=1.0,
+                    run_id="r", want_judge=False)
+    assert (ei.value.suite, ei.value.case_id, ei.value.trial) == ("cap_hard", "h1", 0)
+
+
+def test_abort_usage_limit_reports_pointer_and_exits_4(capsys):
+    from evallib import driver
+    e = driver.UsageLimitHit("You've hit your Codex usage limit. Try again in ~15 min.", "~15 min")
+    e.locate("cap_coding", "impl_fn", 1)
+    e.retries, e.waited_min = 4, 390                 # exhausted the 30/60/120/180 schedule
+    assert rc._abort_usage_limit(e, done=3, total=10) == 4
+    err = capsys.readouterr().err
+    assert "cap_coding/impl_fn (trial 1)" in err     # the resume pointer
+    assert "~15 min" in err and "3/10" in err         # reset window + progress
+    assert "4 retries across ~390 min" in err         # backoff was exhausted
+    assert "NOT written" in err                       # leaderboard is left intact
 
 
 if __name__ == "__main__":
