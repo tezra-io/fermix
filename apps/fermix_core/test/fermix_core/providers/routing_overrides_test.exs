@@ -174,10 +174,18 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
                {%{provider: :xai}, xai_opts}
              ] = RoutingOverrides.apply_effort(routes, :max)
 
-      # :max clamps to each provider's ceiling: openai -> :xhigh, xai -> :high.
+      # :max caps to gpt-5.5's model ceiling :xhigh; xai (no model cap) clamps
+      # to its provider ceiling :high.
       assert Keyword.get(openai_opts, :reasoning_effort) == :xhigh
       assert Keyword.get(openai_opts, :model) == "gpt-5.5"
       assert Keyword.get(xai_opts, :reasoning_effort) == :high
+    end
+
+    test "a gpt-5.6 route keeps :max (no model cap)" do
+      routes = [{%{provider: :openai, model: "gpt-5.6-sol"}, [model: "gpt-5.6-sol"]}]
+
+      assert [{%{provider: :openai}, opts}] = RoutingOverrides.apply_effort(routes, :max)
+      assert Keyword.get(opts, :reasoning_effort) == :max
     end
 
     # M12 §5.2 effort contract: routes whose provider has no levels entry

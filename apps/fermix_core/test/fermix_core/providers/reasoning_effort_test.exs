@@ -38,8 +38,17 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
 
   describe "levels_for/1 and supported?/2" do
     test "per-provider vocabularies" do
-      assert ReasoningEffort.levels_for(:openai) == [:none, :low, :medium, :high, :xhigh]
-      assert ReasoningEffort.levels_for(:openai_codex) == [:none, :low, :medium, :high, :xhigh]
+      assert ReasoningEffort.levels_for(:openai) == [:none, :low, :medium, :high, :xhigh, :max]
+
+      assert ReasoningEffort.levels_for(:openai_codex) == [
+               :none,
+               :low,
+               :medium,
+               :high,
+               :xhigh,
+               :max
+             ]
+
       assert ReasoningEffort.levels_for(:anthropic) == [:low, :medium, :high, :xhigh, :max]
       assert ReasoningEffort.levels_for(:xai) == [:none, :low, :medium, :high]
       assert ReasoningEffort.levels_for(:unknown) == []
@@ -47,7 +56,8 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
 
     test "supported?/2" do
       assert ReasoningEffort.supported?(:xhigh, :openai)
-      refute ReasoningEffort.supported?(:max, :openai)
+      assert ReasoningEffort.supported?(:max, :openai)
+      assert ReasoningEffort.supported?(:max, :openai_codex)
       assert ReasoningEffort.supported?(:max, :anthropic)
       refute ReasoningEffort.supported?(:none, :anthropic)
       assert ReasoningEffort.supported?(:none, :xai)
@@ -58,6 +68,35 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
       assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "high"}
       assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "high"}
       assert ReasoningEffort.to_provider(:none, :xai) == :omit
+    end
+
+    test "levels_for/2 narrows to a per-model ceiling; nil is the full list" do
+      assert ReasoningEffort.levels_for(:openai, :xhigh) == [:none, :low, :medium, :high, :xhigh]
+
+      assert ReasoningEffort.levels_for(:openai, nil) == [
+               :none,
+               :low,
+               :medium,
+               :high,
+               :xhigh,
+               :max
+             ]
+
+      assert ReasoningEffort.levels_for(:xai, :high) == [:none, :low, :medium, :high]
+    end
+  end
+
+  describe "cap/2" do
+    test "caps a level down to the ceiling, never up" do
+      assert ReasoningEffort.cap(:max, :xhigh) == :xhigh
+      assert ReasoningEffort.cap(:xhigh, :xhigh) == :xhigh
+      assert ReasoningEffort.cap(:low, :xhigh) == :low
+      assert ReasoningEffort.cap(:none, :xhigh) == :none
+    end
+
+    test "a nil ceiling is a no-op" do
+      assert ReasoningEffort.cap(:max, nil) == :max
+      assert ReasoningEffort.cap(:none, nil) == :none
     end
   end
 
@@ -70,14 +109,18 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
     test "supported levels map to their verbatim wire string" do
       assert ReasoningEffort.to_provider(:high, :openai) == {:ok, "high"}
       assert ReasoningEffort.to_provider(:xhigh, :openai) == {:ok, "xhigh"}
+      # :max is now a supported OpenAI/Codex level (no longer clamped to xhigh).
+      assert ReasoningEffort.to_provider(:max, :openai) == {:ok, "max"}
+      assert ReasoningEffort.to_provider(:max, :openai_codex) == {:ok, "max"}
       assert ReasoningEffort.to_provider(:max, :anthropic) == {:ok, "max"}
       assert ReasoningEffort.to_provider(:xhigh, :anthropic) == {:ok, "xhigh"}
       assert ReasoningEffort.to_provider(:low, :anthropic) == {:ok, "low"}
     end
 
     test "a level above the provider's ceiling clamps to that ceiling" do
-      assert ReasoningEffort.to_provider(:max, :openai) == {:ok, "xhigh"}
-      assert ReasoningEffort.to_provider(:max, :openai_codex) == {:ok, "xhigh"}
+      # xAI tops out at :high, so :xhigh/:max clamp down to it.
+      assert ReasoningEffort.to_provider(:xhigh, :xai) == {:ok, "high"}
+      assert ReasoningEffort.to_provider(:max, :xai) == {:ok, "high"}
     end
 
     test "a level below the provider's floor is unsupported (reject loud upstream)" do
@@ -94,12 +137,12 @@ defmodule FermixCore.Providers.ReasoningEffortTest do
   describe "clamp/2" do
     test "a supported level passes through unchanged" do
       assert ReasoningEffort.clamp(:high, :openai) == :high
+      assert ReasoningEffort.clamp(:max, :openai) == :max
       assert ReasoningEffort.clamp(:max, :anthropic) == :max
       assert ReasoningEffort.clamp(:none, :xai) == :none
     end
 
     test "above the ceiling clamps down to the ceiling" do
-      assert ReasoningEffort.clamp(:max, :openai) == :xhigh
       assert ReasoningEffort.clamp(:max, :xai) == :high
       assert ReasoningEffort.clamp(:xhigh, :xai) == :high
     end

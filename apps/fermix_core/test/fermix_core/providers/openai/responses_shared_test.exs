@@ -289,9 +289,9 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
       end
     end
 
-    test "clamps a level above the provider ceiling (:max -> xhigh on OpenAI-family)" do
-      assert ResponsesShared.maybe_reasoning_field(:max, :openai) == %{effort: "xhigh"}
-      assert ResponsesShared.maybe_reasoning_field(:max, :openai_codex) == %{effort: "xhigh"}
+    test "sends :max verbatim on OpenAI-family (now a supported level, not clamped)" do
+      assert ResponsesShared.maybe_reasoning_field(:max, :openai) == %{effort: "max"}
+      assert ResponsesShared.maybe_reasoning_field(:max, :openai_codex) == %{effort: "max"}
     end
 
     test "raises ArgumentError on a removed level (minimal)" do
