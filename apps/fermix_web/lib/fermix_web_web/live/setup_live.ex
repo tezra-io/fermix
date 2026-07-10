@@ -395,6 +395,13 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # Raise the macOS Screen Recording + Accessibility prompts up front (registering the
+  # sidecar bundle first) so the app appears in System Settings at enable time instead
+  # of on the model's first screenshot. Re-probes after so the pane reflects reality.
+  def handle_event("computer_use_grant", _params, socket) do
+    {:noreply, request_computer_use_permissions(socket)}
+  end
+
   # The §4.4 Connect-time collection: the needs_config card form posts the
   # plugin's missing required manifest config entries.
   def handle_event(
@@ -813,40 +820,51 @@ defmodule FermixWebWeb.SetupLive do
   defp computer_use_permissions_result do
     case Doctor.computer_use_permissions() do
       {:ok, %{state: :disabled}} ->
-        %{status: :ok, detail: "Off — computer use is disabled."}
+        %{status: :ok, grant?: false, detail: "Off — computer use is disabled."}
 
       {:ok, %{state: :not_installed}} ->
-        %{status: :warn, detail: "Enabled, but the helper isn't installed yet."}
+        %{status: :warn, grant?: false, detail: "Enabled, but the helper isn't installed yet."}
 
       {:ok, %{state: :probed} = probe} ->
         computer_use_probe_detail(probe)
 
       {:error, reason} ->
-        %{status: :error, detail: "Couldn't probe the helper: #{Redaction.format(reason)}"}
+        %{
+          status: :error,
+          grant?: false,
+          detail: "Couldn't probe the helper: #{Redaction.format(reason)}"
+        }
     end
   end
 
+  # `grant?` drives the "Grant macOS permissions" button — offered only on macOS when
+  # a grant is actually missing (the prompt is a no-op elsewhere).
   defp computer_use_probe_detail(%{screen_capture: true, input_control: true}) do
-    %{status: :ok, detail: "Screen capture and input control are granted."}
+    %{status: :ok, grant?: false, detail: "Screen capture and input control are granted."}
   end
 
-  defp computer_use_probe_detail(%{screen_capture: true, input_control: false}) do
+  defp computer_use_probe_detail(%{screen_capture: true, input_control: false} = probe) do
     %{
       status: :warn,
+      grant?: macos_probe?(probe),
       detail:
         "Input control isn't granted — clicks and keystrokes are silently dropped. " <>
           "On macOS, grant Accessibility in System Settings → Privacy & Security."
     }
   end
 
-  defp computer_use_probe_detail(%{screen_capture: false}) do
+  defp computer_use_probe_detail(%{screen_capture: false} = probe) do
     %{
       status: :warn,
+      grant?: macos_probe?(probe),
       detail:
         "Screen capture isn't granted. On macOS, grant Screen Recording in " <>
           "System Settings → Privacy & Security."
     }
   end
+
+  defp macos_probe?(%{platform: "macos"}), do: true
+  defp macos_probe?(_probe), do: false
 
   # The token-freshness check is offline and instant, so it resolves up front
   # alongside the running provider/channel probes rather than going through the
@@ -1533,6 +1551,32 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign_report(Wizard.report())
     |> save_answers([computer_use_enabled: enabled?], message, nil, restart_required?: true)
+  end
+
+  # Spawns the sidecar (as its own signed TCC identity) to raise the OS grant
+  # dialogs, then refreshes the report so the permission pane re-probes. The prompts
+  # are async, so a fresh grant may only show on the next probe.
+  defp request_computer_use_permissions(socket) do
+    case computer_use_grant_impl().() do
+      {:ok, %{screen_capture: true, input_control: true}} ->
+        refresh_report(socket, "macOS permissions granted.")
+
+      {:ok, _partial} ->
+        refresh_report(
+          socket,
+          "Approve the Screen Recording and Accessibility prompts, then the next " <>
+            "computer-use action will use them."
+        )
+
+      {:error, reason} ->
+        flash_error(socket, "Couldn't open the permission prompts: #{Redaction.format(reason)}")
+    end
+  end
+
+  # Injectable so a LiveView test never fires a real OS permission dialog (mirrors the
+  # `:plugin_auth_runner` seam). Defaults to the real prompt.
+  defp computer_use_grant_impl do
+    Application.get_env(:fermix_web, :computer_use_grant_impl, &ComputerUse.request_permissions/0)
   end
 
   defp computer_use_plugin?(name), do: name == SidecarInstaller.plugin_name()
