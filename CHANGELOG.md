@@ -28,6 +28,58 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `grok-4.5` (1M context window, accepts reasoning effort) leads the xAI model
   list, so a fresh xAI setup defaults to it; `grok-4.3` and the other Grok
   models remain available.
+## [0.5.5] - 2026-07-08
+
+### Fixed
+
+- **Computer Use permissions now attribute to one stable, signed "Fermix" app on
+  macOS.** The screen-capture sidecar used to inherit the ad-hoc, per-version
+  identity of the daemon that launched it, so macOS Screen Recording /
+  Accessibility grants never persisted — every screenshot re-prompted, and each
+  upgrade left a new "Fermix" row in System Settings. The sidecar now runs as its
+  own Developer-ID-signed, notarized `Fermix.app` (a permanent bundle identity)
+  that disclaims TCC responsibility from its parent, so a grant sticks across
+  upgrades and every macOS permission Fermix needs — Screen Recording,
+  Accessibility, and the voice companion's Microphone — shows as a single
+  **Fermix** app with its icon. The setup Plugins page gains a **Grant macOS
+  permissions** button that raises the prompts up front (and registers the app in
+  System Settings) instead of surprising you on the first screenshot.
+  - _Upgrading from a pre-release build:_ if Computer Use reports a missing
+    permission even though the "Fermix" box looks checked, a stale grant from the
+    old build is shadowing the signed one — remove the "Fermix" row under System
+    Settings ▸ Screen Recording (or run `tccutil reset ScreenCapture
+    io.tezra.fermix.computer-use`) and grant again. First-time installs are
+    unaffected.
+  - _Icon cache:_ the new row may briefly show a generic icon until macOS
+    refreshes its icon cache (a relogin, or `killall Dock`).
+- **Upgraded voice configs with any official OpenAI voice no longer crash the
+  daemon.** 0.5.4 validated the Realtime `voice` against only the four curated
+  dropdown options (marin/sage/verse/cedar), but earlier Fermix accepted any
+  voice — so a config carrying `alloy`, `echo`, or another official voice raised
+  during config normalization, which runs on both setup render and daemon
+  boot/readiness. Validation now accepts the full official OpenAI voice set
+  (alloy, ash, ballad, coral, echo, sage, shimmer, verse, marin, cedar); the
+  setup dropdown still lists the recommended voices first.
+- **The setup page reconnects itself after "Apply & restart".** Restarting the
+  daemon from the setup UI briefly stops the web server; the page had relied on
+  LiveView's default reconnect, which could strand the browser on a terminal
+  "can't connect" error during the few seconds of downtime — even though the
+  daemon comes back fine (the setup session survives because `secret_key_base`
+  is persisted, not regenerated per boot). The "Restarting…" overlay now waits
+  for the daemon to go down and come back, then reloads, so the page returns on
+  its own instead of needing a manual `fermix setup`.
+- **OAuth tokens refresh proactively, and a rotated refresh token is never
+  reused.** The daemon refreshed tokens only lazily — on use, within 10 seconds
+  of expiry, with no background timer — and refreshed from an in-memory copy of
+  the refresh token. If that token was rotated out-of-band (by a `fermix
+  doctor`/setup auth probe, or a second daemon on the same account), the daemon
+  could reuse the now-consumed token, and providers like Codex invalidate the
+  entire session when a rotated refresh token is reused ("your session has
+  ended"). `TokenManager` now (a) schedules a single proactive refresh a few
+  minutes before expiry — one timer per token, no polling — so an idle daemon
+  keeps its token warm, and (b) always refreshes from the latest token persisted
+  on disk, so a rotated token is never reused. Recovery from an already-ended
+  session is still `fermix auth login`.
 
 ## [0.5.4] - 2026-07-07
 

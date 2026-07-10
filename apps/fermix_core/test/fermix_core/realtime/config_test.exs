@@ -89,8 +89,29 @@ defmodule FermixCore.Realtime.ConfigTest do
     end
   end
 
-  test "valid_voices is the common source, marin first for the dropdown" do
-    assert Config.valid_voices() == ["marin", "sage", "verse", "cedar"]
+  test "valid_voices lists the full official set, curated voices first for the dropdown" do
+    assert Config.valid_voices() == [
+             "marin",
+             "sage",
+             "verse",
+             "cedar",
+             "alloy",
+             "ash",
+             "ballad",
+             "coral",
+             "echo",
+             "shimmer"
+           ]
+  end
+
+  test "accepts an official voice carried over from a pre-dropdown config (upgrade safety)" do
+    # Earlier Fermix accepted any voice; validating to only the curated four
+    # crashed normalization — which runs on setup render AND daemon boot/readiness
+    # — for a config upgraded with e.g. voice: "alloy" or "echo". Every official
+    # OpenAI Realtime voice must normalize without raising.
+    for voice <- ~w(alloy ash ballad coral echo shimmer) do
+      assert Config.normalize(voice: voice).voice == voice
+    end
   end
 
   test "valid_reasoning_efforts is the common source, ordered low to high" do

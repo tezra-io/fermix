@@ -56,6 +56,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     xai_login_runner = Application.get_env(:fermix_web, :xai_login_runner)
     anthropic_login_impl = Application.get_env(:fermix_web, :anthropic_login_impl)
     doctor_probe_opts = Application.get_env(:fermix_web, :doctor_probe_opts)
+    computer_use_grant_impl = Application.get_env(:fermix_web, :computer_use_grant_impl)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -78,6 +79,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :xai_login_runner)
     Application.delete_env(:fermix_web, :anthropic_login_impl)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
+    Application.delete_env(:fermix_web, :computer_use_grant_impl)
 
     on_exit(fn ->
       restore_env(:fermix_core, :providers, providers)
@@ -94,6 +96,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :xai_login_runner, xai_login_runner)
       restore_env(:fermix_web, :anthropic_login_impl, anthropic_login_impl)
       restore_env(:fermix_web, :doctor_probe_opts, doctor_probe_opts)
+      restore_env(:fermix_web, :computer_use_grant_impl, computer_use_grant_impl)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -2815,6 +2818,40 @@ defmodule FermixWebWeb.SetupLiveTest do
     else
       Process.sleep(25)
       render_until(view, expected, attempts - 1)
+    end
+  end
+
+  describe "computer-use grant prompt" do
+    # The grant impl is injected so the handler never fires a real macOS OS dialog.
+    test "a full grant flashes success", %{conn: conn} do
+      Application.put_env(:fermix_web, :computer_use_grant_impl, fn ->
+        {:ok, %{screen_capture: true, input_control: true}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+      assert render_hook(view, "computer_use_grant", %{}) =~ "macOS permissions granted."
+    end
+
+    test "a partial grant flashes the approve-the-prompts guidance", %{conn: conn} do
+      Application.put_env(:fermix_web, :computer_use_grant_impl, fn ->
+        {:ok, %{screen_capture: true, input_control: false}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      assert render_hook(view, "computer_use_grant", %{}) =~
+               "Approve the Screen Recording and Accessibility prompts"
+    end
+
+    test "a sidecar error flashes the failure instead of crashing", %{conn: conn} do
+      Application.put_env(:fermix_web, :computer_use_grant_impl, fn ->
+        {:error, {:sidecar_missing, "/nope"}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      # (apostrophe in "Couldn't" is HTML-escaped in the rendered flash)
+      assert render_hook(view, "computer_use_grant", %{}) =~ "open the permission prompts"
     end
   end
 
