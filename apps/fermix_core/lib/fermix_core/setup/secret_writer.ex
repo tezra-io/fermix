@@ -323,10 +323,32 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   @impl true
   def put(key, value, opts \\ []) when is_atom(key) and is_binary(value) do
-    with {:ok, binary} <- fetch_security_binary(),
-         {:ok, _output} <- run(binary, put_args(key, value, opts), timeout(opts)) do
-      :ok
+    with {:ok, binary} <- fetch_security_binary() do
+      [delete, add] = put_commands(key, value, opts)
+      # Best-effort delete FIRST so the add re-creates the item fresh with `-A`'s
+      # open ACL (see put_commands/put_args). A missing item just errors and falls
+      # through; the add still stores the value.
+      _ = run(binary, delete, timeout(opts))
+
+      case run(binary, add, timeout(opts)) do
+        {:ok, _output} -> :ok
+        error -> error
+      end
     end
+  end
+
+  @doc """
+  The ordered `security` commands `put/3` runs: delete the existing item, then add
+  it back with `-A`. `-A` only sets the open (no per-application) ACL when an item
+  is CREATED — on a `-U` update it leaves a pre-existing item's ACL untouched, so a
+  secret first written without `-A` (an older Fermix, a manual Keychain entry, or a
+  past "Always Allow") would prompt on every headless daemon read forever. Deleting
+  first makes each save self-heal to the open ACL. Exposed as data so the sequence
+  is unit-testable without touching the real keychain.
+  """
+  @spec put_commands(atom(), String.t(), keyword()) :: [[String.t()]]
+  def put_commands(key, value, opts \\ []) do
+    [delete_args(key, opts), put_args(key, value, opts)]
   end
 
   @impl true
@@ -364,6 +386,10 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   # secret is still keychain-stored rather than on disk.
   defp put_args(key, value, opts) do
     ["add-generic-password", "-a", @account, "-s", service(key, opts), "-w", value, "-U", "-A"]
+  end
+
+  defp delete_args(key, opts) do
+    ["delete-generic-password", "-a", @account, "-s", service(key, opts)]
   end
 
   defp get_args(key, opts) do
