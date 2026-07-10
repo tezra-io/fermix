@@ -52,10 +52,16 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     )
   end
 
-  # The compux download cache under FERMIX_HOME/plugins/compux/<vsn>/<target>/compux.
+  # The compux download cache under FERMIX_HOME/plugins/compux/<vsn>/<target>/.
+  # v0.4.0 ships a signed `.app` on macOS (the TCC-permissions fix), a bare binary
+  # elsewhere — mirror Compux.Binary's exec_relpath so binary_path/installed? resolve it.
   defp cache_binary(home, version, target, mode) do
-    write_bin(Path.join([home, "plugins", "compux", version, target, "compux"]), mode)
+    root = Path.join([home, "plugins", "compux", version, target])
+    write_bin(Path.join([root, exec_relpath(target)]), mode)
   end
+
+  defp exec_relpath("macos-" <> _), do: Path.join(["Fermix.app", "Contents", "MacOS", "compux"])
+  defp exec_relpath(_), do: "compux"
 
   test "plugin_name is the stable card identifier" do
     assert SidecarInstaller.plugin_name() == "computer_use_sidecar"
@@ -99,7 +105,7 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
     end
   end
 
-  test "the checksum gate passes for this host now that compux v0.3.0 shipped", %{home: home} do
+  test "the checksum gate passes for this host now that compux v0.4.0 shipped", %{home: home} do
     # The pinned compux ref ships a populated checksum map for both released
     # targets (macos-aarch64, linux-x86_64), so the download no longer fails at
     # the checksum gate. The stub fetcher keeps the test hermetic: reaching it
