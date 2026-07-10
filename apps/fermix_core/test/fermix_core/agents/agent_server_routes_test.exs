@@ -172,7 +172,7 @@ defmodule FermixCore.Agents.AgentServerRoutesTest do
     assert {:ok, _} = AgentServer.run_task(pid, "do it")
     assert_received {:chat, :flaky}
     # Second route still reached (effort-only did NOT collapse to one route);
-    # :max clamps to OpenAI's ceiling :xhigh.
-    assert_received {:chat, :effort, "gpt-x", :xhigh}
+    # :max is a supported OpenAI level, so it passes through unchanged.
+    assert_received {:chat, :effort, "gpt-x", :max}
   end
 end

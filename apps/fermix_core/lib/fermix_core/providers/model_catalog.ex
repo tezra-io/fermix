@@ -17,6 +17,7 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog.Entry
+  alias FermixCore.Providers.ReasoningEffort
 
   @type provider ::
           :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
@@ -26,19 +27,70 @@ defmodule FermixCore.Providers.ModelCatalog do
   @default_max_output_tokens 8_192
 
   # Same models, two access routes with different effective windows: the Codex
-  # (ChatGPT subscription / OAuth) path caps the shared models at 400k, while the
-  # OpenAI direct API (api key) serves the full window. Keyed per provider so the
-  # window follows the auth path automatically (see models_for/1).
+  # (ChatGPT subscription / OAuth) path caps the older shared models at 400k,
+  # while the OpenAI direct API (api key) serves their full window. Keyed per
+  # provider so the window follows the auth path automatically (see models_for/1).
+  # The GPT-5.6 generation (sol/terra/luna) is the exception: its Codex
+  # `context_window` and direct-API `max_context_window` are both 372k, so it
+  # serves the same window on either path (windows sourced from the Codex model
+  # catalog, `~/.codex/models_cache.json`). sol = frontier (default), terra =
+  # balanced, luna = fast/affordable.
+  #
+  # `max` reasoning effort is a gpt-5.6-family capability, so the 5.6 models
+  # leave `max_reasoning_effort` unset (provider ceiling = `:max`) while
+  # gpt-5.5/gpt-5.4/gpt-5.4-mini cap at `:xhigh`. An over-reaching config
+  # self-heals down to the model's ceiling at route resolution (see
+  # `clamp_effort/3`), it does not 400 at the provider.
   @openai_codex [
-    %Entry{id: "gpt-5.5", label: "GPT-5.5 (default, latest)", context_window: 400_000},
-    %Entry{id: "gpt-5.4", label: "GPT-5.4", context_window: 400_000},
-    %Entry{id: "gpt-5.4-mini", label: "GPT-5.4 mini (faster, cheaper)", context_window: 400_000}
+    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol (default, latest)", context_window: 372_000},
+    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 372_000},
+    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 372_000},
+    %Entry{
+      id: "gpt-5.5",
+      label: "GPT-5.5",
+      context_window: 400_000,
+      max_reasoning_effort: :xhigh
+    },
+    %Entry{
+      id: "gpt-5.4",
+      label: "GPT-5.4",
+      context_window: 400_000,
+      max_reasoning_effort: :xhigh
+    },
+    %Entry{
+      id: "gpt-5.4-mini",
+      label: "GPT-5.4 mini (faster, cheaper)",
+      context_window: 400_000,
+      max_reasoning_effort: :xhigh
+    }
   ]
 
   @openai [
-    %Entry{id: "gpt-5.5", label: "GPT-5.5 (default, recommended)", context_window: 1_050_000},
-    %Entry{id: "gpt-5.4", label: "GPT-5.4", context_window: 1_050_000},
-    %Entry{id: "gpt-5.4-mini", label: "GPT-5.4 mini", context_window: 400_000}
+    %Entry{
+      id: "gpt-5.6-sol",
+      label: "GPT-5.6 Sol (default, recommended)",
+      context_window: 372_000
+    },
+    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 372_000},
+    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 372_000},
+    %Entry{
+      id: "gpt-5.5",
+      label: "GPT-5.5",
+      context_window: 1_050_000,
+      max_reasoning_effort: :xhigh
+    },
+    %Entry{
+      id: "gpt-5.4",
+      label: "GPT-5.4",
+      context_window: 1_050_000,
+      max_reasoning_effort: :xhigh
+    },
+    %Entry{
+      id: "gpt-5.4-mini",
+      label: "GPT-5.4 mini",
+      context_window: 400_000,
+      max_reasoning_effort: :xhigh
+    }
   ]
 
   # Context windows are the API defaults the adapter actually gets (it does not
@@ -80,11 +132,13 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   # xAI model names are volatile (design doc §8) — stale ids fail in the
   # doctor probe, not the first user turn. Windows from current xAI docs:
-  # Grok 4.3 = 1M, Grok 4.20 = 256k (same window as Grok 4), code-fast = 256k.
-  # `reasoning_effort?: false` marks the models that reject `reasoning.effort`
-  # (design doc §6.2) — re-verify against current xAI docs when adding models.
+  # Grok 4.5 = 1M, Grok 4.3 = 1M, Grok 4.20 = 256k (same window as Grok 4),
+  # code-fast = 256k. `reasoning_effort?: false` marks the models that reject
+  # `reasoning.effort` (design doc §6.2) — re-verify against current xAI docs
+  # when adding models.
   @xai [
-    %Entry{id: "grok-4.3", label: "Grok 4.3 (recommended)", context_window: 1_000_000},
+    %Entry{id: "grok-4.5", label: "Grok 4.5 (recommended)", context_window: 1_000_000},
+    %Entry{id: "grok-4.3", label: "Grok 4.3", context_window: 1_000_000},
     %Entry{
       id: "grok-4.20-0309-reasoning",
       label: "Grok 4.20 reasoning",
@@ -251,6 +305,44 @@ defmodule FermixCore.Providers.ModelCatalog do
       %Entry{reasoning_effort?: value} -> value
       nil -> true
     end
+  end
+
+  @doc """
+  The highest reasoning-effort level `model_id` accepts when it is lower than
+  its provider's ceiling, or `nil` when the model has no per-model cap (unknown
+  models and every uncapped model). Today only the older OpenAI models
+  (gpt-5.5 / gpt-5.4 / gpt-5.4-mini) cap — `max` is a gpt-5.6-family capability.
+  """
+  @spec model_effort_ceiling(atom(), String.t()) :: ReasoningEffort.level() | nil
+  def model_effort_ceiling(provider, model_id) when is_binary(model_id) do
+    case find_entry(provider, model_id) do
+      %Entry{max_reasoning_effort: ceiling} -> ceiling
+      nil -> nil
+    end
+  end
+
+  @doc """
+  The reasoning-effort levels a setup surface should offer for `model_id`: the
+  provider's vocabulary narrowed to the model's ceiling. Setup panes call this
+  instead of `ReasoningEffort.levels_for/1` so an older model never lists an
+  effort it would reject.
+  """
+  @spec effort_levels_for(atom(), String.t()) :: [ReasoningEffort.level()]
+  def effort_levels_for(provider, model_id) when is_binary(model_id) do
+    ReasoningEffort.levels_for(provider, model_effort_ceiling(provider, model_id))
+  end
+
+  @doc """
+  Clamps `level` into `model_id`'s effective effort range: the provider's
+  floor/ceiling first (`ReasoningEffort.clamp/2`), then down to the model's own
+  cap. Used to overlay a routing-level effort onto a concrete route without
+  sending an effort the model rejects.
+  """
+  @spec clamp_effort(atom(), String.t(), ReasoningEffort.level()) :: ReasoningEffort.level()
+  def clamp_effort(provider, model_id, level) when is_binary(model_id) do
+    level
+    |> ReasoningEffort.clamp(provider)
+    |> ReasoningEffort.cap(model_effort_ceiling(provider, model_id))
   end
 
   @doc """

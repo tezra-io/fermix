@@ -681,6 +681,31 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ ~s(value="minimal")
     end
 
+    test "reasoning effort options follow the selected model (max only for gpt-5.6)", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      older =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{provider: "openai", default_model: "gpt-5.5"}
+        )
+        |> render_change()
+
+      assert older =~ ~s(value="xhigh")
+      refute older =~ ~s(value="max")
+
+      newer =
+        view
+        |> form("form[phx-submit=\"save_provider\"]",
+          provider_form: %{provider: "openai", default_model: "gpt-5.6-sol"}
+        )
+        |> render_change()
+
+      assert newer =~ ~s(value="max")
+    end
+
     test "provider pane offers a Sub-agent model select that persists to routing", %{conn: conn} do
       routing = Application.get_env(:fermix_core, :routing, [])
       on_exit(fn -> Application.put_env(:fermix_core, :routing, routing) end)
