@@ -102,4 +102,68 @@ defmodule Fermix.CLI.Service.LaunchdTest do
     assert sent?(calls, "TERM")
     refute sent?(calls, "KILL")
   end
+
+  test "stop stays a graceful no-op when launchd reports the job is not loaded" do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+
+    Application.put_env(:fermix_core, :launchctl_runner, fn "launchctl", args ->
+      Agent.update(agent, &(&1 ++ [args]))
+
+      case args do
+        # launchd's stable "not loaded" reply (non-zero exit) must read as
+        # "nothing to stop", not as an error.
+        ["print" | _] -> {~s(Could not find service "io.tezra.fermix" in domain for user), 113}
+        _ -> {"", 0}
+      end
+    end)
+
+    assert :ok = Launchd.stop(@svc)
+
+    calls = Agent.get(agent, & &1)
+    assert Enum.any?(calls, &match?(["kill", "TERM" | _], &1))
+    refute Enum.any?(calls, &match?(["kill", "KILL" | _], &1))
+  end
+
+  test "stop surfaces a launchctl print failure instead of assuming the daemon is gone" do
+    # A genuine query failure (privileges, a launchd hiccup) is NOT "not loaded":
+    # `stop` cannot prove the daemon is gone, so it must fail loud, not return :ok.
+    Application.put_env(:fermix_core, :launchctl_runner, fn "launchctl", args ->
+      case args do
+        ["print" | _] -> {"Bootstrap failed: 5: Input/output error", 5}
+        _ -> {"", 0}
+      end
+    end)
+
+    assert {:error, {:launchctl_failed, 5, _}} = Launchd.stop(@svc)
+  end
+
+  test "a transient print failure mid-shutdown is never read as a clean exit" do
+    {:ok, agent} = Agent.start_link(fn -> %{prints: 0, kill: 0} end)
+
+    runner = fn "launchctl", args ->
+      case args do
+        ["print" | _] ->
+          n = Agent.get_and_update(agent, fn s -> {s.prints, %{s | prints: s.prints + 1}} end)
+          # First read establishes the running pid; every later read fails
+          # transiently — which must NOT masquerade as the process exiting.
+          if n == 0,
+            do: {"\tpid = 100\n", 0},
+            else: {"launchctl print: transient error", 1}
+
+        ["kill", "KILL" | _] ->
+          Agent.update(agent, &%{&1 | kill: &1.kill + 1})
+          {"", 0}
+
+        _ ->
+          {"", 0}
+      end
+    end
+
+    Application.put_env(:fermix_core, :launchctl_runner, runner)
+
+    assert {:error, {:stop_failed, 100}} = Launchd.stop(@svc)
+
+    assert Agent.get(agent, & &1.kill) >= 1,
+           "must escalate to SIGKILL, not trust a failed read as exit"
+  end
 end
