@@ -95,10 +95,12 @@ defmodule FermixCore.Providers.RoutingOverrides do
   end
 
   @doc """
-  Fills `:provider` from `:model` when a model is set but no provider was given,
-  preferring the active primary provider, then the first catalog match. Leaves
-  the override untouched if provider is already set or no model is present
-  (`RouteResolver` then defaults the provider to the primary at resolve time).
+  Fills `:provider` from the active primary when a model is set but no provider
+  was given — a bare model pin runs on the **primary** provider (the sub-agent /
+  cron picker is scoped to it; a cross-provider worker needs an EXPLICIT
+  `*_provider`). Only when no primary is configured does it fall back to the
+  model's catalog owner. Leaves the override untouched if a provider is already
+  set or no model is present.
   """
   @spec infer_provider(override()) :: override()
   def infer_provider(%{provider: nil, model: model} = override) when is_binary(model) do
@@ -107,13 +109,14 @@ defmodule FermixCore.Providers.RoutingOverrides do
 
   def infer_provider(override), do: override
 
+  # A provider-less pin runs on the primary. Only fall back to the model's catalog
+  # owner when no primary is configured (nothing better to default to). This is
+  # what keeps a bare sub-agent model on the primary instead of silently
+  # re-routing to whichever provider's catalog happens to own the slug.
   defp provider_for(model) do
-    primary = current_primary()
-
-    if primary && ModelCatalog.known_model?(primary, model) do
-      primary
-    else
-      ModelCatalog.provider_for_model(model)
+    case current_primary() do
+      nil -> ModelCatalog.provider_for_model(model)
+      primary -> primary
     end
   end
 
