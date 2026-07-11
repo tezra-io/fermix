@@ -50,11 +50,27 @@ defmodule Fermix.CLI.ChatCommandTest do
       )
 
     on_exit(fn ->
-      if Process.alive?(daemon), do: GenServer.stop(daemon, :normal, 1_000)
+      # Restore global state FIRST, before the fallible daemon stop below. The
+      # daemon can die between `Process.alive?` and `GenServer.stop` (a TOCTOU
+      # :noproc exit); if that raised before these restores, FERMIX_HOME would leak
+      # into the next async:false test — whose sandbox working dir derives from it —
+      # and fail it with "working directory does not exist".
       restore_env("FERMIX_HOME", previous_home)
       restore_app_env(:cli_channel_bridge, previous_bridge)
       restore_app_env(:chat_command_test_pid, previous_pid)
       restore_app_env(:chat_command_bridge_result, previous_result)
+
+      # Best-effort stop: an already-exited daemon makes GenServer.stop exit :noproc.
+      # Tolerate exactly that (the goal — a stopped daemon — is already met); any
+      # other stop failure still surfaces.
+      if Process.alive?(daemon) do
+        try do
+          GenServer.stop(daemon, :normal, 1_000)
+        catch
+          :exit, :noproc -> :ok
+        end
+      end
+
       FermixTestSupport.SafeRm.rm_rf!(socket_dir)
     end)
 

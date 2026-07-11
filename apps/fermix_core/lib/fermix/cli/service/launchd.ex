@@ -44,16 +44,24 @@ defmodule Fermix.CLI.Service.Launchd do
   def stop(%{scope: scope, label: label} = spec) do
     job = "#{domain(scope)}/#{label}"
 
-    case job_pid(spec) do
-      nil ->
-        # No running instance (or launchd reports no pid) — a plain TERM is a
+    case job_status(spec) do
+      {:ok, nil} ->
+        # launchd affirmatively reports no running instance — a plain TERM is a
         # harmless no-op; there is nothing to escalate against.
         _ = launchctl(["kill", "TERM", job])
         :ok
 
-      pid ->
+      {:ok, pid} ->
         _ = launchctl(["kill", "TERM", job])
         terminate(spec, job, pid)
+
+      {:error, _reason} = err ->
+        # We could NOT read whether the daemon is running (`launchctl print`
+        # failed for a reason other than "not loaded"). `stop` must GUARANTEE the
+        # instance is gone; an unreadable state is not a guarantee, so surface the
+        # error instead of returning a false :ok that lets restart/upgrade proceed
+        # against a still-live daemon.
+        err
     end
   end
 
@@ -79,15 +87,27 @@ defmodule Fermix.CLI.Service.Launchd do
     end
   end
 
-  # The job's current OS pid via `launchctl print`, or nil when it isn't running
-  # (unloaded, or momentarily between a KeepAlive relaunch). Routed through the same
-  # launchctl seam as every other call, so it stays test-injectable.
-  defp job_pid(%{scope: scope, label: label}) do
+  # The job's running state via `launchctl print`:
+  #   {:ok, pid} — running under `pid`
+  #   {:ok, nil} — launchd answered but reports no running instance (not loaded, or
+  #                momentarily between a KeepAlive relaunch)
+  #   {:error, reason} — the query itself failed (privileges, a transient launchd
+  #                error); the caller must NOT read this as "gone".
+  # Routed through the same launchctl seam as every other call, so it stays
+  # test-injectable.
+  defp job_status(%{scope: scope, label: label}) do
     case launchctl_output(["print", "#{domain(scope)}/#{label}"]) do
-      {:ok, output} -> parse_pid(output)
-      {:error, _} -> nil
+      {:ok, output} ->
+        {:ok, parse_pid(output)}
+
+      {:error, {:launchctl_failed, _code, output}} = err ->
+        if service_not_loaded?(output), do: {:ok, nil}, else: err
     end
   end
+
+  # launchd emits this (non-localized) message when the job isn't bootstrapped —
+  # a definitive "not running", distinct from a query that genuinely failed.
+  defp service_not_loaded?(output), do: String.contains?(output, "Could not find")
 
   defp parse_pid(output) do
     case Regex.run(~r/\bpid\s*=\s*(\d+)/, output) do
@@ -105,7 +125,7 @@ defmodule Fermix.CLI.Service.Launchd do
 
     Enum.reduce_while(1..polls, :alive, fn i, _acc ->
       cond do
-        job_pid(spec) != pid ->
+        exited?(job_status(spec), pid) ->
           {:halt, :exited}
 
         i == polls ->
@@ -117,6 +137,13 @@ defmodule Fermix.CLI.Service.Launchd do
       end
     end)
   end
+
+  # The original process is gone only when launchd AFFIRMATIVELY reports a
+  # different pid (or none). A failed query is inconclusive — never read it as
+  # exit, or a transient `launchctl print` error would fake a clean shutdown and
+  # let a wedged daemon slip through as "stopped".
+  defp exited?({:ok, current_pid}, pid), do: current_pid != pid
+  defp exited?({:error, _reason}, _pid), do: false
 
   # Poll cadence + grace windows + the sleep fn, injectable for tests (real waits
   # would make the suite sleep for the full grace). The default SIGTERM grace matches
