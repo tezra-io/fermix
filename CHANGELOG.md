@@ -6,6 +6,46 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-07-11
+
+### Added
+
+- **`fermix doctor`'s Computer Use check now names the compux sidecar version.**
+  The check reported permission state but never which screen-capture sidecar build
+  is installed, so there was no one-glance way to confirm it after a bump. The
+  probed result now appends ` · sidecar compux v<vsn>`, and the not-installed
+  warning names the target version — sourced from the same `compux` app version
+  the daemon resolves the helper by.
+
+### Fixed
+
+- **Sub-agents now run on your primary provider unless you pin one explicitly.**
+  A sub-agent model set without an explicit provider resolves on the primary
+  provider, instead of being silently re-routed to whichever provider's catalog
+  happens to own the model slug. Previously a leftover sub-agent model from a
+  different provider (e.g. a `gpt-oss` pin — an Ollama model — kept after
+  switching your main provider to Codex) quietly ran delegated workers on that
+  other provider rather than your main model; if that provider wasn't running,
+  the spawn failed. The setup page's **Sub-agent model** picker also no longer
+  surfaces such a stale cross-provider model as the "current" value on the
+  primary pane — it shows "Same as main model" and self-heals on the next save.
+  To run sub-agents on a non-primary provider, set `subagent_provider` explicitly
+  in `[fermix_core.routing]`.
+- **`fermix stop`/`restart`/`upgrade` now force-kill a daemon that won't shut down,
+  and `upgrade` verifies the daemon came back on the new version.** The service
+  commands sent a single `launchctl kill TERM` and reported success the instant
+  launchd accepted the signal — not when the process actually died. A daemon whose
+  orderly shutdown stalled (a draining agent turn, an open Computer Use session, a
+  hung socket) could survive an "upgrade" silently: the on-disk binary was the new
+  version while the old BEAM kept running, and every command reported green. Stop
+  now captures the job pid, waits a bounded grace for that exact process to exit,
+  escalates to SIGKILL if it stalls, and fails loud (with a `kill -9`/reinstall
+  hint) only if even that leaves it alive. The post-restart upgrade health check
+  now asserts the daemon reports the new version (semver compare against
+  `manifest.latest`) rather than merely `{"status":"ok"}`, so a stale daemon
+  triggers rollback instead of a false green. Linux/systemd was never affected
+  (its default `TimeoutStopSec` already guarantees SIGKILL).
+
 ## [0.5.6] - 2026-07-10
 
 ### Added

@@ -214,11 +214,14 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
       assert RoutingOverrides.infer_provider(@empty) == @empty
     end
 
-    test "infers an unambiguous cross-provider slug regardless of primary" do
+    test "a provider-less model defaults to the primary, even a cross-provider slug" do
       Application.put_env(:fermix_core, :providers, [])
       Application.put_env(:fermix_core, :agent, provider: :openai)
 
-      assert %{provider: :anthropic} =
+      # claude-opus-4-8 is an Anthropic model, but with no explicit provider a bare
+      # pin runs on the PRIMARY (openai) — a cross-provider worker must set
+      # `*_provider` explicitly. Stops a stale slug from silently cross-routing.
+      assert %{provider: :openai} =
                RoutingOverrides.infer_provider(%{
                  provider: nil,
                  model: "claude-opus-4-8",

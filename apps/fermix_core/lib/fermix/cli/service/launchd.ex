@@ -31,9 +31,134 @@ defmodule Fermix.CLI.Service.Launchd do
     launchctl(["kickstart", "#{domain(scope)}/#{label}"])
   end
 
+  # `stop` must GUARANTEE the running instance is gone, not merely that launchd
+  # ACCEPTED the signal. `launchctl kill TERM` returns success the instant the signal
+  # is delivered; if the BEAM's orderly shutdown stalls (a draining agent turn, an
+  # open browser/computer-use session, a hung socket) the old process keeps running —
+  # and because `kill` is an out-of-band signal, not a job stop, the plist's
+  # ExitTimeOut SIGKILL backstop never arms. So: capture the pid, send SIGTERM, wait a
+  # bounded grace for it to actually exit, escalate to SIGKILL, and only report :ok
+  # once the ORIGINAL pid is confirmed gone (KeepAlive then relaunches the new binary).
+  # Without this, `fermix restart`/`upgrade` silently no-op against a wedged daemon.
   @spec stop(map()) :: :ok | {:error, term()}
-  def stop(%{scope: scope, label: label}) do
-    launchctl(["kill", "TERM", "#{domain(scope)}/#{label}"])
+  def stop(%{scope: scope, label: label} = spec) do
+    job = "#{domain(scope)}/#{label}"
+
+    case job_status(spec) do
+      {:ok, nil} ->
+        # launchd affirmatively reports no running instance — a plain TERM is a
+        # harmless no-op; there is nothing to escalate against.
+        _ = launchctl(["kill", "TERM", job])
+        :ok
+
+      {:ok, pid} ->
+        _ = launchctl(["kill", "TERM", job])
+        terminate(spec, job, pid)
+
+      {:error, _reason} = err ->
+        # We could NOT read whether the daemon is running (`launchctl print`
+        # failed for a reason other than "not loaded"). `stop` must GUARANTEE the
+        # instance is gone; an unreadable state is not a guarantee, so surface the
+        # error instead of returning a false :ok that lets restart/upgrade proceed
+        # against a still-live daemon.
+        err
+    end
+  end
+
+  # SIGTERM already sent: wait the grace for the original pid to exit, then escalate.
+  defp terminate(spec, job, pid) do
+    {_poll_ms, term_grace_ms, _kill_grace_ms, _sleep} = stop_config()
+
+    case await_exit(spec, pid, term_grace_ms) do
+      :exited -> :ok
+      :alive -> force_kill(spec, job, pid)
+    end
+  end
+
+  # The BEAM's orderly shutdown stalled past the grace — SIGKILL it, and fail loud
+  # only if even that leaves the original pid alive.
+  defp force_kill(spec, job, pid) do
+    {_poll_ms, _term_grace_ms, kill_grace_ms, _sleep} = stop_config()
+    _ = launchctl(["kill", "KILL", job])
+
+    case await_exit(spec, pid, kill_grace_ms) do
+      :exited -> :ok
+      :alive -> {:error, {:stop_failed, pid}}
+    end
+  end
+
+  # The job's running state via `launchctl print`:
+  #   {:ok, pid} — running under `pid`
+  #   {:ok, nil} — launchd answered but reports no running instance (not loaded, or
+  #                momentarily between a KeepAlive relaunch)
+  #   {:error, reason} — the query itself failed (privileges, a transient launchd
+  #                error); the caller must NOT read this as "gone".
+  # Routed through the same launchctl seam as every other call, so it stays
+  # test-injectable.
+  defp job_status(%{scope: scope, label: label}) do
+    case launchctl_output(["print", "#{domain(scope)}/#{label}"]) do
+      {:ok, output} ->
+        {:ok, parse_pid(output)}
+
+      {:error, {:launchctl_failed, _code, output}} = err ->
+        if service_not_loaded?(output), do: {:ok, nil}, else: err
+    end
+  end
+
+  # launchd emits this (non-localized) message when the job isn't bootstrapped —
+  # a definitive "not running", distinct from a query that genuinely failed.
+  defp service_not_loaded?(output), do: String.contains?(output, "Could not find")
+
+  defp parse_pid(output) do
+    case Regex.run(~r/\bpid\s*=\s*(\d+)/, output) do
+      [_, pid] -> String.to_integer(pid)
+      _ -> nil
+    end
+  end
+
+  # The original process has exited once the job no longer runs under `pid`: it is
+  # either gone (nil) or KeepAlive has already relaunched the NEW binary under a
+  # different pid. Polls up to `grace_ms`, then reports it is still :alive.
+  defp await_exit(spec, pid, grace_ms) do
+    {poll_ms, _t, _k, sleep} = stop_config()
+    polls = max(1, div(grace_ms, poll_ms))
+
+    Enum.reduce_while(1..polls, :alive, fn i, _acc ->
+      cond do
+        exited?(job_status(spec), pid) ->
+          {:halt, :exited}
+
+        i == polls ->
+          {:halt, :alive}
+
+        true ->
+          sleep.(poll_ms)
+          {:cont, :alive}
+      end
+    end)
+  end
+
+  # The original process is gone only when launchd AFFIRMATIVELY reports a
+  # different pid (or none). A failed query is inconclusive — never read it as
+  # exit, or a transient `launchctl print` error would fake a clean shutdown and
+  # let a wedged daemon slip through as "stopped".
+  defp exited?({:ok, current_pid}, pid), do: current_pid != pid
+  defp exited?({:error, _reason}, _pid), do: false
+
+  # Poll cadence + grace windows + the sleep fn, injectable for tests (real waits
+  # would make the suite sleep for the full grace). The default SIGTERM grace matches
+  # the unit's `ExitTimeOut` (templates.ex, 30s) so a legitimate slow drain (an
+  # in-flight agent turn, an open browser/computer-use session) isn't force-killed
+  # sooner than the plist itself would tolerate.
+  defp stop_config do
+    cfg = Application.get_env(:fermix_core, :launchd_stop, [])
+
+    {
+      Keyword.get(cfg, :poll_ms, 500),
+      Keyword.get(cfg, :term_grace_ms, 30_000),
+      Keyword.get(cfg, :kill_grace_ms, 3_000),
+      Keyword.get(cfg, :sleep_fun, &Process.sleep/1)
+    }
   end
 
   defp bootout_if_loaded(scope, path) do
@@ -54,8 +179,16 @@ defmodule Fermix.CLI.Service.Launchd do
   end
 
   defp launchctl(args, _opts \\ []) do
+    case launchctl_output(args) do
+      {:ok, _out} -> :ok
+      error -> error
+    end
+  end
+
+  # Like `launchctl/2` but returns the command output (needed to read `print`).
+  defp launchctl_output(args) do
     case launchctl_runner().("launchctl", Enum.map(args, &to_string/1)) do
-      {_out, 0} -> :ok
+      {out, 0} -> {:ok, out}
       {out, code} -> {:error, {:launchctl_failed, code, String.trim(out)}}
     end
   end

@@ -320,16 +320,10 @@ defmodule FermixWebWeb.SetupLive.Components do
                   >
                     {entry.label} ({entry.id} - {format_context(entry.context_window)})
                   </option>
-                  <%!-- A stored value not in this provider's catalog (e.g. set while
-                        another provider was primary) must still display + round-trip,
-                        otherwise saving this pane would reset it to "Same as main". --%>
-                  <option
-                    :if={subagent_model_custom?(@provider_form.subagent_model, @provider_models)}
-                    value={@provider_form.subagent_model}
-                    selected
-                  >
-                    {@provider_form.subagent_model} (current)
-                  </option>
+                  <%!-- Sub-agents run on the primary, so the picker lists only the
+                        primary's models. A stored value that isn't one (e.g. left over
+                        from when another provider was primary) is not surfaced here — the
+                        select shows "Same as main" and the stale pin self-heals on save. --%>
                 </select>
               </label>
             </div>
@@ -2895,14 +2889,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   # global sub-agent-model selector to a single pane.
   defp editing_primary?(statuses, provider),
     do: Enum.any?(statuses, fn s -> s.provider == provider and s.primary? end)
-
-  # A set sub-agent model that the shown catalog doesn't list (e.g. configured
-  # while a different provider was primary) — render it as a selectable option so
-  # saving the pane preserves it instead of resetting to "Same as main".
-  defp subagent_model_custom?(value, _models) when value in [nil, ""], do: false
-
-  defp subagent_model_custom?(value, models) when is_binary(value),
-    do: not Enum.any?(models, &(&1.id == value))
 
   defp format_policy_counts(policy_counts) when map_size(policy_counts) == 0, do: "none"
 
