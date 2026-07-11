@@ -138,14 +138,18 @@ defmodule FermixCore.Providers.RoutingOverrides do
   def apply_effort(routes, nil), do: routes
 
   def apply_effort(routes, level) when is_list(routes) and is_atom(level) do
-    Enum.map(routes, fn {%{provider: provider} = route_key, adapter_opts} ->
+    Enum.map(routes, fn {%{provider: provider, model: model} = route_key, adapter_opts} ->
       case ReasoningEffort.levels_for(provider) do
         [] ->
           {route_key, adapter_opts}
 
         _supported ->
           {route_key,
-           Keyword.put(adapter_opts, :reasoning_effort, ReasoningEffort.clamp(level, provider))}
+           Keyword.put(
+             adapter_opts,
+             :reasoning_effort,
+             ModelCatalog.clamp_effort(provider, model, level)
+           )}
       end
     end)
   end

@@ -392,9 +392,9 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       end
     end
 
-    test "clamps :max to the OpenAI ceiling (xhigh)" do
+    test "sends :max verbatim now that OpenAI accepts it (no longer clamped)" do
       decoded = capture_body(reasoning_effort: :max)
-      assert decoded["reasoning"] == %{"effort" => "xhigh"}
+      assert decoded["reasoning"] == %{"effort" => "max"}
     end
 
     test "sends strict text.format schema when supplied" do

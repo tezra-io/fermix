@@ -46,6 +46,15 @@ defmodule FermixCore.Providers.ModelCatalogTest do
         assert ModelCatalog.default_model_for(provider) == first_id
       end
     end
+
+    test "OpenAI and Codex default to gpt-5.6-sol (frontier of the 5.6 generation)" do
+      assert ModelCatalog.default_model_for(:openai) == "gpt-5.6-sol"
+      assert ModelCatalog.default_model_for(:openai_codex) == "gpt-5.6-sol"
+    end
+
+    test "xAI defaults to grok-4.5" do
+      assert ModelCatalog.default_model_for(:xai) == "grok-4.5"
+    end
   end
 
   describe "context_window_for/2" do
@@ -54,12 +63,19 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
+      # GPT-5.6 (sol/terra/luna) serves the same 372k window on both the Codex
+      # and direct-API paths (context_window == max_context_window).
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-sol") == 372_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 372_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-terra") == 372_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 372_000
       # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
       assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-opus-4-8") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
-      # xAI: Grok 4.3 = 1M, Grok 4.20 = 256k.
+      # xAI: Grok 4.5 = 1M, Grok 4.3 = 1M, Grok 4.20 = 256k.
+      assert ModelCatalog.context_window_for(:xai, "grok-4.5") == 1_000_000
       assert ModelCatalog.context_window_for(:xai, "grok-4.3") == 1_000_000
       assert ModelCatalog.context_window_for(:xai, "grok-4.20-0309-reasoning") == 256_000
     end
@@ -128,6 +144,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "reasoning_effort?/2" do
     test "flags the xAI models that reject the reasoning.effort field" do
+      assert ModelCatalog.reasoning_effort?(:xai, "grok-4.5")
       assert ModelCatalog.reasoning_effort?(:xai, "grok-4.3")
       refute ModelCatalog.reasoning_effort?(:xai, "grok-4.20-0309-reasoning")
       refute ModelCatalog.reasoning_effort?(:xai, "grok-4.20-0309-non-reasoning")
@@ -157,6 +174,39 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     test "defaults to true for unknown models and non-catalog providers" do
       assert ModelCatalog.vision?(:openai, "gpt-future-unlisted")
       assert ModelCatalog.vision?(:mock, "mock")
+    end
+  end
+
+  describe "model_effort_ceiling/2, effort_levels_for/2, clamp_effort/3" do
+    test "older OpenAI models cap at :xhigh; gpt-5.6 and other providers are uncapped" do
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.5") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4-mini") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.6-sol") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.6-sol") == nil
+      assert ModelCatalog.model_effort_ceiling(:xai, "grok-4.5") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai, "unknown-model") == nil
+    end
+
+    test "effort_levels_for/2 drops levels above the model's ceiling" do
+      assert ModelCatalog.effort_levels_for(:openai, "gpt-5.5") ==
+               [:none, :low, :medium, :high, :xhigh]
+
+      refute :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.5")
+      assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.6-sol")
+      assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-5.6-sol")
+    end
+
+    test "clamp_effort/3 caps to the model ceiling, then the provider ceiling" do
+      # gpt-5.5 caps :max down to its :xhigh model ceiling; gpt-5.6 keeps :max.
+      assert ModelCatalog.clamp_effort(:openai, "gpt-5.5", :max) == :xhigh
+      assert ModelCatalog.clamp_effort(:openai_codex, "gpt-5.5", :max) == :xhigh
+      assert ModelCatalog.clamp_effort(:openai, "gpt-5.6-sol", :max) == :max
+      # xai has no per-model cap; :max still clamps to the provider ceiling :high.
+      assert ModelCatalog.clamp_effort(:xai, "grok-4.5", :max) == :high
+      # unknown model: provider-level clamp only.
+      assert ModelCatalog.clamp_effort(:openai, "unknown-model", :max) == :max
     end
   end
 

@@ -35,13 +35,32 @@ defmodule FermixCore.Providers.RouteResolver do
 
   @spec resolve!(keyword()) :: resolution()
   def resolve!(opts \\ []) do
-    case Keyword.get(opts, :provider) || configured_provider() do
-      nil -> resolve_openai!(opts)
-      :openai -> resolve_openai!(opts)
-      :openai_codex -> resolve_codex!(opts)
-      :anthropic -> resolve_anthropic!(opts)
-      :xai -> resolve_xai!(opts)
-      other -> resolve_descriptor!(other, opts)
+    {route_key, adapter_opts} =
+      case Keyword.get(opts, :provider) || configured_provider() do
+        nil -> resolve_openai!(opts)
+        :openai -> resolve_openai!(opts)
+        :openai_codex -> resolve_codex!(opts)
+        :anthropic -> resolve_anthropic!(opts)
+        :xai -> resolve_xai!(opts)
+        other -> resolve_descriptor!(other, opts)
+      end
+
+    {route_key, cap_effort_to_model(route_key, adapter_opts)}
+  end
+
+  # A provider's effort vocabulary can permit a level (e.g. `:max` on OpenAI)
+  # that only some of its models accept. Cap the resolved effort to the route
+  # model's catalog ceiling so an over-reaching config/default self-heals to the
+  # model's top instead of 400-ing at the provider. Routes whose model has no
+  # ceiling (every provider except the older OpenAI models) pass through
+  # untouched — provider-level clamping stays in the adapter.
+  defp cap_effort_to_model(%{provider: provider, model: model}, adapter_opts) do
+    with {:ok, value} <- Keyword.fetch(adapter_opts, :reasoning_effort),
+         ceiling when not is_nil(ceiling) <- ModelCatalog.model_effort_ceiling(provider, model),
+         {:ok, level} <- ReasoningEffort.parse(value) do
+      Keyword.put(adapter_opts, :reasoning_effort, ReasoningEffort.cap(level, ceiling))
+    else
+      _ -> adapter_opts
     end
   end
 

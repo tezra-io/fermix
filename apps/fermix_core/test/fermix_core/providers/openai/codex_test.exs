@@ -483,7 +483,7 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
     end
 
     test "sends reasoning: %{effort: <level>} for each valid non-:none level" do
-      for level <- [:low, :medium, :high, :xhigh] do
+      for level <- [:low, :medium, :high, :xhigh, :max] do
         assert {nil, decoded} = run_chat_capture_body(reasoning_effort: level)
         assert decoded["reasoning"] == %{"effort" => Atom.to_string(level), "summary" => "auto"}
         assert decoded["include"] == ["reasoning.encrypted_content"]

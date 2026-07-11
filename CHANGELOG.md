@@ -6,6 +6,43 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.6] - 2026-07-10
+
+### Added
+
+- **GPT-5.6 models (Sol, Terra, Luna) are now in the OpenAI and Codex catalogs.**
+  `gpt-5.6-sol` (frontier), `gpt-5.6-terra` (balanced), and `gpt-5.6-luna` (fast,
+  affordable) are selectable in the setup wizard and web pane, and `gpt-5.6-sol`
+  is now the default model for both the OpenAI (API-key) and Codex (ChatGPT
+  subscription) providers on a fresh install. All three carry a 372k context
+  window on both access paths (the Codex path and the direct API report the same
+  window for this generation). Existing installs that pin a `default_model` are
+  unaffected; the earlier `gpt-5.5` / `gpt-5.4` / `gpt-5.4-mini` models remain
+  available.
+- **`max` reasoning effort is now available for the GPT-5.6 family on OpenAI and
+  Codex.** `max` is a gpt-5.6-family capability, so setup offers it only when the
+  selected model is a 5.6 model; gpt-5.5/gpt-5.4/gpt-5.4-mini top out at `xhigh`.
+  Each model carries its effort ceiling in the catalog, and an over-reaching
+  config or routing override self-heals down to the model's ceiling at route
+  resolution (e.g. `max` on gpt-5.5 runs as `xhigh`) instead of failing at the
+  provider.
+- **Grok 4.5 is now in the xAI catalog and is the default Grok model.**
+  `grok-4.5` (1M context window, accepts reasoning effort) leads the xAI model
+  list, so a fresh xAI setup defaults to it; `grok-4.3` and the other Grok
+  models remain available.
+
+### Fixed
+
+- **macOS keychain secrets no longer trigger repeated login-password prompts.**
+  Secrets were stored with `security add-generic-password -U -A`, but the open
+  ACL (`-A`) only takes effect when an item is created — on an update it left a
+  pre-existing item's restrictive ACL in place, so any item first written without
+  `-A` (an older Fermix, a manual Keychain entry, or a past "Always Allow") made
+  the daemon's headless reads prompt for the login keychain password on every
+  access. Each save now deletes the item before re-adding it, so the open ACL
+  always applies and the item self-heals; re-run `fermix setup` once to rewrite
+  existing items in a single pass.
+
 ## [0.5.5] - 2026-07-08
 
 ### Fixed

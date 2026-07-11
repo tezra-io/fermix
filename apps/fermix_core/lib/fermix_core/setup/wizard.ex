@@ -271,7 +271,7 @@ defmodule FermixCore.Setup.Wizard do
         %{
           key: :reasoning_effort,
           label:
-            "Reasoning effort (#{Enum.map_join(ReasoningEffort.levels_for(context.prompt_provider), "/", &Atom.to_string/1)}; blank = high)",
+            "Reasoning effort (#{Enum.map_join(ModelCatalog.effort_levels_for(context.prompt_provider, context.default_model), "/", &Atom.to_string/1)}; blank = high)",
           default: :high,
           required?:
             (context.provider_unset? or Descriptor.fetch!(context.prompt_provider).effort?) and

@@ -165,8 +165,29 @@ defmodule FermixCore.Setup.SecretWriterTest do
     end
   end
 
-  defp service_flag(args) do
-    index = Enum.find_index(args, &(&1 == "-s"))
+  describe "macOS put self-heals the keychain ACL" do
+    test "deletes the existing item, then re-adds the SAME item with the open -A ACL" do
+      [delete, add] = SecretWriter.MacOS.put_commands(:openai_api_key, "sk-secret")
+
+      assert hd(delete) == "delete-generic-password"
+      assert hd(add) == "add-generic-password"
+      # same account + service on both, so the delete targets exactly what the add
+      # recreates — the point is resetting THAT item's ACL, not a different one.
+      assert account_flag(delete) == "fermix" and account_flag(add) == "fermix"
+      assert service_flag(delete) == service_flag(add)
+      # the add re-creates with the open, no-per-app ACL (-A) so headless reads
+      # never prompt; -U keeps the value written even if the delete was a no-op.
+      assert "-A" in add and "-U" in add
+      # and the delete carries no secret to redact
+      refute "-w" in delete
+    end
+  end
+
+  defp service_flag(args), do: flag_value(args, "-s")
+  defp account_flag(args), do: flag_value(args, "-a")
+
+  defp flag_value(args, flag) do
+    index = Enum.find_index(args, &(&1 == flag))
     Enum.at(args, index + 1)
   end
 end

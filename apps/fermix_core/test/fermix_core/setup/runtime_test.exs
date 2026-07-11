@@ -1046,7 +1046,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       codex_block = Keyword.get(providers, :openai_codex, [])
 
       assert Keyword.get(codex_block, :primary) == true
-      assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
+      assert Keyword.get(codex_block, :default_model) == "gpt-5.6-sol"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end
 

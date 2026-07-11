@@ -6,11 +6,15 @@ defmodule FermixCore.Providers.ReasoningEffort do
   The level name *is* the provider's wire value. Transforms, treating the
   levels as an ordered scale: `:none` -> omit the field (providers that
   support it); a level *above* a provider's ceiling clamps to that ceiling
-  (so `:max` on OpenAI -> `"xhigh"`, its highest); a level *below* a
+  (so `:max` on xAI -> `"high"`, its highest); a level *below* a
   provider's floor (e.g. `:none` on Anthropic) is rejected as unsupported.
-  Per-*model* support (e.g. Anthropic `xhigh` is Opus-only, `max` is
-  4.6+) is intentionally NOT enforced here; the provider API's 400 is the
-  source of truth, matching the prior OpenAI design.
+
+  This module stays provider-level. Per-*model* effort ceilings (e.g. `max`
+  is a gpt-5.6-family capability, so the older OpenAI models top out at
+  `xhigh`) live in `ModelCatalog` as an `Entry` field and are applied via
+  `cap/2` before the wire — see `ModelCatalog.clamp_effort/3`. Anthropic's
+  per-model nuance (`xhigh` is Opus-only) is still left to the provider
+  API's 400, matching the prior OpenAI design.
 
   Replaces the OpenAI-owned list in `OpenAI.ResponsesShared`: the canonical
   set lives here (provider-neutral) and each provider maps through
@@ -31,8 +35,8 @@ defmodule FermixCore.Providers.ReasoningEffort do
   # consumed by `XAI.Responses` (per-model rejection stays in that adapter —
   # §6.2 of the provider design).
   @provider_levels %{
-    openai: [:none, :low, :medium, :high, :xhigh],
-    openai_codex: [:none, :low, :medium, :high, :xhigh],
+    openai: [:none, :low, :medium, :high, :xhigh, :max],
+    openai_codex: [:none, :low, :medium, :high, :xhigh, :max],
     anthropic: [:low, :medium, :high, :xhigh, :max],
     xai: [:none, :low, :medium, :high]
   }
@@ -63,6 +67,30 @@ defmodule FermixCore.Providers.ReasoningEffort do
 
   @spec levels_for(atom()) :: [level()]
   def levels_for(provider) when is_atom(provider), do: Map.get(@provider_levels, provider, [])
+
+  @doc """
+  Provider levels narrowed to those at or below `ceiling` (a per-model effort
+  cap from `ModelCatalog`). A `nil` ceiling returns the full provider list.
+  """
+  @spec levels_for(atom(), level() | nil) :: [level()]
+  def levels_for(provider, nil) when is_atom(provider), do: levels_for(provider)
+
+  def levels_for(provider, ceiling) when is_atom(provider) and ceiling in @levels do
+    provider |> levels_for() |> Enum.filter(&(rank(&1) <= rank(ceiling)))
+  end
+
+  @doc """
+  Caps `level` DOWN to `ceiling` on the ordered scale: returns `ceiling` when
+  `level` ranks above it, otherwise `level` unchanged. Never raises a level and
+  never rejects — a `nil` ceiling means "no cap". Used to narrow a
+  provider-legal effort to a specific model's ceiling (`ModelCatalog`).
+  """
+  @spec cap(level(), level() | nil) :: level()
+  def cap(level, nil) when level in @levels, do: level
+
+  def cap(level, ceiling) when level in @levels and ceiling in @levels do
+    if rank(level) > rank(ceiling), do: ceiling, else: level
+  end
 
   @spec supported?(atom(), atom()) :: boolean()
   def supported?(level, provider) when is_atom(level) and is_atom(provider) do
@@ -98,7 +126,7 @@ defmodule FermixCore.Providers.ReasoningEffort do
 
     * `:omit` — send no reasoning/effort field (`:none` on a provider that supports it).
     * `{:ok, "xhigh"}` — send this effort string. A level above the provider's
-      ceiling clamps to the ceiling (e.g. `:max` on OpenAI -> `"xhigh"`).
+      ceiling clamps to the ceiling (e.g. `:max` on xAI -> `"high"`).
     * `{:error, {:unsupported, level, provider}}` — the level is below the
       provider's floor (e.g. `:none` on Anthropic) or is not a canonical level.
   """
