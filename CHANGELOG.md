@@ -6,6 +6,34 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-07-11
+
+### Added
+
+- **`fermix doctor`'s Computer Use check now names the compux sidecar version.**
+  The check reported permission state but never which screen-capture sidecar build
+  is installed, so there was no one-glance way to confirm it after a bump. The
+  probed result now appends ` · sidecar compux v<vsn>`, and the not-installed
+  warning names the target version — sourced from the same `compux` app version
+  the daemon resolves the helper by.
+
+### Fixed
+
+- **`fermix stop`/`restart`/`upgrade` now force-kill a daemon that won't shut down,
+  and `upgrade` verifies the daemon came back on the new version.** The service
+  commands sent a single `launchctl kill TERM` and reported success the instant
+  launchd accepted the signal — not when the process actually died. A daemon whose
+  orderly shutdown stalled (a draining agent turn, an open Computer Use session, a
+  hung socket) could survive an "upgrade" silently: the on-disk binary was the new
+  version while the old BEAM kept running, and every command reported green. Stop
+  now captures the job pid, waits a bounded grace for that exact process to exit,
+  escalates to SIGKILL if it stalls, and fails loud (with a `kill -9`/reinstall
+  hint) only if even that leaves it alive. The post-restart upgrade health check
+  now asserts the daemon reports the new version (semver compare against
+  `manifest.latest`) rather than merely `{"status":"ok"}`, so a stale daemon
+  triggers rollback instead of a false green. Linux/systemd was never affected
+  (its default `TimeoutStopSec` already guarantees SIGKILL).
+
 ## [0.5.6] - 2026-07-10
 
 ### Added
