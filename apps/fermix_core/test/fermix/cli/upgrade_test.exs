@@ -204,4 +204,48 @@ defmodule Fermix.CLI.UpgradeTest do
     on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
     path
   end
+
+  describe "wait_for_health/1 asserts the upgraded version" do
+    # status_fun is injectable so these never touch a real control socket; a tiny
+    # timeout/poll keeps the "never matches" case fast.
+    defp health_opts(status_fun, extra \\ []) do
+      Keyword.merge(
+        [status_fun: status_fun, socket_path: "unused", health_timeout_ms: 40, health_poll_ms: 1],
+        extra
+      )
+    end
+
+    test "returns :ok when the daemon reports the expected (new) version" do
+      status = fn _ -> {:ok, %{"status" => "ok", "version" => "0.5.6"}} end
+      assert :ok = Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    test "times out when only the OLD version keeps answering (stale daemon survived)" do
+      # A wedged old daemon still answers the socket 'ok' — but at the old version, so
+      # the gate must NOT go green (it triggers rollback upstream).
+      status = fn _ -> {:ok, %{"status" => "ok", "version" => "0.5.5"}} end
+
+      assert {:error, :health_check_timeout} =
+               Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    test "times out when the status carries no version and one is expected" do
+      status = fn _ -> {:ok, %{"status" => "ok"}} end
+
+      assert {:error, :health_check_timeout} =
+               Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    test "without an expected version, any healthy status passes (bare restart)" do
+      status = fn _ -> {:ok, %{"status" => "ok", "version" => "anything"}} end
+      assert :ok = Upgrade.wait_for_health(health_opts(status))
+    end
+
+    test "times out while the daemon is unreachable" do
+      status = fn _ -> {:error, :not_running} end
+
+      assert {:error, :health_check_timeout} =
+               Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+  end
 end

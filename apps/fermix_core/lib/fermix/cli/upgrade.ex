@@ -82,7 +82,7 @@ defmodule Fermix.CLI.Upgrade do
   defp finalize(staged, artifact, current, latest, installed_path, opts) do
     case Swapper.swap(staged, installed_path, opts) do
       {:ok, _swap_info} ->
-        case restart_and_health_check(opts) do
+        case restart_and_health_check(Keyword.put(opts, :expected_version, latest)) do
           :ok ->
             record_audit(:ok, current, latest, artifact.sha256, opts)
             :ok
@@ -122,7 +122,9 @@ defmodule Fermix.CLI.Upgrade do
     end
   end
 
-  defp wait_for_health(opts) do
+  @doc false
+  @spec wait_for_health(keyword()) :: :ok | {:error, term()}
+  def wait_for_health(opts) do
     deadline =
       System.monotonic_time(:millisecond) +
         Keyword.get(opts, :health_timeout_ms, @health_check_timeout_ms)
@@ -131,19 +133,35 @@ defmodule Fermix.CLI.Upgrade do
   end
 
   defp do_wait(deadline, opts) do
-    case Client.status(socket_path: Keyword.get(opts, :socket_path) || default_socket_path()) do
-      {:ok, %{"status" => "ok"}} ->
+    status_fun = Keyword.get(opts, :status_fun, &Client.status/1)
+    socket = Keyword.get(opts, :socket_path) || default_socket_path()
+    expected = Keyword.get(opts, :expected_version)
+
+    cond do
+      healthy?(status_fun.(socket_path: socket), expected) ->
         :ok
 
-      _ ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          {:error, :health_check_timeout}
-        else
-          Process.sleep(@health_check_poll_ms)
-          do_wait(deadline, opts)
-        end
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, :health_check_timeout}
+
+      true ->
+        Process.sleep(Keyword.get(opts, :health_poll_ms, @health_check_poll_ms))
+        do_wait(deadline, opts)
     end
   end
+
+  # Healthy only when the daemon answers AND — when we know the target version —
+  # reports THAT version. So a stale old daemon that survived the restart (e.g. a
+  # wedged SIGTERM) fails the gate and triggers rollback instead of a false green.
+  defp healthy?({:ok, %{"status" => "ok"}}, nil), do: true
+
+  # Semantic compare (not raw ==) so a compiled vsn carrying build metadata
+  # (e.g. "0.5.6+abcdef") still matches manifest.latest "0.5.6" — matching how
+  # `assert_newer` compares versions elsewhere, so a good upgrade never false-rolls-back.
+  defp healthy?({:ok, %{"status" => "ok", "version" => v}}, expected),
+    do: Manifest.compare_versions(to_string(v), to_string(expected)) == :eq
+
+  defp healthy?(_status, _expected), do: false
 
   defp rollback(installed_path, opts) do
     previous = Keyword.get(opts, :previous_path, Swapper.default_previous_path())
