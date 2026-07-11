@@ -109,17 +109,25 @@ defmodule Fermix.CLI.Upgrade do
   end
 
   defp restart_and_health_check(opts) do
-    scope = Keyword.get(opts, :scope, :user)
     skip_restart? = Keyword.get(opts, :skip_restart, false)
 
     if skip_restart? do
       :ok
     else
-      with :ok <- Service.restart(scope),
+      with :ok <- do_restart(opts),
            :ok <- wait_for_health(opts) do
         :ok
       end
     end
+  end
+
+  # The restart seam — defaults to the real service restart, injectable (like
+  # `status_fun`) so the upgrade orchestration, including the rollback restart, is
+  # unit-tested without cycling a live daemon.
+  defp do_restart(opts) do
+    scope = Keyword.get(opts, :scope, :user)
+    restart_fun = Keyword.get(opts, :restart_fun, &Service.restart/1)
+    restart_fun.(scope)
   end
 
   @doc false
@@ -163,12 +171,16 @@ defmodule Fermix.CLI.Upgrade do
 
   defp healthy?(_status, _expected), do: false
 
+  # Restore the previous binary AND restart, so the RUNNING process becomes the
+  # restored one. A `rename(2)` alone only swaps the file on disk — the
+  # wrong-version daemon keeps executing (KeepAlive relaunches only a daemon that
+  # actually died). Best-effort: the upgrade already failed and `finalize` returns
+  # that error, so we don't mask it with a rollback hiccup here.
   defp rollback(installed_path, opts) do
     previous = Keyword.get(opts, :previous_path, Swapper.default_previous_path())
 
-    case Swapper.rollback(previous, installed_path) do
-      :ok -> :ok
-      {:error, _} -> :ok
+    with :ok <- Swapper.rollback(previous, installed_path) do
+      if Keyword.get(opts, :skip_restart, false), do: :ok, else: do_restart(opts)
     end
   end
 

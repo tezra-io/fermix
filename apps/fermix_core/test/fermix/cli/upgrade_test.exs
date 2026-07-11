@@ -91,6 +91,47 @@ defmodule Fermix.CLI.UpgradeTest do
       assert File.read!(Path.join(tmp, ".previous")) == "old-bin"
       assert File.read!(Path.join(tmp, "upgrades.jsonl")) =~ "\"status\":\"ok\""
     end
+
+    test "a post-swap health failure rolls the binary back AND restarts the restored one",
+         %{tmp: tmp} do
+      installed = Path.join(tmp, "fermix")
+      File.write!(installed, "old-bin")
+
+      blob = "the new fermix binary content"
+      sha = :sha256 |> :crypto.hash(blob) |> Base.encode16(case: :lower)
+      Process.put({__MODULE__, :stub_blob}, blob)
+      Process.put({__MODULE__, :stub_sha}, sha)
+
+      {:ok, restarts} = Agent.start_link(fn -> 0 end)
+
+      result =
+        Upgrade.run(
+          binary_path: installed,
+          req_options: [plug: &__MODULE__.upgrade_plug/1],
+          staging_dir: Path.join(tmp, "staging"),
+          previous_path: Path.join(tmp, ".previous"),
+          audit_path: Path.join(tmp, "upgrades.jsonl"),
+          cosign_path: stub_cosign_path(),
+          # The restart is accepted but the daemon answers at the OLD version — a
+          # wedged daemon that survived — so the health gate fails and rollback
+          # must fire.
+          restart_fun: fn _scope ->
+            Agent.update(restarts, &(&1 + 1))
+            :ok
+          end,
+          status_fun: fn _ -> {:ok, %{"status" => "ok", "version" => "0.0.1"}} end,
+          health_timeout_ms: 20,
+          health_poll_ms: 1,
+          socket_path: "unused"
+        )
+
+      assert {:error, :health_check_timeout} = result
+      # Binary reverted to the previously-running one...
+      assert File.read!(installed) == "old-bin"
+      # ...and restart ran twice: the initial upgrade restart, then the rollback
+      # restart that makes the RUNNING process the restored binary, not just the file.
+      assert Agent.get(restarts, & &1) == 2
+    end
   end
 
   def failing_manifest_plug(conn) do
