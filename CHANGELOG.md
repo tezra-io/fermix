@@ -19,6 +19,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Sub-agents now run on your primary provider unless you pin one explicitly.**
+  A sub-agent model set without an explicit provider resolves on the primary
+  provider, instead of being silently re-routed to whichever provider's catalog
+  happens to own the model slug. Previously a leftover sub-agent model from a
+  different provider (e.g. a `gpt-oss` pin — an Ollama model — kept after
+  switching your main provider to Codex) quietly ran delegated workers on that
+  other provider rather than your main model; if that provider wasn't running,
+  the spawn failed. The setup page's **Sub-agent model** picker also no longer
+  surfaces such a stale cross-provider model as the "current" value on the
+  primary pane — it shows "Same as main model" and self-heals on the next save.
+  To run sub-agents on a non-primary provider, set `subagent_provider` explicitly
+  in `[fermix_core.routing]`.
 - **`fermix stop`/`restart`/`upgrade` now force-kill a daemon that won't shut down,
   and `upgrade` verifies the daemon came back on the new version.** The service
   commands sent a single `launchctl kill TERM` and reported success the instant
