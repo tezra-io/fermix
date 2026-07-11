@@ -16,7 +16,8 @@ daemon): point the dev daemon at the next provider/model, restart it, run again.
 Each run auto-detects the served model from the trace and adds a row; the
 leaderboard re-ranks. See SKILL.md.
 
-Exit: 0 ok · 2 usage/selection · 3 preconditions (Opik or daemon down).
+Exit: 0 ok · 2 usage/selection · 3 preconditions (Opik or daemon down) ·
+4 usage limit hit mid-sweep (aborted at a known pointer, nothing written).
 """
 from __future__ import annotations
 
@@ -182,14 +183,18 @@ def _capture_turn(cfg, opik, session, query, timeout_ms, label) -> _Captured:
     no server-side trace, hard fail. A CLI timeout or daemon-side error still polls
     the completed server-side trace (latency != capability). An Opik read failure is
     recorded, never raised, so one flake can't abort a multi-minute sweep."""
-    res = driver.drive_query(cfg, session, query, timeout_ms)
+    # On a usage/rate/quota limit this waits out the configured backoff and retries
+    # (in a fresh session), only raising UsageLimitHit once the schedule is exhausted —
+    # so a mid-sweep limit is ridden out, not scored as a failure. `used_session` is
+    # the session the (possibly retried) turn actually ran in — poll THAT trace.
+    res, used_session = driver.drive_with_usage_retry(cfg, session, query, timeout_ms, label)
     if res.status in ("not_running", "crashed"):
         return _Captured(res.status, None, None, None, res.elapsed_ms)
     try:
         # 10s clock-skew slack (daemon vs harness clock), mirroring run_eval; the
         # unique per-trial session already prevents grabbing a stale trace.
         after = res.sent_at - timedelta(seconds=10)
-        hit = opik.poll_for_turn(session, query, after, set(),
+        hit = opik.poll_for_turn(used_session, query, after, set(),
                                  cfg.opik.poll_timeout_s, cfg.opik.poll_interval_s)
         if hit is None:
             return _Captured("no_trace" if res.ok else res.status, None, None, None, res.elapsed_ms)
@@ -312,11 +317,15 @@ def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> Ta
     repr_trace_id = None
 
     for i in range(trials):
-        if case.cross_session:
-            tr, trace_id, tmodels = _cross_session_trial(cfg, opik, s, case, run_id, i)
-        else:
-            tr, trace_id, tmodels = _standard_trial(
-                cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge)
+        try:
+            if case.cross_session:
+                tr, trace_id, tmodels = _cross_session_trial(cfg, opik, s, case, run_id, i)
+            else:
+                tr, trace_id, tmodels = _standard_trial(
+                    cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge)
+        except driver.UsageLimitHit as hit:
+            hit.locate(s.name, case.id, i)   # stamp the resume pointer, then abort the sweep
+            raise
         results.append(tr)
         models += tmodels
         if trace_id:
@@ -402,6 +411,26 @@ def _detect_config_id(arg_id, all_models) -> str:
     if not all_models:
         return "unknown-model"
     return Counter(all_models).most_common(1)[0][0]
+
+
+def _abort_usage_limit(hit, done: int, total: int) -> int:
+    """Stop the sweep cleanly on a usage limit. Reports where it stopped (the pointer
+    to resume from) and writes NOTHING — a partial composite would overwrite the
+    model's real leaderboard row, and scoring the limit-blocked turns would count
+    Fermix's own limit as task failures. Re-run once the limit resets."""
+    where = f"{hit.suite}/{hit.case_id} (trial {hit.trial})" if hit.suite else "a task"
+    reset = f" — provider self-reports {hit.reset_hint}" if hit.reset_hint else ""
+    print(f"\n⛔ usage limit hit at {where}{reset}.", file=sys.stderr)
+    print(f"   Fermix reply: {hit.reply_excerpt()!r}", file=sys.stderr)
+    if hit.retries:
+        plural = "retry" if hit.retries == 1 else "retries"
+        print(f"   Still limited after {hit.retries} {plural} across ~{hit.waited_min} min "
+              f"of backoff — giving up.", file=sys.stderr)
+    print(f"   {done}/{total} task(s) scored before the limit. Leaderboard NOT written — "
+          f"a partial row would overwrite the model's real score.", file=sys.stderr)
+    print("   Resume: wait longer for the limit to reset, then re-run the same command "
+          "(nothing was persisted, so it starts fresh from the top).", file=sys.stderr)
+    return 4
 
 
 def preconditions(cfg) -> list[str]:
@@ -514,15 +543,18 @@ def main(argv=None) -> int:
     print(f"capability eval · {len(cases)} task(s) × {trials} trial(s) · "
           f"judge={'on' if want_judge else 'off'} · axis={args.axis}")
     outcomes, all_models, task_stats = [], [], []
-    for s, _scn, case in cases:
-        out = run_task(cfg, opik, s, case, trials, k, args.threshold, run_id, want_judge)
-        outcomes.append((s.name, case.id, out))
-        all_models += out.models
-        task_stats.append(out.stats)
-        st = out.stats
-        print(f"  {s.name}/{case.id:24} success={st.mean_success:.2f} "
-              f"pass^{st.k}={st.pass_hat_k:.2f} tok={int(st.mean_tokens)} "
-              f"{'⚠️safety' if st.safety_violations else ''}")
+    try:
+        for s, _scn, case in cases:
+            out = run_task(cfg, opik, s, case, trials, k, args.threshold, run_id, want_judge)
+            outcomes.append((s.name, case.id, out))
+            all_models += out.models
+            task_stats.append(out.stats)
+            st = out.stats
+            print(f"  {s.name}/{case.id:24} success={st.mean_success:.2f} "
+                  f"pass^{st.k}={st.pass_hat_k:.2f} tok={int(st.mean_tokens)} "
+                  f"{'⚠️safety' if st.safety_violations else ''}")
+    except driver.UsageLimitHit as hit:
+        return _abort_usage_limit(hit, len(outcomes), len(cases))
 
     # Refuse to persist a junk row: an empty model set means every turn failed
     # (e.g. daemon went down mid-run) — recording an "unknown-model" zero would

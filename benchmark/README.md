@@ -144,6 +144,18 @@ Notes:
   shows for OpenAI/Google (Opik prices only those); OAuth routes report `$0`.
 - For a **fair** ranking when `--judge` is on, use an **independent** judge so the
   daemon isn't grading itself: `export EVAL_JUDGE_BACKEND=openai EVAL_JUDGE_API_KEY=sk-…`.
+- **Usage-limit backoff, then fail-fast (exit 4).** If the daemon's model hits a
+  usage/rate/quota limit mid-sweep, Fermix returns a canned "try again" reply —
+  scoring it would count Fermix's own limit as a task failure. So the runner **waits
+  and retries** the turn on an escalating backoff (`usage_limit.retry_backoff_min` in
+  `config.yaml`, default `30 / 60 / 120 / 180` min — sized to ride out a multi-hour
+  subscription session-limit, whose "~N min" self-report is unreliable; each wait logs
+  a `⏳` line with the retry clock time). Only when the **whole schedule is exhausted**
+  does it stop at the pointer (`suite/case (trial)`), write **no** leaderboard row (a
+  partial composite would overwrite the model's real score), and exit 4 — re-run once
+  the limit clears. Tune per run with `EVAL_USAGE_RETRY_BACKOFF_MIN="30,60,120,180"`,
+  or set it empty (`[]` / `""`) for immediate fail-fast. (Subscription paths like
+  `openai_codex` hit limits; the pay-per-token `openai` API-key path usually won't.)
 
 ---
 

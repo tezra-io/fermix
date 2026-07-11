@@ -3,7 +3,7 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Providers.Descriptor
-  alias FermixCore.Providers.ReasoningEffort
+  alias FermixCore.Providers.ModelCatalog
 
   @channels [
     {:telegram, "Telegram"},
@@ -933,7 +933,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <legend class="label pb-1 text-sm font-medium">Reasoning effort</legend>
       <div class="mt-1 grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-2">
         <label
-          :for={effort <- effort_levels(@provider_form.provider)}
+          :for={effort <- effort_levels(@provider_form.provider, @provider_form.default_model)}
           class="flex cursor-pointer items-center gap-2 rounded-field border border-base-300 bg-base-100 px-2.5 py-2 hover:border-primary/50"
         >
           <input
@@ -952,8 +952,8 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp effort_provider?(provider), do: Descriptor.fetch!(provider).effort?
 
-  defp effort_levels(provider) do
-    provider |> ReasoningEffort.levels_for() |> Enum.map(&Atom.to_string/1)
+  defp effort_levels(provider, model) do
+    provider |> ModelCatalog.effort_levels_for(model) |> Enum.map(&Atom.to_string/1)
   end
 
   attr :provider_form, :map, required: true

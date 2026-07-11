@@ -143,5 +143,43 @@ def test_render_md_all_same_task_set_no_warning():
     assert md.index("a") < md.index("b")
 
 
+def test_render_md_all_distinct_task_sets_shows_all_with_full_metrics():
+    # The real-world case: every config ran its OWN task set (distinct hashes). None is
+    # head-to-head, so don't anoint one arbitrary config as "the board" and strip the
+    # rest to a 5-col stub — show all three with full metrics, ordered by success.
+    store = {}
+    store = lb.upsert(store, cfg("m-a", 0.99, 650), {"tasks_hash": "AAA"})
+    store = lb.upsert(store, cfg("m-b", 1.00, 700), {"tasks_hash": "BBB"})
+    store = lb.upsert(store, cfg("m-c", 0.90, 720), {"tasks_hash": "CCC"})
+    md = lb.render_md(store)
+    assert "No two configs share a task set" in md          # the all-solo banner
+    assert "NOT comparable" in md
+    assert "Comparable set" not in md                        # nothing anointed as the board
+    # all three present, ordered by success (m-b 1.00 > m-a 0.99 > m-c 0.90)
+    assert md.index("`m-b`") < md.index("`m-a`") < md.index("`m-c`")
+    # full metrics (not the old 5-col stub): tok/✓ values + the non-rank marker show
+    assert "| · |" in md and "700" in md and "650" in md
+
+
+def test_render_md_cohort_plus_solo_ranks_cohort_shows_solo_full():
+    # A genuine cohort (>=2 share a set) still ranks head-to-head; a lone different-set
+    # config sits below with FULL metrics (its tok/✓ visible), not the 5-col stub.
+    store = {}
+    store = lb.upsert(store, cfg("full-a", 0.90, 700), {"tasks_hash": "AAA"})
+    store = lb.upsert(store, cfg("full-b", 0.85, 900), {"tasks_hash": "AAA"})
+    store = lb.upsert(store, cfg("lone", 0.98, 333), {"tasks_hash": "BBB"})
+    md = lb.render_md(store)
+    assert "Comparable set `AAA`" in md and "2 config(s)" in md
+    assert md.index("`full-a`") < md.index("NOT comparable") < md.index("`lone`")
+    assert "333" in md            # the solo's tok/✓ is shown (full metrics, not a stub)
+
+
+def test_render_md_single_config_ranks_as_one():
+    store = lb.upsert({}, cfg("solo", 0.95, 800), {"tasks_hash": "AAA"})
+    md = lb.render_md(store)
+    assert "Single config" in md
+    assert "NOT comparable" not in md and "| 1 |" in md
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
