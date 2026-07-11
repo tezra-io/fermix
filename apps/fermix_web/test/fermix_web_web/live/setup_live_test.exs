@@ -738,19 +738,21 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(routing_cfg, :subagent_model) == "gpt-5.4-mini"
     end
 
-    test "the sub-agent model select renders a stored value not in the pane's catalog", %{
+    test "a sub-agent model not in the primary's catalog is not surfaced as current", %{
       conn: conn
     } do
       routing = Application.get_env(:fermix_core, :routing, [])
       on_exit(fn -> Application.put_env(:fermix_core, :routing, routing) end)
-      # claude-haiku-4-5 is an Anthropic model; the default pane (openai) does not list it.
+      # claude-haiku-4-5 is an Anthropic model; the primary pane (openai) doesn't list
+      # it. Sub-agents run on the primary, so a stale cross-provider pin is NOT shown
+      # as "(current)" — the select falls back to "Same as main" and self-heals on save.
       Application.put_env(:fermix_core, :routing, subagent_model: "claude-haiku-4-5")
 
       {:ok, view, _html} = live(conn, "/setup")
 
-      # Rendered as a selectable "(current)" option so saving the pane preserves it
-      # instead of resetting to "Same as main".
-      assert render(view) =~ "claude-haiku-4-5 (current)"
+      html = render(view)
+      refute html =~ "claude-haiku-4-5"
+      assert html =~ "Same as main model"
     end
 
     test "the sub-agent model select appears only on the primary provider's pane", %{conn: conn} do

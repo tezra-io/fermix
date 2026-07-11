@@ -42,6 +42,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "granted"
     end
 
+    test "a probed result surfaces the running compux sidecar version" do
+      version = to_string(Application.spec(:compux, :vsn))
+      assert version != ""
+      probe = probed(screen_capture: true, input_control: true)
+      result = Checks.computer_use_permissions({:ok, probe})
+      assert result.detail =~ "sidecar compux v#{version}"
+    end
+
+    test "the not-installed warning names the version that would install" do
+      version = to_string(Application.spec(:compux, :vsn))
+      result = Checks.computer_use_permissions({:ok, %{state: :not_installed}})
+      assert result.detail =~ "installs compux v#{version}"
+    end
+
     test "macOS screen-ok input-denied names the Accessibility pane (the silent-drop case)" do
       probe = probed(screen_capture: true, input_control: false)
       result = Checks.computer_use_permissions({:ok, probe})

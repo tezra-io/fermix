@@ -91,6 +91,47 @@ defmodule Fermix.CLI.UpgradeTest do
       assert File.read!(Path.join(tmp, ".previous")) == "old-bin"
       assert File.read!(Path.join(tmp, "upgrades.jsonl")) =~ "\"status\":\"ok\""
     end
+
+    test "a post-swap health failure rolls the binary back AND restarts the restored one",
+         %{tmp: tmp} do
+      installed = Path.join(tmp, "fermix")
+      File.write!(installed, "old-bin")
+
+      blob = "the new fermix binary content"
+      sha = :sha256 |> :crypto.hash(blob) |> Base.encode16(case: :lower)
+      Process.put({__MODULE__, :stub_blob}, blob)
+      Process.put({__MODULE__, :stub_sha}, sha)
+
+      {:ok, restarts} = Agent.start_link(fn -> 0 end)
+
+      result =
+        Upgrade.run(
+          binary_path: installed,
+          req_options: [plug: &__MODULE__.upgrade_plug/1],
+          staging_dir: Path.join(tmp, "staging"),
+          previous_path: Path.join(tmp, ".previous"),
+          audit_path: Path.join(tmp, "upgrades.jsonl"),
+          cosign_path: stub_cosign_path(),
+          # The restart is accepted but the daemon answers at the OLD version — a
+          # wedged daemon that survived — so the health gate fails and rollback
+          # must fire.
+          restart_fun: fn _scope ->
+            Agent.update(restarts, &(&1 + 1))
+            :ok
+          end,
+          status_fun: fn _ -> {:ok, %{"status" => "ok", "version" => "0.0.1"}} end,
+          health_timeout_ms: 20,
+          health_poll_ms: 1,
+          socket_path: "unused"
+        )
+
+      assert {:error, :health_check_timeout} = result
+      # Binary reverted to the previously-running one...
+      assert File.read!(installed) == "old-bin"
+      # ...and restart ran twice: the initial upgrade restart, then the rollback
+      # restart that makes the RUNNING process the restored binary, not just the file.
+      assert Agent.get(restarts, & &1) == 2
+    end
   end
 
   def failing_manifest_plug(conn) do
@@ -203,5 +244,49 @@ defmodule Fermix.CLI.UpgradeTest do
     File.chmod!(path, 0o755)
     on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
     path
+  end
+
+  describe "wait_for_health/1 asserts the upgraded version" do
+    # status_fun is injectable so these never touch a real control socket; a tiny
+    # timeout/poll keeps the "never matches" case fast.
+    defp health_opts(status_fun, extra \\ []) do
+      Keyword.merge(
+        [status_fun: status_fun, socket_path: "unused", health_timeout_ms: 40, health_poll_ms: 1],
+        extra
+      )
+    end
+
+    test "returns :ok when the daemon reports the expected (new) version" do
+      status = fn _ -> {:ok, %{"status" => "ok", "version" => "0.5.6"}} end
+      assert :ok = Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    test "times out when only the OLD version keeps answering (stale daemon survived)" do
+      # A wedged old daemon still answers the socket 'ok' — but at the old version, so
+      # the gate must NOT go green (it triggers rollback upstream).
+      status = fn _ -> {:ok, %{"status" => "ok", "version" => "0.5.5"}} end
+
+      assert {:error, :health_check_timeout} =
+               Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    test "times out when the status carries no version and one is expected" do
+      status = fn _ -> {:ok, %{"status" => "ok"}} end
+
+      assert {:error, :health_check_timeout} =
+               Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
+
+    test "without an expected version, any healthy status passes (bare restart)" do
+      status = fn _ -> {:ok, %{"status" => "ok", "version" => "anything"}} end
+      assert :ok = Upgrade.wait_for_health(health_opts(status))
+    end
+
+    test "times out while the daemon is unreachable" do
+      status = fn _ -> {:error, :not_running} end
+
+      assert {:error, :health_check_timeout} =
+               Upgrade.wait_for_health(health_opts(status, expected_version: "0.5.6"))
+    end
   end
 end

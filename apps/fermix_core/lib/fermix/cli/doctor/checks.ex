@@ -384,7 +384,10 @@ defmodule Fermix.CLI.Doctor.Checks do
         ok("computer use", "disabled")
 
       {:ok, %{state: :not_installed}} ->
-        warn("computer use", "enabled but the helper isn't installed — install it from setup")
+        warn(
+          "computer use",
+          "enabled but the helper isn't installed — install it from setup#{install_version_note()}"
+        )
 
       {:ok, %{state: :probed} = probe} ->
         format_computer_use_probe(probe)
@@ -395,16 +398,39 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp format_computer_use_probe(%{screen_capture: true, input_control: true} = probe) do
-    ok("computer use", "screen capture and input control granted (#{probe.display_server})")
+    ok(
+      "computer use",
+      "screen capture and input control granted (#{probe.display_server})#{sidecar_version_suffix()}"
+    )
   end
 
   defp format_computer_use_probe(%{screen_capture: true, input_control: false} = probe) do
-    warn("computer use", computer_use_input_hint(probe))
+    warn("computer use", computer_use_input_hint(probe) <> sidecar_version_suffix())
   end
 
   defp format_computer_use_probe(%{screen_capture: false} = probe) do
-    warn("computer use", computer_use_capture_hint(probe))
+    warn("computer use", computer_use_capture_hint(probe) <> sidecar_version_suffix())
   end
+
+  # The compux sidecar version the daemon resolves the helper by (same source the
+  # web setup shows) — appended so `fermix doctor` reveals which computer-use build
+  # is actually installed/running. Empty when compux isn't loaded, so the suffix
+  # simply drops.
+  defp sidecar_version_suffix do
+    case compux_version() do
+      "" -> ""
+      v -> " · sidecar compux v#{v}"
+    end
+  end
+
+  defp install_version_note do
+    case compux_version() do
+      "" -> ""
+      v -> " (installs compux v#{v})"
+    end
+  end
+
+  defp compux_version, do: to_string(Application.spec(:compux, :vsn))
 
   # Platform-specific remediation: name the exact pane (macOS) or the X11 requirement
   # (Linux/Wayland) so the fix is one step, not a hunt.

@@ -70,6 +70,12 @@ defmodule Fermix.CLI.ServiceCommand do
   def format_reason({:launchctl_failed, code, out}), do: "launchctl failed (#{code}): #{out}"
   def format_reason({:systemctl_failed, code, out}), do: "systemctl failed (#{code}): #{out}"
   def format_reason({:unsupported_os, os}), do: "unsupported OS: #{inspect(os)}"
+
+  def format_reason({:stop_failed, pid}),
+    do:
+      "the daemon (pid #{pid}) did not exit after SIGTERM then SIGKILL — it may be wedged. " <>
+        "Force it with `kill -9 #{pid}`, or `fermix service uninstall && fermix service install`."
+
   def format_reason(other), do: inspect(other)
 
   defp unknown_subcommand(name) do
