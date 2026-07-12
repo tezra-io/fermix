@@ -33,6 +33,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.Doctor
   alias FermixCore.Setup.Wizard
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
 
   # Computer use is a core feature, not a plugin whose branding we receive, so its
@@ -48,6 +49,7 @@ defmodule FermixWebWeb.SetupLive do
     %{id: "provider", label: "Provider", component: "provider:*", description: "Model and key"},
     %{id: "realtime", label: "Realtime", component: "realtime:*", description: "Voice companion"},
     %{id: "channels", label: "Channels", component: "channel:*", description: "Message ingress"},
+    %{id: "transcription", label: "Transcription", component: nil, description: "Voice notes"},
     %{id: "plugins", label: "Plugins", component: nil, description: "Integrations"},
     %{id: "search", label: "Search", component: nil, description: "Web search"},
     %{id: "media", label: "Media", component: nil, description: "Image generation"},
@@ -351,6 +353,36 @@ defmodule FermixWebWeb.SetupLive do
      )}
   end
 
+  def handle_event("transcription_changed", %{"transcription_form" => params}, socket) do
+    backend = normalize_transcription_backend(Map.get(params, "backend"))
+
+    form =
+      update_transcription_selection(
+        socket.assigns.transcription_form,
+        backend,
+        Map.get(params, "model")
+      )
+
+    {:noreply, assign(socket, :transcription_form, form)}
+  end
+
+  def handle_event("save_transcription", %{"transcription_form" => params} = root, socket) do
+    # The single `api_key` field carries the selected backend's transcription key;
+    # the wizard routes it to that backend's slot (openai/xai override the reused
+    # chat key, deepgram is its only source). `model` is snapped to the selected
+    # backend's default by the wizard when no explicit model rides along, so a
+    # backend switch never leaves an OpenAI-shaped model on Deepgram (xai is
+    # modelless and sends none).
+    answers =
+      []
+      |> maybe_put_string(:transcription_backend, params["backend"])
+      |> maybe_put_string(:transcription_model, params["model"])
+      |> maybe_put_string(:transcription_api_key, params["api_key"])
+
+    # Backends read [fermix_core.transcription] per call, so no daemon restart.
+    {:noreply, save_answers(socket, answers, "Transcription saved.", Map.get(root, "__nav"))}
+  end
+
   def handle_event(
         "save_oauth_client",
         %{"provider" => provider, "oauth_client_form" => params},
@@ -647,6 +679,7 @@ defmodule FermixWebWeb.SetupLive do
       sandbox_form={@sandbox_form}
       search_form={@search_form}
       image_form={@image_form}
+      transcription_form={@transcription_form}
       saved_flash={@saved_flash}
       skill_summary={@skill_summary}
       tabs={@tabs}
@@ -673,6 +706,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:channels_form, build_channels_form(snapshot))
     |> assign(:search_form, build_search_form(snapshot))
     |> assign(:image_form, build_image_form(snapshot))
+    |> assign(:transcription_form, build_transcription_form(snapshot))
     |> assign(:sandbox_form, build_sandbox_form(snapshot))
     |> assign(:memory_form, build_memory_form(snapshot))
     |> assign(:personalization_form, build_personalization_form(snapshot))
@@ -1193,6 +1227,59 @@ defmodule FermixWebWeb.SetupLive do
     |> Keyword.get(provider, [])
     |> Keyword.get(:api_key)
     |> present?()
+  end
+
+  defp build_transcription_form(snapshot) do
+    transcription = get_fermix_core(snapshot, :transcription)
+    backend = normalize_transcription_backend(Keyword.get(transcription, :backend))
+    options = transcription_models_for(backend)
+
+    %{
+      backend: backend,
+      model_options: options,
+      model: transcription_model_for_options(Keyword.get(transcription, :model), options),
+      openai_api_key_set: secret_set?(transcription, :openai_api_key),
+      xai_api_key_set: secret_set?(transcription, :xai_api_key),
+      deepgram_api_key_set: secret_set?(transcription, :deepgram_api_key)
+    }
+  end
+
+  # A backend switch resets the model to the new backend's default (the prior
+  # backend's model is invalid on a single shared `model` key); a same-backend
+  # change keeps the selected model, snapped to a valid option. A modelless
+  # backend (xai) carries an empty option list and a `nil` model — the card hides
+  # the model field.
+  defp update_transcription_selection(form, backend, _model) when backend != form.backend do
+    options = transcription_models_for(backend)
+    %{form | backend: backend, model_options: options, model: default_model_for_options(options)}
+  end
+
+  defp update_transcription_selection(form, backend, model) do
+    %{form | backend: backend, model: transcription_model_for_options(model, form.model_options)}
+  end
+
+  # `normalize_transcription_backend/1` guarantees a shipped backend, so a
+  # `{:error, _}` here is a broken invariant — fail loud (Rule #12), never
+  # silently degrade to an empty dropdown. A modelless backend (xai) resolves to
+  # `{:ok, []}` — a known backend with no selectable model, not an error.
+  defp transcription_models_for(backend) do
+    {:ok, models} = TranscriptionRegistry.supported_models(Atom.to_string(backend))
+    models
+  end
+
+  defp default_model_for_options([]), do: nil
+  defp default_model_for_options([default | _rest]), do: default
+
+  defp transcription_model_for_options(_configured, []), do: nil
+
+  defp transcription_model_for_options(configured, [default | _rest] = options),
+    do: transcription_model_or_default(configured, options, default)
+
+  defp transcription_model_or_default(configured, options, default) do
+    case to_string(configured || "") do
+      "" -> default
+      model -> if model in options, do: model, else: default
+    end
   end
 
   defp build_memory_form(snapshot) do
@@ -2312,6 +2399,19 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_image_backend("xai"), do: :xai
   defp normalize_image_backend("google"), do: :google
   defp normalize_image_backend(_value), do: :openai
+
+  # Transcription has no keyless default; the form defaults to OpenAI (most
+  # operators already hold an OpenAI key). Nothing is written until the operator
+  # saves the Transcription tab. The on-device `local` backend is not offered
+  # here (it ships in a later phase).
+  defp normalize_transcription_backend(nil), do: :openai
+  defp normalize_transcription_backend(:openai), do: :openai
+  defp normalize_transcription_backend(:xai), do: :xai
+  defp normalize_transcription_backend(:deepgram), do: :deepgram
+  defp normalize_transcription_backend("openai"), do: :openai
+  defp normalize_transcription_backend("xai"), do: :xai
+  defp normalize_transcription_backend("deepgram"), do: :deepgram
+  defp normalize_transcription_backend(_value), do: :openai
 
   defp parse_env_allow(value) when is_binary(value) do
     value

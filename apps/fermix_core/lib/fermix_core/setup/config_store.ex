@@ -106,6 +106,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: Application.get_env(:fermix_core, :memory, []),
         realtime: Application.get_env(:fermix_core, :realtime, []),
         computer_use: Application.get_env(:fermix_core, :computer_use, []),
+        transcription: Application.get_env(:fermix_core, :transcription, []),
         tools: Application.get_env(:fermix_core, :tools, []),
         plugins: Application.get_env(:fermix_core, :plugins, []),
         oauth: Application.get_env(:fermix_core, :oauth, %{}),
@@ -173,6 +174,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_memory_config(Keyword.get(persisted.fermix_core, :memory, []))
     apply_realtime_config(Keyword.get(persisted.fermix_core, :realtime, []))
     apply_computer_use_config(Keyword.get(persisted.fermix_core, :computer_use, []))
+    apply_transcription_config(Keyword.get(persisted.fermix_core, :transcription, []))
     apply_tools_config(Keyword.get(persisted.fermix_core, :tools, []))
     apply_plugins_config(Keyword.get(persisted.fermix_core, :plugins, []))
     apply_oauth_config(Keyword.get(persisted.fermix_core, :oauth, %{}))
@@ -283,6 +285,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:computer_use, [])
           |> normalize_computer_use(),
+        transcription:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:transcription, [])
+          |> normalize_transcription(),
         tools:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -369,6 +376,7 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: [],
         realtime: [],
         computer_use: [],
+        transcription: [],
         tools: [],
         plugins: [],
         oauth: %{},
@@ -499,6 +507,40 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Merge (not replace) so the compile-time transcription baseline (backend +
+  # model + max_file_mb from config.exs) survives a partial TOML edit that omits
+  # some keys — same rationale as memory/realtime. But `model` is a single shared
+  # key whose baseline value is backend-specific (the OpenAI-shaped default):
+  # when a hand-edited TOML selects a DIFFERENT backend and pins no model, the
+  # stale baseline model must NOT bleed onto it, or Deepgram would 400 on an
+  # OpenAI model id (and the modelless xai backend must not carry a stale model
+  # either). Drop the baseline model in that case so the backend's own default
+  # applies — the same coherence snap the wizard makes (M21 §5.4).
+  defp apply_transcription_config(transcription_config) do
+    merged =
+      Application.get_env(:fermix_core, :transcription, [])
+      |> drop_incoherent_baseline_model(transcription_config)
+      |> Keyword.merge(transcription_config)
+
+    Application.put_env(:fermix_core, :transcription, merged)
+    :ok
+  end
+
+  defp drop_incoherent_baseline_model(baseline, incoming) do
+    if backend_switched?(baseline, incoming) and not Keyword.has_key?(incoming, :model) do
+      Keyword.delete(baseline, :model)
+    else
+      baseline
+    end
+  end
+
+  defp backend_switched?(baseline, incoming) do
+    case Keyword.get(incoming, :backend) do
+      nil -> false
+      backend -> backend != Keyword.get(baseline, :backend)
+    end
+  end
+
   defp apply_tools_config(tools_config) do
     Application.put_env(:fermix_core, :tools, tools_config)
     :ok
@@ -544,6 +586,7 @@ defmodule FermixCore.Setup.ConfigStore do
     memory = Keyword.get(fermix_core, :memory, [])
     realtime = Keyword.get(fermix_core, :realtime, [])
     computer_use = Keyword.get(fermix_core, :computer_use, [])
+    transcription = Keyword.get(fermix_core, :transcription, [])
     tools = Keyword.get(fermix_core, :tools, [])
     plugins = Keyword.get(fermix_core, :plugins, [])
     oauth = Keyword.get(fermix_core, :oauth, %{})
@@ -575,6 +618,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "memory"], memory),
       render_section(["fermix_core", "realtime"], realtime),
       render_section(["fermix_core", "computer_use"], computer_use),
+      render_section(["fermix_core", "transcription"], transcription),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
         ["fermix_core", "tools", "tool_search"],
@@ -783,6 +827,8 @@ defmodule FermixCore.Setup.ConfigStore do
         memory: normalize_memory(get_in(document, ["fermix_core", "memory"])),
         realtime: normalize_realtime(get_in(document, ["fermix_core", "realtime"])),
         computer_use: normalize_computer_use(get_in(document, ["fermix_core", "computer_use"])),
+        transcription:
+          normalize_transcription(get_in(document, ["fermix_core", "transcription"])),
         tools: normalize_tools(get_in(document, ["fermix_core", "tools"])),
         plugins: normalize_plugins(get_in(document, ["fermix_core", "plugins"])),
         oauth: normalize_oauth(get_in(document, ["fermix_core", "oauth"])),
@@ -928,6 +974,96 @@ defmodule FermixCore.Setup.ConfigStore do
     config
     |> ComputerUseConfig.normalize()
     |> ComputerUseConfig.to_keyword()
+  end
+
+  # `[fermix_core.transcription]` (M21). Speech-to-text has no keyless degrade
+  # path, so config drift here must refuse boot rather than silently default
+  # (Rule #12): a typo'd key, an unknown backend, or a non-positive max_file_mb
+  # raises at the parse boundary, mirroring `normalize_generate_image/1`.
+  # `backend` is one of the shipped hosted backends; the on-device `local`
+  # backend ships in a later phase and is not selectable here. `model` is
+  # validated only as a string — a power user may pin any id the backend accepts.
+  # Each backend has its own optional API-key slot (secure-on-save): openai/xai
+  # keys OVERRIDE the reused chat-provider key; deepgram has no chat provider to
+  # reuse, so its key is the only source.
+  @transcription_keys ~w(backend model openai_api_key xai_api_key deepgram_api_key max_file_mb)
+
+  defp normalize_transcription(nil), do: []
+
+  defp normalize_transcription(config) when is_map(config) or is_list(config) do
+    validate_transcription_keys!(config)
+
+    []
+    |> put_if_present(
+      :backend,
+      normalize_transcription_backend(lookup(config, "backend", :backend))
+    )
+    |> put_if_present(:model, normalize_string(lookup(config, "model", :model)))
+    |> put_if_present(
+      :openai_api_key,
+      normalize_string(lookup(config, "openai_api_key", :openai_api_key))
+    )
+    |> put_if_present(
+      :xai_api_key,
+      normalize_string(lookup(config, "xai_api_key", :xai_api_key))
+    )
+    |> put_if_present(
+      :deepgram_api_key,
+      normalize_string(lookup(config, "deepgram_api_key", :deepgram_api_key))
+    )
+    |> put_if_present(
+      :max_file_mb,
+      normalize_transcription_max_file_mb(lookup(config, "max_file_mb", :max_file_mb))
+    )
+  end
+
+  defp normalize_transcription(_config), do: []
+
+  defp validate_transcription_keys!(config) do
+    unknown =
+      config
+      |> section_keys()
+      |> Enum.reject(&(&1 in @transcription_keys))
+      |> Enum.sort()
+
+    if unknown != [] do
+      raise ArgumentError, """
+      config.toml [fermix_core.transcription] has unknown key(s): #{Enum.join(unknown, ", ")}.
+
+      Allowed keys: #{Enum.join(@transcription_keys, ", ")}.
+      Remove or fix the key(s); the daemon will not boot until this is fixed.
+      """
+    end
+  end
+
+  defp normalize_transcription_backend(nil), do: nil
+
+  defp normalize_transcription_backend(value) when is_atom(value),
+    do: normalize_transcription_backend(Atom.to_string(value))
+
+  defp normalize_transcription_backend(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      backend when backend in ~w(openai xai deepgram) ->
+        backend
+
+      other ->
+        raise ArgumentError, """
+        config.toml [fermix_core.transcription] has an unknown backend: #{inspect(other)}.
+
+        Allowed backends: deepgram, openai, xai.
+        Remove or fix `backend`; the daemon will not boot until this is fixed.
+        """
+    end
+  end
+
+  defp normalize_transcription_max_file_mb(nil), do: nil
+
+  defp normalize_transcription_max_file_mb(value) when is_integer(value) and value > 0, do: value
+
+  defp normalize_transcription_max_file_mb(value) do
+    raise ArgumentError,
+          "config.toml [fermix_core.transcription] max_file_mb #{inspect(value)} " <>
+            "must be a positive integer"
   end
 
   defp normalize_tools(nil), do: []

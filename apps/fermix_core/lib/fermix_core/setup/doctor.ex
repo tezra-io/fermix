@@ -30,6 +30,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.WebSearch
+  alias FermixCore.Transcription
 
   @type provider ::
           :openai | :openai_codex | :anthropic | :xai | :openrouter | :ollama | :mistral
@@ -69,6 +70,9 @@ defmodule FermixCore.Setup.Doctor do
   @type image_report ::
           %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
           | %{status: :unconfigured}
+          | %{status: :error, error: String.t()}
+  @type transcription_report ::
+          %{:status => :configured, :backend => atom(), :credential_present? => boolean()}
           | %{status: :error, error: String.t()}
   @type model_window :: %{
           provider: provider(),
@@ -342,6 +346,35 @@ defmodule FermixCore.Setup.Doctor do
 
       {:error, reason} ->
         %{status: :error, error: reason}
+    end
+  end
+
+  @doc """
+  Reports the active transcription backend and whether its credential resolves.
+
+  Offline only — like `image_report/1`, it never opens a network call. Resolves
+  the configured backend through the registry (fail-loud on an unknown name) and
+  asks the backend module whether a credential is present (`configured?/1`), so
+  the doctor surfaces the invisible-key-coupling case (a backend selected with no
+  key) without transcribing anything. Unlike `image_report/1` there is no
+  `:unconfigured` state: `[fermix_core.transcription]` always carries a
+  compile-time default backend, so an absent/unknown backend is an `:error`.
+  """
+  @spec transcription_report(keyword()) :: transcription_report()
+  def transcription_report(_opts \\ []) do
+    case Transcription.active_backend() do
+      {:ok, {name, module}} ->
+        %{status: :configured, backend: name, credential_present?: credential_present?(module)}
+
+      {:error, message} ->
+        %{status: :error, error: message}
+    end
+  end
+
+  defp credential_present?(module) do
+    case module.configured?([]) do
+      :ok -> true
+      {:error, _reason} -> false
     end
   end
 
@@ -923,12 +956,12 @@ defmodule FermixCore.Setup.Doctor do
     {"api.openai.com", "API key is missing the api.responses.write scope or has been revoked"},
     {"Codex", "Codex OAuth token rejected — re-import via `fermix setup --import-codex`"},
     {"Grok subscription",
-     "xAI subscription token rejected — reconnect via `fermix auth login --provider xai` " <>
+     "SpaceXAI subscription token rejected — reconnect via `fermix auth login --provider xai` " <>
        "(a 403 can mean the Grok plan lacks API access)"},
     {"subscription",
      "Claude subscription token rejected — reconnect via `fermix auth login --provider anthropic`"},
     {"anthropic", "Anthropic API key rejected — verify it in the Anthropic console"},
-    {"api.x.ai", "xAI API key rejected — verify it in the xAI console"},
+    {"api.x.ai", "SpaceXAI API key rejected — verify it in the SpaceXAI console"},
     {"openrouter.ai", "OpenRouter API key rejected — verify it at openrouter.ai/settings/keys"},
     {"mistral.ai", "Mistral API key rejected — verify it at console.mistral.ai/api-keys"},
     {"Ollama", "the Ollama server rejected the request — check its auth/proxy configuration"}

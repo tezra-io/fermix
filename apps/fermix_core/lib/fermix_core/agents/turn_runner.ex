@@ -423,12 +423,12 @@ defmodule FermixCore.Agents.TurnRunner do
   # xAI 403 in OAuth mode is tier/entitlement denial, not a stale token —
   # re-login won't fix it (design doc §6.5).
   defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth, status: 403}}) do
-    "xAI subscription access denied — the Grok plan may not include API access. " <>
+    "SpaceXAI subscription access denied — the Grok plan may not include API access. " <>
       "Switch to an API key in `fermix setup`, or check the plan tier."
   end
 
   defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth}}) do
-    "xAI subscription authentication failed — reconnect with " <>
+    "SpaceXAI subscription authentication failed — reconnect with " <>
       "`fermix auth login --provider xai` and retry."
   end
 

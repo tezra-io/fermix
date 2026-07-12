@@ -19,6 +19,8 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
   end
 
   defmodule FakeBackend do
+    def name, do: :fake
+
     def transcribe(path, opts) do
       send(
         Keyword.fetch!(opts, :test_pid),
@@ -43,7 +45,40 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
   end
 
   defmodule SilentBackend do
+    def name, do: :silent
     def transcribe(_path, _opts), do: {:ok, "directory transcript"}
+  end
+
+  # Sends a marker before writing the file so a test can assert the size-cap
+  # preflight short-circuits BEFORE any download happens.
+  defmodule MarkerChannel do
+    def download_attachment(_message, attachment) do
+      send(self(), {:downloaded, attachment.file_id})
+
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-transcription-marker-#{System.unique_integer([:positive])}.ogg"
+        )
+
+      File.write!(path, "audio-bytes")
+      {:ok, path}
+    end
+  end
+
+  # Writes a file larger than a 1 MB cap so the post-download size check fires
+  # when the declared size is unknown (size_bytes nil).
+  defmodule LargeDownloadChannel do
+    def download_attachment(_message, _attachment) do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-transcription-large-#{System.unique_integer([:positive])}.ogg"
+        )
+
+      File.write!(path, :binary.copy("x", 1_200_000))
+      {:ok, path}
+    end
   end
 
   test "downloads audio, transcribes it, preserves attachments, and annotates metadata" do
@@ -98,7 +133,7 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
                size_bytes: nil,
                url: nil
              },
-             backend: FakeBackend
+             backend: :fake
            }
 
     assert_receive {:transcribed_file, path, "audio-bytes:audio-media-id", metadata}
@@ -182,5 +217,123 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
       end)
 
     assert log =~ "Transcription temp file cleanup failed"
+  end
+
+  test "composes caption and transcript when audio arrives with a caption (D15)" do
+    message = %{
+      id: "voice-caption",
+      content: "please summarize the call",
+      sender: "Alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{},
+      attachments: [
+        %{kind: :audio, file_id: "audio-cap", mime_type: "audio/ogg", url: nil, size_bytes: nil}
+      ]
+    }
+
+    assert {:ok, updated} =
+             Transcription.maybe_transcribe_message(DownloadChannel, message,
+               backend: FakeBackend,
+               test_pid: self()
+             )
+
+    assert updated.content ==
+             "please summarize the call\n\n[voice note transcript]\ntranscribed voice note"
+
+    assert updated.metadata.transcription.attachment.file_id == "audio-cap"
+    assert updated.metadata.transcription.backend == :fake
+  end
+
+  test "composes caption and transcript for string-key messages" do
+    message = %{
+      "id" => "voice-caption-strkey",
+      "content" => "notes please",
+      "sender" => "Alice",
+      "channel" => "telegram",
+      "chat_id" => "123",
+      "reply_target" => "123",
+      "metadata" => %{},
+      "attachments" => [
+        %{
+          "kind" => "audio",
+          "file_id" => "audio-cap2",
+          "mime_type" => "audio/ogg",
+          "url" => nil,
+          "size_bytes" => nil
+        }
+      ]
+    }
+
+    assert {:ok, updated} =
+             Transcription.maybe_transcribe_message(DownloadChannel, message,
+               backend: FakeBackend,
+               test_pid: self()
+             )
+
+    assert updated["content"] ==
+             "notes please\n\n[voice note transcript]\ntranscribed voice note"
+  end
+
+  test "refuses an oversize audio attachment by declared size without downloading" do
+    message = %{
+      id: "voice-big",
+      content: "",
+      sender: "Alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{},
+      attachments: [
+        %{
+          kind: :audio,
+          file_id: "big",
+          mime_type: "audio/ogg",
+          url: nil,
+          size_bytes: 25 * 1_024 * 1_024
+        }
+      ]
+    }
+
+    # Establish the cap via the `max_file_mb` opt seam (this module is async: true
+    # and can't safely `put_env` the `:transcription` baseline) so the assertion
+    # doesn't depend on un-isolated global app env — the documented order-flake class.
+    assert {:error, {:transcription_failed, {:file_too_large, size_mb, cap_mb}}} =
+             Transcription.maybe_transcribe_message(MarkerChannel, message,
+               backend: FakeBackend,
+               test_pid: self(),
+               max_file_mb: 20
+             )
+
+    assert cap_mb == 20
+    assert size_mb > 20
+    refute_received {:downloaded, _file_id}
+    refute_received {:transcribed_file, _path, _bytes, _metadata}
+  end
+
+  test "refuses an oversize downloaded file when the declared size is unknown" do
+    message = %{
+      id: "voice-unknown",
+      content: "",
+      sender: "Alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{},
+      attachments: [
+        %{kind: :audio, file_id: "unknown", mime_type: "audio/ogg", url: nil, size_bytes: nil}
+      ]
+    }
+
+    assert {:error, {:transcription_failed, {:file_too_large, size_mb, 1}}} =
+             Transcription.maybe_transcribe_message(LargeDownloadChannel, message,
+               backend: FakeBackend,
+               test_pid: self(),
+               max_file_mb: 1
+             )
+
+    assert size_mb > 1
+    refute_received {:transcribed_file, _path, _bytes, _metadata}
   end
 end

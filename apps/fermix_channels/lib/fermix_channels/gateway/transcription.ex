@@ -18,22 +18,24 @@ defmodule FermixChannels.Gateway.Transcription do
   @type attachment :: map()
   @type message :: map()
 
+  @bytes_per_mb 1_024 * 1_024
+
+  # D15: an `:audio` attachment is transcribed whenever the channel can fetch it,
+  # regardless of whether the message also carries a caption — the caption is
+  # composed with the transcript afterwards (see `compose_content/2`). The old
+  # blank-content-only guard is gone.
   @spec maybe_transcribe_message(module(), message(), keyword()) ::
           {:ok, message()} | {:error, term()}
   def maybe_transcribe_message(channel, message, opts \\ [])
       when is_atom(channel) and is_map(message) do
-    case {present?(message_value(message, :content)), audio_attachment(message),
-          downloader?(channel)} do
-      {true, _attachment, _downloader?} ->
+    case {audio_attachment(message), downloader?(channel)} do
+      {nil, _downloader?} ->
         {:ok, message}
 
-      {false, nil, _downloader?} ->
+      {_attachment, false} ->
         {:ok, message}
 
-      {false, _attachment, false} ->
-        {:ok, message}
-
-      {false, attachment, true} ->
+      {attachment, true} ->
         transcribe_message(channel, message, normalize_attachment(attachment), opts)
     end
   end
@@ -47,36 +49,126 @@ defmodule FermixChannels.Gateway.Transcription do
   end
 
   defp do_transcribe_message(channel, message, attachment, opts) do
-    with {:ok, path} <- channel.download_attachment(message, attachment) do
-      try do
-        metadata = transcription_metadata(message, attachment)
-
-        case Transcription.transcribe(path, Keyword.put(opts, :metadata, metadata)) do
-          {:ok, text} ->
-            handle_transcription_text(message, text, attachment, backend(opts))
-
-          {:error, reason} ->
-            {:error, {:transcription_failed, reason}}
-        end
-      after
-        cleanup_download(path)
-      end
-    else
-      {:error, reason} -> {:error, {:attachment_download_failed, reason}}
+    case preflight_cap(attachment, opts) do
+      :ok -> download_and_transcribe(channel, message, attachment, opts)
+      {:error, reason} -> {:error, {:transcription_failed, reason}}
     end
   end
 
-  defp backend(opts), do: Keyword.get(opts, :backend, Transcription.default_backend())
+  defp download_and_transcribe(channel, message, attachment, opts) do
+    case channel.download_attachment(message, attachment) do
+      {:ok, path} ->
+        try do
+          transcribe_capped(message, attachment, path, opts)
+        after
+          cleanup_download(path)
+        end
 
-  defp put_transcription(message, text, attachment, backend) do
+      {:error, reason} ->
+        {:error, {:attachment_download_failed, reason}}
+    end
+  end
+
+  defp transcribe_capped(message, attachment, path, opts) do
+    case postflight_cap(path, attachment, opts) do
+      :ok -> run_transcription(message, attachment, path, opts)
+      {:error, reason} -> {:error, {:transcription_failed, reason}}
+    end
+  end
+
+  defp run_transcription(message, attachment, path, opts) do
+    metadata = transcription_metadata(message, attachment)
+
+    case Transcription.transcribe(path, Keyword.put(opts, :metadata, metadata)) do
+      {:ok, text} -> handle_transcription_text(message, text, attachment, backend_name(opts))
+      {:error, reason} -> {:error, {:transcription_failed, reason}}
+    end
+  end
+
+  # File-size cap (M21 §5.2/D-caps; Code Rule #2 — cap behavior is an explicit
+  # reply upstream): enforced against the declared size before download when the
+  # attachment carries one, otherwise against the written file after download.
+  defp preflight_cap(attachment, opts) do
+    case attachment_value(attachment, :size_bytes) do
+      size when is_integer(size) -> enforce_cap(size, opts)
+      _ -> :ok
+    end
+  end
+
+  defp postflight_cap(path, attachment, opts) do
+    case attachment_value(attachment, :size_bytes) do
+      size when is_integer(size) -> :ok
+      _ -> stat_cap(path, opts)
+    end
+  end
+
+  defp stat_cap(path, opts) do
+    case File.stat(path) do
+      {:ok, %File.Stat{size: size}} -> enforce_cap(size, opts)
+      {:error, reason} -> {:error, {:stat_failed, reason}}
+    end
+  end
+
+  defp enforce_cap(size_bytes, opts) do
+    cap_mb = max_file_mb(opts)
+
+    if size_bytes > cap_mb * @bytes_per_mb do
+      {:error, {:file_too_large, size_mb(size_bytes), cap_mb}}
+    else
+      :ok
+    end
+  end
+
+  # The `max_file_mb` opt is a test/DI seam mirroring `backend/1`; production
+  # ingress passes `[]`, so `[fermix_core.transcription] max_file_mb` (config) is
+  # the single source of truth — not a config overlay (Rule #12).
+  defp max_file_mb(opts) do
+    Keyword.get_lazy(opts, :max_file_mb, fn ->
+      :fermix_core
+      |> Application.get_env(:transcription, [])
+      |> Keyword.get(:max_file_mb, 20)
+    end)
+  end
+
+  defp size_mb(bytes), do: Float.round(bytes / @bytes_per_mb, 1)
+
+  # The backend that produced the transcript, recorded as its name atom in
+  # provenance. `opts[:backend]` (a module) is the test/DI dispatch seam and
+  # reports its own `name/0`; production ingress records the configured active
+  # backend name. We reach here only after a successful transcription, so the
+  # configured backend resolves — the strict match fails loud otherwise.
+  defp backend_name(opts) do
+    case Keyword.get(opts, :backend) do
+      nil -> configured_backend_name()
+      module when is_atom(module) -> module.name()
+    end
+  end
+
+  defp configured_backend_name do
+    {:ok, {name, _module}} = Transcription.active_backend()
+    name
+  end
+
+  defp put_transcription(message, transcript, attachment, backend) do
     transcription = %{attachment: attachment, backend: backend}
     metadata = normalize_metadata(message_value(message, :metadata))
-
     metadata = Map.put(metadata, map_key(metadata, :transcription), transcription)
+    content = compose_content(message_value(message, :content), transcript)
 
     message
-    |> Map.put(map_key(message, :content), text)
+    |> Map.put(map_key(message, :content), content)
     |> Map.put(map_key(message, :metadata), metadata)
+  end
+
+  # D15: the transcript stands alone when the audio arrived without a caption;
+  # when a caption accompanied it, the caption stays first and the transcript
+  # follows under a labeled delimiter so the model sees both.
+  defp compose_content(caption, transcript) do
+    if present?(caption) do
+      "#{caption}\n\n[voice note transcript]\n#{transcript}"
+    else
+      transcript
+    end
   end
 
   defp handle_transcription_text(message, text, attachment, backend) do

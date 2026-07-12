@@ -824,7 +824,10 @@ defmodule FermixChannels.Channels.Telegram do
 
   # Inbound photos arrive as a list of PhotoSize (file_id only — no URL); the
   # bytes are fetched lazily by download_attachment/2 at the gateway media-ingest
-  # step. Only images are parsed today (P1); other media kinds are P2.
+  # step. Audio-bearing messages (voice/audio/audio-MIME document/video note)
+  # parse to a single `:audio` attachment the gateway transcription step consumes
+  # (M21 §5.2/D17). A message carries at most one of these media keys, so clause
+  # order among them is irrelevant — each must precede the catch-all.
   defp parse_attachments(%{"photo" => sizes}) when is_list(sizes) and sizes != [] do
     case largest_photo(sizes) do
       %{"file_id" => file_id} = size when is_binary(file_id) ->
@@ -843,7 +846,37 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # Voice note = OGG/Opus; Telegram fixes the container, so the mime is constant.
+  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice}) when is_binary(file_id) do
+    [audio_attachment_ref(file_id, "audio/ogg", Map.get(voice, "file_size"))]
+  end
+
+  # Audio file (music/clip): carries its own declared mime type.
+  defp parse_attachments(%{"audio" => %{"file_id" => file_id} = audio}) when is_binary(file_id) do
+    [audio_attachment_ref(file_id, Map.get(audio, "mime_type"), Map.get(audio, "file_size"))]
+  end
+
+  # Round video note (≤1 min): the payload has no mime field — hosted backends
+  # take the MP4 container directly (D17), so the mime is fixed to video/mp4.
+  defp parse_attachments(%{"video_note" => %{"file_id" => file_id} = note})
+       when is_binary(file_id) do
+    [audio_attachment_ref(file_id, "video/mp4", Map.get(note, "file_size"))]
+  end
+
+  # A document is transcribable only when it declares an audio mime type; any
+  # other document falls through to the catch-all (unparsed, as before).
+  defp parse_attachments(%{
+         "document" => %{"file_id" => file_id, "mime_type" => "audio/" <> _ = mime} = doc
+       })
+       when is_binary(file_id) do
+    [audio_attachment_ref(file_id, mime, Map.get(doc, "file_size"))]
+  end
+
   defp parse_attachments(_msg), do: []
+
+  defp audio_attachment_ref(file_id, mime_type, size_bytes) do
+    %{kind: :audio, file_id: file_id, url: nil, mime_type: mime_type, size_bytes: size_bytes}
+  end
 
   # A multi-attachment message ("album") shares a media_group_id across the
   # separate updates Telegram delivers it as; the poller buffers by this id so
@@ -999,7 +1032,7 @@ defmodule FermixChannels.Channels.Telegram do
          {:ok, token} <- get_bot_token(),
          {:ok, file_path} <- resolve_file_path(attachment_value(attachment, :file_id), token),
          {:ok, body} <- download_file(token, file_path),
-         {:ok, path} <- write_temp_file(body, attachment) do
+         {:ok, path} <- write_temp_file(body, attachment, file_path) do
       {:ok, path}
     end
   end
@@ -1072,11 +1105,11 @@ defmodule FermixChannels.Channels.Telegram do
 
   defp enforce_inbound_cap(body), do: {:ok, body}
 
-  defp write_temp_file(body, attachment) do
+  defp write_temp_file(body, attachment, file_path) do
     path =
       Path.join(
         System.tmp_dir!(),
-        "fermix-telegram-#{System.unique_integer([:positive])}#{attachment_extension(attachment)}"
+        "fermix-telegram-#{System.unique_integer([:positive])}#{temp_extension(attachment, file_path)}"
       )
 
     case File.write(path, body) do
@@ -1085,13 +1118,24 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
-  defp attachment_extension(attachment) do
-    attachment
-    |> attachment_value(:mime_type)
-    |> normalize_extension()
+  # Prefer the attachment's declared mime for the temp extension. Telegram makes
+  # the Audio `mime_type` optional, so when it is absent, use the real extension
+  # from the getFile `file_path` (the authoritative filename) — otherwise a
+  # mime-less audio clip lands in a `.bin` temp file and the hosted backends
+  # reject the `application/octet-stream` upload with a 400.
+  defp temp_extension(attachment, file_path) do
+    case attachment_value(attachment, :mime_type) do
+      mime when is_binary(mime) and mime != "" -> normalize_extension(mime)
+      _absent -> extension_from_path(file_path)
+    end
   end
 
-  defp normalize_extension(nil), do: ".bin"
+  defp extension_from_path(file_path) do
+    case Path.extname(file_path) do
+      "" -> ".bin"
+      ext -> ext
+    end
+  end
 
   defp normalize_extension(mime_type) when is_binary(mime_type) do
     mime_type

@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       assert value == Map.fetch!(secret_values(), secret.key)
     end)
 
-    assert_received {:puts, "Migrated 27 secret(s) to keyring."}
+    assert_received {:puts, "Migrated 30 secret(s) to keyring."}
   end
 
   test "run writes a sandbox.env source for migrated AI-provider secrets", %{home: home} do
@@ -144,6 +144,11 @@ defmodule FermixCore.Setup.SecretMigrationTest do
     [fermix_core.tools.generate_image]
     google_api_key = "gemini-old"
 
+    [fermix_core.transcription]
+    openai_api_key = "transcription-openai-old"
+    xai_api_key = "transcription-xai-old"
+    deepgram_api_key = "deepgram-old"
+
     [fermix_core.oauth.google]
     client_type = "desktop_public_pkce"
     client_id = "123.apps.googleusercontent.com"
@@ -206,6 +211,9 @@ defmodule FermixCore.Setup.SecretMigrationTest do
       perplexity_api_key: "perplexity-old",
       firecrawl_api_key: "firecrawl-old",
       google_api_key: "gemini-old",
+      transcription_openai_api_key: "transcription-openai-old",
+      transcription_xai_api_key: "transcription-xai-old",
+      deepgram_api_key: "deepgram-old",
       google_oauth_client_secret: "google-oauth-old",
       github_oauth_client_secret: "github-oauth-old",
       notion_oauth_client_secret: "notion-oauth-old",
