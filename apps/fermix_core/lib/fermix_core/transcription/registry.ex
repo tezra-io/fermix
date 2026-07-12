@@ -41,6 +41,17 @@ defmodule FermixCore.Transcription.Registry do
   }
 
   @doc """
+  Every shipped hosted backend as `{name_atom, module}`, in name order — the
+  enumeration the transcription eval sweeps over. The on-device `local` backend is
+  intentionally absent (it ships in a later phase; see `backend_module/1`), so this
+  is the full set of backends selectable today, config-independent.
+  """
+  @spec backends() :: [{atom(), module()}]
+  def backends do
+    @backends |> Map.values() |> Enum.sort_by(&elem(&1, 0))
+  end
+
+  @doc """
   Resolves the active backend from an already-loaded `[fermix_core.transcription]`
   config keyword. Returns `{name_atom, module}` on success.
   """
