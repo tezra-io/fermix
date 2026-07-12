@@ -178,7 +178,7 @@ defmodule FermixCore.Readiness do
     if oauth_mode?(block) do
       %{
         component: "provider:xai",
-        action: "Connect xAI Grok: `fermix auth login --provider xai`."
+        action: "Connect SpaceXAI Grok: `fermix auth login --provider xai`."
       }
     else
       %{component: "provider:xai", action: "Set XAI_API_KEY."}

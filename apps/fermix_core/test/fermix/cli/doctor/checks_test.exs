@@ -296,6 +296,53 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "transcription/0 (M21)" do
+    setup do
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :transcription, transcription)
+        Application.put_env(:fermix_core, :providers, providers)
+      end)
+
+      Application.put_env(:fermix_core, :providers, [])
+      :ok
+    end
+
+    test "reports a configured backend with a present credential as :ok" do
+      Application.put_env(:fermix_core, :transcription,
+        backend: "deepgram",
+        deepgram_api_key: "dg-secret"
+      )
+
+      result = Checks.transcription()
+
+      assert result.name == "transcription"
+      assert result.status == :ok
+      assert result.detail =~ "deepgram"
+    end
+
+    test "warns when the selected backend has no credential configured" do
+      Application.put_env(:fermix_core, :transcription, backend: "deepgram")
+
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "deepgram"
+      assert result.detail =~ "not configured"
+    end
+
+    test "warns when the configured backend is unknown" do
+      Application.put_env(:fermix_core, :transcription, backend: "vosk")
+
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "Unknown"
+    end
+  end
+
   describe "channel_health/1" do
     setup do
       original_registry = Application.get_env(:fermix_channels, :channel_registry)

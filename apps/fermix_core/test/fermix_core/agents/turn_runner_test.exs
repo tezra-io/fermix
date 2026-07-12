@@ -785,7 +785,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
            }}
         )
 
-      assert reply =~ "xAI"
+      assert reply =~ "SpaceXAI"
       assert reply =~ "API key"
       refute reply =~ "fermix auth login"
     end

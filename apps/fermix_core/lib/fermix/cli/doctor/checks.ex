@@ -371,6 +371,34 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
+  Transcription backend health: which speech-to-text backend is selected and
+  whether its credential resolves. Offline only — never transcribes. Voice notes
+  are optional, but the default backend is keyed (openai reuses the chat key), so
+  a selected-backend-with-no-credential is a warning (the invisible-key-coupling
+  the milestone exists to surface), not a hard failure.
+  """
+  @spec transcription() :: result()
+  def transcription do
+    ProviderProbe.transcription_report()
+    |> format_transcription()
+  end
+
+  defp format_transcription(%{status: :error, error: error}) do
+    warn("transcription", error)
+  end
+
+  defp format_transcription(%{credential_present?: false} = report) do
+    warn(
+      "transcription",
+      "backend #{report.backend} not configured — set a key in Transcription setup"
+    )
+  end
+
+  defp format_transcription(%{backend: backend}) do
+    ok("transcription", "backend #{backend} configured")
+  end
+
+  @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
   load-bearing case is macOS: a GRANTED screen capture but DENIED input control is
   the silent-dropped-click symptom — `CGEventPost` is discarded without Accessibility,

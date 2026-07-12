@@ -15,6 +15,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
+    transcription = Application.get_env(:fermix_core, :transcription, [])
     tools = Application.get_env(:fermix_core, :tools, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     oauth = Application.get_env(:fermix_core, :oauth, %{})
@@ -34,6 +35,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
       Application.put_env(:fermix_core, :computer_use, computer_use)
+      Application.put_env(:fermix_core, :transcription, transcription)
       Application.put_env(:fermix_core, :tools, tools)
       Application.put_env(:fermix_core, :plugins, plugins)
       Application.put_env(:fermix_core, :oauth, oauth)
@@ -337,6 +339,207 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert_raise ArgumentError, ~r/unknown backend.*midjourney/s, fn ->
       ConfigStore.load_runtime_config(resolve_secrets: false)
     end
+  end
+
+  test "save/load round-trip preserves transcription config incl. the secret sentinel (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        transcription: [
+          backend: "deepgram",
+          model: "nova-3",
+          openai_api_key: "@keyring",
+          xai_api_key: "@keyring",
+          deepgram_api_key: "@keyring",
+          max_file_mb: 25
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.transcription]"
+    assert contents =~ ~s(backend = "deepgram")
+    assert contents =~ ~s(model = "nova-3")
+    assert contents =~ "max_file_mb = 25"
+    # Each per-backend keyring sentinel round-trips (never plaintext).
+    assert contents =~ ~s(openai_api_key = "@keyring")
+    assert contents =~ ~s(xai_api_key = "@keyring")
+    assert contents =~ ~s(deepgram_api_key = "@keyring")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    transcription = Keyword.get(loaded.fermix_core, :transcription, [])
+
+    assert Keyword.get(transcription, :backend) == "deepgram"
+    assert Keyword.get(transcription, :model) == "nova-3"
+    assert Keyword.get(transcription, :openai_api_key) == "@keyring"
+    assert Keyword.get(transcription, :xai_api_key) == "@keyring"
+    assert Keyword.get(transcription, :deepgram_api_key) == "@keyring"
+    assert Keyword.get(transcription, :max_file_mb) == 25
+  end
+
+  test "load refuses to boot on an unknown transcription key (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.transcription]
+    backend = "openai"
+    modle = "typo"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown key\(s\): modle/, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  test "load refuses to boot on an unknown transcription backend (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.transcription]
+    backend = "local"
+    """)
+
+    assert_raise ArgumentError, ~r/unknown backend.*local/s, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  test "load refuses to boot on a non-positive transcription max_file_mb (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.transcription]
+    backend = "openai"
+    max_file_mb = 0
+    """)
+
+    assert_raise ArgumentError, ~r/max_file_mb.*positive integer/s, fn ->
+      ConfigStore.load_runtime_config(resolve_secrets: false)
+    end
+  end
+
+  test "save secures a plaintext transcription api_key through the keychain (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [transcription: [backend: "deepgram", deepgram_api_key: "dg-secret-plaintext"]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    # The plaintext key never lands in config.toml; the sentinel does.
+    assert contents =~ ~s(deepgram_api_key = "@keyring")
+    refute contents =~ "dg-secret-plaintext"
+
+    # …and the real value lives in the (stubbed) keychain under its secret key.
+    assert {:ok, "dg-secret-plaintext"} =
+             FermixTestSupport.SecretWriterStub.get(:deepgram_api_key)
+  end
+
+  test "save secures the openai/xai transcription override keys to their own keychain slots (M21)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [
+        transcription: [
+          backend: "openai",
+          openai_api_key: "sk-transcription-plaintext",
+          xai_api_key: "xai-transcription-plaintext"
+        ]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(openai_api_key = "@keyring")
+    assert contents =~ ~s(xai_api_key = "@keyring")
+    refute contents =~ "sk-transcription-plaintext"
+    refute contents =~ "xai-transcription-plaintext"
+
+    # Each override lands under its own distinct keychain key, not the chat-key one.
+    assert {:ok, "sk-transcription-plaintext"} =
+             FermixTestSupport.SecretWriterStub.get(:transcription_openai_api_key)
+
+    assert {:ok, "xai-transcription-plaintext"} =
+             FermixTestSupport.SecretWriterStub.get(:transcription_xai_api_key)
+  end
+
+  test "apply_snapshot merges transcription config into app env (M21)" do
+    Application.put_env(:fermix_core, :transcription, backend: "openai", max_file_mb: 20)
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [transcription: [backend: "xai"]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    transcription = Application.get_env(:fermix_core, :transcription, [])
+    assert Keyword.get(transcription, :backend) == "xai"
+    # Other baseline keys survive the partial edit.
+    assert Keyword.get(transcription, :max_file_mb) == 20
+  end
+
+  test "apply_snapshot drops the OpenAI-shaped baseline model when a hand-edit switches backend without a model (M21 §5.4)" do
+    # The compile-time baseline (config.exs) always carries the OpenAI model. A
+    # config.toml that names a different backend but pins no model must NOT let
+    # that model bleed onto Deepgram (which would 400 on the OpenAI id) — and the
+    # modelless xai backend must not carry a stale model either.
+    Application.put_env(:fermix_core, :transcription,
+      backend: "openai",
+      model: "gpt-4o-mini-transcribe",
+      max_file_mb: 20
+    )
+
+    ConfigStore.apply_snapshot(%{
+      fermix_core: [transcription: [backend: "xai"]],
+      fermix_channels: [],
+      fermix_web: []
+    })
+
+    transcription = Application.get_env(:fermix_core, :transcription, [])
+    assert Keyword.get(transcription, :backend) == "xai"
+    # No model key survives — xai is modelless and sends no model to the API.
+    refute Keyword.has_key?(transcription, :model)
+    # Other baseline keys still survive the partial edit.
+    assert Keyword.get(transcription, :max_file_mb) == 20
   end
 
   test "save/load round-trip preserves the tool_search deferral flag (M10)" do

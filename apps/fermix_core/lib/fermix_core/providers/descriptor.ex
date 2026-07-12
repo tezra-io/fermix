@@ -135,7 +135,7 @@ defmodule FermixCore.Providers.Descriptor do
     },
     %{
       id: :xai,
-      label: "xAI",
+      label: "SpaceXAI",
       adapter: FermixCore.Providers.XAI.Responses,
       default_base_url: "https://api.x.ai/v1",
       auth_modes: [:api_key, :oauth],
@@ -145,7 +145,7 @@ defmodule FermixCore.Providers.Descriptor do
         %{
           key: :xai_api_key,
           config_key: :api_key,
-          label: "xAI API key (or connect OAuth later: fermix auth login --provider xai)",
+          label: "SpaceXAI API key (or connect OAuth later: fermix auth login --provider xai)",
           secret?: true,
           default: nil
         }

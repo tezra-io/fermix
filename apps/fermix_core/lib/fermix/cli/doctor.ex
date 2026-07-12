@@ -53,6 +53,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.linger(),
       Checks.web_search(full?),
       Checks.image_generation(),
+      Checks.transcription(),
       Checks.computer_use_permissions()
     ]
 

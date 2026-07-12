@@ -6,6 +6,62 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Telegram voice notes are transcribed.** Inbound Telegram voice notes, audio
+  files, audio-MIME documents, and round video notes now parse to a transcribable
+  audio attachment and are transcribed to text like the other channels — closing
+  the gap where Telegram (the primary channel) extracted only photos and answered
+  a voice note with "your message looks empty." Video notes ride their MP4
+  container straight to the hosted backend (no ffmpeg).
+- **A voice note with a caption transcribes both.** When an audio attachment
+  arrives with a caption, the caption is kept and the transcript is appended under
+  a `[voice note transcript]` delimiter, instead of the caption suppressing
+  transcription entirely.
+- **Transcription is now a backend-pluggable capability.** `[fermix_core.transcription]
+  backend` selects the speech-to-text provider — `openai`, `xai`, or `deepgram` —
+  resolved through a fail-loud registry that lists the valid names on an unknown
+  choice (the on-device `local` backend is reserved for a later phase and says so).
+  Each backend has its own optional API-key slot: `openai_api_key` and
+  `xai_api_key` OVERRIDE the reused chat-provider key (or fall through to it if
+  unset), while Deepgram (`nova-3`, batch; no chat provider to reuse) requires its
+  `deepgram_api_key`. SpaceXAI's native `/v1/stt` is modelless (no model to pick)
+  and **requires an API key** — the Grok subscription OAuth token does not work for
+  STT, so paste one when your SpaceXAI provider is on OAuth. Every backend routes
+  its HTTP round-trip through the shared `[:fermix, :provider, :call]` telemetry
+  emitter (`purpose: :transcription`, no token cost), and a missing key fails loud
+  rather than degrading silently.
+- **Transcription is now configurable through setup.** `[fermix_core.transcription]`
+  is a first-class `config.toml` section (`backend`, `model`, per-backend
+  `openai_api_key`/`xai_api_key`/`deepgram_api_key`, `max_file_mb`) with an unknown
+  key/backend/`max_file_mb` failing config load loudly. The web-setup Transcription
+  card (moved to right after Channels) shows an API-key field for the selected
+  backend (all three ride secure-on-save to the OS keyring), plus a per-backend
+  model dropdown. Set it from the card, or with `fermix setup
+  --transcription-backend`/`--transcription-model`/`--transcription-api-key` (the
+  generic key flag stores under the currently-selected backend's slot); switching
+  backend snaps the single shared `model` to that backend's default so Deepgram
+  never inherits the OpenAI-shaped model (SpaceXAI is modelless and sends none).
+  `fermix doctor` gains a `transcription` row that reports the active backend and
+  whether its credential resolves (offline — it never transcribes).
+
+### Changed
+
+- **The default transcription model is now `gpt-4o-mini-transcribe`** (was the
+  legacy `whisper-1`) — better accuracy on the same OpenAI endpoint. Set
+  `[fermix_core.transcription] model` to pin a different model.
+
+### Fixed
+
+- **Failed voice-note transcription no longer drops silently.** When
+  transcription isn't configured, the audio is over the size cap, or the provider
+  errors, the sender now receives a specific, actionable reply (not configured →
+  run `fermix setup`; too large → the size-cap limit; other failures →
+  transcription failed, try again) and no turn is scheduled — previously the
+  gateway logged the error and the sender heard nothing. A `[fermix_core.transcription]
+  max_file_mb` cap (default 20, aligned with Telegram's bot limit) is enforced
+  before download when the size is declared, after download otherwise.
+
 ## [0.5.7] - 2026-07-11
 
 ### Added
