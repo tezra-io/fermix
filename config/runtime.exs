@@ -27,9 +27,13 @@ config :fermix_web, FermixWebWeb.Endpoint,
 # the single source of truth for "what was set during setup". Any key added
 # to ConfigStore.persistable_snapshot/1 + apply_snapshot/1 lands in env
 # automatically — runtime.exs only needs to apply env-var overlays below.
+# This is the boot config-provider chain: it runs before any application (and
+# thus before `CommandHost.Supervisor`) exists, so every keyring sentinel read
+# it triggers must run `security`/`secret-tool` inline. Pass `supervised: false`
+# from here — the one entry point that knows there is no supervision tree yet.
 if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
      function_exported?(FermixCore.Setup.ConfigStore, :bootstrap_runtime_config, 0) do
-  case FermixCore.Setup.ConfigStore.bootstrap_runtime_config() do
+  case FermixCore.Setup.ConfigStore.bootstrap_runtime_config(supervised: false) do
     :ok ->
       :ok
 

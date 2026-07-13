@@ -28,7 +28,6 @@ defmodule FermixCore.Jobs.Runner do
   @default_timeout_ms 30 * 60 * 1_000
   @default_delivery_timeout_ms 60_000
   @default_capability_policy [:read_only, :network]
-  @scheduled_job_trust :operator
 
   # Transient-infrastructure retry (wake-from-sleep network race). A scheduled
   # run that fires right after the host resumes can hit the network before it
@@ -501,9 +500,10 @@ defmodule FermixCore.Jobs.Runner do
 
   defp loop_opts(state, skill) do
     trust = effective_trust(state.job)
+    {routing_opts, worker_routing} = resolve_run_routing(state)
 
     base = [
-      context: loop_context(state, skill),
+      context: loop_context(state, skill, trust, worker_routing),
       capability_registry: state.capability_registry,
       allowed_tools: effective_allowed_tools(state.job, skill),
       policy: effective_policy(state.job, trust, skill),
@@ -511,7 +511,7 @@ defmodule FermixCore.Jobs.Runner do
       max_iterations: state.job.max_iterations
     ]
 
-    {:ok, add_adapter_opts(base, state)}
+    {:ok, base ++ routing_opts}
   rescue
     error -> {:error, Exception.message(error)}
   end
@@ -605,22 +605,32 @@ defmodule FermixCore.Jobs.Runner do
   # empty for jobs created after this commit — the model can't widen
   # the future run's policy class.
   #
-  # Persisted strings are migrated to the new vocabulary by the
-  # `created_by_trust_rename` Memory.Repo migration; unknown values
-  # fall through to the safe default (`@scheduled_job_trust`).
-  defp effective_trust(%{created_by_trust: "operator"}), do: :operator
-  defp effective_trust(%{created_by_trust: "guest"}), do: :guest
-  defp effective_trust(_job), do: @scheduled_job_trust
+  # The stored vocabulary is `"operator"`/`"guest"`, enforced by the
+  # scheduled_jobs CHECK constraint (trust-check Memory.Repo migration).
+  # There is no fall-through: an out-of-vocabulary value can only mean a
+  # corrupt row, so it raises and fails the run loudly rather than silently
+  # granting a trust the creator may never have had. Public for tests.
+  @doc false
+  @spec effective_trust(map()) :: :operator | :guest
+  def effective_trust(%{created_by_trust: "operator"}), do: :operator
+  def effective_trust(%{created_by_trust: "guest"}), do: :guest
 
-  defp add_adapter_opts(base, %{adapter: adapter, adapter_opts: adapter_opts})
+  # The run's routing, resolved once and threaded two ways (§11.1): as the
+  # AgentLoop route opts for the run's own loop, and as the `worker_routing`
+  # seam its loop context hands delegated `subagents` workers. An injected
+  # adapter (test stubs) drives the run's loop directly and reaches workers as
+  # `:provider` (mirroring TurnRunner); a real run resolves `job_routes/1` once
+  # so a provider-pinned job's workers inherit that same chain instead of
+  # silently falling back to the global primary.
+  defp resolve_run_routing(%{adapter: adapter, adapter_opts: adapter_opts} = state)
        when is_atom(adapter) and not is_nil(adapter) do
-    base
-    |> Keyword.put(:adapter, adapter)
-    |> Keyword.put(:adapter_opts, adapter_opts)
+    {[adapter: adapter, adapter_opts: adapter_opts],
+     %{ordered_routes: job_routes(state.job), provider: adapter}}
   end
 
-  defp add_adapter_opts(base, state) do
-    Keyword.put(base, :routes, job_routes(state.job))
+  defp resolve_run_routing(state) do
+    routes = job_routes(state.job)
+    {[routes: routes], %{ordered_routes: routes}}
   end
 
   # Jobs with a persisted provider/model stay strict (one route) for
@@ -704,7 +714,7 @@ defmodule FermixCore.Jobs.Runner do
     end)
   end
 
-  defp loop_context(state, skill) do
+  defp loop_context(state, skill, trust, worker_routing) do
     %{
       agent_name: "scheduled:#{state.job.id}",
       conversation_key: {:scheduled_job, state.job.id, state.run.id},
@@ -720,12 +730,21 @@ defmodule FermixCore.Jobs.Runner do
       job_id: state.job.id,
       run_id: state.run.id,
       skill_name: if(skill, do: skill.name),
+      # Part B §11.1: the same run trust that selects the capability surface also
+      # selects any delegated worker's surface (one derivation, two consumers),
+      # so an operator cron run can fan out via `subagents` while a guest run
+      # never sees the tool (policy-class exclusion). `worker_routing` places
+      # workers on the run's own route (an injected adapter rides `:provider`, a
+      # resolved chain rides `:ordered_routes`) rather than re-resolving the
+      # global primary.
+      source_trust: trust,
       # Cron owns transient recovery via its own deadline-bounded outer backoff
       # (run_agent_loop_with_retry), whose longer waits suit the wake-from-sleep
       # race better than the inner loop's quick retries — so opt the route-level
       # retry out and avoid stacking two retry loops on the same error.
       route_transient_retry: false
     }
+    |> Map.merge(worker_routing)
   end
 
   # Proactive readiness gate (Layer 2 of the wake-from-sleep defense). Before
@@ -802,13 +821,24 @@ defmodule FermixCore.Jobs.Runner do
 
   defp run_agent_loop_with_retry(loop_opts, state, attempt, elapsed_ms) do
     case run_agent_loop(loop_opts, state) do
-      {:error, reason} -> retry_or_fail(reason, loop_opts, state, attempt, elapsed_ms)
-      other -> other
+      {{:error, reason}, tools_started?} ->
+        retry_or_fail(reason, tools_started?, loop_opts, state, attempt, elapsed_ms)
+
+      {other, _tools_started?} ->
+        other
     end
   end
 
-  defp retry_or_fail(reason, loop_opts, state, attempt, elapsed_ms) do
+  defp retry_or_fail(reason, tools_started?, loop_opts, state, attempt, elapsed_ms) do
     cond do
+      # Idempotency gate: the whole-loop retry replays every completed tool call
+      # (and its side effects). Once any tool has executed this attempt, a
+      # connection loss is a mid-run failure like any other and fails loudly —
+      # the retry only exists for the wake-from-sleep race that kills the FIRST
+      # LLM call, before any tool ran.
+      tools_started? ->
+        {:error, reason}
+
       # Cron retries ONLY the fast wake-from-sleep pool-checkout race, NOT the
       # broader transient set the interactive route-retry uses. A provider
       # timeout/5xx already burned its receive-timeout budget, and the watchdog
@@ -897,21 +927,25 @@ defmodule FermixCore.Jobs.Runner do
       last_activity_at: monotonic_ms(),
       timeout_ms: state.timeout_ms,
       inactivity_timeout_ms: state.inactivity_timeout_ms,
-      active_tools: 0
+      active_tools: 0,
+      tools_started?: false
     })
   end
 
+  # Returns `{result, tools_started?}`: the loop result plus whether any tool
+  # executed this attempt, which gates the whole-loop transient retry (a retry
+  # after a tool ran would replay its side effects).
   defp watch_loop(pid, monitor_ref, activity_ref, watchdog) do
     case receive_watchdog_message(next_watchdog_wait(watchdog)) do
       {:job_loop_result, ^activity_ref, result} ->
         Process.demonitor(monitor_ref, [:flush])
-        result
+        {result, watchdog.tools_started?}
 
       {:job_loop_activity, ^activity_ref, event} ->
         watch_loop(pid, monitor_ref, activity_ref, update_watchdog_activity(watchdog, event))
 
       {:DOWN, ^monitor_ref, :process, _pid, reason} ->
-        {:error, {:agent_loop_exit, reason}}
+        {{:error, {:agent_loop_exit, reason}}, watchdog.tools_started?}
 
       :watchdog_timeout ->
         handle_watchdog_timeout(pid, monitor_ref, activity_ref, watchdog)
@@ -941,11 +975,13 @@ defmodule FermixCore.Jobs.Runner do
     cond do
       timeout_due?(watchdog, now) ->
         kill_loop(pid, monitor_ref)
-        {:timeout, "wall-clock timeout after #{watchdog.timeout_ms}ms"}
+        {{:timeout, "wall-clock timeout after #{watchdog.timeout_ms}ms"}, watchdog.tools_started?}
 
       inactivity_due?(watchdog, now) ->
         kill_loop(pid, monitor_ref)
-        {:timeout, "inactivity timeout after #{watchdog.inactivity_timeout_ms}ms"}
+
+        {{:timeout, "inactivity timeout after #{watchdog.inactivity_timeout_ms}ms"},
+         watchdog.tools_started?}
 
       true ->
         watch_loop(pid, monitor_ref, activity_ref, watchdog)
@@ -996,7 +1032,12 @@ defmodule FermixCore.Jobs.Runner do
   end
 
   defp update_watchdog_activity(watchdog, {:tool_start, _name}) do
-    %{watchdog | last_activity_at: monotonic_ms(), active_tools: watchdog.active_tools + 1}
+    %{
+      watchdog
+      | last_activity_at: monotonic_ms(),
+        active_tools: watchdog.active_tools + 1,
+        tools_started?: true
+    }
   end
 
   defp update_watchdog_activity(watchdog, {:tool_finish, _name}) do

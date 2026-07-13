@@ -5,9 +5,12 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.Registry
+  alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Tools.ScheduleJob
 
   defmodule FakeOpenAIClient do
     def start_link(opts) do
@@ -183,6 +186,92 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert file_name in tool_names
     refute channel_name in tool_names
+  end
+
+  test "default voice capabilities exclude delegation tools" do
+    file_name = "voice_file_#{System.unique_integer([:positive])}"
+    delegation_name = "voice_delegate_#{System.unique_integer([:positive])}"
+
+    :ok = CapabilityRegistry.register(CapabilityRegistry, capability(file_name, :file))
+
+    :ok =
+      CapabilityRegistry.register(CapabilityRegistry, capability(delegation_name, :delegation))
+
+    on_exit(fn ->
+      CapabilityRegistry.unregister(CapabilityRegistry, file_name)
+      CapabilityRegistry.unregister(CapabilityRegistry, delegation_name)
+    end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    tool_names = Enum.map(event.session.tools, & &1.name)
+
+    # Voice gains honest :operator trust, so `subagents` would otherwise become
+    # executable — but a multi-minute blocking fan-out does not fit a live voice
+    # session, so the delegation category is excluded from the voice surface.
+    assert file_name in tool_names
+    refute delegation_name in tool_names
+  end
+
+  test "schedule_job from the voice context persists created_by_trust operator" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-realtime-schedule-#{unique}.db")
+    repo = :"realtime_schedule_repo_#{unique}"
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        FermixTestSupport.SafeRm.rm(path)
+      end)
+    end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    # The voice call is the operator at the keyboard: its default tool context
+    # carries `source_trust: :operator`, so a scheduled job it creates is stamped
+    # with the creator's real trust rather than a minted default.
+    context = Map.put(:sys.get_state(server).tool_context, :memory_repo, repo)
+
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Voice Reminder",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Remind me tomorrow at 9.",
+                 "allowed_tools" => []
+               },
+               context
+             )
+
+    assert result.success == true
+    job_id = Jason.decode!(result.output)["id"]
+
+    assert {:ok, job} = Registry.get_job(job_id, repo: repo)
+    assert job.created_by_trust == "operator"
   end
 
   test "reload_runtime sends active realtime sessions a refreshed tool list" do

@@ -59,6 +59,119 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
   defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 
+  # Captures the opts each keyring read receives so the apply_snapshot/2 →
+  # SecretStore → SecretWriter → CommandRunner threading is observable.
+  defmodule OptsRecordingWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @table __MODULE__
+
+    def start do
+      if :ets.whereis(@table) == :undefined do
+        :ets.new(@table, [:named_table, :public, :bag])
+      end
+
+      :ets.delete_all_objects(@table)
+      :ok
+    end
+
+    def recorded_opts, do: @table |> :ets.tab2list() |> Enum.map(fn {_key, opts} -> opts end)
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def get(key, opts \\ []) do
+      :ets.insert(@table, {key, opts})
+      {:ok, "resolved-" <> Atom.to_string(key)}
+    end
+
+    @impl true
+    def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
+
+    @impl true
+    def command_source(key, _opts \\ []) do
+      %{source: :command, command: "recording", args: [Atom.to_string(key)]}
+    end
+  end
+
+  describe "apply_snapshot/2 supervised threading (boot config-provider chain)" do
+    setup do
+      core = Application.get_all_env(:fermix_core)
+      channels = Application.get_all_env(:fermix_channels)
+
+      :ok = OptsRecordingWriter.start()
+      Application.put_env(:fermix_core, :secret_writer, OptsRecordingWriter)
+
+      on_exit(fn ->
+        Enum.each(core, fn {k, v} -> Application.put_env(:fermix_core, k, v) end)
+        Enum.each(channels, fn {k, v} -> Application.put_env(:fermix_channels, k, v) end)
+      end)
+
+      :ok
+    end
+
+    @sentinel_snapshot %{fermix_core: [providers: [openai: [api_key: "@keyring"]]]}
+
+    test "the boot entry point threads supervised: false down to the read" do
+      :ok = ConfigStore.apply_snapshot(@sentinel_snapshot, supervised: false)
+
+      opts = List.first(OptsRecordingWriter.recorded_opts())
+      assert opts, "apply_snapshot resolved no keyring sentinel"
+      assert Keyword.get(opts, :supervised) == false
+    end
+
+    test "a daemon apply_snapshot omits supervised (defaults to the supervised host)" do
+      :ok = ConfigStore.apply_snapshot(@sentinel_snapshot)
+
+      opts = List.first(OptsRecordingWriter.recorded_opts())
+      assert opts, "apply_snapshot resolved no keyring sentinel"
+      refute Keyword.has_key?(opts, :supervised)
+    end
+  end
+
+  describe "bootstrap_runtime_config/1 supervised threading (boot config-provider chain)" do
+    setup do
+      core = Application.get_all_env(:fermix_core)
+      channels = Application.get_all_env(:fermix_channels)
+
+      :ok = OptsRecordingWriter.start()
+      Application.put_env(:fermix_core, :secret_writer, OptsRecordingWriter)
+
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-bootstrap")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      File.write!(Path.join(tmp_home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+      """)
+
+      on_exit(fn ->
+        Enum.each(core, fn {k, v} -> Application.put_env(:fermix_core, k, v) end)
+        Enum.each(channels, fn {k, v} -> Application.put_env(:fermix_channels, k, v) end)
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      :ok
+    end
+
+    # The boot resolve happens in load_runtime_config/1 (the sentinel is gone
+    # from the snapshot before apply_snapshot re-resolves), so this must drive
+    # the real entry point over a sentinel-bearing TOML — asserting only the
+    # apply_snapshot seam leaves the actual boot read uncovered.
+    test "the boot entry threads supervised: false through the load-path keyring read" do
+      :ok = ConfigStore.bootstrap_runtime_config(supervised: false)
+
+      recorded = OptsRecordingWriter.recorded_opts()
+      assert recorded != [], "bootstrap resolved no keyring sentinel"
+
+      for opts <- recorded do
+        assert Keyword.get(opts, :supervised) == false,
+               "a boot-path keyring read ran without supervised: false: #{inspect(opts)}"
+      end
+    end
+  end
+
   test "current_snapshot carries all four provider blocks" do
     original = Application.get_env(:fermix_core, :providers, [])
 

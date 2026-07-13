@@ -183,7 +183,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     with {:ok, binary} <- fetch_secret_tool_binary(),
          {:ok, shell} <- fetch_shell_binary() do
       with_temp_secret(value, fn secret_file ->
-        run_with_stdin(shell, secret_file, binary, put_args(key, opts), timeout(opts))
+        run_with_stdin(shell, secret_file, binary, put_args(key, opts), opts)
       end)
     end
   end
@@ -191,7 +191,7 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
   @impl true
   def get(key, opts \\ []) when is_atom(key) do
     with {:ok, binary} <- fetch_secret_tool_binary(),
-         {:ok, output} <- run(binary, lookup_args(key, opts), timeout(opts)) do
+         {:ok, output} <- run(binary, lookup_args(key, opts), opts) do
       output
       |> String.trim_trailing("\n")
       |> case do
@@ -279,15 +279,24 @@ defmodule FermixCore.Setup.SecretWriter.SecretTool do
     :ok
   end
 
-  defp run_with_stdin(shell, secret_file, binary, args, timeout_ms) do
+  defp run_with_stdin(shell, secret_file, binary, args, opts) do
     script = ~s(secret_file=$1; shift; exec "$@" < "$secret_file")
-    run(shell, ["-c", script, "fermix-secret", secret_file, binary | args], timeout_ms)
+    run(shell, ["-c", script, "fermix-secret", secret_file, binary | args], opts)
   end
 
-  defp run(binary, args, timeout_ms) do
+  # `supervised` rides in on `opts` from the caller that knows its world: the
+  # boot config-provider chain passes `supervised: false` (no supervision tree
+  # yet); the daemon wizard/doctor callers omit it (CommandRunner defaults to
+  # the supervised host). CommandRunner defaults an absent key to `true`.
+  defp run(binary, args, opts) do
+    timeout_ms = timeout(opts)
     command = Enum.join([binary | args], " ")
 
-    case CommandRunner.run(binary, args, timeout_ms: timeout_ms) do
+    case CommandRunner.run(
+           binary,
+           args,
+           [timeout_ms: timeout_ms] ++ Keyword.take(opts, [:supervised])
+         ) do
       {:ok, %{exit: 0, stdout: output, truncated?: false}} ->
         {:ok, output}
 
@@ -328,9 +337,9 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
       # Best-effort delete FIRST so the add re-creates the item fresh with `-A`'s
       # open ACL (see put_commands/put_args). A missing item just errors and falls
       # through; the add still stores the value.
-      _ = run(binary, delete, timeout(opts))
+      _ = run(binary, delete, opts)
 
-      case run(binary, add, timeout(opts)) do
+      case run(binary, add, opts) do
         {:ok, _output} -> :ok
         error -> error
       end
@@ -354,7 +363,7 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
   @impl true
   def get(key, opts \\ []) when is_atom(key) do
     with {:ok, binary} <- fetch_security_binary(),
-         {:ok, output} <- run(binary, get_args(key, opts), timeout(opts)) do
+         {:ok, output} <- run(binary, get_args(key, opts), opts) do
       output
       |> String.trim_trailing("\n")
       |> case do
@@ -417,11 +426,18 @@ defmodule FermixCore.Setup.SecretWriter.MacOS do
 
   # CommandRunner kills the OS child on timeout — the prior Task.async +
   # System.cmd pattern only ended the BEAM task and left `security` running
-  # (e.g. hung on a locked keychain).
-  defp run(binary, args, timeout_ms) do
+  # (e.g. hung on a locked keychain). `supervised` rides in on `opts`: the boot
+  # config-provider chain passes `supervised: false`; daemon callers omit it and
+  # CommandRunner defaults to the supervised host.
+  defp run(binary, args, opts) do
+    timeout_ms = timeout(opts)
     command = Enum.join([binary | args_without_secret(args)], " ")
 
-    case CommandRunner.run(binary, args, timeout_ms: timeout_ms) do
+    case CommandRunner.run(
+           binary,
+           args,
+           [timeout_ms: timeout_ms] ++ Keyword.take(opts, [:supervised])
+         ) do
       {:ok, %{exit: 0, stdout: output, truncated?: false}} ->
         {:ok, output}
 

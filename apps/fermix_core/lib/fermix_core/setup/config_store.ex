@@ -154,11 +154,14 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   @spec apply_snapshot(runtime_config()) :: :ok
-  def apply_snapshot(snapshot) do
+  @spec apply_snapshot(runtime_config(), keyword()) :: :ok
+  def apply_snapshot(snapshot, opts \\ []) do
     persisted =
       snapshot
       |> persistable_snapshot()
-      |> SecretStore.resolve_sentinels(warn_plaintext: false)
+      |> SecretStore.resolve_sentinels(
+        [warn_plaintext: false] ++ Keyword.take(opts, [:supervised])
+      )
 
     providers = Keyword.get(persisted.fermix_core, :providers, [])
 
@@ -204,9 +207,10 @@ defmodule FermixCore.Setup.ConfigStore do
   problem rather than silently start with stale defaults.
   """
   @spec bootstrap_runtime_config() :: :ok | {:error, term()}
-  def bootstrap_runtime_config do
-    with {:ok, snapshot} <- load_runtime_config(),
-         :ok <- apply_snapshot(snapshot) do
+  @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
+  def bootstrap_runtime_config(opts \\ []) do
+    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised])),
+         :ok <- apply_snapshot(snapshot, opts) do
       apply_mcp_config()
     end
   end
@@ -391,7 +395,10 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp maybe_resolve_keyring(snapshot, opts) do
     if Keyword.get(opts, :resolve_secrets, true) do
-      SecretStore.resolve_sentinels(snapshot, warn_plaintext: true)
+      SecretStore.resolve_sentinels(
+        snapshot,
+        [warn_plaintext: true] ++ Keyword.take(opts, [:supervised])
+      )
     else
       snapshot
     end
@@ -401,7 +408,10 @@ defmodule FermixCore.Setup.ConfigStore do
     persistable = persistable_snapshot(snapshot)
 
     if Keyword.get(opts, :secure_secrets, true) do
-      SecretStore.secure_snapshot(persistable, previous: existing_persisted_snapshot())
+      SecretStore.secure_snapshot(
+        persistable,
+        [previous: existing_persisted_snapshot()] ++ Keyword.take(opts, [:supervised])
+      )
     else
       {:ok, persistable}
     end

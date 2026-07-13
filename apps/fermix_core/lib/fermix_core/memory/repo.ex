@@ -20,6 +20,7 @@ defmodule FermixCore.Memory.Repo do
   @fermix_md_rename_migration_version 8
   @memory_review_migration_version 9
   @taxonomy_migration_version 10
+  @trust_check_migration_version 11
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -304,6 +305,81 @@ defmodule FermixCore.Memory.Repo do
         archive_reason = 'retired_category:episode',
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE category = 'episode' AND archived_at IS NULL;
+  """
+
+  # Trust vocabulary is now enforced by the schema. The `created_by_trust`
+  # column still carried `NOT NULL DEFAULT 'core'` with no CHECK, so a
+  # rolled-back binary (or any stray writer) could mint an out-of-vocabulary
+  # row that the runner's raising `effective_trust/1` would brick at run time.
+  # The standard SQLite 12-step rebuild drops the column default and adds a
+  # CHECK constraint, rewriting the last `'core'` rows (minted since the v7
+  # rename) to `'operator'` in the copy. Foreign keys are disabled around the
+  # rebuild so dropping the parent `scheduled_jobs` does not cascade-delete
+  # `job_runs`; the copy preserves every id, so integrity holds. The column
+  # order matches the pre-rebuild table exactly, keeping `SELECT *` reads
+  # (`scheduled_job_row/1`) unaffected.
+  @trust_check_schema_sql_template """
+  CREATE TABLE scheduled_jobs_new (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    schedule_kind TEXT NOT NULL,
+    schedule_expr TEXT NOT NULL,
+    timezone TEXT NOT NULL,
+    next_run_at TEXT,
+    task_prompt TEXT NOT NULL,
+    skill_name TEXT,
+    session_mode TEXT NOT NULL DEFAULT 'isolated',
+    provider TEXT,
+    model TEXT,
+    max_iterations INTEGER NOT NULL DEFAULT {{max_iterations_default}},
+    timeout_seconds INTEGER,
+    inactivity_timeout_seconds INTEGER,
+    capability_policy_json TEXT,
+    allowed_tools_json TEXT,
+    memory_source_id TEXT NOT NULL REFERENCES memory_sources(id) ON DELETE RESTRICT,
+    memory_read_scopes_json TEXT,
+    memory_write_scope TEXT,
+    main_visible INTEGER NOT NULL DEFAULT 1,
+    delivery_mode TEXT NOT NULL DEFAULT 'none',
+    delivery_target_json TEXT,
+    silent_marker TEXT NOT NULL DEFAULT '[SILENT]',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    state TEXT NOT NULL DEFAULT 'scheduled',
+    last_run_at TEXT,
+    last_status TEXT,
+    last_error TEXT,
+    created_by_agent_id TEXT NOT NULL DEFAULT 'main',
+    created_by_session_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    expires_at TEXT,
+    created_by_channel TEXT,
+    created_by_trust TEXT NOT NULL CHECK (created_by_trust IN ('operator', 'guest'))
+  );
+
+  INSERT INTO scheduled_jobs_new
+  SELECT
+    id, name, description, schedule_kind, schedule_expr, timezone, next_run_at,
+    task_prompt, skill_name, session_mode, provider, model, max_iterations,
+    timeout_seconds, inactivity_timeout_seconds, capability_policy_json,
+    allowed_tools_json, memory_source_id, memory_read_scopes_json,
+    memory_write_scope, main_visible, delivery_mode, delivery_target_json,
+    silent_marker, enabled, state, last_run_at, last_status, last_error,
+    created_by_agent_id, created_by_session_id, created_at, updated_at,
+    expires_at, created_by_channel,
+    CASE WHEN created_by_trust = 'core' THEN 'operator' ELSE created_by_trust END
+  FROM scheduled_jobs;
+
+  DROP TABLE scheduled_jobs;
+  ALTER TABLE scheduled_jobs_new RENAME TO scheduled_jobs;
+
+  CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_state_next_run
+    ON scheduled_jobs(enabled, state, next_run_at);
+  CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_creator_state
+    ON scheduled_jobs(created_by_agent_id, state);
+  CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_expires_at
+    ON scheduled_jobs(enabled, state, expires_at);
   """
 
   @memory_review_schema_sql """
@@ -1251,7 +1327,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_trust_rename_migration(conn, versions),
          :ok <- apply_fermix_md_rename_migration(conn, versions),
          :ok <- apply_memory_review_migration(conn, versions),
-         :ok <- apply_taxonomy_migration(conn, versions) do
+         :ok <- apply_taxonomy_migration(conn, versions),
+         :ok <- apply_trust_check_migration(conn, versions) do
       :ok
     end
   end
@@ -1432,6 +1509,36 @@ defmodule FermixCore.Memory.Repo do
         COMMIT;
         """
       )
+    end
+  end
+
+  defp trust_check_schema_sql do
+    default = Integer.to_string(IterationLimits.scheduled_job_default())
+    String.replace(@trust_check_schema_sql_template, "{{max_iterations_default}}", default)
+  end
+
+  # The scheduled_jobs rebuild drops the parent of job_runs' foreign key, so
+  # foreign keys are disabled around the transaction to prevent the implicit
+  # DELETE from cascading. Toggled outside BEGIN/COMMIT — a PRAGMA is a no-op
+  # inside a transaction. A migration failure stops the GenServer and discards
+  # the connection, so a left-off pragma cannot leak to real traffic.
+  defp apply_trust_check_migration(conn, versions) do
+    if Enum.member?(versions, @trust_check_migration_version) do
+      :ok
+    else
+      with :ok <- Sqlite3.execute(conn, "PRAGMA foreign_keys=OFF;"),
+           :ok <-
+             Sqlite3.execute(
+               conn,
+               """
+               BEGIN;
+               #{trust_check_schema_sql()}
+               INSERT INTO schema_migrations(version) VALUES (#{@trust_check_migration_version});
+               COMMIT;
+               """
+             ) do
+        Sqlite3.execute(conn, "PRAGMA foreign_keys=ON;")
+      end
     end
   end
 
@@ -2789,7 +2896,7 @@ defmodule FermixCore.Memory.Repo do
       created_by_agent_id: string_with_default!(attrs, :created_by_agent_id, "main"),
       created_by_session_id: optional_string!(attrs, :created_by_session_id),
       created_by_channel: optional_string!(attrs, :created_by_channel),
-      created_by_trust: string_with_default!(attrs, :created_by_trust, "core"),
+      created_by_trust: fetch_string!(attrs, :created_by_trust),
       expires_at: optional_timestamp_string(Map.get(attrs, :expires_at)),
       created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
       updated_at: timestamp_string(Map.get(attrs, :updated_at, DateTime.utc_now()))

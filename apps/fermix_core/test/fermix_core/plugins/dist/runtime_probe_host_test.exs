@@ -22,6 +22,40 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host.SystemTest do
     assert status != 0
   end
 
+  describe "supervised threading (tree-less CLI verbs vs daemon)" do
+    # `fermix plugins install/doctor/status` reach this probe on cli_dispatch's
+    # tree-less fall-through — no CommandHost.Supervisor exists — so those entry
+    # points thread `supervised: false` and the probe must resolve inline. A
+    # daemon call site (Status from the prompt catalog) keeps the default and
+    # must fail loud if its supervisor is dead (design §3: never a silent inline
+    # run). Both are exercised here with the global host supervisor terminated.
+    setup do
+      :ok = Supervisor.terminate_child(FermixCore.Supervisor, FermixCore.CommandHost.Supervisor)
+
+      on_exit(fn ->
+        {:ok, _pid} =
+          Supervisor.restart_child(FermixCore.Supervisor, FermixCore.CommandHost.Supervisor)
+      end)
+
+      :ok
+    end
+
+    test "supervised: false resolves inline without a CommandHost supervisor" do
+      echo = System.find_executable("echo")
+
+      assert {:ok, output} = HostSystem.version_output(echo, supervised: false)
+      assert is_binary(output)
+    end
+
+    test "the default (daemon) run fails loud when the supervisor is absent" do
+      echo = System.find_executable("echo")
+
+      assert_raise RuntimeError, ~r/command host supervisor/, fn ->
+        HostSystem.version_output(echo)
+      end
+    end
+  end
+
   test "version_output is bounded — a wedged runtime cannot hang the render path" do
     # Regression: the probe used raw `System.cmd` with no timeout, so a host
     # runtime that never returns from `--version` hung the setup page (this runs

@@ -111,7 +111,9 @@ defmodule Fermix.CLI.SandboxCommand do
   defp env_get(name, opts) do
     config = Config.current()
 
-    case Env.build_command(config, [name]) do
+    # `fermix sandbox` is a tree-less `cli_dispatch` verb — no
+    # `CommandHost.Supervisor` — so a `source = "command"` env resolves inline.
+    case Env.build_command(config, [name], supervised: false) do
       {:ok, env} ->
         value = env |> List.keyfind(name, 0) |> elem(1)
         printed = if Keyword.fetch!(opts, :masked?), do: "***", else: value
@@ -180,7 +182,9 @@ defmodule Fermix.CLI.SandboxCommand do
   end
 
   defp mutate(mutation, success_message, opts \\ []) do
-    case ConfigMutation.apply(Config.current(), mutation, opts) do
+    # `fermix grant|revoke|sandbox` runs tree-less (cli_dispatch fall-through):
+    # the persist chain's keyring reads/writes must run inline (design §3.2).
+    case ConfigMutation.apply(Config.current(), mutation, [supervised: false] ++ opts) do
       {:ok, _config} ->
         IO.puts(success_message)
         0

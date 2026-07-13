@@ -22,18 +22,28 @@ defmodule FermixCore.CommandRunner do
   site.
   """
 
+  alias FermixCore.ProcessGroup
+
   @type opts :: [
           {:cwd, String.t() | nil}
           | {:env, [{String.t() | charlist(), String.t() | charlist()}]}
           | {:timeout_ms, pos_integer()}
           | {:max_output_bytes, pos_integer()}
           | {:kill_grace_ms, pos_integer()}
+          | {:supervised, boolean()}
+          | {:dynamic_supervisor, atom() | pid()}
         ]
 
   @type result :: %{exit: integer(), stdout: binary(), truncated?: boolean()}
+  @type limits :: %{
+          timeout_ms: pos_integer(),
+          max_output_bytes: pos_integer(),
+          kill_grace_ms: pos_integer()
+        }
   @type reason ::
           {:timeout, pos_integer()}
           | {:executable_not_found, String.t()}
+          | {:command_host_crashed, term()}
           | {:port_failed, term()}
           | term()
 
@@ -41,37 +51,108 @@ defmodule FermixCore.CommandRunner do
   @default_max_output_bytes 1_048_576
   @default_kill_grace_ms 200
 
+  @doc """
+  Runs an external command, returning its captured output once.
+
+  Two configurations, chosen by `:supervised` (default `true`):
+
+    * `supervised: true` — the daemon path. A `FermixCore.CommandHost` under
+      `FermixCore.CommandHost.Supervisor` owns the OS process group and sweeps
+      it on every ending, including requester death. If the supervisor is not
+      running this **raises before any OS process spawns** (never a silent
+      inline run). `:dynamic_supervisor` (atom or pid, default the global
+      supervisor) is a test seam.
+    * `supervised: false` — the one-shot path (config-provider boot, tree-less
+      CLI verbs). The call collects inline and sweeps at end of run; owner-death
+      coverage is out of scope there.
+  """
   @spec run(String.t(), [String.t()], opts()) :: {:ok, result()} | {:error, reason()}
   def run(executable, args, opts \\ [])
       when is_binary(executable) and is_list(args) and is_list(opts) do
-    timeout_ms = positive_int_opt(opts, :timeout_ms, @default_timeout_ms)
-    max_output_bytes = positive_int_opt(opts, :max_output_bytes, @default_max_output_bytes)
-    kill_grace_ms = positive_int_opt(opts, :kill_grace_ms, @default_kill_grace_ms)
+    limits = build_limits(opts)
 
-    if File.exists?(executable) do
-      do_run(executable, args, opts, %{
-        timeout_ms: timeout_ms,
-        max_output_bytes: max_output_bytes,
-        kill_grace_ms: kill_grace_ms
-      })
-    else
-      {:error, {:executable_not_found, executable}}
+    cond do
+      not File.exists?(executable) ->
+        {:error, {:executable_not_found, executable}}
+
+      Keyword.get(opts, :supervised, true) ->
+        run_supervised(executable, args, opts)
+
+      true ->
+        do_run(executable, args, opts, limits)
+    end
+  end
+
+  @doc false
+  @spec build_limits(opts()) :: limits()
+  def build_limits(opts) when is_list(opts) do
+    %{
+      timeout_ms: positive_int_opt(opts, :timeout_ms, @default_timeout_ms),
+      max_output_bytes: positive_int_opt(opts, :max_output_bytes, @default_max_output_bytes),
+      kill_grace_ms: positive_int_opt(opts, :kill_grace_ms, @default_kill_grace_ms)
+    }
+  end
+
+  # Exact Port.open construction shared by the one-shot path (`do_run`) and the
+  # supervised host (`CommandHost.init`). Kept in one place so the two configs
+  # can never drift on cwd/env/stderr/binary handling.
+  @doc false
+  @spec build_port_opts([String.t()], opts()) :: keyword()
+  def build_port_opts(args, opts) when is_list(args) and is_list(opts) do
+    [
+      :binary,
+      :exit_status,
+      :stderr_to_stdout,
+      :hide,
+      args: args
+    ]
+    |> maybe_put_cwd(Keyword.get(opts, :cwd))
+    |> maybe_put_env(Keyword.get(opts, :env, []))
+  end
+
+  # Daemon path: start a supervised host (fail loud if the supervisor is absent —
+  # before any OS process exists), then block on a monitor for the result. No
+  # receive timeout — the host is bounded by its own timers; the monitor is the
+  # hang protection (a host crash surfaces as {:error, {:command_host_crashed, _}}).
+  defp run_supervised(executable, args, opts) do
+    dyn_sup = Keyword.get(opts, :dynamic_supervisor, FermixCore.CommandHost.Supervisor)
+    supervisor = resolve_supervisor!(dyn_sup)
+    reply_ref = make_ref()
+    child = {FermixCore.CommandHost, {self(), reply_ref, executable, args, opts}}
+
+    case DynamicSupervisor.start_child(supervisor, child) do
+      {:ok, host} -> await_host(host, reply_ref)
+      {:error, reason} -> {:error, {:command_host_crashed, reason}}
+    end
+  end
+
+  defp resolve_supervisor!(dyn_sup) do
+    case GenServer.whereis(dyn_sup) do
+      pid when is_pid(pid) ->
+        pid
+
+      _absent ->
+        raise "CommandRunner: command host supervisor #{inspect(dyn_sup)} is not running. " <>
+                "Daemon call sites need the supervision tree started; tree-less callers " <>
+                "(config-provider boot, CLI verbs) must pass supervised: false."
+    end
+  end
+
+  defp await_host(host, reply_ref) do
+    mon = Process.monitor(host)
+
+    receive do
+      {:command_result, ^reply_ref, result} ->
+        Process.demonitor(mon, [:flush])
+        result
+
+      {:DOWN, ^mon, :process, ^host, reason} ->
+        {:error, {:command_host_crashed, reason}}
     end
   end
 
   defp do_run(executable, args, opts, limits) do
-    port_opts =
-      [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        :hide,
-        args: args
-      ]
-      |> maybe_put_cwd(Keyword.get(opts, :cwd))
-      |> maybe_put_env(Keyword.get(opts, :env, []))
-
-    port = Port.open({:spawn_executable, executable}, port_opts)
+    port = Port.open({:spawn_executable, executable}, build_port_opts(args, opts))
     deadline = System.monotonic_time(:millisecond) + limits.timeout_ms
 
     case Port.info(port, :os_pid) do
@@ -119,31 +200,42 @@ defmodule FermixCore.CommandRunner do
         new_total = total + byte_size(chunk)
 
         if new_total > limits.max_output_bytes do
-          kill_and_drain(port, os_pid, limits)
+          drain_and_kill(port, os_pid, limits)
           {:ok, %{exit: 124, stdout: take_prefix(acc, limits.max_output_bytes), truncated?: true}}
         else
           collect(port, os_pid, deadline, limits, [acc | chunk], new_total)
         end
 
       {^port, {:exit_status, exit_code}} ->
+        # Exit ending: immediate group-SIGKILL — any group member still alive is
+        # a leak by definition (e.g. a `nohup … &` descendant on `exit 0`).
+        sweep_kill(port, os_pid)
         {:ok, %{exit: exit_code, stdout: IO.iodata_to_binary(acc), truncated?: false}}
     after
       remaining ->
-        kill_and_drain(port, os_pid, limits)
+        drain_and_kill(port, os_pid, limits)
         {:error, {:timeout, limits.timeout_ms}}
     end
   end
 
-  defp kill_and_drain(port, os_pid, %{kill_grace_ms: grace_ms}) do
-    _ = os_signal(os_pid, "TERM")
+  # Exit ending sweep: unconditional group-SIGKILL, then close + flush.
+  defp sweep_kill(port, os_pid) do
+    ProcessGroup.signal(os_pid, :sigkill)
+    _ = safe_port_close(port)
+    flush_port_messages(port)
+  end
 
-    unless await_exit(port, grace_ms) do
-      _ = os_signal(os_pid, "KILL")
-      _ = await_exit(port, grace_ms)
-    end
+  # Timeout / output-cap ending: group-SIGTERM, drain (discarding output) until
+  # the direct child exits or the grace elapses, then **unconditional**
+  # group-SIGKILL. The KILL no longer depends on the direct child's exit — a
+  # TERM-trapping, fd-closing grandchild is reaped regardless.
+  defp drain_and_kill(port, os_pid, %{kill_grace_ms: grace_ms}) do
+    ProcessGroup.signal(os_pid, :sigterm)
+    _ = await_exit(port, grace_ms)
+    ProcessGroup.signal(os_pid, :sigkill)
 
-    # SIGKILL is non-blockable; whether or not exit_status arrived, close the
-    # port (no more messages after this) and flush anything already queued.
+    # SIGKILL is non-blockable; close the port (no more messages after this) and
+    # flush anything already queued.
     _ = safe_port_close(port)
     flush_port_messages(port)
   end
@@ -176,24 +268,6 @@ defmodule FermixCore.CommandRunner do
     Port.close(port)
   rescue
     ArgumentError -> :ok
-  end
-
-  # Signal the child's whole PROCESS GROUP (the negative pid), not just the direct
-  # child. Erlang starts each spawned port in its own session, so the group leader
-  # is the port child (os_pid) and the group contains every descendant it forked
-  # (e.g. `sh -c "uv run python"` → python) — but never the BEAM, which lives in a
-  # different group. Killing only os_pid orphaned those grandchildren to launchd,
-  # where they ran for days (audit F-05 follow-up). `--` stops the leading
-  # `-<pgid>` from being parsed as an option by `kill`.
-  defp os_signal(pid, signal) when is_integer(pid) and is_binary(signal) do
-    group = "-" <> Integer.to_string(pid)
-
-    case System.cmd("kill", ["-" <> signal, "--", group], stderr_to_stdout: true) do
-      {_out, 0} -> :ok
-      {_out, _code} -> :no_such_process
-    end
-  rescue
-    error -> {:error, error}
   end
 
   defp take_prefix(iodata, max_bytes) do

@@ -103,7 +103,9 @@ defmodule FermixCore.AgentLoop do
     excluded_categories = Keyword.get(opts, :excluded_categories)
     routes = resolve_routes(opts)
     {first_route_key, _first_opts} = hd(routes)
-    context = Keyword.get(opts, :context, %{})
+
+    context =
+      stamp_effective_surface(Keyword.get(opts, :context, %{}), trust, policy, allowed_tools)
 
     {{capabilities, dispatchable}, capability_duration_us} =
       Telemetry.timed_us(fn ->
@@ -153,6 +155,21 @@ defmodule FermixCore.AgentLoop do
       activity_callback: Keyword.get(opts, :activity_callback),
       stream_callback: Keyword.get(opts, :stream_callback)
     }
+  end
+
+  # Single source of truth for the run's effective capability surface (§11.2):
+  # the loop already resolves the surface from `(trust, policy, allowed_tools)`,
+  # so it stamps the *resolved* class list and allowlist into the tool context.
+  # `subagents` reads these to intersect a worker's baseline against the parent
+  # run's ceiling — a confined run (a tool-narrowed job, a skill-confined run)
+  # can never spawn workers that regain the tools it lost. Correct for every run
+  # type, including workers themselves: a worker's own loop re-stamps its
+  # (already-intersected) values. `effective_allowed_tools` is `nil` when the
+  # run is unrestricted.
+  defp stamp_effective_surface(context, trust, policy, allowed_tools) do
+    context
+    |> Map.put(:effective_policy, CapabilityRegistry.resolved_policy_classes(trust, policy))
+    |> Map.put(:effective_allowed_tools, allowed_tools)
   end
 
   # A tool whose backing module exports `dynamic_parameters/1` gets its

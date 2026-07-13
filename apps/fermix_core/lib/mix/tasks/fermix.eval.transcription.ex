@@ -59,7 +59,10 @@ defmodule Mix.Tasks.Fermix.Eval.Transcription do
   end
 
   defp bootstrap_config do
-    case ConfigStore.bootstrap_runtime_config() do
+    # Tree-less task (no daemon supervision tree — see @moduledoc): a `@keyring`
+    # or `source = "command"` secret resolves inline, so thread `supervised:
+    # false`. A supervised run here would raise (no CommandHost.Supervisor).
+    case ConfigStore.bootstrap_runtime_config(supervised: false) do
       :ok -> :ok
       {:error, reason} -> Mix.raise("config bootstrap failed: #{inspect(reason)}")
     end

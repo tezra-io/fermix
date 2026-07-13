@@ -74,8 +74,10 @@ defmodule Fermix.CLI.Upgrade.Cosign do
     run_with_timeout(cosign, args, timeout_ms)
   end
 
+  # `fermix upgrade` runs on the tree-less `cli_dispatch` fall-through — no
+  # `CommandHost.Supervisor` exists, so cosign runs inline (`supervised: false`).
   defp run_with_timeout(cosign, args, timeout_ms) do
-    case CommandRunner.run(cosign, args, timeout_ms: timeout_ms) do
+    case CommandRunner.run(cosign, args, timeout_ms: timeout_ms, supervised: false) do
       {:ok, %{exit: 0}} -> :ok
       {:ok, %{exit: code, stdout: out}} -> {:error, {:cosign_failed, code, String.trim(out)}}
       {:error, {:timeout, ms}} -> {:error, {:cosign_timeout, ms}}

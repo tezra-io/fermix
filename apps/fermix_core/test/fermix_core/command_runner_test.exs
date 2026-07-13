@@ -116,4 +116,89 @@ defmodule FermixCore.CommandRunnerTest do
 
     assert byte_size(out) <= 256
   end
+
+  test "supervised: false completes inline and sweeps a straggler at end of run", %{sh: sh} do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("command-runner-oneshot")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    pidfile = Path.join(dir, "straggler.pid")
+
+    inner = ~s(echo $$ > #{pidfile}; exec 0<&- 1>&- 2>&-; while true; do sleep 1; done)
+    cmd = ["-c", ~s(sh -c '#{inner}' & until [ -s #{pidfile} ]; do sleep 0.02; done; exit 0)]
+
+    # No supervision tree is consulted — the collect runs inline in this process,
+    # and the exit-ending sweep group-SIGKILLs the fd-closed background straggler.
+    assert {:ok, %{exit: 0, truncated?: false}} =
+             CommandRunner.run(sh, cmd, supervised: false, timeout_ms: 30_000)
+
+    straggler = await_pidfile(pidfile)
+    on_exit(fn -> liveness_gated_kill(straggler) end)
+    assert await_death(straggler) == :dead
+  end
+
+  test "supervised: true with an absent supervisor fails loudly before any spawn", %{sh: sh} do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("command-runner-nosup")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    marker = Path.join(dir, "spawned.marker")
+
+    assert_raise RuntimeError, ~r/command host supervisor .* is not running/, fn ->
+      CommandRunner.run(sh, ["-c", "touch #{marker}"],
+        supervised: true,
+        dynamic_supervisor: :fermix_absent_command_host_sup
+      )
+    end
+
+    # The raise must precede any OS process — the marker command never ran.
+    refute File.exists?(marker), "a command spawned despite the missing supervisor"
+  end
+
+  @poll_max 50
+  @poll_ms 100
+
+  defp await_pidfile(path) do
+    Enum.reduce_while(1..@poll_max, nil, fn _attempt, _acc ->
+      case read_pid(path) do
+        {:ok, pid} ->
+          {:halt, pid}
+
+        :error ->
+          Process.sleep(@poll_ms)
+          {:cont, nil}
+      end
+    end) || flunk("pidfile never appeared: #{path}")
+  end
+
+  defp read_pid(path) do
+    with {:ok, content} <- File.read(path),
+         {pid, _rest} <- Integer.parse(String.trim(content)) do
+      {:ok, pid}
+    else
+      _absent_or_empty -> :error
+    end
+  end
+
+  defp alive?(os_pid) do
+    {_out, status} =
+      System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
+
+    status == 0
+  end
+
+  defp await_death(os_pid) do
+    Enum.reduce_while(1..@poll_max, :alive, fn _attempt, _acc ->
+      if alive?(os_pid) do
+        Process.sleep(@poll_ms)
+        {:cont, :alive}
+      else
+        {:halt, :dead}
+      end
+    end)
+  end
+
+  defp liveness_gated_kill(os_pid) do
+    if alive?(os_pid) do
+      System.cmd("kill", ["-9", Integer.to_string(os_pid)], stderr_to_stdout: true)
+    end
+
+    :ok
+  end
 end

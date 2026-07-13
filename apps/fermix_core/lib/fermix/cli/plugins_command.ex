@@ -345,8 +345,11 @@ defmodule Fermix.CLI.PluginsCommand do
   # CLI tests never touch the network or real cosign. Empty (the real
   # pipeline) outside tests.
   defp dist_opts(extra \\ []) do
-    :fermix_core
-    |> Application.get_env(:plugins_dist_opts, [])
+    # Every `fermix plugins` verb runs tree-less (cli_dispatch's fall-through
+    # `System.halt`s without a supervision tree), so the install-time runtime
+    # probe must resolve inline — no CommandHost.Supervisor exists to own it.
+    [probe_opts: [supervised: false]]
+    |> Keyword.merge(Application.get_env(:fermix_core, :plugins_dist_opts, []))
     |> Keyword.merge(extra)
   end
 
@@ -443,7 +446,8 @@ defmodule Fermix.CLI.PluginsCommand do
       name: plugin.name,
       display_name: plugin.display_name,
       enabled: plugin.name in Config.enabled_plugins(),
-      status: Status.status(plugin),
+      # Tree-less CLI verb (see dist_opts): the runtime probe resolves inline.
+      status: Status.status(plugin, probe: [supervised: false]),
       account: Status.account_label(plugin)
     }
   end
@@ -467,7 +471,7 @@ defmodule Fermix.CLI.PluginsCommand do
   end
 
   defp doctor_row(plugin, full?) do
-    case Health.check(plugin.name, full?: full?) do
+    case Health.check(plugin.name, full?: full?, probe: [supervised: false]) do
       {:ok, result} ->
         Map.merge(plugin_row(plugin), %{doctor: :ok, detail: result})
 
