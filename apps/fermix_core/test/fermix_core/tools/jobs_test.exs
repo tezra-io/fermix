@@ -62,7 +62,8 @@ defmodule FermixCore.Tools.JobsTest do
         memory_repo: repo,
         memory_agent_id: "main",
         conversation_key: {"telegram", "chat-1", :root},
-        session_id: "telegram:chat-1:root"
+        session_id: "telegram:chat-1:root",
+        source_trust: :operator
       }
     }
   end
@@ -116,6 +117,26 @@ defmodule FermixCore.Tools.JobsTest do
              MemorySourcesList.execute(%{"source_type" => "scheduled_job"}, context)
 
     assert %{"sources" => [%{"status" => "removed"}]} = Jason.decode!(final_sources.output)
+  end
+
+  test "schedule_job without source_trust in context returns a clear tool error", %{
+    context: context
+  } do
+    trustless = Map.delete(context, :source_trust)
+
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "No Trust",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Should never persist."
+               },
+               trustless
+             )
+
+    assert result.success == false
+    assert result.error =~ "source_trust"
+    assert {:error, :not_found} = Repo.get_scheduled_job("no_trust", server: context.memory_repo)
   end
 
   test "update_job edits an existing job's task and schedule in place", %{context: context} do

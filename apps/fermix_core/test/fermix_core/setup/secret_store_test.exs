@@ -95,6 +95,68 @@ defmodule FermixCore.Setup.SecretStoreTest do
     end
   end
 
+  # Captures the opts each read receives, so tests can pin that the caller's
+  # world (supervised: false for the tree-less boot chain) is threaded through
+  # to the writer — which forwards it to CommandRunner.
+  defmodule OptsRecordingWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @table __MODULE__
+
+    def start do
+      if :ets.whereis(@table) == :undefined do
+        :ets.new(@table, [:named_table, :public, :bag])
+      end
+
+      :ets.delete_all_objects(@table)
+      :ok
+    end
+
+    def recorded_opts, do: @table |> :ets.tab2list() |> Enum.map(fn {_key, opts} -> opts end)
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def get(key, opts \\ []) do
+      :ets.insert(@table, {key, opts})
+      {:ok, "resolved-" <> Atom.to_string(key)}
+    end
+
+    @impl true
+    def put(_key, _value, _opts \\ []), do: raise("resolution must never write")
+
+    @impl true
+    def command_source(key, _opts \\ []) do
+      %{source: :command, command: "recording", args: [Atom.to_string(key)]}
+    end
+  end
+
+  describe "resolve_sentinels/2 supervised threading" do
+    setup do
+      :ok = OptsRecordingWriter.start()
+      Application.put_env(:fermix_core, :secret_writer, OptsRecordingWriter)
+      :ok
+    end
+
+    @sentinel_snapshot %{fermix_channels: [telegram: [bot_token: "@keyring"]]}
+
+    test "the tree-less boot chain threads supervised: false to the read" do
+      SecretStore.resolve_sentinels(@sentinel_snapshot, warn_plaintext: false, supervised: false)
+
+      assert [opts] = OptsRecordingWriter.recorded_opts()
+      assert Keyword.get(opts, :supervised) == false
+      assert Keyword.get(opts, :profile) == "general"
+    end
+
+    test "a daemon caller omits supervised so CommandRunner defaults to the host" do
+      SecretStore.resolve_sentinels(@sentinel_snapshot, warn_plaintext: false)
+
+      assert [opts] = OptsRecordingWriter.recorded_opts()
+      refute Keyword.has_key?(opts, :supervised)
+    end
+  end
+
   describe "resolve_sentinels/2 keyring fan-out" do
     setup do
       :ok = RecordingWriter.start()

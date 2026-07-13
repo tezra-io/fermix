@@ -11,6 +11,8 @@ defmodule FermixNif.MixProject do
       lockfile: "../../mix.lock",
       elixir: "~> 1.17",
       elixirc_options: [warnings_as_errors: true],
+      compilers: [:elixir_make] ++ Mix.compilers(),
+      make_clean: ["clean"],
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -23,6 +25,8 @@ defmodule FermixNif.MixProject do
   end
 
   defp deps do
-    []
+    [
+      {:elixir_make, "~> 0.9", runtime: false}
+    ]
   end
 end

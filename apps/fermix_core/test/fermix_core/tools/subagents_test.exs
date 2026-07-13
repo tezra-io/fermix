@@ -639,6 +639,97 @@ defmodule FermixCore.Tools.SubagentsTest do
     end
   end
 
+  describe "worker confinement intersection (§11.2)" do
+    defp register_surface(ctx) do
+      Enum.each(
+        [
+          stub_cap("reader", :read_only),
+          stub_cap("net", :network),
+          stub_cap("api", :external_api),
+          stub_cap("runner", :exec)
+        ],
+        &CapabilityRegistry.register(ctx.registry, &1)
+      )
+    end
+
+    test "a narrowed parent effective_policy intersects the worker classes", ctx do
+      register_surface(ctx)
+      tasks = [%{"id" => "t1", "task" => "inspect"}]
+
+      # The parent run resolved a [:read_only, :network] surface (e.g. a
+      # capability_policy-narrowed cron job); the worker baseline (operator minus
+      # read_write/gui_control) is intersected DOWN to those classes.
+      _ =
+        Subagents.execute(
+          %{"tasks" => tasks},
+          context(ctx, %{effective_policy: [:read_only, :network]})
+        )
+        |> decode_output()
+
+      [worker_caps | _] = MockAdapter.captured_capabilities()
+      assert "reader" in worker_caps
+      assert "net" in worker_caps
+      refute "api" in worker_caps
+      refute "runner" in worker_caps
+    end
+
+    test "the worker inherits the parent's effective_allowed_tools (allowlist)", ctx do
+      register_surface(ctx)
+      tasks = [%{"id" => "t1", "task" => "inspect"}]
+
+      # A parent confined to allowed_tools ["reader"] (e.g. a job's own tool
+      # ceiling) hands workers exactly that allowlist — net stays out even though
+      # its class is granted.
+      _ =
+        Subagents.execute(
+          %{"tasks" => tasks},
+          context(ctx, %{effective_allowed_tools: ["reader"]})
+        )
+        |> decode_output()
+
+      [worker_caps | _] = MockAdapter.captured_capabilities()
+      assert worker_caps == ["reader"]
+    end
+
+    test "an empty intersection yields a tool-less worker, not an error", ctx do
+      register_surface(ctx)
+      tasks = [%{"id" => "t1", "task" => "inspect"}]
+
+      # The parent granted only a class the worker baseline never carries; the
+      # intersection is empty — the worker still runs and answers from the model.
+      result =
+        Subagents.execute(
+          %{"tasks" => tasks},
+          context(ctx, %{effective_policy: [:read_write]})
+        )
+        |> decode_output()
+
+      assert result["summary"]["completed"] == 1
+      [worker_caps | _] = MockAdapter.captured_capabilities()
+      assert worker_caps == []
+    end
+
+    test "a full-surface parent is an identity intersection (interactive parent guard)", ctx do
+      register_surface(ctx)
+      tasks = [%{"id" => "t1", "task" => "inspect"}]
+
+      # An interactive main-agent parent's effective_policy is the full operator
+      # class list, so intersecting the worker baseline against it changes
+      # nothing — today's worker surface, unchanged.
+      full = CapabilityRegistry.default_policy_classes(:operator)
+
+      _ =
+        Subagents.execute(%{"tasks" => tasks}, context(ctx, %{effective_policy: full}))
+        |> decode_output()
+
+      [worker_caps | _] = MockAdapter.captured_capabilities()
+      assert "reader" in worker_caps
+      assert "net" in worker_caps
+      assert "api" in worker_caps
+      assert "runner" in worker_caps
+    end
+  end
+
   describe "context sanitizing and recursion depth" do
     test "worker drops channel/memory handles, keeps conversation_key, sets subagent_depth",
          ctx do

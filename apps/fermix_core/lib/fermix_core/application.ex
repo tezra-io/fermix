@@ -17,6 +17,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Config, as: CoreConfig
@@ -121,6 +122,10 @@ defmodule FermixCore.Application do
 
     children =
       [
+        # First child (`:rest_for_one`): every process that can run an external
+        # command starts after its owner supervisor exists. `:temporary` hosts
+        # add no restart intensity to the tree.
+        CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Finch, name: FermixCore.Finch, pools: finch_pools()},
         {Trace, trace_opts()},

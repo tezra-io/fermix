@@ -81,6 +81,25 @@ defmodule FermixCore.Sandbox.EnvTest do
     assert {"FERMIX_TEST_SECRET", "from-helper"} in env
   end
 
+  test "build_command/3 threads supervised: false (tree-less fermix sandbox verb)" do
+    config =
+      Config.normalize(
+        env: [
+          allow: ["FERMIX_TEST_SECRET"],
+          sources: %{
+            "FERMIX_TEST_SECRET" => [
+              source: :command,
+              command: "/bin/echo",
+              args: ["from-helper"]
+            ]
+          }
+        ]
+      )
+
+    assert {:ok, env} = Env.build_command(config, ["FERMIX_TEST_SECRET"], supervised: false)
+    assert {"FERMIX_TEST_SECRET", "from-helper"} in env
+  end
+
   test "command env source rejects multi-line helper output" do
     config =
       Config.normalize(

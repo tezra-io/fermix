@@ -518,7 +518,10 @@ defmodule FermixCore.Realtime.SessionServer do
         RuntimeContext.build_profile(:operator, available_skills, capability_registry,
           # `:media` too — image/video generation egresses through a channel
           # `reply_fn`, which a voice session does not have (M15 §411).
-          excluded_categories: [:channel, :media]
+          # `:delegation` too — voice gains honest `:operator` trust, so
+          # `subagents` would become executable, but a multi-minute blocking
+          # fan-out does not fit a live voice session.
+          excluded_categories: [:channel, :media, :delegation]
         )
 
       {:ok,
@@ -776,8 +779,11 @@ defmodule FermixCore.Realtime.SessionServer do
     CapabilityRegistry.list_for(capability_registry,
       trust: :operator,
       # `:media` too — generation egresses through a channel `reply_fn` a voice
-      # session lacks (M15 §411); kept in sync with the profile above.
-      excluded_categories: [:channel, :media]
+      # session lacks (M15 §411). `:delegation` too — `subagents` would be
+      # executable at the session's honest `:operator` trust, but a multi-minute
+      # blocking fan-out does not fit a live voice session. Kept in sync with the
+      # profile above.
+      excluded_categories: [:channel, :media, :delegation]
     )
   end
 
@@ -975,7 +981,12 @@ defmodule FermixCore.Realtime.SessionServer do
       conversation_key: ConversationRecorder.conversation_key(device_id),
       memory_agent_id: MemoryConfig.agent_id(),
       memory_owner_id: MemoryConfig.owner_id(),
-      realtime?: true
+      realtime?: true,
+      # Voice is the operator at the keyboard — the session already builds its
+      # capability surface at `trust: :operator`, so the tool context carries the
+      # same trust rather than a nil that trust-asserting writers (e.g.
+      # `schedule_job`) would reject. Not new privilege; the context stops lying.
+      source_trust: :operator
     }
   end
 

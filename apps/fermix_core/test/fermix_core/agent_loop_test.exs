@@ -418,7 +418,16 @@ defmodule FermixCore.AgentLoopTest do
                run_loop(
                  capability_registry: registry,
                  capabilities: [subagents_cap],
-                 context: %{agent_name: "test", conversation_key: :test, subagent_mode: :ultra}
+                 # subagents only advertises where it can execute (§12), so a
+                 # trust-less context would now drop it before the schema refresh
+                 # is even observable — establish the operator trust the model
+                 # would actually carry.
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   subagent_mode: :ultra,
+                   source_trust: :operator
+                 }
                )
 
       [{_messages, [cap], _opts}] = mock_calls()
@@ -431,7 +440,16 @@ defmodule FermixCore.AgentLoopTest do
       set_mock_responses([turn("done")])
       subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
 
-      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [subagents_cap])
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   source_trust: :operator
+                 }
+               )
 
       [{_messages, [cap], _opts}] = mock_calls()
       assert cap.parameters.properties.tasks.maxItems == 10
@@ -515,6 +533,59 @@ defmodule FermixCore.AgentLoopTest do
 
       [{_messages, [cap], _opts}] = mock_calls()
       assert cap.name == "file_read"
+    end
+
+    test "advertises subagents in a top-level operator context", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   source_trust: :operator
+                 }
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.name == "subagents"
+    end
+
+    test "hides subagents when the context carries no trust", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      # No source_trust ⇒ Subagents.advertise?/1 is false ⇒ a call would fail
+      # the fetch_source_trust guard, so it is dropped from the wire.
+      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [subagents_cap])
+
+      [{_messages, advertised, _opts}] = mock_calls()
+      assert advertised == []
+    end
+
+    test "hides subagents inside a subagent (depth > 0)", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      # A worker carries the parent's trust but subagent_depth > 0 ⇒ the
+      # recursion guard would reject the call, so it never reaches the wire.
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   source_trust: :operator,
+                   subagent_depth: 1
+                 }
+               )
+
+      [{_messages, advertised, _opts}] = mock_calls()
+      assert advertised == []
     end
   end
 

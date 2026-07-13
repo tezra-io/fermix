@@ -161,11 +161,12 @@ defmodule FermixCore.Sandbox.ConfigMutation do
   @spec persist(Config.t() | map() | keyword(), keyword()) :: :ok | {:error, term()}
   def persist(config, opts \\ []) do
     config = Config.normalize(config)
+    supervised = Keyword.take(opts, [:supervised])
 
-    with {:ok, snapshot} <- ConfigStore.load_runtime_config(),
+    with {:ok, snapshot} <- ConfigStore.load_runtime_config(supervised),
          updated = Map.put(snapshot, :sandbox, Config.to_keyword(config)),
-         :ok <- ConfigStore.save_snapshot(updated) do
-      ConfigStore.apply_snapshot(updated)
+         :ok <- ConfigStore.save_snapshot(updated, supervised) do
+      ConfigStore.apply_snapshot(updated, supervised)
 
       with :ok <- maybe_write_grant_record(opts) do
         refresh_command_capabilities(config)
