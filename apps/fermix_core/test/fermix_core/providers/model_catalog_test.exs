@@ -63,12 +63,12 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 400_000
-      # GPT-5.6 (sol/terra/luna) serves the same 372k window on both the Codex
+      # GPT-5.6 (sol/terra/luna) serves the same 272k window on both the Codex
       # and direct-API paths (context_window == max_context_window).
-      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-sol") == 372_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 372_000
-      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-terra") == 372_000
-      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 372_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-sol") == 272_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 272_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-terra") == 272_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 272_000
       # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
       assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5") == 1_000_000
