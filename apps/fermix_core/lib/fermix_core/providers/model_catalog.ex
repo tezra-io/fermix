@@ -31,7 +31,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   # while the OpenAI direct API (api key) serves their full window. Keyed per
   # provider so the window follows the auth path automatically (see models_for/1).
   # The GPT-5.6 generation (sol/terra/luna) is the exception: its Codex
-  # `context_window` and direct-API `max_context_window` are both 372k, so it
+  # `context_window` and direct-API `max_context_window` are both 272k, so it
   # serves the same window on either path (windows sourced from the Codex model
   # catalog, `~/.codex/models_cache.json`). sol = frontier (default), terra =
   # balanced, luna = fast/affordable.
@@ -42,9 +42,9 @@ defmodule FermixCore.Providers.ModelCatalog do
   # self-heals down to the model's ceiling at route resolution (see
   # `clamp_effort/3`), it does not 400 at the provider.
   @openai_codex [
-    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol (default, latest)", context_window: 372_000},
-    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 372_000},
-    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 372_000},
+    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol (default, latest)", context_window: 272_000},
+    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
+    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
     %Entry{
       id: "gpt-5.5",
       label: "GPT-5.5",
@@ -69,10 +69,10 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{
       id: "gpt-5.6-sol",
       label: "GPT-5.6 Sol (default, recommended)",
-      context_window: 372_000
+      context_window: 272_000
     },
-    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 372_000},
-    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 372_000},
+    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
+    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
     %Entry{
       id: "gpt-5.5",
       label: "GPT-5.5",
