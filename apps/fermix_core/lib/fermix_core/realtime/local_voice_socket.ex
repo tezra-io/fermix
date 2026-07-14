@@ -178,7 +178,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       session_starter: state.session_starter,
       session_opts: state.session_opts,
       session_supervisor: state.session_supervisor,
-      buffer: ""
+      buffer: "",
+      hello_received: false
     }
 
     case Task.Supervisor.start_child(state.task_supervisor, fn -> client_loop(handler_state) end) do
@@ -283,9 +284,16 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     end
   end
 
-  defp dispatch_event(%{type: "client_hello"}, state) do
-    :ok = send_event(state.conn, %{type: "state", state: "idle"})
-    {:cont, state}
+  defp dispatch_event(%{type: "client_hello", payload: payload}, state) do
+    handle_client_hello(payload, state)
+  end
+
+  # Every other event is gated behind a completed handshake. Placed after the
+  # `client_hello` clause and before the per-event clauses, this catches any
+  # premature event while `hello_received` is false; once the handshake lands,
+  # it no longer matches and the specific handlers below run.
+  defp dispatch_event(_event, %{hello_received: false} = state) do
+    send_error_and_stop(:handshake_required, state)
   end
 
   defp dispatch_event(%{type: "call_start"}, state) do
@@ -353,6 +361,47 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
     _ = send_event(state.conn, %{type: "state", state: "idle"})
     {:cont, %{state | session: nil}}
+  end
+
+  # A repeat hello is a protocol violation — the handshake is a one-shot
+  # transition. Fail loud rather than silently re-negotiating.
+  defp handle_client_hello(_payload, %{hello_received: true} = state) do
+    send_error_and_stop(:unexpected_client_hello, state)
+  end
+
+  defp handle_client_hello(%{"protocol_version" => version}, state) do
+    case Protocol.negotiate(version) do
+      :ok ->
+        {min, max} = Protocol.supported_version_range()
+        reply = %{type: "server_hello", min_version: min, max_version: max}
+
+        # A failed write must stop the loop so cleanup_client/1 closes the
+        # accepted socket. A hard `:ok =` here would raise past cleanup and
+        # leak the parent-owned fd on a peer that broke mid-handshake.
+        case send_event(state.conn, reply) do
+          :ok -> {:cont, %{state | hello_received: true}}
+          {:error, _reason} -> {:stop, state}
+        end
+
+      {:error, direction} ->
+        send_version_mismatch_and_stop(direction, version, state)
+    end
+  end
+
+  defp send_version_mismatch_and_stop(direction, client_version, state) do
+    {min, max} = Protocol.supported_version_range()
+
+    _ =
+      send_event(state.conn, %{
+        type: "error",
+        reason: "unsupported_protocol_version",
+        direction: Atom.to_string(direction),
+        client_version: client_version,
+        min_version: min,
+        max_version: max
+      })
+
+    {:stop, state}
   end
 
   defp ensure_session(%{session: session} = state) when is_pid(session), do: {:ok, session, state}

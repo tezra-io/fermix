@@ -54,6 +54,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.web_search(full?),
       Checks.image_generation(),
       Checks.transcription(),
+      Checks.realtime(),
       Checks.computer_use_permissions()
     ]
 

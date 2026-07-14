@@ -296,6 +296,52 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "realtime/0" do
+    setup do
+      realtime = Application.get_env(:fermix_core, :realtime, [])
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :realtime, realtime)
+        Application.put_env(:fermix_core, :providers, providers)
+      end)
+
+      Application.put_env(:fermix_core, :providers, [])
+      :ok
+    end
+
+    test "reports :ok when enabled with an OpenAI key present" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      result = Checks.realtime()
+
+      assert result.name == "realtime voice"
+      assert result.status == :ok
+      assert result.detail =~ "key present"
+    end
+
+    test "warns when enabled but the OpenAI key is missing" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+      Application.put_env(:fermix_core, :providers, [])
+
+      result = Checks.realtime()
+
+      assert result.status == :warn
+      assert result.detail =~ "sk-"
+      assert result.detail =~ "Codex"
+    end
+
+    test "reports :ok and disabled when realtime is off" do
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      result = Checks.realtime()
+
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+  end
+
   describe "transcription/0 (M21)" do
     setup do
       transcription = Application.get_env(:fermix_core, :transcription, [])

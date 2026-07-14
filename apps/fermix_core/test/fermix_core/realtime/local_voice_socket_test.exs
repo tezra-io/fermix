@@ -64,19 +64,111 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert Bitwise.band(stat.mode, 0o777) == 0o600
   end
 
-  test "client_hello returns idle state and tracks active clients", %{
+  test "client_hello replies with the supported version range and tracks active clients", %{
     socket: socket,
     socket_path: socket_path
   } do
     {:ok, conn} = connect(socket_path)
 
     wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+
+    assert {:ok, line} = recv_line(conn)
+
+    assert Jason.decode!(String.trim(line)) == %{
+             "type" => "server_hello",
+             "min_version" => 1,
+             "max_version" => 1
+           }
+
+    :gen_tcp.close(conn)
+  end
+
+  test "events before the handshake are rejected and close the client", %{
+    socket_path: socket_path
+  } do
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "error", "reason" => "handshake_required"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "a client_hello whose version the daemon cannot serve is refused", %{
+    socket_path: socket_path
+  } do
+    {:ok, conn} = connect(socket_path)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":99}\n))
+
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{
+             "type" => "error",
+             "reason" => "unsupported_protocol_version",
+             "direction" => "client_too_new",
+             "client_version" => 99,
+             "min_version" => 1,
+             "max_version" => 1
+           } = Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "a client_hello without a protocol_version is refused", %{socket_path: socket_path} do
+    {:ok, conn} = connect(socket_path)
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello"}\n))
 
     assert {:ok, line} = recv_line(conn)
-    assert Jason.decode!(String.trim(line)) == %{"type" => "state", "state" => "idle"}
+
+    assert %{"type" => "error", "reason" => "missing_protocol_version"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "applies the handshake before a pipelined event in the same buffer", %{
+    socket_path: socket_path
+  } do
+    {:ok, conn} = connect(socket_path)
+
+    # The pre-change pet sets connected=true and fires the next event without
+    # waiting to read server_hello, so client_hello and call_start can land in
+    # one recv buffer. The daemon must apply the handshake before dispatching
+    # the buffered call_start — the daemon-first rollout's backward-compat with
+    # the already-shipped pet rests on this.
+    :ok =
+      :gen_tcp.send(
+        conn,
+        ~s({"type":"client_hello","protocol_version":1}\n{"type":"call_start"}\n)
+      )
+
+    # call_start dispatched (not rejected by the hello gate) → session started.
+    assert_receive {:session_started, _session, _opts}, 1_000
+
+    # The first server frame is the handshake reply, not a handshake_required error.
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "server_hello"} = Jason.decode!(String.trim(line))
 
     :gen_tcp.close(conn)
+  end
+
+  test "a repeated client_hello is refused after the handshake completes", %{
+    socket_path: socket_path
+  } do
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "error", "reason" => "unexpected_client_hello"} =
+             Jason.decode!(String.trim(line))
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
   end
 
   test "call_start waits for the session to publish listening state" do
@@ -114,6 +206,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     end)
 
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
     assert_receive {:silent_session_started, _session}, 1_000
@@ -133,6 +226,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
   test "call and audio events dispatch to a session", %{socket_path: socket_path} do
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
     assert_receive {:session_started, session, _opts}, 1_000
@@ -155,6 +249,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     socket_path: socket_path
   } do
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
     assert_receive {:session_started, session, _opts}, 1_000
@@ -183,6 +278,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
   test "accepts a pet-sized audio chunk over the socket", %{socket_path: socket_path} do
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
     assert_receive {:session_started, session, _opts}, 1_000
@@ -206,6 +302,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
   test "audio chunks require an active call", %{socket_path: socket_path} do
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
 
     audio = Base.encode64("before-start")
     :ok = :gen_tcp.send(conn, ~s({"type":"audio_chunk","audio":"#{audio}"}\n))
@@ -219,6 +316,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     socket_path: socket_path
   } do
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
     assert_receive {:session_started, session, _opts}, 1_000
@@ -234,6 +332,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
   test "client disconnect closes the active realtime session", %{socket_path: socket_path} do
     {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
     :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
 
     assert_receive {:session_started, session, _opts}, 1_000
@@ -427,6 +526,18 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
       [:binary, {:active, false}],
       1_000
     )
+  end
+
+  # Completes the mandatory handshake and consumes the daemon's server_hello
+  # reply so the following events dispatch instead of tripping the hello gate.
+  defp handshake(conn) do
+    :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":1}\n))
+    assert {:ok, line} = recv_line(conn)
+
+    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 1} =
+             Jason.decode!(String.trim(line))
+
+    :ok
   end
 
   defp recv_line(conn, timeout \\ 1_000, acc \\ "") do

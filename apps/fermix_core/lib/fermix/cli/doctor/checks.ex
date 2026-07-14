@@ -18,6 +18,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
@@ -392,6 +393,35 @@ defmodule Fermix.CLI.Doctor.Checks do
   a selected-backend-with-no-credential is a warning (the invisible-key-coupling
   the milestone exists to surface), not a hard failure.
   """
+  @spec realtime() :: result()
+  def realtime do
+    config = RealtimeConfig.current()
+
+    if config.enabled? do
+      realtime_key_status(config)
+    else
+      ok("realtime voice", "disabled")
+    end
+  end
+
+  # Realtime uses the plain `openai` provider key, not the Codex provider. A
+  # Codex subscription / OAuth login configures `openai_codex` and does NOT
+  # authorize the Realtime API, so an enabled companion with only Codex auth
+  # fails at call time with no obvious cause. Surface it here.
+  defp realtime_key_status(config) do
+    case FermixCore.Config.provider_api_key(:openai) do
+      {:ok, _key} ->
+        ok("realtime voice", "enabled; OpenAI Realtime key present (model #{config.model})")
+
+      {:error, _reason} ->
+        warn(
+          "realtime voice",
+          "enabled but no OpenAI API key — the Realtime API needs an OpenAI Platform key (sk-...); " <>
+            "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
+        )
+    end
+  end
+
   @spec transcription() :: result()
   def transcription do
     ProviderProbe.transcription_report()
