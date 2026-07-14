@@ -12,6 +12,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
+  alias Fermix.CLI.VersionSkew
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
@@ -59,11 +60,13 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  @spec daemon_socket() :: result()
-  def daemon_socket do
-    case Client.status() do
+  @spec daemon_socket(keyword()) :: result()
+  def daemon_socket(opts \\ []) do
+    client = Keyword.get(opts, :client, &Client.status/0)
+
+    case client.() do
       {:ok, %{"status" => "ok", "version" => version, "uptime_ms" => uptime_ms}} ->
-        ok("daemon socket", "running, version #{version}, up #{format_uptime(uptime_ms)}")
+        daemon_socket_result(version, uptime_ms)
 
       {:ok, other} ->
         warn("daemon socket", "unexpected reply: #{inspect(other)}")
@@ -73,6 +76,18 @@ defmodule Fermix.CLI.Doctor.Checks do
 
       {:error, reason} ->
         fail("daemon socket", inspect(reason))
+    end
+  end
+
+  # A daemon on a different version than this binary is the stale state a
+  # package-manager upgrade leaves behind (brew swaps the binary on disk,
+  # the service keeps running the old release) — warn, don't pass.
+  defp daemon_socket_result(version, uptime_ms) do
+    detail = "running, version #{version}, up #{format_uptime(uptime_ms)}"
+
+    case VersionSkew.note(version) do
+      nil -> ok("daemon socket", detail)
+      note -> warn("daemon socket", "#{detail}; #{note}")
     end
   end
 

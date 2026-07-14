@@ -53,6 +53,8 @@ brew install tezra-io/tap/fermix
 
 > **Installing plugins requires [`cosign`](https://github.com/sigstore/cosign).** Fermix verifies each plugin's signature before activating it and refuses unsigned or tampered artifacts, so the daemon needs `cosign` on its `PATH`. Install it with `brew install cosign` (macOS/Linux).
 
+> **After `brew upgrade fermix`, run `fermix restart`.** The upgrade swaps the binary on disk, but the background daemon keeps running the old version until it is restarted. `fermix status` and `fermix doctor` warn while the running daemon's version differs from the installed binary.
+
 ### Build from source
 
 Requires Elixir ≥ 1.19, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
@@ -226,7 +228,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix version` | Print the release version |
 | `fermix help` | Show usage |
 
-`fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails. After a package-manager upgrade, re-run `fermix setup`: it reconciles the service unit when the new binary would write a different one (e.g. an updated `PATH` or template), so the running daemon picks up the change without a manual `fermix service install`.
+`fermix upgrade` detects package-manager installs (Homebrew, dpkg) and refuses to mutate them — it prints the right `brew upgrade` / `apt upgrade` command and exits non-zero. Unmanaged installs follow `fetch → cosign verify → snapshot → rename → restart → health-check`, with rollback from `~/.fermix/.previous` if the post-swap health check fails. A package-manager upgrade only swaps the binary on disk — the daemon keeps running the old version until you run `fermix restart` (`fermix status` and `fermix doctor` warn while the versions differ). If the service unit drifted across the upgrade (e.g. an updated `PATH` or template), re-run `fermix setup` instead: it rewrites and reloads the unit — which a plain restart never does — without a manual `fermix service install`.
 
 ## Channel command reference
 

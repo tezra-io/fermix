@@ -8,6 +8,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`fermix status` and `fermix doctor` now warn when the running daemon's
+  version differs from the installed binary.** A package-manager upgrade
+  (`brew upgrade fermix`) swaps the binary on disk while the launchd/systemd
+  service keeps running the old release until restarted, and nothing surfaced
+  that skew — right after a brew upgrade, doctor's upgrade check even reported
+  "on the latest version" while the daemon was stale. `fermix status` now
+  appends a warning line and doctor's daemon-socket check degrades to a
+  warning, both naming the two versions and the `fermix restart` fix. The
+  `fermix upgrade` managed-install refusal also tells you to restart after
+  running the package-manager command, and the README, wiki, and Homebrew
+  caveats now document the restart-after-upgrade requirement.
 - **Telegram voice notes are transcribed.** Inbound Telegram voice notes, audio
   files, audio-MIME documents, and round video notes now parse to a transcribable
   audio attachment and are transcribed to text like the other channels — closing

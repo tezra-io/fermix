@@ -399,11 +399,31 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
-  describe "daemon_socket/0" do
+  describe "daemon_socket/1" do
     test "warns when nothing is listening" do
       result = Checks.daemon_socket()
       assert result.name == "daemon socket"
       assert result.status in [:ok, :warn, :fail]
+    end
+
+    test "ok when the daemon version matches this binary" do
+      vsn = to_string(Application.spec(:fermix_core, :vsn))
+      client = fn -> {:ok, %{"status" => "ok", "version" => vsn, "uptime_ms" => 5_000}} end
+
+      result = Checks.daemon_socket(client: client)
+
+      assert result.status == :ok
+      assert result.detail =~ "running, version #{vsn}"
+    end
+
+    test "warns when the daemon runs a different version than this binary" do
+      client = fn -> {:ok, %{"status" => "ok", "version" => "0.0.1", "uptime_ms" => 5_000}} end
+
+      result = Checks.daemon_socket(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "running, version 0.0.1"
+      assert result.detail =~ "`fermix restart`"
     end
   end
 
