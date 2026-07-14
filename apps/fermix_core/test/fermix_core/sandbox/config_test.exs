@@ -43,6 +43,30 @@ defmodule FermixCore.Sandbox.ConfigTest do
     assert Path.type(config.workspace_root) == :absolute
   end
 
+  test "defaults os_home to the operating-system home, distinct from the fermix home" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-config")
+    System.put_env("FERMIX_HOME", home)
+
+    config = Config.default()
+
+    assert config.os_home == System.user_home!()
+    assert config.home == home
+    assert config.os_home != config.home
+  end
+
+  test "normalize accepts an os_home override, expanded like home" do
+    config = Config.normalize(mode: :open, os_home: "~/os-home-x")
+
+    assert config.os_home == Path.join(System.user_home!(), "os-home-x")
+  end
+
+  test "to_keyword omits the runtime-derived os_home" do
+    config = Config.normalize(mode: :open, os_home: "/tmp/os-home-y")
+
+    refute Keyword.has_key?(Config.to_keyword(config), :os_home)
+    refute Keyword.has_key?(Config.to_keyword(config), :home)
+  end
+
   test "normalizes top-level sandbox config from maps and keywords" do
     config =
       Config.normalize(%{

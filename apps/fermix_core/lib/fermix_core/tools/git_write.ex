@@ -128,12 +128,14 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp format_error({:repo_path_denied, {:outside_root, path}}) do
     "Sandbox denied git_write repo path outside roots: #{path}. " <>
-      "To allow this repository path, run: fermix grant path #{path}"
+      "To allow this repository path, run: fermix grant path #{path}, " <>
+      "or call the request_directory_access tool to ask the owner to approve it."
   end
 
   defp format_error({:repo_root_denied, {:outside_root, root}, repo_dir}) do
     "Sandbox denied git_write repo root outside roots: #{root} " <>
-      "(resolved from input #{repo_dir}). To allow this repository, run: fermix grant path #{root}"
+      "(resolved from input #{repo_dir}). To allow this repository, run: fermix grant path #{root}, " <>
+      "or call the request_directory_access tool to ask the owner to approve it."
   end
 
   defp format_error({:repo_path_denied, reason}), do: format_error(reason)
@@ -141,7 +143,8 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp format_error({:outside_root, path}) do
     "Sandbox denied git_write outside roots: #{path}. " <>
-      "To allow this repository, run: fermix grant path #{path}"
+      "To allow this repository, run: fermix grant path #{path}, " <>
+      "or call the request_directory_access tool to ask the owner to approve it."
   end
 
   defp format_error({:protected_path, path}),

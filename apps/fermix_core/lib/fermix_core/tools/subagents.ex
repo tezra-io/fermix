@@ -51,6 +51,9 @@ defmodule FermixCore.Tools.Subagents do
   # (all stripped), so inheriting the key alone grants no parent-state access.
   @stripped_context_keys [
     :reply_fn,
+    # The owner's grant-approval closure never reaches a delegated worker: a
+    # subagent must not be able to widen the sandbox on the owner's behalf.
+    :approval_fn,
     :channel,
     :source_channel,
     :source_trust,

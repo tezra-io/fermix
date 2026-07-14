@@ -4,6 +4,7 @@ defmodule FermixChannels.DispatcherTest do
   import ExUnit.CaptureLog
 
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -165,6 +166,81 @@ defmodule FermixChannels.DispatcherTest do
     end)
 
     :ok
+  end
+
+  test "injects an approval_fn on an operator agent message, bound to the message origin" do
+    message = %Message{
+      id: "ga-1",
+      content: "please read /Users/me/repos/acme/README",
+      sender: "alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      thread_ts: 77,
+      metadata: %{user_id: "test-sender"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert is_function(agent_message.approval_fn, 1)
+
+    assert {:ok, token, :new} =
+             agent_message.approval_fn.(%{
+               path: "/Users/me/repos/acme",
+               reason: "the task needs it",
+               diff: "allowed_roots + /Users/me/repos/acme"
+             })
+
+    assert {:ok, record} = Confirmations.take(token)
+    assert record.channel == "telegram"
+    assert record.chat_id == "123"
+    assert record.thread_ts == 77
+    assert record.user_id == "test-sender"
+    assert record.mutation == {:add_allowed_root, "/Users/me/repos/acme"}
+    # A remote chat origin captures the verbatim request for auto-resume.
+    assert record.resume == %{
+             content: "please read /Users/me/repos/acme/README",
+             reply_target: "123",
+             sender: "alice"
+           }
+  end
+
+  test "attaches no approval_fn on a guest agent message" do
+    previous = Application.get_env(:fermix_channels, :telegram, [])
+
+    Application.put_env(:fermix_channels, :telegram,
+      owner_user_id: "test-sender",
+      allowed_user_ids: ["test-sender", "guest-9"]
+    )
+
+    on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
+
+    message = %Message{
+      id: "ga-2",
+      content: "hi",
+      sender: "bob",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{user_id: "guest-9"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.source_trust == :guest
+    refute Map.has_key?(agent_message, :approval_fn)
   end
 
   test "routes normalized inbound messages into the configured agent with reply runtime" do

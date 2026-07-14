@@ -77,6 +77,30 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     assert Enum.all?(Task.await_many(tasks, 2_000), &(&1 == :ok))
   end
 
+  test "explain annotates effective roots with granted vs mode provenance", %{root: root} do
+    home = Path.dirname(root)
+
+    Application.put_env(
+      :fermix_core,
+      :sandbox,
+      SandboxConfig.normalize(
+        home: home,
+        os_home: home,
+        mode: :strict,
+        workspace_root: Path.join(home, "workspace"),
+        allowed_roots: [root]
+      )
+    )
+
+    assert :ok = dispatch(message("/sandbox explain", user_id: "owner-1"))
+
+    assert_receive {:sandbox_reply, reply}
+    assert reply =~ "mode: strict"
+    assert reply =~ "effective roots:"
+    assert reply =~ "- #{PathPolicy.canonical_path(root)} (granted)"
+    assert reply =~ "- #{PathPolicy.canonical_path(Path.join(home, "workspace"))} (mode)"
+  end
+
   test "usage mentions env and command update forms" do
     assert :ok = dispatch(message("/sandbox nope", user_id: "owner-1"))
 

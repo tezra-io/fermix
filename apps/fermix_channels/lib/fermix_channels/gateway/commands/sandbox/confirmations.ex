@@ -25,6 +25,15 @@ defmodule FermixChannels.Gateway.Commands.Sandbox.Confirmations do
     end
   end
 
+  @doc """
+  Every live `{token, record}` pair. Read-only (never deletes) — used to dedupe
+  an agent-initiated grant request against an already-pending one for the same
+  mutation + origin, so a re-request returns the existing token instead of
+  prompting the owner twice.
+  """
+  @spec list() :: [{String.t(), map()}]
+  def list, do: :ets.tab2list(@table)
+
   @impl true
   def init(_opts) do
     :ets.new(@table, [:named_table, :public, read_concurrency: true])

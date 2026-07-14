@@ -376,6 +376,7 @@ defmodule FermixChannels.Gateway do
         |> to_agent_message()
         |> Map.put(:reply_fn, reply_fn)
         |> Map.put(:source_trust, authorization.trust)
+        |> maybe_put_approval_fn(message, authorization)
         |> maybe_put_typing_fn(typing_fn)
         |> maybe_put_stream_spec(stream_spec)
         |> maybe_put_reaction_spec(reaction_spec)
@@ -465,6 +466,47 @@ defmodule FermixChannels.Gateway do
   rescue
     ArgumentError -> :unknown
   end
+
+  # The grant-approval seam (SANDBOX_ACCESS_APPROVAL_FLOW §6.1): an injected
+  # closure — mirroring reply_fn — so core never depends on the channels layer.
+  # Attached only for an operator turn; the `request_directory_access` tool
+  # additionally gates on it, so a guest/unattended turn has no approval path.
+  # Calling it binds a pending grant to THIS owner conversation's origin and, on a
+  # re-ingestable channel, captures the verbatim request for auto-resume.
+  defp maybe_put_approval_fn(agent_message, %Message{} = message, %{trust: :operator}) do
+    Map.put(agent_message, :approval_fn, build_approval_fn(message))
+  end
+
+  defp maybe_put_approval_fn(agent_message, _message, _authorization), do: agent_message
+
+  defp build_approval_fn(%Message{} = message) do
+    origin = %{
+      channel: message.channel,
+      chat_id: message.chat_id,
+      thread_ts: message.thread_ts,
+      user_id: approval_user_id(message.metadata),
+      resume: resume_intent(message)
+    }
+
+    fn request -> Commands.Sandbox.store_pending_grant(request, origin) end
+  end
+
+  # A one-shot loopback origin (CLI, daemon) cannot be re-ingested — its reply
+  # surface dies with the invocation — so it carries no resume intent (confirm
+  # persists and asks the owner to re-run). A re-ingestable chat channel captures
+  # the verbatim original request so confirm can auto-resume it.
+  defp resume_intent(%Message{channel: channel} = message) when is_binary(channel) do
+    if ChannelRegistry.local?(channel) do
+      nil
+    else
+      %{content: message.content, reply_target: message.reply_target, sender: message.sender}
+    end
+  end
+
+  defp approval_user_id(metadata) when is_map(metadata),
+    do: Map.get(metadata, :user_id) || Map.get(metadata, "user_id")
+
+  defp approval_user_id(_metadata), do: nil
 
   defp maybe_put_typing_fn(message, typing_fn) when is_function(typing_fn, 0) do
     Map.put(message, :typing_fn, typing_fn)

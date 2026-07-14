@@ -49,6 +49,7 @@ defmodule FermixCore.Sandbox.Config do
   @type t :: %__MODULE__{
           mode: :strict | :standard | :open,
           home: String.t(),
+          os_home: String.t(),
           workspace_root: String.t(),
           allowed_roots: [String.t()],
           blocked_roots: [String.t()],
@@ -58,6 +59,7 @@ defmodule FermixCore.Sandbox.Config do
 
   defstruct mode: :standard,
             home: nil,
+            os_home: nil,
             workspace_root: nil,
             allowed_roots: [],
             blocked_roots: [],
@@ -70,6 +72,7 @@ defmodule FermixCore.Sandbox.Config do
 
     %__MODULE__{
       home: home,
+      os_home: System.user_home!(),
       workspace_root: Path.join(home, "workspace")
     }
   end
@@ -91,6 +94,7 @@ defmodule FermixCore.Sandbox.Config do
     %__MODULE__{
       mode: enum_value(value(config, "mode", :mode, defaults.mode), @modes, :mode),
       home: expand_path(value(config, "home", :home, defaults.home)),
+      os_home: expand_path(value(config, "os_home", :os_home, defaults.os_home)),
       workspace_root:
         expand_path(value(config, "workspace_root", :workspace_root, defaults.workspace_root)),
       allowed_roots:

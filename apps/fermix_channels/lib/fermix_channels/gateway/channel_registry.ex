@@ -102,6 +102,15 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     end
   end
 
+  @doc "Adapter module for a channel string; nil for the daemon channel or an unknown one."
+  @spec adapter(String.t()) :: module() | nil
+  def adapter(name) when is_binary(name) do
+    case find(name) do
+      %{adapter: adapter} -> adapter
+      nil -> nil
+    end
+  end
+
   @doc "Whether a channel is a local/operator loopback (cli, daemon)."
   @spec local?(String.t()) :: boolean()
   def local?(name) when is_binary(name) do
