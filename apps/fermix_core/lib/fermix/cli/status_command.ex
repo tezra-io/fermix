@@ -10,6 +10,7 @@ defmodule Fermix.CLI.StatusCommand do
   """
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.VersionSkew
 
   @not_running_exit 3
 
@@ -69,8 +70,12 @@ defmodule Fermix.CLI.StatusCommand do
   defp print_ok(%{"version" => version, "uptime_ms" => uptime_ms} = reply) do
     pid = Map.get(reply, "pid", "?")
     IO.puts("fermix: running (pid #{pid}, version #{version}, up #{format_uptime(uptime_ms)})")
+    print_skew_warning(VersionSkew.note(version))
     0
   end
+
+  defp print_skew_warning(nil), do: :ok
+  defp print_skew_warning(note), do: IO.puts("warning: #{note}")
 
   defp print_unexpected(reply) do
     IO.puts(:stderr, "fermix status: unexpected reply: #{inspect(reply)}")

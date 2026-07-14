@@ -13,20 +13,20 @@ defmodule Fermix.CLI.UpgradeCommand do
 
   @switches [check: :boolean]
 
-  @spec run([String.t()]) :: non_neg_integer()
-  def run(argv) do
+  @spec run([String.t()], module()) :: non_neg_integer()
+  def run(argv, upgrade \\ Upgrade) do
     case OptionParser.parse(argv, strict: @switches) do
-      {opts, _, []} -> dispatch(opts)
+      {opts, _, []} -> dispatch(opts, upgrade)
       {_, _, invalid} -> abort("invalid options: #{inspect(invalid)}")
     end
   end
 
-  defp dispatch(opts) do
-    if Keyword.get(opts, :check, false), do: do_check(), else: do_run()
+  defp dispatch(opts, upgrade) do
+    if Keyword.get(opts, :check, false), do: do_check(upgrade), else: do_run(upgrade)
   end
 
-  defp do_check do
-    case Upgrade.check() do
+  defp do_check(upgrade) do
+    case upgrade.check() do
       {:ok, %{available: false, current: current}} ->
         IO.puts("fermix upgrade: already on the latest version (#{current}).")
         0
@@ -41,14 +41,19 @@ defmodule Fermix.CLI.UpgradeCommand do
     end
   end
 
-  defp do_run do
-    case Upgrade.run() do
+  defp do_run(upgrade) do
+    case upgrade.run() do
       :ok ->
         IO.puts("fermix upgrade: complete.")
         0
 
       {:error, {:managed_install, name, hint}} ->
-        IO.puts(:stderr, "fermix upgrade: managed by #{name}; run: #{hint}")
+        IO.puts(
+          :stderr,
+          "fermix upgrade: managed by #{name}; run: #{hint}, then " <>
+            "`fermix restart` — the daemon keeps running the old version until restarted"
+        )
+
         2
 
       {:error, {:already_latest, version}} ->
