@@ -199,7 +199,10 @@ defmodule FermixCore.Tools.FileRead do
     do: "Path is protected by the sandbox: #{path}"
 
   defp format_sandbox_reason({:outside_root, path}),
-    do: "Path is outside the sandbox roots: #{path}"
+    do:
+      "Path is outside the sandbox roots: #{path}. " <>
+        "To allow this directory, run: fermix grant path #{Path.dirname(path)}, " <>
+        "or call the request_directory_access tool to ask the owner to approve it."
 
   defp format_sandbox_reason({:blocked_root, path}),
     do: "Path is under a blocked root: #{path}"

@@ -19,6 +19,11 @@ defmodule FermixChannels.Gateway.Message do
     :chat_id,
     :reply_target,
     :thread_ts,
+    # Filesystem working directory of the request's origin, set ONLY by the
+    # local CLI bridge (never populated from remote channel user input). A
+    # trusted operator turn threads it into the sandbox's standard-mode roots so
+    # the agent can work where the owner ran the command.
+    :request_cwd,
     thread_scope: :root,
     metadata: %{},
     attachments: [],
@@ -38,6 +43,7 @@ defmodule FermixChannels.Gateway.Message do
           chat_id: String.t(),
           reply_target: String.t(),
           thread_ts: thread_id() | nil,
+          request_cwd: String.t() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [map()],

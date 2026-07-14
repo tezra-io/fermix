@@ -53,7 +53,8 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.Browser,
     FermixCore.Tools.SendAttachment,
     FermixCore.Tools.React,
-    FermixCore.Tools.GenerateImage
+    FermixCore.Tools.GenerateImage,
+    FermixCore.Tools.RequestDirectoryAccess
   ]
 
   def child_spec(opts) do

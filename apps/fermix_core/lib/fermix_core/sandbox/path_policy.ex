@@ -212,11 +212,11 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
   @spec protected_paths(Config.t()) :: [String.t()]
   def protected_paths(config) do
-    home = config.home
+    os_home = config.os_home
     fermix_home = fermix_home()
 
     (@os_roots ++
-       Enum.map(@protected_home_dirs, &Path.join(home, &1)) ++
+       Enum.map(@protected_home_dirs, &Path.join(os_home, &1)) ++
        [
          Path.join(fermix_home, "config.toml"),
          Path.join(fermix_home, "config.toml.pre-m5"),

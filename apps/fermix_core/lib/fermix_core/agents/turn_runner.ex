@@ -236,6 +236,12 @@ defmodule FermixCore.Agents.TurnRunner do
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
+      # Request cwd admits the owner's live working directory into the sandbox's
+      # standard-mode roots (SANDBOX_ACCESS_APPROVAL_FLOW §2/§7). Gated on
+      # operator trust: only a trusted local origin may steer the sandbox cwd, so
+      # an attacker-influenced remote channel can never widen roots. PathPolicy
+      # reads this same `:cwd` key as the relative-path resolution base.
+      cwd: request_cwd_for(source_trust, msg),
       # Attended-origin gate (COMPUTER_USE.md §7.6): only a turn with a live owner
       # surface who can abort may start a host session. Derived from the channel via
       # computer_use_origin/1 so a detached `/background` run fails closed instead of
@@ -243,6 +249,11 @@ defmodule FermixCore.Agents.TurnRunner do
       # `:unattended` default); voice tags `:voice` on its own path.
       computer_use_origin: computer_use_origin(msg),
       reply_fn: deliver,
+      # The grant-approval seam (SANDBOX_ACCESS_APPROVAL_FLOW §6.1): an operator
+      # turn carries the gateway's approval closure so `request_directory_access`
+      # can bind a pending grant to the owner's conversation. Absent (nil) on
+      # unattended/cron/guest turns, where the tool fails closed.
+      approval_fn: Map.get(msg, :approval_fn),
       channel: msg.channel,
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
@@ -286,6 +297,9 @@ defmodule FermixCore.Agents.TurnRunner do
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
   end
+
+  defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
+  defp request_cwd_for(_trust, _msg), do: nil
 
   defp apply_run_profile(:ultra, messages, context) do
     {inject_ultra_addendum(messages), Map.put(context, :subagent_mode, :ultra)}

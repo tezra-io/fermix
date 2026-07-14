@@ -97,6 +97,8 @@ Runtime precedence is:
 2. persisted setup state from `config.toml`
 3. environment variable overrides applied in `config/runtime.exs`
 
+To let the agent work in a project directory beyond its workspace and launch/request cwd, grant it with `fermix grant path PATH` from the CLI (or `/grant path PATH` on a channel); the agent can also ask for a directory in chat, which you approve with `/confirm`.
+
 ### Scheduled job delivery
 
 Scheduled jobs can deliver their final response to an explicit per-job target, or to a cron-specific default channel target stored in `config.toml`:

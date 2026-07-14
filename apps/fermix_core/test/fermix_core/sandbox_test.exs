@@ -5,6 +5,32 @@ defmodule FermixCore.SandboxTest do
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.PathPolicy
 
+  test "standard mode admits the request cwd for an operator context and denies it without" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-request-cwd")
+    request_dir = Path.join(os_home, "repos/project")
+    File.mkdir_p!(request_dir)
+
+    config =
+      Config.normalize(
+        mode: :standard,
+        os_home: os_home,
+        workspace_root: Path.join(os_home, "workspace")
+      )
+
+    # `request_dir` is reachable ONLY via the request cwd: it is not the
+    # workspace and not the launch cwd (File.cwd! is the repo root, outside os_home).
+    operator_context = %{sandbox_config: config, cwd: request_dir}
+    assert {:ok, resolved} = Sandbox.working_dir(request_dir, :shell, operator_context)
+    assert resolved == PathPolicy.canonical_path(request_dir)
+
+    without_cwd = %{sandbox_config: config}
+
+    assert {:error, {:outside_root, _path}} =
+             Sandbox.working_dir(request_dir, :shell, without_cwd)
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
+  end
+
   test "enforce fails closed for unknown request shapes" do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-enforce")
     context = %{sandbox_config: Config.normalize(mode: :strict, workspace_root: root)}
@@ -144,7 +170,7 @@ defmodule FermixCore.SandboxTest do
       agent_name: "test",
       conversation_key: :test,
       cwd: home,
-      sandbox_config: Config.normalize(mode: :open, home: home, workspace_root: home)
+      sandbox_config: Config.normalize(mode: :open, os_home: home, workspace_root: home)
     }
 
     %{

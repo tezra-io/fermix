@@ -202,7 +202,8 @@ defmodule FermixCore.Sandbox.ConfigMutation do
   end
 
   defp reject_unsafe_root(root, config) do
-    protected_roots = ["/", System.user_home!(), ConfigStore.fermix_home(), config.home]
+    protected_roots =
+      ["/", System.user_home!(), config.os_home, ConfigStore.fermix_home(), config.home]
 
     if root in Enum.map(protected_roots, &PathPolicy.canonical_path/1) or
          Enum.any?(PathPolicy.protected_paths(config), &inside_or_equal?(root, &1)) do

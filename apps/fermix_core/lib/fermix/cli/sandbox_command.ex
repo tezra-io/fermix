@@ -54,7 +54,7 @@ defmodule Fermix.CLI.SandboxCommand do
     workspace: #{config.workspace_root}
 
     effective roots:
-    #{format_list(Mode.effective_roots(config))}
+    #{format_roots(Mode.root_provenance(config))}
 
     allowed roots:
     #{format_list(config.allowed_roots)}
@@ -197,6 +197,12 @@ defmodule Fermix.CLI.SandboxCommand do
 
   defp format_list([]), do: "  (none)"
   defp format_list(values), do: Enum.map_join(values, "\n", &"  - #{&1}")
+
+  defp format_roots([]), do: "  (none)"
+
+  defp format_roots(roots),
+    do: Enum.map_join(roots, "\n", fn {root, provenance} -> "  - #{root} (#{provenance})" end)
+
   defp format_inline([]), do: "(none)"
   defp format_inline(values), do: Enum.join(values, ", ")
 

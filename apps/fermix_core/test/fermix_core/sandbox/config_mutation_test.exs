@@ -174,6 +174,24 @@ defmodule FermixCore.Sandbox.ConfigMutationTest do
     FermixTestSupport.SafeRm.rm_rf!(home)
   end
 
+  test "refuses a grant of the OS home wholesale" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mutation-oshome")
+
+    config =
+      Config.normalize(
+        mode: :standard,
+        os_home: os_home,
+        workspace_root: Path.join(os_home, "workspace")
+      )
+
+    canonical = PathPolicy.canonical_path(os_home)
+
+    assert {:error, {:unsafe_root, ^canonical}} =
+             ConfigMutation.add_allowed_root(config, os_home)
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
+  end
+
   test "enables and disables command capabilities with confirmation diff signal" do
     config = Config.normalize(commands: [profile: :bare])
 
