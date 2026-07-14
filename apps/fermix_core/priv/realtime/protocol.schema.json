@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/realtime/protocol.schema.json",
+  "title": "Fermix Realtime voice socket protocol",
+  "description": "Newline-delimited JSON wire contract between the Fermix daemon and the FermixPet companion. Source of truth: FermixCore.Realtime.Protocol. See PROTOCOL.md.",
+  "x-protocol-version": 1,
+  "x-supported-version-range": { "min": 1, "max": 1 },
+  "$defs": {
+    "clientEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "client_hello",
+            "call_start",
+            "audio_chunk",
+            "interrupt",
+            "mute",
+            "call_stop"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "client_hello" } } },
+          "then": { "$ref": "#/$defs/client_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "audio_chunk" } } },
+          "then": { "$ref": "#/$defs/audio_chunk" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "interrupt" } } },
+          "then": { "$ref": "#/$defs/interrupt" }
+        }
+      ]
+    },
+    "serverEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "server_hello",
+            "state",
+            "audio_delta",
+            "transcript_delta",
+            "assistant_text_delta",
+            "tool_event",
+            "usage",
+            "error",
+            "playback_stop"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "server_hello" } } },
+          "then": { "$ref": "#/$defs/server_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
+          "then": { "$ref": "#/$defs/error" }
+        }
+      ]
+    },
+    "client_hello": {
+      "type": "object",
+      "required": ["type", "protocol_version"],
+      "properties": {
+        "type": { "const": "client_hello" },
+        "protocol_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "audio_chunk": {
+      "type": "object",
+      "required": ["type", "audio"],
+      "properties": {
+        "type": { "const": "audio_chunk" },
+        "audio": { "type": "string", "contentEncoding": "base64" }
+      }
+    },
+    "interrupt": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "interrupt" },
+        "audio_end_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "server_hello": {
+      "type": "object",
+      "required": ["type", "min_version", "max_version"],
+      "properties": {
+        "type": { "const": "server_hello" },
+        "min_version": { "type": "integer", "minimum": 1 },
+        "max_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "required": ["type", "reason"],
+      "properties": {
+        "type": { "const": "error" },
+        "reason": { "type": "string" },
+        "direction": { "enum": ["client_too_old", "client_too_new"] },
+        "client_version": { "type": "integer" },
+        "min_version": { "type": "integer" },
+        "max_version": { "type": "integer" }
+      }
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/clientEvent" },
+    { "$ref": "#/$defs/serverEvent" }
+  ]
+}

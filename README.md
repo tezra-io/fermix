@@ -175,15 +175,16 @@ Realtime voice is an optional local mode: **FermixPet**, a native macOS app (mac
 
 Enable it on the **setup page** under the *Realtime* tab (it needs an OpenAI API key), then restart the daemon. Check it with `fermix voice status`.
 
-FermixPet has no prebuilt download yet, so build and install it from source (Xcode or its command-line tools required):
+FermixPet lives in its own repo, [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos), which ships it as a Developer ID-signed, notarized DMG (universal2) with a Homebrew cask. Grab the DMG from that repo's releases, or build from its source:
 
 ```bash
-cd clients/macos/FermixPet
+git clone https://github.com/tezra-io/fermix-macos
+cd fermix-macos/Apps/FermixPet
 ./script/build_and_run.sh install
 open "$HOME/Applications/FermixPet.app"
 ```
 
-Full setup options, the dev workflow, and troubleshooting are in the [FermixPet README](clients/macos/FermixPet/README.md).
+Full setup options, the dev workflow, and troubleshooting are in the [fermix-macos repo](https://github.com/tezra-io/fermix-macos).
 
 ### Channels
 
@@ -285,9 +286,10 @@ fermix/ (umbrella)
 ├── apps/fermix_core/       # Agents, providers, tools, memory, setup, CLI, auth, tracing
 ├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, CLI
 ├── apps/fermix_web/        # Phoenix: setup LiveView, health, webhook ingress
-├── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
-└── clients/macos/FermixPet # Native local Realtime voice companion
+└── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
 ```
+
+The native macOS voice companion (FermixPet) lives in [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos) and talks to the daemon over the local Realtime socket.
 
 One BEAM VM, all `:permanent` under OTP. The data flow is straight-line:
 
@@ -398,10 +400,10 @@ echo "summarize current health" | fermix ask --stdin --json    # stdin + JSON ou
 curl -s http://127.0.0.1:4030/health/ready | jq .              # Phoenix readiness
 ```
 
-For the macOS Realtime companion, point it at the same `FERMIX_HOME`:
+For the macOS Realtime companion (from [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos)), point it at the same `FERMIX_HOME`:
 
 ```bash
-cd clients/macos/FermixPet
+cd fermix-macos/Apps/FermixPet
 FERMIX_HOME=~/.fermix-dev ./script/build_and_run.sh
 ```
 

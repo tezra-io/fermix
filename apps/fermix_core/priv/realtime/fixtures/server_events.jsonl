@@ -1,0 +1,10 @@
+{"type":"server_hello","min_version":1,"max_version":1}
+{"type":"state","state":"listening"}
+{"type":"audio_delta","audio":"AAAA"}
+{"type":"transcript_delta","text":"hello"}
+{"type":"assistant_text_delta","text":"hi"}
+{"type":"tool_event","status":"completed"}
+{"type":"usage","input_tokens":1,"output_tokens":2}
+{"type":"error","reason":"invalid_json"}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":99,"min_version":1,"max_version":1}
+{"type":"playback_stop"}
