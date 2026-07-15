@@ -6,6 +6,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   """
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Channels.Telegram
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Commands.Sandbox, as: SandboxCommand
@@ -146,16 +147,25 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       refute_receive {:resumed, _}, 200
     end
 
-    test "rejects a confirm from a different user (origin mismatch)", %{root: root} do
+    test "rejects a confirm from a command_allowlist guest and keeps the token", %{root: root} do
+      # owner-2 is a command_allowlist guest (module setup). FIX 0: /confirm is
+      # operator-only, so the guest is refused at authorization — before the
+      # pending record is ever peeked — and the owner's token survives intact.
       origin =
         chat_origin("owner-1", resume: %{content: "x", reply_target: "chat-1", sender: "alice"})
 
       {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
 
-      assert :ok = confirm(token, "owner-2", agent_ctx())
-      assert_receive {:sandbox_reply, "Confirmation failed: :origin_mismatch"}
+      assert {:error, :unauthorized} = confirm(token, "owner-2", agent_ctx())
+      assert_receive {:sandbox_reply, "This command requires owner permissions."}
       refute PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
       refute_receive {:resumed, _}, 200
+
+      # The owner can still confirm the untouched token and auto-resume.
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:sandbox_reply, reply}
+      assert reply =~ "resuming your request"
+      assert PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
     end
 
     test "rejects an expired token", %{root: root} do
@@ -175,6 +185,82 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       assert_receive {:sandbox_reply, "Confirmation failed: :expired"}
       refute_receive {:resumed, _}, 200
     end
+  end
+
+  # The inline "Approve" button synthesizes the same inbound message a typed
+  # /confirm would, then funnels through the UNCHANGED confirm path. These tests
+  # drive `Telegram.parse_update/1` on a real callback_query so the button and the
+  # confirm invariants (persist, single-use, owner_only, auto-resume) are proven
+  # against the same seams as the typed path — never ConfigMutation.persist direct.
+  describe "inline Approve button (callback_query) → confirm" do
+    setup do
+      # A callback carries integer Telegram ids; make id 111 the owner so the tap
+      # is authorized. Restored by the module setup's on_exit (previous_telegram).
+      Application.put_env(:fermix_channels, :telegram,
+        owner_user_id: "111",
+        allowed_user_ids: ["111"],
+        command_allowlist: []
+      )
+
+      :ok
+    end
+
+    test "a tap persists the grant, auto-resumes, and the token is single-use", %{root: root} do
+      origin =
+        callback_origin(resume: %{content: "finish it", reply_target: "123", sender: "alice"})
+
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
+
+      {:ok, [tap]} = Telegram.parse_update(callback_update(token, 111))
+      assert tap.content == "/confirm #{token}"
+
+      assert :ok = dispatch(tap, agent_ctx())
+      assert_receive {:sandbox_reply, reply}
+      assert reply =~ "resuming your request"
+      assert PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+
+      assert_receive {:resumed, resumed}, 2_000
+      assert resumed.content == "finish it"
+      assert resumed.metadata.resumed_from_grant == token
+
+      # Single-use: a second tap of the same button finds no pending record.
+      {:ok, [again]} = Telegram.parse_update(callback_update(token, 111))
+      assert :ok = dispatch(again, agent_ctx())
+      assert_receive {:sandbox_reply, "Confirmation failed: :unknown_token"}
+    end
+
+    test "a tap from a non-owner is refused and never persists", %{root: root} do
+      origin = callback_origin(resume: %{content: "x", reply_target: "123", sender: "alice"})
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), origin)
+
+      {:ok, [tap]} = Telegram.parse_update(callback_update(token, 222))
+
+      assert {:error, :unauthorized} = dispatch(tap, agent_ctx())
+      assert_receive {:sandbox_reply, "This command requires owner permissions."}
+      refute PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+      refute_receive {:resumed, _}, 200
+    end
+  end
+
+  defp callback_origin(opts) do
+    %{
+      channel: "telegram",
+      chat_id: "123",
+      thread_ts: nil,
+      user_id: "111",
+      resume: Keyword.fetch!(opts, :resume)
+    }
+  end
+
+  defp callback_update(token, from_id) do
+    %{
+      "callback_query" => %{
+        "id" => "cbq-#{System.unique_integer([:positive])}",
+        "data" => "grant:#{token}",
+        "from" => %{"id" => from_id, "username" => "alice"},
+        "message" => %{"message_id" => 55, "chat" => %{"id" => 123, "type" => "private"}}
+      }
+    }
   end
 
   defp request(root),

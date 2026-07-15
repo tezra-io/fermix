@@ -172,6 +172,12 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
       {:react, _emoji} ->
         {:error, :reaction_unsupported}
+
+      # One-tap approval degrades to the prompt text (which carries `/confirm`).
+      {:approval_prompt, text, _token} ->
+        result = send_text(channel, message.reply_target, text, env)
+        send(parent, {:adapter_e2e_reply, ref, result})
+        result
     end
 
     :ok =

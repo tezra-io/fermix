@@ -204,13 +204,33 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
     end
   end
 
+  # Chat labels that denote a private 1:1 conversation, not a shared/group chat
+  # (Telegram `private`, Slack `im`). Every other label is treated as shared.
+  @dm_chat_types ["private", "im"]
+
+  # Emit the abstract approval prompt: the channel decides how to render the
+  # one-tap approve affordance (Telegram: an inline button carrying the token in
+  # its private callback_data). The token still rides the tuple's third element
+  # for that button; whether the *visible text* also carries the tap-to-copy
+  # `/confirm <token>` line depends on the chat context (see `owner_prompt/6`).
   defp deliver_prompt(context, canonical, reason, diff, token) do
     reply_fn = Map.fetch!(context, :reply_fn)
-    reply_fn.({:text, owner_prompt(canonical, reason, diff, token)})
+    chat_type = Map.get(context, :chat_type)
+    private_button? = Map.get(context, :private_approval_button?, false)
+    prompt = owner_prompt(canonical, reason, diff, token, chat_type, private_button?)
+    reply_fn.({:approval_prompt, prompt, token})
     :ok
   end
 
-  defp owner_prompt(canonical, reason, diff, token) do
+  # Omit the raw `/confirm <token>` from the text ONLY when the delivering channel
+  # carries the token privately via a one-tap button (Telegram) AND the chat is
+  # shared — there the button, not the text, hands the owner the token, so the
+  # text stays clean of it. Everywhere else the token IS the approval affordance
+  # (a private DM, the CLI, or any channel without a button), so it must remain in
+  # the text or the owner could not confirm at all. Replay is independently blocked
+  # (operator-only confirm + same-origin binding), so this is info-disclosure
+  # hardening, not a bypass fix.
+  defp owner_prompt(canonical, reason, diff, token, chat_type, private_button?) do
     """
     I need access to a directory outside the current sandbox roots:
 
@@ -219,9 +239,26 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
 
     #{diff}
 
-    Approve with /confirm #{token} (expires in 60s). Once you confirm, I'll resume automatically.
+    #{approval_line(token, chat_type, private_button?)}
     """
     |> String.trim()
+  end
+
+  defp approval_line(token, chat_type, private_button?) do
+    if omit_token?(chat_type, private_button?) do
+      "Approve with the button below, or privately via `/confirm` in a DM or the CLI " <>
+        "(expires in 60s). Once you confirm, I'll resume automatically."
+    else
+      "Approve with `/confirm #{token}` (expires in 60s). Once you confirm, I'll resume automatically."
+    end
+  end
+
+  defp omit_token?(chat_type, private_button?) do
+    private_button? and shared_chat?(chat_type)
+  end
+
+  defp shared_chat?(chat_type) do
+    is_binary(chat_type) and chat_type not in @dm_chat_types
   end
 
   defp canonicalize(path) do

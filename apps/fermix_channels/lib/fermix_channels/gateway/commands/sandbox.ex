@@ -40,9 +40,25 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   @impl true
   def description, do: "Inspect or update sandbox policy."
 
+  # Directory-grant subcommands demand strict operator role. The
+  # `command_allowlist` (which admits a trusted guest for /new, /compact) must
+  # never reach sandbox mutation: a guest's own /grant binds the pending record
+  # to their origin, so `same_origin?` would otherwise let them self-approve
+  # (SANDBOX_ACCESS_APPROVAL_FLOW). Read-only /sandbox status|explain and the
+  # remaining /sandbox subcommands keep the owner-or-allowlist gate.
+  @operator_subcommands ["grant", "revoke", "confirm"]
+
   @impl true
-  def authorize(message, metadata, context),
-    do: Authorization.owner_only(message, metadata, context)
+  def authorize(message, metadata, context) do
+    if invoked_command(metadata) in @operator_subcommands do
+      Authorization.operator_only(message, metadata, context)
+    else
+      Authorization.owner_only(message, metadata, context)
+    end
+  end
+
+  defp invoked_command(metadata) when is_map(metadata),
+    do: Map.get(metadata, :command_name, "sandbox")
 
   @impl true
   def execute(message, reply_fn, context) do
@@ -307,10 +323,19 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
     token
   end
 
+  # Peek → validate → take: a wrong-origin or expired /confirm must NOT consume
+  # the owner's single-use token (token-burn hardening). The final `take` stays
+  # the single-use authority — if a concurrent valid confirm consumed the token
+  # between our peek and take, `take` returns `:error` and we report it as
+  # already-used, never as success. This preserves exactly-once.
   defp take_pending(token, message) do
-    case Confirmations.take(token) do
-      {:ok, record} -> validate_pending(record, message)
+    with {:ok, record} <- Confirmations.peek(token),
+         {:ok, ^record} <- validate_pending(record, message),
+         {:ok, taken} <- Confirmations.take(token) do
+      {:ok, taken}
+    else
       :error -> {:error, :unknown_token}
+      {:error, reason} -> {:error, reason}
     end
   end
 

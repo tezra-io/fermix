@@ -441,6 +441,190 @@ defmodule FermixChannels.Channels.DiscordTest do
     end
   end
 
+  # -- send_approval/3 (one-tap Approve button) --
+
+  describe "send_approval/3" do
+    defp approval_message(chat_id) do
+      Message.new!(%{
+        id: "message-1",
+        content: "x",
+        sender: "alice",
+        channel: "discord",
+        chat_id: chat_id,
+        reply_target: chat_id
+      })
+    end
+
+    test "attaches an action-row button whose custom_id is the grant-namespaced token" do
+      test_pid = self()
+
+      Req.Test.stub(:discord, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:discord_request, conn.request_path, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "reply-id"}))
+      end)
+
+      assert :ok =
+               Discord.send_approval(
+                 approval_message("dm-channel-1"),
+                 "Approve with `/confirm TOK12345`",
+                 "TOK12345"
+               )
+
+      assert_receive {:discord_request, "/api/v10/channels/dm-channel-1/messages", body}
+      assert body["content"] =~ "Approve"
+      assert body["message_reference"]["message_id"] == "message-1"
+
+      assert body["components"] == [
+               %{
+                 "type" => 1,
+                 "components" => [
+                   %{
+                     "type" => 2,
+                     "style" => 3,
+                     "label" => "Approve",
+                     "custom_id" => "grant:TOK12345"
+                   }
+                 ]
+               }
+             ]
+    end
+
+    test "a plain text send carries no components (no button regression)" do
+      test_pid = self()
+
+      Req.Test.stub(:discord, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:discord_request, conn.request_path, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"id" => "reply-id"}))
+      end)
+
+      assert :ok = Discord.send_message("dm-channel-1", "hello")
+
+      assert_receive {:discord_request, _path, body}
+      refute Map.has_key?(body, "components")
+    end
+  end
+
+  # -- parse_interaction/1 (button-click INTERACTION_CREATE) --
+
+  describe "parse_interaction/1" do
+    test "synthesizes a /confirm message from a guild tap (member.user.id)" do
+      assert {:ok, interaction} =
+               Discord.parse_interaction(interaction_event("grant:TOK12345", guild: true))
+
+      assert interaction.id == "interaction-1"
+      assert interaction.token == "interaction-token-1"
+
+      message = interaction.message
+      assert message.content == "/confirm TOK12345"
+      assert message.channel == "discord"
+      assert message.chat_id == "guild-channel-1"
+      assert message.reply_target == "guild-channel-1"
+      assert message.thread_ts == nil
+      assert message.metadata.user_id == "111"
+    end
+
+    test "reads the tapper id from user.id in a DM interaction" do
+      assert {:ok, interaction} =
+               Discord.parse_interaction(interaction_event("grant:TOK12345", guild: false))
+
+      assert interaction.message.metadata.user_id == "111"
+      assert interaction.message.chat_id == "dm-channel-1"
+    end
+
+    test "ignores a non-grant custom_id" do
+      assert :ignore =
+               Discord.parse_interaction(interaction_event("other:payload", guild: true))
+    end
+
+    test "ignores a non-component interaction (type != 3)" do
+      event = put_in(interaction_event("grant:TOK12345", guild: true), ["d", "type"], 2)
+      assert :ignore = Discord.parse_interaction(event)
+    end
+
+    test "ignores a non-interaction event" do
+      assert :ignore = Discord.parse_interaction(dm_event("hello"))
+    end
+  end
+
+  # -- respond_interaction/4 (interaction callback REST) --
+
+  describe "respond_interaction/4" do
+    test "posts to the interaction callback endpoint using the interaction id + token" do
+      test_pid = self()
+
+      Req.Test.stub(:discord, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        send(
+          test_pid,
+          {:discord_request, conn.request_path, Jason.decode!(body), conn.req_headers}
+        )
+
+        Plug.Conn.send_resp(conn, 204, "")
+      end)
+
+      assert :ok =
+               Discord.respond_interaction(
+                 "interaction-1",
+                 "interaction-token-1",
+                 %{type: 7, data: %{components: []}},
+                 req_options: [plug: {Req.Test, :discord}]
+               )
+
+      assert_receive {:discord_request, path, body, headers}
+      assert path == "/api/v10/interactions/interaction-1/interaction-token-1/callback"
+      # The per-interaction token in the URL authenticates — no bot-token header.
+      refute Enum.any?(headers, fn {k, _v} -> k == "authorization" end)
+      assert body["type"] == 7
+    end
+
+    test "surfaces a non-2xx as an interaction_ack_failed error" do
+      Req.Test.stub(:discord, fn conn ->
+        Plug.Conn.send_resp(conn, 404, Jason.encode!(%{"message" => "Unknown interaction"}))
+      end)
+
+      assert {:error, {:interaction_ack_failed, 404}} =
+               Discord.respond_interaction("interaction-1", "interaction-token-1", %{type: 7},
+                 req_options: [plug: {Req.Test, :discord}]
+               )
+    end
+  end
+
+  defp interaction_event(custom_id, opts) do
+    guild? = Keyword.fetch!(opts, :guild)
+
+    data =
+      %{
+        "id" => "interaction-1",
+        "token" => "interaction-token-1",
+        "type" => 3,
+        "channel_id" => if(guild?, do: "guild-channel-1", else: "dm-channel-1"),
+        "data" => %{"custom_id" => custom_id, "component_type" => 2}
+      }
+      |> put_interaction_actor(guild?)
+
+    %{"t" => "INTERACTION_CREATE", "d" => data}
+  end
+
+  defp put_interaction_actor(data, true) do
+    Map.merge(data, %{
+      "guild_id" => "guild-1",
+      "member" => %{"user" => %{"id" => "111", "username" => "alice"}}
+    })
+  end
+
+  defp put_interaction_actor(data, false) do
+    Map.put(data, "user", %{"id" => "111", "username" => "alice"})
+  end
+
   defp dm_event(content) do
     %{
       "t" => "MESSAGE_CREATE",

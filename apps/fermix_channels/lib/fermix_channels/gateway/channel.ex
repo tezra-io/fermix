@@ -15,7 +15,8 @@ defmodule FermixChannels.Gateway.Channel do
           reply_to: String.t(),
           parse_mode: String.t(),
           message_thread_id: String.t() | integer(),
-          thread_ts: String.t()
+          thread_ts: String.t(),
+          reply_markup: map()
         ]
 
   @type media_part :: Reply.media_part()
@@ -153,6 +154,18 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback reaction_capability() :: reaction_capability()
 
+  @doc """
+  Deliver an owner-approval prompt with a one-tap approve affordance
+  (SANDBOX_ACCESS_APPROVAL_FLOW). `token` is the single-use confirmation token;
+  the channel renders an affordance (Telegram: an inline "Approve" button whose
+  callback data is the token) so a tap funnels back through the normal
+  `/confirm <token>` path. Only channels that support one-tap approval implement
+  it; `Delivery` gates on `function_exported?` and falls back to plain text
+  (which already carries the tap-to-copy `/confirm` command) otherwise.
+  """
+  @callback send_approval(message(), text :: String.t(), token :: String.t()) ::
+              :ok | {:error, term()}
+
   @optional_callbacks [
     start_typing: 1,
     download_attachment: 2,
@@ -164,6 +177,7 @@ defmodule FermixChannels.Gateway.Channel do
     discard_draft: 2,
     album_classify: 1,
     react: 2,
-    reaction_capability: 0
+    reaction_capability: 0,
+    send_approval: 3
   ]
 end

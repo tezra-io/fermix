@@ -54,10 +54,14 @@ defmodule FermixChannels.Gateway.Commands do
       %{command: handler.name(), channel: message.channel}
     )
 
+    # Set the invoked command name before authorization so a handler with
+    # multiple aliases (e.g. sandbox: /sandbox vs /grant //confirm) can gate
+    # each subcommand on its own role requirement.
+    message = put_command_name(message, name)
+
     case handler.authorize(message, message.metadata || %{}, context) do
       :ok ->
         message
-        |> put_command_name(name)
         |> Map.put(:content, Enum.join(args, " "))
         |> handler.execute(reply_fn, context)
 

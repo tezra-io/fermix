@@ -255,6 +255,7 @@ defmodule FermixChannels.Gateway do
     typing_fn = build_typing_fn(channel, reply_message)
     stream_spec = build_stream_spec(channel, reply_message, reply_fn)
     reaction_spec = build_reaction_spec(channel)
+    approval_button? = function_exported?(channel, :send_approval, 3)
 
     context =
       command_context(
@@ -288,7 +289,7 @@ defmodule FermixChannels.Gateway do
           authorization,
           deps.agent,
           deps.agent_server,
-          {reply_fn, typing_fn, stream_spec, reaction_spec}
+          {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
         )
 
       :passthrough ->
@@ -297,7 +298,7 @@ defmodule FermixChannels.Gateway do
           authorization,
           deps.agent,
           deps.agent_server,
-          {reply_fn, typing_fn, stream_spec, reaction_spec}
+          {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
         )
     end
   end
@@ -368,7 +369,7 @@ defmodule FermixChannels.Gateway do
          authorization,
          agent,
          agent_server,
-         {reply_fn, typing_fn, stream_spec, reaction_spec}
+         {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
        ) do
     if agent_alive?(agent_server) do
       agent_message =
@@ -377,6 +378,7 @@ defmodule FermixChannels.Gateway do
         |> Map.put(:reply_fn, reply_fn)
         |> Map.put(:source_trust, authorization.trust)
         |> maybe_put_approval_fn(message, authorization)
+        |> maybe_put_approval_button(authorization, approval_button?)
         |> maybe_put_typing_fn(typing_fn)
         |> maybe_put_stream_spec(stream_spec)
         |> maybe_put_reaction_spec(reaction_spec)
@@ -478,6 +480,20 @@ defmodule FermixChannels.Gateway do
   end
 
   defp maybe_put_approval_fn(agent_message, _message, _authorization), do: agent_message
+
+  # Whether this channel renders a private one-tap approval button that carries the
+  # confirmation token (SANDBOX_ACCESS_APPROVAL_FLOW). Core-facing plain data (like
+  # `reaction_spec`, never the channel module): `request_directory_access` reads it
+  # to decide whether it may drop the tap-to-copy `/confirm <token>` from a
+  # shared-chat prompt. Attached only for an operator turn — the sole turn that can
+  # reach the tool — mirroring `maybe_put_approval_fn`.
+  defp maybe_put_approval_button(agent_message, %{trust: :operator}, approval_button?)
+       when is_boolean(approval_button?) do
+    Map.put(agent_message, :private_approval_button?, approval_button?)
+  end
+
+  defp maybe_put_approval_button(agent_message, _authorization, _approval_button?),
+    do: agent_message
 
   defp build_approval_fn(%Message{} = message) do
     origin = %{

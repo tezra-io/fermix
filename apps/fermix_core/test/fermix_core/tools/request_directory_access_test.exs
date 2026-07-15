@@ -162,9 +162,11 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
                )
 
       assert_received {:approval_called, %{path: ^canonical, reason: "the task spans this repo"}}
-      assert_received {:reply_called, {:text, prompt}}
+      # Abstract approval part: the channel renders the one-tap button; the prompt
+      # text still carries the tap-to-copy `/confirm <token>` fallback + the token.
+      assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
       assert prompt =~ canonical
-      assert prompt =~ "/confirm TOKEN123"
+      assert prompt =~ "`/confirm TOKEN123`"
       assert prompt =~ "the task spans this repo"
       assert output =~ "TOKEN123"
     end
@@ -187,6 +189,66 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
       refute_received {:reply_called, _}
       assert output =~ "already pending"
       assert output =~ "DUP45678"
+    end
+  end
+
+  # FIX 2: the raw `/confirm <token>` in the prompt TEXT is visible to every
+  # member of a shared/group chat. The tap-to-copy line is omitted ONLY when the
+  # channel delivers a private one-tap button that carries the token instead
+  # (`private_approval_button?` — Telegram today). Without that button the token
+  # stays in the text, because it is the sole approval affordance: omitting it
+  # would leave a shared-channel owner unable to confirm at all. A private DM
+  # (any channel) always keeps the token.
+  describe "token disclosure in shared vs private chats" do
+    test "omits the tap-to-copy token in a group when the channel has a private button",
+         %{grant_dir: grant_dir} do
+      context = attended_context(%{chat_type: "group", private_approval_button?: true})
+
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "spans repo"}, context)
+
+      assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
+      # The token itself must not appear in the group-visible text (the button
+      # carries it privately). A bare `/confirm` mention as guidance is fine.
+      refute prompt =~ "TOKEN123"
+      refute prompt =~ "/confirm TOKEN123"
+      assert prompt =~ "button below"
+    end
+
+    test "keeps the token in a shared chat when the channel has NO private button",
+         %{grant_dir: grant_dir} do
+      # Discord guild / Slack channel: no one-tap button, so the token is the
+      # only way the owner can confirm — it must stay in the text.
+      context = attended_context(%{chat_type: "guild", private_approval_button?: false})
+
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "spans repo"}, context)
+
+      assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
+      assert prompt =~ "`/confirm TOKEN123`"
+    end
+
+    test "treats a DM chat label (im) as private and keeps the token even with a button",
+         %{grant_dir: grant_dir} do
+      # A Slack-style DM label ("im") is a genuine private chat, not a group:
+      # the token stays regardless of button capability.
+      context = attended_context(%{chat_type: "im", private_approval_button?: true})
+
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "spans repo"}, context)
+
+      assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
+      assert prompt =~ "`/confirm TOKEN123`"
+    end
+
+    test "keeps the tap-to-copy token in a private DM/CLI prompt", %{grant_dir: grant_dir} do
+      context = attended_context(%{chat_type: "private"})
+
+      assert {:ok, %{success: true}} =
+               Tool.execute(%{"path" => grant_dir, "reason" => "spans repo"}, context)
+
+      assert_received {:reply_called, {:approval_prompt, prompt, "TOKEN123"}}
+      assert prompt =~ "`/confirm TOKEN123`"
     end
   end
 
@@ -263,8 +325,8 @@ defmodule FermixCore.Tools.RequestDirectoryAccessTest do
 
       # The owner received the prompt via reply_fn...
       assert_received {:approval_called, _}
-      assert_received {:reply_called, {:text, prompt}}
-      assert prompt =~ "/confirm LOOPTOK1"
+      assert_received {:reply_called, {:approval_prompt, prompt, "LOOPTOK1"}}
+      assert prompt =~ "`/confirm LOOPTOK1`"
 
       # ...and the loop CONTINUED past the tool (finding #1/#2): the model's
       # follow-up text is the reply, so the turn never ends with an empty
