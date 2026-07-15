@@ -1213,10 +1213,16 @@ defmodule FermixCore.Jobs.Runner do
       |> Keyword.get(:default_timeout_ms, @default_timeout_ms)
   end
 
+  # Precedence: caller opt > job column > nil (the wall-clock caller adds the
+  # daemon default on top). Keyed on the VALUE, not the key's presence: every
+  # caller builds this opt list positionally (`timeout_ms: state.timeout_ms`),
+  # so an unset timeout arrives as a present key with a nil value. Testing
+  # presence made that nil read as "explicitly configured", shadowing the job's
+  # own timeout_seconds/inactivity_timeout_seconds.
   defp configured_timeout_ms(opts, job, direct_key, seconds_key) do
     cond do
-      Keyword.has_key?(opts, direct_key) ->
-        Keyword.get(opts, direct_key)
+      is_integer(Keyword.get(opts, direct_key)) ->
+        Keyword.fetch!(opts, direct_key)
 
       is_integer(Map.get(job, seconds_key)) ->
         Map.fetch!(job, seconds_key) * 1_000
