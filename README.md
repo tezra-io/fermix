@@ -21,7 +21,7 @@ Fermix is a personal, self-hosted AI agent: it runs as a background service on y
 
 - **One runtime.** Everything is a single Elixir/OTP application in one BEAM VM — no HTTP bridges, no external worker pool, no message broker. Persistent agents, concurrent conversations, and in-process sub-agents all fall out of that design.
 - **Reaches you anywhere.** Telegram, WhatsApp, Slack, Discord, Signal, and a local CLI all terminate in the same agent loop.
-- **Bring your own model.** Seven providers — OpenAI, OpenAI Codex, Anthropic, xAI, OpenRouter, Mistral, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
+- **Bring your own model.** Seven providers — OpenAI, OpenAI Codex, Anthropic, SpaceXAI, OpenRouter, Mistral, and a keyless local Ollama — chosen as one primary with an automatic fallback chain. Sub-agents and scheduled jobs can be pinned to their own cheaper model.
 - **Always on.** Scheduled jobs run digests, watchers, reminders, and checks — each isolated, bounded, stored durably, and delivered back through your channels. Work survives reboots.
 - **Self-contained.** Ships as one self-extracting binary per platform and installs an OS service unit on first run.
 
@@ -57,7 +57,7 @@ brew install tezra-io/tap/fermix
 
 ### Build from source
 
-Requires Elixir ≥ 1.19, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
+Requires Elixir ≥ 1.17, Erlang/OTP 28, and [Zig](https://ziglang.org) 0.15.2 — Burrito uses it to package the self-contained binary.
 
 ```bash
 git clone https://github.com/tezra-io/fermix.git
@@ -114,6 +114,21 @@ chat_id = "8217352118"
 
 `chat_id` is the external channel conversation id, such as a Telegram chat id; it is not a Fermix session id. Delivery settings are resolved into each job when the job is created, so changing the default later does not silently retarget existing jobs. Jobs can also set an optional `expires_at` ISO8601 timestamp; when it is reached, Fermix marks the job expired through scheduler state.
 
+### Transcription
+
+Inbound voice notes are transcribed before they reach the agent, through a pluggable speech-to-text backend:
+
+```toml
+[fermix_core.transcription]
+backend = "openai"
+model = "gpt-4o-mini-transcribe"
+max_file_mb = 20
+```
+
+`backend` is `openai`, `xai`, or `deepgram`. `model` defaults to `gpt-4o-mini-transcribe`; Deepgram uses `nova-3`, and SpaceXAI's native STT is modelless, so it takes no model. Each backend reads its own optional key slot — `openai_api_key`, `xai_api_key`, `deepgram_api_key` — and OpenAI and SpaceXAI fall through to the matching chat-provider key when the slot is unset. Deepgram always requires its own key, and SpaceXAI STT requires an API key even when the `xai` chat provider is on OAuth. `max_file_mb` (default 20) bounds the audio Fermix will accept.
+
+Set it from the web setup **Transcription** card, or with `fermix setup --transcription-backend/--transcription-model/--transcription-api-key`. `fermix doctor` reports a `transcription` row.
+
 ### Environment variables
 
 > **The credential variables are optional.** Running `fermix setup` (CLI wizard or web setup) collects your provider API keys and channel tokens and stores the secrets in your OS keychain, so a configured install needs **none** of the API-key/token variables below. Set them only for headless or container deployments that inject secrets through the environment — the **Required** column assumes that env-only style of configuration. (The `FERMIX_*` runtime/Realtime rows are environment-only operational knobs, unrelated to secret storage.)
@@ -121,6 +136,14 @@ chat_id = "8217352118"
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `OPENAI_API_KEY` | Yes when provider is `openai` | OpenAI API key |
+| `ANTHROPIC_API_KEY` | Yes when provider is `anthropic` on api-key auth | Anthropic API key |
+| `XAI_API_KEY` | Yes when provider is `xai` on api-key auth | SpaceXAI API key |
+| `OPENROUTER_API_KEY` | Yes when provider is `openrouter` | OpenRouter API key |
+| `MISTRAL_API_KEY` | Yes when provider is `mistral` | Mistral API key |
+| `FERMIX_ANTHROPIC_AUTH_MODE` | No | Override the Anthropic auth mode |
+| `FERMIX_XAI_AUTH_MODE` | No | Override the SpaceXAI auth mode |
+| `XAI_BASE_URL` | No | Override the SpaceXAI base URL |
+| `OLLAMA_BASE_URL` | No | Override the local Ollama base URL |
 | `WHATSAPP_ACCESS_TOKEN` | If WhatsApp is enabled | WhatsApp Cloud API access token |
 | `WHATSAPP_PHONE_NUMBER_ID` | If WhatsApp is enabled | WhatsApp phone number ID |
 | `WHATSAPP_VERIFY_TOKEN` | If WhatsApp is enabled | WhatsApp webhook verification token |
@@ -142,11 +165,11 @@ chat_id = "8217352118"
 | `FERMIX_REALTIME_MAX_SESSION_MINUTES` | No | Per-session voice duration cap |
 | `FERMIX_REALTIME_MAX_COST_CENTS` | No | Per-session estimated/reported cost cap |
 | `FERMIX_REALTIME_MAX_ESTIMATED_COST_CENTS_PER_SESSION` | No | Long-form alias for `FERMIX_REALTIME_MAX_COST_CENTS` |
-| `FERMIX_REALTIME_TOOL_POLICY` | No | Voice tool scope, `read_only` or `broad` |
-| `FERMIX_REALTIME_ALLOW_NETWORK_TOOLS` | No | Allow Realtime tool calls that use network access |
 | `FERMIX_REALTIME_PERSIST_TRANSCRIPTS` | No | Persist final voice transcripts as local memory text |
 
 In dev/test these default to empty strings.
+
+For providers, only credentials — API keys, auth modes, and base URLs — are read from the environment. Provider selection, model, and reasoning effort are config-only and never overlaid from an environment variable.
 
 ## Use
 
@@ -175,6 +198,8 @@ Realtime voice is an optional local mode: **FermixPet**, a native macOS app (mac
 
 Enable it on the **setup page** under the *Realtime* tab (it needs an OpenAI API key), then restart the daemon. Check it with `fermix voice status`.
 
+Realtime uses the same capability surface as the main agent, so voice tool scope is governed by the sandbox mode and command profile rather than a voice-specific knob.
+
 FermixPet lives in its own repo, [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos), which ships it as a Developer ID-signed, notarized DMG (universal2) with a Homebrew cask. Grab the DMG from that repo's releases, or build from its source:
 
 ```bash
@@ -190,7 +215,7 @@ Full setup options, the dev workflow, and troubleshooting are in the [fermix-mac
 
 All channels normalize inbound messages and dispatch them through the same `FermixCore.Agents.MainAgent`.
 
-- **Telegram** — long-poll ingress, Bot API replies.
+- **Telegram** — long-poll ingress, Bot API replies. Voice notes, audio files, audio-MIME documents, and round video notes are transcribed before reaching the agent.
 - **WhatsApp** — Cloud API webhook ingress, text replies. Voice notes are transcribed before reaching the agent.
 - **Slack** — Events API DM and `app_mention` ingress, Web API replies.
 - **Discord** — Gateway DM and app-mention ingress, REST replies.
@@ -216,6 +241,7 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | Command | Description |
 |---------|-------------|
 | `fermix setup [--reconfigure]` | Install + start the service and open the browser setup (or a terminal wizard with `--cli`) |
+| `fermix auth login [--provider PROVIDER]` | Complete or refresh a provider OAuth login |
 | `fermix run` | Start the daemon in the foreground (used by service units) |
 | `fermix service install [--user\|--system]` | Write and enable the OS service unit |
 | `fermix service uninstall [--user\|--system]` | Remove the OS service unit |
@@ -223,8 +249,17 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix stop [--user\|--system]` | Stop the installed OS service |
 | `fermix restart [--user\|--system]` | Restart the installed OS service |
 | `fermix status` | Print running daemon status via the control socket (exit `3` if not running) |
+| `fermix health` | Print structured daemon readiness and runtime health |
 | `fermix voice status [--json]` | Show local Realtime voice companion status |
 | `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
+| `fermix sandbox explain` | Show the effective sandbox roots, each annotated `(granted)` or `(mode)` |
+| `fermix grant path PATH` | Persist a sandbox root the agent may work in |
+| `fermix revoke path PATH` | Remove a persisted sandbox root |
+| `fermix agents` | Print main-agent and skill-worker status |
+| `fermix capabilities` | Print registered runtime capabilities |
+| `fermix skills` | List, view, and reload installed skills |
+| `fermix plugins` | Manage local Fermix plugins |
+| `fermix memory` | Review and restore durable memory rows |
 | `fermix logs [-f] [-n LINES]` | Show or follow the daemon log file |
 | `fermix upgrade [--check]` | Self-update from signed releases (cosign-verified, atomic swap) |
 | `fermix doctor [--full]` | Post-install diagnostics; `--full` adds network checks |
@@ -244,11 +279,12 @@ Plain-text commands work in every channel through the shared dispatcher, and loc
 | `/clear` | Alias for `/new` |
 | `/help` | List available commands |
 | `/whoami` | Show the stable channel user id used for command authorization |
-| `/background` | Run the current request as a durable background job (`/tasks` to check, `/stop` to cancel) |
+| `/background` | Run the current request as a durable background job (`/tasks` to check, `/stop` to cancel); alias `/bg` |
 | `/tasks` | List in-flight background tasks for this channel |
 | `/stop` | Cancel a running background task |
 | `/ultra` | Run the next turn in exhaustive multi-agent (ultra) mode |
-| `/sandbox` | Inspect and adjust the workspace sandbox (env allow/deny/set, command presets, path grants) |
+| `/sandbox` | Inspect and adjust the workspace sandbox (env allow/deny/set, command presets, path grants); aliased as `/grant path PATH`, `/revoke path PATH`, and `/confirm TOKEN` |
+| `/soul` | Review, apply, revert, or reset the agent's persona (`SOUL.md`); owner-only, and mutations are confirmed with a token |
 
 Outside the local CLI, mutating commands require a per-channel owner. For a
 single-user channel, `owner_user_id` is enough; it also becomes the default
@@ -286,7 +322,7 @@ fermix/ (umbrella)
 ├── apps/fermix_core/       # Agents, providers, tools, memory, setup, CLI, auth, tracing
 ├── apps/fermix_channels/   # Telegram, WhatsApp, Slack, Discord, Signal, CLI
 ├── apps/fermix_web/        # Phoenix: setup LiveView, health, webhook ingress
-└── apps/fermix_nif/        # Stub for future Rustler NIFs (no NIFs implemented yet)
+└── apps/fermix_nif/        # C NIF (elixir_make): kill_pgid process-group signal shim
 ```
 
 The native macOS voice companion (FermixPet) lives in [tezra-io/fermix-macos](https://github.com/tezra-io/fermix-macos) and talks to the daemon over the local Realtime socket.
@@ -315,12 +351,13 @@ The current built-in capability set is:
 | `git_read` | Inspect git status, logs, branches, diffs, and objects |
 | `git_write` | Stage, commit, checkout, or pull changes; push is deferred to M10 approval |
 | `web_fetch` | Fetch a public URL and return markdown-light text |
-| `web_search` | Search the public web through the keyless DuckDuckGo HTML backend |
+| `web_search` | Search the public web through the configured backend (Brave, Exa, Firecrawl, Parallel, Perplexity, Tavily, or the keyless DuckDuckGo default); a configured backend that is unavailable degrades once to DuckDuckGo |
 | `subagents` | Run one or more temporary subagents for delegated work, concurrently up to a cap |
 | `skill_create` | Scaffold a local skill with starter eval cases |
 | `skill_list` | List installed skills available to run via `skill_run` |
 | `skill_run` | Run an installed skill by name |
 | `skill_view` | Show an installed skill's instructions and metadata |
+| `skill_reload` | Re-scan the skills directories |
 | `model_routing_config` | Read or update local model-routing config |
 | `tool_help` | Return full docs for one registered capability |
 | `memory_store` | Store key-value facts |
@@ -333,7 +370,15 @@ The current built-in capability set is:
 | `pause_job` | Pause a scheduled job |
 | `resume_job` | Resume a paused scheduled job |
 | `remove_job` | Remove a scheduled job |
+| `run_job_now` | Trigger a scheduled job immediately |
+| `list_job_runs` | List a scheduled job's run history |
+| `get_job_run` | Show one scheduled-job run in detail |
 | `send_attachment` | Send a file attachment back through the active channel |
+| `react` | Acknowledge a message with a channel emoji reaction instead of a text reply |
+| `generate_image` | Generate an image through the configured media backend |
+| `request_directory_access` | Ask the owner to grant a directory, approved with `/confirm` |
+
+`computer_use` is seeded only when Computer Use is enabled and its sidecar and OS permissions are ready.
 
 Observability:
 
