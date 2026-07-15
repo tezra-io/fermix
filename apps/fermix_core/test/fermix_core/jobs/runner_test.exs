@@ -585,6 +585,96 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert timed_out_run.error =~ "wall-clock timeout after 20ms"
   end
 
+  test "job timeout_seconds is honored when the caller passes timeout_ms: nil", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Job Wall Clock",
+               schedule: "every 15 minutes",
+               task_prompt: "This adapter hangs past the job's own wall-clock timeout.",
+               timeout_seconds: 1
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      timeout_ms: nil,
+      adapter_opts: [sleep_ms: 5_000],
+      script: [%{content: "too late"}],
+      exit_timeout_ms: 3_000
+    )
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "wall-clock timeout after 1000ms"
+  end
+
+  test "job inactivity_timeout_seconds is honored when the caller passes inactivity_timeout_ms: nil",
+       %{
+         repo: repo,
+         capability_registry: capability_registry,
+         output_base_dir: output_base_dir
+       } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Job Inactivity",
+               schedule: "every 15 minutes",
+               task_prompt: "This adapter goes silent past the job's inactivity timeout.",
+               inactivity_timeout_seconds: 1
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      inactivity_timeout_ms: nil,
+      adapter_opts: [sleep_ms: 5_000],
+      script: [%{content: "too late"}],
+      exit_timeout_ms: 3_000
+    )
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "inactivity timeout after 1000ms"
+  end
+
+  test "an explicit caller timeout_ms still overrides the job's timeout_seconds", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Caller Override",
+               schedule: "every 15 minutes",
+               task_prompt: "The caller's explicit timeout wins over the job column.",
+               timeout_seconds: 3_600
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      timeout_ms: 20,
+      adapter_opts: [sleep_ms: 200],
+      script: [%{content: "too late"}]
+    )
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "wall-clock timeout after 20ms"
+  end
+
   test "guest-trust scheduled runs are narrowed to read-only capabilities", %{
     repo: repo,
     capability_registry: capability_registry,
@@ -978,6 +1068,10 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert delivered_run.delivery_error == nil
   end
 
+  # The `Keyword.get(opts, :timeout_ms)` shape below is load-bearing: it mirrors
+  # Jobs.Scheduler, which always passes these keys and lets the value be nil when
+  # unset. Do not "clean it up" into conditional puts — that would stop exercising
+  # the caller shape that shadowed per-job timeouts.
   defp assert_runner_exits_normally(job, run, opts) do
     parent = self()
     script = Keyword.fetch!(opts, :script)
@@ -1003,7 +1097,9 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal},
+                   Keyword.get(opts, :exit_timeout_ms, 1_000)
   end
 
   defp create_claimed_job(repo, attrs) do
