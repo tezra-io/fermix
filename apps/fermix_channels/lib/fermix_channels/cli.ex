@@ -91,6 +91,12 @@ defmodule FermixChannels.CLI do
                  send(parent, {ref, {:reply, text}})
                  :ok
 
+               # The one-tap button is Telegram-only; the CLI gets the prompt text,
+               # which carries the tap-to-copy `/confirm <token>` command.
+               {:approval_prompt, text, _token} ->
+                 send(parent, {ref, {:reply, text}})
+                 :ok
+
                {:media, _media_part} ->
                  {:error, :media_unsupported}
 

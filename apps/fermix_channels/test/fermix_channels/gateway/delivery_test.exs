@@ -24,6 +24,30 @@ defmodule FermixChannels.Gateway.DeliveryTest do
     def build_media_reply(_message), do: fn _media -> :ok end
   end
 
+  # A channel that renders a one-tap approve affordance: records the
+  # (message, text, token) it was asked to deliver an approval for.
+  defmodule ApprovingChannel do
+    def build_text_reply(_message), do: fn _text -> :ok end
+    def build_media_reply(_message), do: fn _media -> :ok end
+
+    def send_approval(%Message{id: id}, text, token) do
+      send(self(), {:approval_sent, id, text, token})
+      :ok
+    end
+  end
+
+  # A channel without send_approval/3: the approval prompt must degrade to the
+  # plain text closure (the prompt text still carries the `/confirm` command).
+  defmodule TextOnlyChannel do
+    def build_text_reply(_message),
+      do: fn text ->
+        send(self(), {:text_sent, text})
+        :ok
+      end
+
+    def build_media_reply(_message), do: fn _media -> :ok end
+  end
+
   defp message do
     Message.new!(%{
       id: "42",
@@ -68,6 +92,28 @@ defmodule FermixChannels.Gateway.DeliveryTest do
       after
         :telemetry.detach(handler_id)
       end
+    end
+  end
+
+  describe "build_deliver/1 — {:approval_prompt, text, token}" do
+    test "routes to the channel's send_approval/3 with the prompt text and token" do
+      deliver = Delivery.build_deliver(ReplyContext.new(ApprovingChannel, message()))
+
+      assert :ok = deliver.({:approval_prompt, "Approve with /confirm AB12CD34", "AB12CD34"})
+      assert_received {:approval_sent, "42", "Approve with /confirm AB12CD34", "AB12CD34"}
+    end
+
+    test "falls back to the text closure when the channel has no send_approval/3" do
+      deliver = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
+
+      assert :ok = deliver.({:approval_prompt, "Approve with /confirm AB12CD34", "AB12CD34"})
+      assert_received {:text_sent, "Approve with /confirm AB12CD34"}
+    end
+
+    test "is not rejected as an invalid reply part" do
+      deliver = Delivery.build_deliver(ReplyContext.new(TextOnlyChannel, message()))
+
+      refute match?({:error, {:invalid_reply_part, _}}, deliver.({:approval_prompt, "x", "TOK"}))
     end
   end
 end

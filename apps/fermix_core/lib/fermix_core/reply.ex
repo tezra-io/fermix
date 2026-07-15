@@ -15,7 +15,18 @@ defmodule FermixCore.Reply do
           optional(:mime_type) => String.t()
         }
 
-  @type outbound :: {:text, String.t()} | {:media, media_part()} | {:react, String.t()}
+  @typedoc """
+  An abstract owner-approval prompt (SANDBOX_ACCESS_APPROVAL_FLOW): the prompt
+  text plus the confirmation `token`. A channel that renders one-tap approval
+  attaches it (Telegram: an inline "Approve" button whose callback carries the
+  token); every other channel delivers the text alone — the text already carries
+  the tap-to-copy `/confirm <token>` command, so no button is a full fallback,
+  not a degraded state.
+  """
+  @type approval_prompt :: {:approval_prompt, text :: String.t(), token :: String.t()}
+
+  @type outbound ::
+          {:text, String.t()} | {:media, media_part()} | {:react, String.t()} | approval_prompt()
   @type reply_fn :: (outbound() -> :ok | {:error, term()})
 
   @doc """

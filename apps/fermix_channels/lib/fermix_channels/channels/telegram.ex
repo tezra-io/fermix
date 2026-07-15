@@ -11,6 +11,7 @@ defmodule FermixChannels.Channels.Telegram do
 
   require Logger
 
+  alias FermixChannels.Gateway.ApprovalButton
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
@@ -85,9 +86,48 @@ defmodule FermixChannels.Channels.Telegram do
       Map.has_key?(update, "edited_message") ->
         parse_message(update["edited_message"])
 
+      Map.has_key?(update, "callback_query") ->
+        parse_callback_query(update["callback_query"])
+
       true ->
         {:ok, []}
     end
+  end
+
+  # An inline-button tap (SANDBOX_ACCESS_APPROVAL_FLOW) synthesizes the exact
+  # inbound message a typed `/confirm <token>` would produce, so the tap funnels
+  # through the unchanged Gateway.ingest -> Commands.parse -> Sandbox.confirm path
+  # (single-use take, owner-only + same-origin validation, auto-resume). The
+  # payload is namespaced `grant:<token>`; a payload without that prefix is not a
+  # confirmation tap and is ignored. The origin fields are taken from the
+  # callback: `from.id` is Telegram-authenticated, and chat/thread come from the
+  # message the button rides on. The callback ids are stashed so the poller can
+  # answer the query and strip the used button.
+  defp parse_callback_query(%{"data" => data} = callback) when is_binary(data) do
+    case ApprovalButton.parse_payload(data) do
+      {:ok, token} -> {:ok, [synthesize_confirm(callback, token)]}
+      :ignore -> {:ok, []}
+    end
+  end
+
+  defp parse_callback_query(_callback), do: {:ok, []}
+
+  defp synthesize_confirm(callback, token) do
+    source = Map.get(callback, "message", %{})
+
+    sender =
+      get_in(callback, ["from", "username"]) || get_in(callback, ["from", "first_name"]) ||
+        "unknown"
+
+    ApprovalButton.confirm_message(%{
+      id: "callback-#{callback["id"]}",
+      sender: sender,
+      channel: "telegram",
+      chat_id: source |> get_in(["chat", "id"]) |> to_string(),
+      thread_ts: source["message_thread_id"],
+      user_id: get_in(callback, ["from", "id"]),
+      token: token
+    })
   end
 
   @impl true
@@ -149,6 +189,86 @@ defmodule FermixChannels.Channels.Telegram do
     opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
 
     fn media_part -> send_media(reply_target, media_part, opts) end
+  end
+
+  # -- Owner-approval one-tap button (SANDBOX_ACCESS_APPROVAL_FLOW) --
+
+  @impl true
+  @spec send_approval(Message.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def send_approval(%Message{reply_target: reply_target, thread_ts: thread_ts}, text, token)
+      when is_binary(text) and is_binary(token) do
+    # The prompt rides the normal send path (markdown->HTML, so the backticked
+    # `/confirm <token>` fallback still renders as a tap-to-copy code span); the
+    # inline keyboard is the additive one-tap affordance. callback_data carries
+    # the `grant:<token>` payload (the callback handler strips the prefix and
+    # prepends `/confirm `); an 8-char token is far under Telegram's 64-byte
+    # callback_data cap.
+    markup = %{
+      inline_keyboard: [[%{text: "✅ Approve", callback_data: ApprovalButton.payload(token)}]]
+    }
+
+    opts = [reply_markup: markup]
+    opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts
+    send_message(reply_target, text, opts)
+  end
+
+  @doc """
+  Acknowledge an inline-button tap: clear the client spinner
+  (`answerCallbackQuery`) and strip the used button (`editMessageReplyMarkup`) so
+  it can't be re-tapped. Best-effort UI cleanup fired by the poller on every tap —
+  the confirmation token is single-use regardless, and the confirm outcome reaches
+  the owner through the normal `/confirm` text reply. Failures are logged, not
+  raised, so a spinner/edit hiccup never crashes the poll loop.
+  """
+  @spec acknowledge_callback(map(), keyword()) :: :ok | {:error, :not_configured}
+  def acknowledge_callback(callback, opts \\ []) when is_map(callback) do
+    with {:ok, token} <- get_bot_token() do
+      answer_callback_query(token, Map.get(callback, "id"), opts)
+      strip_callback_button(token, Map.get(callback, "message"), opts)
+      :ok
+    end
+  end
+
+  defp answer_callback_query(_token, nil, _opts), do: :ok
+
+  defp answer_callback_query(token, callback_id, opts) do
+    url = "#{@bot_api_base}/bot#{token}/answerCallbackQuery"
+    post_callback_ack(url, %{callback_query_id: callback_id}, opts, "answerCallbackQuery")
+  end
+
+  defp strip_callback_button(
+         token,
+         %{"message_id" => message_id, "chat" => %{"id" => chat_id}},
+         opts
+       ) do
+    url = "#{@bot_api_base}/bot#{token}/editMessageReplyMarkup"
+
+    body = %{
+      chat_id: to_string(chat_id),
+      message_id: message_id,
+      reply_markup: %{inline_keyboard: []}
+    }
+
+    post_callback_ack(url, body, opts, "editMessageReplyMarkup")
+  end
+
+  defp strip_callback_button(_token, _message, _opts), do: :ok
+
+  defp post_callback_ack(url, body, opts, label) do
+    case Req.new(url: url, method: :post, json: body)
+         |> Req.merge(req_options(opts))
+         |> HttpClient.request("Telegram #{label}") do
+      {:ok, %{status: 200}} ->
+        :ok
+
+      {:ok, %{status: status, body: response}} ->
+        Logger.warning("Telegram #{label} failed: #{status} - #{inspect(response)}")
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Telegram #{label} request failed: #{inspect(reason)}")
+        :ok
+    end
   end
 
   @impl true
@@ -336,6 +456,7 @@ defmodule FermixChannels.Channels.Telegram do
         |> maybe_put_parse_mode(opts)
         |> maybe_put_reply_to(opts)
         |> maybe_put_message_thread_id(opts)
+        |> maybe_put_reply_markup(opts)
 
       result =
         Req.new(url: url, method: :post, json: body)
@@ -789,6 +910,13 @@ defmodule FermixChannels.Channels.Telegram do
     case Keyword.get(opts, :message_thread_id) do
       nil -> body
       thread_id -> Map.put(body, :message_thread_id, thread_id)
+    end
+  end
+
+  defp maybe_put_reply_markup(body, opts) do
+    case Keyword.get(opts, :reply_markup) do
+      nil -> body
+      markup when is_map(markup) -> Map.put(body, :reply_markup, markup)
     end
   end
 

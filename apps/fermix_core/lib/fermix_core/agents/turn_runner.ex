@@ -255,6 +255,18 @@ defmodule FermixCore.Agents.TurnRunner do
       # unattended/cron/guest turns, where the tool fails closed.
       approval_fn: Map.get(msg, :approval_fn),
       channel: msg.channel,
+      # Chat context (private DM vs shared group), from the inbound message
+      # metadata. `request_directory_access` reads it to keep the tap-to-copy
+      # `/confirm <token>` line out of group-visible approval prompts
+      # (SANDBOX_ACCESS_APPROVAL_FLOW: token disclosure in shared channels).
+      chat_type: chat_type_of(msg),
+      # Whether the delivering channel renders a private one-tap approval button
+      # that carries the confirmation token (Telegram). Plain data resolved by the
+      # gateway (never the channel module). `request_directory_access` reads it to
+      # decide whether it may drop the tap-to-copy `/confirm <token>` from a
+      # shared-chat prompt — safe only because the button delivers the token
+      # privately. Defaults false, so any surface without a button keeps the token.
+      private_approval_button?: Map.get(msg, :private_approval_button?, false),
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
@@ -296,6 +308,11 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
+  end
+
+  defp chat_type_of(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    Map.get(metadata, :chat_type) || Map.get(metadata, "chat_type")
   end
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)

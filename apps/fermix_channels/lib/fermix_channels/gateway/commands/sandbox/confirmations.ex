@@ -26,6 +26,19 @@ defmodule FermixChannels.Gateway.Commands.Sandbox.Confirmations do
   end
 
   @doc """
+  Look up a pending record without consuming it. Read-only, so origin/TTL
+  validation can reject a bad `/confirm` *before* the single-use `take/1`
+  burns the owner's live token. `take/1` remains the sole consume authority.
+  """
+  @spec peek(String.t()) :: {:ok, map()} | :error
+  def peek(token) when is_binary(token) do
+    case :ets.lookup(@table, token) do
+      [{^token, record}] -> {:ok, record}
+      [] -> :error
+    end
+  end
+
+  @doc """
   Every live `{token, record}` pair. Read-only (never deletes) — used to dedupe
   an agent-initiated grant request against an already-pending one for the same
   mutation + origin, so a re-request returns the existing token instead of

@@ -116,7 +116,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
       body = %{
         offset: state.offset,
         timeout: timeout,
-        allowed_updates: ["message"]
+        allowed_updates: ["message", "callback_query"]
       }
 
       result =
@@ -173,12 +173,24 @@ defmodule FermixChannels.Channels.Telegram.Poller do
         {:ok, messages} when messages != [] ->
           emit_inbound_telemetry(length(messages))
           Enum.each(messages, &AlbumBuffer.ingest(&1, state.buffer))
+          maybe_ack_callback(update, state)
 
         _ ->
           :ok
       end
     end)
   end
+
+  # An inline-button tap is dispatched as its synthesized `/confirm` message above;
+  # here we clear the tap's spinner and strip the used button. Best-effort UI
+  # cleanup — the token is single-use, so a tap always spends the button, and the
+  # confirm result reaches the owner through the normal `/confirm` text reply.
+  defp maybe_ack_callback(%{"callback_query" => callback}, state) when is_map(callback) do
+    Telegram.acknowledge_callback(callback, req_options: state.req_options)
+    :ok
+  end
+
+  defp maybe_ack_callback(_update, _state), do: :ok
 
   defp emit_inbound_telemetry(count) do
     :telemetry.execute(
