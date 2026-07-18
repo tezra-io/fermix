@@ -8,9 +8,12 @@ defmodule FermixCore.Introspection.Wire do
   def json_safe(%Date{} = value), do: Date.to_iso8601(value)
   def json_safe(%Time{} = value), do: Time.to_iso8601(value)
   def json_safe(pid) when is_pid(pid), do: inspect(pid)
-  def json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
-  def json_safe(value) when is_binary(value) or is_number(value) or is_boolean(value), do: value
+  # Booleans and nil are atoms in Elixir — keep them JSON-native (true/false/null)
+  # before the atom->string clause below, which would otherwise stringify them.
+  def json_safe(value) when is_boolean(value), do: value
   def json_safe(nil), do: nil
+  def json_safe(atom) when is_atom(atom), do: Atom.to_string(atom)
+  def json_safe(value) when is_binary(value) or is_number(value), do: value
 
   def json_safe(list) when is_list(list) do
     Enum.map(list, &json_safe/1)
