@@ -1,5 +1,6 @@
 # Nightly eval (Milestone 22 T1 + T3): graded behavioral regression on a
-# disposable Linux box, plus the ungraded macOS daemon smoke.
+# disposable Linux box, plus the ungraded macOS daemon smoke. Any tier that
+# fails files (or updates) a GitHub issue via the shared `alert` job.
 #
 # Schedules execute the workflow file on the DEFAULT branch (main) — this file
 # must exist on main to fire, and it checks out `dev` explicitly so nightly
@@ -68,3 +69,57 @@ jobs:
       - name: Daemon log tail (failure diagnostics)
         if: failure()
         run: tail -n 200 "${RUNNER_TEMP}/fermix-smoke-eval/daemon.log" || true
+
+  alert:
+    name: file an issue for any failed tier
+    needs: [regression, macos-smoke]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          WORKFLOW: ${{ github.workflow }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.NEEDS);
+            const failed = Object.entries(needs)
+              .filter(([, r]) => r.result === "failure")
+              .map(([job]) => job);
+            if (failed.length === 0) return;
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            for (const job of failed) {
+              const critical = job === "dangerous";
+              const title = `${process.env.WORKFLOW}: the ${job} tier is failing`;
+              const existing = open.find((i) => i.title === title && !i.pull_request);
+              if (existing) {
+                // De-dupe: a persistently-red tier (e.g. regression on the luna
+                // baseline) updates one running issue instead of a new one nightly.
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Still failing — ${runUrl}`,
+                });
+                continue;
+              }
+              const body = [
+                `The **${job}** tier failed in \`${process.env.WORKFLOW}\`.`,
+                critical
+                  ? "\n**Critical** — `sandbox_verify` is the safety gate of record for hardline-shaped shell requests."
+                  : "",
+                `\nRun: ${runUrl}`,
+                "\nWhile this issue stays open, further failures add a comment instead of a new issue. Close it once the tier is green again.",
+              ].join("\n");
+              const created = await github.rest.issues.create({ owner, repo, title, body });
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: created.data.number,
+                labels: critical ? ["eval-failure", "critical"] : ["eval-failure"],
+              });
+            }
