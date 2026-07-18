@@ -213,6 +213,30 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       assert turn.provider_state.capabilities == [capability()]
     end
 
+    test "never sends temperature — the served reasoning models reject it" do
+      # Every model this adapter serves (the gpt-5 catalog) 400s on a
+      # `temperature` param ("Unsupported parameter"); a caller-supplied
+      # temperature must be dropped, not forwarded. Caught live by the first
+      # M22 eval box (run 29645334904).
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        refute Map.has_key?(decoded, "temperature")
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      {:ok, _turn} =
+        Responses.chat([%{role: "user", content: "Hi"}], [capability()],
+          api_key: "sk-test",
+          model: "gpt-5.6-luna",
+          temperature: 0.7,
+          base_url: "https://api.openai.com/v1",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+    end
+
     test "returns an auth error when api_key is missing" do
       assert {:error, {:provider_error, %{provider: :openai, kind: :auth, message: message}}} =
                Responses.chat([%{role: "user", content: "x"}], [], model: "gpt-5.4-mini")
