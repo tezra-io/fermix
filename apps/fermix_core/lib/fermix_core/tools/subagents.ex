@@ -182,8 +182,9 @@ defmodule FermixCore.Tools.Subagents do
 
   @impl true
   def when_to_use do
-    "When a request has independent substantial parts and delegating them improves " <>
-      "speed, coverage, or quality. Skip it for simple or tightly-coupled work."
+    "When a request spans several independent parts or sources that each need their own " <>
+      "gathering — delegate and run them in parallel rather than working serially. " <>
+      "Skip it for simple or tightly-coupled work."
   end
 
   @impl true
