@@ -179,20 +179,51 @@ defmodule FermixCore.Application do
   # rather than the common path.
   @http_pool_count 2
 
+  # Web-search backend hosts get the same idle-capped pool plus the backends'
+  # fail-fast connect budget (they degrade to DuckDuckGo on failure, so a dead
+  # provider should fail in seconds, not hang the reply path on a stalled
+  # connect). The budget lives here rather than as per-request
+  # `connect_options` because Req forbids `:connect_options` with `:finch` —
+  # and per-request `connect_options` is exactly what used to fork these
+  # backends onto Req-managed dynamic pools with `conn_max_idle_time:
+  # :infinity`, reviving the stale-socket `:closed` class this pool exists to
+  # kill. Keep in sync with the backends' `@endpoint` hosts.
+  @web_search_connect_timeout_ms 3_000
+  @web_search_hosts [
+    "https://api.exa.ai",
+    "https://api.firecrawl.dev",
+    "https://api.parallel.ai",
+    "https://api.perplexity.ai",
+    "https://api.search.brave.com",
+    "https://api.tavily.com",
+    "https://html.duckduckgo.com"
+  ]
+
   # Public (@doc false) because Finch has no API to read pool config back,
   # so tests pin these literals here — a regression to the :infinity / count:1
   # defaults would otherwise be invisible to the suite.
   @doc false
   @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
   def finch_pools do
-    %{
-      :default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count],
-      "https://chatgpt.com" => [
-        conn_max_idle_time: @http_conn_max_idle_ms,
-        count: @http_pool_count,
-        conn_opts: [transport_opts: [timeout: 5_000]]
-      ]
-    }
+    Map.merge(
+      %{
+        :default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count],
+        "https://chatgpt.com" => [
+          conn_max_idle_time: @http_conn_max_idle_ms,
+          count: @http_pool_count,
+          conn_opts: [transport_opts: [timeout: 5_000]]
+        ]
+      },
+      Map.new(@web_search_hosts, &{&1, web_search_pool()})
+    )
+  end
+
+  defp web_search_pool do
+    [
+      conn_max_idle_time: @http_conn_max_idle_ms,
+      count: @http_pool_count,
+      conn_opts: [transport_opts: [timeout: @web_search_connect_timeout_ms]]
+    ]
   end
 
   defp run_cli(argv) do

@@ -140,6 +140,31 @@ defmodule FermixCore.Net.HttpClientTest do
     assert pools["https://chatgpt.com"][:conn_opts] == [transport_opts: [timeout: 5_000]]
   end
 
+  test "web-search hosts ride the shared hardened pool with their fail-fast connect budget" do
+    # The search backends' 3s connect budget moved here from per-request
+    # `connect_options` — which had silently forked them onto Req-managed
+    # dynamic Finch pools with conn_max_idle_time: :infinity (the
+    # exa-fails-after-an-idle-gap :closed bug). Pin both halves: the
+    # hardened idle cap AND the connect budget, per host.
+    pools = FermixCore.Application.finch_pools()
+
+    hosts = [
+      "https://api.exa.ai",
+      "https://api.firecrawl.dev",
+      "https://api.parallel.ai",
+      "https://api.perplexity.ai",
+      "https://api.search.brave.com",
+      "https://api.tavily.com",
+      "https://html.duckduckgo.com"
+    ]
+
+    for host <- hosts do
+      assert pools[host][:conn_max_idle_time] == 15_000, "#{host} is missing the idle cap"
+      assert pools[host][:count] == 2, "#{host} is missing the multi-process pool"
+      assert pools[host][:conn_opts] == [transport_opts: [timeout: 3_000]]
+    end
+  end
+
   test "the shared pool runs multiple pool processes so one blocked teardown can't starve checkouts" do
     # Finch's default pool count is 1: a single per-host pool process. Right
     # after wake-from-sleep that lone process can block ~5s tearing down a

@@ -37,10 +37,7 @@ defmodule FermixCore.Tools.WebSearch.Backends.Tavily do
   def search(_query, _opts), do: {:error, "invalid_query", %{}}
 
   defp request_options(context, query, api_key) do
-    [
-      retry: false,
-      receive_timeout: 15_000,
-      connect_options: [timeout: 3_000],
+    Support.request_options(context,
       headers: [
         {"authorization", "Bearer #{api_key}"},
         {"content-type", "application/json"}
@@ -54,21 +51,12 @@ defmodule FermixCore.Tools.WebSearch.Backends.Tavily do
         include_images: false,
         auto_parameters: false
       }
-    ]
-    |> Keyword.merge(Map.get(context, :req_options, []))
-    |> Keyword.put(:redirect, false)
-  end
-
-  defp post_search(request_options) do
-    case Req.post(@endpoint, request_options) do
-      {:ok, response} -> {:ok, response}
-      {:error, reason} -> {:error, "network: #{inspect(reason)}"}
-    end
+    )
   end
 
   defp run_search(request_options, context) do
     with :ok <- Guard.validate(@endpoint, resolver: resolver(context)),
-         {:ok, response} <- post_search(request_options),
+         {:ok, response} <- Support.request(:post, @endpoint, request_options),
          {:ok, body} <- Support.response_json(response) do
       parse_results(body)
     end
