@@ -62,13 +62,32 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   @anthropic_version "2023-06-01"
   # §5.1: non-streaming requests need a bounded output ceiling; the SSE
   # follow-up raises this toward ModelCatalog.max_output_tokens_for/2.
-  @non_streaming_max_tokens 8_192
+  # 16k (not 8k): adaptive thinking counts against max_tokens, so the ceiling
+  # must leave room for deliberation ahead of the visible answer — sized to
+  # what TimeoutPolicy's buffered window can actually deliver, not to the
+  # model's 64k+ capability.
+  @non_streaming_max_tokens 16_384
   @cache_control %{type: "ephemeral"}
   # Marker left in place of an older screenshot's image bytes once it falls
   # outside the retention window (ScreenshotRetention) — keeps the textual trail.
   @screenshot_elided "[earlier screenshot omitted to bound context]"
   # Claude 4.7+ rejects sampling params (temperature/top_p/top_k) — §5.1.
   @no_sampling_substrings ["4-7", "4.7", "4-8", "4.8"]
+  # Claude 4.6+ models run WITHOUT thinking unless `thinking: {type: adaptive}`
+  # is sent explicitly (reasoning_effort alone only calibrates token spend);
+  # older models (haiku-4-5 and earlier) reject the adaptive type, so the
+  # param is allowlist-gated — an unknown model gets today's no-thinking wire.
+  @adaptive_thinking_substrings [
+    "4-6",
+    "4.6",
+    "4-7",
+    "4.7",
+    "4-8",
+    "4.8",
+    "sonnet-5",
+    "fable",
+    "mythos"
+  ]
   @known_stop_reasons ["end_turn", "tool_use", "max_tokens", "stop_sequence", "refusal"]
   @context_length_markers [
     "prompt is too long",
@@ -216,6 +235,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       |> maybe_put(:system, system_blocks(system, mode))
       |> maybe_put(:tools, tools |> wire_tools(mode) |> cache_final_tool())
       |> maybe_put(:temperature, resolve_temperature(model, opts))
+      |> maybe_put(:thinking, thinking_config(model))
       |> maybe_put(:output_config, output_config(Keyword.get(opts, :reasoning_effort)))
 
     turn_state = %{
@@ -424,6 +444,16 @@ defmodule FermixCore.Providers.Anthropic.Messages do
 
   defp forbids_sampling?(model),
     do: Enum.any?(@no_sampling_substrings, &String.contains?(model, &1))
+
+  # Adaptive thinking rides every request on supported models (the model itself
+  # decides when and how much to deliberate; reasoning_effort calibrates it).
+  # Response `thinking` blocks are replayed verbatim through provider_state's
+  # assistant_content in continue/3, so tool loops keep their signatures intact.
+  defp thinking_config(model) do
+    if Enum.any?(@adaptive_thinking_substrings, &String.contains?(model, &1)) do
+      %{type: "adaptive"}
+    end
+  end
 
   # Maps the canonical effort level to Anthropic's `output_config.effort` wire
   # value (low/medium/high/xhigh/max — no `:none`, the floor is `:low`). nil =>

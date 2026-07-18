@@ -20,7 +20,7 @@ defmodule FermixCore.Net.TimeoutPolicyTest do
     end
 
     test "a buffered LLM turn gets the same ceiling as a streaming one, not 15s" do
-      assert TimeoutPolicy.receive_timeout_for(:llm_buffered) == 120_000
+      assert TimeoutPolicy.receive_timeout_for(:llm_buffered) == 240_000
       assert TimeoutPolicy.receive_timeout_for(:llm_buffered) > @req_default_ms
     end
 
