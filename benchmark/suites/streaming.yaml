@@ -16,9 +16,10 @@
 #     you to send ONE marked message from your phone, then finds the trace by
 #     marker and grades it automatically. Preconditions: dev daemon built from
 #     a streaming-capable branch, `[fermix_channels.telegram] streaming =
-#     "draft"` or `"block"` in ~/.fermix-dev/config.toml, daemon restarted
+#     "draft"` or `"block"` in ~/.fermix-eval/config.toml, daemon restarted
 #     after enabling.
 suite: streaming
+risk: host_readonly
 title: "Channel streaming — live draft replies"
 description: >
   Verifies the draft-stream rail end-to-end: CLI turns never stream (the
@@ -51,6 +52,7 @@ scenarios:
           reply_matches: "stream-check-ok"
 
   - id: telegram_draft_stream
+    risk: external_write
     title: "Telegram turn streams a draft and seals it in place (operator-assisted)"
     severity: critical
     tags: [streaming, operator]

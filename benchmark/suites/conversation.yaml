@@ -1,4 +1,5 @@
 suite: conversation
+risk: host_readonly
 title: "Conversation routing — a fresh turn is handled on its own, not as a continuation"
 description: >
   Exercises multi-turn conversational routing: after a substantive turn has
@@ -29,7 +30,7 @@ scenarios:
     # critical: conversation-turn routing is core; deterministic (reply_not_matches on the
     # prior topic) so a regression to treating every turn as a continuation fails the run.
     severity: critical
-    tags: [conversation, routing, context]
+    tags: [conversation, routing, context, host-safe-core]
     cases:
       - id: greeting_after_fact
         turns:

@@ -12,14 +12,19 @@
 #      (or `--private-data ~/fermix-eval-holdout`).
 # The runner refuses --private without that path, so this example never scores as
 # a "private" set by accident.
+# Candidate prompts/replies still enter the daemon's configured Opik trace store;
+# use a private local eval-only project. The flag only suppresses held-out
+# dataset/experiment/feedback writeback.
 #
 # CANARY (replace with your own): fermix-holdout-EXAMPLE-replace-me-do-not-train
 # ============================================================================
 suite: cap_holdout_example
+risk: host_readonly
 title: "Capability — held-out split TEMPLATE (replace before use)"
 description: >
   Template only. See the header — copy this OUTSIDE the repo, swap in your own
-  tasks, and run via FERMIX_EVAL_HOLDOUT_DIR so the held-out answers stay private.
+  tasks, and run via FERMIX_EVAL_HOLDOUT_DIR so the gold answers stay out of the
+  repository and Opik datasets. Candidate turns still appear in eval-only traces.
 defaults:
   judge: false
   timeout_ms: 180000

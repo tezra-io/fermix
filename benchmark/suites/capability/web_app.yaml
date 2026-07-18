@@ -1,4 +1,5 @@
 suite: cap_web_app
+risk: host_readonly
 title: "Capability — multi-step browser navigation of a real website"
 description: >
   A genuinely agentic BROWSER task: drive a REAL public site (Wikipedia) via search ->

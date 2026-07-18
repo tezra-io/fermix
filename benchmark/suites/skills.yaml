@@ -1,4 +1,5 @@
 suite: skills
+risk: host_readonly
 title: "Skills — list and view installed skills"
 description: >
   Exercises the read side of the skills subsystem: enumerating installed skills
@@ -114,43 +115,42 @@ scenarios:
         rubric: "Enumerates the skills, then views browser_guidance and reports its contents."
 
   - id: create_and_reload
-    title: "Author a new skill and hot-reload it into the running agent"
-    # skill_create + skill_reload were untested (only list/view were). A skill can be
-    # authored two valid ways — the skill_create tool, OR file_write of the SKILL.md to disk
-    # + skill_reload (observed live) — so the gate accepts either (skill_reload is the common
-    # registration step). Leaves stable-named skills in ~/.fermix/skills (re-runs overwrite).
+    risk: isolated_mutation
+    title: "Scaffold a new skill and hot-reload it into the running agent"
+    # skill_create accepts only a name and description and creates the supported
+    # boilerplate. These cases test that real contract; they do not pretend it authors
+    # arbitrary SKILL.md instructions. Run-id placeholders keep disposable names unique.
     severity: normal
     tags: [skills, create, reload]
     cases:
       - id: create_then_reload
         query: >
-          Create a new skill called "eval-widget" whose instructions are simply to always
-          reply with the word WIDGET, then reload your skills so it's live and confirm it's
-          available now.
+          Create a new skill called "eval-widget-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+          with the description "A helper for WIDGET-related requests." Reload your
+          skills, then list them and confirm that scaffold is available now.
         expect:
-          # skill_create OR file_write-to-disk + skill_reload both validly author a skill;
-          # gate on either so the file-write route doesn't falsely fail a real creation.
-          tools_any: [skill_create, skill_reload]
+          tools_all: [skill_create, skill_reload, skill_list]
+          tools_none: [file_write, file_edit]
           reply_matches: "(?i)eval[-_]?widget|created|added|reload|available|new skill"
           reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
-          Writes the skill with skill_create (to ~/.fermix/skills) and reloads it
-          (skill_reload) so it registers without a restart, confirming the new skill name.
-          Fails if it claims it cannot create skills or fabricates a creation it didn't do.
+          Uses the supported skill_create scaffold in the disposable eval home,
+          reloads, and confirms the unique skill through the real listing. It does
+          not claim that arbitrary WIDGET behavior was authored or executed.
       - id: create_then_verify_in_list
         query: >
-          Make me a skill named "eval-greeter" that greets people in French, then show me
-          your current skill list so I can see it landed.
+          Make me a skill named "eval-greeter-__EVAL_RUN_ID__-__EVAL_TRIAL__" that
+          is described as "A scaffold for French greeting guidance." Reload skills,
+          then show me your current skill list so I can see the scaffold landed.
         expect:
-          # skill_create OR file_write-to-disk + skill_reload both validly author a skill
-          # (same as create_then_reload); don't pin the create tool.
-          tools_any: [skill_create, skill_reload]
+          tools_all: [skill_create, skill_reload, skill_list]
+          tools_none: [file_write, file_edit]
           reply_matches: "(?i)eval[-_]?greeter|created|added|skill"
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
-          Creates the skill and then reloads + lists skills so the new "eval-greeter"
-          appears in the listing; grounds the confirmation in the real skill list, not a
-          fabricated success.
+          Creates the supported scaffold, then reloads and lists skills so the unique
+          eval-greeter name appears; it does not claim the scaffold already implements
+          French greeting behavior.

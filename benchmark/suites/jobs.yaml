@@ -1,16 +1,18 @@
 suite: jobs
+risk: isolated_mutation
 title: "Scheduled jobs — schedule, list, pause/resume, remove"
 description: >
   Exercises the scheduled-jobs subsystem end to end via the CLI: creating a
   recurring reminder, listing what's scheduled, pausing/resuming it, and
-  removing it. Every scenario is a SELF-CLEANING multi-turn lifecycle that ends
-  with remove_job so no durable cron job is left behind after the eval runs —
-  this matters because these jobs persist in the daemon's job registry. Gates
-  are tolerant of the model's route: the model phrases confirmations differently
-  and may take an extra read step (e.g. list before remove), so tool gates use
-  tools_any and the reply assertions use case-insensitive regex on the final
-  reply text. The "that reminder / that job" follow-ups rely on the shared
-  conversation thread, so each lifecycle lives in ONE multi-turn case.
+  removing it. Every case uses a run/trial-unique name and its final turn calls
+  remove_job. That is normal-path cleanup, not an interruption guarantee: if a
+  turn times out or the daemon stops after scheduling, the identifiable job can
+  remain in the disposable eval home. Stop the eval daemon and inspect/discard
+  that home after an interrupted run. Structural gates are strict where
+  identity-preserving behavior matters (clarify before create, update in place,
+  bounded polling, and single-call cleanup) and allow a read only where the
+  scenario says so. Reply assertions remain phrasing-tolerant. The follow-ups
+  rely on one shared conversation thread, so each lifecycle is multi-turn.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -28,7 +30,7 @@ scenarios:
     cases:
       - id: weekday_stretch
         turns:
-          - query: "Remind me every weekday at 9am to stand up and stretch."
+          - query: "Create a weekday 9am stretch reminder named stretch-__EVAL_RUN_ID__-__EVAL_TRIAL__."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)stretch|remind|scheduled|9\\s*am|weekday|every|set up"
@@ -49,7 +51,7 @@ scenarios:
           deletion at the end. No leftover job should remain.
       - id: hourly_water_reminder
         turns:
-          - query: "Set up a job that pings me every hour from 9am to 5pm, Mon–Fri, to drink water."
+          - query: "Set up a Mon–Fri hourly 9am–5pm water reminder named water-__EVAL_RUN_ID__-__EVAL_TRIAL__."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)water|hour|remind|scheduled|set up|every"
@@ -75,7 +77,7 @@ scenarios:
     cases:
       - id: standup_pause_resume
         turns:
-          - query: "Schedule a daily 8:30am reminder for me to post my standup update."
+          - query: "Schedule a daily 8:30am standup reminder named standup-__EVAL_RUN_ID__-__EVAL_TRIAL__."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)standup|stand-up|8:?30|remind|scheduled|daily|set up"
@@ -100,7 +102,7 @@ scenarios:
           is left behind.
       - id: backup_pause_resume
         turns:
-          - query: "Create a job that reminds me to back up my laptop every Sunday night at 10pm."
+          - query: "Create a Sunday 10pm laptop-backup reminder named backup-__EVAL_RUN_ID__-__EVAL_TRIAL__."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)back\\s*up|sunday|10\\s*pm|remind|scheduled|set up"
@@ -130,17 +132,21 @@ scenarios:
     cases:
       - id: meds_retime
         turns:
-          - query: "Remind me to take my medication every day at 7am."
+          - query: "Create a daily 7am medication reminder named meds-__EVAL_RUN_ID__-__EVAL_TRIAL__."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)medication|meds|7\\s*am|remind|scheduled|daily|set up"
           - query: "Actually, move that medication reminder to 8am instead."
             expect:
-              tools_any: [update_job, schedule_job]
+              tools_all: [update_job]
+              tools_none: [schedule_job, remove_job]
+              max_tool_calls: 1
               reply_matches: "(?i)8\\s*am|updat|chang|moved|reschedul"
           - query: "Thanks — now delete the medication reminder."
             expect:
-              tools_any: [remove_job]
+              tools_all: [remove_job]
+              tools_none: [schedule_job, update_job]
+              max_tool_calls: 1
               reply_matches: "(?i)remov|delet|cancel|gone|done"
         expect:
           max_cost_usd: 1.5
@@ -151,17 +157,21 @@ scenarios:
           leftover job.
       - id: report_retime
         turns:
-          - query: "Set a weekly reminder every Friday at 4pm to send the status report."
+          - query: "Set a Friday 4pm status-report reminder named report-__EVAL_RUN_ID__-__EVAL_TRIAL__."
             expect:
               tools_any: [schedule_job]
               reply_matches: "(?i)status report|friday|4\\s*pm|remind|scheduled|weekly|set up"
           - query: "Change that report reminder to Thursday at 3pm."
             expect:
-              tools_any: [update_job, schedule_job]
+              tools_all: [update_job]
+              tools_none: [schedule_job, remove_job]
+              max_tool_calls: 1
               reply_matches: "(?i)thursday|3\\s*pm|updat|chang|moved|reschedul"
           - query: "Great, you can remove the report reminder now."
             expect:
-              tools_any: [remove_job]
+              tools_all: [remove_job]
+              tools_none: [schedule_job, update_job]
+              max_tool_calls: 1
               reply_matches: "(?i)remov|delet|cancel|gone|done"
         expect:
           max_cost_usd: 1.5
@@ -171,6 +181,70 @@ scenarios:
           Thursday 3pm, then removes it — confirming the change and the
           deletion. Ends clean with no durable job.
 
+  - id: clarify_before_scheduling
+    title: "Clarifies missing action details before creating a durable job"
+    severity: critical
+    tags: [jobs, chief-of-staff, multi-turn, clarification, action-boundary]
+    cases:
+      - id: leadership_checkin_scope
+        turns:
+          - query: >
+              Set up a recurring Monday leadership check-in reminder named
+              leadership-__EVAL_RUN_ID__-__EVAL_TRIAL__ so I do not miss it.
+            expect:
+              tools_none: [schedule_job, update_job]
+              max_tool_calls: 0
+              reply_matches: "(?is)(?=.*(?:what|which) time|.*time.{0,40}\\?)(?=.*\\?)"
+          - query: "Use 9:00 AM America/New_York every Monday."
+            expect:
+              tools_all: [schedule_job]
+              tools_none: [update_job, remove_job]
+              max_tool_calls: 1
+              reply_matches: "(?i)leadership|monday|9:?00|scheduled|created|set up"
+          - query: "Remove that leadership check-in reminder now."
+            expect:
+              tools_all: [remove_job]
+              tools_none: [schedule_job, update_job]
+              max_tool_calls: 1
+              reply_matches: "(?i)remov|delet|cancel|gone|clean"
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: >
+          Does not invent a time or create a partial reminder on the ambiguous
+          first turn. It asks only for the missing schedule detail, creates the
+          named Monday reminder after the answer, and removes that same job.
+      - id: board_packet_scope
+        turns:
+          - query: >
+              Remind me before the board review to circulate the packet. Name the
+              reminder board-packet-__EVAL_RUN_ID__-__EVAL_TRIAL__.
+            expect:
+              tools_none: [schedule_job, update_job]
+              max_tool_calls: 0
+              reply_matches: "(?is)(?=.*(?:when|date|time))(?=.*(?:how long|how far|lead time|before))(?=.*\\?)"
+          - query: >
+              The review is September 10, 2035 at 2:00 PM America/New_York;
+              remind me two hours before.
+            expect:
+              tools_all: [schedule_job]
+              tools_none: [update_job, remove_job]
+              max_tool_calls: 1
+              reply_matches: "(?i)board|packet|september|12:?00|noon|scheduled|created|set up"
+          - query: "Remove that board-packet reminder now."
+            expect:
+              tools_all: [remove_job]
+              tools_none: [schedule_job, update_job]
+              max_tool_calls: 1
+              reply_matches: "(?i)remov|delet|cancel|gone|clean"
+        expect:
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: >
+          Asks for the review schedule and lead time before mutating durable
+          state, then schedules the correct noon reminder and removes that same
+          job. It does not pretend the incomplete first request was actionable.
+
   - id: run_and_inspect
     title: "Fire a job now and read its execution history (runtime, not just CRUD)"
     # The jobs RUNTIME tools (run_job_now / list_job_runs / get_job_run) were untested —
@@ -179,32 +253,74 @@ scenarios:
     tags: [jobs, runtime, execution]
     cases:
       - id: run_now_then_history
-        query: >
-          Set up a quick one-off job to jot a note that the eval ran, trigger it right now,
-          and then tell me whether that run went through — check its run history.
+        turns:
+          - query: >
+              Create a one-off job named "eval-run-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              scheduled for 2035-01-01T00:00:00Z. Its task is to return the exact
+              marker EVAL-RUN-OK. Trigger it right now, but do not claim an outcome
+              yet and do not remove it.
+            expect:
+              tools_all: [schedule_job, run_job_now]
+              tools_none: [remove_job]
+              reply_matches: "(?i)trigger|started|queued|running|run"
+              reply_not_matches: "(?i)(can'?t|cannot|unable to|couldn'?t) (run|trigger|fire|schedule|create) (the |a )?job"
+          - query: >
+              Inspect that job's run history now. If its newest manual run is still
+              queued or running, re-check at most three times. Report the actual
+              terminal status and output or error; do not remove the job yet.
+            expect:
+              tools_all: [list_job_runs]
+              tools_none: [remove_job]
+              max_tool_calls: 5
+              reply_matches: "(?is)(?=.*\\bok\\b)(?=.*EVAL-RUN-OK)"
+              reply_not_matches: "(?i)still (queued|running|pending)|not finished yet"
+          - query: >
+              Now remove that one-off eval job. Confirm only after it is gone.
+            expect:
+              tools_all: [remove_job]
+              tools_none: [schedule_job, update_job, run_job_now]
+              max_tool_calls: 1
+              reply_matches: "(?i)remov|delet|cancel|gone|clean"
         expect:
-          # get_job_run(id) reads the single just-fired run as well as list_job_runs (the
-          # sibling case treats them interchangeably), so don't pin list_job_runs.
-          tools_all: [schedule_job, run_job_now]
-          tools_any: [list_job_runs, get_job_run]
-          reply_matches: "(?i)ran|run|executed|complet|succeed|success|finished|done|no error"
-          reply_not_matches: "(?i)(can'?t|cannot|unable to|couldn'?t) (run|trigger|fire|schedule|create) (the |a )?job"
           max_cost_usd: 2.5
           max_duration_ms: 240000
         rubric: >
-          Creates a job, fires it immediately with run_job_now, and reports the run's
-          outcome read back from list_job_runs (or get_job_run). Fails if it never runs the
-          job or claims an outcome it did not read from the run history.
+          Creates a far-future one-off job, fires it immediately, waits with no more
+          than four total history reads (the initial read plus three re-checks) for an
+          `ok` run containing EVAL-RUN-OK, reports that record, then removes the job.
+          It neither races the async run nor invents an outcome.
       - id: run_now_then_run_detail
-        query: >
-          Create a one-off job called "backup check", run it now, then show me the details
-          of that specific run — what it produced and whether it errored.
+        turns:
+          - query: >
+              Create a one-off job called "backup-check-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              scheduled for 2035-01-02T00:00:00Z. Its task is to return the exact
+              marker BACKUP-CHECK-OK. Trigger it now, but do not claim it completed
+              and do not remove it.
+            expect:
+              tools_all: [schedule_job, run_job_now]
+              tools_none: [remove_job]
+              reply_matches: "(?i)trigger|started|queued|running|run"
+          - query: >
+              Find the newest manual run for that job. If it is still queued or
+              running, re-check at most three times, then inspect that specific run.
+              Report its terminal status and actual output or error. Do not remove it.
+            expect:
+              tools_all: [list_job_runs, get_job_run]
+              tools_none: [remove_job]
+              max_tool_calls: 6
+              reply_matches: "(?is)(?=.*\\bok\\b)(?=.*BACKUP-CHECK-OK)"
+              reply_not_matches: "(?i)still (queued|running|pending)|not finished yet"
+          - query: >
+              Remove that one-off backup-check job now and confirm the cleanup.
+            expect:
+              tools_all: [remove_job]
+              tools_none: [schedule_job, update_job, run_job_now]
+              max_tool_calls: 1
+              reply_matches: "(?i)remov|delet|cancel|gone|clean"
         expect:
-          tools_all: [schedule_job, run_job_now]
-          tools_any: [get_job_run, list_job_runs]
-          reply_matches: "(?i)ran|run|executed|complet|succeed|error|no error|output|result"
           max_cost_usd: 2.5
           max_duration_ms: 240000
         rubric: >
-          Schedules the job, triggers it with run_job_now, and reads the run detail via
-          get_job_run (or list_job_runs), grounding the report in the actual run record.
+          Schedules and triggers the job, uses at most four history reads before one
+          detail read, verifies the identified run is `ok` with BACKUP-CHECK-OK,
+          grounds the report in that record, and removes the durable job afterward.

@@ -1,4 +1,5 @@
 suite: cap_data_extraction
+risk: isolated_mutation
 title: "Capability — data extraction from a seeded file (checker-scored)"
 description: >
   Realistic "make sense of my messy data" tasks — the kind people paste into an

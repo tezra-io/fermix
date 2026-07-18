@@ -11,8 +11,17 @@ def _pct(n: int, d: int) -> str:
     return f"{(100.0 * n / d):.0f}%" if d else "n/a"
 
 
-def _badge_txt(passed) -> str:
-    return "PASS" if passed else ("—" if passed is None else "FAIL")
+def _case_mark(outcome: str) -> str:
+    return {"pass": "✅", "fail": "❌", "incomplete": "⚠️"}.get(outcome, "?")
+
+
+def _scenario_outcome(scenario: dict) -> str:
+    outcomes = {case.get("outcome") for case in scenario.get("cases", [])}
+    if "fail" in outcomes:
+        return "fail"
+    if "incomplete" in outcomes or not outcomes:
+        return "incomplete"
+    return "pass"
 
 
 def write(results: dict, out_dir: str) -> dict:
@@ -35,7 +44,8 @@ def write(results: dict, out_dir: str) -> dict:
 
 def _markdown(r: dict) -> str:
     t = r["totals"]
-    overall = "✅ PASS" if t["critical_failed"] == 0 else "❌ FAIL"
+    overall = {"pass": "✅ PASS", "fail": "❌ FAIL",
+               "incomplete": "⚠️ INCOMPLETE"}[r["outcome"]]
     lines = [
         f"# Fermix E2E Eval — {overall}",
         "",
@@ -46,15 +56,24 @@ def _markdown(r: dict) -> str:
         "## Summary",
         "",
         f"- Cases: **{t['cases_passed']}/{t['cases']} passed** ({_pct(t['cases_passed'], t['cases'])})  ·  "
+        f"failed: **{t['cases_failed']}**  ·  incomplete: **{t['cases_incomplete']}**  ·  "
         f"critical failures: **{t['critical_failed']}**",
         f"- Structural gates: {t['gates_passed']}/{t['gates']} ({_pct(t['gates_passed'], t['gates'])})  ·  "
         f"Rubrics: {t['rubrics_passed']}/{t['rubrics']} ({_pct(t['rubrics_passed'], t['rubrics'])})",
-        f"- Turns driven: {t['turns']}  ·  Total cost: **${t['cost_usd']:.4f}**  ·  "
+        f"- Turns driven: {t['turns']}  ·  Candidate trace cost: **${t['cost_usd']:.4f}**  ·  "
         f"Wall time on turns: {t['duration_ms_total'] / 1000:.0f}s",
+        f"- Judge calls: **{t['judge_calls']}**  ·  API-reported judge tokens: "
+        f"**{t['judge_tokens_reported']}** across "
+        f"{t['judge_usage_reported_calls']}/{t['judge_calls']} call(s) "
+        "(judge cost is not included)",
         "",
-        "| Suite | Cases | Passed | Critical fails | Cost |",
+        "| Suite | Cases | Passed | Critical fails | Candidate trace cost |",
         "|---|---|---|---|---|",
     ]
+    repeated = [item for item in r.get("reliability", []) if item["trials"] > 1]
+    if repeated:
+        flaky = sum(1 for item in repeated if item["status"] == "flaky")
+        lines.insert(11, f"- Repeated cases: **{len(repeated)}**  ·  flaky: **{flaky}**")
     for s in r["suites"]:
         st = s["totals"]
         lines.append(f"| {s['title']} | {st['cases']} | {st['cases_passed']} | "
@@ -65,12 +84,12 @@ def _markdown(r: dict) -> str:
         lines.append(f"## {s['title']}  `({s['name']})`")
         lines.append("")
         for scn in s["scenarios"]:
-            mark = "✅" if scn["passed"] else "❌"
+            mark = _case_mark(_scenario_outcome(scn))
             sev = "🔴 critical" if scn["severity"] == "critical" else "normal"
             lines.append(f"### {mark} {scn['title']}  _( {sev} )_")
             for c in scn["cases"]:
-                cmark = "✅" if c["passed"] else "❌"
-                lines.append(f"- {cmark} **{c['id']}**")
+                lines.append(f"- {_case_mark(c['outcome'])} **{c['id']}** "
+                             f"(trial {c.get('trial', 1)}) — {c['outcome'].upper()}")
                 for turn in c["turns"]:
                     lines.append(f"  - turn {turn['index'] + 1}: `{_short(turn['query'], 90)}`")
                     if turn["status"] != "ok":
@@ -94,7 +113,8 @@ def _markdown(r: dict) -> str:
                     if rb["evaluated"]:
                         rm = "✓" if rb["passed"] else "✗"
                         sc = f" ({rb['score']:.2f})" if rb["score"] is not None else ""
-                        lines.append(f"  - judge {rm}{sc}: {rb['rationale']}")
+                        lines.append(
+                            f"  - judge {rm}{sc} [{_judge_route(rb)}]: {rb['rationale']}")
                     else:
                         lines.append(f"  - judge: not evaluated ({rb.get('error')})")
             lines.append("")
@@ -104,6 +124,13 @@ def _markdown(r: dict) -> str:
 def _short(text: str, n: int) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _judge_route(rubric: dict) -> str:
+    parts = [rubric.get("judge_provider"), rubric.get("judge_model"),
+             rubric.get("judge_reasoning_effort")]
+    route = "/".join(str(item) for item in parts if item)
+    return route or rubric.get("backend") or "unknown"
 
 
 # --- html -------------------------------------------------------------------
@@ -138,9 +165,9 @@ def _e(s) -> str:
 
 def _html(r: dict) -> str:
     t = r["totals"]
-    ok = t["critical_failed"] == 0
-    banner_cls = "pass" if ok else "fail"
-    banner = "✅ PASS — no critical failures" if ok else f"❌ FAIL — {t['critical_failed']} critical case(s) failed"
+    outcome = r["outcome"]
+    banner_cls = {"pass": "pass", "fail": "fail", "incomplete": "skip"}[outcome]
+    banner = {"pass": "✅ PASS", "fail": "❌ FAIL", "incomplete": "⚠️ INCOMPLETE"}[outcome]
     out = [f"<!doctype html><html><head><meta charset='utf-8'>",
            f"<title>Fermix E2E Eval {_e(r['run_id'])}</title><style>{_CSS}</style></head><body><div class='wrap'>"]
     out.append(f"<h1>Fermix E2E Eval</h1>")
@@ -150,16 +177,22 @@ def _html(r: dict) -> str:
     out.append(f"<div class='banner {banner_cls}'>{_e(banner)}</div>")
     out.append("<div class='cards'>")
     for n, l in [(f"{t['cases_passed']}/{t['cases']}", "cases passed"),
+                 (t["cases_failed"], "cases failed"),
+                 (t["cases_incomplete"], "cases incomplete"),
                  (t["critical_failed"], "critical fails"),
                  (f"{t['gates_passed']}/{t['gates']}", "gates passed"),
                  (f"{t['rubrics_passed']}/{t['rubrics']}", "rubrics passed"),
-                 (f"${t['cost_usd']:.4f}", "total cost"),
+                 (f"${t['cost_usd']:.4f}", "candidate trace cost"),
+                 (t["judge_calls"], "judge calls"),
+                 (t["judge_tokens_reported"],
+                  f"reported judge tokens ({t['judge_usage_reported_calls']}/{t['judge_calls']} calls)"),
                  (f"{t['duration_ms_total'] / 1000:.0f}s", "turn wall-time")]:
         out.append(f"<div class='card'><div class='n'>{_e(n)}</div><div class='l'>{_e(l)}</div></div>")
     out.append("</div>")
 
     # suite summary table
-    out.append("<table><tr><th>Suite</th><th>Cases</th><th>Passed</th><th>Critical fails</th><th>Cost</th></tr>")
+    out.append("<table><tr><th>Suite</th><th>Cases</th><th>Passed</th>"
+               "<th>Critical fails</th><th>Candidate trace cost</th></tr>")
     for s in r["suites"]:
         st = s["totals"]
         out.append(f"<tr><td>{_e(s['title'])}</td><td>{st['cases']}</td><td>{st['cases_passed']}</td>"
@@ -169,13 +202,14 @@ def _html(r: dict) -> str:
     for s in r["suites"]:
         out.append(f"<h2>{_e(s['title'])} <span class='meta'>({_e(s['name'])})</span></h2>")
         for scn in s["scenarios"]:
-            pill = "pass" if scn["passed"] else "fail"
+            scenario_outcome = _scenario_outcome(scn)
+            pill = {"pass": "pass", "fail": "fail", "incomplete": "skip"}[scenario_outcome]
             sev = "<span class='pill crit'>critical</span> " if scn["severity"] == "critical" else ""
-            out.append(f"<h3>{sev}<span class='pill {pill}'>{_badge_txt(scn['passed'])}</span> {_e(scn['title'])}</h3>")
+            out.append(f"<h3>{sev}<span class='pill {pill}'>{_e(scenario_outcome.upper())}</span> {_e(scn['title'])}</h3>")
             for c in scn["cases"]:
-                cpill = "pass" if c["passed"] else "fail"
-                out.append(f"<div class='case'><span class='pill {cpill}'>{_badge_txt(c['passed'])}</span> "
-                           f"<b>{_e(c['id'])}</b>")
+                cpill = {"pass": "pass", "fail": "fail", "incomplete": "skip"}[c["outcome"]]
+                out.append(f"<div class='case'><span class='pill {cpill}'>{_e(c['outcome'].upper())}</span> "
+                           f"<b>{_e(c['id'])}</b> <span class='meta'>trial {_e(c.get('trial', 1))}</span>")
                 for turn in c["turns"]:
                     out.append(f"<div class='q'>▸ {_e(turn['query'])}</div>")
                     if turn["status"] != "ok":
@@ -201,7 +235,7 @@ def _html(r: dict) -> str:
                         cls = "ok" if rb["passed"] else "no"
                         sc = f" ({rb['score']:.2f})" if rb["score"] is not None else ""
                         out.append(f"<div class='gate {cls}'>judge {('✓' if rb['passed'] else '✗')}{_e(sc)} "
-                                   f"({_e(rb['backend'])}): {_e(rb['rationale'])}</div>")
+                                   f"({_e(_judge_route(rb))}): {_e(rb['rationale'])}</div>")
                     else:
                         out.append(f"<div class='gate skip'>judge: not evaluated ({_e(rb.get('error'))})</div>")
                 out.append("</div>")

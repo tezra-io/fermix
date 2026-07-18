@@ -19,7 +19,7 @@
 # error — only happens when there is NO reply_fn at all, i.e. a subagent or
 # scheduled job; that path is covered by deterministic unit tests, not here.)
 #
-# PRECONDITION: the dev daemon must run with the OpenAI image backend enabled:
+# PRECONDITION: the disposable eval daemon must run with the OpenAI image backend enabled:
 #
 #   [fermix_core.tools.generate_image]
 #   backend = "openai"
@@ -39,9 +39,14 @@
 # giving up and replying honestly. This adds ~80k–150k tokens (~$0.5–0.9) of
 # reasoning cost on top of the nominal call. max_cost_usd is set to $1.20 for
 # edit/UAT cases to tolerate this variation without masking a real runaway loop
-# (which would exceed even $1.20). Six renders per full run; run explicitly:
-#   uv run bin/run_eval.py --suite generate_image
+# (which would exceed even $1.20). Six renders per full run; run only against a
+# disposable eval home because each successful tool call writes a media file:
+#   FERMIX_EVAL_HOME=~/.fermix-eval OPIK_PROJECT=fermix-eval \
+#     uv run bin/run_eval.py --suite generate_image --profile isolated_mutation \
+#     --confirm-daemon-isolated --confirm-isolated-env --confirm-cost
 suite: generate_image
+risk: isolated_mutation
+confirm_cost: true
 title: "Media generation — generate_image (create + edit) via the OpenAI backend"
 description: >
   Exercises the generate_image builtin end to end against the OpenAI image
