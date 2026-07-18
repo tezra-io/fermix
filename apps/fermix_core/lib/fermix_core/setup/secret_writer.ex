@@ -7,6 +7,7 @@ defmodule FermixCore.Setup.SecretWriter do
 
   @sentinel "@keyring"
   @default_profile "general"
+  @compiled_env Mix.env()
   @type secret_key :: atom()
   @type writer_error :: {:error, term()}
 
@@ -85,8 +86,19 @@ defmodule FermixCore.Setup.SecretWriter do
   end
 
   defp impl(opts) do
-    Keyword.get(opts, :impl) ||
-      Application.get_env(:fermix_core, :secret_writer, __MODULE__.Auto)
+    explicit = Keyword.get(opts, :impl) || Application.get_env(:fermix_core, :secret_writer)
+
+    cond do
+      explicit != nil ->
+        explicit
+
+      @compiled_env == :test ->
+        raise "no :secret_writer configured under test — config/test.exs must keep the " <>
+                "SecretWriterStub default so tests can never reach the OS keychain"
+
+      true ->
+        __MODULE__.Auto
+    end
   end
 
   defp format_reason({:helper_timeout, command, timeout}) do

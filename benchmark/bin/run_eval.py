@@ -214,6 +214,20 @@ def profile_policy_error(profiles: set[str], args) -> str | None:
     return None
 
 
+def dangerous_disposable_error(args) -> str | None:
+    if not args.dangerous:
+        return None
+    if os.environ.get("FERMIX_EVAL_DISPOSABLE") == "1":
+        return None
+    return ("--dangerous refuses to run unless FERMIX_EVAL_DISPOSABLE=1 attests a "
+            "disposable, throwaway environment (a VM or CI container with no "
+            "persistent state). Dangerous suites issue commands that cause real "
+            "harm if the sandbox fails; muscle-memory attestation flags on a dev "
+            "machine must not reach a destructive run. See "
+            "docs/design/MILESTONE_22_MULTI_OS_CI_AND_DISPOSABLE_E2E.md and "
+            "docs/design/MILESTONE_20_EVAL_VM_ISOLATION.md.")
+
+
 def selection_policy_error(chosen, args) -> str | None:
     cost_confirmed = getattr(args, "confirm_cost", False)
     if cost_confirmed:
@@ -1064,7 +1078,8 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--dangerous", action="store_true",
                     help="include suites from suites/dangerous/ — these exercise the sandbox by "
                          "issuing commands that cause real harm if the sandbox fails; only run in "
-                         "an isolated, disposable test environment, never on your dev machine")
+                         "an isolated, disposable test environment, never on your dev machine "
+                         "(requires FERMIX_EVAL_DISPOSABLE=1 to attest that environment)")
     ap.add_argument("--confirm-isolated-env", action="store_true",
                     help="attest that mutable/desktop/destructive profiles target a disposable environment")
     ap.add_argument(
@@ -1305,6 +1320,10 @@ def main(argv=None) -> int:
     policy_error = None if args.dry_run else profile_policy_error(profiles, args)
     if policy_error:
         print(f"profile policy refused selection: {policy_error}", file=sys.stderr)
+        return 2
+    disposable_error = dangerous_disposable_error(args)
+    if disposable_error:
+        print(disposable_error, file=sys.stderr)
         return 2
     if args.dangerous and not (args.suite or args.scenario or args.case):
         print("--dangerous requires --suite <name>, --scenario <id>, or --case <id>: "

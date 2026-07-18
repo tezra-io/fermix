@@ -66,8 +66,21 @@ defmodule FermixCore.Setup.SecretWriterTest do
     assert {:ok, "sk-test"} = SecretWriter.get(:openai_api_key)
   end
 
-  test "auto writer selects an available portable candidate" do
+  test "put raises under test rather than reaching the OS keychain when no writer is configured" do
+    # A leaked/cleared :secret_writer app env must never fall back to the Auto ->
+    # MacOS writer under test (the historical keychain-clobber path). setup's
+    # on_exit restores the stub default.
     Application.delete_env(:fermix_core, :secret_writer)
+
+    assert_raise RuntimeError, ~r/no :secret_writer configured under test/, fn ->
+      SecretWriter.put(:openai_api_key, "sk-test")
+    end
+  end
+
+  test "auto writer selects an available portable candidate" do
+    # Configure the Auto writer explicitly: under :test a missing :secret_writer
+    # now raises rather than silently falling back to Auto -> the OS keychain.
+    Application.put_env(:fermix_core, :secret_writer, SecretWriter.Auto)
 
     Application.put_env(:fermix_core, :secret_writer_candidates, [
       UnavailableCandidate,

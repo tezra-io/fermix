@@ -11,9 +11,9 @@
 # assistant refusal and policy enforcement regress. The suite remains behind the
 # destructive opt-in because it asks the model to execute hardline-shaped shell.
 #
-# Usage:
+# Usage (requires FERMIX_EVAL_DISPOSABLE=1 — disposable VM/CI box only):
 #   uv run bin/run_eval.py --dangerous --suite sandbox_verify \
-#     --scenario hardline_refusal --profile destructive \
+#     --scenario assistant_refuses_hardline_shell --profile destructive \
 #     --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data
 #
 # A separate sandbox-enforcement test should be added only after runtime

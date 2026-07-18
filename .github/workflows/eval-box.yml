@@ -1,0 +1,215 @@
+# The reusable disposable eval box (Milestone 22 §3.2): one recipe owns the
+# box anatomy — pinned in-box Opik, seeded disposable FERMIX_HOME, daemon boot
+# with bounded readiness, tier dispatch, report artifacts. Thin callers
+# (eval-nightly / eval-weekly) own only cadence and tier selection.
+#
+# Secrets never reach PR-triggered workflows: this runs only via workflow_call
+# from scheduled callers or manual workflow_dispatch.
+name: eval-box
+
+on:
+  workflow_call:
+    inputs:
+      tier:
+        description: "regression | capability | dangerous"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to evaluate (schedules run off main; dev is the active branch)"
+        type: string
+        default: dev
+      model:
+        description: "Candidate model — must differ from judge.model in benchmark/config.yaml"
+        type: string
+        default: gpt-5.6-luna
+    secrets:
+      OPENAI_API_KEY:
+        required: true
+      EVAL_JUDGE_API_KEY:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Eval tier"
+        required: true
+        type: choice
+        options: [regression, capability, dangerous]
+      ref:
+        description: "Git ref to evaluate"
+        type: string
+        default: dev
+      model:
+        description: "Candidate model — must differ from judge.model in benchmark/config.yaml"
+        type: string
+        default: gpt-5.6-luna
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-box
+  cancel-in-progress: false
+
+jobs:
+  box:
+    name: eval-box (${{ inputs.tier }})
+    runs-on: ubuntu-24.04
+    # Per-tier runaway backstop (M22 §3.2): a hung regression must not burn
+    # capability-sized wall-clock/tokens.
+    timeout-minutes: ${{ inputs.tier == 'capability' && 180 || inputs.tier == 'regression' && 60 || 30 }}
+    env:
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28"
+      TIER: ${{ inputs.tier }}
+      CANDIDATE_MODEL: ${{ inputs.model }}
+      # Leaf must contain 'eval' (seed_capability_home.py + harness guards).
+      # Sibling of the checkout, not inside it (the runner context is not
+      # available in job-level env, and the dangerous-tier rsync must never
+      # find its own target inside the source tree).
+      EVAL_HOME: ${{ github.workspace }}/../fermix-eval-ci
+      OPIK_PROJECT: fermix-eval-ci-${{ inputs.tier }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Cache deps and _build (dev env — distinct from the test-env CI cache)
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ runner.arch }}-mix-dev-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-mix-dev-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Restore capability leaderboard
+        if: inputs.tier == 'capability'
+        uses: actions/cache/restore@v4
+        with:
+          path: benchmark/reports/capability/leaderboard.json
+          key: capability-leaderboard-${{ github.run_id }}
+          restore-keys: |
+            capability-leaderboard-
+
+      - name: Opik up (pinned, in-box)
+        # No --wait: compose --wait fails on the exit-0 opik-minio-init one-shot
+        # (docker/compose#10596). wait_opik.sh below is the real readiness gate.
+        run: docker compose -f benchmark/ci/opik/docker-compose.yml up -d --quiet-pull
+
+      - name: Wait for the Opik API route the harness uses
+        run: benchmark/ci/wait_opik.sh
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      - name: Seed the disposable home and boot the daemon
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          FERMIX_CAP_HOME: ${{ env.EVAL_HOME }}
+          FERMIX_CAP_PROJECT: ${{ env.OPIK_PROJECT }}
+        run: |
+          set -euo pipefail
+          # Checker trials may commit inside the eval workspace; give git an identity.
+          git config --global user.name "fermix-eval-box"
+          git config --global user.email "eval-box@localhost"
+          mkdir -p "$EVAL_HOME"
+          seed_args="--provider openai --model ${CANDIDATE_MODEL}"
+          case "$TIER" in
+            regression)
+              # Behavioral repo-read cases expand __EVAL_REPO_ROOT__ to this
+              # checkout; host-readonly profiles skip the strict-sandbox check,
+              # so the checkout may sit in allowed_roots here (and only here).
+              seed_args="$seed_args --allow-root $GITHUB_WORKSPACE"
+              ;;
+            dangerous)
+              # run_eval's strict-profile preflight requires the disposable
+              # workspace to be a git snapshot at the SAME HEAD as this harness
+              # checkout (workspace_revision_error). actions/checkout is shallow,
+              # which git refuses to clone from — rsync the tree instead
+              # (.git included; _build/deps are gitignored so the tree stays clean).
+              rsync -a --exclude _build --exclude deps "$GITHUB_WORKSPACE/" "$EVAL_HOME/workspace/"
+              ;;
+          esac
+          FERMIX_CAP_SEED_ARGS="$seed_args" benchmark/bin/capability-daemon.sh up
+
+      - name: Tier — regression (host-safe-core, judged)
+        if: inputs.tier == 'regression'
+        working-directory: benchmark
+        env:
+          FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
+          EVAL_JUDGE_API_KEY: ${{ secrets.EVAL_JUDGE_API_KEY }}
+        run: |
+          set -euo pipefail
+          uv run bin/run_eval.py --check --judge
+          make dry
+          make regression
+
+      - name: Tier — capability (deterministic composite + judged axis)
+        if: inputs.tier == 'capability'
+        working-directory: benchmark
+        env:
+          FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
+          EVAL_JUDGE_API_KEY: ${{ secrets.EVAL_JUDGE_API_KEY }}
+          # True by construction on this box: the runner VM and the seeded
+          # FERMIX_HOME exist only for this run; no channels are configured;
+          # the sandbox is strict and home-scoped (M22 §3.2).
+          CONFIRM_DAEMON_ISOLATED: "1"
+          CONFIRM_ISOLATED_ENV: "1"
+          CONFIRM_COST: "1"
+        run: |
+          set -euo pipefail
+          make check
+          make estimate
+          make capability
+          make capability-judged
+
+      - name: Tier — dangerous (sandbox_verify on a disposable box)
+        if: inputs.tier == 'dangerous'
+        working-directory: benchmark
+        env:
+          FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
+          # The D5 guard: only a disposable, throwaway environment may run the
+          # dangerous suites. This box qualifies by construction.
+          FERMIX_EVAL_DISPOSABLE: "1"
+        run: |
+          set -euo pipefail
+          uv run bin/run_eval.py --check
+          uv run bin/run_eval.py --dangerous --suite sandbox_verify \
+            --scenario assistant_refuses_hardline_shell --profile destructive \
+            --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data
+
+      - name: Save capability leaderboard
+        if: inputs.tier == 'capability' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: benchmark/reports/capability/leaderboard.json
+          key: capability-leaderboard-${{ github.run_id }}
+
+      - name: Daemon down
+        if: always()
+        env:
+          FERMIX_CAP_HOME: ${{ env.EVAL_HOME }}
+        run: benchmark/bin/capability-daemon.sh down
+
+      - name: Daemon log tail (failure diagnostics)
+        if: failure()
+        run: tail -n 200 "${{ env.EVAL_HOME }}/daemon.log" || true
+
+      - name: Upload reports and daemon log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-${{ inputs.tier }}-${{ github.run_number }}
+          path: |
+            benchmark/reports/
+            ${{ env.EVAL_HOME }}/daemon.log
+          if-no-files-found: warn
+          retention-days: 30
