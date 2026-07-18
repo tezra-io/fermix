@@ -440,7 +440,15 @@ defmodule FermixCore.Providers.OpenAI.Codex do
       "ChatGPT account status or network stability."
   end
 
-  def transport_error_message(:timeout, _stage) do
+  def transport_error_message(:timeout, :before_response) do
+    "Codex request timed out before any response data arrived — either the " <>
+      "pool's TCP+TLS connect timeout fired, or the response never started " <>
+      "within the receive_timeout window. Zero response chunks were seen " <>
+      "(not stream starvation), so re-issuing the call cannot duplicate " <>
+      "output."
+  end
+
+  def transport_error_message(:timeout, :mid_stream) do
     "Codex stream had no data for the configured receive_timeout (between-chunk " <>
       "window; 120s at xhigh reasoning, 60s otherwise). Likely provider-side " <>
       "stream starvation — e.g. several concurrent Codex streams — or a network " <>

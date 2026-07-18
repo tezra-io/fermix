@@ -1,6 +1,7 @@
 defmodule FermixCore.Providers.TransientTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Transient
 
   @finch_pool_error %RuntimeError{
@@ -36,6 +37,44 @@ defmodule FermixCore.Providers.TransientTest do
       refute Transient.retryable?({:provider_transport_error, %{kind: :transport}})
       refute Transient.retryable?(%RuntimeError{message: "some other genuine bug"})
       refute Transient.retryable?(:weird)
+    end
+  end
+
+  describe "pre_response_timeout?/1" do
+    test "true only for a transport timeout that saw zero response data" do
+      assert Transient.pre_response_timeout?(
+               {:provider_transport_error, %{kind: :timeout, stage: :before_response}}
+             )
+    end
+
+    test "false for a mid-stream timeout (response data already flowed)" do
+      refute Transient.pre_response_timeout?(
+               {:provider_transport_error, %{kind: :timeout, stage: :mid_stream}}
+             )
+    end
+
+    test "false for an unmeasured timeout — a stage-less mint defaults to :unknown" do
+      # Buffered adapters pass no :stage; the constructor must not default
+      # them into the proven zero-data class.
+      error = ProviderError.transport(:anthropic, :messages, :timeout)
+
+      assert {:provider_transport_error, %{stage: :unknown}} = error
+      refute Transient.pre_response_timeout?(error)
+    end
+
+    test "false for other kinds, api errors, and unrelated failures" do
+      refute Transient.pre_response_timeout?(
+               {:provider_transport_error,
+                %{kind: :connection_unavailable, stage: :before_response}}
+             )
+
+      refute Transient.pre_response_timeout?(
+               {:provider_transport_error, %{kind: :transport_closed, stage: :before_response}}
+             )
+
+      refute Transient.pre_response_timeout?({:provider_error, %{kind: :timeout}})
+      refute Transient.pre_response_timeout?(@finch_pool_error)
+      refute Transient.pre_response_timeout?(:weird)
     end
   end
 
