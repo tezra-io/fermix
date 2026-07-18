@@ -16,8 +16,13 @@ Scheduled workflows execute the file on `main` but always **check out `dev`**.
 
 ## Box anatomy (what eval-box does)
 
-1. Pinned Opik up in-box (`opik/docker-compose.yml`, see `opik/README.md`),
-   probed via `wait_opik.sh` — the harness's own precondition route.
+1. Comet-hosted Opik over its API (operator decision 2026-07-18; the earlier
+   in-box docker stack is gone). The daemon exporter writes to
+   `https://www.comet.com/opik/api`, the harness reads
+   `…/opik/api/v1/private`, both authenticated with the `FERMIX_OPIK_API_KEY`
+   + `FERMIX_OPIK_WORKSPACE` secrets. Each tier gets its own project in the
+   workspace (`fermix-eval-ci-<tier>`). The local dev flow is untouched — it
+   still defaults to the unauthenticated `http://localhost:5173` Opik.
 2. Disposable `FERMIX_HOME` under the runner temp (leaf contains `eval`),
    seeded by `benchmark/bin/seed_capability_home.py` in **explicit mode**
    (`--provider openai --model <candidate>`): no keychain, no auth.json — the
@@ -28,7 +33,7 @@ Scheduled workflows execute the file on `main` but always **check out `dev`**.
    route through the channels Gateway queue; none are configured, so none poll).
 4. Tier-specific harness invocation, then reports + daemon log uploaded as the
    run artifact (30-day retention). Trace links inside reports point at the
-   box-local Opik and die with it — the report is the durable record.
+   hosted Comet workspace, so they stay live after the box dies.
 
 Tier-specific seeding: the regression tier adds `--allow-root $GITHUB_WORKSPACE`
 (behavioral repo-read cases expand `__EVAL_REPO_ROOT__` to the checkout;
@@ -43,6 +48,12 @@ strict preflight requires the workspace HEAD to match the harness checkout.
 - `EVAL_JUDGE_API_KEY` — the independent judge (may be the same OpenAI key
   *value*; independence comes from the judge **model**). The Makefile's
   keychain fallback for this key is macOS-only; CI must set the secret.
+- `FERMIX_OPIK_API_KEY` + `FERMIX_OPIK_WORKSPACE` — Comet-hosted Opik auth
+  for both the daemon exporter and the harness read side. Project names are
+  workflow config, not secrets (`fermix-eval-ci-<tier>`); a
+  `FERMIX_OPIK_PROJECT_NAME` secret is unused. Mind the hosted free-tier
+  span quota (~25k/month): nightly regression + weekly capability sit close
+  to it — check the workspace usage after the first weeks.
 
 **Model rule:** the candidate model (eval-box input `model`, default
 `gpt-5.6-luna`) must differ from `judge.model` in `benchmark/config.yaml`

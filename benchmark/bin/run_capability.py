@@ -451,7 +451,8 @@ def write_results_json(path, arm, config_id, k, threshold, outcomes) -> None:
 # --- Opik writeback ---------------------------------------------------------
 
 def write_opik(cfg, config_id, run_id, outcomes) -> str | None:
-    writer = ExperimentWriter(cfg.opik.base_url)
+    writer = ExperimentWriter(cfg.opik.base_url,
+                              api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     try:
         writer.create_dataset(DATASET, "Fermix capability tasks (ground-truth scored)")
         exp_id = stable_id(f"cap:{config_id}:{run_id}")
@@ -666,7 +667,8 @@ def preconditions(cfg, require_isolated: bool = False) -> list[str]:
     if problems:
         return problems
     try:
-        OpikClient(cfg.opik.base_url, cfg.opik.project).ping()
+        OpikClient(cfg.opik.base_url, cfg.opik.project,
+                          api_key=cfg.opik.api_key, workspace=cfg.opik.workspace).ping()
     except OpikError as exc:
         problems.append(f"Opik not reachable at {cfg.opik.base_url}: {exc}")
     ok, detail = driver.daemon_reachable(cfg)
@@ -815,7 +817,8 @@ def main(argv=None) -> int:
         print(f"  [dev] using local development daemon at {cfg.daemon.fermix_home}")
 
     run_id = now_utc().strftime("%Y%m%dT%H%M%SZ")
-    opik = OpikClient(cfg.opik.base_url, cfg.opik.project)
+    opik = OpikClient(cfg.opik.base_url, cfg.opik.project,
+                          api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
 
     print(f"capability eval · {len(cases)} task(s) × {trials} trial(s) · "
           f"judge={'on' if want_judge else 'off'} · axis={args.axis}")

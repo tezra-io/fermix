@@ -88,6 +88,10 @@ class OpikCfg:
     poll_timeout_s: int
     poll_interval_s: float
     ui_base: str
+    # Hosted (Comet cloud) auth — env-only (OPIK_API_KEY / OPIK_WORKSPACE),
+    # never from config.yaml; None for a local unauthenticated Opik.
+    api_key: str | None = None
+    workspace: str | None = None
 
 
 @dataclass
@@ -165,13 +169,17 @@ def load(skill_dir: str, path: str | None = None) -> Config:
         "opik.base_url")
     project = _nonempty_string(
         os.environ.get("OPIK_PROJECT", o.get("project", "fermix")), "opik.project")
-    ui_base = _nonempty_string(o.get("ui_base", "http://localhost:5173"), "opik.ui_base")
+    ui_base = _nonempty_string(
+        os.environ.get("OPIK_UI_BASE", o.get("ui_base", "http://localhost:5173")),
+        "opik.ui_base")
     opik = OpikCfg(
         base_url=base_url.rstrip("/"),
         project=project,
         poll_timeout_s=_positive_int(o.get("poll_timeout_s", 90), "opik.poll_timeout_s"),
         poll_interval_s=_positive_float(o.get("poll_interval_s", 2), "opik.poll_interval_s"),
         ui_base=ui_base.rstrip("/"),
+        api_key=os.environ.get("OPIK_API_KEY") or None,
+        workspace=os.environ.get("OPIK_WORKSPACE") or None,
     )
     backend = os.environ.get("EVAL_JUDGE_BACKEND", j.get("backend", "openai"))
     if backend not in ("openai", "none"):

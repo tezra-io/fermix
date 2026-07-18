@@ -450,7 +450,8 @@ def check(cfg, require_isolated: bool = False, require_strict: bool = False) -> 
         print(f"  [static] config declares eval-scoped sandbox roots{suffix}; "
               "running daemon state is unverified")
     ok = True
-    client = OpikClient(cfg.opik.base_url, cfg.opik.project)
+    client = OpikClient(cfg.opik.base_url, cfg.opik.project,
+                        api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     try:
         client.ping()
         print(f"  [ok] Opik reachable at {cfg.opik.base_url}")
@@ -492,7 +493,8 @@ def purge(cfg, run_id: str, confirmed: bool) -> int:
         print("--purge-run must be an eval run id like 20260715T151102Z01234567",
               file=sys.stderr)
         return 2
-    client = OpikClient(cfg.opik.base_url, cfg.opik.project)
+    client = OpikClient(cfg.opik.base_url, cfg.opik.project,
+                        api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     try:
         ids = client.eval_trace_ids_for_run(run_id)
     except OpikError as exc:
@@ -1272,7 +1274,8 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
           f"{skipped} operator skip(s), ~{nt + njudge} real turns "
           f"({nt} eval + {njudge} judge). These are real model calls and may be billed. "
           "Driving now...\n")
-    client = OpikClient(cfg.opik.base_url, cfg.opik.project)
+    client = OpikClient(cfg.opik.base_url, cfg.opik.project,
+                        api_key=cfg.opik.api_key, workspace=cfg.opik.workspace)
     run_id = new_run_id()
     started = now_utc()
     suite_results, skipped_required = _execute_jobs(

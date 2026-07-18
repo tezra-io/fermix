@@ -888,11 +888,12 @@ def test_purge_refuses_a_non_eval_project_before_constructing_a_client(monkeypat
 def test_purge_reports_a_possibly_partial_delete_failure(monkeypatch, capsys):
     cfg = SimpleNamespace(
         daemon=SimpleNamespace(fermix_home="~/.fermix-eval"),
-        opik=SimpleNamespace(base_url="http://localhost", project="fermix-eval"),
+        opik=SimpleNamespace(base_url="http://localhost", project="fermix-eval",
+                             api_key=None, workspace=None),
     )
 
     class FailingClient:
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             pass
 
         def eval_trace_ids_for_run(self, _run_id):
