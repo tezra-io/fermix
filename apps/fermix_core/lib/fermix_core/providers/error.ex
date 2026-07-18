@@ -213,14 +213,21 @@ defmodule FermixCore.Providers.Error do
   defp error_message(body) when is_map(body) do
     case error_object(body) do
       error when is_map(error) ->
-        string_value(error, "message", :message) || string_value(body, "message", :message)
+        string_value(error, "message", :message) || body_message(body)
 
       error when is_binary(error) ->
         error
 
       _other ->
-        string_value(body, "message", :message)
+        body_message(body)
     end
+  end
+
+  # Some backends (e.g. the ChatGPT Codex endpoint) return a bare top-level
+  # `{"detail": "..."}` with no nested `"error"` object — surface that string
+  # instead of collapsing to a bare "HTTP <status>".
+  defp body_message(body) do
+    string_value(body, "message", :message) || string_value(body, "detail", :detail)
   end
 
   # Unix-seconds reset time from an OpenAI/Codex usage-limit body, if present.

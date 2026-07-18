@@ -8,4 +8,9 @@ defmodule FermixCore.Introspection.WireTest do
       Wire.json_safe({:ok, "value"})
     end
   end
+
+  test "keeps booleans and nil JSON-native while stringifying other atoms" do
+    assert Wire.json_safe(%{ok: true, off: false, missing: nil, kind: :done}) ==
+             %{"ok" => true, "off" => false, "missing" => nil, "kind" => "done"}
+  end
 end

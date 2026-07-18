@@ -307,6 +307,25 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert error.auth_mode == :oauth
     end
 
+    test "surfaces a bare {\"detail\": ...} error body instead of a bare HTTP status" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(400, ~s({"detail":"Unsupported parameter: max_output_tokens"}))
+      end)
+
+      {:error, {:provider_error, error}} =
+        Codex.chat([%{role: "user", content: "x"}], [],
+          access_token: @jwt_with_sub,
+          model: "gpt-5",
+          base_url: "https://chatgpt.test/codex/responses",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        )
+
+      assert error.status == 400
+      assert error.message =~ "Unsupported parameter: max_output_tokens"
+    end
+
     test "provider telemetry includes the agent when supplied" do
       telemetry_id = "codex-provider-agent-#{System.unique_integer([:positive])}"
 
