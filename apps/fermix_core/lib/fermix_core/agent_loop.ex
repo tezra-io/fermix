@@ -27,6 +27,20 @@ defmodule FermixCore.AgentLoop do
 
   @max_iterations 25
 
+  # Bounded in-place recovery for a continuation call that failed before any
+  # response data arrived (`Transient.pre_response_timeout?/1` — a measured
+  # zero-chunk timeout: a connect/TLS stall, or a response that never started
+  # within the receive window). Unlike the route-level retry (first call only)
+  # or cron's whole-loop backoff (refuses once tools ran), this re-issues ONLY
+  # the failed LLM call: no tool replay, no provider switch, nothing emitted to
+  # re-emit. Two retries with 2s/4s backoff outlast the multi-second network
+  # blips of the connect-stall subclass; the first-byte-stall subclass costs a
+  # full receive window per attempt, so exhaustion is bounded at roughly three
+  # windows — accepted, since the alternative is failing a whole run (or turn)
+  # on one transient stall.
+  @continuation_retry_attempts 2
+  @continuation_retry_backoff_ms 2_000
+
   @typedoc """
   Channel-streaming events emitted through `stream_callback` (see
   docs/design/CHANNEL_STREAMING.md §5.1). The loop emits `:session_started`
@@ -74,7 +88,8 @@ defmodule FermixCore.AgentLoop do
           activity_callback: (term() -> any()) | nil,
           stream_callback: stream_callback() | nil,
           context: map(),
-          capability_registry: GenServer.server()
+          capability_registry: GenServer.server(),
+          retry_delay_fn: (non_neg_integer() -> any())
         ]
 
   @type loop_result :: %{
@@ -153,7 +168,8 @@ defmodule FermixCore.AgentLoop do
       context_tokens: 0,
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback),
-      stream_callback: Keyword.get(opts, :stream_callback)
+      stream_callback: Keyword.get(opts, :stream_callback),
+      retry_delay_fn: Keyword.get(opts, :retry_delay_fn, &Process.sleep/1)
     }
   end
 
@@ -442,6 +458,8 @@ defmodule FermixCore.AgentLoop do
       telemetry: failover_telemetry_meta(state)
     ]
 
+    opts = Keyword.put(opts, :retry_delay_fn, state.retry_delay_fn)
+
     # Cron opts out of the inner route-level retry (it owns its own
     # deadline-bounded outer backoff), so the two retry loops never stack.
     if Map.get(state.context, :route_transient_retry, true) do
@@ -561,9 +579,7 @@ defmodule FermixCore.AgentLoop do
     start = System.monotonic_time(:millisecond)
     emit_stream(state, {:iteration_started, state.iteration + 1})
 
-    emit_activity(state, :provider_start)
-
-    case state.adapter.continue(provider_state, tool_results, state.adapter_opts) do
+    case continue_with_retry(provider_state, tool_results, state) do
       {:ok, next_turn} ->
         emit_activity(state, :provider_response)
         duration_ms = System.monotonic_time(:millisecond) - start
@@ -581,6 +597,30 @@ defmodule FermixCore.AgentLoop do
         Logger.error("LLM continuation failed: #{inspect(reason)}")
         {:error, reason}
     end
+  end
+
+  # See @continuation_retry_attempts. Runs through Failover.run_chain — the
+  # shared bounded-recovery executor — pinned to the single route that answered
+  # the initial call, with failover disabled: a continuation never switches
+  # provider. Only the measured zero-data timeout class retries (buffered
+  # adapters mint stage :unknown and never match); every other error surfaces
+  # on the first failure exactly as before. `:provider_start` is emitted per
+  # attempt so a scheduled run's inactivity watchdog sees each retry as
+  # progress rather than one long silent window.
+  defp continue_with_retry(provider_state, tool_results, state) do
+    Failover.run_chain(
+      [{state.route_key, state.adapter_opts}],
+      fn _route ->
+        emit_activity(state, :provider_start)
+        state.adapter.continue(provider_state, tool_results, state.adapter_opts)
+      end,
+      eligible?: fn _reason -> false end,
+      retryable?: &Transient.pre_response_timeout?/1,
+      max_retries: @continuation_retry_attempts,
+      retry_base_delay_ms: @continuation_retry_backoff_ms,
+      retry_delay_fn: state.retry_delay_fn,
+      telemetry: failover_telemetry_meta(state)
+    )
   end
 
   defp execute_tool_calls(tool_calls, state) do

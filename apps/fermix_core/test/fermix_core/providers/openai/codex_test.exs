@@ -1023,9 +1023,13 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
           req_options: [plug: {Req.Test, __MODULE__}]
         )
 
+      # Zero chunks arrived, so this is the connect-phase/first-byte signature —
+      # the message must not claim between-chunk stream starvation (the 2026-07-17
+      # F1-job incident: a 5s connect stall labeled as a 60s receive_timeout).
       assert error.kind == :timeout
-      assert error.message =~ "no data for"
-      assert error.message =~ "receive_timeout"
+      assert error.stage == :before_response
+      assert error.message =~ "before any response data"
+      refute error.message =~ "between-chunk"
       refute error.message =~ "Lower reasoning_effort"
     end
 
@@ -1263,10 +1267,20 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       refute message =~ "reasoning_effort"
     end
 
-    test ":timeout describes stream starvation and the per-effort window" do
+    test ":timeout before any response data points at the connect phase, not starvation" do
+      message = Codex.transport_error_message(:timeout, :before_response)
+
+      assert message =~ "before any response data"
+      assert message =~ "connect"
+      refute message =~ "between-chunk"
+      refute message =~ "Lower reasoning_effort"
+    end
+
+    test ":timeout mid-stream describes stream starvation and the per-effort window" do
       message = Codex.transport_error_message(:timeout, :mid_stream)
 
       assert message =~ "no data for"
+      assert message =~ "between-chunk"
       assert message =~ "receive_timeout"
       refute message =~ "Lower reasoning_effort"
     end
