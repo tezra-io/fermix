@@ -33,7 +33,7 @@ defmodule FermixCore.Tools.WebFetch do
   @impl true
   def when_to_use,
     do:
-      "The readable text of one known static URL — not JS-rendered or interactive pages (use browser)."
+      "To read or verify a source you already have the URL for — fetch it rather than describing it from memory. Readable text of one known static URL; not JS-rendered or interactive pages (use browser)."
 
   @impl true
   def examples,
