@@ -124,16 +124,27 @@ def _annotate_completion(trace: dict, complete: bool, issues: list[str]) -> dict
 
 
 class OpikClient:
-    def __init__(self, base_url: str, project: str, timeout_s: float = 8.0):
+    def __init__(self, base_url: str, project: str, timeout_s: float = 8.0,
+                 api_key: str | None = None, workspace: str | None = None):
         self.base = base_url.rstrip("/")
         self.project = project
         self.timeout = timeout_s
+        self.api_key = api_key or None
+        self.workspace = workspace or None
+
+    def _headers(self, headers: dict) -> dict:
+        """Hosted Opik (Comet cloud) auth; a local unauthenticated Opik adds none."""
+        if self.api_key:
+            headers["authorization"] = self.api_key
+        if self.workspace:
+            headers["Comet-Workspace"] = self.workspace
+        return headers
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        req = urllib.request.Request(url, headers=self._headers({"Accept": "application/json"}))
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return json.load(resp)
@@ -145,7 +156,7 @@ class OpikClient:
     def _post(self, path: str, body: dict) -> int:
         req = urllib.request.Request(
             self.base + path, data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
+            headers=self._headers({"Content-Type": "application/json"}), method="POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:

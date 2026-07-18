@@ -55,15 +55,23 @@ def uuid7() -> str:
 
 
 class ExperimentWriter:
-    def __init__(self, base_url: str, timeout_s: float = 10.0):
+    def __init__(self, base_url: str, timeout_s: float = 10.0,
+                 api_key: str | None = None, workspace: str | None = None):
         self.base = base_url.rstrip("/")
         self.timeout = timeout_s
+        self.api_key = api_key or None
+        self.workspace = workspace or None
 
     def _request(self, method: str, path: str, body: dict | None = None) -> tuple[int, object]:
         data = json.dumps(body).encode() if body is not None else None
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        # Hosted Opik (Comet cloud) auth; a local unauthenticated Opik adds none.
+        if self.api_key:
+            headers["authorization"] = self.api_key
+        if self.workspace:
+            headers["Comet-Workspace"] = self.workspace
         req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"Content-Type": "application/json",
-                                              "Accept": "application/json"})
+                                     headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 raw = resp.read().decode(errors="replace")
