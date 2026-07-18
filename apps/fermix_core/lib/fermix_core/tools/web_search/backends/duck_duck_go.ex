@@ -35,7 +35,7 @@ defmodule FermixCore.Tools.WebSearch.Backends.DuckDuckGo do
   def search(_query, _opts), do: {:error, "invalid_query", %{}}
 
   defp post_search(request_options) do
-    case Req.post(@endpoint, request_options) do
+    case Support.request(:post, @endpoint, request_options) do
       {:ok, %{status: status, body: body}} when status in [202, 429] ->
         {:ok, %{status: status, body: body}}
 
@@ -51,20 +51,10 @@ defmodule FermixCore.Tools.WebSearch.Backends.DuckDuckGo do
   end
 
   defp request_options(context, query) do
-    context
-    |> base_request_options()
-    |> Keyword.put(:form, q: query)
-  end
-
-  defp base_request_options(context) do
-    [
-      retry: false,
-      receive_timeout: 15_000,
-      connect_options: [timeout: 3_000],
-      headers: [{"user-agent", user_agent()}]
-    ]
-    |> Keyword.merge(Map.get(context, :req_options, []))
-    |> Keyword.put(:redirect, false)
+    Support.request_options(context,
+      headers: [{"user-agent", user_agent()}],
+      form: [q: query]
+    )
   end
 
   defp parse_response(%{status: status}) when status in [202, 429] do

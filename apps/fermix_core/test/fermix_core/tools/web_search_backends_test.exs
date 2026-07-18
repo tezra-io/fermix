@@ -1,7 +1,10 @@
 defmodule FermixCore.Tools.WebSearchBackendsTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Tools.WebSearch
+  alias FermixCore.Tools.WebSearch.Backends.Support
 
   @context %{agent_name: "test_agent", conversation_key: :test}
 
@@ -289,6 +292,65 @@ defmodule FermixCore.Tools.WebSearchBackendsTest do
 
     # redirect: false → the 302 is surfaced, never followed to the leak target
     refute_received :redirect_followed
+  end
+
+  test "a stale-connection :closed is retried once instead of degrading" do
+    # Backends ride the shared FermixCore.Finch pool via Net.HttpClient, which
+    # retries a stale-socket :closed once on a fresh connection. An idle-closed
+    # keepalive socket must not degrade the search to DuckDuckGo when the
+    # backend itself is healthy (the "exa fails after an idle gap" class).
+    handler_id = attach_tool_telemetry()
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+    test_id = :"web_search_closed_retry_#{System.unique_integer([:positive])}"
+
+    Application.put_env(:fermix_core, :tools,
+      web_search: [backend: :exa, exa_api_key: "exa-secret"]
+    )
+
+    Req.Test.stub(test_id, fn conn ->
+      case Agent.get_and_update(attempts, &{&1, &1 + 1}) do
+        0 ->
+          Req.Test.transport_error(conn, :closed)
+
+        _retry ->
+          json_response(conn, %{
+            "results" => [
+              %{"title" => "Exa", "url" => "https://exa.example", "highlights" => ["recovered"]}
+            ]
+          })
+      end
+    end)
+
+    context =
+      Map.merge(@context, %{
+        req_options: [plug: {Req.Test, test_id}],
+        net_resolver: public_resolver()
+      })
+
+    {result, log} =
+      with_log(fn ->
+        assert {:ok, result} = WebSearch.execute(%{"query" => "fermix"}, context)
+        result
+      end)
+
+    assert result.success == true
+    assert_result(result, "Exa", "https://exa.example", "recovered")
+    assert log =~ "retrying once"
+
+    # Served by exa itself on the retry — no degrade to duckduckgo.
+    assert_receive {:telemetry, %{backend: "exa"} = meta}
+    refute Map.has_key?(meta, :degraded)
+    assert Agent.get(attempts, & &1) == 2
+    :telemetry.detach(handler_id)
+  end
+
+  test "Support.request/3 rejects :connect_options loudly on every path" do
+    # Req only raises on :finch + :connect_options on the real adapter path —
+    # a plug-stubbed test would stay green while production crashed. Guard the
+    # boundary so a reintroduced :connect_options fails identically everywhere.
+    assert_raise ArgumentError, ~r/finch_pools/, fn ->
+      Support.request(:post, "https://api.exa.ai/search", connect_options: [timeout: 3_000])
+    end
   end
 
   test "manual unknown backend names use the DuckDuckGo default" do
