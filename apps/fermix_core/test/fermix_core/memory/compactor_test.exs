@@ -113,7 +113,7 @@ defmodule FermixCore.Memory.CompactorTest do
       decoded = Jason.decode!(body)
 
       refute Map.has_key?(decoded, "tools")
-      assert decoded["max_tokens"] == 8192
+      assert decoded["max_tokens"] == 16_384
 
       Req.Test.json(conn, %{
         "model" => "claude-sonnet-4-6",
