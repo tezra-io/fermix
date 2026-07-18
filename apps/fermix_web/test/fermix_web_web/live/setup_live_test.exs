@@ -321,6 +321,17 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute card =~ "v0.1.0"
     end
 
+    # The Ready state requires an installed sidecar, and the installed-check
+    # resolves through Compux.Binary.target/0 — impossible on hosts compux
+    # ships no artifact for (e.g. the linux-aarch64 CI leg).
+    case Compux.Binary.target() do
+      {:ok, _target} ->
+        :ok
+
+      {:error, reason} ->
+        @tag skip: "compux sidecar unsupported on this host: #{inspect(reason)}"
+    end
+
     test "a ready computer-use sidecar card shows Ready without a registry health check",
          %{conn: conn} do
       checkout = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live-cu-ready")
