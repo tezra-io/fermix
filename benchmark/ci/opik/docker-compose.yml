@@ -168,7 +168,9 @@ services:
       timeout: 30s
       retries: 60
       start_period: 30s
-    mem_limit: 2560m
+    # 3g: the liquibase migration burst needs headroom beyond the JVM's
+    # MaxRAMPercentage heap (metaspace/threads/direct buffers).
+    mem_limit: 3g
     depends_on:
       opik-mysql:
         condition: service_healthy
