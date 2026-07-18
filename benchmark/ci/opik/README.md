@@ -15,7 +15,7 @@ adaptation of the upstream `comet-ml/opik` self-hosted compose. Every image is
 
 CI-lean deltas vs a persistent local stack: no volumes (the box is disposable;
 report artifacts are the durable record), no restart policies (a crash fails
-the job loudly), `mem_limit` on every service (worst-case sum ≈ 9.3 GB on a
+the job loudly), `mem_limit` on every service (worst-case sum ≈ 9.8 GB on a
 16 GB runner, leaving room for the BEAM daemon + build), and no external nginx
 config volume (the frontend image generates its config from `NGINX_PORT` at
 start).

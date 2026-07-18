@@ -62,13 +62,16 @@ jobs:
       OTP_VERSION: "28"
       TIER: ${{ inputs.tier }}
       CANDIDATE_MODEL: ${{ inputs.model }}
-      # Leaf must contain 'eval' (seed_capability_home.py + harness guards).
-      # Sibling of the checkout, not inside it (the runner context is not
-      # available in job-level env, and the dangerous-tier rsync must never
-      # find its own target inside the source tree).
-      EVAL_HOME: ${{ github.workspace }}/../fermix-eval-ci
       OPIK_PROJECT: fermix-eval-ci-${{ inputs.tier }}
     steps:
+      - name: Resolve the disposable eval home
+        # Absolute with no '..' (upload-artifact@v4 rejects parent-relative
+        # patterns), outside the checkout (the dangerous-tier rsync must never
+        # find its target inside the source tree), leaf contains 'eval'
+        # (seeder + harness guards). runner.temp is unavailable in job-level
+        # env, hence a step writing GITHUB_ENV.
+        run: echo "EVAL_HOME=$RUNNER_TEMP/fermix-eval-ci" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -105,7 +108,17 @@ jobs:
         run: docker compose -f benchmark/ci/opik/docker-compose.yml up -d --quiet-pull
 
       - name: Wait for the Opik API route the harness uses
+        env:
+          # Cold chain on a 4 vCPU runner: stores healthy -> liquibase
+          # migrations -> backend -> frontend. 180s proved too tight live.
+          OPIK_READY_TIMEOUT: "420"
         run: benchmark/ci/wait_opik.sh
+
+      - name: Opik diagnostics (bring-up failure)
+        if: failure()
+        run: |
+          docker compose -f benchmark/ci/opik/docker-compose.yml ps -a
+          docker compose -f benchmark/ci/opik/docker-compose.yml logs --tail 80 opik-backend opik-clickhouse opik-frontend opik-mysql
 
       - name: Fetch deps
         run: mix deps.get
