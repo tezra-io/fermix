@@ -1,7 +1,8 @@
 suite: cap_response_quality
+risk: host_readonly
 title: "Capability — response quality / taste (judge-scored, SOFT axis)"
 # SOFT axis: the runner EXCLUDES this suite from the correctness sweep (`make capability`,
-# `make capability-judged`) so its noisy 0..1 judge scores never fold into task-success or
+# default `make capability`) so its noisy 0..1 judge scores never fold into task-success or
 # share the capability tasks_hash. Run it deliberately on its own axis:
 #   uv run bin/run_capability.py --suite cap_response_quality --judge --threshold 0.5
 soft: true

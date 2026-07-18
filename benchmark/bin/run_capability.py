@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pyyaml>=6,<7"]
+# dependencies = ["pyyaml>=6,<7", "certifi"]
 # ///
 """Fermix capability eval — score the model the dev daemon currently serves.
 
@@ -17,7 +17,7 @@ Each run auto-detects the served model from the trace and adds a row; the
 leaderboard re-ranks. See SKILL.md.
 
 Exit: 0 ok · 2 usage/selection · 3 preconditions (Opik or daemon down) ·
-4 usage limit hit mid-sweep (aborted at a known pointer, nothing written).
+4 incomplete sweep (usage limit or judge failure; no leaderboard row written).
 """
 from __future__ import annotations
 
@@ -26,6 +26,8 @@ import hashlib
 import os
 import re
 import sys
+import time
+import tomllib
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -35,10 +37,10 @@ SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 from evallib import (aggregate, checker, config as cfgmod, driver, grade, judge, leaderboard,
-                     safe_rm, scoring, uplift)
+                     scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
 from evallib.opik import OpikClient, OpikError
-from evallib.suites import SuiteError, load_all
+from evallib.suites import UNCLASSIFIED_RISK, SuiteError, load_all
 
 # Negative "must-not" gates: a failure here is a safety violation that zeroes the
 # task regardless of answer correctness (§4 hard gate).
@@ -65,9 +67,9 @@ def _checker_fingerprint(case) -> str:
     digest = "no-script"
     if script:
         try:
-            with open(os.path.join(SKILL_DIR, script), "rb") as fh:
+            with open(checker.resolve_script(SKILL_DIR, script), "rb") as fh:
                 digest = hashlib.sha256(fh.read()).hexdigest()[:12]
-        except OSError:
+        except (checker.CheckerBoundaryError, OSError):
             pass
     return f"{script}:{case.checker_spec.get('mode')}:{case.checker_spec.get('seed')}:{digest}"
 
@@ -110,6 +112,22 @@ class TaskOutcome:
     models: list[str]                # main-agent models seen (config detection)
 
 
+class JudgeUnavailable(RuntimeError):
+    """A required judge result was not gradeable; the sweep must stay incomplete."""
+
+    def __init__(self, case_id: str, error: str):
+        super().__init__(error)
+        self.case_id = case_id
+        self.error = error
+        self.suite = None
+        self.trial = None
+
+    def locate(self, suite: str, case_id: str, trial: int) -> None:
+        self.suite = suite
+        self.case_id = case_id
+        self.trial = trial
+
+
 # --- selection --------------------------------------------------------------
 
 def capability_cases(suites, want_suites, want_tags, max_tasks, want_judge):
@@ -140,13 +158,38 @@ def capability_cases(suites, want_suites, want_tags, max_tasks, want_judge):
     return (out[:max_tasks] if max_tasks else out), skipped
 
 
+def _capability_risk_error(cases, args) -> str | None:
+    risks = {scenario.risk for _suite, scenario, _case in cases}
+    if UNCLASSIFIED_RISK in risks:
+        return "every capability scenario must declare an execution risk"
+    unsupported = risks & {
+        "private_account_read", "external_write", "desktop_input", "destructive"}
+    if unsupported:
+        names = ", ".join(sorted(unsupported))
+        return (f"capability runner refuses high-impact risk(s) {names}; use the "
+                "behavioral runner's named, confirmation-gated workflow")
+    if _capability_requires_isolated_home(cases) and not args.confirm_isolated_env:
+        return ("isolated_mutation and checker-backed capability tasks require "
+                "--confirm-isolated-env")
+    if _capability_requires_cost_confirmation(cases) and not args.confirm_cost:
+        return "expensive capability tasks require --confirm-cost"
+    return None
+
+
+def _independent_judge_error(cfg, want_judge: bool) -> str | None:
+    if not want_judge:
+        return None
+    return judge.precondition_error(cfg)
+
+
 # --- one trial / one task ---------------------------------------------------
 
-def _safety_ok(trace, spans, expect) -> bool:
+def _safety_ok(trace, spans, expect, elapsed_ms: float) -> bool:
     relevant = {k: expect[k] for k in SAFETY_GATES if k in expect}
     if not relevant:
         return True
-    return all(g.passed for g in grade.grade(trace, spans, relevant))
+    gates = grade.grade(trace, spans, relevant, elapsed_ms=elapsed_ms)
+    return all(gate.passed for gate in gates if gate.key in relevant)
 
 
 def _provenance_ok(requires_tools, tool_names) -> bool:
@@ -156,15 +199,22 @@ def _provenance_ok(requires_tools, tool_names) -> bool:
     return not requires_tools or bool(set(requires_tools) & set(tool_names))
 
 
-def _task_success(cfg, case, reply, want_judge, tag) -> tuple[float, str]:
+def _gradeable(view) -> bool:
+    return view.trace_complete and view.telemetry_complete
+
+
+def _task_success(cfg, case, reply, want_judge, tag,
+                  candidate_routes) -> tuple[float, str]:
     if case.score_spec:
         s = scoring.score_answer(reply, case.score_spec)
         return s.score, s.detail
     if case.rubric and want_judge:
-        jr = judge.judge_case(cfg, case.turns[-1].query, reply, case.rubric, tag)
+        jr = judge.judge_case(
+            cfg, case.turns[-1].query, reply, case.rubric, tag,
+            candidate_routes=candidate_routes)
         if jr.evaluated and jr.score is not None:
             return jr.score, f"judge {jr.score:.2f}: {jr.rationale[:60]}"
-        return 0.0, f"judge unavailable: {jr.error}"
+        raise JudgeUnavailable(case.id, jr.error or "judge result was not gradeable")
     return 0.0, "no score_spec and judge off (skip-scored 0)"
 
 
@@ -194,18 +244,27 @@ def _capture_turn(cfg, opik, session, query, timeout_ms, label) -> _Captured:
         # 10s clock-skew slack (daemon vs harness clock), mirroring run_eval; the
         # unique per-trial session already prevents grabbing a stale trace.
         after = res.sent_at - timedelta(seconds=10)
+        settle_started = time.monotonic()
         hit = opik.poll_for_turn(used_session, query, after, set(),
                                  cfg.opik.poll_timeout_s, cfg.opik.poll_interval_s)
         if hit is None:
-            return _Captured("no_trace" if res.ok else res.status, None, None, None, res.elapsed_ms)
+            elapsed_ms = driver.settled_elapsed_ms(res, settle_started)
+            return _Captured(
+                "no_trace" if res.ok else res.status, None, None, None, elapsed_ms)
         if res.status == "timeout":
             print(f"    · {label}: CLI wait elapsed; graded from the completed server-side "
                   f"trace (latency, not a failure)", file=sys.stderr)
         trace, spans = opik.await_complete(hit)
-        return _Captured("graded", grade.TurnView.build(trace, spans), trace, spans, res.elapsed_ms)
+        elapsed_ms = driver.settled_elapsed_ms(res, settle_started)
+        view = grade.TurnView.build(trace, spans, elapsed_ms=elapsed_ms)
+        incomplete = not _gradeable(view) or driver.is_usage_limit_reply(view.reply)
+        if incomplete:
+            return _Captured("incomplete", view, trace, spans, elapsed_ms)
+        return _Captured("graded", view, trace, spans, elapsed_ms)
     except OpikError as exc:
         print(f"    ! opik read failed for {label}: {exc}", file=sys.stderr)
-        return _Captured("opik_error", None, None, None, res.elapsed_ms)
+        elapsed_ms = driver.settled_elapsed_ms(res, settle_started)
+        return _Captured("opik_error", None, None, None, elapsed_ms)
 
 
 def _models_of(view) -> list[str]:
@@ -214,14 +273,29 @@ def _models_of(view) -> list[str]:
             for p, m, e in zip(view.main_providers, view.main_models, view.main_efforts)]
 
 
-def _fail_trial(case_id, cap) -> tuple[aggregate.TrialResult, None, list]:
-    return (aggregate.score_trial(case_id, task_success=0.0, safety_ok=True, cost=0.0,
-            duration_ms=cap.elapsed_ms, tokens=0, tool_calls=0, status=cap.status), None, [])
+def _candidate_routes(view) -> list[dict]:
+    return [
+        {"provider": provider, "model": model, "reasoning_effort": effort}
+        for provider, model, effort in zip(
+            view.main_providers, view.main_models, view.main_efforts)
+    ]
+
+
+def _fail_trial(case, cap) -> tuple[aggregate.TrialResult, None, list]:
+    safety_ok = True
+    if cap.trace is not None and cap.spans is not None:
+        safety_ok = _safety_ok(cap.trace, cap.spans, case.expect, cap.elapsed_ms)
+    view = cap.view
+    return (aggregate.score_trial(
+        case.id, task_success=0.0, safety_ok=safety_ok,
+        cost=view.cost if view else 0.0, duration_ms=cap.elapsed_ms,
+        tokens=view.tokens if view else 0,
+        tool_calls=len(view.tool_spans) if view else 0, status=cap.status), None, [])
 
 
 def _score_trial(case, cap, succ) -> tuple[aggregate.TrialResult, str | None, list]:
     view = cap.view
-    ok = _safety_ok(cap.trace, cap.spans, case.expect)
+    ok = _safety_ok(cap.trace, cap.spans, case.expect, cap.elapsed_ms)
     tr = aggregate.score_trial(case.id, task_success=succ, safety_ok=ok, cost=view.cost,
         duration_ms=cap.elapsed_ms, tokens=view.tokens, tool_calls=len(view.tool_spans),
         status=view.status, trace_id=cap.trace.get("id"))
@@ -246,26 +320,29 @@ def _xsession_subject(s_name, case_id, run_id, i) -> str:
     return f"ref-{h}"
 
 
-def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge):
+def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
+                    cleanup_root, want_judge):
     session = sess("e2e-cap", run_id, s.name, case.id, f"t{i}")
-    query, scoped = case.turns[-1].query, None
-    if is_checker:
-        # fresh per-trial scoped dir under the agent's sandbox; the absolute `{ws}`
-        # resolves under workspace_root in ANY sandbox mode.
-        scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i)
-        checker.seed_workspace(scoped, fixtures_dir)
-        query = query.replace("{ws}", scoped)
+    query = case.turns[-1].query
+    scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i) if is_checker else None
     try:
+        if is_checker:
+            # Fresh scoring dir under the conventional capability workspace. This
+            # is not containment; the disposable daemon owns the broader sandbox.
+            checker.seed_workspace(scoped, SKILL_DIR, fixture_path, cleanup_root)
+            query = query.replace("{ws}", scoped)
         cap = _capture_turn(cfg, opik, session, query, case.timeout_ms, f"{case.id} t{i}")
-        if cap.view is None:
-            return _fail_trial(case.id, cap)
+        if cap.status != "graded" or cap.view is None:
+            return _fail_trial(case, cap)
         if is_checker:
             cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, cap.view.reply)
             if cr.error:
                 print(f"    ! checker error {case.id} t{i}: {cr.error}", file=sys.stderr)
             succ = cr.score
         else:
-            succ, _detail = _task_success(cfg, case, cap.view.reply, want_judge, session)
+            succ, _detail = _task_success(
+                cfg, case, cap.view.reply, want_judge, session,
+                _candidate_routes(cap.view))
         # Tool-provenance gate: a task that DECLARES required tools scores 0 unless ≥1
         # fired — a right answer reached WITHOUT the tool is parametric recall, not tool
         # use, and earns no credit. This is what makes uplift vs a tool-less arm real.
@@ -275,11 +352,8 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
             succ = 0.0
         return _score_trial(case, cap, succ)
     finally:
-        if scoped:                       # always clean the seeded dir (SafeRm-guarded)
-            try:
-                checker.teardown_workspace(cfg.daemon.fermix_home, scoped)
-            except safe_rm.SafeRmError as exc:
-                print(f"    ! teardown refused for {case.id} t{i}: {exc}", file=sys.stderr)
+        if scoped and os.path.isdir(scoped):  # always clean full or partial seeds
+            checker.teardown_workspace(cleanup_root, scoped)
 
 
 def _cross_session_trial(cfg, opik, s, case, run_id, i):
@@ -296,21 +370,25 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i):
     sess_b = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "recall")
 
     store = _capture_turn(cfg, opik, sess_a, store_q, case.timeout_ms, f"{case.id} t{i} store")
-    if store.status in ("not_running", "crashed"):
-        return _fail_trial(case.id, store)   # infra failure on store → recall is meaningless
+    if store.status != "graded" or store.view is None:
+        return _fail_trial(case, store)   # infra failure on store → recall is meaningless
     cap = _capture_turn(cfg, opik, sess_b, recall_q, case.timeout_ms, f"{case.id} t{i} recall")
-    if cap.view is None:
-        return _fail_trial(case.id, cap)
+    if cap.status != "graded" or cap.view is None:
+        return _fail_trial(case, cap)
     spec = {**case.score_spec, "expected": str(case.score_spec["expected"]).replace("{token}", token)}
     succ = scoring.score_answer(cap.view.reply, spec).score
+    if not _provenance_ok(case.requires_tools, cap.view.tool_names):
+        print(f"    · {case.id} t{i} recall: no required tool {case.requires_tools} fired "
+              f"(ran={sorted(set(cap.view.tool_names))}) — provenance fail", file=sys.stderr)
+        succ = 0.0
     return _score_trial(case, cap, succ)
 
 
 def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> TaskOutcome:
     is_checker = case.checker_spec is not None
     task_key = f"{s.name}-{case.id}"
-    fixtures_dir = (os.path.join(SKILL_DIR, case.checker_spec["seed"])
-                    if is_checker and case.checker_spec.get("seed") else None)
+    fixture_path = case.checker_spec.get("seed") if is_checker else None
+    cleanup_root = checker.eval_root(cfg.daemon.fermix_home) if is_checker else None
     results: list[aggregate.TrialResult] = []
     trial_traces: list[tuple[str, float]] = []
     models: list[str] = []
@@ -322,9 +400,13 @@ def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> Ta
                 tr, trace_id, tmodels = _cross_session_trial(cfg, opik, s, case, run_id, i)
             else:
                 tr, trace_id, tmodels = _standard_trial(
-                    cfg, opik, s, case, run_id, i, is_checker, task_key, fixtures_dir, want_judge)
+                    cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
+                    cleanup_root, want_judge)
         except driver.UsageLimitHit as hit:
             hit.locate(s.name, case.id, i)   # stamp the resume pointer, then abort the sweep
+            raise
+        except JudgeUnavailable as unavailable:
+            unavailable.locate(s.name, case.id, i)
             raise
         results.append(tr)
         models += tmodels
@@ -333,10 +415,7 @@ def run_task(cfg, opik, s, case, trials, k, threshold, run_id, want_judge) -> Ta
             repr_trace_id = repr_trace_id or trace_id
 
     if is_checker:                       # drop the now-empty eval/<task> parent
-        try:
-            checker.teardown_task(cfg.daemon.fermix_home, task_key)
-        except safe_rm.SafeRmError as exc:
-            print(f"    ! task teardown refused for {case.id}: {exc}", file=sys.stderr)
+        checker.teardown_task(cleanup_root, task_key)
 
     stats = aggregate.aggregate_task(results, k=k, threshold=threshold)
     method = (f"checker:{os.path.basename(case.checker_spec['script'])}" if is_checker
@@ -415,7 +494,7 @@ def _detect_config_id(arg_id, all_models) -> str:
 
 def _abort_usage_limit(hit, done: int, total: int) -> int:
     """Stop the sweep cleanly on a usage limit. Reports where it stopped (the pointer
-    to resume from) and writes NOTHING — a partial composite would overwrite the
+    to resume from) and writes no leaderboard row — a partial composite would overwrite the
     model's real leaderboard row, and scoring the limit-blocked turns would count
     Fermix's own limit as task failures. Re-run once the limit resets."""
     where = f"{hit.suite}/{hit.case_id} (trial {hit.trial})" if hit.suite else "a task"
@@ -428,20 +507,160 @@ def _abort_usage_limit(hit, done: int, total: int) -> int:
               f"of backoff — giving up.", file=sys.stderr)
     print(f"   {done}/{total} task(s) scored before the limit. Leaderboard NOT written — "
           f"a partial row would overwrite the model's real score.", file=sys.stderr)
-    print("   Resume: wait longer for the limit to reset, then re-run the same command "
-          "(nothing was persisted, so it starts fresh from the top).", file=sys.stderr)
+    print("   Resume: wait for the limit to reset, then re-run the same command. "
+          "Completed turns, traces, memory, or tool effects may remain; unique run/trial "
+          "ids prevent them from being mistaken for the rerun.", file=sys.stderr)
     return 4
 
 
-def preconditions(cfg) -> list[str]:
-    problems = []
+def _abort_judge_unavailable(unavailable, done: int, total: int) -> int:
+    where = (f"{unavailable.suite}/{unavailable.case_id} (trial {unavailable.trial})"
+             if unavailable.suite else unavailable.case_id)
+    print(f"\n⛔ required judge result unavailable at {where}.", file=sys.stderr)
+    print(f"   Judge error: {unavailable.error}", file=sys.stderr)
+    print(f"   {done}/{total} task(s) scored before judging became incomplete. "
+          "Leaderboard NOT written — judge infrastructure must not become a "
+          "candidate score of zero.", file=sys.stderr)
+    return 4
+
+
+def _path_within(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
+
+
+def _capability_home_error(
+        fermix_home: str, require_isolated: bool = False) -> str | None:
+    resolved = os.path.realpath(os.path.expanduser(fermix_home))
+    production = os.path.realpath(os.path.expanduser("~/.fermix"))
+    dev = os.path.realpath(os.path.expanduser("~/.fermix-dev"))
+    home = os.path.realpath(os.path.expanduser("~"))
+    if resolved in {production, home}:
+        return f"refusing production/non-daemon FERMIX_HOME: {resolved}"
+    if resolved == dev:
+        if require_isolated:
+            return ("selected capability tasks mutate state and cannot use ~/.fermix-dev; "
+                    "set FERMIX_EVAL_HOME to a disposable eval/e2e home")
+        return None
+    leaf = os.path.basename(resolved).lower()
+    if "eval" not in leaf and "e2e" not in leaf:
+        return ("safe capability runs use ~/.fermix-dev; isolated runs require a "
+                "dedicated path named with 'eval' or 'e2e'")
+    return None
+
+
+def _capability_project_error(
+        project: str, require_isolated: bool = False) -> str | None:
+    if not isinstance(project, str) or not project.strip():
+        return "Opik project must be a non-empty name"
+    name = project.strip().lower()
+    if name == "fermix-dev":
+        if require_isolated:
+            return ("isolated capability runs require an eval/e2e Opik project, "
+                    "not fermix-dev")
+        return None
+    if "eval" not in name and "e2e" not in name:
+        return f"refusing production or unknown Opik project: {project!r}"
+    return None
+
+
+def _capability_config_requires_isolation(cfg) -> bool:
+    configured_home = os.path.realpath(os.path.expanduser(cfg.daemon.fermix_home))
+    dev_home = os.path.realpath(os.path.expanduser("~/.fermix-dev"))
+    project = cfg.opik.project.strip().lower()
+    return configured_home != dev_home or project != "fermix-dev"
+
+
+def _capability_sandbox_error(
+        fermix_home: str, require_isolated: bool = False) -> str | None:
+    home = os.path.realpath(os.path.expanduser(fermix_home))
+    config_path = os.path.join(home, "config.toml")
+    try:
+        with open(config_path, "rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return f"cannot read capability daemon config at {config_path}: {exc}"
+    sandbox = raw.get("sandbox", {})
+    if not isinstance(sandbox, dict):
+        return "capability daemon [sandbox] config must be a table"
+    if not require_isolated:
+        return None
+    if sandbox.get("mode", "standard") != "strict":
+        return 'capability daemon must declare [sandbox] mode = "strict"'
+    workspace_raw = sandbox.get("workspace_root", os.path.join(home, "workspace"))
+    if not isinstance(workspace_raw, str) or not workspace_raw.strip():
+        return "capability daemon sandbox.workspace_root must be a non-empty path"
+    expanded = os.path.expandvars(os.path.expanduser(workspace_raw))
+    if not os.path.isabs(expanded):
+        return "capability daemon sandbox.workspace_root must be absolute"
+    workspace = os.path.realpath(expanded)
+    if workspace == home or not _path_within(workspace, home):
+        return f"capability workspace must stay below its dedicated FERMIX_HOME: {workspace}"
+    expected_workspace = os.path.realpath(os.path.join(home, "workspace"))
+    if workspace != expected_workspace:
+        return ("capability daemon sandbox.workspace_root must be the conventional "
+                f"checker root {expected_workspace}; got {workspace}")
+    git_metadata = os.path.realpath(os.path.join(workspace, ".git"))
+    if (not os.path.isdir(workspace) or not os.path.isdir(git_metadata)
+            or not _path_within(git_metadata, workspace)):
+        return ("capability workspace must contain a disposable repository snapshot "
+                f"with its own .git metadata: {workspace}")
+    allowed = sandbox.get("allowed_roots", [])
+    if not isinstance(allowed, list) or not all(isinstance(item, str) for item in allowed):
+        return "capability daemon sandbox.allowed_roots must be a list of paths"
+    escaped = [
+        os.path.realpath(os.path.expandvars(os.path.expanduser(item)))
+        for item in allowed
+        if not _path_within(
+            os.path.realpath(os.path.expandvars(os.path.expanduser(item))), home)
+    ]
+    if escaped:
+        return f"capability daemon allowed_roots escape its disposable home: {escaped}"
+    return None
+
+
+def _capability_requires_isolated_home(cases) -> bool:
+    return any(
+        scenario.risk == "isolated_mutation" or case.checker_spec is not None
+        for _suite, scenario, case in cases)
+
+
+def _capability_requires_cost_confirmation(cases) -> bool:
+    return any(
+        scenario.risk == "expensive" or scenario.confirm_cost
+        for _suite, scenario, _case in cases)
+
+
+def _execution_attestation_error(args, require_isolated: bool) -> str | None:
+    if not require_isolated:
+        return None
+    if not args.confirm_daemon_isolated:
+        return ("execution requires --confirm-daemon-isolated: attest that the running daemon "
+                "was restarted against this disposable home/project, with strict sandboxing, "
+                "no channels/realtime, and headless browser")
+    return None
+
+
+def preconditions(cfg, require_isolated: bool = False) -> list[str]:
+    problems = [
+        _capability_home_error(cfg.daemon.fermix_home, require_isolated),
+        _capability_project_error(cfg.opik.project, require_isolated),
+        _capability_sandbox_error(cfg.daemon.fermix_home, require_isolated),
+    ]
+    problems = [problem for problem in problems if problem]
+    if problems:
+        return problems
     try:
         OpikClient(cfg.opik.base_url, cfg.opik.project).ping()
     except OpikError as exc:
         problems.append(f"Opik not reachable at {cfg.opik.base_url}: {exc}")
     ok, detail = driver.daemon_reachable(cfg)
     if not ok:
-        problems.append(f"dev daemon not reachable (FERMIX_HOME={cfg.daemon.fermix_home}): {detail}")
+        problems.append(
+            f"capability daemon not reachable "
+            f"(FERMIX_HOME={cfg.daemon.fermix_home}): {detail}")
     return problems
 
 
@@ -455,7 +674,8 @@ def build_args(argv):
     p.add_argument("--judge", action="store_true", help="enable LLM judge for rubric-only tasks")
     p.add_argument("--config-id", help="override config label (default: auto-detect served model)")
     p.add_argument("--axis", choices=("tokens", "cost"), default="tokens", help="efficiency axis")
-    p.add_argument("--max-tasks", type=int, default=None, help="cap task count (bound spend)")
+    p.add_argument("--max-tasks", type=int, default=None,
+                   help="limit task count (not a dollar/spend cap)")
     p.add_argument("--candidates", action="store_true",
                    help="also load UNVALIDATED hard-tier drafts under suites/capability/candidates/ "
                         "(pair with --suite <name> to validate one in isolation)")
@@ -467,6 +687,21 @@ def build_args(argv):
     p.add_argument("--rank-only", action="store_true", help="re-render the leaderboard, drive nothing")
     p.add_argument("--estimate", action="store_true", help="print the turn-count/cost plan and exit")
     p.add_argument("--check", action="store_true", help="preconditions only")
+    p.add_argument(
+        "--confirm-daemon-isolated",
+        action="store_true",
+        help=("for isolated_mutation tasks, attest the reachable daemon was restarted "
+              "against the disposable eval home/project with strict sandboxing, no "
+              "channels/realtime, and a headless browser"),
+    )
+    p.add_argument(
+        "--confirm-isolated-env", action="store_true",
+        help="attest isolated_mutation tasks target the disposable capability home/workspace",
+    )
+    p.add_argument(
+        "--confirm-cost", action="store_true",
+        help="acknowledge expensive capability tasks may spawn multiple billed calls",
+    )
     return p.parse_args(argv)
 
 
@@ -480,9 +715,18 @@ def main(argv=None) -> int:
         print(leaderboard.render_md(store, axis=args.axis))
         return 0
 
-    problems = preconditions(cfg)
-    if args.check or problems:
-        print("preconditions:" + ("\n  - " + "\n  - ".join(problems) if problems else " all OK ✓"))
+    if args.check:
+        require_isolated = _capability_config_requires_isolation(cfg)
+        problems = preconditions(cfg, require_isolated=require_isolated)
+        judge_problem = _independent_judge_error(
+            cfg, args.judge or cfg.judge.enabled)
+        if judge_problem:
+            problems.append(f"judge: {judge_problem}")
+        if problems:
+            print("preconditions:\n  - " + "\n  - ".join(problems))
+        else:
+            environment = "isolated" if require_isolated else "development"
+            print(f"preconditions: {environment} daemon config and reachability OK")
         return 3 if problems else 0
 
     if not 0 < args.threshold <= 1:
@@ -492,16 +736,12 @@ def main(argv=None) -> int:
     trials = max(1, args.trials)
     k = args.k or trials
     want_judge = args.judge or cfg.judge.enabled
-    if want_judge and cfg.judge.backend == "fermix":
-        print("warning: judge backend is 'fermix' — the judge IS the model under test "
-              "(circular for a fair ranking). Set EVAL_JUDGE_BACKEND=openai + "
-              "EVAL_JUDGE_API_KEY for an independent judge.", file=sys.stderr)
 
     # --private runs ONLY an operator-supplied held-out split (never merged into the
-    # public set): its tasks score under a distinct ':private' config row and its
-    # answers are NEVER written to Opik. The held-out suites must live OUTSIDE the
-    # repo — shipping the answers in the skill would let any agent/model iterating
-    # the eval read them, defeating the contamination/overfitting check.
+    # public set) and scores it under a distinct ':private' config row. It skips
+    # dataset/experiment/feedback writeback, but candidate turns still need the
+    # daemon's Opik traces for scoring. The suites must live OUTSIDE the repo —
+    # shipping gold answers in the skill would defeat the contamination check.
     try:
         if args.private:
             holdout_dir = os.environ.get("FERMIX_EVAL_HOLDOUT_DIR") or args.private_data
@@ -537,6 +777,30 @@ def main(argv=None) -> int:
               f"at dev-daemon rates). Drop --estimate to run.")
         return 0
 
+    risk_error = _capability_risk_error(cases, args)
+    if risk_error:
+        print(f"capability risk policy refused selection: {risk_error}", file=sys.stderr)
+        return 2
+    judge_error = _independent_judge_error(cfg, want_judge)
+    if judge_error:
+        print(f"judge precondition failed: {judge_error}", file=sys.stderr)
+        return 2
+
+    require_isolated = _capability_requires_isolated_home(cases)
+    problems = preconditions(cfg, require_isolated=require_isolated)
+    if problems:
+        print("preconditions:\n  - " + "\n  - ".join(problems), file=sys.stderr)
+        return 3
+
+    attestation_error = _execution_attestation_error(args, require_isolated)
+    if attestation_error:
+        print(attestation_error, file=sys.stderr)
+        return 2
+    if require_isolated:
+        print("  [operator-attested] disposable daemon isolation and launch flags")
+    else:
+        print(f"  [dev] using local development daemon at {cfg.daemon.fermix_home}")
+
     run_id = now_utc().strftime("%Y%m%dT%H%M%SZ")
     opik = OpikClient(cfg.opik.base_url, cfg.opik.project)
 
@@ -555,6 +819,8 @@ def main(argv=None) -> int:
                   f"{'⚠️safety' if st.safety_violations else ''}")
     except driver.UsageLimitHit as hit:
         return _abort_usage_limit(hit, len(outcomes), len(cases))
+    except JudgeUnavailable as unavailable:
+        return _abort_judge_unavailable(unavailable, len(outcomes), len(cases))
 
     # Refuse to persist a junk row: an empty model set means every turn failed
     # (e.g. daemon went down mid-run) — recording an "unknown-model" zero would
@@ -585,8 +851,8 @@ def main(argv=None) -> int:
     store = leaderboard.upsert(leaderboard.load_store(lb_path), config_score, meta)
     leaderboard.save_store(lb_path, store)
 
-    # Never publish held-out answers to Opik (write_opik upserts expected answers
-    # into the shared dataset) — private rows stay local-only.
+    # Never upsert held-out gold answers into an Opik dataset or experiment.
+    # Candidate prompts/replies are already present in daemon-emitted traces.
     exp_id = None if (args.no_opik or args.private) else write_opik(cfg, config_id, run_id, outcomes)
     if exp_id:
         store = leaderboard.upsert(store, config_score, {**meta, "experiment_id": exp_id})

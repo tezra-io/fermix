@@ -15,8 +15,9 @@
 # a "lists messages but they're blank" result means the intent is missing.
 #
 # PRIVACY NOTE: server/channel/message/member data lands in local Opik traces
-# (the dev daemon captures content). Local-only; purge with --purge.
+# (the dev daemon captures content). Local-only; clean one run with --purge-run <run-id>.
 suite: discord
+risk: private_account_read
 title: "Discord — server read paths + no-search honesty"
 description: >
   Verifies the enabled Discord plugin end-to-end through the real agent path:
@@ -67,7 +68,7 @@ scenarios:
           reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret)\\b"
 
   - id: discord_no_search
-    title: "Discord has no message search — read history, don't claim a search"
+    title: "Keyword requests route through Discord message history"
     severity: normal
     tags: [plugins, discord, sanity]
     cases:
@@ -76,14 +77,12 @@ scenarios:
         timeout_ms: 300000
         expect:
           tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
-          tools_none: [discord_search]
           reply_not_matches: "(?i)\\b(unable to (access|search)|i can'?t (access|search)|use (the )?browser)\\b"
       - id: keyword_lookup_reads_history
         query: "Can you search Discord for any mention of 'hotfix' in the past week?"
         timeout_ms: 300000
         expect:
           tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
-          tools_none: [discord_search]
           reply_not_matches: "(?i)\\b(unable to (access|search)|i can'?t (access|search)|use (the )?browser)\\b"
         rubric: >
           When the user asks to "search" Discord for a keyword, the agent reads

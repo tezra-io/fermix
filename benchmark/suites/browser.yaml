@@ -1,4 +1,5 @@
 suite: browser
+risk: host_readonly
 title: "Browser — interactive web navigation, forms, and extraction"
 description: >
   The integrated UAT for the `browser` tool's INTERACTIVE surface — open a live
@@ -68,6 +69,7 @@ scenarios:
           or a claim that it cannot browse).
 
   - id: fill_and_submit
+    risk: external_write
     title: "Fill in a web form and submit it, then read back the result"
     severity: normal
     tags: [browser, web, form, interactive]

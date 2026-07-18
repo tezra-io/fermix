@@ -18,7 +18,7 @@ sys.path.insert(0, HERE)
 import pytest  # noqa: E402
 
 import run_capability as rc  # noqa: E402
-from evallib import suites  # noqa: E402
+from evallib import grade, safe_rm, suites  # noqa: E402
 
 
 # --- tool-provenance gate ---------------------------------------------------
@@ -37,6 +37,243 @@ def test_provenance_fails_when_no_required_tool_fired():
 def test_provenance_passes_when_any_required_tool_fired():
     assert rc._provenance_ok(["web_search", "web_fetch"], ["web_fetch"]) is True
     assert rc._provenance_ok(["web_search"], ["web_search", "file_read"]) is True
+
+
+def test_safety_grading_uses_the_captured_driver_duration():
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 4},
+        "metadata": {"iterations": 1},
+        "output": "ok",
+    }
+    assert rc._safety_ok(trace, [], {"tools_none": ["shell"]}, 5.0)
+
+
+def test_capability_evidence_requires_settled_complete_telemetry():
+    complete = grade.TurnView.build({
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 4},
+        "metadata": {"iterations": 1},
+    }, [], elapsed_ms=1.0)
+    unsettled = grade.TurnView.build({
+        "total_estimated_cost": 0.0,
+        "usage": {"total_tokens": 4},
+        "metadata": {"iterations": 1},
+    }, [], elapsed_ms=1.0)
+    assert rc._gradeable(complete)
+    assert not rc._gradeable(unsettled)
+
+
+def test_capability_judge_preflight_delegates_to_the_judge_precondition(monkeypatch):
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
+    monkeypatch.setattr(rc.judge, "precondition_error", lambda _cfg: None)
+    assert rc._independent_judge_error(cfg, want_judge=True) is None
+
+
+def test_unevaluated_judge_aborts_instead_of_scoring_candidate_zero(monkeypatch):
+    case = SimpleNamespace(
+        id="quality", score_spec=None, rubric="Judge quality.",
+        turns=[SimpleNamespace(query="q")])
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
+    monkeypatch.setattr(
+        rc.judge, "judge_case",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            evaluated=False, score=None, error="judge output truncated"))
+
+    with pytest.raises(rc.JudgeUnavailable) as caught:
+        rc._task_success(
+            cfg, case, "reply", True, "tag",
+            [{"provider": "openai_codex", "model": "candidate"}])
+
+    assert caught.value.case_id == "quality"
+    assert "truncated" in caught.value.error
+
+
+def test_abort_judge_unavailable_exits_incomplete_without_writing(capsys):
+    unavailable = rc.JudgeUnavailable("quality", "invalid verdict")
+    unavailable.locate("cap_response_quality", "quality", 2)
+    assert rc._abort_judge_unavailable(unavailable, done=1, total=3) == 4
+    err = capsys.readouterr().err
+    assert "cap_response_quality/quality (trial 2)" in err
+    assert "invalid verdict" in err
+    assert "Leaderboard NOT written" in err
+
+
+def test_incomplete_trace_still_records_an_observed_safety_violation():
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {},
+        "metadata": {"iterations": 1},
+    }
+    spans = [{"type": "tool", "name": "shell", "input": {"command": "unsafe"}}]
+    view = grade.TurnView.build(trace, spans, elapsed_ms=1.0)
+    cap = rc._Captured("incomplete", view, trace, spans, 1.0)
+    case = SimpleNamespace(id="unsafe", expect={"tools_none": ["shell"]})
+    trial, _trace_id, _models = rc._fail_trial(case, cap)
+    assert not trial.safety_ok
+
+
+def test_incomplete_trace_without_forbidden_action_is_not_a_safety_violation():
+    trace = {
+        "_eval_trace_complete": True,
+        "total_estimated_cost": 0.0,
+        "usage": {},
+        "metadata": {"iterations": 1},
+    }
+    view = grade.TurnView.build(trace, [], elapsed_ms=1.0)
+    cap = rc._Captured("incomplete", view, trace, [], 1.0)
+    case = SimpleNamespace(id="safe", expect={"tools_none": ["shell"]})
+    trial, _trace_id, _models = rc._fail_trial(case, cap)
+    assert trial.safety_ok
+
+
+# --- dev-default / isolated-mutation execution boundary --------------------
+
+def test_capability_home_uses_dev_for_safe_runs_but_never_production():
+    assert rc._capability_home_error("~/.fermix", require_isolated=False) is not None
+    assert rc._capability_home_error("~/.fermix-dev", require_isolated=False) is None
+    assert rc._capability_home_error("~/.fermix-dev", require_isolated=True) is not None
+
+
+def test_capability_home_accepts_a_named_eval_home(tmp_path):
+    home = str(tmp_path / "fermix-capability-eval")
+    assert rc._capability_home_error(home, require_isolated=False) is None
+    assert rc._capability_home_error(home, require_isolated=True) is None
+
+
+def test_capability_project_uses_dev_for_safe_runs_and_eval_for_isolated_runs():
+    assert rc._capability_project_error("fermix") is not None
+    assert rc._capability_project_error("fermix-dev", require_isolated=False) is None
+    assert rc._capability_project_error(
+        "fermix-dev", require_isolated=True) is not None
+    assert rc._capability_project_error(
+        "fermix-capability-eval", require_isolated=True) is None
+
+
+def test_capability_config_defaults_to_the_dev_daemon(monkeypatch):
+    monkeypatch.delenv("FERMIX_EVAL_HOME", raising=False)
+    monkeypatch.delenv("OPIK_PROJECT", raising=False)
+    cfg = rc.cfgmod.load(os.path.dirname(HERE))
+    assert cfg.daemon.fermix_home == os.path.expanduser("~/.fermix-dev")
+    assert cfg.opik.project == "fermix-dev"
+
+
+def test_capability_check_infers_isolation_from_the_configured_target():
+    dev = SimpleNamespace(
+        daemon=SimpleNamespace(fermix_home="~/.fermix-dev"),
+        opik=SimpleNamespace(project="fermix-dev"),
+    )
+    isolated = SimpleNamespace(
+        daemon=SimpleNamespace(fermix_home="~/.fermix-capability-eval"),
+        opik=SimpleNamespace(project="fermix-capability-eval"),
+    )
+    assert not rc._capability_config_requires_isolation(dev)
+    assert rc._capability_config_requires_isolation(isolated)
+
+
+def test_capability_sandbox_requires_strict_home_scoped_repo(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    workspace = home / "workspace"
+    (workspace / ".git").mkdir(parents=True)
+    (home / "config.toml").write_text(
+        f'[sandbox]\nmode = "strict"\nworkspace_root = "{workspace}"\n'
+    )
+    assert rc._capability_sandbox_error(str(home), require_isolated=True) is None
+
+
+def test_capability_safe_dev_run_accepts_standard_non_git_workspace(tmp_path):
+    home = tmp_path / ".fermix-dev"
+    workspace = home / "workspace"
+    workspace.mkdir(parents=True)
+    (home / "config.toml").write_text(
+        f'[sandbox]\nmode = "standard"\nworkspace_root = "{workspace}"\n'
+    )
+    assert rc._capability_sandbox_error(str(home), require_isolated=False) is None
+    assert rc._capability_sandbox_error(str(home), require_isolated=True) is not None
+
+
+def test_capability_sandbox_rejects_workspace_escape(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    home.mkdir()
+    (home / "config.toml").write_text(
+        f'[sandbox]\nmode = "strict"\nworkspace_root = "{tmp_path}"\n'
+    )
+    assert rc._capability_sandbox_error(str(home), require_isolated=True) is not None
+
+
+def test_capability_sandbox_rejects_nonconventional_workspace_root(tmp_path):
+    home = tmp_path / "fermix-capability-eval"
+    workspace = home / "repo"
+    (workspace / ".git").mkdir(parents=True)
+    (home / "config.toml").write_text(
+        f'[sandbox]\nmode = "strict"\nworkspace_root = "{workspace}"\n'
+    )
+    error = rc._capability_sandbox_error(str(home), require_isolated=True)
+    assert error is not None and "workspace" in error.lower()
+
+
+def test_capability_attestation_is_only_required_for_isolated_execution():
+    assert rc._execution_attestation_error(
+        SimpleNamespace(confirm_daemon_isolated=False), require_isolated=False
+    ) is None
+    assert rc._execution_attestation_error(
+        SimpleNamespace(confirm_daemon_isolated=False), require_isolated=True
+    ) is not None
+    assert rc._execution_attestation_error(
+        SimpleNamespace(confirm_daemon_isolated=True), require_isolated=True
+    ) is None
+
+
+def test_only_mutating_capability_cases_require_an_isolated_home():
+    assert not rc._capability_requires_isolated_home(_risk_case("host_readonly"))
+    assert not rc._capability_requires_isolated_home(_risk_case("expensive"))
+    assert rc._capability_requires_isolated_home(
+        _risk_case("expensive", checker_spec={"script": "checker.py"}))
+    assert rc._capability_requires_isolated_home(_risk_case("isolated_mutation"))
+
+
+def _risk_case(risk, checker_spec=None, confirm_cost=False):
+    suite = SimpleNamespace(name="cap")
+    scenario = SimpleNamespace(id="scenario", risk=risk, confirm_cost=confirm_cost)
+    case = SimpleNamespace(id="case", checker_spec=checker_spec)
+    return [(suite, scenario, case)]
+
+
+def test_capability_risk_refuses_unclassified_and_high_impact_tasks():
+    args = SimpleNamespace(confirm_isolated_env=True, confirm_cost=True)
+    assert "risk" in rc._capability_risk_error(
+        _risk_case(suites.UNCLASSIFIED_RISK), args).lower()
+    for risk in ("private_account_read", "external_write", "desktop_input", "destructive"):
+        assert "behavioral" in rc._capability_risk_error(_risk_case(risk), args).lower()
+
+
+def test_capability_risk_requires_mutation_and_cost_confirmations():
+    no_confirm = SimpleNamespace(confirm_isolated_env=False, confirm_cost=False)
+    assert "confirm-isolated-env" in rc._capability_risk_error(
+        _risk_case("isolated_mutation"), no_confirm)
+    assert "confirm-isolated-env" in rc._capability_risk_error(
+        _risk_case("expensive", checker_spec={"script": "checker.py"}), no_confirm)
+    assert "confirm-cost" in rc._capability_risk_error(
+        _risk_case("expensive"), no_confirm)
+    assert "confirm-cost" in rc._capability_risk_error(
+        _risk_case("host_readonly", confirm_cost=True), no_confirm)
+    confirmed = SimpleNamespace(confirm_isolated_env=True, confirm_cost=True)
+    assert rc._capability_risk_error(_risk_case("host_readonly"), confirmed) is None
+    assert rc._capability_risk_error(_risk_case("isolated_mutation"), confirmed) is None
+    assert rc._capability_risk_error(_risk_case("expensive"), confirmed) is None
+
+
+def test_all_shipped_capability_scenarios_declare_a_risk():
+    cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
+    for suite in suites.load_all(cap_dir, include_candidates=True):
+        assert all(
+            scenario.risk != suites.UNCLASSIFIED_RISK for scenario in suite.scenarios)
+    safety = next(s for s in suites.load_all(cap_dir) if s.name == "cap_safety")
+    assert {scenario.risk for scenario in safety.scenarios} == {"destructive"}
+    assert safety.soft
 
 
 # --- requires_tools suite validation ----------------------------------------
@@ -130,10 +367,39 @@ def test_cross_session_requires_two_turns_and_score(tmp_path):
     assert any("cross_session" in p and "2 turns" in p for p in ei.value.problems)
 
 
+def test_cross_session_accepts_native_prompt_injected_memory(monkeypatch):
+    case = SimpleNamespace(
+        id="durable_codeword",
+        turns=[SimpleNamespace(query="store {token}"), SimpleNamespace(query="recall {token}")],
+        score_spec={"match": "contains", "expected": "{token}"},
+        requires_tools=[],
+        timeout_ms=120_000,
+    )
+    suite = SimpleNamespace(name="cap_memory")
+    captures = iter([
+        rc._Captured("graded", SimpleNamespace(reply="stored", tool_names=["memory_store"]),
+                     {}, [], 1.0),
+        rc._Captured("graded", SimpleNamespace(reply="kestrel-answer", tool_names=[]),
+                     {}, [], 1.0),
+    ])
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_args: next(captures))
+    monkeypatch.setattr(rc.scoring, "score_answer", lambda *_args: SimpleNamespace(score=1.0))
+    monkeypatch.setattr(rc, "_score_trial", lambda _case, _cap, success: (success, None, []))
+
+    trial, _trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, suite, case, "run", 0,
+    )
+
+    assert trial == 1.0
+
+
 def test_the_real_cap_memory_suite_is_valid():
     # the shipped cross-session suite must load + validate
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
-    suites.load_all(cap_dir)   # raises SuiteError on any problem
+    loaded = suites.load_all(cap_dir)   # raises SuiteError on any problem
+    memory = next(suite for suite in loaded if suite.name == "cap_memory")
+    for case in memory.scenarios[0].cases:
+        assert case.requires_tools == []
 
 
 # --- reproducibility pin (tasks_hash / checker fingerprint) -----------------
@@ -157,6 +423,30 @@ def test_checker_fingerprint_tracks_script_content(tmp_path, monkeypatch):
     fp2 = rc._checker_fingerprint(_FakeCase(spec))
     assert fp1 != fp2
     assert rc._checker_fingerprint(_FakeCase(None)) == ""   # non-checker case -> empty
+
+
+def test_checker_cleanup_refusal_fails_the_trial_loudly(tmp_path, monkeypatch):
+    scoped = tmp_path / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", turns=[SimpleNamespace(query="q")])
+    suite = SimpleNamespace(name="suite")
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_args: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_args: None)
+    monkeypatch.setattr(
+        rc, "_capture_turn",
+        lambda *_args: rc._Captured("no_trace", None, None, None, 1.0),
+    )
+
+    def refuse(*_args):
+        raise safe_rm.SafeRmError("refused")
+
+    monkeypatch.setattr(rc.checker, "teardown_workspace", refuse)
+    with pytest.raises(safe_rm.SafeRmError):
+        rc._standard_trial(
+            cfg, None, suite, case, "run", 0, True, "task", None,
+            str(tmp_path / "workspace" / "eval"), False,
+        )
 
 
 # --- soft (taste) suite exclusion from the correctness composite ------------

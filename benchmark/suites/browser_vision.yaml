@@ -1,4 +1,5 @@
 suite: browser_vision
+risk: host_readonly
 title: "Outbound tool images — a browser screenshot is SEEN by the model"
 description: >
   Phase 0 of computer-use lets a tool RESULT carry image content parts back to the

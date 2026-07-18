@@ -1,24 +1,19 @@
 suite: git
+risk: host_readonly
 title: "Git — status, log, branch, and safe inspection"
 description: >
-  Exercises the assistant's git surface against the Fermix repo at
-  /Users/sujshe/projects/fermix. Queries name the repo path explicitly because
-  the eval runs via the CLI channel whose sandbox root is ~/.fermix-dev/workspace
-  (not the repo); the model must use the path-specified repo, not the sandbox cwd.
+  Exercises the assistant's read-only git surface against the repository under
+  evaluation. The runner expands an explicit repository-root placeholder so the
+  development daemon does not mistake its own workspace for the target checkout.
   Gates are tolerant of the model's route — it may run one git_read or several —
   and assert git_read was used plus that the reply mentions the relevant
-  branch/commit/status vocabulary. The stage_when_idle scenario is deliberately
-  tolerant: with nothing staged the model may legitimately report clean instead
-  of calling git_write.
+  branch/commit/status vocabulary.
 defaults:
   timeout_ms: 180000
   judge: true
   expect:
     status: ok
-    # no_tool_errors omitted: git_read may emit an intermediate error while
-    # resolving the repo path (the sandbox cwd differs from the target repo)
-    # before succeeding on a retry — the answer is still correct.
-    # The reply_matches and tools_any gates are the real correctness signal.
+    no_tool_errors: true
 
 scenarios:
   - id: working_tree_status
@@ -29,7 +24,7 @@ scenarios:
     tags: [git, read, status]
     cases:
       - id: whats_the_status
-        query: "What's the current git status of /Users/sujshe/projects/fermix?"
+        query: "What's the current git status of the repository at __EVAL_REPO_ROOT__?"
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)status|clean|modified|staged|untracked|changes|nothing to commit|working tree"
@@ -37,7 +32,7 @@ scenarios:
           max_duration_ms: 90000
         rubric: "Reports the working-tree status (clean, or which files are modified/staged/untracked) based on a real git_read, without inventing files."
       - id: anything_uncommitted
-        query: "Do I have any uncommitted changes in /Users/sujshe/projects/fermix right now? Give me the short version."
+        query: "Does the repository at __EVAL_REPO_ROOT__ have uncommitted changes? Give me the short version."
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)clean|nothing to commit|no (uncommitted|pending) changes|modified|staged|untracked|uncommitted"
@@ -45,7 +40,7 @@ scenarios:
           max_duration_ms: 90000
         rubric: "Answers whether there are uncommitted changes, grounded in actual git status output."
       - id: check_state_before_commit
-        query: "Before I commit in /Users/sujshe/projects/fermix, can you check whether the working tree is clean?"
+        query: "Before I commit in the repository at __EVAL_REPO_ROOT__, check whether its working tree is clean."
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)clean|working tree|nothing to commit|modified|staged|untracked|uncommitted"
@@ -59,7 +54,7 @@ scenarios:
     tags: [git, read, log, branch]
     cases:
       - id: last_three_commits
-        query: "Show me the last 3 commits in /Users/sujshe/projects/fermix."
+        query: "Show me the last 3 commits in the repository at __EVAL_REPO_ROOT__."
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)commit|log|message|author|[0-9a-f]{7}"
@@ -67,7 +62,7 @@ scenarios:
           max_duration_ms: 100000
         rubric: "Lists recent commits (subjects and/or hashes) drawn from a real git log, without fabricating commits."
       - id: what_branch
-        query: "What branch am I on in /Users/sujshe/projects/fermix?"
+        query: "What branch is checked out in the repository at __EVAL_REPO_ROOT__?"
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)branch|main|dev|master|on .* branch|currently on"
@@ -75,7 +70,7 @@ scenarios:
           max_duration_ms: 80000
         rubric: "Names the current git branch based on git_read, not a guess."
       - id: summarize_recent_changes
-        query: "Summarize what's changed recently in /Users/sujshe/projects/fermix — the gist of the last few commits."
+        query: "Summarize the last few commits in the repository at __EVAL_REPO_ROOT__."
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)commit|recent|change|log|added|fixed|updated|feat|fix"
@@ -92,15 +87,15 @@ scenarios:
       # mutate the host repo. Write-path coverage lives in the ExUnit suite.
       # These cases cover the read side of the git diff/stat surface instead.
       - id: whats_changed_in_detail
-        query: "What files have changed in /Users/sujshe/projects/fermix, and what's the broad breakdown of what's in them?"
+        query: "What files have changed in the git repository at __EVAL_REPO_ROOT__, and what's the broad breakdown?"
         expect:
           tools_any: [git_read]
-          reply_matches: "(?i)modified|changed|file|\\.ex|apps/"
+          reply_matches: "(?i)modified|changed|file|\\.ex|apps/|clean|no (diff|change)|nothing to commit"
           max_cost_usd: 0.8
           max_duration_ms: 110000
         rubric: "Lists the changed files or gives a breakdown of what is modified, drawn from real git status/diff output, without fabricating files."
       - id: show_diff_one_file
-        query: "In /Users/sujshe/projects/fermix, show me the diff for apps/fermix_opik/lib/fermix_opik/aggregation.ex."
+        query: "In the git repository at __EVAL_REPO_ROOT__, show me the diff for apps/fermix_opik/lib/fermix_opik/aggregation.ex."
         expect:
           tools_any: [git_read]
           reply_matches: "(?i)diff|\\+|aggregation|no (diff|change)|not modified|unchanged|identical"
