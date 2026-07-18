@@ -142,3 +142,75 @@ jobs:
           fi
           git -C "$tap_dir" commit -m "fermix ${VERSION#v}"
           git -C "$tap_dir" push
+
+  verify:
+    # M22 T5: prove the artifacts users actually download — signature verifies
+    # keyless against this workflow's OIDC identity, and the binary executes on
+    # every shipped-and-runnable platform. Downloads the PUBLISHED assets, never
+    # a rebuild.
+    name: verify published artifacts (${{ matrix.target }})
+    needs: build
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: linux_x86_64 }
+          - { os: ubuntu-24.04-arm, target: linux_aarch64 }
+          - { os: macos-15, target: macos_aarch64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Download the published release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release download "$TAG_NAME" \
+            --repo "${{ github.repository }}" \
+            --pattern "fermix_${{ matrix.target }}*"
+          ls -la
+
+      - name: Verify keyless signature against the published blob
+        run: |
+          cosign verify-blob \
+            --certificate "fermix_${{ matrix.target }}.pem" \
+            --signature "fermix_${{ matrix.target }}.sig" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}/.github/workflows/release.yml@.*" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "fermix_${{ matrix.target }}"
+
+      - name: Run the shipped binary
+        env:
+          FERMIX_HOME: ${{ runner.temp }}/fermix-verify-home
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          chmod +x "fermix_${{ matrix.target }}"
+          out=$("./fermix_${{ matrix.target }}" --version)
+          echo "$out"
+          tag="$TAG_NAME"
+          case "$out" in
+            *"${tag#v}"*) echo "version matches tag" ;;
+            *) echo "::error::--version output does not contain ${tag#v}"; exit 1 ;;
+          esac
+
+      - name: Verify the Homebrew formula serves this release (stable tags)
+        if: matrix.os == 'macos-15' && !contains(github.ref_name, '-')
+        run: |
+          set -euo pipefail
+          brew tap tezra-io/tap
+          version="${GITHUB_REF_NAME#v}"
+          for _ in $(seq 1 12); do
+            stable=$(brew info --json=v2 tezra-io/tap/fermix 2>/dev/null \
+              | jq -r '.formulae[0].versions.stable // empty')
+            if [ "$stable" = "$version" ]; then break; fi
+            sleep 10
+            brew update >/dev/null 2>&1 || true
+          done
+          brew install tezra-io/tap/fermix
+          fermix --version | grep -F "$version"

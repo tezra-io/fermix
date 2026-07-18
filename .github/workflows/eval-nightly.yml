@@ -1,0 +1,70 @@
+# Nightly eval (Milestone 22 T1 + T3): graded behavioral regression on a
+# disposable Linux box, plus the ungraded macOS daemon smoke.
+#
+# Schedules execute the workflow file on the DEFAULT branch (main) — this file
+# must exist on main to fire, and it checks out `dev` explicitly so nightly
+# results track active development, not the last release.
+name: eval-nightly
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# No workflow-level concurrency here: the reusable eval-box declares the
+# `eval-box` group itself, and a caller sharing its callee's group collides
+# with its own still-running run (the documented reusable-workflow footgun).
+
+jobs:
+  regression:
+    uses: ./.github/workflows/eval-box.yml
+    with:
+      tier: regression
+      ref: dev
+    secrets: inherit
+
+  macos-smoke:
+    name: macos daemon smoke (ungraded)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Cache deps and _build (dev env)
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-${{ runner.arch }}-mix-dev-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-mix-dev-${{ env.OTP_VERSION }}-${{ env.ELIXIR_VERSION }}-
+
+      - name: Fetch deps
+        run: mix deps.get
+
+      # seed_capability_home.py runs under a `uv run --script` shebang; the
+      # macos-15 image does not preinstall uv.
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Run the smoke
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: benchmark/ci/macos_smoke.sh
+
+      - name: Daemon log tail (failure diagnostics)
+        if: failure()
+        run: tail -n 200 "${RUNNER_TEMP}/fermix-smoke-eval/daemon.log" || true

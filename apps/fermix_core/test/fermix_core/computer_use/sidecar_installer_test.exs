@@ -1,6 +1,21 @@
 defmodule FermixCore.ComputerUse.SidecarInstallerTest do
   use ExUnit.Case, async: false
 
+  # compux only ships a sidecar artifact for macos-aarch64 and linux-x86_64.
+  # On any other host (e.g. the linux-aarch64 CI leg, or an unsupported OS like
+  # Windows) Compux.Binary.target/0 returns an error — {:unsupported_target,..},
+  # {:unsupported_os,..}, or {:unsupported_arch,..}; skip the module with an
+  # explicit reason instead of crashing the setup's `{:ok, target} =` match.
+  case Compux.Binary.target() do
+    {:ok, _target} ->
+      :ok
+
+    {:error, reason} ->
+      @moduletag skip:
+                   "compux ships no sidecar artifact for this host: " <>
+                     "#{inspect(reason)} (supported: macos-aarch64, linux-x86_64)"
+  end
+
   alias FermixCore.ComputerUse.SidecarInstaller
 
   setup do

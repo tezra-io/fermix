@@ -608,6 +608,31 @@ def test_isolated_behavioral_execution_requires_daemon_attestation():
     assert "daemon" in error
 
 
+def test_dangerous_requires_the_disposable_env_marker(monkeypatch):
+    monkeypatch.delenv("FERMIX_EVAL_DISPOSABLE", raising=False)
+    error = run_eval.dangerous_disposable_error(SimpleNamespace(dangerous=True))
+    assert error is not None
+    assert "FERMIX_EVAL_DISPOSABLE=1" in error
+    assert "MILESTONE_22_MULTI_OS_CI_AND_DISPOSABLE_E2E.md" in error
+    assert "MILESTONE_20_EVAL_VM_ISOLATION.md" in error
+
+
+def test_disposable_marker_allows_dangerous(monkeypatch):
+    monkeypatch.setenv("FERMIX_EVAL_DISPOSABLE", "1")
+    assert run_eval.dangerous_disposable_error(SimpleNamespace(dangerous=True)) is None
+
+
+@pytest.mark.parametrize("value", ["0", "true", "yes", "", "2"])
+def test_disposable_marker_must_be_exactly_one(monkeypatch, value):
+    monkeypatch.setenv("FERMIX_EVAL_DISPOSABLE", value)
+    assert run_eval.dangerous_disposable_error(SimpleNamespace(dangerous=True)) is not None
+
+
+def test_disposable_marker_is_not_required_without_dangerous(monkeypatch):
+    monkeypatch.delenv("FERMIX_EVAL_DISPOSABLE", raising=False)
+    assert run_eval.dangerous_disposable_error(SimpleNamespace(dangerous=False)) is None
+
+
 def test_workspace_revision_must_match_the_harness_checkout(monkeypatch):
     values = {
         ("/harness", "rev-parse", "HEAD"): "abc123",

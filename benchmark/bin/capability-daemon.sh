@@ -13,10 +13,14 @@
 #   capability-daemon.sh run     up, run the full `make capability` sweep, down
 #
 # Override the home with FERMIX_CAP_HOME (leaf must contain 'eval' or 'e2e').
+# CI knobs: FERMIX_CAP_PROJECT overrides the Opik project; FERMIX_CAP_SEED_ARGS
+# passes extra flags to seed_capability_home.py (e.g. the explicit --provider/
+# --model CI mode); FERMIX_CAP_OPIK=0 starts the daemon without the Opik
+# exporter (macOS smoke boxes have no Opik).
 set -euo pipefail
 
 HOME_DIR="${FERMIX_CAP_HOME:-$HOME/.fermix-capability-eval}"
-PROJECT="fermix-capability-eval"
+PROJECT="${FERMIX_CAP_PROJECT:-fermix-capability-eval}"
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"      # benchmark/bin
 BENCH="$(cd "$BIN_DIR/.." && pwd)"                            # benchmark
 REPO_ROOT="$(cd "$BENCH/.." && pwd)"                          # umbrella root
@@ -30,7 +34,11 @@ running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 seed() {
   log "seeding disposable home $HOME_DIR"
-  "$BIN_DIR/seed_capability_home.py" "$HOME_DIR"
+  local -a seed_args=()
+  if [ -n "${FERMIX_CAP_SEED_ARGS:-}" ]; then
+    read -r -a seed_args <<<"$FERMIX_CAP_SEED_ARGS"
+  fi
+  "$BIN_DIR/seed_capability_home.py" "$HOME_DIR" ${seed_args[@]+"${seed_args[@]}"}
 }
 
 up() {
@@ -46,9 +54,11 @@ up() {
   # is FermixChannels.Gateway.Queue, so --no-channels would break every turn. No
   # channel is configured in the seeded home, so no bot adapters actually poll.
   log "starting disposable daemon (no web/realtime); log: $LOGFILE"
+  local -a opik_env=(FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT")
+  if [ "${FERMIX_CAP_OPIK:-1}" = "0" ]; then opik_env=(); fi
   ( cd "$REPO_ROOT" && exec env \
       FERMIX_HOME="$HOME_DIR" \
-      FERMIX_OPIK_ENABLED=1 FERMIX_OPIK_PROJECT="$PROJECT" \
+      ${opik_env[@]+"${opik_env[@]}"} \
       FERMIX_BROWSER_HEADLESS=1 \
       mix fermix.dev --no-web --no-realtime ) >"$LOGFILE" 2>&1 &
   echo $! >"$PIDFILE"

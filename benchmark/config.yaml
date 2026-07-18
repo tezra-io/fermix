@@ -1,5 +1,7 @@
 # Fermix E2E eval — runner configuration.
 # Every value here is overridable by an env var (see comments) or a CLI flag.
+# --dangerous suites also require FERMIX_EVAL_DISPOSABLE=1 to attest a disposable
+# throwaway VM/CI container (attestation env gate read from the environment, no config key).
 
 daemon:
   # Safe/read-only capability runs use the existing development daemon.

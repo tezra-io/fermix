@@ -492,6 +492,19 @@ def _detect_config_id(arg_id, all_models) -> str:
     return Counter(all_models).most_common(1)[0][0]
 
 
+def _soft_axis_suffix(cases) -> str | None:
+    """A config_id suffix for a SOFT-ONLY selection (every selected case comes from a
+    `soft: true` taste suite — only reachable via explicit `--suite`, since the default
+    sweep excludes soft suites). A judge/taste run and the correctness composite both
+    auto-detect the SAME served-model config_id, and the leaderboard store is keyed on
+    config_id alone, so without this the axis that runs second silently overwrites the
+    other's row. The suffix is the sorted, `+`-joined soft suite name(s), so a soft run
+    lands on its OWN row. A deterministic or mixed selection returns None (unchanged)."""
+    if not cases or not all(suite.soft for suite, _scn, _case in cases):
+        return None
+    return "+".join(sorted({suite.name for suite, _scn, _case in cases}))
+
+
 def _abort_usage_limit(hit, done: int, total: int) -> int:
     """Stop the sweep cleanly on a usage limit. Reports where it stopped (the pointer
     to resume from) and writes no leaderboard row — a partial composite would overwrite the
@@ -838,6 +851,9 @@ def main(argv=None) -> int:
         print("note: traces report both openai (api_key) and openai_codex (oauth) as "
               "'openai' — to rank both, pass --config-id (e.g. --config-id openai_codex/<model>).",
               file=sys.stderr)
+    soft_suffix = _soft_axis_suffix(cases)
+    if soft_suffix:
+        config_id = f"{config_id}:{soft_suffix}"  # soft/taste axis: own row, never the composite's
     if args.private:
         config_id = f"{config_id}:private"      # distinct row; never overwrites the public one
     config_score = aggregate.aggregate_config(config_id, task_stats)

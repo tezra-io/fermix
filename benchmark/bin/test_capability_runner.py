@@ -516,6 +516,48 @@ def test_soft_suite_included_only_when_named(tmp_path):
     assert {s.name for s, _scn, _c in selected} == {"cap_taste"}
 
 
+# --- soft-axis config_id suffix (own leaderboard row, never the composite's) ---
+
+def _soft_case(name, soft):
+    # only .name / .soft are read by the suffix logic; scenario/case are placeholders.
+    return (SimpleNamespace(name=name, soft=soft), SimpleNamespace(), SimpleNamespace())
+
+
+def test_soft_axis_suffix_for_soft_only_selection():
+    # a soft-only selection (all selected cases from soft suites) => suffixed config_id,
+    # so the judge/taste axis never overwrites the served model's correctness composite row.
+    assert rc._soft_axis_suffix([_soft_case("cap_response_quality", True)]) == "cap_response_quality"
+
+
+def test_soft_axis_suffix_none_for_deterministic_selection():
+    # a hard/deterministic selection keeps today's behavior (bare composite config_id).
+    cases = [_soft_case("cap_coding", False), _soft_case("cap_web_research", False)]
+    assert rc._soft_axis_suffix(cases) is None
+    assert rc._soft_axis_suffix([]) is None
+
+
+def test_soft_axis_suffix_none_for_mixed_selection():
+    # even one hard suite in the mix => composite row (unchanged), not a soft-axis suffix.
+    cases = [_soft_case("cap_response_quality", True), _soft_case("cap_coding", False)]
+    assert rc._soft_axis_suffix(cases) is None
+
+
+def test_soft_axis_suffix_is_sorted_and_joined_for_multiple_soft_suites():
+    # multiple soft suites => sorted names joined with '+', deduped and order-independent.
+    cases = [_soft_case("cap_taste_b", True), _soft_case("cap_taste_a", True),
+             _soft_case("cap_taste_b", True)]
+    assert rc._soft_axis_suffix(cases) == "cap_taste_a+cap_taste_b"
+
+
+def test_soft_axis_suffix_reads_the_actual_selected_soft_suite(tmp_path):
+    # end-to-end through the real selector: naming the soft suite yields its suffix, while
+    # the default (unscoped) sweep resolves hard-only and keeps the bare composite id.
+    named, _skipped = rc.capability_cases(_load_soft_and_hard(tmp_path), {"cap_taste"}, None, None, True)
+    assert rc._soft_axis_suffix(named) == "cap_taste"
+    default, _skipped = rc.capability_cases(_load_soft_and_hard(tmp_path), None, None, None, True)
+    assert rc._soft_axis_suffix(default) is None
+
+
 # --- unvalidated hard-tier candidates (candidates/ subdir) ------------------
 
 def test_candidates_excluded_by_default_included_with_flag(tmp_path):
