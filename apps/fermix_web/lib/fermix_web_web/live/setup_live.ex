@@ -1189,7 +1189,8 @@ defmodule FermixWebWeb.SetupLive do
       model: image_model_or_default(Keyword.get(generate_image, :model), options, default),
       openai_api_key_set: provider_api_key_set?(snapshot, :openai),
       xai_api_key_set: provider_api_key_set?(snapshot, :xai),
-      google_api_key_set: secret_set?(generate_image, :google_api_key)
+      google_api_key_set: secret_set?(generate_image, :google_api_key),
+      codex_connected: codex_auth_summary().connected?
     }
   end
 
@@ -2398,6 +2399,8 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_image_backend("openai"), do: :openai
   defp normalize_image_backend("xai"), do: :xai
   defp normalize_image_backend("google"), do: :google
+  defp normalize_image_backend(:openai_codex), do: :openai_codex
+  defp normalize_image_backend("openai_codex"), do: :openai_codex
   defp normalize_image_backend(_value), do: :openai
 
   # Transcription has no keyless default; the form defaults to OpenAI (most

@@ -1335,6 +1335,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               description="Gemini image — needs a Gemini key"
               checked={@image_form.backend == :google}
             />
+            <.image_backend_option
+              value="openai_codex"
+              label="OpenAI Codex (ChatGPT)"
+              description="gpt-image via your ChatGPT subscription — no API key"
+              checked={@image_form.backend == :openai_codex}
+            />
           </div>
         </fieldset>
 
@@ -1367,6 +1373,15 @@ defmodule FermixWebWeb.SetupLive.Components do
             />
             <p :if={@image_form.google_api_key_set} class="text-sm text-success">
               Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+
+          <div
+            :if={@image_form.backend == :openai_codex and !@image_form.codex_connected}
+            class="space-y-2"
+          >
+            <p class="text-sm text-warning">
+              Connect OpenAI Codex on the Providers tab first.
             </p>
           </div>
 

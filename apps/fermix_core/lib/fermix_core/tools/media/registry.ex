@@ -12,6 +12,7 @@ defmodule FermixCore.Tools.Media.Registry do
 
   alias FermixCore.Config
   alias FermixCore.Tools.Media.Backend
+  alias FermixCore.Tools.Media.Backends.CodexImage
   alias FermixCore.Tools.Media.Backends.GoogleImage
   alias FermixCore.Tools.Media.Backends.OpenAIImage
   alias FermixCore.Tools.Media.Backends.XAIImage
@@ -22,6 +23,7 @@ defmodule FermixCore.Tools.Media.Registry do
   # modality with no change here.
   @backends %{
     {:image, "openai"} => OpenAIImage,
+    {:image, "openai_codex"} => CodexImage,
     {:image, "xai"} => XAIImage,
     {:image, "google"} => GoogleImage
   }
