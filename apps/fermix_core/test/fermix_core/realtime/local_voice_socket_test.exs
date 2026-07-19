@@ -519,6 +519,98 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
   end
 
+  test "a session dying mid-call notifies the peer, closes the socket, and decrements" do
+    %{socket: socket, socket_path: socket_path} = start_unlinked_session_socket()
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, session, _opts}, 1_000
+    # Reading the listening frame proves the handler is past bind (the session is
+    # monitored) and back in its loop.
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
+
+    Process.exit(session, :kill)
+
+    # The handler's session monitor fires: it sends a final error to the peer,
+    # then the handler exits and its owned socket closes — the peer reads the
+    # error, then EOF, promptly (no silently dead pipe).
+    assert {:ok, err_line} = recv_line(conn, 2_000)
+    assert %{"type" => "error"} = Jason.decode!(String.trim(err_line))
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 2_000)
+
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
+  end
+
+  test "killing the connection handler closes the client socket and tears the session down" do
+    %{socket: socket, socket_path: socket_path} = start_unlinked_session_socket()
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, session, opts}, 1_000
+    handler = Keyword.fetch!(opts, :companion)
+    # Listening frame → the handler is past bind and looping.
+    assert {:ok, _line} = recv_line(conn)
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 1} end)
+
+    # The root-cause scenario: the reader handler dies mid-call.
+    Process.exit(handler, :kill)
+
+    # Socket ownership was transferred to the handler (controlling_process), so
+    # its death closes the fd and the peer reads EOF promptly — the exact leak
+    # that used to wedge the pet on a silent dead pipe.
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 2_000)
+
+    # The listener's monitor decrements the count AND tears down the session that
+    # was still bound to the dead handler.
+    wait_until(fn -> LocalVoiceSocket.active_clients(socket) == {:ok, 0} end)
+    wait_until(fn -> Agent.get(session, &Map.get(&1, :stopped?)) == true end)
+  end
+
+  # Starts a socket whose sessions are UNLINKED from their handler (Agent.start,
+  # not start_link), matching production where the DynamicSupervisor owns the
+  # session. A link would let a kill on one side cascade to the other and mask
+  # the very monitor/teardown paths these tests exercise.
+  defp start_unlinked_session_socket do
+    socket_path =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-realtime-down-#{System.unique_integer([:positive])}.sock"
+      )
+
+    {:ok, task_sup} =
+      Task.Supervisor.start_link(name: :"rt_down_tasks_#{System.unique_integer([:positive])}")
+
+    test_pid = self()
+
+    session_starter = fn opts ->
+      {:ok, pid} = Agent.start(fn -> %{opts: opts} end)
+      send(test_pid, {:session_started, pid, opts})
+      {:ok, pid}
+    end
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        task_supervisor: task_sup,
+        session_starter: session_starter,
+        session_module: FakeSession,
+        name: :"rt_down_socket_#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn ->
+      stop_socket(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    %{socket: socket, socket_path: socket_path}
+  end
+
   defp connect(socket_path) do
     :gen_tcp.connect(
       {:local, String.to_charlist(socket_path)},

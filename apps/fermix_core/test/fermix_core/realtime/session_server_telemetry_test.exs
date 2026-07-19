@@ -47,6 +47,8 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
         policy_class: :read_only
       })
 
+    task_supervisor = start_supervised!({Task.Supervisor, []})
+
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
@@ -57,6 +59,7 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
         api_key: "sk-test",
         safety_identifier: "safe-id",
         capabilities: [capability],
+        task_supervisor: task_supervisor,
         prompt_loader: fn _opts ->
           {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
         end
