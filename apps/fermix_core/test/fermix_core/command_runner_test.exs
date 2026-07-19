@@ -94,13 +94,19 @@ defmodule FermixCore.CommandRunnerTest do
     # Regression: a secret helper (`security`) that finishes just after the
     # timeout used to leave its output — the raw secret — in the caller's mailbox,
     # which crashed a GenServer caller (SetupLive/BootReport) and wrote the secret
-    # to the crash log. The child here ignores SIGTERM and prints during the kill
-    # grace, then exits; the runner must drain that output, leaving the caller's
-    # mailbox with no stray port message.
+    # to the crash log. `supervised: false` runs the inline path where the CALLER
+    # owns the port (the real secret-writer path), so the `refute_received`s below
+    # actually pin the drain-discard — under `supervised: true` the port lives in
+    # CommandHost and those refutes are vacuous. The child blocks silently on
+    # `sleep 30` and emits only from its TERM trap — strictly after the 20ms
+    # timeout fires and the runner kills the group — so the timeout ALWAYS wins
+    # (no wall-clock race against a short child sleep the shell might truncate to
+    # 0) and the runner must drain that late output.
     assert {:error, {:timeout, 20}} =
-             CommandRunner.run(sh, ["-c", "trap '' TERM; sleep 0.05; printf LEAKED"],
+             CommandRunner.run(sh, ["-c", "trap 'printf LEAKED; exit 0' TERM; sleep 30"],
                timeout_ms: 20,
-               kill_grace_ms: 500
+               kill_grace_ms: 500,
+               supervised: false
              )
 
     refute_received {_port, {:data, _}}
