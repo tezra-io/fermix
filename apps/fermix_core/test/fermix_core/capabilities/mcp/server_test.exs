@@ -309,6 +309,44 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
     end
+
+    test "terminate tolerates registries that already died (shutdown race)" do
+      Process.flag(:trap_exit, true)
+      suffix = System.unique_integer([:positive])
+      {:ok, cap_reg} = CapabilityRegistry.start_link(name: :"race_cap_#{suffix}")
+      {:ok, mcp_reg} = McpRegistry.start_link(name: :"race_mcp_#{suffix}")
+
+      StubDiscoverer.set_tools([
+        %{name: "create_issue", description: "x", input_schema: %{}}
+      ])
+
+      {:ok, pid} =
+        McpServer.start_link(
+          server_name: "github",
+          # A pid client so `is_pid(state.client)` holds and terminate/2 exercises
+          # BOTH wrapped unregister sites (capability + mcp registry).
+          client: self(),
+          discoverer: StubDiscoverer,
+          caller: StubCaller,
+          capability_registry: cap_reg,
+          mcp_registry: mcp_reg,
+          fail_fast?: true
+        )
+
+      # Both registries die BEFORE the server terminates — the shutdown race that
+      # made terminate/2's unregister GenServer.call exit :noproc and crash,
+      # leaking the capability into later tests.
+      :ok = GenServer.stop(cap_reg, :normal)
+      :ok = GenServer.stop(mcp_reg, :normal)
+
+      # terminate must clean up without crashing, so the stop returns :ok and the
+      # server honors the requested :normal exit rather than dying (`:noproc`) on
+      # the dead registries. Without the fix, GenServer.stop/2 re-raises the
+      # mismatched exit and this line fails.
+      ref = Process.monitor(pid)
+      assert :ok = GenServer.stop(pid, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    end
   end
 
   defp write_skill(skills_dir, name) do

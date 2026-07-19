@@ -98,14 +98,37 @@ defmodule FermixCore.Capabilities.MCP.Server do
   @impl true
   def terminate(_reason, state) do
     Enum.each(state.registered_names, fn name ->
-      CapabilityRegistry.unregister(state.capability_registry, name)
+      best_effort_unregister(fn ->
+        CapabilityRegistry.unregister(state.capability_registry, name)
+      end)
     end)
 
     if is_pid(state.client) do
-      McpRegistry.unregister(state.mcp_registry, state.server_name)
+      best_effort_unregister(fn ->
+        McpRegistry.unregister(state.mcp_registry, state.server_name)
+      end)
     end
 
     :ok
+  end
+
+  # terminate/2 runs during shutdown, where the capability/MCP registries may be
+  # concurrently terminating — their unregister `GenServer.call` then exits
+  # `:noproc` (or a shutdown reason) and would crash this callback, leaving the
+  # capability half-cleaned and leaking into later work. A dead registry holds no
+  # capabilities, so the unregister postcondition is already satisfied: swallow
+  # only the registry-is-gone exits and let any real fault (e.g. a `:timeout`
+  # from a live-but-stuck registry) propagate.
+  defp best_effort_unregister(fun) do
+    _ = fun.()
+    :ok
+  catch
+    :exit, {reason, {GenServer, :call, _}} when reason in [:noproc, :normal, :shutdown] ->
+      Logger.debug(
+        "MCP server terminate: registry already gone (#{inspect(reason)}); skipping unregister"
+      )
+
+      :ok
   end
 
   defp discover_and_register(state) do
