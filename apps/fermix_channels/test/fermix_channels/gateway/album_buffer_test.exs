@@ -172,14 +172,26 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       assert Idempotency.check_and_record(:whatsapp, "wa-err-1") == :fresh
       assert Idempotency.check_and_record(:whatsapp, "wa-err-2") == :fresh
 
-      pid =
-        start_buffer(debounce_ms: 20, dispatch: fn _messages, _opts -> {:error, :boom} end)
+      test_pid = self()
+
+      # The failing dispatch signals the test the moment the flush actually runs,
+      # so we synchronize on the real flush instead of guessing a delay.
+      dispatch = fn _messages, _opts ->
+        send(test_pid, :flush_dispatched)
+        {:error, :boom}
+      end
+
+      pid = start_buffer(debounce_ms: 20, dispatch: dispatch)
 
       AlbumBuffer.ingest(image_message("wa-err-1", "wa-9", "a"), pid)
       AlbumBuffer.ingest(image_message("wa-err-2", "wa-9", "b"), pid)
 
-      # Wait for the debounce flush to run (and forget).
-      Process.sleep(120)
+      # Wait for the debounce flush to actually fire, then a synchronous barrier:
+      # :sys.get_state returns only after the flush handler completes, and the
+      # post-dispatch forget/2 (a synchronous call into Idempotency) runs inside
+      # that handler — so the ids are guaranteed forgotten before we probe.
+      assert_receive :flush_dispatched, 1_000
+      :sys.get_state(pid)
 
       assert Idempotency.check_and_record(:whatsapp, "wa-err-1") == :fresh
       assert Idempotency.check_and_record(:whatsapp, "wa-err-2") == :fresh
