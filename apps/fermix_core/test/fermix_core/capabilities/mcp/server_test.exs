@@ -231,17 +231,28 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
           max_discovery_attempts: 5
         )
 
-      Process.sleep(40)
+      # Wait until the first discovery attempt has actually failed (recorded a
+      # retry) rather than guessing 40ms, then confirm the transient error
+      # registered nothing.
+      assert eventually(fn -> :sys.get_state(pid).discovery_attempts >= 1 end)
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
 
       StubDiscoverer.set_tools([
         %{name: "create_issue", description: "x", input_schema: %{}}
       ])
 
-      Process.sleep(120)
-
-      assert [%{name: "mcp_github_create_issue"}] =
-               CapabilityRegistry.list(cap_registry, kind: :mcp)
+      # Wait for a retry to actually discover + register, instead of a fixed
+      # 120ms sleep that races the retry timer under CI load (the flake:
+      # left: [%{name}], right: []).
+      assert eventually(
+               fn ->
+                 match?(
+                   [%{name: "mcp_github_create_issue"}],
+                   CapabilityRegistry.list(cap_registry, kind: :mcp)
+                 )
+               end,
+               2_000
+             )
 
       # The server is linked (start_link); unlink before the kill or the
       # :shutdown exit signal propagates back and kills the test process —
@@ -364,5 +375,23 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       Body.
       """
     )
+  end
+
+  defp eventually(fun, deadline_ms \\ 500) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    poll(fun, deadline)
+  end
+
+  defp poll(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(20)
+        poll(fun, deadline)
+      end
+    end
   end
 end
