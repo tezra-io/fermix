@@ -6,6 +6,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Channel streaming is now on by default.** A configured channel streams its
+  reply as the model works (`streaming = "block"`) instead of staying silent until
+  the final message, so you see the intermediate "thinking" progress. Opt out per
+  channel with `[fermix_channels.<name>] streaming = "off"`, or use `"draft"` for a
+  single message edited in place. Streaming is a no-op for non-streaming providers,
+  so nothing changes unless your primary provider streams.
+
 ## [0.6.0] - 2026-07-19
 
 ### Added

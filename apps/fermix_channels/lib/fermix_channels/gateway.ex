@@ -105,11 +105,15 @@ defmodule FermixChannels.Gateway do
       channel.stream_capability() == :draft_edit
   end
 
+  # A configured channel streams by default ("block" works on every channel and
+  # is a no-op for non-streaming providers); an unknown or unconfigured channel
+  # carries no live turns, so it stays off. Opt out per channel with
+  # `streaming = "off"`.
   defp streaming_config(nil), do: "off"
 
   defp streaming_config(config_key) when is_atom(config_key) do
     case FermixCore.Config.channel(config_key) do
-      {:ok, config} -> Keyword.get(config, :streaming, "off")
+      {:ok, config} -> Keyword.get(config, :streaming, "block")
       {:error, :not_configured} -> "off"
     end
   end
