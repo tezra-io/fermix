@@ -15,6 +15,13 @@ defmodule FermixCore.ComputerUse.SessionTest do
        %{
          test_pid: Keyword.fetch!(opts, :test_pid),
          response: Keyword.get(opts, :response, %{"ok" => true}),
+         # Coexistence (V3 R0): the courtesy arbiter probes `idle_ms` before a
+         # disturbing action and may `wait_for_idle`. Default to "human idle 10s"
+         # (not active) + "reached idle", so existing disturbing-action tests proceed
+         # untouched; courtesy tests override these to exercise defer/yield.
+         idle_response: Keyword.get(opts, :idle_response, %{"ok" => true, "idle_ms" => 10_000}),
+         wait_for_idle_response:
+           Keyword.get(opts, :wait_for_idle_response, %{"ok" => true, "idle" => true}),
          # An optional fake port so handle_info port-matched clauses can be
          # exercised without a real Port/sidecar.
          port: Keyword.get(opts, :port)
@@ -24,7 +31,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
     @impl true
     def execute(%{test_pid: pid} = state, request) do
       send(pid, {:driver_execute, request})
-      {:ok, state.response}
+      {:ok, response_for(state, request)}
     end
 
     @impl true
@@ -32,6 +39,10 @@ defmodule FermixCore.ComputerUse.SessionTest do
       send(pid, :driver_stop)
       :ok
     end
+
+    defp response_for(state, %{"action" => "idle_ms"}), do: state.idle_response
+    defp response_for(state, %{"action" => "wait_for_idle"}), do: state.wait_for_idle_response
+    defp response_for(state, _request), do: state.response
   end
 
   # A Driver whose action always reports the inner sidecar timeout (the shape
@@ -183,7 +194,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
                Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
 
       assert {:ok, result} = Session.execute(session, request)
-      assert result == %{summary: "ok", image: nil}
+      assert %{summary: "ok", image: nil} = result
     end
 
     test "an inspect response becomes a text summary describing the element (no image)" do
@@ -212,7 +223,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
 
       assert {:ok, request} = wrap_classify(session, %{"action" => "inspect", "x" => 5, "y" => 6})
       assert {:ok, result} = Session.execute(session, request)
-      assert result == %{summary: "no UI element at that point", image: nil}
+      assert %{summary: "no UI element at that point", image: nil} = result
     end
 
     test "an elements response becomes a text list of clickable elements (no image)" do
@@ -238,7 +249,7 @@ defmodule FermixCore.ComputerUse.SessionTest do
       session = start_session(driver_opts: [response: %{"ok" => true, "elements" => []}])
       assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
       assert {:ok, result} = Session.execute(session, request)
-      assert result == %{summary: "no interactive UI elements found", image: nil}
+      assert %{summary: "no interactive UI elements found", image: nil} = result
     end
 
     test "a malformed elements entry is skipped, never crashed on" do
@@ -394,6 +405,111 @@ defmodule FermixCore.ComputerUse.SessionTest do
       send(session, {port, {:exit_status, 2}})
 
       assert_receive {:DOWN, ^ref, :process, ^session, {:sidecar_exited, 2}}
+    end
+  end
+
+  describe "coexistence — courtesy arbiter (V3 R0)" do
+    test "proceeds without deferring when the human is idle" do
+      # default idle_response = idle 10s → not active → proceed, no wait_for_idle
+      session = start_session([])
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{courtesy: :proceeded}} = Session.execute(session, request)
+      assert_received {:driver_execute, %{"action" => "idle_ms"}}
+      assert_received {:driver_execute, %{"action" => "left_click"}}
+      refute_received {:driver_execute, %{"action" => "wait_for_idle"}}
+    end
+
+    test "defers then proceeds when an active human pauses within the window" do
+      session =
+        start_session(
+          driver_opts: [
+            idle_response: %{"ok" => true, "idle_ms" => 200},
+            wait_for_idle_response: %{"ok" => true, "idle" => true}
+          ]
+        )
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{courtesy: :deferred}} = Session.execute(session, request)
+      assert_received {:driver_execute, %{"action" => "wait_for_idle"}}
+      assert_received {:driver_execute, %{"action" => "left_click"}}
+    end
+
+    test "yields (refuses the action) when the human stays active" do
+      session =
+        start_session(
+          driver_opts: [
+            idle_response: %{"ok" => true, "idle_ms" => 200},
+            wait_for_idle_response: %{"ok" => true, "idle" => false}
+          ]
+        )
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:error, :user_active} = Session.execute(session, request)
+      # the action itself never ran — only the idle probe + the wait
+      refute_received {:driver_execute, %{"action" => "left_click"}}
+    end
+
+    test "a read-only action never triggers the arbiter, even when the human is active" do
+      session = start_session(driver_opts: [idle_response: %{"ok" => true, "idle_ms" => 0}])
+      {:ok, :auto, request} = Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:ok, %{courtesy: :off}} = Session.execute(session, request)
+      refute_received {:driver_execute, %{"action" => "idle_ms"}}
+    end
+
+    test "courtesy = :off skips the arbiter entirely" do
+      config = Config.normalize(enabled: true, courtesy: "off")
+
+      session =
+        start_session(
+          config: config,
+          driver_opts: [idle_response: %{"ok" => true, "idle_ms" => 0}]
+        )
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{courtesy: :off}} = Session.execute(session, request)
+      refute_received {:driver_execute, %{"action" => "idle_ms"}}
+    end
+
+    test "an unavailable idle signal fails OPEN (proceeds), never bricks the action" do
+      # a malformed idle reply (no idle_ms) — e.g. the macOS-only probe on Linux
+      session = start_session(driver_opts: [idle_response: %{"ok" => true}])
+
+      {:ok, :auto, request} =
+        Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      assert {:ok, %{courtesy: :unavailable}} = Session.execute(session, request)
+      assert_received {:driver_execute, %{"action" => "left_click"}}
+    end
+  end
+
+  describe "coexistence — /pause and /resume" do
+    test "pause refuses every action at classify; resume restores it" do
+      session = start_session([])
+      refute Session.paused?(session)
+
+      :ok = Session.pause(session)
+      # cast lands before the next call (same mailbox, serialized)
+      assert Session.paused?(session)
+
+      assert {:error, {:refused, :paused}} =
+               Session.classify(session, %{"action" => "screenshot"})
+
+      assert {:error, {:refused, :paused}} =
+               Session.classify(session, %{"action" => "left_click", "x" => 1, "y" => 2})
+
+      :ok = Session.resume(session)
+      refute Session.paused?(session)
+      assert {:ok, :auto, _request} = Session.classify(session, %{"action" => "screenshot"})
     end
   end
 

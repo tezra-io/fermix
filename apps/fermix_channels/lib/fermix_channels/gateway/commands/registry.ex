@@ -11,6 +11,8 @@ defmodule FermixChannels.Gateway.Commands.Registry do
     FermixChannels.Gateway.Commands.Sandbox,
     FermixChannels.Gateway.Commands.Soul,
     FermixChannels.Gateway.Commands.Stop,
+    FermixChannels.Gateway.Commands.Pause,
+    FermixChannels.Gateway.Commands.Resume,
     FermixChannels.Gateway.Commands.Background,
     FermixChannels.Gateway.Commands.Tasks,
     FermixChannels.Gateway.Commands.Ultra
