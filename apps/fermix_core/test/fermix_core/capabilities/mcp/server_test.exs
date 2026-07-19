@@ -231,17 +231,28 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
           max_discovery_attempts: 5
         )
 
-      Process.sleep(40)
+      # Wait until the first discovery attempt has actually failed (recorded a
+      # retry) rather than guessing 40ms, then confirm the transient error
+      # registered nothing.
+      assert eventually(fn -> :sys.get_state(pid).discovery_attempts >= 1 end)
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
 
       StubDiscoverer.set_tools([
         %{name: "create_issue", description: "x", input_schema: %{}}
       ])
 
-      Process.sleep(120)
-
-      assert [%{name: "mcp_github_create_issue"}] =
-               CapabilityRegistry.list(cap_registry, kind: :mcp)
+      # Wait for a retry to actually discover + register, instead of a fixed
+      # 120ms sleep that races the retry timer under CI load (the flake:
+      # left: [%{name}], right: []).
+      assert eventually(
+               fn ->
+                 match?(
+                   [%{name: "mcp_github_create_issue"}],
+                   CapabilityRegistry.list(cap_registry, kind: :mcp)
+                 )
+               end,
+               2_000
+             )
 
       # The server is linked (start_link); unlink before the kill or the
       # :shutdown exit signal propagates back and kills the test process —
@@ -309,6 +320,44 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       assert CapabilityRegistry.list(cap_registry, kind: :mcp) == []
     end
+
+    test "terminate tolerates registries that already died (shutdown race)" do
+      Process.flag(:trap_exit, true)
+      suffix = System.unique_integer([:positive])
+      {:ok, cap_reg} = CapabilityRegistry.start_link(name: :"race_cap_#{suffix}")
+      {:ok, mcp_reg} = McpRegistry.start_link(name: :"race_mcp_#{suffix}")
+
+      StubDiscoverer.set_tools([
+        %{name: "create_issue", description: "x", input_schema: %{}}
+      ])
+
+      {:ok, pid} =
+        McpServer.start_link(
+          server_name: "github",
+          # A pid client so `is_pid(state.client)` holds and terminate/2 exercises
+          # BOTH wrapped unregister sites (capability + mcp registry).
+          client: self(),
+          discoverer: StubDiscoverer,
+          caller: StubCaller,
+          capability_registry: cap_reg,
+          mcp_registry: mcp_reg,
+          fail_fast?: true
+        )
+
+      # Both registries die BEFORE the server terminates — the shutdown race that
+      # made terminate/2's unregister GenServer.call exit :noproc and crash,
+      # leaking the capability into later tests.
+      :ok = GenServer.stop(cap_reg, :normal)
+      :ok = GenServer.stop(mcp_reg, :normal)
+
+      # terminate must clean up without crashing, so the stop returns :ok and the
+      # server honors the requested :normal exit rather than dying (`:noproc`) on
+      # the dead registries. Without the fix, GenServer.stop/2 re-raises the
+      # mismatched exit and this line fails.
+      ref = Process.monitor(pid)
+      assert :ok = GenServer.stop(pid, :normal)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    end
   end
 
   defp write_skill(skills_dir, name) do
@@ -326,5 +375,23 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       Body.
       """
     )
+  end
+
+  defp eventually(fun, deadline_ms \\ 500) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+    poll(fun, deadline)
+  end
+
+  defp poll(fun, deadline) do
+    if fun.() do
+      true
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        false
+      else
+        Process.sleep(20)
+        poll(fun, deadline)
+      end
+    end
   end
 end
