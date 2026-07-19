@@ -1462,10 +1462,16 @@ defmodule FermixWebWeb.SetupLive do
 
   # The sidecar ships via the pinned compux release, not the plugin catalog;
   # the catalog entry predates that move, so its version is core-owned like
-  # the card's name and logo.
+  # the card's name and logo. `Application.spec/2` returns nil when compux is
+  # not loaded — keep that nil rather than collapsing it to `to_string(nil)`
+  # ("", which the card's `:if={@entry.latest}` guard treats as truthy and
+  # renders as a bare "v") so the version simply drops instead.
   defp card_latest(entry) do
     if computer_use_plugin?(entry.name) do
-      to_string(Application.spec(:compux, :vsn))
+      case Application.spec(:compux, :vsn) do
+        nil -> nil
+        vsn -> to_string(vsn)
+      end
     else
       entry.latest
     end
