@@ -15,10 +15,26 @@ defmodule FermixCore.ComputerUse do
 
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Grant
+  alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.ComputerUse.SidecarInstaller
 
   @spec enabled?() :: boolean()
   def enabled?, do: Config.enabled?()
+
+  @doc """
+  Pause the computer-use session for a conversation `context` (the `/pause` command):
+  the human is reclaiming the machine. The session, its sidecar, and the task stay
+  ALIVE and resumable — this only flips the session's guard so it refuses actions
+  until `resume/1` (contrast the interactive `/stop`, which tears the session down).
+  Returns `:paused` if a session was running, `:no_session` otherwise. A safe no-op
+  when computer-use isn't running.
+  """
+  @spec pause(map()) :: :paused | :no_session
+  def pause(context) when is_map(context), do: SessionManager.pause(context)
+
+  @doc "Resume a paused computer-use session (`/resume`). `:resumed` or `:no_session`."
+  @spec resume(map()) :: :resumed | :no_session
+  def resume(context) when is_map(context), do: SessionManager.resume(context)
 
   @doc """
   Actively PROMPT for the macOS Screen Recording + Accessibility grants and report the

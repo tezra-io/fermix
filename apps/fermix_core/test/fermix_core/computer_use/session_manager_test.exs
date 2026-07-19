@@ -2,6 +2,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
 
@@ -123,5 +124,32 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     refute is_pid(Process.whereis(CuSupervisor.registry()))
 
     assert :ok = SessionManager.abort(context(%{computer_use_origin: :voice}))
+  end
+
+  test "pause/resume flip a running session's guard without tearing it down", %{config: config} do
+    ctx = context(%{computer_use_origin: :interactive})
+    {:ok, pid} = SessionManager.ensure(config, ctx, driver: stub_driver())
+
+    assert :paused = SessionManager.pause(ctx)
+    # unlike abort, the session stays alive and registered
+    assert Process.alive?(pid)
+    assert {:ok, ^pid} = SessionManager.lookup(ctx)
+    assert Session.paused?(pid)
+
+    assert :resumed = SessionManager.resume(ctx)
+    refute Session.paused?(pid)
+    assert {:ok, ^pid} = SessionManager.lookup(ctx)
+  end
+
+  test "pause/resume are :no_session no-ops when nothing is running" do
+    assert :no_session = SessionManager.pause(context(%{conversation_key: {"cli", "x", :root}}))
+    assert :no_session = SessionManager.resume(context(%{conversation_key: {"cli", "x", :root}}))
+    assert :no_session = SessionManager.pause(%{agent_name: "realtime"})
+  end
+
+  test "pause is a clean :no_session when the registry is not running (CU disabled)" do
+    :ok = stop_supervised(CuSupervisor)
+    refute is_pid(Process.whereis(CuSupervisor.registry()))
+    assert :no_session = SessionManager.pause(context(%{computer_use_origin: :voice}))
   end
 end
