@@ -1306,14 +1306,14 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_image_backend(value) when is_binary(value) do
     case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google) ->
+      backend when backend in ~w(openai xai google openai_codex) ->
         backend
 
       other ->
         raise ArgumentError, """
         config.toml [fermix_core.tools.generate_image] has an unknown backend: #{inspect(other)}.
 
-        Allowed backends: google, openai, xai.
+        Allowed backends: google, openai, openai_codex, xai.
         Remove or fix `backend`; the daemon will not boot until this is fixed.
         """
     end

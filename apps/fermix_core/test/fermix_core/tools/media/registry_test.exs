@@ -46,7 +46,7 @@ defmodule FermixCore.Tools.Media.RegistryTest do
       assert message =~ "Unknown generate_image backend"
       assert message =~ "midjourney"
       # All wired image providers are offered, sorted.
-      assert message =~ "Supported: google | openai | xai"
+      assert message =~ "Supported: google | openai | openai_codex | xai"
     end
 
     test "a modality with no backend wired yet fails loud" do
@@ -91,7 +91,7 @@ defmodule FermixCore.Tools.Media.RegistryTest do
     test "an unknown backend fails loud and lists the supported set" do
       assert {:error, message} = Registry.supported_models(:image, "midjourney")
       assert message =~ "Unknown generate_image backend"
-      assert message =~ "Supported: google | openai | xai"
+      assert message =~ "Supported: google | openai | openai_codex | xai"
     end
 
     test "a missing provider fails loud" do

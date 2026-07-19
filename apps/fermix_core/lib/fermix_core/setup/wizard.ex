@@ -1607,7 +1607,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_image_backend(value) when is_binary(value) do
     case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google) -> backend
+      backend when backend in ~w(openai xai google openai_codex) -> backend
       invalid -> raise ArgumentError, "invalid image_backend #{inspect(invalid)}"
     end
   end

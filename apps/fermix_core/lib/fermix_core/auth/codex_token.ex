@@ -29,6 +29,54 @@ defmodule FermixCore.Auth.CodexToken do
     Store.read(:openai_codex, path)
   end
 
+  @account_id_claims ["account_id", "accountId", "sub", "https://api.openai.com/account_id"]
+
+  @doc """
+  Extracts the ChatGPT account id from a Codex bearer JWT payload. Shared by the
+  Codex chat adapter (`chatgpt-account-id` header) and the Codex image backend so
+  the claim-parsing lives in one place. Returns `{:error, reason}` (rather than a
+  bare nil) so callers can log why a token yielded no account id.
+  """
+  @spec account_id_from_token(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def account_id_from_token(token) when is_binary(token) do
+    with {:ok, payload} <- jwt_payload(token),
+         {:ok, decoded} <- decode_payload(payload),
+         {:ok, claims} <- decode_claims(decoded) do
+      account_id_from_claims(claims)
+    end
+  end
+
+  def account_id_from_token(_token), do: {:error, :not_a_token}
+
+  defp jwt_payload(token) do
+    case String.split(token, ".") do
+      [_header, payload | _rest] -> {:ok, payload}
+      _parts -> {:error, :missing_payload}
+    end
+  end
+
+  defp decode_payload(payload) do
+    case Base.url_decode64(payload, padding: false) do
+      {:ok, decoded} -> {:ok, decoded}
+      :error -> {:error, :invalid_payload_base64}
+    end
+  end
+
+  defp decode_claims(decoded) do
+    case Jason.decode(decoded) do
+      {:ok, claims} when is_map(claims) -> {:ok, claims}
+      {:ok, _other} -> {:error, :invalid_payload_claims}
+      {:error, reason} -> {:error, {:invalid_payload_json, reason}}
+    end
+  end
+
+  defp account_id_from_claims(claims) do
+    case Enum.find_value(@account_id_claims, &nonempty_string(claims[&1])) do
+      nil -> {:error, :missing_account_id_claim}
+      account_id -> {:ok, account_id}
+    end
+  end
+
   @spec refresh_entry(Store.entry(), Path.t(), keyword()) ::
           {:ok, Store.entry()} | {:error, term()}
   def refresh_entry(%{tokens: %{refresh_token: nil}}, path, refresh_opts)
@@ -81,4 +129,7 @@ defmodule FermixCore.Auth.CodexToken do
   end
 
   defp access_token(_entry), do: {:error, :empty_access_token}
+
+  defp nonempty_string(value) when is_binary(value) and value != "", do: value
+  defp nonempty_string(_value), do: nil
 end
