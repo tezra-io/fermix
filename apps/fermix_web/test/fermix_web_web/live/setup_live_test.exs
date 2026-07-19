@@ -47,6 +47,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     agent = Application.get_env(:fermix_core, :agent, [])
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
     tools = Application.get_env(:fermix_core, :tools, [])
+    transcription = Application.get_env(:fermix_core, :transcription, [])
     plugins = Application.get_env(:fermix_core, :plugins, [])
     plugins_dist_opts = Application.get_env(:fermix_core, :plugins_dist_opts)
     oauth = Application.get_env(:fermix_core, :oauth, %{})
@@ -70,6 +71,14 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_channels, :telegram)
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
     Application.put_env(:fermix_core, :tools, [])
+    # Deterministic transcription baseline so the card's default backend/model
+    # are stable regardless of any leaked env.
+    Application.put_env(:fermix_core, :transcription,
+      backend: "openai",
+      model: "gpt-4o-mini-transcribe",
+      max_file_mb: 20
+    )
+
     Application.put_env(:fermix_core, :plugins, [])
     Application.put_env(:fermix_core, :plugins_dist_opts, [])
     Application.put_env(:fermix_core, :oauth, %{})
@@ -87,6 +96,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_core, :agent, agent)
       restore_env(:fermix_core, :secret_writer, secret_writer)
       Application.put_env(:fermix_core, :tools, tools)
+      Application.put_env(:fermix_core, :transcription, transcription)
       Application.put_env(:fermix_core, :plugins, plugins)
       restore_env(:fermix_core, :plugins_dist_opts, plugins_dist_opts)
       Application.put_env(:fermix_core, :oauth, oauth)
@@ -309,6 +319,17 @@ defmodule FermixWebWeb.SetupLiveTest do
       compux_vsn = to_string(Application.spec(:compux, :vsn))
       assert card =~ "v" <> compux_vsn
       refute card =~ "v0.1.0"
+    end
+
+    # The Ready state requires an installed sidecar, and the installed-check
+    # resolves through Compux.Binary.target/0 — impossible on hosts compux
+    # ships no artifact for (e.g. the linux-aarch64 CI leg).
+    case Compux.Binary.target() do
+      {:ok, _target} ->
+        :ok
+
+      {:error, reason} ->
+        @tag skip: "compux sidecar unsupported on this host: #{inspect(reason)}"
     end
 
     test "a ready computer-use sidecar card shows Ready without a registry health check",
@@ -1177,6 +1198,141 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
+  describe "Transcription form (M21)" do
+    test "every backend shows a key field; Deepgram's key persists as a sentinel", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      # OpenAI (default) now shows its own key field (an override for the chat key),
+      # under the shared `api_key` field name.
+      assert html =~ "transcription_form[api_key]"
+      assert html =~ "OpenAI API key"
+
+      # Selecting Deepgram relabels the same key field.
+      html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]",
+          transcription_form: %{backend: "deepgram"}
+        )
+        |> render_change()
+
+      assert html =~ "transcription_form[api_key]"
+      assert html =~ "Deepgram API key"
+
+      view
+      |> form("form[phx-submit=\"save_transcription\"]",
+        transcription_form: %{
+          backend: "deepgram",
+          model: "nova-3",
+          api_key: "dg-live-test"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Transcription saved."
+
+      transcription =
+        :fermix_core
+        |> Application.get_env(:transcription, [])
+        |> then(&Keyword.take(&1, [:backend, :model, :deepgram_api_key]))
+
+      assert Keyword.get(transcription, :backend) == "deepgram"
+      assert Keyword.get(transcription, :model) == "nova-3"
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ "[fermix_core.transcription]"
+      assert contents =~ ~s(backend = "deepgram")
+      # The key rode to the deepgram slot, secured to the keyring.
+      assert contents =~ ~s(deepgram_api_key = "@keyring")
+      # The plaintext key never reaches config.toml.
+      refute contents =~ "dg-live-test"
+
+      assert {:ok, "dg-live-test"} = FermixTestSupport.SecretWriterStub.get(:deepgram_api_key)
+    end
+
+    test "openai and xai each expose a transcription key field; xai stays modelless",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]", transcription_form: %{backend: "xai"})
+        |> render_change()
+
+      # SpaceXAI now takes its own key (the Grok OAuth token won't work for STT).
+      assert html =~ "transcription_form[api_key]"
+      assert html =~ "SpaceXAI API key"
+      assert html =~ "OAuth won&#39;t work here"
+      # xai is modelless — the model dropdown is hidden.
+      refute html =~ ~r{<select[^>]*name="transcription_form\[model\]"}
+
+      # OpenAI's field is optional — it can reuse the chat key.
+      openai_html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]",
+          transcription_form: %{backend: "openai"}
+        )
+        |> render_change()
+
+      assert openai_html =~ "OpenAI API key"
+      assert openai_html =~ "reuse your OpenAI chat key"
+    end
+
+    test "the SpaceXAI transcription key persists to its own slot", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_transcription\"]",
+        transcription_form: %{backend: "xai", api_key: "xai-live-test"}
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Transcription saved."
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(backend = "xai")
+      assert contents =~ ~s(xai_api_key = "@keyring")
+      refute contents =~ "xai-live-test"
+
+      assert {:ok, "xai-live-test"} =
+               FermixTestSupport.SecretWriterStub.get(:transcription_xai_api_key)
+    end
+
+    test "the model field is a dropdown that swaps options on backend change", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      html = view |> element("button[phx-value-tab=\"transcription\"]") |> render_click()
+
+      # OpenAI (default): a real <select> carrying its curated entries.
+      assert html =~ ~r{<select[^>]*name="transcription_form\[model\]"}
+      assert html =~ "gpt-4o-mini-transcribe"
+      assert html =~ "whisper-1"
+
+      # Switching backend swaps the options to Deepgram's models and drops the
+      # OpenAI-only entries.
+      html =
+        view
+        |> form("form[phx-submit=\"save_transcription\"]",
+          transcription_form: %{backend: "deepgram"}
+        )
+        |> render_change()
+
+      assert html =~ "nova-3"
+      refute html =~ "whisper-1"
+    end
+  end
+
   describe "Realtime form" do
     test "submitting persists voice companion settings", %{
       conn: conn,
@@ -1324,7 +1480,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "xai"})
         |> render_change()
 
-      assert html =~ "Configuring xAI"
+      assert html =~ "Configuring SpaceXAI"
     end
 
     test "ollama pane shows a keyless base_url field and saves it", %{conn: conn} do

@@ -1,16 +1,13 @@
 suite: subagents
+risk: expensive
 title: "Subagents — fan-out mechanism + model routing"
 description: >
-  Tests the delegation MECHANISM, deterministically: when the model is asked to
-  run parallel workers it fans out (the `subagents` tool span + nested
-  `subagent:*` worker spans) and the reply synthesizes every branch.
-
-  It deliberately does NOT test the model's *autonomous* "decide to fan out"
-  behavior. For small/medium tasks the model correctly answers in one pass
-  (cheaper and just as good), so a fan-out assertion on a natural query would be
-  testing a non-deterministic, task-size-dependent judgment call — and broad
-  outcome quality is already covered by `complex` and `knowledge_qa`. So the
-  gated subagents coverage is the explicit, deterministic fan-out below.
+  Tests both the deterministic delegation mechanism and the non-deterministic
+  chief-of-staff judgment of when delegation is proportionate. Explicit cases
+  verify fan-out plumbing; a paired natural-request scenario lets the judge assess
+  the chosen approach for a broad dossier review while requiring a small
+  prioritization to stay direct.
+  Run the judgment pair with `--repeat 3` when measuring behavioral stability.
 
   Model routing gates (`main_model_matches`, `subagent_model_matches`) are
   deliberately omitted here — they are daemon-config-specific and would fail any
@@ -73,3 +70,75 @@ scenarios:
           the subagents tool or uses the configured sub-agent model), fans out into
           at least two parallel workers, and returns a summary covering all three
           topics (cricket, vaccines, jazz).
+      - id: chief_of_staff_launch_workstreams
+        query: |
+          Act as my chief of staff. Use exactly three parallel subagent tasks to
+          analyze these independent synthetic launch workstreams, then synthesize
+          one go/no-go recommendation yourself. Security: two P0s are open and have
+          no owners. Revenue: forecast is $1.2M, including a $400k renewal contingent
+          on launch. Staffing: launch-day on-call coverage is empty from 18:00–22:00.
+          Do not browse, write, schedule, send, or change anything.
+        expect:
+          tools_all: [subagents]
+          min_subagent_spawns: 3
+          tools_none: [file_write, file_edit, git_write, shell, browser, computer_use, web_search, web_fetch, schedule_job, update_job, pause_job, resume_job, remove_job, run_job_now, send_attachment, memory_store, skill_create, model_routing_config]
+          reply_matches: '(?is)(?=.*two P0|.*2 P0)(?=.*\$1\.2M)(?=.*\$400k)(?=.*18:00)(?=.*22:00)(?=.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay)|.*(?:^|[.!?]\s*)(?:hold|no-go)\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bdo not launch\b)'
+          reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Uses three workers for the three separable analyses, preserves every
+          supplied fact, and personally synthesizes a decisive recommendation with
+          clear unblock conditions rather than pasting three reports together.
+
+  - id: autonomous_delegation_judgment
+    title: "Chooses delegation proportionally without being told which route to use"
+    severity: normal
+    tags: [subagents, chief-of-staff, delegation, judgment, nondeterministic]
+    cases:
+      - id: autonomous_launch_diligence
+        query: |
+          Act as my chief of staff and prepare one go/no-go launch brief from these
+          four synthetic dossiers. Assess the security, commercial, staffing, and
+          governance evidence as separate workstreams, reconcile conflicts, then
+          give your own ordered recommendation with owners and unblock conditions.
+          Choose the work approach yourself; do not ask me how to organize it.
+
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_calendar.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_inbox.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_tracker.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_notes.md
+
+          Do not write, schedule, send, or change anything.
+        expect:
+          tools_any: [file_read, content_search, subagents]
+          tools_none: [file_write, file_edit, git_write, shell, browser, computer_use, web_search, web_fetch, schedule_job, update_job, pause_job, resume_job, remove_job, run_job_now, send_attachment, memory_store, skill_create, model_routing_config]
+          tool_inputs_match_all:
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_calendar\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_inbox\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_tracker\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_notes\.md'
+          reply_matches: '(?is)(?=.*P1)(?=.*Northstar)(?=.*board[ -]memo)(?=.*Tuesday.{0,40}11:30|.*11:30.{0,40}Tuesday)(?=.*10:30)(?=.*18 (?:of|/) 20)(?=.*provisional|.*assumption)(?=.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay)|.*(?:^|[.!?]\s*)(?:hold|no-go)\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bdo not launch\b)(?=.*owner|.*Sam)'
+          reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
+          max_cost_usd: 30
+          max_duration_ms: 900000
+        rubric: >
+          Chooses and executes a proportionate approach without asking the user to
+          design the workflow, covers all four dossiers, and reconciles them into
+          one decision. A small parallel team is reasonable; direct analysis is
+          also acceptable if it is efficient and complete. Excess workers,
+          duplicated work, or pasted worker reports are disproportionate.
+      - id: autonomous_single_priority
+        query: >
+          Act as my chief of staff. From these synthetic facts, return only the
+          single most urgent item and its owner: checkout P1 due at noon, owned by
+          Sam; board memo due Friday, owned by Lea; optional coffee chat next week.
+          Choose the work approach yourself.
+        expect:
+          tools_none: [subagents]
+          max_tool_calls: 0
+          reply_matches: '(?is)(?=.*checkout P1|.*P1)(?=.*Sam)'
+          reply_not_matches: '(?i)board memo|coffee chat|Lea'
+        rubric: >
+          Answers the tiny prioritization directly in one concise line. Spawning
+          workers, outlining workstreams, or adding unrelated items is overkill.

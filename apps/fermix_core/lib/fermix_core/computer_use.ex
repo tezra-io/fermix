@@ -15,10 +15,106 @@ defmodule FermixCore.ComputerUse do
 
   alias FermixCore.ComputerUse.Config
   alias FermixCore.ComputerUse.Grant
+  alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.ComputerUse.SidecarInstaller
+
+  require Logger
+
+  # Boot-time bound on the one-shot sidecar ensure below: a slow or offline
+  # download is killed after this so it never blocks the daemon's boot, and
+  # computer-use stays off (fail-closed) until the next boot.
+  @sidecar_boot_ensure_timeout_ms 30_000
 
   @spec enabled?() :: boolean()
   def enabled?, do: Config.enabled?()
+
+  @doc """
+  Ensure the OS-driver sidecar matching the COMPILED-IN compux version is
+  installed, so a `computer_use`-enabled daemon that just upgraded (new compux
+  ref -> new sidecar version) downloads the matching sidecar at boot instead of
+  silently losing computer-use until the operator re-runs the setup enable flow.
+
+  Returns `:ok` immediately with NO network when computer-use is disabled or the
+  matching sidecar is already installed, so the common boot path is untouched.
+  Otherwise it downloads once, BOUNDED by `:timeout_ms` and FAIL-SOFT: a slow,
+  failed, or crashing download is logged and leaves computer-use off (the
+  existing fail-closed state, retried on the next boot or via the setup card) —
+  it never blocks or crashes boot. `:installer` (default `SidecarInstaller`) is
+  injectable for tests.
+  """
+  @spec ensure_sidecar_installed(keyword()) :: :ok
+  def ensure_sidecar_installed(opts \\ []) when is_list(opts) do
+    installer = Keyword.get(opts, :installer, SidecarInstaller)
+    timeout = Keyword.get(opts, :timeout_ms, @sidecar_boot_ensure_timeout_ms)
+
+    cond do
+      not Config.current().enabled? -> :ok
+      installer.installed?() -> :ok
+      true -> download_sidecar(installer, timeout)
+    end
+  end
+
+  defp download_sidecar(installer, timeout) do
+    task = Task.async(fn -> safe_install(installer) end)
+
+    (Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill))
+    |> log_ensure_result()
+
+    :ok
+  end
+
+  # The task body must never raise: `Task.async` links to the boot process, so an
+  # install exception here would otherwise crash the daemon's startup.
+  defp safe_install(installer) do
+    installer.install()
+  rescue
+    error -> {:error, {:exception, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp log_ensure_result({:ok, {:ok, path}}),
+    do: Logger.info("computer-use: sidecar ensured at boot (#{path})")
+
+  defp log_ensure_result({:ok, {:error, reason}}),
+    do:
+      Logger.warning(
+        "computer-use: sidecar ensure failed at boot (#{inspect(reason)}); " <>
+          "computer-use stays off until the next boot or re-enable"
+      )
+
+  defp log_ensure_result({:exit, reason}),
+    do:
+      Logger.warning(
+        "computer-use: sidecar ensure crashed at boot (#{inspect(reason)}); computer-use stays off"
+      )
+
+  defp log_ensure_result(nil),
+    do: Logger.warning("computer-use: sidecar ensure timed out at boot; computer-use stays off")
+
+  # Catch-all so an unexpected install return can never raise a FunctionClauseError
+  # in the boot process — the never-crash-boot guarantee holds even off-contract.
+  defp log_ensure_result(other),
+    do:
+      Logger.warning(
+        "computer-use: sidecar ensure returned an unexpected result at boot " <>
+          "(#{inspect(other)}); computer-use stays off"
+      )
+
+  @doc """
+  Pause the computer-use session for a conversation `context` (the `/pause` command):
+  the human is reclaiming the machine. The session, its sidecar, and the task stay
+  ALIVE and resumable — this only flips the session's guard so it refuses actions
+  until `resume/1` (contrast the interactive `/stop`, which tears the session down).
+  Returns `:paused` if a session was running, `:no_session` otherwise. A safe no-op
+  when computer-use isn't running.
+  """
+  @spec pause(map()) :: :paused | :no_session
+  def pause(context) when is_map(context), do: SessionManager.pause(context)
+
+  @doc "Resume a paused computer-use session (`/resume`). `:resumed` or `:no_session`."
+  @spec resume(map()) :: :resumed | :no_session
+  def resume(context) when is_map(context), do: SessionManager.resume(context)
 
   @doc """
   Actively PROMPT for the macOS Screen Recording + Accessibility grants and report the

@@ -26,9 +26,25 @@ defmodule Fermix.CLI.Doctor do
 
   defp dispatch(opts) do
     full? = Keyword.get(opts, :full, false)
+    if full?, do: ensure_http_pool()
     results = collect_results(full?)
     print_report(results)
     exit_for(results)
+  end
+
+  # `--full` live probes (provider auth, channels, web search) route through
+  # `FermixCore.Net.HttpClient`, which pins the shared `FermixCore.Finch`
+  # pool. The daemon supervision tree owns that pool, but `fermix doctor`
+  # runs in the tree-less CLI dispatch — bring the pool up here (a no-op when
+  # a tree is already running, e.g. under `mix test`), mirroring
+  # `mix fermix.eval.transcription`.
+  defp ensure_http_pool do
+    if Process.whereis(FermixCore.Finch) == nil do
+      {:ok, _pid} =
+        Finch.start_link(name: FermixCore.Finch, pools: FermixCore.Application.finch_pools())
+    end
+
+    :ok
   end
 
   defp collect_results(full?) do
@@ -53,6 +69,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.linger(),
       Checks.web_search(full?),
       Checks.image_generation(),
+      Checks.transcription(),
+      Checks.realtime(),
       Checks.computer_use_permissions()
     ]
 

@@ -11,6 +11,7 @@ defmodule FermixChannels.Channels.Telegram do
 
   require Logger
 
+  alias FermixChannels.Gateway.ApprovalButton
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.RetryHint
@@ -85,9 +86,48 @@ defmodule FermixChannels.Channels.Telegram do
       Map.has_key?(update, "edited_message") ->
         parse_message(update["edited_message"])
 
+      Map.has_key?(update, "callback_query") ->
+        parse_callback_query(update["callback_query"])
+
       true ->
         {:ok, []}
     end
+  end
+
+  # An inline-button tap (SANDBOX_ACCESS_APPROVAL_FLOW) synthesizes the exact
+  # inbound message a typed `/confirm <token>` would produce, so the tap funnels
+  # through the unchanged Gateway.ingest -> Commands.parse -> Sandbox.confirm path
+  # (single-use take, owner-only + same-origin validation, auto-resume). The
+  # payload is namespaced `grant:<token>`; a payload without that prefix is not a
+  # confirmation tap and is ignored. The origin fields are taken from the
+  # callback: `from.id` is Telegram-authenticated, and chat/thread come from the
+  # message the button rides on. The callback ids are stashed so the poller can
+  # answer the query and strip the used button.
+  defp parse_callback_query(%{"data" => data} = callback) when is_binary(data) do
+    case ApprovalButton.parse_payload(data) do
+      {:ok, token} -> {:ok, [synthesize_confirm(callback, token)]}
+      :ignore -> {:ok, []}
+    end
+  end
+
+  defp parse_callback_query(_callback), do: {:ok, []}
+
+  defp synthesize_confirm(callback, token) do
+    source = Map.get(callback, "message", %{})
+
+    sender =
+      get_in(callback, ["from", "username"]) || get_in(callback, ["from", "first_name"]) ||
+        "unknown"
+
+    ApprovalButton.confirm_message(%{
+      id: "callback-#{callback["id"]}",
+      sender: sender,
+      channel: "telegram",
+      chat_id: source |> get_in(["chat", "id"]) |> to_string(),
+      thread_ts: source["message_thread_id"],
+      user_id: get_in(callback, ["from", "id"]),
+      token: token
+    })
   end
 
   @impl true
@@ -149,6 +189,86 @@ defmodule FermixChannels.Channels.Telegram do
     opts = if thread_ts, do: [message_thread_id: thread_ts], else: []
 
     fn media_part -> send_media(reply_target, media_part, opts) end
+  end
+
+  # -- Owner-approval one-tap button (SANDBOX_ACCESS_APPROVAL_FLOW) --
+
+  @impl true
+  @spec send_approval(Message.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def send_approval(%Message{reply_target: reply_target, thread_ts: thread_ts}, text, token)
+      when is_binary(text) and is_binary(token) do
+    # The prompt rides the normal send path (markdown->HTML, so the backticked
+    # `/confirm <token>` fallback still renders as a tap-to-copy code span); the
+    # inline keyboard is the additive one-tap affordance. callback_data carries
+    # the `grant:<token>` payload (the callback handler strips the prefix and
+    # prepends `/confirm `); an 8-char token is far under Telegram's 64-byte
+    # callback_data cap.
+    markup = %{
+      inline_keyboard: [[%{text: "✅ Approve", callback_data: ApprovalButton.payload(token)}]]
+    }
+
+    opts = [reply_markup: markup]
+    opts = if thread_ts, do: Keyword.put(opts, :message_thread_id, thread_ts), else: opts
+    send_message(reply_target, text, opts)
+  end
+
+  @doc """
+  Acknowledge an inline-button tap: clear the client spinner
+  (`answerCallbackQuery`) and strip the used button (`editMessageReplyMarkup`) so
+  it can't be re-tapped. Best-effort UI cleanup fired by the poller on every tap —
+  the confirmation token is single-use regardless, and the confirm outcome reaches
+  the owner through the normal `/confirm` text reply. Failures are logged, not
+  raised, so a spinner/edit hiccup never crashes the poll loop.
+  """
+  @spec acknowledge_callback(map(), keyword()) :: :ok | {:error, :not_configured}
+  def acknowledge_callback(callback, opts \\ []) when is_map(callback) do
+    with {:ok, token} <- get_bot_token() do
+      answer_callback_query(token, Map.get(callback, "id"), opts)
+      strip_callback_button(token, Map.get(callback, "message"), opts)
+      :ok
+    end
+  end
+
+  defp answer_callback_query(_token, nil, _opts), do: :ok
+
+  defp answer_callback_query(token, callback_id, opts) do
+    url = "#{@bot_api_base}/bot#{token}/answerCallbackQuery"
+    post_callback_ack(url, %{callback_query_id: callback_id}, opts, "answerCallbackQuery")
+  end
+
+  defp strip_callback_button(
+         token,
+         %{"message_id" => message_id, "chat" => %{"id" => chat_id}},
+         opts
+       ) do
+    url = "#{@bot_api_base}/bot#{token}/editMessageReplyMarkup"
+
+    body = %{
+      chat_id: to_string(chat_id),
+      message_id: message_id,
+      reply_markup: %{inline_keyboard: []}
+    }
+
+    post_callback_ack(url, body, opts, "editMessageReplyMarkup")
+  end
+
+  defp strip_callback_button(_token, _message, _opts), do: :ok
+
+  defp post_callback_ack(url, body, opts, label) do
+    case Req.new(url: url, method: :post, json: body)
+         |> Req.merge(req_options(opts))
+         |> HttpClient.request("Telegram #{label}") do
+      {:ok, %{status: 200}} ->
+        :ok
+
+      {:ok, %{status: status, body: response}} ->
+        Logger.warning("Telegram #{label} failed: #{status} - #{inspect(response)}")
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Telegram #{label} request failed: #{inspect(reason)}")
+        :ok
+    end
   end
 
   @impl true
@@ -336,6 +456,7 @@ defmodule FermixChannels.Channels.Telegram do
         |> maybe_put_parse_mode(opts)
         |> maybe_put_reply_to(opts)
         |> maybe_put_message_thread_id(opts)
+        |> maybe_put_reply_markup(opts)
 
       result =
         Req.new(url: url, method: :post, json: body)
@@ -792,6 +913,13 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  defp maybe_put_reply_markup(body, opts) do
+    case Keyword.get(opts, :reply_markup) do
+      nil -> body
+      markup when is_map(markup) -> Map.put(body, :reply_markup, markup)
+    end
+  end
+
   # Ingress authorization is centralized in the gateway dispatcher
   # (`FermixChannels.Gateway.Authorizer`); the adapter parses every message and
   # records the sender id in `metadata.user_id` so the gateway can authorize.
@@ -824,7 +952,10 @@ defmodule FermixChannels.Channels.Telegram do
 
   # Inbound photos arrive as a list of PhotoSize (file_id only — no URL); the
   # bytes are fetched lazily by download_attachment/2 at the gateway media-ingest
-  # step. Only images are parsed today (P1); other media kinds are P2.
+  # step. Audio-bearing messages (voice/audio/audio-MIME document/video note)
+  # parse to a single `:audio` attachment the gateway transcription step consumes
+  # (M21 §5.2/D17). A message carries at most one of these media keys, so clause
+  # order among them is irrelevant — each must precede the catch-all.
   defp parse_attachments(%{"photo" => sizes}) when is_list(sizes) and sizes != [] do
     case largest_photo(sizes) do
       %{"file_id" => file_id} = size when is_binary(file_id) ->
@@ -843,7 +974,37 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
+  # Voice note = OGG/Opus; Telegram fixes the container, so the mime is constant.
+  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice}) when is_binary(file_id) do
+    [audio_attachment_ref(file_id, "audio/ogg", Map.get(voice, "file_size"))]
+  end
+
+  # Audio file (music/clip): carries its own declared mime type.
+  defp parse_attachments(%{"audio" => %{"file_id" => file_id} = audio}) when is_binary(file_id) do
+    [audio_attachment_ref(file_id, Map.get(audio, "mime_type"), Map.get(audio, "file_size"))]
+  end
+
+  # Round video note (≤1 min): the payload has no mime field — hosted backends
+  # take the MP4 container directly (D17), so the mime is fixed to video/mp4.
+  defp parse_attachments(%{"video_note" => %{"file_id" => file_id} = note})
+       when is_binary(file_id) do
+    [audio_attachment_ref(file_id, "video/mp4", Map.get(note, "file_size"))]
+  end
+
+  # A document is transcribable only when it declares an audio mime type; any
+  # other document falls through to the catch-all (unparsed, as before).
+  defp parse_attachments(%{
+         "document" => %{"file_id" => file_id, "mime_type" => "audio/" <> _ = mime} = doc
+       })
+       when is_binary(file_id) do
+    [audio_attachment_ref(file_id, mime, Map.get(doc, "file_size"))]
+  end
+
   defp parse_attachments(_msg), do: []
+
+  defp audio_attachment_ref(file_id, mime_type, size_bytes) do
+    %{kind: :audio, file_id: file_id, url: nil, mime_type: mime_type, size_bytes: size_bytes}
+  end
 
   # A multi-attachment message ("album") shares a media_group_id across the
   # separate updates Telegram delivers it as; the poller buffers by this id so
@@ -999,7 +1160,7 @@ defmodule FermixChannels.Channels.Telegram do
          {:ok, token} <- get_bot_token(),
          {:ok, file_path} <- resolve_file_path(attachment_value(attachment, :file_id), token),
          {:ok, body} <- download_file(token, file_path),
-         {:ok, path} <- write_temp_file(body, attachment) do
+         {:ok, path} <- write_temp_file(body, attachment, file_path) do
       {:ok, path}
     end
   end
@@ -1072,11 +1233,11 @@ defmodule FermixChannels.Channels.Telegram do
 
   defp enforce_inbound_cap(body), do: {:ok, body}
 
-  defp write_temp_file(body, attachment) do
+  defp write_temp_file(body, attachment, file_path) do
     path =
       Path.join(
         System.tmp_dir!(),
-        "fermix-telegram-#{System.unique_integer([:positive])}#{attachment_extension(attachment)}"
+        "fermix-telegram-#{System.unique_integer([:positive])}#{temp_extension(attachment, file_path)}"
       )
 
     case File.write(path, body) do
@@ -1085,13 +1246,24 @@ defmodule FermixChannels.Channels.Telegram do
     end
   end
 
-  defp attachment_extension(attachment) do
-    attachment
-    |> attachment_value(:mime_type)
-    |> normalize_extension()
+  # Prefer the attachment's declared mime for the temp extension. Telegram makes
+  # the Audio `mime_type` optional, so when it is absent, use the real extension
+  # from the getFile `file_path` (the authoritative filename) — otherwise a
+  # mime-less audio clip lands in a `.bin` temp file and the hosted backends
+  # reject the `application/octet-stream` upload with a 400.
+  defp temp_extension(attachment, file_path) do
+    case attachment_value(attachment, :mime_type) do
+      mime when is_binary(mime) and mime != "" -> normalize_extension(mime)
+      _absent -> extension_from_path(file_path)
+    end
   end
 
-  defp normalize_extension(nil), do: ".bin"
+  defp extension_from_path(file_path) do
+    case Path.extname(file_path) do
+      "" -> ".bin"
+      ext -> ext
+    end
+  end
 
   defp normalize_extension(mime_type) when is_binary(mime_type) do
     mime_type

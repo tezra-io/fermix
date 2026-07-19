@@ -61,6 +61,9 @@ defmodule FermixCore.Providers.Failover do
       same-provider RETRY (the agent loop layers the same stream-content gate
       so a retry never fires once content has streamed).
     * `:max_retries` — bound on same-provider retries per route (default 3).
+    * `:retry_base_delay_ms` — base of the exponential retry backoff
+      (default 250; the agent loop's continuation seam passes a wider base
+      to outlast multi-second network blips).
     * `:retry_delay_fn` — `fn ms -> :ok end` invoked for backoff between
       retries (default `Process.sleep/1`; injected in tests).
     * `:telemetry` — metadata map (e.g. `%{agent: "main"}`) merged into the
@@ -83,6 +86,7 @@ defmodule FermixCore.Providers.Failover do
       eligible_fn: Keyword.get(opts, :eligible?, &eligible?/1),
       retryable_fn: Keyword.get(opts, :retryable?, &Transient.retryable?/1),
       max_retries: Keyword.get(opts, :max_retries, @default_max_retries),
+      base_delay_ms: Keyword.get(opts, :retry_base_delay_ms, @retry_base_delay_ms),
       delay_fn: Keyword.get(opts, :retry_delay_fn, &Process.sleep/1),
       meta: Keyword.get(opts, :telemetry, %{})
     }
@@ -107,7 +111,7 @@ defmodule FermixCore.Providers.Failover do
 
       {:error, reason} ->
         if retry_same?(reason, rest, ctx, attempt) do
-          delay_ms = retry_backoff_ms(attempt)
+          delay_ms = retry_backoff_ms(ctx, attempt)
 
           Logger.warning(
             "Provider retry: #{route_key.provider}/#{route_key.model} " <>
@@ -129,7 +133,7 @@ defmodule FermixCore.Providers.Failover do
       (Transient.connection_unavailable?(reason) or rest == [])
   end
 
-  defp retry_backoff_ms(attempt), do: @retry_base_delay_ms * Integer.pow(2, attempt)
+  defp retry_backoff_ms(ctx, attempt), do: ctx.base_delay_ms * Integer.pow(2, attempt)
 
   defp next_or_halt(route_key, reason, rest, ctx, tried) do
     tried = tried ++ [{route_key.provider, reason}]

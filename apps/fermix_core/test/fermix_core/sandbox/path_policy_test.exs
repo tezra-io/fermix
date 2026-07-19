@@ -73,7 +73,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
   test "blocks a case-variant of a protected home dir" do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-home")
     File.mkdir_p!(Path.join(home, ".ssh"))
-    config = Config.normalize(mode: :open, home: home, workspace_root: home)
+    config = Config.normalize(mode: :open, os_home: home, workspace_root: home)
 
     assert {:error, {:protected_path, _path}} =
              PathPolicy.allowed_path?(Path.join(home, ".SSH/evil_key"), config)
@@ -85,7 +85,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-precomputed")
     File.mkdir_p!(Path.join(home, ".ssh"))
     File.mkdir_p!(Path.join(home, "work"))
-    config = Config.normalize(mode: :open, home: home, workspace_root: home)
+    config = Config.normalize(mode: :open, os_home: home, workspace_root: home)
 
     # The protected-roots walk happens once; the precomputed list must yield the
     # exact same allow/deny decision as the self-computing /2 arity for every
@@ -126,7 +126,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-eff")
     File.mkdir_p!(Path.join(home, ".ssh"))
     File.mkdir_p!(Path.join(home, "work"))
-    config = Config.normalize(mode: :open, home: home, workspace_root: home)
+    config = Config.normalize(mode: :open, os_home: home, workspace_root: home)
 
     # The effective-roots walk now happens once; the precomputed pair must yield
     # the exact same allow/deny (and deny reason) as the self-computing /2 arity.
@@ -162,6 +162,56 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
              PathPolicy.resolve_working_dir(nil, config, context)
 
     FermixTestSupport.SafeRm.rm_rf!(root)
+  end
+
+  test "a credential dir under the OS home is denied in standard and open even inside a granted root" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-cred")
+    File.mkdir_p!(Path.join(os_home, ".ssh"))
+    key = Path.join(os_home, ".ssh/id_rsa")
+
+    for mode <- [:standard, :open] do
+      config =
+        Config.normalize(
+          mode: mode,
+          os_home: os_home,
+          workspace_root: Path.join(os_home, "workspace"),
+          allowed_roots: [os_home]
+        )
+
+      # Protected wins over the granted root: the credential dir stays denied.
+      assert {:error, {:protected_path, _path}} = PathPolicy.allowed_path?(key, config)
+    end
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
+  end
+
+  test "fermix-state files stay protected off the fermix home, independent of os_home" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-osh")
+    fermix_home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-fh")
+    previous = System.get_env("FERMIX_HOME")
+    System.put_env("FERMIX_HOME", fermix_home)
+
+    on_exit(fn ->
+      case previous do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(fermix_home)
+    end)
+
+    config =
+      Config.normalize(
+        mode: :open,
+        os_home: os_home,
+        home: fermix_home,
+        workspace_root: Path.join(fermix_home, "workspace")
+      )
+
+    assert {:error, {:protected_path, _path}} =
+             PathPolicy.allowed_path?(Path.join(fermix_home, "auth.json"), config)
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
   end
 
   test "protects macOS private etc alias when present" do

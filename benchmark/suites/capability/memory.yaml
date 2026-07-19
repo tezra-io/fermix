@@ -1,4 +1,5 @@
 suite: cap_memory
+risk: isolated_mutation
 title: "Capability — cross-session durable memory (store in A, recall in fresh B)"
 description: >
   Fermix's headline differentiator: owner-scoped memory that persists across SEPARATE
@@ -21,11 +22,13 @@ description: >
   trial's tag: a deterministic 0 that looked like a broken memory subsystem but was durable
   memory working correctly on a poisoned test.)
 
-  PRECONDITION: run against the owner-scoped dev daemon (the CLI caller is the owner).
-  Leaves per-trial tokened facts in ~/.fermix-dev durable memory; each is uniquely keyed so
-  they don't collide, but they accumulate — a periodic `memory` purge is recommended hygiene.
-  No `requires_tools` gate: memory_store/memory_recall emit no span on the CLI path, so
-  the FRESH recall session is itself the provenance — context can't carry the fact.
+  PRECONDITION: run against a dedicated owner-scoped capability daemon (the CLI caller is
+  the owner). Per-trial tokened facts persist in that daemon's durable memory; each is
+  uniquely keyed so they do not collide, but they accumulate. Use a disposable capability
+  home rather than a shared personal/dev memory store.
+  The fresh recall session cannot inherit conversation context. Fermix may supply
+  owner-scoped memory natively in the new turn's system prompt, so a correct recall
+  does not require an explicit `memory_recall` tool span.
 defaults:
   judge: false
   timeout_ms: 180000

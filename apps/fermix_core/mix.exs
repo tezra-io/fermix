@@ -4,7 +4,7 @@ defmodule FermixCore.MixProject do
   def project do
     [
       app: :fermix_core,
-      version: "0.5.8",
+      version: "0.6.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
@@ -30,7 +30,9 @@ defmodule FermixCore.MixProject do
       {:anubis_mcp, "~> 1.6"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
-      {:compux, github: "tezra-io/compux", ref: "0bf18e55e6fb8a724e2a1c9c516ff5f3b0bb9804"},
+      {:compux, github: "tezra-io/compux", ref: "5ff68c724129c497cb28ab4e31b90da1cb3f6b9b"},
+      # Native kill(2) process-group shim used by the command-sweep (ProcessGroup).
+      {:fermix_nif, in_umbrella: true},
       {:plug, "~> 1.15", only: :test},
       # Explicit because FermixCore.Application supervises the shared
       # FermixCore.Finch pool directly (req would only pull it transitively).

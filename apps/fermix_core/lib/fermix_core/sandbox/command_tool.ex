@@ -85,7 +85,8 @@ defmodule FermixCore.Sandbox.CommandTool do
   defp format_error({:outside_root, path}),
     do:
       "Sandbox denied command capability working_dir outside roots: #{path}. " <>
-        "To allow this directory, run: fermix grant path #{path}"
+        "To allow this directory, run: fermix grant path #{path}, " <>
+        "or call the request_directory_access tool to ask the owner to approve it."
 
   defp format_error({:protected_path, path}),
     do: "Sandbox denied protected path: #{path}. Run: fermix sandbox explain"

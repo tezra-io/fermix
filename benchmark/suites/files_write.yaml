@@ -1,4 +1,5 @@
 suite: files_write
+risk: isolated_mutation
 title: "Filesystem writes — create and edit scratch files"
 description: >
   Exercises the assistant's ability to write to the daemon workspace: creating a

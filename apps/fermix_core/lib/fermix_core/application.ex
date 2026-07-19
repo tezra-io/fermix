@@ -17,6 +17,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Capabilities.BuiltinSeeder
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.CommandHost.Supervisor, as: CommandHostSupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Config, as: CoreConfig
@@ -39,6 +40,10 @@ defmodule FermixCore.Application do
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
+
+  # Compile-time env: the boot-time computer-use sidecar ensure is a network
+  # side effect, so it is gated OUT of `:test` here (never in `mix test`).
+  @compiled_env Mix.env()
 
   @impl true
   def start(_type, _args) do
@@ -118,9 +123,14 @@ defmodule FermixCore.Application do
     redact_default_logger()
     Trace.TelemetryHandler.attach()
     DecisionTelemetry.attach()
+    maybe_ensure_computer_use_sidecar()
 
     children =
       [
+        # First child (`:rest_for_one`): every process that can run an external
+        # command starts after its owner supervisor exists. `:temporary` hosts
+        # add no restart intensity to the tree.
+        CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
         {Finch, name: FermixCore.Finch, pools: finch_pools()},
         {Trace, trace_opts()},
@@ -174,20 +184,51 @@ defmodule FermixCore.Application do
   # rather than the common path.
   @http_pool_count 2
 
+  # Web-search backend hosts get the same idle-capped pool plus the backends'
+  # fail-fast connect budget (they degrade to DuckDuckGo on failure, so a dead
+  # provider should fail in seconds, not hang the reply path on a stalled
+  # connect). The budget lives here rather than as per-request
+  # `connect_options` because Req forbids `:connect_options` with `:finch` —
+  # and per-request `connect_options` is exactly what used to fork these
+  # backends onto Req-managed dynamic pools with `conn_max_idle_time:
+  # :infinity`, reviving the stale-socket `:closed` class this pool exists to
+  # kill. Keep in sync with the backends' `@endpoint` hosts.
+  @web_search_connect_timeout_ms 3_000
+  @web_search_hosts [
+    "https://api.exa.ai",
+    "https://api.firecrawl.dev",
+    "https://api.parallel.ai",
+    "https://api.perplexity.ai",
+    "https://api.search.brave.com",
+    "https://api.tavily.com",
+    "https://html.duckduckgo.com"
+  ]
+
   # Public (@doc false) because Finch has no API to read pool config back,
   # so tests pin these literals here — a regression to the :infinity / count:1
   # defaults would otherwise be invisible to the suite.
   @doc false
   @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
   def finch_pools do
-    %{
-      :default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count],
-      "https://chatgpt.com" => [
-        conn_max_idle_time: @http_conn_max_idle_ms,
-        count: @http_pool_count,
-        conn_opts: [transport_opts: [timeout: 5_000]]
-      ]
-    }
+    Map.merge(
+      %{
+        :default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count],
+        "https://chatgpt.com" => [
+          conn_max_idle_time: @http_conn_max_idle_ms,
+          count: @http_pool_count,
+          conn_opts: [transport_opts: [timeout: 5_000]]
+        ]
+      },
+      Map.new(@web_search_hosts, &{&1, web_search_pool()})
+    )
+  end
+
+  defp web_search_pool do
+    [
+      conn_max_idle_time: @http_conn_max_idle_ms,
+      count: @http_pool_count,
+      conn_opts: [transport_opts: [timeout: @web_search_connect_timeout_ms]]
+    ]
   end
 
   defp run_cli(argv) do
@@ -242,6 +283,24 @@ defmodule FermixCore.Application do
     else
       []
     end
+  end
+
+  # Only in a real daemon boot: if computer-use is enabled but the sidecar for the
+  # compiled-in compux version isn't installed — the state a fermix upgrade that
+  # bumped the compux ref lands in — download it now, before the
+  # `ComputerUse.ready?/0` gates (tool registration + supervisor boot) run, so the
+  # upgrade transparently keeps computer-use working. Fail-soft and bounded; see
+  # `ComputerUse.ensure_sidecar_installed/1`.
+  defp maybe_ensure_computer_use_sidecar do
+    if daemon_boot?(), do: ComputerUse.ensure_sidecar_installed(), else: :ok
+  end
+
+  # A real in-process daemon run (`fermix run` / `mix fermix.dev`) — both enable
+  # the daemon control socket before the tree builds — and never `mix test`,
+  # `fermix setup`, or `fermix memory`.
+  defp daemon_boot? do
+    @compiled_env != :test and
+      Application.get_env(:fermix_core, :daemon_socket_enabled, false)
   end
 
   defp realtime_socket_enabled? do

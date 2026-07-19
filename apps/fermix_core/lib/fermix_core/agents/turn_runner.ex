@@ -236,6 +236,12 @@ defmodule FermixCore.Agents.TurnRunner do
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
+      # Request cwd admits the owner's live working directory into the sandbox's
+      # standard-mode roots (SANDBOX_ACCESS_APPROVAL_FLOW §2/§7). Gated on
+      # operator trust: only a trusted local origin may steer the sandbox cwd, so
+      # an attacker-influenced remote channel can never widen roots. PathPolicy
+      # reads this same `:cwd` key as the relative-path resolution base.
+      cwd: request_cwd_for(source_trust, msg),
       # Attended-origin gate (COMPUTER_USE.md §7.6): only a turn with a live owner
       # surface who can abort may start a host session. Derived from the channel via
       # computer_use_origin/1 so a detached `/background` run fails closed instead of
@@ -243,7 +249,24 @@ defmodule FermixCore.Agents.TurnRunner do
       # `:unattended` default); voice tags `:voice` on its own path.
       computer_use_origin: computer_use_origin(msg),
       reply_fn: deliver,
+      # The grant-approval seam (SANDBOX_ACCESS_APPROVAL_FLOW §6.1): an operator
+      # turn carries the gateway's approval closure so `request_directory_access`
+      # can bind a pending grant to the owner's conversation. Absent (nil) on
+      # unattended/cron/guest turns, where the tool fails closed.
+      approval_fn: Map.get(msg, :approval_fn),
       channel: msg.channel,
+      # Chat context (private DM vs shared group), from the inbound message
+      # metadata. `request_directory_access` reads it to keep the tap-to-copy
+      # `/confirm <token>` line out of group-visible approval prompts
+      # (SANDBOX_ACCESS_APPROVAL_FLOW: token disclosure in shared channels).
+      chat_type: chat_type_of(msg),
+      # Whether the delivering channel renders a private one-tap approval button
+      # that carries the confirmation token (Telegram). Plain data resolved by the
+      # gateway (never the channel module). `request_directory_access` reads it to
+      # decide whether it may drop the tap-to-copy `/confirm <token>` from a
+      # shared-chat prompt — safe only because the button delivers the token
+      # privately. Defaults false, so any surface without a button keeps the token.
+      private_approval_button?: Map.get(msg, :private_approval_button?, false),
       # Reaction capability resolved by the gateway (nil on no-reaction channels).
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
@@ -286,6 +309,14 @@ defmodule FermixCore.Agents.TurnRunner do
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
   end
+
+  defp chat_type_of(msg) do
+    metadata = Map.get(msg, :metadata) || %{}
+    Map.get(metadata, :chat_type) || Map.get(metadata, "chat_type")
+  end
+
+  defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
+  defp request_cwd_for(_trust, _msg), do: nil
 
   defp apply_run_profile(:ultra, messages, context) do
     {inject_ultra_addendum(messages), Map.put(context, :subagent_mode, :ultra)}
@@ -423,12 +454,12 @@ defmodule FermixCore.Agents.TurnRunner do
   # xAI 403 in OAuth mode is tier/entitlement denial, not a stale token —
   # re-login won't fix it (design doc §6.5).
   defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth, status: 403}}) do
-    "xAI subscription access denied — the Grok plan may not include API access. " <>
+    "SpaceXAI subscription access denied — the Grok plan may not include API access. " <>
       "Switch to an API key in `fermix setup`, or check the plan tier."
   end
 
   defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth}}) do
-    "xAI subscription authentication failed — reconnect with " <>
+    "SpaceXAI subscription authentication failed — reconnect with " <>
       "`fermix auth login --provider xai` and retry."
   end
 

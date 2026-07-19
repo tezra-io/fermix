@@ -13,9 +13,17 @@ defmodule FermixChannels.Channels.Discord.Gateway do
 
   alias FermixChannels.Channels.Discord
   alias FermixChannels.Gateway
+  alias FermixChannels.Gateway.Authorization
+  alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Gateway.Source
 
   @default_reconnect_ms 5_000
+
+  # Ephemeral (flags 64) reply shown only to a non-owner tapper so Discord does
+  # not render "This interaction failed"; the confirm ingest independently
+  # rejects the tap at operator_only, so nothing is persisted.
+  @not_authorized_ack "You're not authorized to approve this."
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -51,6 +59,11 @@ defmodule FermixChannels.Channels.Discord.Gateway do
   end
 
   @impl true
+  def handle_cast({:gateway_event, %{"t" => "INTERACTION_CREATE"} = event}, state) do
+    handle_interaction(event, state)
+    {:noreply, state}
+  end
+
   def handle_cast({:gateway_event, event}, state) do
     case Discord.parse_gateway_event(event) do
       {:ok, messages} when messages != [] ->
@@ -140,6 +153,73 @@ defmodule FermixChannels.Channels.Discord.Gateway do
 
       {:error, reason} ->
         Logger.error("Discord gateway dispatch failed: #{inspect(reason)}")
+    end
+  end
+
+  # A button tap (INTERACTION_CREATE): ack within the interaction's hard 3s
+  # window, then — for the owner only — funnel the synthesized `/confirm` through
+  # the unchanged confirm path (the single authority that consumes the single-use
+  # token). We resolve owner-vs-guest once, up front: it selects both the ack
+  # shape and whether to ingest.
+  defp handle_interaction(event, state) do
+    case Discord.parse_interaction(event) do
+      {:ok, interaction} ->
+        respond_to_tap(interaction, owner_tap?(interaction.message), state)
+
+      :ignore ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Discord interaction parse failed: #{inspect(reason)}")
+    end
+  end
+
+  # Owner: strip the used button, then ingest the synthesized `/confirm`.
+  defp respond_to_tap(interaction, true, state) do
+    ack_interaction(interaction, true, state)
+    handle_dispatch_result([interaction.message], state)
+  end
+
+  # Non-owner: ack ephemerally and DON'T ingest. The confirm path would reject a
+  # non-owner at operator_only anyway; ingesting would post the command
+  # framework's public "requires owner permissions" reply to a shared channel,
+  # and the un-stripped guest button could be re-tapped to flood it.
+  defp respond_to_tap(interaction, false, state) do
+    ack_interaction(interaction, false, state)
+  end
+
+  defp owner_tap?(message) do
+    case message |> Map.from_struct() |> Source.from_message() |> Authorizer.resolve() do
+      {:ok, %Authorization{role: :operator}} -> true
+      _other -> false
+    end
+  end
+
+  # Owner: type 7 UPDATE_MESSAGE strips the used button so it can't be re-tapped
+  # (the token is single-use regardless; the confirm outcome reaches the owner
+  # through the normal reply path). Guest: type 4 CHANNEL_MESSAGE_WITH_SOURCE
+  # with an ephemeral "not authorized" note.
+  defp ack_interaction(interaction, true, state) do
+    respond_ack(interaction, %{type: 7, data: %{components: []}}, state)
+  end
+
+  defp ack_interaction(interaction, false, state) do
+    respond_ack(
+      interaction,
+      %{type: 4, data: %{content: @not_authorized_ack, flags: 64}},
+      state
+    )
+  end
+
+  defp respond_ack(interaction, response, state) do
+    case Discord.respond_interaction(interaction.id, interaction.token, response,
+           req_options: state.req_options
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error("Discord interaction ack failed: #{inspect(reason)}")
     end
   end
 end

@@ -1,0 +1,58 @@
+# Weekly Windows reconnaissance (Milestone 22 T4). Advisory only: the job is
+# continue-on-error and gates nothing. Its deliverable is the gap list —
+# expected suspects: fermix_nif (POSIX kill(2) C source), exqlite/lazy_html
+# native builds, path/HOME assumptions, no Burrito :windows target. Findings
+# seed a future Windows-support milestone.
+name: windows-spike
+
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  spike:
+    name: windows compile+test spike (advisory)
+    runs-on: windows-2025
+    continue-on-error: true
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      MIX_ENV: test
+      ELIXIR_VERSION: "1.19.5"
+      OTP_VERSION: "28"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+
+      - name: Fetch deps
+        run: mix deps.get 2>&1 | tee deps.log
+
+      - name: Compile (expected gaps land here)
+        run: mix compile --warnings-as-errors 2>&1 | tee compile.log
+
+      - name: Test
+        run: mix test 2>&1 | tee test.log
+
+      - name: Upload spike logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-spike-${{ github.run_number }}
+          path: |
+            deps.log
+            compile.log
+            test.log
+          if-no-files-found: warn
+          retention-days: 30

@@ -279,7 +279,21 @@ defmodule FermixCore.Capabilities.Registry do
   """
   @spec default_policy_classes(trust()) :: [Capability.policy_class()]
   def default_policy_classes(trust) do
-    {allow, deny} = normalize_policy(resolve_policy(trust, nil))
+    resolved_policy_classes(trust, nil)
+  end
+
+  @doc """
+  Resolve `(trust, policy)` to the concrete policy-class list the run is
+  granted — `resolve_policy/2` flattened to bare classes (`allow -- deny`).
+
+  Where `default_policy_classes/1` answers "the trust's baseline classes",
+  this honors an explicit `policy` narrowing too, so the effective run surface
+  a loop resolves can be handed to `subagents` (§11.2) as the ceiling a worker
+  is intersected against — a confined run can never widen its workers.
+  """
+  @spec resolved_policy_classes(trust(), policy_spec()) :: [Capability.policy_class()]
+  def resolved_policy_classes(trust, policy) do
+    {allow, deny} = normalize_policy(resolve_policy(trust, policy))
     allow -- deny
   end
 

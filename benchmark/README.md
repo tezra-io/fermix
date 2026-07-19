@@ -1,64 +1,182 @@
-# Running the Fermix eval metrics
+# Fermix end-to-end regression harness
 
-This skill scores **how well a model performs *with* Fermix's tools** and **ranks
-models against each other**. This README is the step-by-step run guide; `SKILL.md`
-has the design detail, `bench/RUNBOOK.md` covers the external public benchmarks,
-and the `Makefile` wraps the common commands.
+The primary job of this harness is **change-by-change behavioral regression**:
+does Fermix still behave like a grounded chief of staff through its real agent,
+tool, memory, and trace path? The recommended 15-case core covers realistic
+multi-turn work, prioritization, tool-grounded synthesis, sycophancy
+counterfactuals, evidence-sensitive recommendations, and calibrated confidence.
+It is not a benchmark.
 
-> **The cross-model sweep is a manual loop:** Fermix bakes the main-agent model at
-> daemon boot, so to score a different provider/model you **edit the config, restart
-> the dev daemon, and run again**. Each run auto-detects the served model and adds a
-> row to a leaderboard that re-ranks. Steps are in §3.
+The separate `run_capability.py` workflow can optionally score and rank models.
+That is a different, less-frequent workflow; it does not replace the behavioral
+E2E regression. This README covers both, `docs/HARNESS.md` has design detail,
+`bench/RUNBOOK.md` covers external public benchmarks, and the `Makefile` wraps
+common commands.
 
 ---
 
-## 1. Prerequisites (once)
+## 1. Safe setup (development default)
 
 - **Opik** running locally (`http://localhost:5173`).
-- The **Opik-enabled dev daemon** running against `~/.fermix-dev`. Start it with
-  both eval flags set (the brew daemon at `~/.fermix` does NOT export to Opik and
-  can't be used):
+- **uv** installed (`brew install uv`).
+- The existing Opik-enabled development daemon at `~/.fermix-dev`, exporting to
+  project `fermix-dev`. Safe/read-only behavioral runs and the response-quality
+  capability suite use it by default:
 
   ```sh
-  FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 FERMIX_BROWSER_HEADLESS=1 PORT=4031 mix fermix.dev
+  FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 \
+  FERMIX_OPIK_PROJECT=fermix-dev FERMIX_BROWSER_HEADLESS=1 PORT=4031 \
+  mix fermix.dev
   ```
 
-  `FERMIX_OPIK_ENABLED=1` turns on trace export. `FERMIX_BROWSER_HEADLESS=1` runs the
-  browser tool's Chrome in `--headless=new`, so browser/web eval turns stop opening
-  (and stealing focus with) visible Chrome windows on your Mac — screenshots and
-  vision still work. Without it the daemon launches a real, visible window per
-  browser turn (macOS default; the `:auto` profile only goes headless on Linux).
-- **uv** installed (`brew install uv`). The runners are self-contained `uv run`
-  scripts — no venv to set up.
+The production home `~/.fermix` is always forbidden. Only
+`isolated_mutation`, `external_write`, `desktop_input`, and `destructive` runs
+must move to a disposable eval/e2e home and project. For those runs, use a strict
+home-scoped sandbox and sanitized repository snapshot, start without unrelated
+channels or realtime, and provide both `--confirm-daemon-isolated` and
+`--confirm-isolated-env`. Conventional pairs are `~/.fermix-eval` /
+`fermix-eval` for behavioral runs and `~/.fermix-capability-eval` /
+`fermix-capability-eval` for capability runs. The confirmations are operator
+attestations, not containment.
+
+Judged runs use an **independent external judge** — the OpenAI API, called
+directly by the harness (no daemon or core involvement). Configure it in **this
+benchmark's config** (`config.yaml` / `behavioral_config.yaml`):
+
+```yaml
+judge:
+  backend: "openai"        # or "none" to skip rubric judging
+  model: "gpt-5.4-mini"    # must differ from the candidate model
+```
+
+The call authenticates with `EVAL_JUDGE_API_KEY`; the `make` judged targets
+resolve it from the same OpenAI key the daemon uses (macOS keychain service
+`fermix:OPENAI_API_KEY`), so there's no separate setup — export
+`EVAL_JUDGE_API_KEY` to override, or `EVAL_JUDGE_BASE_URL` / `EVAL_JUDGE_MODEL`
+to point elsewhere. The judge scores only prose against the rubric (structural
+gates remain the hard safety/flow signal), and the harness refuses a judge model
+that matches the candidate so the field is never graded by one of its own.
+
+`private_account_read` alone may use the development daemon with
+`--confirm-private-data`. Non-checker `expensive` work may use it with
+`--confirm-cost`; checker-backed capability tasks always require the disposable
+capability home because their trials seed and write workspace files.
+Suites can also declare additive `confirm_cost: true` when cost is secondary to
+another risk, so neither confirmation is lost.
 
 Verify everything is ready:
 
 ```sh
 cd benchmark
-make check          # Opik reachable + dev daemon reachable
-make tests          # 88 unit/integration tests (no daemon spend)
+uv run bin/run_eval.py --check     # development behavioral daemon + Opik
+uv run bin/run_eval.py --check --judge  # also preflight the restricted judge route
+uv run bin/run_capability.py --check --judge  # capability + judge preflight
 ```
+
+`make tests` is a separate developer command for the harness's unit/integration
+tests. Behavioral and capability E2E commands do not invoke it implicitly.
 
 ---
 
-## 2. Quick start — score the model the daemon is serving now
+## 2. Change-by-change behavioral regression
 
 ```sh
-make estimate                       # turn-count + rough $/time, no spend
-make capability                     # score all public suites, k=5 trials/task
-make rank                           # re-render the leaderboard table
+make dry
+make regression
 ```
 
-`make capability` = `uv run bin/run_capability.py --trials 5` (all public suites).
+`make dry` validates and prints the exact 15-case plan without contacting the
+daemon or judge. `make regression` runs that host-read-only core through the real
+assistant and independent judge. For targeted investigation, select
+`chief_of_staff`, `chief_of_staff_tools`, or `epistemic_integrity` directly with
+`run_eval.py`; these safe/read-only runs use the development daemon without an
+isolation attestation.
+The isolated `jobs/clarify_before_scheduling` scenario tests clarification before
+a real durable action. The expensive `subagents/autonomous_delegation_judgment`
+pair tests whether Fermix chooses a proportionate work approach without being
+told which route to use; repeat that named scenario three times when assessing
+stability, never as an unbounded bulk run. This non-checker scenario requires
+`--confirm-cost` but does not require an isolated daemon.
+
+---
+
+## 3. Optional capability score and model ranking
+
+```sh
+make estimate           # rough turn/time/price range, no model calls
+make capability-auto     # full 22-task sweep: seed+start a disposable daemon, run, tear down
+make capability-judged   # 4 rubric tasks, dev daemon, external OpenAI judge
+make capability-readonly # cap_web_research + cap_web_app, dev daemon, read-only
+make rank                # render the leaderboard
+```
+
+`make estimate` prints a rough turn/time/price range without model calls; it is
+not a quote or hard spend guard. `make capability-judged` (4 rubric tasks) and
+`make capability-readonly` (`cap_web_research` + `cap_web_app`) run host-read-only
+against `~/.fermix-dev` / `fermix-dev` and need no isolation confirmation. `make
+capability-auto` is the full 22-task sweep — it includes isolated-mutation and
+expensive suites that must never touch `~/.fermix-dev`, so it stands up a
+throwaway daemon, supplies the isolation attestations and cost confirmation, runs,
+and tears the daemon down.
+
+### The disposable capability daemon
+
+`make capability-auto` is the whole flow in one command. It scores the model your
+`~/.fermix-dev` daemon currently runs, in a throwaway `~/.fermix-capability-eval`
+home, and cleans up after itself:
+
+```sh
+make capability-auto     # seed -> start (background) -> make check -> full sweep -> stop
+```
+
+Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
+
+1. **Seeds `~/.fermix-capability-eval`** — creates the home, a git-backed
+   `workspace/` (the checker's per-trial scoring root), a minimal strict
+   `config.toml`, and the auth the scored model needs. The scored model is derived
+   from the `primary = true` provider in `~/.fermix-dev/config.toml`, and its
+   credentials are reused from the dev home:
+   - **OAuth providers** (`openai_codex`, `anthropic`, `xai`) store their token
+     home-scoped in `$FERMIX_HOME/auth.json`, so a fresh home has none. The seed
+     copies just that provider's entry from `~/.fermix-dev/auth.json` into the
+     disposable home (`0600`). It only *reads* the dev store; the eval daemon writes
+     any refresh to its own copy, and a current token (valid hours out) is used
+     as-is, so a normal short run never refreshes or rotates the shared token.
+   - **API-key providers** keep `profile = "fermix-dev"` plus a `@keyring` sentinel,
+     so the existing `fermix:fermix-dev:<ENV>` keychain entry resolves unchanged.
+
+   The `[sandbox]` block is always regenerated strict and home-scoped
+   (`mode = "strict"`, `workspace_root = $FERMIX_HOME/workspace`, `allowed_roots =
+   []`) — never copied from the dev config, whose `allowed_roots` escape the home and
+   would fail the runner's precondition.
+2. **Starts it in the background** — `mix fermix.dev --no-web --no-realtime` with
+   `FERMIX_OPIK_PROJECT=fermix-capability-eval` and a headless browser. Channels stay
+   *on* (no `--no-channels`) because the CLI-ask turn queue is
+   `FermixChannels.Gateway.Queue`; the seeded home configures no channel, so no bot
+   adapter actually polls. `--no-web` drops the Phoenix port entirely, so it never
+   collides with your `~/.fermix-dev` daemon (which owns a different home, a
+   different control socket, and its own port); the two coexist untouched.
+3. **Waits for readiness** — polls the control socket until `fermix status` answers.
+4. **Runs `make check` then the full sweep**, and on exit **stops the daemon**
+   (SIGTERM the BEAM, SIGKILL fallback) and clears its socket.
+
+`make capability-auto` always scores the **current `~/.fermix-dev` primary** — the
+seed regenerates `config.toml` from it on every run. To rank *several* models, drive
+the daemon manually per §4 (you hand-edit which provider is primary between runs);
+don't use `capability-auto` for that loop.
+
 Useful flags on `bin/run_capability.py`:
 
 | flag | effect |
 |---|---|
 | `--trials N` | trials per task (pass^k reliability needs N≥3; default 3) |
-| `--suite NAME` | one suite — `cap_web_research` (live-fetch, provenance-gated), `cap_data_extraction`, `cap_coding` (end-state checker), `cap_memory` (cross-session durable memory), `cap_safety` (judge) |
-| `--max-tasks N` | cap task count (bound spend) |
-| `--judge` | enable the LLM judge (required for `cap_safety` — refusal needs a judge) |
-| `--private` | run an operator-supplied held-out split (`FERMIX_EVAL_HOLDOUT_DIR` or `--private-data <dir>`, OUTSIDE the repo) under a separate `:private` row, never written to Opik |
+| `--suite NAME` | one suite — `cap_web_research` (live-fetch, provenance-gated), `cap_data_extraction`, `cap_coding` (end-state checker), `cap_memory` (cross-session durable memory), `cap_response_quality` (independent judge) |
+| `--max-tasks N` | limit the number of tasks driven; not a dollar/spend cap |
+| `--judge` | enable the independent external OpenAI judge (scores rubric prose; `EVAL_JUDGE_API_KEY` auto-resolved from the keychain) |
+| `--confirm-daemon-isolated` | attest that an isolated-profile run is using the declared disposable daemon |
+| `--confirm-isolated-env` | attest selected `isolated_mutation` tasks use the disposable capability home/workspace |
+| `--confirm-cost` | acknowledge selected `expensive` cases may spawn several billed calls |
+| `--private` | run an operator-supplied held-out split (`FERMIX_EVAL_HOLDOUT_DIR` or `--private-data <dir>`, OUTSIDE the repo) under a separate local `:private` row; skips Opik dataset/experiment/feedback writeback, but candidate turns still appear in the configured Opik trace store |
 | `--config-id NAME` | override the auto-detected row label (needed to rank `openai` vs `openai_codex` — both report as `openai`) |
 | `--estimate` | print the plan and exit |
 | `--rank-only` | re-render the leaderboard, drive nothing |
@@ -67,11 +185,16 @@ Useful flags on `bin/run_capability.py`:
 after the turn (SWE-bench style), not the reply. The runner seeds a fresh per-trial
 dir under the daemon's `workspace/eval/<task>/t<i>/`, templates its absolute path in
 as `{ws}`, runs `suites/capability/checkers/<name>` afterward, and SafeRm-tears-down.
-They work on the standard dev daemon (absolute `{ws}` resolves under `workspace_root`
-in any sandbox mode); for stronger confinement run the eval daemon with
-`[sandbox] mode = "strict"` + shell enabled. Each checker ships an oracle/negative
-proof (`bin/test_checker.py`). Authoring: a case carries `checker: {script, mode,
-seed?}` instead of `score:`/`rubric:` (one scorer per case).
+They require the capability daemon's conventional `workspace_root =
+$FERMIX_HOME/workspace`. The scoped directory is a scoring oracle, not the
+agent's sandbox root: the harness does not prove the agent wrote nowhere else.
+Use a disposable capability home/workspace and strict mode. Each checker ships
+an oracle/negative proof (`bin/test_checker.py`). Authoring: a case carries
+`checker: {script, mode, seed?}` instead of `score:`/`rubric:` (one scorer per case).
+Checker and fixture paths must remain relative to the harness root; traversal,
+absolute paths, symlink escapes, non-finite scores/timeouts, and unknown modes are
+rejected. Subprocesses receive an allowlisted environment. Checkers are still
+trusted tracked scripts, not a general untrusted-code sandbox.
 
 The leaderboard lives at `reports/capability/leaderboard.json` and is rendered by
 `make rank`. The served config is **auto-detected** from the trace, so each row is
@@ -83,11 +206,11 @@ traces, so to rank it *alongside* `openai` (api-key) you must pass
 
 ---
 
-## 3. Cross-model ranking — the manual provider-switch loop
+## 4. Cross-model ranking — the manual provider-switch loop
 
-To rank multiple providers/models, repeat this loop **once per model**. (The model
-you want must already be credentialed in `~/.fermix-dev` — API key in the keychain/
-config, or OAuth connected.)
+To rank multiple providers/models, repeat this loop **once per model**. Configure
+each provider only in the disposable `~/.fermix-capability-eval` home; do not
+reuse or point the runner at the normal/dev daemon.
 
 **List the rankable provider × model matrix** (from the repo root):
 
@@ -97,7 +220,7 @@ mix fermix.eval.matrix        # JSON: every provider + its curated models
 
 **For each model you want to score:**
 
-1. **Edit `~/.fermix-dev/config.toml`** — set `primary = true` on exactly ONE
+1. **Edit `~/.fermix-capability-eval/config.toml`** — set `primary = true` on exactly ONE
    provider block and `primary = false` on all the others, and set that provider's
    `default_model`. Example switching from OpenAI to Anthropic:
 
@@ -113,21 +236,34 @@ mix fermix.eval.matrix        # JSON: every provider + its curated models
    ```
 
    ⚠️ Exactly one provider may have `primary = true` — the daemon refuses to boot
-   with two.
+   with two. If the new primary is an **OAuth** provider (`openai_codex`,
+   `anthropic`, `xai`), also copy its entry from `~/.fermix-dev/auth.json` into
+   `~/.fermix-capability-eval/auth.json` (`0600`) — OAuth tokens are home-scoped, so
+   a hand-managed eval home has none. (`capability-auto` does this automatically for
+   the dev primary.) API-key providers just need `profile = "fermix-dev"` +
+   `@keyring`.
 
-2. **Restart the dev daemon** so it picks up the new model (the model is a boot
-   snapshot). For a source daemon: stop the running `mix fermix.dev` (Ctrl+C) and
-   re-run it; for an installed service, `fermix stop` then start it. Then wait
-   until it's back:
+2. **Restart the isolated source daemon by hand** so it picks up the new model
+   (the model is a boot snapshot). Do **not** use `make capability-auto` here — it
+   re-seeds `config.toml` from the `~/.fermix-dev` primary and would clobber your
+   hand-edited model choice. Launch it directly, then wait until it is reachable:
 
    ```sh
-   make check                  # re-run until the daemon is reachable again
+   FERMIX_HOME=~/.fermix-capability-eval FERMIX_OPIK_ENABLED=1 \
+     FERMIX_OPIK_PROJECT=fermix-capability-eval FERMIX_BROWSER_HEADLESS=1 \
+     mix fermix.dev --no-web --no-realtime
+
+   FERMIX_EVAL_HOME=~/.fermix-capability-eval \
+     OPIK_PROJECT=fermix-capability-eval make check
    ```
 
 3. **Run the metrics** — the model is detected automatically:
 
    ```sh
-   make capability             # adds/updates this model's leaderboard row
+   FERMIX_EVAL_HOME=~/.fermix-capability-eval \
+     OPIK_PROJECT=fermix-capability-eval \
+     CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 \
+     make capability
    ```
 
 **After cycling every model:**
@@ -142,8 +278,10 @@ Notes:
   caveat above — it shares the `openai` key unless you pass `--config-id`.)
 - The efficiency axis is **tokens/✓** by default (provider-neutral). `$ /✓` only
   shows for OpenAI/Google (Opik prices only those); OAuth routes report `$0`.
-- For a **fair** ranking when `--judge` is on, use an **independent** judge so the
-  daemon isn't grading itself: `export EVAL_JUDGE_BACKEND=openai EVAL_JUDGE_API_KEY=sk-…`.
+- For a **fair** ranking when `--judge` is on, keep `judge.model` fixed and
+  different from every candidate model. The runner verifies the actual routes and
+  refuses a match. Point `EVAL_JUDGE_BASE_URL` at a separately operated endpoint
+  if one is required.
 - **Usage-limit backoff, then fail-fast (exit 4).** If the daemon's model hits a
   usage/rate/quota limit mid-sweep, Fermix returns a canned "try again" reply —
   scoring it would count Fermix's own limit as a task failure. So the runner **waits
@@ -159,12 +297,12 @@ Notes:
 
 ---
 
-## 4. The other metrics
+## 5. The other metrics
 
 | Goal | Command | Notes |
 |---|---|---|
-| Behavioral regression (did a change break anything) | `make regression` | the original `run_eval.py` tier |
-| Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, `export FERMIX_EVAL_HOLDOUT_DIR=…`, run `… --private`, compare the `provider/model` vs `…:private` rows | answers stay out of the repo + out of Opik; see `suites/capability/private/holdout.example.yaml` |
+| Behavioral regression (did a change break anything) | `make regression` | 15-case `host-safe-core`, independent external OpenAI judge, development daemon |
+| Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, `export FERMIX_EVAL_HOLDOUT_DIR=…`, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served) |
 | Raw-intelligence baseline (Tier 0) | `make lmeval` (dry-run prints the `lm_eval` command) | needs `pip install lm-eval` + key |
 | **GAIA** (flagship public number) | `bin/run_gaia.py --data <gaia.jsonl> --limit 30` | dataset gated on Hugging Face; see `bench/RUNBOOK.md` |
@@ -174,11 +312,18 @@ Run `make help` for the full target list.
 
 ---
 
-## 5. Where results land / housekeeping
+## 6. Where results land / housekeeping
 
 - **Leaderboard:** `reports/capability/leaderboard.json` (+ per-run `reports/capability/<ts>/`).
 - **Opik:** one experiment per model under the `fermix-capability` dataset + feedback
-  scores on each turn's trace (filter Opik by thread `e2e-cap-`).
-- **Cost:** every turn is a real billed LLM turn (~$0.05–0.6, ~3–45 s). Use
-  `--estimate` and `--max-tasks` to bound spend; cycle providers deliberately.
-- **Purge** this skill's eval traces from Opik: `make purge`.
+  scores on each turn's trace (filter Opik by thread `e2e-cap-`). Safe runs use
+  `fermix-dev`; isolated runs use their configured eval/e2e project.
+- **Cost:** every turn is a real model call and may be billed. `--estimate`,
+  `--max-tasks`, and `--max-cases` limit the plan or number of driven tasks; none
+  is a dollar cap. Retries, judge calls, provider pricing, and unpriced OAuth
+  routes can make billed spend differ from candidate-trace estimates.
+- **Behavioral accounting:** reports label Opik cost as **candidate trace cost**,
+  report judge call count and API-reported judge tokens when available, and do
+  not claim judge cost is included.
+- **Behavioral trace cleanup:** use `bin/run_eval.py --purge-run <UTC_RUN_ID>` to
+  preview one exact run, then add `--confirm-purge` only after reviewing the count.

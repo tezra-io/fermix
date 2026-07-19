@@ -40,6 +40,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :sandbox_form, :map, required: true
   attr :search_form, :map, required: true
   attr :image_form, :map, required: true
+  attr :transcription_form, :map, required: true
   attr :restarting, :boolean, default: false
   attr :saved_flash, :map, default: nil
   attr :skill_summary, :map, required: true
@@ -124,6 +125,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               sandbox_form={@sandbox_form}
               search_form={@search_form}
               image_form={@image_form}
+              transcription_form={@transcription_form}
               skill_summary={@skill_summary}
               tabs={@tabs}
               tool_summary={@tool_summary}
@@ -247,6 +249,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :sandbox_form, :map, required: true
   attr :search_form, :map, required: true
   attr :image_form, :map, required: true
+  attr :transcription_form, :map, required: true
   attr :skill_summary, :map, required: true
   attr :tabs, :list, required: true
   attr :tool_summary, :map, required: true
@@ -260,6 +263,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("plugins", assigns), do: plugins_pane(assigns)
   defp render_active_pane("search", assigns), do: search_pane(assigns)
   defp render_active_pane("media", assigns), do: media_pane(assigns)
+  defp render_active_pane("transcription", assigns), do: transcription_pane(assigns)
   defp render_active_pane("sandbox", assigns), do: sandbox_pane(assigns)
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
@@ -1306,7 +1310,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     <div>
       <.pane_header
         title="Image generation"
-        subtitle="Pick the backend for the generate_image tool and set its API key here. The OpenAI and xAI keys are the same keys those providers use for chat; Google uses its own Gemini key."
+        subtitle="Pick the backend for the generate_image tool and set its API key here. The OpenAI and SpaceXAI keys are the same keys those providers use for chat; Google uses its own Gemini key."
       />
 
       <form phx-change="image_changed" phx-submit="save_image" class="mt-6 space-y-6">
@@ -1321,8 +1325,8 @@ defmodule FermixWebWeb.SetupLive.Components do
             />
             <.image_backend_option
               value="xai"
-              label="xAI"
-              description="grok image — reuses your xAI key"
+              label="SpaceXAI"
+              description="grok image — reuses your SpaceXAI key"
               checked={@image_form.backend == :xai}
             />
             <.image_backend_option
@@ -1330,6 +1334,12 @@ defmodule FermixWebWeb.SetupLive.Components do
               label="Google"
               description="Gemini image — needs a Gemini key"
               checked={@image_form.backend == :google}
+            />
+            <.image_backend_option
+              value="openai_codex"
+              label="OpenAI Codex (ChatGPT)"
+              description="gpt-image via your ChatGPT subscription — no API key"
+              checked={@image_form.backend == :openai_codex}
             />
           </div>
         </fieldset>
@@ -1347,7 +1357,7 @@ defmodule FermixWebWeb.SetupLive.Components do
           </div>
           <div :if={@image_form.backend == :xai} class="space-y-2">
             <.secret_input
-              label="xAI API key"
+              label="SpaceXAI API key"
               name="image_form[xai_api_key]"
               set={@image_form.xai_api_key_set}
             />
@@ -1366,6 +1376,15 @@ defmodule FermixWebWeb.SetupLive.Components do
             </p>
           </div>
 
+          <div
+            :if={@image_form.backend == :openai_codex and !@image_form.codex_connected}
+            class="space-y-2"
+          >
+            <p class="text-sm text-warning">
+              Connect OpenAI Codex on the Providers tab first.
+            </p>
+          </div>
+
           <.select_field
             label="Model"
             name="image_form[model]"
@@ -1378,6 +1397,98 @@ defmodule FermixWebWeb.SetupLive.Components do
         </div>
 
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save media" />
+      </form>
+    </div>
+    """
+  end
+
+  defp transcription_pane(assigns) do
+    ~H"""
+    <div>
+      <.pane_header
+        title="Voice-note transcription"
+        subtitle="Pick the speech-to-text backend for inbound voice notes and set its API key. OpenAI and SpaceXAI can reuse your chat-provider key; a key set here overrides it."
+      />
+
+      <form phx-change="transcription_changed" phx-submit="save_transcription" class="mt-6 space-y-6">
+        <fieldset>
+          <legend class="text-sm font-medium text-base-content/80">Backend</legend>
+          <div class="mt-2 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <.transcription_backend_option
+              value="openai"
+              label="OpenAI"
+              description="gpt-4o-mini-transcribe — reuses your OpenAI key"
+              checked={@transcription_form.backend == :openai}
+            />
+            <.transcription_backend_option
+              value="xai"
+              label="SpaceXAI"
+              description="Grok STT — reuses your SpaceXAI key"
+              checked={@transcription_form.backend == :xai}
+            />
+            <.transcription_backend_option
+              value="deepgram"
+              label="Deepgram"
+              description="nova-3 — needs a Deepgram key"
+              checked={@transcription_form.backend == :deepgram}
+            />
+          </div>
+        </fieldset>
+
+        <div class="max-w-xl space-y-4">
+          <div :if={@transcription_form.backend == :openai} class="space-y-2">
+            <.secret_input
+              label="OpenAI API key"
+              name="transcription_form[api_key]"
+              set={@transcription_form.openai_api_key_set}
+            />
+            <p class="text-sm text-base-content/70">
+              Optional; leave blank to reuse your OpenAI chat key from the Provider tab.
+            </p>
+            <p :if={@transcription_form.openai_api_key_set} class="text-sm text-success">
+              Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+          <div :if={@transcription_form.backend == :xai} class="space-y-2">
+            <.secret_input
+              label="SpaceXAI API key"
+              name="transcription_form[api_key]"
+              set={@transcription_form.xai_api_key_set}
+            />
+            <p class="text-sm text-base-content/70">
+              Required; SpaceXAI STT needs an API key (the Grok subscription/OAuth won't work here).
+              Leave blank only if your SpaceXAI provider is configured with an API key.
+            </p>
+            <p :if={@transcription_form.xai_api_key_set} class="text-sm text-success">
+              Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+          <div :if={@transcription_form.backend == :deepgram} class="space-y-2">
+            <.secret_input
+              label="Deepgram API key"
+              name="transcription_form[api_key]"
+              set={@transcription_form.deepgram_api_key_set}
+            />
+            <p class="text-sm text-base-content/70">Required.</p>
+            <p :if={@transcription_form.deepgram_api_key_set} class="text-sm text-success">
+              Already configured. Leave blank to keep it, or paste a new key to replace it.
+            </p>
+          </div>
+
+          <div :if={@transcription_form.model_options != []} class="space-y-2">
+            <.select_field
+              label="Model"
+              name="transcription_form[model]"
+              options={@transcription_form.model_options}
+              value={@transcription_form.model}
+            />
+            <p class="text-sm text-base-content/60">
+              Choose the model for this backend.
+            </p>
+          </div>
+        </div>
+
+        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save transcription" />
       </form>
     </div>
     """
@@ -2264,6 +2375,24 @@ defmodule FermixWebWeb.SetupLive.Components do
       <input
         type="radio"
         name="image_form[backend]"
+        value={@value}
+        checked={@checked}
+        class="radio radio-primary radio-sm mt-0.5"
+      />
+      <span class="min-w-0">
+        <span class="block font-medium">{@label}</span>
+        <span class="block text-xs leading-5 text-base-content/60">{@description}</span>
+      </span>
+    </label>
+    """
+  end
+
+  defp transcription_backend_option(assigns) do
+    ~H"""
+    <label class={search_backend_option_class(@checked)}>
+      <input
+        type="radio"
+        name="transcription_form[backend]"
         value={@value}
         checked={@checked}
         class="radio radio-primary radio-sm mt-0.5"

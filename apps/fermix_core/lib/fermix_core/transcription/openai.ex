@@ -1,37 +1,77 @@
 defmodule FermixCore.Transcription.OpenAI do
-  @moduledoc false
+  @moduledoc """
+  OpenAI transcription backend (`gpt-4o-mini-transcribe` by default).
+
+  Multipart `POST /v1/audio/transcriptions`, model from
+  `[fermix_core.transcription] model`. The key resolves in a deterministic order
+  (two valid setups of one credential source, not a Rule #12 fallback): the
+  transcription-specific `[fermix_core.transcription] openai_api_key` override if
+  set, else the OpenAI chat-provider key. Both are `api_key` auth only; a
+  non-`api_key` auth mode is refused loudly (`{:unsupported_auth_mode, _}`), never
+  silently degraded. The HTTP round-trip is wrapped in `[:fermix, :provider,
+  :call]` telemetry via `Transcription.Support`.
+  """
+
+  @behaviour FermixCore.Transcription.Backend
 
   require Logger
 
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
+  alias FermixCore.Transcription.Support
 
   @base_url "https://api.openai.com/v1"
-  @default_model "whisper-1"
+  @default_model "gpt-4o-mini-transcribe"
+  @provider :openai
 
+  @impl true
+  @spec name() :: atom()
+  def name, do: @provider
+
+  @impl true
+  @spec capabilities() :: FermixCore.Transcription.Backend.capabilities()
+  def capabilities, do: %{streaming?: false, local?: false}
+
+  @impl true
+  @spec configured?(keyword()) :: :ok | {:error, term()}
+  def configured?(opts) when is_list(opts) do
+    case resolve_token(opts) do
+      {:ok, _token} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
   @spec transcribe(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def transcribe(path, opts \\ []) when is_binary(path) do
-    case {resolve_token(opts), multipart_fields(path, opts)} do
-      {{:ok, token}, {:ok, fields}} ->
-        url = "#{base_url()}/audio/transcriptions"
+    model = model()
 
-        result =
-          Req.new(
-            url: url,
-            method: :post,
-            form_multipart: fields,
-            receive_timeout: TimeoutPolicy.receive_timeout_for(:transcription)
-          )
-          |> Req.Request.put_header("authorization", "Bearer #{token}")
-          |> Req.merge(Keyword.get(opts, :req_options, []))
-          |> HttpClient.request("OpenAI Whisper")
+    case resolve_token(opts) do
+      {:ok, token} ->
+        Support.with_provider_call(@provider, model, opts, fn ->
+          post_transcription(path, token, opts)
+        end)
 
-        handle_response(result)
+      {:error, reason} ->
+        Support.provider_call_error(@provider, model, opts, reason)
+    end
+  end
 
-      {{:error, reason}, _fields} ->
-        {:error, reason}
+  defp post_transcription(path, token, opts) do
+    case Support.multipart_fields(path, model(), opts) do
+      {:ok, fields} ->
+        Req.new(
+          url: "#{base_url()}/audio/transcriptions",
+          method: :post,
+          form_multipart: fields,
+          receive_timeout: TimeoutPolicy.receive_timeout_for(:transcription)
+        )
+        |> Req.Request.put_header("authorization", "Bearer #{token}")
+        |> Req.merge(Keyword.get(opts, :req_options, []))
+        |> HttpClient.request("OpenAI transcription")
+        |> handle_response()
 
-      {_token, {:error, reason}} ->
+      {:error, reason} ->
         {:error, reason}
     end
   end
@@ -43,64 +83,31 @@ defmodule FermixCore.Transcription.OpenAI do
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}) do
     Logger.error("OpenAI transcription failed: #{status} - #{inspect(body)}")
-    {:error, "OpenAI transcription error: #{status}"}
+    {:error, Support.http_error_message(status, body)}
   end
 
   defp handle_response({:error, reason}) do
     Logger.error("OpenAI transcription request failed: #{inspect(reason)}")
-    {:error, reason}
-  end
-
-  defp multipart_fields(path, opts) do
-    with {:ok, stat} <- File.stat(path) do
-      mime_type = infer_mime_type(path, opts)
-      filename = Path.basename(path)
-
-      {:ok,
-       [
-         model: model(),
-         file:
-           {File.stream!(path, 64_000, []),
-            filename: filename, content_type: mime_type, size: stat.size}
-       ]}
-    end
-  end
-
-  defp infer_mime_type(path, opts) do
-    opts
-    |> Keyword.get(:metadata, %{})
-    |> Map.get(:attachment, %{})
-    |> then(fn attachment ->
-      Map.get(attachment, :mime_type) || Map.get(attachment, "mime_type") ||
-        mime_from_extension(path)
-    end)
-  end
-
-  defp mime_from_extension(path) do
-    case Path.extname(path) do
-      ".ogg" -> "audio/ogg"
-      ".mp3" -> "audio/mpeg"
-      ".wav" -> "audio/wav"
-      ".m4a" -> "audio/mp4"
-      ".webm" -> "audio/webm"
-      _ -> "application/octet-stream"
-    end
+    {:error, Support.network_error_message(reason)}
   end
 
   defp resolve_token(opts) do
     case auth_mode(opts) do
-      :api_key ->
-        api_key_token(opts)
-
-      other ->
-        {:error, {:unsupported_auth_mode, other}}
+      :api_key -> api_key_token(opts)
+      other -> {:error, {:unsupported_auth_mode, other}}
     end
   end
 
+  # Key resolution routes through `Support` so the blank and unresolved-`@keyring`
+  # sentinels are rejected as `:absent` (never sent as a bearer token) — identical
+  # to xAI/Deepgram (§5.1). The `opts[:api_key]` seam wins first, then the
+  # transcription-specific `openai_api_key` override, then the reused OpenAI
+  # chat-provider key; a missing key fails loud as `:not_configured`.
   defp api_key_token(opts) do
-    case api_key(opts) do
-      key when is_binary(key) and key != "" -> {:ok, key}
-      _ -> {:error, :not_configured}
+    with :absent <- Support.opts_key(opts),
+         :absent <- Support.block_config_key(:openai_api_key),
+         :absent <- Support.provider_key(@provider) do
+      {:error, :not_configured}
     end
   end
 
@@ -113,15 +120,6 @@ defmodule FermixCore.Transcription.OpenAI do
     end)
   end
 
-  defp api_key(opts) do
-    Keyword.get_lazy(opts, :api_key, fn ->
-      case FermixCore.Config.provider_api_key(:openai) do
-        {:ok, key} -> key
-        {:error, _reason} -> nil
-      end
-    end)
-  end
-
   defp base_url do
     case FermixCore.Config.provider(:openai) do
       {:ok, config} -> Keyword.get(config, :base_url, @base_url)
@@ -130,7 +128,8 @@ defmodule FermixCore.Transcription.OpenAI do
   end
 
   defp model do
-    Application.get_env(:fermix_core, :transcription, [])
+    :fermix_core
+    |> Application.get_env(:transcription, [])
     |> Keyword.get(:model, @default_model)
   end
 end

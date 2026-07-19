@@ -143,6 +143,17 @@ defmodule FermixChannels.Gateway do
     end
   end
 
+  # Fail-loud ingress replies (M21 §5.2/D14): a transcription or attachment
+  # download failure replies to the sender with a reason-specific message instead
+  # of the old silent drop. Built only after authorization (an unauthorized
+  # sender is dropped first and never sees these) and NO turn is scheduled.
+  @not_configured_reply "I couldn't transcribe your voice note — no transcription " <>
+                          "backend is configured. Run `fermix setup` to add one."
+  @transcription_failed_reply "I couldn't transcribe your voice note — the " <>
+                                "transcription failed. Please try again."
+  @download_failed_reply "I couldn't download your attachment to transcribe it. " <>
+                           "Please try again."
+
   defp dispatch_message(
          channel,
          message,
@@ -159,70 +170,20 @@ defmodule FermixChannels.Gateway do
     emit_normalize_telemetry(message, normalize_result, normalize_duration_us)
 
     with {:ok, reply_message} <- normalize_result,
-         {:ok, authorization} <- authorize(reply_message),
-         {:ok, reply_message} <-
-           Transcription.maybe_transcribe_message(
-             channel,
-             reply_message,
-             transcription_opts
-           ),
-         {:ok, reply_message} <-
-           MediaIngest.maybe_attach_images(channel, reply_message),
-         reply_fn =
-           Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override),
-         :actionable <- ensure_actionable(reply_message, reply_fn) do
-      typing_fn = build_typing_fn(channel, reply_message)
-      stream_spec = build_stream_spec(channel, reply_message, reply_fn)
-      reaction_spec = build_reaction_spec(channel)
+         {:ok, authorization} <- authorize(reply_message) do
+      reply_fn =
+        Delivery.build_deliver(ReplyContext.new(channel, reply_message), reply_fn_override)
 
-      context =
-        command_context(
-          reply_message,
-          authorization,
-          conversation_store,
-          agent,
-          agent_server,
-          command_context_opts
-        )
+      deps = %{
+        agent: agent,
+        agent_server: agent_server,
+        transcription_opts: transcription_opts,
+        conversation_store: conversation_store,
+        command_context_opts: command_context_opts
+      }
 
-      case Commands.dispatch(
-             Commands.parse(reply_message, bot_name: bot_name_for(reply_message.channel)),
-             reply_fn,
-             context
-           ) do
-        :ok ->
-          :ok
-
-        {:error, :unauthorized} ->
-          :ok
-
-        {:error, _reason} = error ->
-          error
-
-        # A command (e.g. /ultra) handled parsing/auth but wants the agent to run
-        # a turn on a modified message (prefix stripped, run_profile tagged).
-        {:enqueue, agent_message} ->
-          deliver_to_agent(
-            agent_message,
-            authorization,
-            agent,
-            agent_server,
-            {reply_fn, typing_fn, stream_spec, reaction_spec}
-          )
-
-        :passthrough ->
-          deliver_to_agent(
-            reply_message,
-            authorization,
-            agent,
-            agent_server,
-            {reply_fn, typing_fn, stream_spec, reaction_spec}
-          )
-      end
+      ingest_authorized(channel, reply_message, authorization, reply_fn, deps)
     else
-      :replied_empty ->
-        :ok
-
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
         error
@@ -235,10 +196,150 @@ defmodule FermixChannels.Gateway do
         :ok
 
       {:error, reason} = error ->
-        Logger.error("Dispatcher ingress failed (transcription/media): #{inspect(reason)}")
+        Logger.error("Dispatcher ingress failed (authorize): #{inspect(reason)}")
         error
     end
   end
+
+  # Transcription materialization + fail-loud replies. Runs with the delivery
+  # `reply_fn` already built, so a failure can reply to the sender. Building
+  # reply_fn ahead of transcription is behavior-identical to building it after:
+  # the channel reply closures read only routing fields (reply_target, thread_ts,
+  # channel), which transcription/media-ingest never touch.
+  #
+  # Speech intake (D14) is the only ingress step with fail-loud sender replies: a
+  # transcription failure — including the audio-download failure the transcription
+  # step wraps as `{:attachment_download_failed, _}` — replies to the sender. Image
+  # media-ingest keeps its pre-D14 log-only behavior (its download failures wrap
+  # the same tuple, but are handled in `attach_images_and_deliver`, never here), so
+  # a failed photo download never gets the transcription-worded reply.
+  defp ingest_authorized(channel, reply_message, authorization, reply_fn, deps) do
+    case Transcription.maybe_transcribe_message(
+           channel,
+           reply_message,
+           deps.transcription_opts
+         ) do
+      {:ok, reply_message} ->
+        attach_images_and_deliver(channel, reply_message, authorization, reply_fn, deps)
+
+      {:error, {:transcription_failed, _reason} = wrapped} ->
+        reply_ingress_failure(reply_message.channel, reply_fn, wrapped)
+
+      {:error, {:attachment_download_failed, _reason} = wrapped} ->
+        reply_ingress_failure(reply_message.channel, reply_fn, wrapped)
+
+      {:error, reason} = error ->
+        Logger.error("Dispatcher ingress failed (transcription): #{inspect(reason)}")
+        error
+    end
+  end
+
+  # Image materialization is not part of speech intake, so its download/read
+  # failures stay log-only (pre-D14 behavior) — no sender reply, and the turn is
+  # not scheduled.
+  defp attach_images_and_deliver(channel, reply_message, authorization, reply_fn, deps) do
+    with {:ok, reply_message} <- MediaIngest.maybe_attach_images(channel, reply_message),
+         :actionable <- ensure_actionable(reply_message, reply_fn) do
+      run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps)
+    else
+      :replied_empty ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.error("Dispatcher ingress failed (media): #{inspect(reason)}")
+        error
+    end
+  end
+
+  defp run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps) do
+    typing_fn = build_typing_fn(channel, reply_message)
+    stream_spec = build_stream_spec(channel, reply_message, reply_fn)
+    reaction_spec = build_reaction_spec(channel)
+    approval_button? = function_exported?(channel, :send_approval, 3)
+
+    context =
+      command_context(
+        reply_message,
+        authorization,
+        deps.conversation_store,
+        deps.agent,
+        deps.agent_server,
+        deps.command_context_opts
+      )
+
+    case Commands.dispatch(
+           Commands.parse(reply_message, bot_name: bot_name_for(reply_message.channel)),
+           reply_fn,
+           context
+         ) do
+      :ok ->
+        :ok
+
+      {:error, :unauthorized} ->
+        :ok
+
+      {:error, _reason} = error ->
+        error
+
+      # A command (e.g. /ultra) handled parsing/auth but wants the agent to run
+      # a turn on a modified message (prefix stripped, run_profile tagged).
+      {:enqueue, agent_message} ->
+        deliver_to_agent(
+          agent_message,
+          authorization,
+          deps.agent,
+          deps.agent_server,
+          {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
+        )
+
+      :passthrough ->
+        deliver_to_agent(
+          reply_message,
+          authorization,
+          deps.agent,
+          deps.agent_server,
+          {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
+        )
+    end
+  end
+
+  # The turn is never scheduled: reply once and return `:ok` (handled, like the
+  # empty-inbound path), so the ingest batch continues to the next message.
+  defp reply_ingress_failure(channel, reply_fn, wrapped) do
+    Logger.error("Dispatcher ingress failed (transcription/media): #{inspect(wrapped)}")
+
+    :telemetry.execute(
+      [:fermix, :dispatcher, :ingress_failed],
+      %{count: 1},
+      %{channel: channel, reason: elem(wrapped, 0)}
+    )
+
+    _ = reply_fn.({:text, ingress_failure_copy(wrapped)})
+    :ok
+  end
+
+  defp ingress_failure_copy({:transcription_failed, reason}),
+    do: transcription_failure_copy(reason)
+
+  defp ingress_failure_copy({:attachment_download_failed, reason}),
+    do: download_failure_copy(reason)
+
+  defp transcription_failure_copy(:not_configured), do: @not_configured_reply
+  defp transcription_failure_copy({:unsupported_auth_mode, _mode}), do: @not_configured_reply
+
+  defp transcription_failure_copy({:file_too_large, size_mb, cap_mb}) do
+    "I couldn't transcribe your voice note — it's #{size_mb} MB, over the " <>
+      "#{cap_mb} MB limit. Send a shorter clip."
+  end
+
+  defp transcription_failure_copy(_reason), do: @transcription_failed_reply
+
+  defp download_failure_copy({:byte_cap_exceeded, _size, max_bytes}) do
+    "I couldn't download that to transcribe — it's over the " <>
+      "#{div(max_bytes, 1_048_576)} MB limit. Send a shorter clip."
+  end
+
+  defp download_failure_copy(_reason), do: @download_failed_reply
 
   defp authorize(%Message{} = message) do
     {result, duration_us} =
@@ -268,7 +369,7 @@ defmodule FermixChannels.Gateway do
          authorization,
          agent,
          agent_server,
-         {reply_fn, typing_fn, stream_spec, reaction_spec}
+         {reply_fn, typing_fn, stream_spec, reaction_spec, approval_button?}
        ) do
     if agent_alive?(agent_server) do
       agent_message =
@@ -276,6 +377,8 @@ defmodule FermixChannels.Gateway do
         |> to_agent_message()
         |> Map.put(:reply_fn, reply_fn)
         |> Map.put(:source_trust, authorization.trust)
+        |> maybe_put_approval_fn(message, authorization)
+        |> maybe_put_approval_button(authorization, approval_button?)
         |> maybe_put_typing_fn(typing_fn)
         |> maybe_put_stream_spec(stream_spec)
         |> maybe_put_reaction_spec(reaction_spec)
@@ -365,6 +468,61 @@ defmodule FermixChannels.Gateway do
   rescue
     ArgumentError -> :unknown
   end
+
+  # The grant-approval seam (SANDBOX_ACCESS_APPROVAL_FLOW §6.1): an injected
+  # closure — mirroring reply_fn — so core never depends on the channels layer.
+  # Attached only for an operator turn; the `request_directory_access` tool
+  # additionally gates on it, so a guest/unattended turn has no approval path.
+  # Calling it binds a pending grant to THIS owner conversation's origin and, on a
+  # re-ingestable channel, captures the verbatim request for auto-resume.
+  defp maybe_put_approval_fn(agent_message, %Message{} = message, %{trust: :operator}) do
+    Map.put(agent_message, :approval_fn, build_approval_fn(message))
+  end
+
+  defp maybe_put_approval_fn(agent_message, _message, _authorization), do: agent_message
+
+  # Whether this channel renders a private one-tap approval button that carries the
+  # confirmation token (SANDBOX_ACCESS_APPROVAL_FLOW). Core-facing plain data (like
+  # `reaction_spec`, never the channel module): `request_directory_access` reads it
+  # to decide whether it may drop the tap-to-copy `/confirm <token>` from a
+  # shared-chat prompt. Attached only for an operator turn — the sole turn that can
+  # reach the tool — mirroring `maybe_put_approval_fn`.
+  defp maybe_put_approval_button(agent_message, %{trust: :operator}, approval_button?)
+       when is_boolean(approval_button?) do
+    Map.put(agent_message, :private_approval_button?, approval_button?)
+  end
+
+  defp maybe_put_approval_button(agent_message, _authorization, _approval_button?),
+    do: agent_message
+
+  defp build_approval_fn(%Message{} = message) do
+    origin = %{
+      channel: message.channel,
+      chat_id: message.chat_id,
+      thread_ts: message.thread_ts,
+      user_id: approval_user_id(message.metadata),
+      resume: resume_intent(message)
+    }
+
+    fn request -> Commands.Sandbox.store_pending_grant(request, origin) end
+  end
+
+  # A one-shot loopback origin (CLI, daemon) cannot be re-ingested — its reply
+  # surface dies with the invocation — so it carries no resume intent (confirm
+  # persists and asks the owner to re-run). A re-ingestable chat channel captures
+  # the verbatim original request so confirm can auto-resume it.
+  defp resume_intent(%Message{channel: channel} = message) when is_binary(channel) do
+    if ChannelRegistry.local?(channel) do
+      nil
+    else
+      %{content: message.content, reply_target: message.reply_target, sender: message.sender}
+    end
+  end
+
+  defp approval_user_id(metadata) when is_map(metadata),
+    do: Map.get(metadata, :user_id) || Map.get(metadata, "user_id")
+
+  defp approval_user_id(_metadata), do: nil
 
   defp maybe_put_typing_fn(message, typing_fn) when is_function(typing_fn, 0) do
     Map.put(message, :typing_fn, typing_fn)

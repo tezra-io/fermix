@@ -18,10 +18,10 @@ defmodule FermixCore.Setup.SecretStore do
   @spec secure_snapshot(snapshot(), keyword()) :: {:ok, snapshot()} | {:error, String.t()}
   def secure_snapshot(snapshot, opts \\ []) when is_map(snapshot) and is_list(opts) do
     previous = Keyword.get(opts, :previous)
-    profile = profile_of(snapshot)
+    write_opts = [profile: profile_of(snapshot)] ++ Keyword.take(opts, [:supervised])
 
     Enum.reduce_while(SecretPaths.all(), {:ok, snapshot}, fn secret, {:ok, acc} ->
-      case secure_secret(acc, previous, secret, profile) do
+      case secure_secret(acc, previous, secret, write_opts) do
         {:ok, updated} -> {:cont, {:ok, updated}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -36,10 +36,15 @@ defmodule FermixCore.Setup.SecretStore do
   # a stuck task. Hitting it means the read failed: the sentinel stays.
   @keyring_read_timeout_ms 10_000
 
+  # `supervised` is owned by the caller's world: the boot config-provider chain
+  # (`ConfigStore.bootstrap_runtime_config`) passes `supervised: false` since no
+  # supervision tree exists yet; daemon callers omit it and `SecretWriter`/
+  # `CommandRunner` default to the supervised host. Never probed at runtime.
   @spec resolve_sentinels(snapshot(), keyword()) :: snapshot()
   def resolve_sentinels(snapshot, opts) when is_map(snapshot) and is_list(opts) do
     warn_plaintext? = Keyword.fetch!(opts, :warn_plaintext)
     profile = profile_of(snapshot)
+    read_opts = [profile: profile] ++ Keyword.take(opts, [:supervised])
     sentinel = SecretWriter.sentinel()
 
     {keyring, plain} =
@@ -51,18 +56,18 @@ defmodule FermixCore.Setup.SecretStore do
       |> Enum.each(&warn_plaintext_secret/1)
     end
 
-    resolve_keyring_secrets(snapshot, keyring, warn_plaintext?, profile)
+    resolve_keyring_secrets(snapshot, keyring, warn_plaintext?, read_opts)
   end
 
   # Reads are independent, so fan out over a bounded task pool and merge
   # deterministically (ordered stream zipped back to its input). Failure
   # semantics stay in handle_keyring_resolution_error: warn, keep sentinel.
-  defp resolve_keyring_secrets(snapshot, [], _warn?, _profile), do: snapshot
+  defp resolve_keyring_secrets(snapshot, [], _warn?, _read_opts), do: snapshot
 
-  defp resolve_keyring_secrets(snapshot, secrets, warn?, profile) do
+  defp resolve_keyring_secrets(snapshot, secrets, warn?, read_opts) do
     secrets
     |> Task.async_stream(
-      fn secret -> SecretWriter.get(secret.key, profile: profile) end,
+      fn secret -> SecretWriter.get(secret.key, read_opts) end,
       max_concurrency: @keyring_read_concurrency,
       timeout: @keyring_read_timeout_ms,
       on_timeout: :kill_task,
@@ -183,7 +188,7 @@ defmodule FermixCore.Setup.SecretStore do
   # Shape mismatch: nothing at this path to delete.
   def delete_snapshot_value(value, _path), do: value
 
-  defp secure_secret(snapshot, previous, secret, profile) do
+  defp secure_secret(snapshot, previous, secret, write_opts) do
     value = get_snapshot_value(snapshot, secret.path)
     old_value = previous_value(previous, secret.path)
 
@@ -192,10 +197,10 @@ defmodule FermixCore.Setup.SecretStore do
         {:ok, snapshot}
 
       old_value == SecretWriter.sentinel() ->
-        keep_or_rotate(snapshot, secret, value, profile)
+        keep_or_rotate(snapshot, secret, value, write_opts)
 
       SecretWriter.available?() ->
-        write_secret(snapshot, secret, value, profile)
+        write_secret(snapshot, secret, value, write_opts)
 
       # No OS secret writer, but this exact plaintext is already what's on
       # disk: keep it rather than failing an unrelated save (the load-time
@@ -222,10 +227,10 @@ defmodule FermixCore.Setup.SecretStore do
   #                   A real rotation is re-detected on the next save once the
   #                   keychain is reachable. Only a positively-confirmed different
   #                   stored value triggers a write.
-  defp keep_or_rotate(snapshot, secret, value, profile) do
-    case SecretWriter.get(secret.key, profile: profile) do
+  defp keep_or_rotate(snapshot, secret, value, write_opts) do
+    case SecretWriter.get(secret.key, write_opts) do
       {:ok, ^value} -> {:ok, keep_sentinel(snapshot, secret)}
-      {:ok, _other} -> write_secret(snapshot, secret, value, profile)
+      {:ok, _other} -> write_secret(snapshot, secret, value, write_opts)
       {:error, _reason} -> {:ok, keep_sentinel(snapshot, secret)}
     end
   end
@@ -234,8 +239,8 @@ defmodule FermixCore.Setup.SecretStore do
     put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())
   end
 
-  defp write_secret(snapshot, secret, value, profile) do
-    case SecretWriter.put(secret.key, value, profile: profile) do
+  defp write_secret(snapshot, secret, value, write_opts) do
+    case SecretWriter.put(secret.key, value, write_opts) do
       :ok ->
         {:ok, put_snapshot_value(snapshot, secret.path, SecretWriter.sentinel())}
 

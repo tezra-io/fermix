@@ -296,6 +296,99 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "realtime/0" do
+    setup do
+      realtime = Application.get_env(:fermix_core, :realtime, [])
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :realtime, realtime)
+        Application.put_env(:fermix_core, :providers, providers)
+      end)
+
+      Application.put_env(:fermix_core, :providers, [])
+      :ok
+    end
+
+    test "reports :ok when enabled with an OpenAI key present" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      result = Checks.realtime()
+
+      assert result.name == "realtime voice"
+      assert result.status == :ok
+      assert result.detail =~ "key present"
+    end
+
+    test "warns when enabled but the OpenAI key is missing" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+      Application.put_env(:fermix_core, :providers, [])
+
+      result = Checks.realtime()
+
+      assert result.status == :warn
+      assert result.detail =~ "sk-"
+      assert result.detail =~ "Codex"
+    end
+
+    test "reports :ok and disabled when realtime is off" do
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+
+      result = Checks.realtime()
+
+      assert result.status == :ok
+      assert result.detail =~ "disabled"
+    end
+  end
+
+  describe "transcription/0 (M21)" do
+    setup do
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :transcription, transcription)
+        Application.put_env(:fermix_core, :providers, providers)
+      end)
+
+      Application.put_env(:fermix_core, :providers, [])
+      :ok
+    end
+
+    test "reports a configured backend with a present credential as :ok" do
+      Application.put_env(:fermix_core, :transcription,
+        backend: "deepgram",
+        deepgram_api_key: "dg-secret"
+      )
+
+      result = Checks.transcription()
+
+      assert result.name == "transcription"
+      assert result.status == :ok
+      assert result.detail =~ "deepgram"
+    end
+
+    test "warns when the selected backend has no credential configured" do
+      Application.put_env(:fermix_core, :transcription, backend: "deepgram")
+
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "deepgram"
+      assert result.detail =~ "not configured"
+    end
+
+    test "warns when the configured backend is unknown" do
+      Application.put_env(:fermix_core, :transcription, backend: "vosk")
+
+      result = Checks.transcription()
+
+      assert result.status == :warn
+      assert result.detail =~ "Unknown"
+    end
+  end
+
   describe "channel_health/1" do
     setup do
       original_registry = Application.get_env(:fermix_channels, :channel_registry)
@@ -352,11 +445,31 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
-  describe "daemon_socket/0" do
+  describe "daemon_socket/1" do
     test "warns when nothing is listening" do
       result = Checks.daemon_socket()
       assert result.name == "daemon socket"
       assert result.status in [:ok, :warn, :fail]
+    end
+
+    test "ok when the daemon version matches this binary" do
+      vsn = to_string(Application.spec(:fermix_core, :vsn))
+      client = fn -> {:ok, %{"status" => "ok", "version" => vsn, "uptime_ms" => 5_000}} end
+
+      result = Checks.daemon_socket(client: client)
+
+      assert result.status == :ok
+      assert result.detail =~ "running, version #{vsn}"
+    end
+
+    test "warns when the daemon runs a different version than this binary" do
+      client = fn -> {:ok, %{"status" => "ok", "version" => "0.0.1", "uptime_ms" => 5_000}} end
+
+      result = Checks.daemon_socket(client: client)
+
+      assert result.status == :warn
+      assert result.detail =~ "running, version 0.0.1"
+      assert result.detail =~ "`fermix restart`"
     end
   end
 

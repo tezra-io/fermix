@@ -8,7 +8,8 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host do
   """
 
   @callback find_executable(command :: String.t()) :: Path.t() | nil
-  @callback version_output(command :: Path.t()) :: {:ok, String.t()} | {:error, term()}
+  @callback version_output(command :: Path.t(), opts :: keyword()) ::
+              {:ok, String.t()} | {:error, term()}
 end
 
 defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host.System do
@@ -28,9 +29,15 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe.Host.System do
   @impl true
   def find_executable(command) when is_binary(command), do: System.find_executable(command)
 
+  # `supervised` rides in on `opts` from the caller that knows its world: the
+  # tree-less `fermix plugins install/doctor/status` verbs thread `supervised:
+  # false` (no CommandHost.Supervisor on cli_dispatch's fall-through); daemon
+  # callers omit it and CommandRunner defaults to the supervised host.
   @impl true
-  def version_output(command) when is_binary(command) do
-    case CommandRunner.run(command, ["--version"], timeout_ms: version_timeout_ms()) do
+  def version_output(command, opts \\ []) when is_binary(command) and is_list(opts) do
+    run_opts = [timeout_ms: version_timeout_ms()] ++ Keyword.take(opts, [:supervised])
+
+    case CommandRunner.run(command, ["--version"], run_opts) do
       {:ok, %{exit: 0, stdout: output}} -> {:ok, output}
       {:ok, %{exit: status, stdout: output}} -> {:error, {:version_probe_failed, status, output}}
       {:error, reason} -> {:error, {:version_probe_failed, reason}}
@@ -191,7 +198,8 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
   defp version_fetch(opts) do
     Keyword.get_lazy(opts, :version_fetch, fn ->
       host = host_module()
-      &host.version_output/1
+      command_opts = Keyword.take(opts, [:supervised])
+      &host.version_output(&1, command_opts)
     end)
   end
 

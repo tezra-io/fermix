@@ -9,26 +9,34 @@ defmodule FermixCore.Sandbox.Env do
   @default_keys ~w(PATH HOME USER LANG SHELL TMPDIR)
   @secret_max_bytes 8_192
 
-  @spec build(Config.t() | map() | keyword(), [String.t()]) ::
+  @spec build(Config.t() | map() | keyword(), [String.t()], keyword()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def build(config, extra_names \\ []) do
+  def build(config, extra_names \\ [], opts \\ []) do
     config = Config.normalize(config)
 
-    with {:ok, selected} <- selected_env(config, config.env.allow ++ extra_names) do
+    with {:ok, selected} <-
+           selected_env(config, config.env.allow ++ extra_names, supervised(opts)) do
       {:ok, default_env() |> Map.merge(selected) |> Map.to_list()}
     end
   end
 
-  @spec build_command(Config.t() | map() | keyword(), [String.t()]) ::
+  @spec build_command(Config.t() | map() | keyword(), [String.t()], keyword()) ::
           {:ok, [{String.t(), String.t()}]} | {:error, term()}
-  def build_command(config, pass_env) when is_list(pass_env) do
+  def build_command(config, pass_env, opts \\ []) when is_list(pass_env) do
     config = Config.normalize(config)
 
     with :ok <- validate_pass_env(config, pass_env),
-         {:ok, selected} <- selected_env(config, pass_env) do
+         {:ok, selected} <- selected_env(config, pass_env, supervised(opts)) do
       {:ok, default_env() |> Map.merge(selected) |> Map.to_list()}
     end
   end
+
+  # `supervised` is owned by the caller's world: the tree-less `fermix sandbox
+  # env get` verb passes `supervised: false` (no `CommandHost.Supervisor`);
+  # daemon callers (shell tool, MCP supervisor) omit it and CommandRunner
+  # defaults to the supervised host. Only `source = "command"` env resolution
+  # spawns a subprocess, so the flag matters solely on that path.
+  defp supervised(opts), do: Keyword.get(opts, :supervised, true)
 
   @spec format_error(term()) :: String.t()
   def format_error({:env_not_allowed, name}) when is_binary(name) do
@@ -75,7 +83,7 @@ defmodule FermixCore.Sandbox.Env do
 
   def format_error(reason), do: inspect(reason)
 
-  defp selected_env(%Config{env: %{mode: :all} = env}, names) do
+  defp selected_env(%Config{env: %{mode: :all} = env}, names, supervised) do
     denied = MapSet.new(env.deny)
 
     if names == [] do
@@ -86,17 +94,17 @@ defmodule FermixCore.Sandbox.Env do
     else
       names
       |> Enum.reject(&MapSet.member?(denied, &1))
-      |> resolve_names(env.sources)
+      |> resolve_names(env.sources, supervised)
     end
   end
 
-  defp selected_env(%Config{env: env}, names) do
-    names |> Enum.uniq() |> resolve_names(env.sources)
+  defp selected_env(%Config{env: env}, names, supervised) do
+    names |> Enum.uniq() |> resolve_names(env.sources, supervised)
   end
 
-  defp resolve_names(names, sources) do
+  defp resolve_names(names, sources, supervised) do
     Enum.reduce_while(Enum.uniq(names), {:ok, %{}}, fn name, {:ok, acc} ->
-      case resolve_name(name, sources) do
+      case resolve_name(name, sources, supervised) do
         {:ok, value} -> {:cont, {:ok, Map.put(acc, name, value)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -121,12 +129,12 @@ defmodule FermixCore.Sandbox.Env do
     end
   end
 
-  defp resolve_name(name, sources) do
+  defp resolve_name(name, sources, supervised) do
     source = Map.get(sources, name, %{source: :env, name: name})
 
     case source.source do
       :env -> read_env(source.name || name)
-      :command -> read_command(source)
+      :command -> read_command(source, supervised)
     end
   end
 
@@ -137,20 +145,20 @@ defmodule FermixCore.Sandbox.Env do
     end
   end
 
-  defp read_command(%{command: command, args: args, timeout_ms: timeout})
+  defp read_command(%{command: command, args: args, timeout_ms: timeout}, supervised)
        when is_binary(command) do
     case System.find_executable(command) do
       nil -> {:error, {:env_command_not_found, command}}
-      executable -> run_command(command, executable, args, timeout)
+      executable -> run_command(command, executable, args, timeout, supervised)
     end
   end
 
-  defp read_command(_source), do: {:error, :invalid_env_command_source}
+  defp read_command(_source, _supervised), do: {:error, :invalid_env_command_source}
 
   # CommandRunner kills the OS child on timeout — the prior Task.async +
   # System.cmd pattern only ended the BEAM task and left the helper running.
-  defp run_command(command, executable, args, timeout) do
-    case CommandRunner.run(executable, args, timeout_ms: timeout) do
+  defp run_command(command, executable, args, timeout, supervised) do
+    case CommandRunner.run(executable, args, timeout_ms: timeout, supervised: supervised) do
       {:ok, %{truncated?: true}} ->
         {:error, :env_command_output_too_large}
 

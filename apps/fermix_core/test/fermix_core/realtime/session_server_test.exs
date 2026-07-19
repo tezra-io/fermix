@@ -5,9 +5,12 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Jobs.Registry
+  alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Tools.ScheduleJob
 
   defmodule FakeOpenAIClient do
     def start_link(opts) do
@@ -85,9 +88,21 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
   end
 
+  defmodule SleepyTool do
+    def execute(%{"sleep_ms" => ms}, _context) when is_integer(ms) do
+      Process.sleep(ms)
+      {:ok, %{success: true, output: "slept #{ms}", error: nil}}
+    end
+  end
+
+  defmodule RaisingTool do
+    def execute(_args, _context), do: raise("tool boom")
+  end
+
   setup do
     config = Config.normalize(enabled: true)
     capability = capability()
+    task_supervisor = start_supervised!({Task.Supervisor, []})
 
     {:ok, pid} =
       SessionServer.start_link(
@@ -97,12 +112,13 @@ defmodule FermixCore.Realtime.SessionServerTest do
         api_key: "sk-test",
         safety_identifier: "safe-id",
         capabilities: [capability],
+        task_supervisor: task_supervisor,
         prompt_loader: fn _opts ->
           {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
         end
       )
 
-    %{server: pid}
+    %{server: pid, task_supervisor: task_supervisor}
   end
 
   test "call_start opens OpenAI session and sends filtered session.update", %{server: server} do
@@ -183,6 +199,92 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert file_name in tool_names
     refute channel_name in tool_names
+  end
+
+  test "default voice capabilities exclude delegation tools" do
+    file_name = "voice_file_#{System.unique_integer([:positive])}"
+    delegation_name = "voice_delegate_#{System.unique_integer([:positive])}"
+
+    :ok = CapabilityRegistry.register(CapabilityRegistry, capability(file_name, :file))
+
+    :ok =
+      CapabilityRegistry.register(CapabilityRegistry, capability(delegation_name, :delegation))
+
+    on_exit(fn ->
+      CapabilityRegistry.unregister(CapabilityRegistry, file_name)
+      CapabilityRegistry.unregister(CapabilityRegistry, delegation_name)
+    end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    tool_names = Enum.map(event.session.tools, & &1.name)
+
+    # Voice gains honest :operator trust, so `subagents` would otherwise become
+    # executable — but a multi-minute blocking fan-out does not fit a live voice
+    # session, so the delegation category is excluded from the voice surface.
+    assert file_name in tool_names
+    refute delegation_name in tool_names
+  end
+
+  test "schedule_job from the voice context persists created_by_trust operator" do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-realtime-schedule-#{unique}.db")
+    repo = :"realtime_schedule_repo_#{unique}"
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], fn path ->
+        FermixTestSupport.SafeRm.rm(path)
+      end)
+    end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    # The voice call is the operator at the keyboard: its default tool context
+    # carries `source_trust: :operator`, so a scheduled job it creates is stamped
+    # with the creator's real trust rather than a minted default.
+    context = Map.put(:sys.get_state(server).tool_context, :memory_repo, repo)
+
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Voice Reminder",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Remind me tomorrow at 9.",
+                 "allowed_tools" => []
+               },
+               context
+             )
+
+    assert result.success == true
+    job_id = Jason.decode!(result.output)["id"]
+
+    assert {:ok, job} = Registry.get_job(job_id, repo: repo)
+    assert job.created_by_trust == "operator"
   end
 
   test "reload_runtime sends active realtime sessions a refreshed tool list" do
@@ -331,6 +433,9 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert :ok = SessionServer.audio_chunk(server, "after-response")
 
+    # audio_chunk is now a cast; a follow-up call is a barrier that guarantees
+    # the cast has been processed before we read the fake client's events.
+    _ = SessionServer.openai_pid(server)
     events = FakeOpenAIClient.events(openai)
     assert length(events) == before_response_count + 2
 
@@ -402,7 +507,11 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert Agent.get(openai, & &1.closed?)
     assert SessionServer.openai_pid(server) == nil
-    assert {:error, :not_connected} = SessionServer.audio_chunk(server, "after-stop")
+    # audio_chunk is fire-and-forget now: after the session drops it is silently
+    # discarded (logged, not acked with an error). The barrier call confirms the
+    # cast did not revive the session.
+    assert :ok = SessionServer.audio_chunk(server, "after-stop")
+    assert SessionServer.openai_pid(server) == nil
     assert_receive {:realtime, %{type: "state", state: "idle"}}
   end
 
@@ -536,12 +645,14 @@ defmodule FermixCore.Realtime.SessionServerTest do
                %{"call_id" => "call-1", "name" => "echo", "arguments" => ~s({"text":"hi"})}
              })
 
+    # The tool now runs off the loop; wait for completion before reading events.
+    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+
     openai = SessionServer.openai_pid(server)
     events = FakeOpenAIClient.events(openai)
 
     assert Enum.any?(events, &(&1.type == "conversation.item.create"))
     assert Enum.any?(events, &(&1.type == "response.create"))
-    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
   end
 
   test "provider function call errors are sent back as function output", %{server: server} do
@@ -552,6 +663,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
                :function_call,
                %{"call_id" => "call-err", "name" => "missing_tool", "arguments" => "{}"}
              })
+
+    assert_receive {:realtime, %{type: "tool_event", status: "error", name: "missing_tool"}}
 
     openai = SessionServer.openai_pid(server)
     events = FakeOpenAIClient.events(openai)
@@ -569,7 +682,118 @@ defmodule FermixCore.Realtime.SessionServerTest do
            end)
 
     assert Enum.any?(events, &(&1.type == "response.create"))
-    assert_receive {:realtime, %{type: "tool_event", status: "error", name: "missing_tool"}}
+  end
+
+  test "a slow tool runs off the session loop so audio and interrupt are never blocked" do
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :sleepy_task_sup)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [sleepy_capability()],
+        task_supervisor: task_supervisor,
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    # Deliver the function call via the production provider path (an async
+    # handle_info, exactly how OpenAIClient forwards events), NOT the synchronous
+    # `handle_provider_event` GenServer.call. Under the old inline design that
+    # call absorbed the full 2s tool sleep before returning, so the interrupt
+    # timer below started AFTER the tool was already done and could never trip.
+    # The async send lets a still-running tool block the mailbox if it is inline.
+    send(
+      server,
+      {:openai_realtime_event,
+       {:function_call,
+        %{
+          "call_id" => "call-slow",
+          "name" => "sleepy",
+          "arguments" => ~s({"sleep_ms":2000})
+        }}}
+    )
+
+    assert_receive {:realtime, %{type: "tool_event", status: "running", name: "sleepy"}}
+
+    # While the tool sleeps, an audio cast is absorbed and an interrupt call
+    # round-trips promptly. Under the old inline design the tool blocked the
+    # session mailbox for its full ~2s, so BOTH of these would have queued behind
+    # it — time the whole window so any inline execution trips the bound.
+    started = System.monotonic_time(:millisecond)
+    assert :ok = SessionServer.audio_chunk(server, "mid-tool-audio")
+    assert :ok = SessionServer.interrupt(server)
+    elapsed = System.monotonic_time(:millisecond) - started
+    assert elapsed < 1_000, "audio+interrupt were blocked #{elapsed}ms behind the running tool"
+
+    # When the tool finishes, its function output reaches OpenAI and the
+    # companion sees completion.
+    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "sleepy"}}, 5_000
+
+    openai = SessionServer.openai_pid(server)
+    events = FakeOpenAIClient.events(openai)
+
+    assert Enum.any?(events, fn
+             %{
+               type: "conversation.item.create",
+               item: %{type: "function_call_output", call_id: "call-slow"}
+             } ->
+               true
+
+             _other ->
+               false
+           end)
+
+    assert Enum.any?(events, &(&1.type == "response.create"))
+  end
+
+  @tag capture_log: true
+  test "a tool task that raises still answers OpenAI with an error function output" do
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :boomer_task_sup)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [raising_capability()],
+        task_supervisor: task_supervisor,
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    assert :ok =
+             SessionServer.handle_provider_event(server, {
+               :function_call,
+               %{"call_id" => "call-boom", "name" => "boomer", "arguments" => "{}"}
+             })
+
+    # The raising tool crashes its task; the :DOWN path must still answer OpenAI
+    # so the turn is not left hanging.
+    assert_receive {:realtime, %{type: "tool_event", status: "error", name: "boomer"}}, 5_000
+
+    openai = SessionServer.openai_pid(server)
+    events = FakeOpenAIClient.events(openai)
+
+    assert Enum.any?(events, fn
+             %{
+               type: "conversation.item.create",
+               item: %{type: "function_call_output", call_id: "call-boom", output: output}
+             } ->
+               match?(%{"error" => _reason}, Jason.decode!(output))
+
+             _other ->
+               false
+           end)
+
+    assert Enum.any?(events, &(&1.type == "response.create"))
   end
 
   test "response completion records final transcripts when transcript persistence is enabled" do
@@ -753,6 +977,28 @@ defmodule FermixCore.Realtime.SessionServerTest do
       executor: {FakeTool, :execute, []},
       policy_class: :read_only,
       metadata: %{category: category}
+    })
+  end
+
+  defp sleepy_capability do
+    Capability.new(%{
+      name: "sleepy",
+      description: "Sleeps, then returns.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {SleepyTool, :execute, []},
+      policy_class: :read_only
+    })
+  end
+
+  defp raising_capability do
+    Capability.new(%{
+      name: "boomer",
+      description: "Raises.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {RaisingTool, :execute, []},
+      policy_class: :read_only
     })
   end
 

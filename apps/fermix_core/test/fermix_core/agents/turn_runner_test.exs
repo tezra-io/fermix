@@ -3,6 +3,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
+  alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.Memory.ConversationStore
@@ -204,6 +205,58 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     def chat(_messages, _capabilities, opts) do
       send(Keyword.fetch!(opts, :test_pid), {:compact_chat, :primary})
       {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
+  # Emits one tool call to `record_cwd`, then finishes — so a real turn executes
+  # the recording capability and the test can inspect the tool-execution context.
+  defmodule RecordCwdAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts), do: step(opts)
+
+    @impl true
+    def continue(_provider_state, _tool_results, opts), do: step(opts)
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp step(_opts) do
+      n = Process.get(:record_cwd_step, 0) + 1
+      Process.put(:record_cwd_step, n)
+
+      tool_calls =
+        if n == 1 do
+          [%{id: "c1", call_id: "c1", name: "record_cwd", arguments: "{}"}]
+        else
+          []
+        end
+
+      {:ok,
+       %{
+         content: if(n == 1, do: "", else: "done"),
+         tool_calls: tool_calls,
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock-model"
+       }}
+    end
+  end
+
+  defmodule CwdRecorder do
+    def execute(_args, context, test_pid) do
+      send(test_pid, {:tool_context, context})
+      {:ok, %{success: true, output: "recorded"}}
     end
   end
 
@@ -423,6 +476,37 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                TurnRunner.run(msg, turn_state, fn _part -> :ok end)
 
       assert Process.get(:looping_adapter_step) == 100
+    end
+
+    test "an operator turn threads request_cwd into the tool-execution context :cwd" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-op-cwd")
+
+      assert context.cwd == "/tmp/fermix-op-cwd"
+    end
+
+    test "a guest turn leaves the tool-execution context :cwd nil despite a request_cwd" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:guest, "/tmp/fermix-guest-cwd")
+
+      assert context.cwd == nil
+    end
+
+    test "surfaces the message's approval_fn in the tool-execution context" do
+      Process.put(:record_cwd_step, 0)
+      approval_fn = fn _request -> {:ok, "TKN", :new} end
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-approval", %{approval_fn: approval_fn})
+
+      assert context.approval_fn == approval_fn
+    end
+
+    test "leaves the tool-execution context approval_fn nil when the message carries none" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-no-approval")
+
+      assert context.approval_fn == nil
     end
 
     test "run/4 threads the stream callback into adapter_opts; run/3 stays callback-free" do
@@ -785,7 +869,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
            }}
         )
 
-      assert reply =~ "xAI"
+      assert reply =~ "SpaceXAI"
       assert reply =~ "API key"
       refute reply =~ "fermix auth login"
     end
@@ -982,6 +1066,81 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       runtime_message: %{role: "system", content: "runtime contract"},
       runtime_accounting: %{part: :runtime}
     }
+  end
+
+  defp run_record_cwd_turn(trust, request_cwd, extra_msg \\ %{}) do
+    registry_name = :"tr_cwd_reg_#{System.unique_integer([:positive])}"
+    store_name = :"tr_cwd_store_#{System.unique_integer([:positive])}"
+
+    start_supervised!({CapabilityRegistry, name: registry_name})
+
+    store =
+      start_supervised!({ConversationStore, name: store_name, max_messages: :infinity, repo: nil})
+
+    msg =
+      Map.merge(
+        %{
+          channel: "cli",
+          chat_id: "cwd_#{trust}",
+          sender: "user",
+          content: "hi",
+          source_trust: trust,
+          request_cwd: request_cwd
+        },
+        extra_msg
+      )
+
+    turn_state =
+      turn_state(
+        adapter: RecordCwdAdapter,
+        adapter_opts: [model: "mock-model"],
+        capability_registry: registry_name,
+        conversation_store: store,
+        runtime_context: record_cwd_runtime_context(self())
+      )
+
+    assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+    assert_receive {:tool_context, context}
+    %{context: context}
+  end
+
+  # A runtime context whose operator and guest profiles both advertise (and
+  # dispatch) the `record_cwd` capability, so a driven turn actually executes it
+  # regardless of the turn's trust level.
+  defp record_cwd_runtime_context(test_pid) do
+    cap = record_cwd_capability(test_pid)
+
+    %RuntimeContext{
+      agent_id: "main",
+      built_at_ms: 0,
+      base_messages: [%{role: "system", content: "base prompt"}],
+      stable_messages: [%{role: "system", content: "base prompt"}],
+      volatile_messages: [],
+      base_accounting: [],
+      available_skills: [],
+      operator_profile: record_cwd_profile(:operator, cap),
+      guest_profile: record_cwd_profile(:guest, cap)
+    }
+  end
+
+  defp record_cwd_profile(trust, cap) do
+    %{
+      trust: trust,
+      capabilities: [cap],
+      runtime_message: %{role: "system", content: "runtime contract"},
+      runtime_accounting: %{part: :runtime}
+    }
+  end
+
+  defp record_cwd_capability(test_pid) do
+    Capability.new(%{
+      name: "record_cwd",
+      description: "records the tool-execution context for assertions",
+      parameters: %{"type" => "object", "properties" => %{}},
+      kind: :builtin,
+      executor: {CwdRecorder, :execute, [test_pid]},
+      policy_class: :read_only
+    })
   end
 
   defp turn_state(overrides) do

@@ -40,7 +40,11 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   require Logger
 
   @default_base_url "https://api.openai.com/v1"
-  @default_temperature 0.7
+
+  # No temperature: every model this adapter serves (the gpt-5 reasoning
+  # family) rejects the param with a 400 "Unsupported parameter" — sampling
+  # control on this API is the `reasoning` effort field. A caller-supplied
+  # :temperature opt is deliberately ignored.
 
   @impl true
   def chat(messages, capabilities, opts) when is_list(messages) and is_list(capabilities) do
@@ -54,7 +58,6 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp do_chat(messages, capabilities, bearer, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
-    temperature = Keyword.get(opts, :temperature, @default_temperature)
 
     {instructions, input} = ResponsesShared.build_input(messages)
     tools = ResponsesShared.to_provider_tools(capabilities)
@@ -67,7 +70,6 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       %{model: model, input: input, store: false}
       |> maybe_put(:instructions, instructions)
       |> maybe_put(:tools, tools)
-      |> maybe_put(:temperature, temperature)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:text, text)
 
@@ -100,7 +102,6 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   defp do_continue(provider_state, tool_results, bearer, req_options, opts) do
     model = Keyword.fetch!(opts, :model)
     base_url = Keyword.get(opts, :base_url, @default_base_url)
-    temperature = Keyword.get(opts, :temperature, @default_temperature)
 
     %{
       input: prior_input,
@@ -128,7 +129,6 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     body =
       %{model: model, input: next_input, store: false}
       |> maybe_put(:tools, tools)
-      |> maybe_put(:temperature, temperature)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:text, text)
 

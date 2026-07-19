@@ -1,6 +1,8 @@
 defmodule FermixCore.Tools.GitCommand do
   @moduledoc false
 
+  alias FermixCore.CommandRunner
+
   # Audit F-01 follow-up (shared boundary): even when the resolved repo path
   # is sandbox-checked, git accepts flags that escape the `cd: repo` boundary.
   # `--upload-pack`/`--receive-pack` run an arbitrary program for the transport
@@ -38,21 +40,56 @@ defmodule FermixCore.Tools.GitCommand do
   # be bypassed by quoting, abbreviation, or a transport we forgot to enumerate.
   @allowed_protocols "https:ssh:git"
 
-  @spec run(String.t(), String.t(), [String.t()]) ::
+  # Fixed wall-clock ceiling for any single git command. `pull` is the only
+  # network-reaching command in either whitelist; a first pull on a slow link
+  # exceeding this fails loud (accepted). Not a config knob — the timeout is a
+  # containment invariant, not an operator setting.
+  @timeout_ms 120_000
+
+  @spec run(String.t(), String.t(), [String.t()], keyword()) ::
           {:ok, String.t()} | {:error, String.t()}
-  def run(repo, command, args) when is_binary(repo) and is_binary(command) and is_list(args) do
+  def run(repo, command, args, opts \\ [])
+      when is_binary(repo) and is_binary(command) and is_list(args) and is_list(opts) do
     with :ok <- validate_repo(repo),
          :ok <- validate_args(args),
-         :ok <- validate_flags(args) do
-      case System.cmd("git", [command | args],
-             cd: repo,
-             stderr_to_stdout: true,
-             env: [{"GIT_ALLOW_PROTOCOL", @allowed_protocols}]
-           ) do
-        {output, 0} -> {:ok, output}
-        {output, exit_code} -> {:error, "git #{command} failed (exit #{exit_code}):\n#{output}"}
-      end
+         :ok <- validate_flags(args),
+         {:ok, git} <- resolve_executable(opts) do
+      git
+      |> CommandRunner.run([command | args],
+        cwd: repo,
+        env: [{"GIT_ALLOW_PROTOCOL", @allowed_protocols}],
+        timeout_ms: Keyword.get(opts, :timeout_ms, @timeout_ms)
+      )
+      |> translate(command)
     end
+  end
+
+  @doc false
+  @spec executable() :: {:ok, String.t()} | {:error, String.t()}
+  def executable, do: resolve_executable([])
+
+  # The executable-path seam: production resolves `git` on PATH once; tests pass
+  # an `:executable` stub. Resolution stays inside this chokepoint so git_read,
+  # git_write, and the git_root preflight cannot drift.
+  defp resolve_executable(opts) do
+    case Keyword.get(opts, :executable) || System.find_executable("git") do
+      path when is_binary(path) -> {:ok, path}
+      nil -> {:error, "git executable not found"}
+    end
+  end
+
+  defp translate({:ok, %{exit: 0, stdout: output}}, _command), do: {:ok, output}
+
+  defp translate({:ok, %{exit: exit_code, stdout: output}}, command) do
+    {:error, "git #{command} failed (exit #{exit_code}):\n#{output}"}
+  end
+
+  defp translate({:error, {:timeout, _ms}}, command) do
+    {:error, "git #{command} timed out after #{div(@timeout_ms, 1000)}s"}
+  end
+
+  defp translate({:error, reason}, command) do
+    {:error, "git #{command} failed: #{inspect(reason)}"}
   end
 
   defp validate_repo(repo) do

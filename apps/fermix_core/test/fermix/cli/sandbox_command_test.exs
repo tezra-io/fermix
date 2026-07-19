@@ -61,6 +61,34 @@ defmodule Fermix.CLI.SandboxCommandTest do
     refute output =~ "sk-"
   end
 
+  test "explain annotates effective roots with granted vs mode provenance" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-explain-provenance")
+    workspace = Path.join(home, "workspace")
+    granted = Path.join(home, "granted-proj")
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(granted)
+
+    Application.put_env(
+      :fermix_core,
+      :sandbox,
+      Config.normalize(
+        home: home,
+        os_home: home,
+        mode: :strict,
+        workspace_root: workspace,
+        allowed_roots: [granted]
+      )
+    )
+
+    output = capture_io(fn -> assert SandboxCommand.run(["explain"]) == 0 end)
+
+    assert output =~ "effective roots:"
+    assert output =~ "  - #{PathPolicy.canonical_path(granted)} (granted)"
+    assert output =~ "  - #{PathPolicy.canonical_path(workspace)} (mode)"
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
   test "mode command persists sandbox mode" do
     output = capture_io(fn -> assert SandboxCommand.run(["mode", "standard"]) == 0 end)
 

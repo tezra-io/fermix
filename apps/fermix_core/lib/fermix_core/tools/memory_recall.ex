@@ -61,7 +61,7 @@ defmodule FermixCore.Tools.MemoryRecall do
 
   @impl true
   def when_to_use do
-    "Recall durable memory facts or run lexical memory search before answering from remembered context."
+    "Before answering anything that may depend on stored user or project facts, check memory rather than assuming. Recall durable facts or run lexical search."
   end
 
   @impl true

@@ -418,7 +418,16 @@ defmodule FermixCore.AgentLoopTest do
                run_loop(
                  capability_registry: registry,
                  capabilities: [subagents_cap],
-                 context: %{agent_name: "test", conversation_key: :test, subagent_mode: :ultra}
+                 # subagents only advertises where it can execute (§12), so a
+                 # trust-less context would now drop it before the schema refresh
+                 # is even observable — establish the operator trust the model
+                 # would actually carry.
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   subagent_mode: :ultra,
+                   source_trust: :operator
+                 }
                )
 
       [{_messages, [cap], _opts}] = mock_calls()
@@ -431,7 +440,16 @@ defmodule FermixCore.AgentLoopTest do
       set_mock_responses([turn("done")])
       subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
 
-      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [subagents_cap])
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   source_trust: :operator
+                 }
+               )
 
       [{_messages, [cap], _opts}] = mock_calls()
       assert cap.parameters.properties.tasks.maxItems == 10
@@ -515,6 +533,59 @@ defmodule FermixCore.AgentLoopTest do
 
       [{_messages, [cap], _opts}] = mock_calls()
       assert cap.name == "file_read"
+    end
+
+    test "advertises subagents in a top-level operator context", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   source_trust: :operator
+                 }
+               )
+
+      [{_messages, [cap], _opts}] = mock_calls()
+      assert cap.name == "subagents"
+    end
+
+    test "hides subagents when the context carries no trust", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      # No source_trust ⇒ Subagents.advertise?/1 is false ⇒ a call would fail
+      # the fetch_source_trust guard, so it is dropped from the wire.
+      assert {:ok, _} = run_loop(capability_registry: registry, capabilities: [subagents_cap])
+
+      [{_messages, advertised, _opts}] = mock_calls()
+      assert advertised == []
+    end
+
+    test "hides subagents inside a subagent (depth > 0)", %{registry: registry} do
+      set_mock_responses([turn("done")])
+      subagents_cap = BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+
+      # A worker carries the parent's trust but subagent_depth > 0 ⇒ the
+      # recursion guard would reject the call, so it never reaches the wire.
+      assert {:ok, _} =
+               run_loop(
+                 capability_registry: registry,
+                 capabilities: [subagents_cap],
+                 context: %{
+                   agent_name: "test",
+                   conversation_key: :test,
+                   source_trust: :operator,
+                   subagent_depth: 1
+                 }
+               )
+
+      [{_messages, advertised, _opts}] = mock_calls()
+      assert advertised == []
     end
   end
 
@@ -1628,6 +1699,136 @@ defmodule FermixCore.AgentLoopTest do
 
     def continue(_provider_state, _tool_results, _opts) do
       {:error, ProviderError.transport(:anthropic, __MODULE__, :timeout)}
+    end
+  end
+
+  describe "run/1 continuation pre-response timeout retry" do
+    # The 2026-07-17 F1-job incident class: a transient network stall kills a
+    # continuation call with a transport :timeout at a MEASURED
+    # :before_response stage — zero response chunks, so re-issuing the call in
+    # place replays nothing. Delays are observed via message passing (the
+    # suite's delay_fn convention — see jobs/runner_test.exs), so no state
+    # leaks between tests.
+
+    defp pre_response_timeout do
+      ProviderError.transport(:openai_codex, :codex, :timeout, stage: :before_response)
+    end
+
+    defp delay_spy do
+      parent = self()
+      fn ms -> send(parent, {:delay, ms}) end
+    end
+
+    test "retries in place with backoff and succeeds without replaying tools", %{
+      registry: registry
+    } do
+      register_caps(registry, [SpyTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "spy_tool", %{})]),
+        {:error, pre_response_timeout()},
+        turn("recovered")
+      ])
+
+      log =
+        capture_log(fn ->
+          assert {:ok, result} =
+                   run_loop(
+                     capability_registry: registry,
+                     trust: :operator,
+                     retry_delay_fn: delay_spy()
+                   )
+
+          assert result.response == "recovered"
+        end)
+
+      assert_received {:delay, 2_000}
+      refute_received {:delay, _}
+      assert log =~ "Provider retry"
+      assert log =~ "attempt 1/2"
+
+      # The tool ran exactly once — the retry re-issued only the LLM call.
+      assert_received :spy_tool_executed
+      refute_received :spy_tool_executed
+      assert length(mock_continues()) == 2
+    end
+
+    test "retries are bounded and the error surfaces after exhaustion", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        {:error, pre_response_timeout()},
+        {:error, pre_response_timeout()},
+        {:error, pre_response_timeout()}
+      ])
+
+      capture_log(fn ->
+        assert {:error, {:provider_transport_error, %{kind: :timeout, stage: :before_response}}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      assert_received {:delay, 2_000}
+      assert_received {:delay, 4_000}
+      refute_received {:delay, _}
+      assert length(mock_continues()) == 3
+    end
+
+    test "a mid-stream timeout is not retried", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+
+      mid_stream_timeout =
+        ProviderError.transport(:openai_codex, :codex, :timeout, stage: :mid_stream)
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        {:error, mid_stream_timeout}
+      ])
+
+      capture_log(fn ->
+        assert {:error, {:provider_transport_error, %{stage: :mid_stream}}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      refute_received {:delay, _}
+      assert length(mock_continues()) == 1
+    end
+
+    test "an unmeasured (stage :unknown) timeout from a buffered adapter is not retried", %{
+      registry: registry
+    } do
+      register_caps(registry, [EchoTool])
+
+      # A buffered adapter mints transport errors with no :stage — the
+      # constructor defaults to :unknown, which must never enter the
+      # zero-data retry class (a slow model burning its receive window
+      # would be re-issued for nothing).
+      unmeasured_timeout = ProviderError.transport(:anthropic, :messages, :timeout)
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("c1", "echo", %{"text" => "hi"})]),
+        {:error, unmeasured_timeout}
+      ])
+
+      capture_log(fn ->
+        assert {:error, {:provider_transport_error, %{stage: :unknown}}} =
+                 run_loop(
+                   capability_registry: registry,
+                   trust: :operator,
+                   retry_delay_fn: delay_spy()
+                 )
+      end)
+
+      refute_received {:delay, _}
+      assert length(mock_continues()) == 1
     end
   end
 

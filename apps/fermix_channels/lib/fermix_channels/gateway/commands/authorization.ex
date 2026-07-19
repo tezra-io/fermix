@@ -18,6 +18,11 @@ defmodule FermixChannels.Gateway.Commands.Authorization do
   Any other context (missing authorization, missing user id, no
   matching channel) fails loud as `{:error, :unauthorized}`.
 
+  For operator-grade actions (e.g. sandbox directory grants) use
+  `operator_only/3`, which admits *only* `role: :operator` and never
+  the `command_allowlist` guest branch: a trusted collaborator allowed
+  to run `/new` must not thereby gain sandbox-mutation authority.
+
   This is `MESSAGE_GATEWAY_ARCHITECTURE.md` stage 4: command
   authorization and agent tool trust now share one decision.
   """
@@ -39,6 +44,19 @@ defmodule FermixChannels.Gateway.Commands.Authorization do
   end
 
   def owner_only(_message, _metadata, _context), do: {:error, :unauthorized}
+
+  @doc """
+  Strict operator gate. Authorises only when the gateway classified the
+  sender as the configured owner (`role: :operator`). Unlike `owner_only/3`
+  it never consults `command_allowlist`, so a guest can never reach an
+  operator-grade action even if allowed to run other slash commands.
+  """
+  @spec operator_only(FermixChannels.Gateway.Message.t(), map(), map()) ::
+          :ok | {:error, :unauthorized}
+  def operator_only(_message, _metadata, %{authorization: %Authorization{role: :operator}}),
+    do: :ok
+
+  def operator_only(_message, _metadata, _context), do: {:error, :unauthorized}
 
   defp stable_user_id(metadata) when is_map(metadata) do
     case Map.get(metadata, :user_id) || Map.get(metadata, "user_id") do

@@ -1,0 +1,38 @@
+# Fermix E2E behavioral-eval configuration.
+
+daemon:
+  # Safe/read-only regressions use the existing development daemon. Higher-risk
+  # profiles require FERMIX_EVAL_HOME pointing at a disposable eval/e2e home.
+  fermix_home: "~/.fermix-dev"
+  fermix_bin: "bin/fermix-shim"
+  default_timeout_ms: 180000
+
+opik:
+  base_url: "http://localhost:5173/api/v1/private"
+  project: "fermix-dev"
+  poll_timeout_s: 90
+  poll_interval_s: 2
+  ui_base: "http://localhost:5173"
+
+judge:
+  # Independent external judge: the OpenAI API via EVAL_JUDGE_API_KEY (the Makefile
+  # resolves it from the daemon's configured key in the keychain). No daemon/core
+  # code involved. The judge model must differ from the candidate model.
+  backend: "openai"
+  model: "gpt-5.4-mini"
+  enabled: false
+
+# Behavioral regressions fail incomplete on provider limits; they never wait for
+# the capability sweep's multi-hour retry schedule.
+usage_limit:
+  retry_backoff_min: []
+
+budgets:
+  max_cost_usd: 2.0
+  max_duration_ms: 240000
+
+report:
+  dir: "reports"
+
+policy:
+  rubric_failures: "fail"

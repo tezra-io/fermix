@@ -14,10 +14,47 @@ defmodule FermixCore.ComputerUse.ConfigTest do
       assert config.screenshot_after? == true
       assert config.max_actions == 80
       assert config.max_retained_screenshots == 3
+      # Coexistence (V3 R0): courtesy is ON by default so the agent yields to a
+      # present human out of the box; the idle threshold defaults to 1s.
+      assert config.courtesy == :yield
+      assert config.courtesy_idle_ms == 1_000
     end
 
     test "nil normalizes to defaults" do
       assert Config.normalize(nil) == Config.normalize([])
+    end
+  end
+
+  describe "courtesy (coexistence)" do
+    test "reads an atom or string courtesy and the idle threshold" do
+      assert Config.normalize(courtesy: :off).courtesy == :off
+      assert Config.normalize(courtesy: "off").courtesy == :off
+      assert Config.normalize(courtesy: "yield").courtesy == :yield
+      assert Config.normalize(courtesy_idle_ms: 2_500).courtesy_idle_ms == 2_500
+    end
+
+    test "an unknown courtesy value fails loud" do
+      assert_raise ArgumentError, ~r/computer_use.courtesy must be :off or :yield/, fn ->
+        Config.normalize(courtesy: "sometimes")
+      end
+    end
+
+    test "a non-positive idle threshold fails loud" do
+      assert_raise ArgumentError,
+                   ~r/computer_use.courtesy_idle_ms must be a positive integer/,
+                   fn ->
+                     Config.normalize(courtesy_idle_ms: 0)
+                   end
+    end
+
+    test "to_keyword round-trips courtesy (as a TOML-safe string) and the threshold" do
+      kw = Config.to_keyword(Config.normalize(courtesy: :off, courtesy_idle_ms: 1_500))
+      assert kw[:courtesy] == "off"
+      assert kw[:courtesy_idle_ms] == 1_500
+      # and it re-normalizes back to the same struct fields
+      round = Config.normalize(kw)
+      assert round.courtesy == :off
+      assert round.courtesy_idle_ms == 1_500
     end
   end
 

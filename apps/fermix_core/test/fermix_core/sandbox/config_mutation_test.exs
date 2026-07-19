@@ -1,9 +1,121 @@
 defmodule FermixCore.Sandbox.ConfigMutationTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Sandbox.CommandCapabilities
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
   alias FermixCore.Sandbox.PathPolicy
+
+  # Captures the opts every keyring read/write receives so the persist/2 →
+  # ConfigStore → SecretStore → SecretWriter → CommandRunner threading is
+  # observable. `get` returns a different value per call so the secure pass
+  # sees a rotation and exercises the keyring WRITE path too.
+  defmodule RotatingRecordingWriter do
+    @behaviour FermixCore.Setup.SecretWriter
+
+    @table __MODULE__
+
+    def start do
+      if :ets.whereis(@table) == :undefined do
+        :ets.new(@table, [:named_table, :public, :ordered_set])
+      end
+
+      :ets.delete_all_objects(@table)
+      :ok
+    end
+
+    def recorded(kind) do
+      @table
+      |> :ets.tab2list()
+      |> Enum.filter(fn {_n, k, _opts} -> k == kind end)
+      |> Enum.map(fn {_n, _k, opts} -> opts end)
+    end
+
+    defp record(kind, opts) do
+      n = :erlang.unique_integer([:monotonic, :positive])
+      :ets.insert(@table, {n, kind, opts})
+      n
+    end
+
+    @impl true
+    def available?(_opts \\ []), do: true
+
+    @impl true
+    def get(_key, opts \\ []), do: {:ok, "rotated-#{record(:get, opts)}"}
+
+    @impl true
+    def put(_key, _value, opts \\ []) do
+      record(:put, opts)
+      :ok
+    end
+
+    @impl true
+    def command_source(key, _opts \\ []) do
+      %{source: :command, command: "recording", args: [Atom.to_string(key)]}
+    end
+  end
+
+  describe "persist/2 supervised threading (tree-less fermix grant chain)" do
+    setup do
+      core = Application.get_all_env(:fermix_core)
+      channels = Application.get_all_env(:fermix_channels)
+      previous_home = System.get_env("FERMIX_HOME")
+
+      :ok = RotatingRecordingWriter.start()
+      Application.put_env(:fermix_core, :secret_writer, RotatingRecordingWriter)
+
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-mutation-persist")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      File.write!(Path.join(tmp_home, "config.toml"), """
+      [fermix_core.providers.openai]
+      api_key = "@keyring"
+      """)
+
+      on_exit(fn ->
+        case previous_home do
+          nil -> System.delete_env("FERMIX_HOME")
+          value -> System.put_env("FERMIX_HOME", value)
+        end
+
+        Enum.each(core, fn {k, v} -> Application.put_env(:fermix_core, k, v) end)
+        Enum.each(channels, fn {k, v} -> Application.put_env(:fermix_channels, k, v) end)
+
+        if Process.whereis(CapabilityRegistry) do
+          CommandCapabilities.refresh(CapabilityRegistry, Config.current())
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      {:ok, tmp_home: tmp_home}
+    end
+
+    test "threads supervised: false through resolution reads and keyring writes", %{
+      tmp_home: tmp_home
+    } do
+      config =
+        Config.normalize(
+          home: tmp_home,
+          mode: :strict,
+          workspace_root: Path.join(tmp_home, "workspace")
+        )
+
+      assert :ok = ConfigMutation.persist(config, supervised: false)
+
+      gets = RotatingRecordingWriter.recorded(:get)
+      puts = RotatingRecordingWriter.recorded(:put)
+
+      assert gets != [], "persist resolved no keyring sentinel"
+      assert puts != [], "the rotating writer should force one keyring write"
+
+      for opts <- gets ++ puts do
+        assert Keyword.get(opts, :supervised) == false,
+               "a grant-chain keyring call ran without supervised: false: #{inspect(opts)}"
+      end
+    end
+  end
 
   test "adds and removes allowed roots with confirmation diff signal" do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mutation")
@@ -60,6 +172,24 @@ defmodule FermixCore.Sandbox.ConfigMutationTest do
              ConfigMutation.add_allowed_root(config, fermix_home)
 
     FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
+  test "refuses a grant of the OS home wholesale" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mutation-oshome")
+
+    config =
+      Config.normalize(
+        mode: :standard,
+        os_home: os_home,
+        workspace_root: Path.join(os_home, "workspace")
+      )
+
+    canonical = PathPolicy.canonical_path(os_home)
+
+    assert {:error, {:unsafe_root, ^canonical}} =
+             ConfigMutation.add_allowed_root(config, os_home)
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
   end
 
   test "enables and disables command capabilities with confirmation diff signal" do

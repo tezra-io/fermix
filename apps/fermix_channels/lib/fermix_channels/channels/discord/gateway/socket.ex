@@ -3,7 +3,7 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
   Discord Gateway WebSocket protocol handler.
 
   Handles the minimal M3 protocol surface: Hello, Identify, heartbeat, reconnect
-  requests, and MESSAGE_CREATE dispatch events.
+  requests, and MESSAGE_CREATE / INTERACTION_CREATE dispatch events.
   """
 
   use WebSockex
@@ -76,6 +76,15 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
   end
 
   defp handle_gateway_event(%{"op" => 0, "t" => "MESSAGE_CREATE"} = event, state) do
+    Gateway.dispatch_event(state.gateway, event)
+    {:ok, state}
+  end
+
+  # A button click (SANDBOX_ACCESS_APPROVAL_FLOW one-tap Approve) arrives as an
+  # INTERACTION_CREATE dispatch; route it to the gateway process alongside
+  # message events. The gateway acks the interaction and funnels the tap through
+  # the unchanged confirm path.
+  defp handle_gateway_event(%{"op" => 0, "t" => "INTERACTION_CREATE"} = event, state) do
     Gateway.dispatch_event(state.gateway, event)
     {:ok, state}
   end

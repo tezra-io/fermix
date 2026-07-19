@@ -6,11 +6,16 @@ defmodule FermixCore.Tools.GitWrite do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.CommandRunner
   alias FermixCore.Sandbox
   alias FermixCore.Tools.GitCommand
   alias FermixCore.Tools.Support
 
   @commands ~w(add commit checkout pull)
+
+  # The rev-parse preflight is a local, non-network command; a repo on a hung
+  # network mount is the only way it blocks, so a short fixed ceiling is enough.
+  @rev_parse_timeout_ms 10_000
 
   @impl true
   def name, do: "git_write"
@@ -90,10 +95,28 @@ defmodule FermixCore.Tools.GitWrite do
   end
 
   defp git_root(repo) do
-    case System.cmd("git", ["rev-parse", "--show-toplevel"], cd: repo, stderr_to_stdout: true) do
-      {root, 0} -> {:ok, String.trim(root)}
-      {output, code} -> {:error, "git_failed: rev-parse exited #{code}: #{output}"}
+    with {:ok, git} <- GitCommand.executable() do
+      git
+      |> CommandRunner.run(["rev-parse", "--show-toplevel"],
+        cwd: repo,
+        timeout_ms: @rev_parse_timeout_ms
+      )
+      |> translate_root()
     end
+  end
+
+  defp translate_root({:ok, %{exit: 0, stdout: root}}), do: {:ok, String.trim(root)}
+
+  defp translate_root({:ok, %{exit: code, stdout: output}}) do
+    {:error, "git_failed: rev-parse exited #{code}: #{output}"}
+  end
+
+  defp translate_root({:error, {:timeout, _ms}}) do
+    {:error, "git_failed: rev-parse timed out after #{div(@rev_parse_timeout_ms, 1000)}s"}
+  end
+
+  defp translate_root({:error, reason}) do
+    {:error, "git_failed: rev-parse #{inspect(reason)}"}
   end
 
   defp validate_command("push") do
@@ -105,12 +128,14 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp format_error({:repo_path_denied, {:outside_root, path}}) do
     "Sandbox denied git_write repo path outside roots: #{path}. " <>
-      "To allow this repository path, run: fermix grant path #{path}"
+      "To allow this repository path, run: fermix grant path #{path}, " <>
+      "or call the request_directory_access tool to ask the owner to approve it."
   end
 
   defp format_error({:repo_root_denied, {:outside_root, root}, repo_dir}) do
     "Sandbox denied git_write repo root outside roots: #{root} " <>
-      "(resolved from input #{repo_dir}). To allow this repository, run: fermix grant path #{root}"
+      "(resolved from input #{repo_dir}). To allow this repository, run: fermix grant path #{root}, " <>
+      "or call the request_directory_access tool to ask the owner to approve it."
   end
 
   defp format_error({:repo_path_denied, reason}), do: format_error(reason)
@@ -118,7 +143,8 @@ defmodule FermixCore.Tools.GitWrite do
 
   defp format_error({:outside_root, path}) do
     "Sandbox denied git_write outside roots: #{path}. " <>
-      "To allow this repository, run: fermix grant path #{path}"
+      "To allow this repository, run: fermix grant path #{path}, " <>
+      "or call the request_directory_access tool to ask the owner to approve it."
   end
 
   defp format_error({:protected_path, path}),

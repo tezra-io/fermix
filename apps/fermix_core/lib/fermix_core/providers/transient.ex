@@ -4,11 +4,14 @@ defmodule FermixCore.Providers.Transient do
   bounded same-provider retry (vs. a deterministic failure that should fail
   loud or fail over to another provider).
 
-  Single source of truth shared by the route-level retry in
-  `FermixCore.Providers.Failover.run_chain/3` and the scheduled-job runner's
-  coarser deadline-bounded backoff (`FermixCore.Jobs.Runner`). Keying both on
-  one classifier keeps the two retry scopes — quick inner (every surface) and
-  long outer (cron only) — from drifting apart.
+  Single source of truth for every retry seam: the route-level retry in
+  `FermixCore.Providers.Failover.run_chain/3` (initial call, every surface),
+  the agent loop's continuation retry (`pre_response_timeout?/1`, every
+  surface), and the scheduled-job runner's coarser deadline-bounded backoff
+  (`connection_unavailable?/1`, cron only, before any tool ran). HttpClient
+  additionally retries `:closed`/`:econnrefused` once at the transport layer.
+  Keying all of them on one classifier keeps the retry scopes from drifting
+  apart.
 
   Retryable kinds are the ones a same-provider retry can plausibly clear: a
   pool-checkout/connection failure (the wake-from-sleep race), a transport
@@ -33,6 +36,21 @@ defmodule FermixCore.Providers.Transient do
   def retryable?({:provider_error, %{kind: kind}}), do: kind in @retryable_api_kinds
   def retryable?(%RuntimeError{} = reason), do: HttpClient.connection_unavailable?(reason)
   def retryable?(_reason), do: false
+
+  @doc """
+  True when `reason` is a transport timeout whose adapter MEASURED that zero
+  response data had arrived (`stage: :before_response` is set only from a
+  chunk count — an adapter that cannot measure mints `stage: :unknown` and
+  never matches). Re-issuing such a call cannot duplicate output, which is
+  what the agent loop's continuation retry keys on.
+  """
+  @spec pre_response_timeout?(term()) :: boolean()
+  def pre_response_timeout?(
+        {:provider_transport_error, %{kind: :timeout, stage: :before_response}}
+      ),
+      do: true
+
+  def pre_response_timeout?(_reason), do: false
 
   @doc """
   True when `reason` is specifically the connection-unavailable / pool-checkout

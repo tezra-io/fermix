@@ -308,7 +308,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
 
         assert conn.request_path == "/v1/messages"
         assert decoded["model"] == "claude-sonnet-4-6"
-        assert decoded["max_tokens"] == 8192
+        assert decoded["max_tokens"] == 16_384
 
         # System prompt becomes a cache-marked block list.
         assert decoded["system"] == [
@@ -425,6 +425,31 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
       end)
 
       assert {:ok, _turn} = Messages.chat([%{role: "user", content: "."}], [], chat_opts())
+    end
+
+    test "sends adaptive thinking for models that support it" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body)["thinking"] == %{"type" => "adaptive"}
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} = Messages.chat([%{role: "user", content: "."}], [], chat_opts())
+    end
+
+    test "omits thinking for models without adaptive support" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        refute Map.has_key?(Jason.decode!(body), "thinking")
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               Messages.chat(
+                 [%{role: "user", content: "."}],
+                 [],
+                 chat_opts(model: "claude-haiku-4-5")
+               )
     end
 
     test "includes temperature for models that accept sampling params" do

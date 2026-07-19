@@ -344,7 +344,8 @@ defmodule Fermix.CLI.Daemon do
           cli_bridge_reply(content,
             session_id: session_id,
             timeout_ms: timeout_ms,
-            media_parts: media_parts
+            media_parts: media_parts,
+            cwd: Map.get(params, "cwd")
           )
         end
 

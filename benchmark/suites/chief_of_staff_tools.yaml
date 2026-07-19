@@ -1,0 +1,92 @@
+suite: chief_of_staff_tools
+title: "Chief of staff — fixture-backed multi-source synthesis"
+description: >
+  Host-read-only cases that use local synthetic files as stand-ins for calendar,
+  inbox, tracker, and leadership-note systems. They test real read-tool routing
+  and evidence-grounded synthesis without exposing connected accounts.
+risk: host_readonly
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+    max_iterations: 5
+    tools_none:
+      - file_write
+      - file_edit
+      - git_write
+      - shell
+      - memory_store
+      - skill_create
+      - skill_reload
+      - skill_run
+      - model_routing_config
+      - schedule_job
+      - update_job
+      - pause_job
+      - resume_job
+      - remove_job
+      - run_job_now
+      - browser
+      - computer_use
+      - web_search
+      - web_fetch
+      - tool_call
+      - request_directory_access
+      - send_attachment
+      - react
+      - generate_image
+      - subagents
+
+scenarios:
+  - id: multi_source_brief
+    title: "Builds a decision brief from four synthetic systems"
+    severity: critical
+    tags: [chief-of-staff, multi-source, files, synthetic, host-readonly, host-safe-core]
+    cases:
+      - id: launch_readiness
+        query: |
+          Read these four synthetic fixture files and give me exactly three ordered
+          priorities, followed by risks, unknowns, and your launch recommendation:
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_calendar.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_inbox.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_tracker.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_notes.md
+          Do not write, send, schedule, or change anything.
+        expect:
+          tools_any: [file_read, content_search]
+          max_tool_calls: 6
+          tool_inputs_match_all:
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_calendar\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_inbox\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_tracker\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/launch_notes\.md'
+          reply_matches: '(?is)(?=.*P1)(?=.*Sam)(?=.*12:30)(?=.*Northstar)(?=.*board[ -]memo)(?=.*not (?:on track|ready)|.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay)|.*(?:^|[.!?]\s*)(?:hold|no-go)\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bdo not launch\b)'
+          # A negated conclusion ("not at risk", "no need to hold/delay") must not
+          # false-pass via the substring "need to hold/delay".
+          reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
+        rubric: >
+          Grounds a decisive launch brief in all four fixtures, prioritizes the
+          unresolved P1 and customer escalation, and labels unresolved evidence.
+      - id: hiring_decision
+        query: |
+          Read these four synthetic fixture files and give me exactly three ordered
+          priorities, followed by decision risks, unknowns, and your recommendation:
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/hiring_calendar.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/hiring_inbox.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/hiring_tracker.md
+          __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/hiring_notes.md
+          Do not write, send, schedule, or change anything.
+        expect:
+          tools_any: [file_read, content_search]
+          max_tool_calls: 6
+          tool_inputs_match_all:
+            - 'benchmark/suites/fixtures/chief_of_staff/hiring_calendar\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/hiring_inbox\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/hiring_tracker\.md'
+            - 'benchmark/suites/fixtures/chief_of_staff/hiring_notes\.md'
+          reply_matches: '(?is)(?=.*Maya)(?=.*Staff Engineer)(?=.*Friday)(?=.*scorecard)(?=.*Jordan)(?=.*conditional|.*pending|.*subject to|.*provided)'
+        rubric: >
+          Uses all four fixtures, preserves the Staff-level correction, and gives
+          a conditional recommendation rather than inventing the missing scorecard.

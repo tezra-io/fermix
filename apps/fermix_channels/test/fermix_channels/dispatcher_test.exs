@@ -4,6 +4,7 @@ defmodule FermixChannels.DispatcherTest do
   import ExUnit.CaptureLog
 
   alias FermixChannels.Dispatcher
+  alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -103,6 +104,8 @@ defmodule FermixChannels.DispatcherTest do
   end
 
   defmodule FakeTranscriptionBackend do
+    def name, do: :fake_transcription
+
     def transcribe(path, opts) do
       send(
         Keyword.fetch!(opts, :test_pid),
@@ -111,6 +114,39 @@ defmodule FermixChannels.DispatcherTest do
 
       {:ok, "voice note text"}
     end
+  end
+
+  defmodule NotConfiguredBackend do
+    def transcribe(_path, _opts), do: {:error, :not_configured}
+  end
+
+  defmodule ProviderErrorBackend do
+    def transcribe(_path, _opts), do: {:error, "OpenAI transcription error: 500"}
+  end
+
+  # Fails the download with the channel byte-cap tuple (as Telegram's getFile
+  # preflight would for an over-20-MB file).
+  defmodule CapExceededChannel do
+    def download_attachment(_message, _attachment) do
+      {:error, {:byte_cap_exceeded, 21 * 1_024 * 1_024, 20 * 1_024 * 1_024}}
+    end
+  end
+
+  # Fails an image download. Exposes build_text_reply so a spurious reply would be
+  # observable — the point being that image (media-ingest) failures stay log-only.
+  defmodule ImageDownloadFailChannel do
+    def build_text_reply(%Message{reply_target: reply_target}) do
+      fn text ->
+        send(self(), {:reply_sent, reply_target, text, []})
+        :ok
+      end
+    end
+
+    def build_media_reply(%Message{}) do
+      fn _media_part -> {:error, :media_unsupported} end
+    end
+
+    def download_attachment(_message, _attachment), do: {:error, :boom}
   end
 
   # The dispatcher now resolves source trust through
@@ -130,6 +166,81 @@ defmodule FermixChannels.DispatcherTest do
     end)
 
     :ok
+  end
+
+  test "injects an approval_fn on an operator agent message, bound to the message origin" do
+    message = %Message{
+      id: "ga-1",
+      content: "please read /Users/me/repos/acme/README",
+      sender: "alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      thread_ts: 77,
+      metadata: %{user_id: "test-sender"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert is_function(agent_message.approval_fn, 1)
+
+    assert {:ok, token, :new} =
+             agent_message.approval_fn.(%{
+               path: "/Users/me/repos/acme",
+               reason: "the task needs it",
+               diff: "allowed_roots + /Users/me/repos/acme"
+             })
+
+    assert {:ok, record} = Confirmations.take(token)
+    assert record.channel == "telegram"
+    assert record.chat_id == "123"
+    assert record.thread_ts == 77
+    assert record.user_id == "test-sender"
+    assert record.mutation == {:add_allowed_root, "/Users/me/repos/acme"}
+    # A remote chat origin captures the verbatim request for auto-resume.
+    assert record.resume == %{
+             content: "please read /Users/me/repos/acme/README",
+             reply_target: "123",
+             sender: "alice"
+           }
+  end
+
+  test "attaches no approval_fn on a guest agent message" do
+    previous = Application.get_env(:fermix_channels, :telegram, [])
+
+    Application.put_env(:fermix_channels, :telegram,
+      owner_user_id: "test-sender",
+      allowed_user_ids: ["test-sender", "guest-9"]
+    )
+
+    on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous) end)
+
+    message = %Message{
+      id: "ga-2",
+      content: "hi",
+      sender: "bob",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{user_id: "guest-9"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.source_trust == :guest
+    refute Map.has_key?(agent_message, :approval_fn)
   end
 
   test "routes normalized inbound messages into the configured agent with reply runtime" do
@@ -462,7 +573,167 @@ defmodule FermixChannels.DispatcherTest do
 
     assert_receive {:agent_message, agent_message}
     assert agent_message.content == "voice note text"
-    assert agent_message.metadata.transcription.backend == FakeTranscriptionBackend
+    assert agent_message.metadata.transcription.backend == :fake_transcription
+  end
+
+  defp audio_message(overrides \\ %{}) do
+    Map.merge(
+      %Message{
+        id: "voice-fail-#{System.unique_integer([:positive])}",
+        content: "",
+        sender: "alice",
+        channel: "whatsapp",
+        chat_id: "123",
+        reply_target: "123",
+        metadata: %{message_type: "audio", user_id: "test-sender"},
+        attachments: [%{kind: :audio, file_id: "audio-x", mime_type: "audio/ogg"}]
+      },
+      overrides
+    )
+  end
+
+  defp capture_reply(test_pid) do
+    fn
+      {:text, text} ->
+        send(test_pid, {:ingress_reply, text})
+        :ok
+
+      _other ->
+        :ok
+    end
+  end
+
+  describe "fail-loud ingress replies (M21 §5.2/D14)" do
+    test "a not-configured transcription failure replies to the sender through the channel and schedules no turn" do
+      test_pid = self()
+      handler_id = "ingress-failed-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :dispatcher, :ingress_failed],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      # No reply_fn override — the reply must route end-to-end through the
+      # channel's build_text_reply to the sender's reply_target ("123").
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Dispatcher.dispatch([audio_message()],
+                     channel: AudioChannel,
+                     agent: CapturingAgent,
+                     agent_server: test_pid,
+                     transcription: [backend: NotConfiguredBackend]
+                   )
+        end)
+
+      assert_receive {:reply_sent, "123", reply, []}
+      assert reply =~ "no transcription backend is configured"
+      assert reply =~ "fermix setup"
+      refute_received {:agent_message, _agent_message}
+      assert log =~ "Dispatcher ingress failed"
+
+      assert_receive {:telemetry, [:fermix, :dispatcher, :ingress_failed], %{count: 1},
+                      %{channel: "whatsapp", reason: :transcription_failed}}
+    end
+
+    test "an image download failure stays log-only and never sends a transcription reply (D14 scope)" do
+      test_pid = self()
+
+      message = %Message{
+        id: "img-fail-#{System.unique_integer([:positive])}",
+        content: "",
+        sender: "alice",
+        channel: "whatsapp",
+        chat_id: "123",
+        reply_target: "123",
+        metadata: %{user_id: "test-sender"},
+        attachments: [%{kind: :image, file_id: "img-1"}]
+      }
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:attachment_download_failed, :boom}} =
+                   Dispatcher.dispatch([message],
+                     channel: ImageDownloadFailChannel,
+                     agent: CapturingAgent,
+                     agent_server: test_pid
+                   )
+        end)
+
+      refute_received {:reply_sent, _target, _text, _opts}
+      refute_received {:agent_message, _agent_message}
+      assert log =~ "media"
+    end
+
+    test "a provider transcription failure replies with a try-again message" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: ProviderErrorBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "transcription failed"
+      assert reply =~ "try again"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    test "an oversize declared audio attachment replies with the size cap and never downloads" do
+      test_pid = self()
+
+      message =
+        audio_message(%{
+          attachments: [%{kind: :audio, file_id: "big", size_bytes: 25 * 1_024 * 1_024}]
+        })
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([message],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: ProviderErrorBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "MB limit"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    test "a byte-cap download failure replies with the size cap" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: CapExceededChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: FakeTranscriptionBackend, test_pid: test_pid],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "MB limit"
+      refute_received {:agent_message, _agent_message}
+      refute_received {:dispatcher_transcription, _path, _bytes, _metadata}
+    end
   end
 
   describe "ingress trust resolution" do

@@ -138,7 +138,7 @@ defmodule Fermix.CLI.ChatCommand do
     timeout_ms = Keyword.get_lazy(opts, :timeout, &default_timeout_ms/0)
 
     params =
-      %{"content" => content, "timeout_ms" => timeout_ms}
+      %{"content" => content, "timeout_ms" => timeout_ms, "cwd" => File.cwd!()}
       |> maybe_put("session_id", Keyword.get(opts, :session))
       |> maybe_put_images(images)
 

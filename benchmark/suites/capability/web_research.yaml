@@ -1,4 +1,5 @@
 suite: cap_web_research
+risk: host_readonly
 title: "Capability — live web research (single verifiable answer)"
 description: >
   Realistic info-seeking tasks (the ~21% of real assistant use that needs live

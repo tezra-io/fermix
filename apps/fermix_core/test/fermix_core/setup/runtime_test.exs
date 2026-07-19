@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.RuntimeTest do
     agent = Application.get_env(:fermix_core, :agent, [])
     memory = Application.get_env(:fermix_core, :memory, [])
     realtime = Application.get_env(:fermix_core, :realtime, [])
+    transcription = Application.get_env(:fermix_core, :transcription, [])
     fermix_home = System.get_env("FERMIX_HOME")
     openai_api_key = System.get_env("OPENAI_API_KEY")
 
@@ -24,6 +25,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :memory, memory)
       Application.put_env(:fermix_core, :realtime, realtime)
+      Application.put_env(:fermix_core, :transcription, transcription)
       restart_global_memory_repo!()
 
       case fermix_home do
@@ -816,6 +818,12 @@ defmodule FermixCore.Setup.RuntimeTest do
                    image_backend: "google",
                    image_model: "gemini-2.5-flash-image",
                    google_api_key: "gm-key",
+                   # No provider key is seeded here, so without a nonexistent codex
+                   # auth path `maybe_import_codex` would probe the operator's REAL
+                   # ~/.codex/auth.json and fire a live OAuth token refresh during
+                   # `mix test` (banned host-credential access). Point it at a
+                   # missing tmp path so the probe short-circuits.
+                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
                    skip_probe: true
                  ],
                  puts: puts,
@@ -829,6 +837,155 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(generate_image, :backend) == "google"
       assert Keyword.get(generate_image, :model) == "gemini-2.5-flash-image"
       assert Keyword.get(generate_image, :google_api_key) == "gm-key"
+    end
+
+    test "extracts the M21 transcription flags as answers" do
+      answers =
+        Runtime.provided_answers(
+          transcription_backend: "deepgram",
+          transcription_model: "nova-2"
+        )
+
+      assert Keyword.get(answers, :transcription_backend) == "deepgram"
+      assert Keyword.get(answers, :transcription_model) == "nova-2"
+    end
+
+    test "non-interactive run persists the transcription backend and explicit model" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   openai_api_key: "sk-test",
+                   transcription_backend: "deepgram",
+                   transcription_model: "nova-2",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      transcription = Keyword.get(snapshot.fermix_core, :transcription, [])
+
+      assert Keyword.get(transcription, :backend) == "deepgram"
+      assert Keyword.get(transcription, :model) == "nova-2"
+    end
+
+    test "switching backend without a model snaps the model to the backend default (coherence)" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", transcription_backend: "deepgram", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      transcription = Keyword.get(snapshot.fermix_core, :transcription, [])
+
+      # No OpenAI-shaped default model bleeds onto Deepgram — it gets its default.
+      assert Keyword.get(transcription, :backend) == "deepgram"
+      assert Keyword.get(transcription, :model) == "nova-3"
+    end
+
+    test "switching to the modelless xai backend drops the model entirely (coherence)" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", transcription_backend: "xai", skip_probe: true],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      transcription = Keyword.get(snapshot.fermix_core, :transcription, [])
+
+      # xai is modelless: no OpenAI-shaped model survives the switch and none is
+      # written — the backend sends no model to the API.
+      assert Keyword.get(transcription, :backend) == "xai"
+      refute Keyword.has_key?(transcription, :model)
+    end
+
+    test "re-running the SAME backend without a model keeps the operator-pinned model" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      # Pin openai + whisper-1 first.
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   openai_api_key: "sk-test",
+                   transcription_backend: "openai",
+                   transcription_model: "whisper-1",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      # Re-run with the SAME backend and NO model flag — the pinned model must
+      # survive (the coherence snap only fires on an actual backend change).
+      {puts2, _collector2} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [openai_api_key: "sk-test", transcription_backend: "openai", skip_probe: true],
+                 puts: puts2,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      transcription = Keyword.get(snapshot.fermix_core, :transcription, [])
+
+      assert Keyword.get(transcription, :backend) == "openai"
+      assert Keyword.get(transcription, :model) == "whisper-1"
+    end
+
+    test "the generic --transcription-api-key stores under the selected backend's slot" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {puts, _collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 [
+                   openai_api_key: "sk-test",
+                   transcription_backend: "deepgram",
+                   transcription_api_key: "dg-generic-flag",
+                   skip_probe: true
+                 ],
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      transcription = Keyword.get(snapshot.fermix_core, :transcription, [])
+
+      # The key rode to deepgram_api_key (the selected backend's slot), keychained.
+      assert Keyword.get(transcription, :backend) == "deepgram"
+      assert Keyword.get(transcription, :deepgram_api_key) == "@keyring"
+      refute Keyword.has_key?(transcription, :openai_api_key)
+      assert {:ok, "dg-generic-flag"} = FermixTestSupport.SecretWriterStub.get(:deepgram_api_key)
     end
 
     test "non-interactive run with provider/model/effort writes them through ConfigStore" do

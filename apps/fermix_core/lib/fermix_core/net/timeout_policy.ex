@@ -20,7 +20,10 @@ defmodule FermixCore.Net.TimeoutPolicy do
   # Buffered LLM: whole-turn response budget (the full body lands at once).
   # Fermix consumes every LLM adapter except Codex in buffered mode; Codex
   # streams and owns its own effort-tuned window, so it is not listed here.
-  @llm_buffered_ms 120_000
+  # 240s (not 120s): Anthropic runs adaptive thinking inside the buffered
+  # response, so a high-effort turn deliberates before any byte arrives —
+  # the window must cover thinking + answer up to the adapter's max_tokens.
+  @llm_buffered_ms 240_000
   # Image generation: providers routinely take 30-120s to render; give headroom.
   @image_generation_ms 300_000
   # Media download: idle window while streaming a provider image/result to disk.

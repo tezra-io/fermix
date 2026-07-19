@@ -1,14 +1,15 @@
 suite: multimodal
+risk: host_readonly
 title: "Inbound multimodal — images reach and are understood by the model"
 description: >
   Verifies an inbound image attachment is materialized at the gateway, encoded as
-  a provider image content part, and actually understood by the model (M14). Real
-  channel media cannot be synthesized through `fermix ask`, so these cases use
-  drive: telegram_operator and run only with --operator (like the streaming suite).
-  OPERATOR INSTRUCTION: when prompted to send the marked message, attach a PHOTO
-  to the dev Telegram bot and put the prompted text (which carries the eval marker)
-  in the photo's CAPTION — the marker must be in the caption so the runner can
-  correlate the resulting telegram trace. The non-vision-route fail-loud boundary
+  a provider image content part, and actually understood by the model (M14). Most
+  cases inject bundled fixtures through `fermix ask --attach`; only the channel-
+  specific scenarios use drive: telegram_operator with --operator. For those, the
+  runner prints an exact fixture path to attach to the dedicated eval Telegram bot
+  with the marked prompt as its caption. Known fixtures make channel-image answers
+  objectively gradeable; arbitrary private photos are intentionally excluded. The
+  non-vision-route fail-loud boundary
   is covered by deterministic unit tests (ModelCatalog.vision?/RouteResolver),
   not here, because the eval daemon runs a vision-capable model.
 defaults:
@@ -105,12 +106,14 @@ scenarios:
         rubric: "Reports both numbers 42 and 73 — proof both images reached the model."
 
   - id: image_described
+    risk: external_write
     title: "A photo with a caption is read and described"
     severity: critical
     tags: [multimodal, vision, core]
     cases:
       - id: photo_describe
         drive: telegram_operator
+        image: fixtures/red_square.png
         query: "Describe what is in this image in one sentence."
         expect:
           # A main model turn served the reply (sanity: the turn actually ran).
@@ -118,27 +121,29 @@ scenarios:
           # The model must say something concrete about the picture — NOT claim it
           # cannot see an image (the pre-M14 failure mode).
           reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open).{0,20}(image|picture|photo|attach)"
-        rubric: >
-          Accurately describes the visible content of the operator-sent photo.
-          Fails if it claims it cannot see the image.
+          reply_matches: "(?is)(?=.*\\bred\\b)(?=.*\\bsquare\\b)"
       - id: photo_read_text
         drive: telegram_operator
+        image: fixtures/text_alpha.png
         query: "Read any text shown in this image and quote it back."
         expect:
           reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open).{0,20}(image|picture|photo|attach)"
-        rubric: >
-          Transcribes or describes the text visible in the operator-sent photo;
-          does not claim it cannot see the image.
+          reply_matches: "(?is)(?=.*\\bALPHA\\b)(?=.*\\b42\\b)"
   - id: image_plus_question
+    risk: external_write
     title: "A photo plus a specific question about it"
     severity: normal
     tags: [multimodal, vision]
     cases:
       - id: photo_count
         drive: telegram_operator
-        query: "How many distinct objects are in this photo? Give a number."
-        rubric: "Gives a plausible count grounded in the actual photo contents."
+        image: fixtures/red_square.png
+        query: "How many coloured shapes are shown in this image? Give a number."
+        expect:
+          reply_matches: "(?i)\\b(one|1)\\b"
       - id: photo_colour
         drive: telegram_operator
+        image: fixtures/red_square.png
         query: "What is the dominant colour in this image?"
-        rubric: "Names a colour consistent with the operator-sent photo."
+        expect:
+          reply_matches: "(?i)\\bred\\b"

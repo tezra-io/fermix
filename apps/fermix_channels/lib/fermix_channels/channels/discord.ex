@@ -12,6 +12,7 @@ defmodule FermixChannels.Channels.Discord do
 
   require Logger
 
+  alias FermixChannels.Gateway.ApprovalButton
   alias FermixChannels.Gateway.Idempotency
   alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
@@ -57,6 +58,7 @@ defmodule FermixChannels.Channels.Discord do
       body =
         %{content: text, allowed_mentions: %{parse: []}}
         |> maybe_put_message_reference(channel_id, opts)
+        |> maybe_put_components(opts)
 
       {result, duration_us} =
         Telemetry.timed_us(fn ->
@@ -98,6 +100,120 @@ defmodule FermixChannels.Channels.Discord do
           (FermixChannels.Gateway.Channel.media_part() -> :ok | {:error, term()})
   def build_media_reply(%Message{id: message_id, reply_target: reply_target}) do
     fn media_part -> send_media(reply_target, media_part, reply_to: message_id) end
+  end
+
+  # -- Owner-approval one-tap button (SANDBOX_ACCESS_APPROVAL_FLOW) --
+
+  @impl true
+  @spec send_approval(Message.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def send_approval(%Message{id: message_id, reply_target: reply_target}, text, token)
+      when is_binary(text) and is_binary(token) do
+    # The prompt rides the normal send path (the backticked `/confirm <token>`
+    # still renders as tap-to-copy); the action row is the additive one-tap
+    # affordance. custom_id carries the `grant:<token>` payload (well under the
+    # 100-char cap); the interaction handler strips the prefix and funnels the
+    # tap through the unchanged `/confirm` path.
+    send_message(reply_target, text, reply_to: message_id, components: approval_components(token))
+  end
+
+  # Action row (type 1) wrapping a success-style button (type 2, style 3).
+  defp approval_components(token) do
+    [
+      %{
+        type: 1,
+        components: [
+          %{type: 2, style: 3, label: "Approve", custom_id: ApprovalButton.payload(token)}
+        ]
+      }
+    ]
+  end
+
+  @doc """
+  Parse a component-button INTERACTION_CREATE dispatch into the synthesized
+  `/confirm` message + the per-interaction id/token the caller acks with. Returns
+  `:ignore` for any non-component interaction or a payload that is not a
+  `grant:` confirmation tap. `member.user.id` (guild) / `user.id` (DM) is
+  Discord-authenticated server-side, so it is the unspoofable tapper identity.
+  """
+  @spec parse_interaction(map()) :: {:ok, map()} | :ignore | {:error, term()}
+  def parse_interaction(%{"t" => "INTERACTION_CREATE", "d" => data}) when is_map(data) do
+    if component_interaction?(data) do
+      parse_component_interaction(data)
+    else
+      :ignore
+    end
+  end
+
+  def parse_interaction(_event), do: :ignore
+
+  # Discord interaction type 3 = MESSAGE_COMPONENT (a button/select click).
+  defp component_interaction?(data), do: Map.get(data, "type") == 3
+
+  defp parse_component_interaction(data) do
+    case ApprovalButton.parse_payload(get_in(data, ["data", "custom_id"])) do
+      {:ok, token} -> build_interaction(data, token)
+      :ignore -> :ignore
+    end
+  end
+
+  defp build_interaction(data, token) do
+    with id when is_binary(id) <- Map.get(data, "id"),
+         interaction_token when is_binary(interaction_token) <- Map.get(data, "token"),
+         user_id when is_binary(user_id) <- interaction_user_id(data),
+         channel_id when is_binary(channel_id) <- Map.get(data, "channel_id") do
+      message =
+        ApprovalButton.confirm_message(%{
+          id: "interaction-#{id}",
+          sender: interaction_sender(data),
+          channel: "discord",
+          chat_id: channel_id,
+          # Discord threads are their own channels (channel_id), so the confirm
+          # rides at :root exactly like the message the button was posted on —
+          # keeping same-origin with the pending grant record.
+          thread_ts: nil,
+          user_id: user_id,
+          token: token
+        })
+
+      {:ok, %{id: id, token: interaction_token, message: message}}
+    else
+      _ -> {:error, :invalid_interaction_payload}
+    end
+  end
+
+  defp interaction_user_id(data) do
+    get_in(data, ["member", "user", "id"]) || get_in(data, ["user", "id"])
+  end
+
+  defp interaction_sender(data) do
+    user = get_in(data, ["member", "user"]) || Map.get(data, "user") || %{}
+    sender_name(user)
+  end
+
+  @doc """
+  Respond to a Discord interaction within its 3s window. Authenticates via the
+  per-interaction token in the URL path (NOT the bot token), so this endpoint
+  needs no authorization header.
+  """
+  @spec respond_interaction(String.t(), String.t(), map(), keyword()) :: :ok | {:error, term()}
+  def respond_interaction(interaction_id, interaction_token, response, opts \\ [])
+      when is_binary(interaction_id) and is_binary(interaction_token) and is_map(response) do
+    url = "#{@api_base}/interactions/#{interaction_id}/#{interaction_token}/callback"
+
+    case Req.new(url: url, method: :post, json: response)
+         |> Req.merge(req_options(opts))
+         |> HttpClient.request("Discord interaction callback") do
+      {:ok, %{status: status}} when status in [200, 201, 204] ->
+        :ok
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.error("Discord interaction callback failed: #{status} - #{inspect(body)}")
+        {:error, {:interaction_ack_failed, status}}
+
+      {:error, reason} ->
+        Logger.error("Discord interaction callback request failed: #{inspect(reason)}")
+        {:error, reason}
+    end
   end
 
   # -- Reactions (docs/design/EMOJI_REACTION_ACKS.md §9) --
@@ -377,6 +493,13 @@ defmodule FermixChannels.Channels.Discord do
   defp maybe_release_claim({:error, _reason} = error, claim) do
     :ok = Idempotency.release_outbound_media_claim(claim)
     error
+  end
+
+  defp maybe_put_components(body, opts) do
+    case Keyword.get(opts, :components) do
+      nil -> body
+      components when is_list(components) -> Map.put(body, :components, components)
+    end
   end
 
   defp maybe_put_message_reference(body, channel_id, opts) do

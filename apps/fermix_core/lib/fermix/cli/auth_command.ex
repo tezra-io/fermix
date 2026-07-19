@@ -122,7 +122,7 @@ defmodule Fermix.CLI.AuthCommand do
         case select_route(:xai, :oauth) do
           :ok ->
             IO.puts(
-              "Connected xAI Grok (oauth_pkce); set xai auth_mode = oauth. " <>
+              "Connected SpaceXAI Grok (oauth_pkce); set xai auth_mode = oauth. " <>
                 "Tokens saved to #{Store.path()}."
             )
 

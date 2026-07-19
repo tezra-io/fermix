@@ -28,6 +28,7 @@
 # COST NOTE: the X cases spend real pay-per-use credits (small: one identity,
 # two lookups, one recent-post search).
 suite: tool_search
+risk: private_account_read
 title: "Tool-schema deferral — real-user routing + no reflexive search"
 description: >
   Verifies M10 tool-schema deferral through real-user requests: deferred plugin

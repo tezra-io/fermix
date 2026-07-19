@@ -60,9 +60,11 @@ class Fermix < Formula
       To check daemon health:
         fermix doctor
 
-      After upgrading, re-run `fermix setup` — it reconciles the service unit
-      if the new binary would write a different one. (`fermix service install`
-      is the manual escape hatch.)
+      After `brew upgrade fermix`, run `fermix restart` — the daemon keeps
+      running the old version until restarted (`fermix status` warns about
+      the mismatch). If the service unit drifted across the upgrade, re-run
+      `fermix setup` instead: it rewrites and reloads the unit.
+      (`fermix service install` is the manual escape hatch.)
     EOS
   end
 

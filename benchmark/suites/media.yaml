@@ -1,4 +1,5 @@
 suite: media
+risk: external_write
 title: "Media — outbound attachments via send_attachment"
 description: >
   Exercises the outbound attachment path (the send_attachment builtin tool). The

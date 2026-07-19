@@ -11,12 +11,17 @@ defmodule FermixCore.Providers.Error do
   @type adapter :: atom()
 
   @typedoc """
-  Where the failure happened relative to user-visible output. Streaming
-  adapters tag `:mid_stream` once response chunks were seen; everything
-  else defaults to `:before_response`. Failover eligibility keys on this
-  (docs/design/MULTI_PROVIDER_FAILOVER.md §5 Streaming Boundary).
+  Where the failure happened relative to response data — a MEASURED value.
+  A streaming adapter that counts response chunks tags `:before_response`
+  (zero chunks seen) or `:mid_stream` (data already flowed); an adapter that
+  cannot measure gets `:unknown`, never a guess. Consumers that treat
+  `:before_response` as proof of a zero-data failure (e.g.
+  `Transient.pre_response_timeout?/1`) depend on this: an unmeasured error
+  must not default into the proven class. Failover does NOT key on stage
+  (it is diagnostic there — see `Failover.eligible?/1`); it rides telemetry
+  as `transport_stage`.
   """
-  @type stage :: :before_response | :mid_stream
+  @type stage :: :before_response | :mid_stream | :unknown
 
   @type api_error :: %{
           :provider => provider(),
@@ -142,7 +147,7 @@ defmodule FermixCore.Providers.Error do
   def provider_label(:openai), do: "OpenAI"
   def provider_label(:openai_codex), do: "Codex"
   def provider_label(:anthropic), do: "Anthropic"
-  def provider_label(:xai), do: "xAI"
+  def provider_label(:xai), do: "SpaceXAI"
   def provider_label(provider), do: provider |> to_string() |> String.replace("_", " ")
 
   defp api_kind(status, code, message) do
@@ -180,13 +185,14 @@ defmodule FermixCore.Providers.Error do
   defp transport_kind(_reason), do: :transport
 
   defp stage_opt(opts) do
-    case Keyword.get(opts, :stage, :before_response) do
-      stage when stage in [:before_response, :mid_stream] ->
+    case Keyword.get(opts, :stage, :unknown) do
+      stage when stage in [:before_response, :mid_stream, :unknown] ->
         stage
 
       other ->
         raise ArgumentError,
-              "invalid error stage: #{inspect(other)}; expected :before_response or :mid_stream"
+              "invalid error stage: #{inspect(other)}; " <>
+                "expected :before_response, :mid_stream, or :unknown"
     end
   end
 
@@ -213,14 +219,21 @@ defmodule FermixCore.Providers.Error do
   defp error_message(body) when is_map(body) do
     case error_object(body) do
       error when is_map(error) ->
-        string_value(error, "message", :message) || string_value(body, "message", :message)
+        string_value(error, "message", :message) || body_message(body)
 
       error when is_binary(error) ->
         error
 
       _other ->
-        string_value(body, "message", :message)
+        body_message(body)
     end
+  end
+
+  # Some backends (e.g. the ChatGPT Codex endpoint) return a bare top-level
+  # `{"detail": "..."}` with no nested `"error"` object — surface that string
+  # instead of collapsing to a bare "HTTP <status>".
+  defp body_message(body) do
+    string_value(body, "message", :message) || string_value(body, "detail", :detail)
   end
 
   # Unix-seconds reset time from an OpenAI/Codex usage-limit body, if present.

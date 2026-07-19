@@ -369,7 +369,7 @@ defmodule FermixCore.Setup.DoctorTest do
                Doctor.probe_provider(:xai, req_options: [plug: plug])
 
       assert surface =~ "api.x.ai"
-      assert hint =~ "xAI"
+      assert hint =~ "SpaceXAI"
     end
 
     test "returns misconfigured when api_key missing" do
@@ -950,6 +950,77 @@ defmodule FermixCore.Setup.DoctorTest do
 
       refute_received :web_search_probe_request
     end
+  end
+
+  describe "transcription_report/1 (M21)" do
+    setup do
+      transcription = Application.get_env(:fermix_core, :transcription, [])
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :transcription, transcription)
+        Application.put_env(:fermix_core, :providers, providers)
+      end)
+
+      # Establish a clean baseline: no reused provider keys unless a test sets one.
+      Application.put_env(:fermix_core, :providers, [])
+      :ok
+    end
+
+    test "reports the configured deepgram backend with a present deepgram_api_key" do
+      put_transcription(backend: "deepgram", deepgram_api_key: "dg-secret")
+
+      assert %{status: :configured, backend: :deepgram, credential_present?: true} =
+               Doctor.transcription_report()
+    end
+
+    test "reports a missing credential without crashing (deepgram)" do
+      put_transcription(backend: "deepgram")
+
+      assert %{status: :configured, backend: :deepgram, credential_present?: false} =
+               Doctor.transcription_report()
+    end
+
+    test "reuses the openai provider key for the openai backend" do
+      put_transcription(backend: "openai")
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-openai"])
+
+      assert %{status: :configured, backend: :openai, credential_present?: true} =
+               Doctor.transcription_report()
+    end
+
+    test "the transcription openai_api_key override alone configures the openai backend" do
+      # No reused chat key, but the transcription-specific slot resolves.
+      put_transcription(backend: "openai", openai_api_key: "sk-transcription")
+
+      assert %{status: :configured, backend: :openai, credential_present?: true} =
+               Doctor.transcription_report()
+    end
+
+    test "the transcription xai_api_key override alone configures the xai backend" do
+      put_transcription(backend: "xai", xai_api_key: "xai-transcription")
+
+      assert %{status: :configured, backend: :xai, credential_present?: true} =
+               Doctor.transcription_report()
+    end
+
+    test "reports an unknown backend as a config error" do
+      put_transcription(backend: "vosk")
+
+      assert %{status: :error, error: error} = Doctor.transcription_report()
+      assert error =~ "Unknown"
+    end
+
+    test "reports a missing backend selection as a config error" do
+      put_transcription([])
+
+      assert %{status: :error, error: error} = Doctor.transcription_report()
+      assert error =~ "no configured backend"
+    end
+  end
+
+  defp put_transcription(config) do
+    Application.put_env(:fermix_core, :transcription, config)
   end
 
   defp put_web_search(config) do

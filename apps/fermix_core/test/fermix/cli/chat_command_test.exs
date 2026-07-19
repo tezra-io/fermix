@@ -91,6 +91,22 @@ defmodule Fermix.CLI.ChatCommandTest do
     assert Keyword.get(opts, :session_id) == "cli"
   end
 
+  test "includes the invocation cwd in the request payload" do
+    test_self = self()
+
+    output =
+      capture_io(fn ->
+        send(test_self, {:chat_exit, ChatCommand.run(["hello"])})
+      end)
+
+    assert_receive {:chat_exit, 0}
+    assert output == "chat reply: hello\n"
+    # The payload carries "cwd" => File.cwd!(); the daemon decodes it and forwards
+    # it to the bridge as the :cwd opt, which the CLI channel puts on request_cwd.
+    assert_receive {:chat_command_bridge_call, "hello", opts}
+    assert Keyword.get(opts, :cwd) == File.cwd!()
+  end
+
   test "passes session and timeout options" do
     test_self = self()
 

@@ -27,13 +27,15 @@ defmodule FermixCore.ComputerUse.Session do
 
   alias Compux.Protocol
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.Courtesy
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Telemetry
   alias FermixCore.Timeouts
 
   require Logger
 
-  @type action_result :: %{summary: String.t(), image: map() | nil}
+  @type courtesy_outcome :: :off | :unavailable | :proceeded | :deferred
+  @type action_result :: %{summary: String.t(), image: map() | nil, courtesy: courtesy_outcome()}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -75,6 +77,24 @@ defmodule FermixCore.ComputerUse.Session do
   @spec action_count(GenServer.server()) :: non_neg_integer()
   def action_count(server), do: GenServer.call(server, :action_count)
 
+  @doc """
+  Pause the session — the human is reclaiming the machine (`/pause`). While paused,
+  `classify/2` refuses EVERY action with `{:error, {:refused, :paused}}` so the agent
+  stops acting; the session, its TCC-warm sidecar, and the task stay ALIVE (unlike
+  `/stop`, which tears down). Resumable via `resume/1`. A cast so it lands promptly
+  between the turn's serialized classify/execute calls.
+  """
+  @spec pause(GenServer.server()) :: :ok
+  def pause(server), do: GenServer.cast(server, :pause)
+
+  @doc "Clear a pause (`/resume`); subsequent actions classify normally again."
+  @spec resume(GenServer.server()) :: :ok
+  def resume(server), do: GenServer.cast(server, :resume)
+
+  @doc "Whether the session is currently paused by the human."
+  @spec paused?(GenServer.server()) :: boolean()
+  def paused?(server), do: GenServer.call(server, :paused?)
+
   @doc "Tear the session down — stops the driver (releasing held input) and emits the lifecycle bookend."
   @spec abort(GenServer.server()) :: :ok
   def abort(server), do: GenServer.stop(server, :normal)
@@ -102,7 +122,12 @@ defmodule FermixCore.ComputerUse.Session do
         session_id: session_id,
         parent_session: Keyword.get(opts, :parent_session),
         agent: Keyword.get(opts, :agent, "computer_use"),
-        started_at: now_ms()
+        started_at: now_ms(),
+        # Coexistence (V3 R0): `paused` is the human's `/pause` reclaim; `last_action_at`
+        # is when the agent last DISTURBED the seat, so the courtesy arbiter can tell
+        # the human's input from the agent's own (`Courtesy.human_active?/3`).
+        paused: false,
+        last_action_at: :never
       }
 
       Telemetry.session_start(meta(state))
@@ -115,12 +140,12 @@ defmodule FermixCore.ComputerUse.Session do
   @impl true
   def handle_call({:classify, params}, _from, state) do
     result =
-      with {:ok, request} <- Protocol.validate(params),
-           :ok <- check_budget(state) do
-        case Safety.gate(request["action"], state.config) do
-          :auto -> {:ok, :auto, finalize_request(request, state.config)}
-          :refuse -> {:error, {:refused, :strict_mode}}
-        end
+      if state.paused do
+        # The human reclaimed the machine (`/pause`) — refuse everything until
+        # `/resume`, before validation, so the agent stops acting immediately.
+        {:error, {:refused, :paused}}
+      else
+        classify_action(params, state)
       end
 
     {:reply, result, state}
@@ -129,7 +154,7 @@ defmodule FermixCore.ComputerUse.Session do
   def handle_call({:execute, request}, _from, state) do
     case check_budget(state) do
       :ok ->
-        run_action(request, state)
+        execute_with_courtesy(request, state)
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
@@ -137,6 +162,12 @@ defmodule FermixCore.ComputerUse.Session do
   end
 
   def handle_call(:action_count, _from, state), do: {:reply, state.action_count, state}
+
+  def handle_call(:paused?, _from, state), do: {:reply, state.paused, state}
+
+  @impl true
+  def handle_cast(:pause, state), do: {:noreply, %{state | paused: true}}
+  def handle_cast(:resume, state), do: {:noreply, %{state | paused: false}}
 
   # A late/stale sidecar response arriving after a prior action timed out. The
   # protocol matches responses by Port order (no request-id today), so a stale
@@ -171,13 +202,89 @@ defmodule FermixCore.ComputerUse.Session do
     :ok
   end
 
-  defp run_action(request, state) do
+  defp classify_action(params, state) do
+    with {:ok, request} <- Protocol.validate(params),
+         :ok <- check_budget(state) do
+      case Safety.gate(request["action"], state.config) do
+        :auto -> {:ok, :auto, finalize_request(request, state.config)}
+        :refuse -> {:error, {:refused, :strict_mode}}
+      end
+    end
+  end
+
+  # Coexistence gate (V3 R0): before a DISTURBING action, when courtesy is on, yield
+  # to a present human. This is the one place that does the idle I/O — the decision
+  # itself is `Courtesy` (pure). Not disturbing / courtesy off → proceed untouched.
+  defp execute_with_courtesy(request, state) do
+    case apply_courtesy(request, state) do
+      {:proceed, courtesy} -> run_action(request, state, courtesy)
+      {:refuse, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp apply_courtesy(request, state) do
+    if state.config.courtesy == :yield and Courtesy.disturbing?(request["action"]),
+      do: arbitrate(state),
+      else: {:proceed, :off}
+  end
+
+  defp arbitrate(state) do
+    case idle_probe(state) do
+      {:ok, idle_ms} ->
+        if Courtesy.human_active?(idle_ms, since_agent_ms(state), state.config.courtesy_idle_ms),
+          do: defer_to_human(state),
+          else: {:proceed, :proceeded}
+
+      # The idle signal is unavailable (compux probe is macOS-only, or a malformed
+      # reply). Courtesy is a nicety, not a safety gate — fail OPEN and proceed; the
+      # access posture + attended-origin gate remain the hard floors.
+      {:error, _reason} ->
+        {:proceed, :unavailable}
+    end
+  end
+
+  defp defer_to_human(state) do
+    case wait_for_idle(state) do
+      {:ok, true} -> {:proceed, :deferred}
+      {:ok, false} -> {:refuse, :user_active}
+      {:error, _reason} -> {:proceed, :unavailable}
+    end
+  end
+
+  defp idle_probe(state) do
+    case state.driver_mod.execute(state.driver_state, %{"action" => "idle_ms"}) do
+      {:ok, %{"idle_ms" => ms}} when is_integer(ms) and ms >= 0 -> {:ok, ms}
+      {:ok, _other} -> {:error, :malformed_idle_response}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp wait_for_idle(state) do
+    request = %{
+      "action" => "wait_for_idle",
+      "idle_ms" => state.config.courtesy_idle_ms,
+      "timeout_ms" => Courtesy.defer_ms()
+    }
+
+    case state.driver_mod.execute(state.driver_state, request) do
+      {:ok, %{"idle" => idle}} when is_boolean(idle) -> {:ok, idle}
+      {:ok, _other} -> {:error, :malformed_idle_response}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp since_agent_ms(%{last_action_at: :never}), do: :never
+  defp since_agent_ms(%{last_action_at: at}), do: now_ms() - at
+
+  defp run_action(request, state, courtesy) do
     case state.driver_mod.execute(state.driver_state, request) do
       {:ok, response} ->
-        state = %{state | action_count: state.action_count + 1}
+        state =
+          %{state | action_count: state.action_count + 1}
+          |> mark_action_time(request["action"])
 
         case normalize_response(response) do
-          {:ok, result} -> {:reply, {:ok, result}, state}
+          {:ok, result} -> {:reply, {:ok, Map.put(result, :courtesy, courtesy)}, state}
           {:error, reason} -> {:reply, {:error, reason}, state}
         end
 
@@ -205,6 +312,15 @@ defmodule FermixCore.ComputerUse.Session do
   # non-zero status is a genuine sidecar crash and stays a bare error reason.
   defp sidecar_exit_reason(75), do: {:shutdown, {:sidecar_exited, 75}}
   defp sidecar_exit_reason(status), do: {:sidecar_exited, status}
+
+  # Stamp the last time the agent DISTURBED the seat, so the courtesy arbiter can
+  # distinguish the human's input from the agent's own on the next disturbing action
+  # (a non-disturbing action — screenshot/inspect — leaves the stamp untouched).
+  defp mark_action_time(state, action) do
+    if Courtesy.disturbing?(action),
+      do: %{state | last_action_at: now_ms()},
+      else: state
+  end
 
   # Computer-use drives the host desktop, so a session may only start from an
   # attended owner origin (§7.6). There is no relaxed "browser" mode anymore — the

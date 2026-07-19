@@ -26,6 +26,18 @@ defmodule FermixCore.Jobs.Scheduler do
   @runner_stagger_ms 250
   @max_startup_stagger_ms 5_000
 
+  # A due tick that could not fully drain its work — a DB fault on any path, a
+  # timer-lookup failure, or admission backpressure — re-arms the next tick no
+  # sooner than this, so a persistently past-due-but-unclaimable job can never
+  # spin the scheduler at 0ms (Rule #2). One constant, no escalation ladder.
+  @due_error_backoff_ms 5_000
+
+  # Concurrent scheduled-run ceiling. When this many runs are already active the
+  # tick claims nothing; due jobs stay "scheduled" and later ticks (armed at the
+  # backoff floor above) or reconciliation claim them as slots free. The bounded
+  # queue is the DB due scan itself — no separate queue structure.
+  @max_active_runs 4
+
   @type state :: %{
           enabled?: boolean(),
           timer_enabled?: boolean(),
@@ -48,6 +60,7 @@ defmodule FermixCore.Jobs.Scheduler do
           reconciliation_interval_ms: pos_integer(),
           run_freshness_window_seconds: pos_integer() | nil,
           due_limit: pos_integer(),
+          max_active_runs: pos_integer(),
           due_timer: reference() | nil,
           reconciliation_timer: reference() | nil,
           run_monitors: map()
@@ -122,6 +135,7 @@ defmodule FermixCore.Jobs.Scheduler do
           jobs_config(:run_freshness_window_seconds, @default_run_freshness_window_seconds)
         ),
       due_limit: Keyword.get(opts, :due_limit, @default_due_limit),
+      max_active_runs: Keyword.get(opts, :max_active_runs, @max_active_runs),
       due_timer: nil,
       reconciliation_timer: nil,
       run_monitors: %{}
@@ -137,12 +151,7 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @impl true
   def handle_call({:tick, %DateTime{} = now}, _from, state) do
-    state =
-      state
-      |> run_due_jobs(now)
-      |> schedule_due_timer()
-
-    {:reply, :ok, state}
+    {:reply, :ok, run_due_and_rearm(state, now)}
   end
 
   def handle_call({:run_now, job_id, %DateTime{} = now}, _from, state) do
@@ -157,19 +166,13 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @impl true
   def handle_info(:due_tick, state) do
-    state =
-      state
-      |> run_due_jobs(DateTime.utc_now())
-      |> schedule_due_timer()
-
-    {:noreply, state}
+    {:noreply, run_due_and_rearm(state, DateTime.utc_now())}
   end
 
   def handle_info(:reconcile_tick, state) do
     state =
       state
-      |> run_due_jobs(DateTime.utc_now())
-      |> schedule_due_timer()
+      |> run_due_and_rearm(DateTime.utc_now())
       |> schedule_reconciliation_timer()
 
     {:noreply, state}
@@ -189,25 +192,57 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp run_due_jobs(%{enabled?: false} = state, _now), do: state
+  # One due tick, run then re-armed. The tick outcome — `:ok` (drained),
+  # `:busy` (admission backpressure), or `:error` (a fault on any path) — decides
+  # whether the next timer floors at the backoff interval so a stuck past-due job
+  # never hot-loops the scheduler.
+  defp run_due_and_rearm(state, now) do
+    {outcome, state} = run_due_jobs(state, now)
+    schedule_due_timer(state, outcome)
+  end
+
+  defp run_due_jobs(%{enabled?: false} = state, _now), do: {:ok, state}
 
   defp run_due_jobs(state, now) do
     case Repo.due_scheduled_jobs(now, server: state.repo, limit: state.due_limit) do
       {:ok, jobs} ->
-        Enum.reduce(jobs, state, &claim_and_start(&1, now, &2))
+        Enum.reduce(jobs, {:ok, state}, &reduce_due_job(&1, now, &2))
 
       {:error, reason} ->
         Logger.error("Scheduled job due scan failed: #{inspect(reason)}")
-        state
+        {:error, state}
     end
   end
+
+  defp reduce_due_job(job, now, {outcome, state}) do
+    {job_outcome, state} = claim_and_start(job, now, state)
+    {merge_outcome(outcome, job_outcome), state}
+  end
+
+  # Most-severe wins: a fault dominates admission backpressure dominates a clean
+  # drain, so the tick re-arms conservatively.
+  defp merge_outcome(:error, _other), do: :error
+  defp merge_outcome(_prev, :error), do: :error
+  defp merge_outcome(:busy, _other), do: :busy
+  defp merge_outcome(_prev, :busy), do: :busy
+  defp merge_outcome(:ok, :ok), do: :ok
 
   defp claim_and_start(job, now, state) do
     cond do
       expired?(job, now) -> expire_job(job.id, now, state)
       stale?(job, now, state.run_freshness_window_seconds) -> skip_stale_job(job, now, state)
+      at_capacity?(state) -> {:busy, state}
       true -> claim_and_start_due_job(job, now, state)
     end
+  end
+
+  # Aggregate admission: the tick claims nothing while the run ceiling is full.
+  # The blocked due job stays "scheduled" and a later tick (armed at the backoff
+  # floor) or reconciliation claims it once a slot frees.
+  defp at_capacity?(state), do: active_run_count(state) >= state.max_active_runs
+
+  defp active_run_count(state) do
+    DynamicSupervisor.count_children(state.runner_supervisor).active
   end
 
   # When the daemon is down across a recurring job's fire time, its next_run_at
@@ -232,10 +267,10 @@ defmodule FermixCore.Jobs.Scheduler do
 
       {:error, reason} ->
         Logger.error(
-          "Scheduled job #{job.id} stale-skip schedule recompute failed: #{inspect(reason)}"
+          "Scheduled job #{job.id} stale-skip schedule recompute failed; disabling: #{inspect(reason)}"
         )
 
-        state
+        disable_job(job, schedule_error_message(reason), now, state)
     end
   end
 
@@ -258,19 +293,18 @@ defmodule FermixCore.Jobs.Scheduler do
             "#{DateTime.to_iso8601(job.next_run_at)}; next run at #{DateTime.to_iso8601(next_run_at)}"
         )
 
-        store_advanced_run_at(current, next_run_at, now, state.repo)
+        outcome_state(store_advanced_run_at(current, next_run_at, now, state.repo), state)
 
       {:ok, _job} ->
-        :ok
+        {:ok, state}
 
       {:error, :not_found} ->
-        :ok
+        {:ok, state}
 
       {:error, reason} ->
         Logger.error("Scheduled job #{job.id} stale-skip lookup failed: #{inspect(reason)}")
+        {:error, state}
     end
-
-    state
   end
 
   defp store_advanced_run_at(job, next_run_at, now, repo) do
@@ -283,30 +317,43 @@ defmodule FermixCore.Jobs.Scheduler do
 
       {:error, reason} ->
         Logger.error("Scheduled job #{job.id} stale-skip advance failed: #{inspect(reason)}")
+        :error
     end
   end
 
   defp claim_and_start_due_job(job, now, state) do
-    with {:ok, job_patch} <- claim_job_patch(job, now),
-         run_attrs <- run_attrs(job, now) do
-      case Repo.claim_due_job(job.id, job_patch, run_attrs, now, server: state.repo) do
-        {:ok, {claimed_job, run}} ->
-          start_or_mark_failed(claimed_job, run, state)
+    case claim_job_patch(job, now) do
+      {:ok, job_patch} ->
+        claim_patched_job(job, job_patch, now, state)
 
-        {:error, :already_running} ->
-          state
-
-        {:error, :not_due} ->
-          state
-
-        {:error, reason} ->
-          Logger.error("Scheduled job #{job.id} claim failed: #{inspect(reason)}")
-          state
-      end
-    else
+      # The claim patch fails only when the schedule expression/timezone no
+      # longer parses. Retrying would re-fail forever, so the job is terminal:
+      # disable it (edit then resume) rather than spin the due scan on it.
       {:error, reason} ->
-        Logger.error("Scheduled job #{job.id} claim patch failed: #{inspect(reason)}")
-        state
+        Logger.error(
+          "Scheduled job #{job.id} schedule unparseable at claim; disabling: #{inspect(reason)}"
+        )
+
+        disable_job(job, schedule_error_message(reason), now, state)
+    end
+  end
+
+  defp claim_patched_job(job, job_patch, now, state) do
+    run_attrs = run_attrs(job, now)
+
+    case Repo.claim_due_job(job.id, job_patch, run_attrs, now, server: state.repo) do
+      {:ok, {claimed_job, run}} ->
+        {:ok, start_or_mark_failed(claimed_job, run, state)}
+
+      {:error, :already_running} ->
+        {:ok, state}
+
+      {:error, :not_due} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} claim failed: #{inspect(reason)}")
+        {:error, state}
     end
   end
 
@@ -358,19 +405,18 @@ defmodule FermixCore.Jobs.Scheduler do
   defp expire_job(job_id, now, state) do
     case Repo.get_scheduled_job(job_id, server: state.repo) do
       {:ok, %{enabled?: true, state: "scheduled"} = job} ->
-        expire_scheduled_job(job, now, state.repo)
+        outcome_state(expire_scheduled_job(job, now, state.repo), state)
 
       {:ok, _job} ->
-        :ok
+        {:ok, state}
 
       {:error, :not_found} ->
-        :ok
+        {:ok, state}
 
       {:error, reason} ->
         Logger.error("Scheduled job #{job_id} expiry lookup failed: #{inspect(reason)}")
+        {:error, state}
     end
-
-    state
   end
 
   defp expire_scheduled_job(job, now, repo) do
@@ -387,13 +433,56 @@ defmodule FermixCore.Jobs.Scheduler do
       |> Repo.upsert_scheduled_job(server: repo)
       |> case do
         {:ok, updated_job} ->
-          mark_source_expired(updated_job, now, repo)
+          _ = mark_source_expired(updated_job, now, repo)
+          :ok
 
         {:error, reason} ->
           Logger.error("Scheduled job #{job.id} expiry update failed: #{inspect(reason)}")
+          :error
       end
+    else
+      :ok
     end
   end
+
+  # Terminal state for a job whose schedule no longer parses (claim time or the
+  # stale-skip recompute). Re-fetch and guard on the live row (mirrors expiry) so
+  # an edit/pause landing between the due scan and here is not clobbered. The
+  # `state = 'scheduled'` due-scan filter then keeps a disabled job off every
+  # future tick; `resume` re-parses and fails loudly if the schedule is still
+  # broken.
+  defp disable_job(job, error, now, state) do
+    case Repo.get_scheduled_job(job.id, server: state.repo) do
+      {:ok, %{enabled?: true, state: "scheduled"} = current} ->
+        current
+        |> Map.merge(%{state: "disabled", enabled?: false, last_error: error, updated_at: now})
+        |> Repo.upsert_scheduled_job(server: state.repo)
+        |> case do
+          {:ok, _updated} ->
+            {:ok, state}
+
+          {:error, reason} ->
+            Logger.error("Scheduled job #{job.id} disable update failed: #{inspect(reason)}")
+            {:error, state}
+        end
+
+      {:ok, _job} ->
+        {:ok, state}
+
+      {:error, :not_found} ->
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.error("Scheduled job #{job.id} disable lookup failed: #{inspect(reason)}")
+        {:error, state}
+    end
+  end
+
+  defp schedule_error_message(:no_future_run), do: "schedule has no future occurrence"
+  defp schedule_error_message(reason), do: "schedule no longer parses: #{inspect(reason)}"
+
+  defp outcome_state(:ok, state), do: {:ok, state}
+  defp outcome_state(:error, state), do: {:error, state}
 
   defp start_or_mark_failed(job, run, state) do
     case start_runner(job, run, state) do
@@ -436,8 +525,7 @@ defmodule FermixCore.Jobs.Scheduler do
   # waits 0, run 2 one step, …) without the scheduler ever blocking — the runner
   # does the waiting before its first network call.
   defp startup_stagger_ms(state) do
-    active = DynamicSupervisor.count_children(state.runner_supervisor).active
-    min(active * @runner_stagger_ms, @max_startup_stagger_ms)
+    min(active_run_count(state) * @runner_stagger_ms, @max_startup_stagger_ms)
   end
 
   defp start_runner(job, run, state) do
@@ -661,35 +749,40 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp schedule_due_timer(state) do
+  defp schedule_due_timer(state, outcome \\ :ok) do
     cancel_timer(state.due_timer)
 
     if state.enabled? and state.timer_enabled? do
-      %{state | due_timer: next_due_timer(state)}
+      %{state | due_timer: next_due_timer(state, outcome)}
     else
       %{state | due_timer: nil}
     end
   end
 
-  defp next_due_timer(state) do
+  defp next_due_timer(state, outcome) do
     case Repo.next_scheduled_job(server: state.repo) do
       {:ok, job} when is_map(job) ->
-        case next_wakeup_at(job) do
-          %DateTime{} = wakeup_at ->
-            Process.send_after(self(), :due_tick, due_delay_ms(wakeup_at))
-
-          nil ->
-            nil
-        end
+        arm_due_timer(next_wakeup_at(job), outcome)
 
       {:ok, _none} ->
-        nil
+        backoff_timer(outcome)
 
+      # The timer lookup itself failing is a fault: re-arm at the backoff floor
+      # so the scheduler retries rather than going dark until reconciliation.
       {:error, reason} ->
         Logger.error("Scheduled job timer lookup failed: #{inspect(reason)}")
-        nil
+        Process.send_after(self(), :due_tick, @due_error_backoff_ms)
     end
   end
+
+  defp arm_due_timer(%DateTime{} = wakeup_at, outcome) do
+    Process.send_after(self(), :due_tick, due_delay_ms(wakeup_at, outcome))
+  end
+
+  defp arm_due_timer(nil, outcome), do: backoff_timer(outcome)
+
+  defp backoff_timer(:ok), do: nil
+  defp backoff_timer(_outcome), do: Process.send_after(self(), :due_tick, @due_error_backoff_ms)
 
   defp next_wakeup_at(%{next_run_at: nil, expires_at: nil}), do: nil
   defp next_wakeup_at(%{next_run_at: nil, expires_at: expires_at}), do: expires_at
@@ -717,9 +810,16 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp due_delay_ms(next_run_at) do
-    delay = DateTime.diff(next_run_at, DateTime.utc_now(), :millisecond)
-    max(delay, 0)
+  # A clean tick fires at the next wakeup (0ms floor for a past-due job). A tick
+  # that errored or hit admission backpressure re-arms no sooner than the backoff
+  # floor, so a persistently past-due-but-unclaimable job cannot spin at 0ms.
+  defp due_delay_ms(next_run_at, outcome) do
+    delay = max(DateTime.diff(next_run_at, DateTime.utc_now(), :millisecond), 0)
+
+    case outcome do
+      :ok -> delay
+      _backoff -> max(delay, @due_error_backoff_ms)
+    end
   end
 
   defp cancel_timer(nil), do: :ok

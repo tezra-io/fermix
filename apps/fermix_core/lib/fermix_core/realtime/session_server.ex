@@ -47,9 +47,13 @@ defmodule FermixCore.Realtime.SessionServer do
   @spec call_start(GenServer.server()) :: :ok | {:error, term()}
   def call_start(server), do: GenServer.call(server, :call_start, @call_start_timeout_ms)
 
-  @spec audio_chunk(GenServer.server(), binary()) :: :ok | {:error, term()}
+  # Audio is fire-and-forget media: a cast, so a busy session loop (e.g. running
+  # a tool) never blocks the socket reader's send. Control verbs below stay
+  # `GenServer.call` so the caller still gets an ack. Drops are logged, not
+  # silently swallowed.
+  @spec audio_chunk(GenServer.server(), binary()) :: :ok
   def audio_chunk(server, audio) when is_binary(audio),
-    do: GenServer.call(server, {:audio_chunk, audio})
+    do: GenServer.cast(server, {:audio_chunk, audio})
 
   @spec interrupt(GenServer.server(), non_neg_integer() | nil) :: :ok | {:error, term()}
   def interrupt(server, audio_end_ms \\ nil)
@@ -109,6 +113,15 @@ defmodule FermixCore.Realtime.SessionServer do
         {:ok,
          %{
            companion: Keyword.fetch!(opts, :companion),
+           # Tool calls run on this supervisor via `async_nolink` so a slow tool
+           # never blocks the session's mailbox (the deadlock this fixes). Passed
+           # explicitly; defaults to the Realtime tree's supervisor.
+           task_supervisor:
+             Keyword.get(opts, :task_supervisor, FermixCore.Realtime.TaskSupervisor),
+           # task ref -> {%Task{}, call}. The call is kept for the error/crash
+           # path (needs the call_id to answer OpenAI); the task is kept so
+           # teardown/reconnect can shut in-flight tools down. Concurrent-safe.
+           pending_tool_calls: %{},
            config: config,
            device_id: device_id,
            session_scope: session_scope,
@@ -188,42 +201,6 @@ defmodule FermixCore.Realtime.SessionServer do
     {:reply, {:error, :provider_not_connected}, state}
   end
 
-  def handle_call({:audio_chunk, _audio}, _from, %{muted?: true} = state) do
-    {:reply, {:error, :muted}, state}
-  end
-
-  def handle_call({:audio_chunk, audio}, _from, %{openai_pid: openai_pid} = state)
-      when is_pid(openai_pid) do
-    case send_openai(state, OpenAIClient.audio_append_event(audio)) do
-      :ok ->
-        usage = CostTracker.add_input_audio_ms(state.usage, audio_duration_ms(audio))
-        state = %{state | usage: usage}
-
-        notify_usage(state, "estimated")
-
-        case CostTracker.enforce_limits(usage) do
-          :ok ->
-            {:reply, :ok, state}
-
-          {:stop, reason} ->
-            notify(state.companion, %{
-              type: "usage",
-              status: "limit_reached",
-              reason: Atom.to_string(reason)
-            })
-
-            {:reply, {:error, reason}, drop_session(state)}
-        end
-
-      {:error, reason} ->
-        notify_provider_send_error(state, reason)
-        {:reply, {:error, reason}, drop_session(state)}
-    end
-  end
-
-  def handle_call({:audio_chunk, _audio}, _from, state),
-    do: {:reply, {:error, :not_connected}, state}
-
   def handle_call({:interrupt, audio_end_ms}, _from, %{openai_pid: openai_pid} = state)
       when is_pid(openai_pid) do
     with :ok <- maybe_send_truncate(openai_pid, state, audio_end_ms),
@@ -270,8 +247,71 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   @impl true
+  def handle_cast({:audio_chunk, _audio}, %{muted?: true} = state) do
+    Logger.debug("Realtime session dropped audio chunk while muted")
+    {:noreply, state}
+  end
+
+  def handle_cast({:audio_chunk, audio}, %{openai_pid: openai_pid} = state)
+      when is_pid(openai_pid) do
+    case send_openai(state, OpenAIClient.audio_append_event(audio)) do
+      :ok ->
+        usage = CostTracker.add_input_audio_ms(state.usage, audio_duration_ms(audio))
+        state = %{state | usage: usage}
+
+        notify_usage(state, "estimated")
+        enforce_audio_limits(state, usage)
+
+      {:error, reason} ->
+        notify_provider_send_error(state, reason)
+        {:noreply, drop_session(state)}
+    end
+  end
+
+  def handle_cast({:audio_chunk, _audio}, state) do
+    Logger.debug("Realtime session dropped audio chunk with no active provider session")
+    {:noreply, state}
+  end
+
+  defp enforce_audio_limits(state, usage) do
+    case CostTracker.enforce_limits(usage) do
+      :ok ->
+        {:noreply, state}
+
+      {:stop, reason} ->
+        notify(state.companion, %{
+          type: "usage",
+          status: "limit_reached",
+          reason: Atom.to_string(reason)
+        })
+
+        {:noreply, drop_session(state)}
+    end
+  end
+
+  @impl true
   def handle_info({:openai_realtime_event, event}, state) do
     {:noreply, handle_provider_event_internal(event, state)}
+  end
+
+  # A tool task finished (async_nolink). Flush its stale :DOWN, then answer
+  # OpenAI + the companion with the exact same success/error handling the
+  # inline path used. Guarded on the ref so it never shadows the other
+  # 2-tuple/EXIT clauses below.
+  def handle_info({ref, result}, %{pending_tool_calls: pending} = state)
+      when is_reference(ref) and is_map_key(pending, ref) do
+    Process.demonitor(ref, [:flush])
+    {{_task, call}, remaining} = Map.pop(pending, ref)
+    {:noreply, apply_tool_result(result, call, %{state | pending_tool_calls: remaining})}
+  end
+
+  # A tool task crashed. OpenAI is still waiting for this call's output, so
+  # answer it with the failure rather than hanging the turn.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{pending_tool_calls: pending} = state)
+      when is_map_key(pending, ref) do
+    {{_task, call}, remaining} = Map.pop(pending, ref)
+    error = {:error, %{call_id: call_id(call), reason: {:tool_task_crashed, reason}}}
+    {:noreply, apply_tool_result(error, call, %{state | pending_tool_calls: remaining})}
   end
 
   def handle_info({:openai_realtime_disconnect, _reason}, %{session_update_event: nil} = state) do
@@ -346,11 +386,13 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   @impl true
-  def terminate(_reason, %{tool_context: context}) do
-    # Backstop for the §7.6 guarantee on any process exit (crash, supervisor
-    # shutdown, disconnect) that never reached `:call_stop`: never let a host
-    # computer-use session outlive the attended voice call. Idempotent — a no-op
-    # when the model didn't use computer-use this call.
+  def terminate(_reason, %{tool_context: context} = state) do
+    # Backstop for any process exit (crash, supervisor shutdown, disconnect)
+    # that never reached `drop_session`: shut in-flight tool tasks down (they are
+    # `async_nolink`, so they outlive this process otherwise) and never let a
+    # host computer-use session outlive the attended voice call (§7.6). Both are
+    # idempotent — no-ops when drop_session already ran or nothing was in flight.
+    cancel_pending_tool_calls(state)
     ComputerUseSessionManager.abort(context)
     :ok
   end
@@ -432,6 +474,10 @@ defmodule FermixCore.Realtime.SessionServer do
       delay when is_integer(delay) and delay >= 0 ->
         RealtimeTelemetry.reconnect(telemetry_meta(state), state.reconnect_attempts)
         notify(state.companion, %{type: "state", state: "reconnecting"})
+        # The reconnect opens a fresh server-side conversation that never issued
+        # the outstanding call_ids, so abandon any in-flight tool tasks here
+        # rather than let a late result fire at (or tear down) the new session.
+        state = cancel_pending_tool_calls(state)
         timer = Process.send_after(self(), :reconnect_attempt, delay)
 
         {:ok,
@@ -460,11 +506,15 @@ defmodule FermixCore.Realtime.SessionServer do
     # host computer-use session must not persist (COMPUTER_USE.md §7.6). Tear it
     # down before dropping the socket; idempotent, and a reconnect's next action
     # re-opens a fresh session via SessionManager.ensure. `terminate/2` is the
-    # backstop for a process death that never runs drop_session.
+    # backstop for a process death that never runs drop_session. In-flight tool
+    # tasks answer this dying connection (their call_ids die with it), so they
+    # are shut down too — no orphaned tool outlives the call, no stale output
+    # fires later.
     ComputerUseSessionManager.abort(state.tool_context)
     close_openai(state)
 
     state
+    |> cancel_pending_tool_calls()
     |> cancel_timers()
     |> Map.merge(%{
       openai_pid: nil,
@@ -474,6 +524,21 @@ defmodule FermixCore.Realtime.SessionServer do
       reconnect_timer: nil,
       current_item_id: nil
     })
+  end
+
+  # A tool task belongs to the provider connection whose call it answers. When
+  # that connection is lost — teardown (drop_session), reconnect (a fresh
+  # server-side conversation the old call_id is unknown to), or process exit
+  # (terminate/2) — the result is undeliverable, so brutal-kill the in-flight
+  # tasks and forget them. `Task.shutdown` also flushes each task's stale reply
+  # and :DOWN from the mailbox, so no late `{ref, result}` lingers.
+  defp cancel_pending_tool_calls(%{pending_tool_calls: pending} = state)
+       when map_size(pending) == 0,
+       do: state
+
+  defp cancel_pending_tool_calls(%{pending_tool_calls: pending} = state) do
+    Enum.each(pending, fn {_ref, {task, _call}} -> Task.shutdown(task, :brutal_kill) end)
+    %{state | pending_tool_calls: %{}}
   end
 
   defp maybe_send_truncate(_openai_pid, _state, nil), do: :ok
@@ -518,7 +583,10 @@ defmodule FermixCore.Realtime.SessionServer do
         RuntimeContext.build_profile(:operator, available_skills, capability_registry,
           # `:media` too — image/video generation egresses through a channel
           # `reply_fn`, which a voice session does not have (M15 §411).
-          excluded_categories: [:channel, :media]
+          # `:delegation` too — voice gains honest `:operator` trust, so
+          # `subagents` would become executable, but a multi-minute blocking
+          # fan-out does not fit a live voice session.
+          excluded_categories: [:channel, :media, :delegation]
         )
 
       {:ok,
@@ -628,40 +696,21 @@ defmodule FermixCore.Realtime.SessionServer do
     %{state | assistant_transcript: text}
   end
 
+  # Run the tool OFF the session loop (async_nolink on the Realtime task
+  # supervisor). A multi-second tool used to block this GenServer's mailbox,
+  # starving `audio_chunk`/`interrupt` and wedging the whole call. The result
+  # comes back as `{ref, result}` (or `:DOWN` on crash) and is answered there.
   defp handle_provider_event_internal({:function_call, call}, state) do
     notify(state.companion, %{type: "tool_event", status: "running", name: tool_name(call)})
 
-    state =
-      case ToolBridge.execute_call(state.tool_bridge, call) do
-        {:ok, output} ->
-          state =
-            send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
+    bridge = state.tool_bridge
 
-          notify(state.companion, %{
-            type: "tool_event",
-            status: "completed",
-            name: tool_name(call)
-          })
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        ToolBridge.execute_call(bridge, call)
+      end)
 
-          state
-
-        {:error, %{call_id: call_id, reason: reason}} ->
-          output = %{call_id: call_id, output: Jason.encode!(%{error: reason_to_string(reason)})}
-
-          state =
-            send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
-
-          notify(state.companion, %{
-            type: "tool_event",
-            status: "error",
-            name: tool_name(call),
-            reason: reason_to_string(reason)
-          })
-
-          state
-      end
-
-    state
+    %{state | pending_tool_calls: Map.put(state.pending_tool_calls, task.ref, {task, call})}
   end
 
   defp handle_provider_event_internal({:response_created, _event}, state) do
@@ -695,6 +744,26 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp handle_provider_event_internal(_event, state), do: state
+
+  defp apply_tool_result({:ok, output}, call, state) do
+    state = send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
+    notify(state.companion, %{type: "tool_event", status: "completed", name: tool_name(call)})
+    state
+  end
+
+  defp apply_tool_result({:error, %{call_id: call_id, reason: reason}}, call, state) do
+    output = %{call_id: call_id, output: Jason.encode!(%{error: reason_to_string(reason)})}
+    state = send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
+
+    notify(state.companion, %{
+      type: "tool_event",
+      status: "error",
+      name: tool_name(call),
+      reason: reason_to_string(reason)
+    })
+
+    state
+  end
 
   defp handle_active_response_race(error, state) do
     Logger.debug("Ignoring OpenAI Realtime active-response race: #{inspect(error)}")
@@ -776,8 +845,11 @@ defmodule FermixCore.Realtime.SessionServer do
     CapabilityRegistry.list_for(capability_registry,
       trust: :operator,
       # `:media` too — generation egresses through a channel `reply_fn` a voice
-      # session lacks (M15 §411); kept in sync with the profile above.
-      excluded_categories: [:channel, :media]
+      # session lacks (M15 §411). `:delegation` too — `subagents` would be
+      # executable at the session's honest `:operator` trust, but a multi-minute
+      # blocking fan-out does not fit a live voice session. Kept in sync with the
+      # profile above.
+      excluded_categories: [:channel, :media, :delegation]
     )
   end
 
@@ -975,11 +1047,18 @@ defmodule FermixCore.Realtime.SessionServer do
       conversation_key: ConversationRecorder.conversation_key(device_id),
       memory_agent_id: MemoryConfig.agent_id(),
       memory_owner_id: MemoryConfig.owner_id(),
-      realtime?: true
+      realtime?: true,
+      # Voice is the operator at the keyboard — the session already builds its
+      # capability surface at `trust: :operator`, so the tool context carries the
+      # same trust rather than a nil that trust-asserting writers (e.g.
+      # `schedule_job`) would reject. Not new privilege; the context stops lying.
+      source_trust: :operator
     }
   end
 
   defp tool_name(%{"name" => name}), do: name
   defp tool_name(%{name: name}), do: name
   defp tool_name(_call), do: "unknown"
+
+  defp call_id(call), do: Map.get(call, "call_id") || Map.get(call, :call_id) || ""
 end

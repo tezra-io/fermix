@@ -36,8 +36,23 @@ defmodule FermixChannels.Gateway.Delivery do
       {:react, emoji} when is_binary(emoji) ->
         deliver_reaction(channel, message, emoji)
 
+      {:approval_prompt, text, token} when is_binary(text) and is_binary(token) ->
+        deliver_approval(channel, message, text_reply, text, token)
+
       other ->
         {:error, {:invalid_reply_part, other}}
+    end
+  end
+
+  # One-tap approval is a per-channel capability, not a runtime degrade: a channel
+  # that renders an approve affordance implements `send_approval/3`; every other
+  # channel delivers the same prompt text (which carries the tap-to-copy
+  # `/confirm <token>` command) through the text closure already built above.
+  defp deliver_approval(channel, message, text_reply, text, token) do
+    if function_exported?(channel, :send_approval, 3) do
+      observe_reply(fn -> channel.send_approval(message, text, token) end, :text, nil, message)
+    else
+      observe_reply(fn -> text_reply.(text) end, :text, nil, message)
     end
   end
 

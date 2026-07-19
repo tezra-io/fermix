@@ -51,6 +51,9 @@ defmodule FermixCore.Tools.Subagents do
   # (all stripped), so inheriting the key alone grants no parent-state access.
   @stripped_context_keys [
     :reply_fn,
+    # The owner's grant-approval closure never reaches a delegated worker: a
+    # subagent must not be able to widen the sandbox on the owner's behalf.
+    :approval_fn,
     :channel,
     :source_channel,
     :source_trust,
@@ -153,6 +156,22 @@ defmodule FermixCore.Tools.Subagents do
     }
   end
 
+  @doc """
+  Advertise `subagents` only where a call could execute (§12): a top-level turn
+  (`subagent_depth == 0`) whose context carries a delegating trust. This mirrors
+  the two execution guards (`check_recursion`, `fetch_source_trust`) so the tool
+  — schema and model-slug hint and all — is dropped from every AgentLoop-driven
+  context where a call is guaranteed to fail (workers, any trust-less context),
+  instead of burning a model iteration on a doomed call. The guards stay; this
+  is advertisement, not enforcement. Discovered via `function_exported?` at
+  `AgentLoop.build_state`.
+  """
+  @spec advertise?(map()) :: boolean()
+  def advertise?(context) when is_map(context) do
+    Map.get(context, :subagent_depth, 0) == 0 and
+      Map.get(context, :source_trust) in [:operator, :guest]
+  end
+
   defp model_slugs_hint do
     ModelCatalog.providers()
     |> Enum.flat_map(&ModelCatalog.models_for/1)
@@ -163,8 +182,9 @@ defmodule FermixCore.Tools.Subagents do
 
   @impl true
   def when_to_use do
-    "When a request has independent substantial parts and delegating them improves " <>
-      "speed, coverage, or quality. Skip it for simple or tightly-coupled work."
+    "When a request spans several independent parts or sources that each need their own " <>
+      "gathering — delegate and run them in parallel rather than working serially. " <>
+      "Skip it for simple or tightly-coupled work."
   end
 
   @impl true
@@ -254,7 +274,8 @@ defmodule FermixCore.Tools.Subagents do
          context,
          override
        ) do
-    policy = worker_policy(source_trust)
+    policy = worker_policy(source_trust, context)
+    allowed_tools = worker_allowed_tools(policy, context)
     worker_context = sanitize_context(context, depth)
     spawn_opts = base_spawn_opts(context)
     task_supervisor = Map.get(context, :task_supervisor, FermixCore.TaskSupervisor)
@@ -270,6 +291,7 @@ defmodule FermixCore.Tools.Subagents do
           run_one(task, %{
             source_trust: source_trust,
             policy: policy,
+            allowed_tools: allowed_tools,
             timeout_seconds: timeout_seconds,
             worker_context: worker_context,
             spawn_opts: spawn_opts,
@@ -301,6 +323,7 @@ defmodule FermixCore.Tools.Subagents do
         task.id,
         run.source_trust,
         run.policy,
+        run.allowed_tools,
         run.timeout_seconds,
         run.worker_iterations,
         run.override
@@ -318,7 +341,15 @@ defmodule FermixCore.Tools.Subagents do
     end
   end
 
-  defp build_definition(id, trust, policy, timeout_seconds, max_iterations, override) do
+  defp build_definition(
+         id,
+         trust,
+         policy,
+         allowed_tools,
+         timeout_seconds,
+         max_iterations,
+         override
+       ) do
     %AgentDefinition{
       name: "subagent:#{id}",
       description: "Temporary generic Fermix subagent for #{id}",
@@ -330,7 +361,7 @@ defmodule FermixCore.Tools.Subagents do
       reasoning_effort: override.reasoning_effort,
       temperature: nil,
       capabilities: [],
-      allowed_tools: nil,
+      allowed_tools: allowed_tools,
       policy: policy,
       trust: trust,
       max_iterations: max_iterations,
@@ -340,12 +371,40 @@ defmodule FermixCore.Tools.Subagents do
     }
   end
 
-  # `:gui_control` is subtracted alongside `:read_write`: desktop/GUI control is
-  # attended + operator-only and must never be handed to an unwatched delegated
-  # worker (COMPUTER_USE.md §7).
-  defp worker_policy(source_trust) do
-    CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write, :gui_control]
+  # The worker's policy classes: the delegation baseline INTERSECTED with the
+  # parent run's effective surface (§11.2), so a fan-out can never widen past
+  # its parent's ceiling. `:gui_control` is subtracted alongside `:read_write`:
+  # desktop/GUI control is attended + operator-only and must never be handed to
+  # an unwatched delegated worker (COMPUTER_USE.md §7).
+  #
+  # `context.effective_policy` is stamped by the parent's `AgentLoop`
+  # (`nil` only on a direct, non-loop call — then the baseline stands, today's
+  # behavior). An empty intersection is NOT an error: a worker with no tools can
+  # still answer from the model alone. An interactive main-agent parent's
+  # effective surface is its full trust default, so the intersection is the
+  # identity — today's worker surface, unchanged.
+  defp worker_policy(source_trust, context) do
+    baseline =
+      CapabilityRegistry.default_policy_classes(source_trust) -- [:read_write, :gui_control]
+
+    intersect_policy(baseline, Map.get(context, :effective_policy))
   end
+
+  defp intersect_policy(baseline, nil), do: baseline
+
+  defp intersect_policy(baseline, parent_classes) when is_list(parent_classes) do
+    Enum.filter(baseline, &(&1 in parent_classes))
+  end
+
+  # The worker's allowlist is the parent run's own tool ceiling (§11.2), passed
+  # through verbatim (`nil` = unrestricted). One exception: an EMPTY policy
+  # intersection must yield a tool-less worker, but the registry reads
+  # `policy: []` as "use the trust default" rather than "deny all" — so the
+  # deny-all rides the allowlist instead (`[]`, which AgentLoop reads as
+  # deny-all). The worker still runs and answers from the model; it just has no
+  # tools. Not an error (design §11.2).
+  defp worker_allowed_tools([], _context), do: []
+  defp worker_allowed_tools(_policy, context), do: Map.get(context, :effective_allowed_tools)
 
   defp sanitize_context(context, depth) do
     context

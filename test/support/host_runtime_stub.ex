@@ -15,5 +15,5 @@ defmodule FermixTestSupport.HostRuntimeStub do
   def find_executable(_command), do: nil
 
   @impl true
-  def version_output(_command), do: {:error, :host_runtime_stubbed_out}
+  def version_output(_command, _opts \\ []), do: {:error, :host_runtime_stubbed_out}
 end
