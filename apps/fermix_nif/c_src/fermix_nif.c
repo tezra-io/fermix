@@ -5,6 +5,13 @@
 // (spawning `kill` fails precisely under the fd/process-table exhaustion the
 // sweep exists to contain), so the signal is delivered by a direct syscall.
 
+// kill(2) is POSIX, not ISO C: request the POSIX.1-2008 declarations so
+// <signal.h> declares it under -std=c99. The release build's zig cross-compile
+// for aarch64-linux hard-errors on the implicit declaration otherwise (native
+// macOS headers are lenient), which broke the v0.6.0 release build. Must precede
+// every #include so the feature macro is set before the system headers load.
+#define _POSIX_C_SOURCE 200809L
+
 #include <erl_nif.h>
 #include <signal.h>
 #include <errno.h>
