@@ -41,6 +41,10 @@ defmodule FermixCore.Application do
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
 
+  # Compile-time env: the boot-time computer-use sidecar ensure is a network
+  # side effect, so it is gated OUT of `:test` here (never in `mix test`).
+  @compiled_env Mix.env()
+
   @impl true
   def start(_type, _args) do
     if BurritoUtil.running_standalone?() do
@@ -119,6 +123,7 @@ defmodule FermixCore.Application do
     redact_default_logger()
     Trace.TelemetryHandler.attach()
     DecisionTelemetry.attach()
+    maybe_ensure_computer_use_sidecar()
 
     children =
       [
@@ -278,6 +283,24 @@ defmodule FermixCore.Application do
     else
       []
     end
+  end
+
+  # Only in a real daemon boot: if computer-use is enabled but the sidecar for the
+  # compiled-in compux version isn't installed — the state a fermix upgrade that
+  # bumped the compux ref lands in — download it now, before the
+  # `ComputerUse.ready?/0` gates (tool registration + supervisor boot) run, so the
+  # upgrade transparently keeps computer-use working. Fail-soft and bounded; see
+  # `ComputerUse.ensure_sidecar_installed/1`.
+  defp maybe_ensure_computer_use_sidecar do
+    if daemon_boot?(), do: ComputerUse.ensure_sidecar_installed(), else: :ok
+  end
+
+  # A real in-process daemon run (`fermix run` / `mix fermix.dev`) — both enable
+  # the daemon control socket before the tree builds — and never `mix test`,
+  # `fermix setup`, or `fermix memory`.
+  defp daemon_boot? do
+    @compiled_env != :test and
+      Application.get_env(:fermix_core, :daemon_socket_enabled, false)
   end
 
   defp realtime_socket_enabled? do
