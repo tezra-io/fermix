@@ -6,8 +6,58 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-19
+
 ### Added
 
+- **Computer use no longer fights you for the cursor (coexistence).** When the
+  agent is driving the host desktop and you start using the machine, it now yields
+  the seat instead of stealing the pointer mid-action. Before any disturbing action
+  (click, drag, scroll, mouse-move, type, key, paste) it checks how long you have
+  been idle and, if you are active, briefly waits in-turn for a pause, then either
+  proceeds or holds the action back and tells you so. `/pause` hands the machine
+  back on demand (the session stays alive and resumable — unlike `/stop`, which
+  tears it down) and `/resume` continues. Controlled by `[fermix_core.computer_use]
+  courtesy` (`yield` default, `off`) and `courtesy_idle_ms`. Idle detection is
+  macOS-only; where it is unavailable the arbiter proceeds rather than blocking.
+- **Image generation can run on a ChatGPT/Codex subscription (keyless).** A new
+  `openai_codex` image backend drives `gpt-image-2` over the Codex subscription
+  endpoint — billed to the subscription, no `OPENAI_API_KEY` — mirroring how the
+  Codex chat provider works. Opt-in and connection-gated (never a fallback); a
+  missing/unentitled token fails loud. Selectable in the CLI wizard and web setup.
+- **One-tap directory-grant approval, and the grant loop is multi-user safe.** The
+  `/confirm` prompt renders as a tap-to-copy code span, and Telegram/Discord get a
+  native **Approve** button that synthesizes the exact confirm through the unchanged
+  origin-bound, single-use, TTL path. Grants are now strictly operator-only (never
+  reachable through the guest command allowlist), `/confirm` peek-validates before
+  consuming so a wrong-origin attempt can't burn the owner's token, and a non-owner
+  button tap is refused before consumption. (Telegram + Discord; Slack deferred.)
+- **Owner-approval directory access, and the sandbox lives where you do.** Standard
+  mode now auto-allows the launch/request working directory (under your real home)
+  plus the workspace and explicit grants, and open mode is your home minus the
+  protected credential/OS/state dirs — the mode roots key off your OS home, not
+  `FERMIX_HOME`, so "works where I am" is finally true. A new
+  `request_directory_access(path, reason)` tool prompts the owner for an
+  out-of-roots path and, on `/confirm`, persists the grant and auto-resumes the
+  original request. `fermix sandbox explain` annotates each root as (granted) vs
+  (mode).
+- **Voice notes are heard everywhere, on a pluggable speech-to-text backend (M21).**
+  Milestone 21 makes voice-note transcription real, configurable, and channel-wide
+  (see the transcription entries below). Also replaces the old Groq backend with a
+  native SpaceXAI STT backend, and relabels user-facing "xAI" → "SpaceXAI" (display
+  only — the `:xai` atom, `XAI_API_KEY`, `api.x.ai`, and `grok-*` model ids are
+  unchanged, so existing configs keep working).
+- **FermixPet is now its own notarized macOS app, and the realtime wire is
+  versioned.** The voice companion moved to `tezra-io/fermix-macos` (SwiftPM source,
+  notarized universal2 DMG + Homebrew cask). The daemon's realtime socket gained a
+  versioned hello-first handshake (N/N-1 window) so the pet and daemon can ship
+  independently, and `fermix doctor`/`voice status` now flag the OpenAI-Platform-key
+  requirement (a Codex/OAuth login does not authorize the Realtime API).
+- **Every spawned OS process is group-reaped (subprocess lifecycle).** External
+  commands now run under a central `CommandHost` in their own process group and are
+  killed on exit, crash, or daemon shutdown (a new `kill_pgid` NIF), and cron jobs
+  can delegate. Closes the orphaned-subprocess class across git tools, subagents,
+  jobs, sandbox env, plugin probes, and realtime.
 - **`fermix status` and `fermix doctor` now warn when the running daemon's
   version differs from the installed binary.** A package-manager upgrade
   (`brew upgrade fermix`) swaps the binary on disk while the launchd/systemd
@@ -58,12 +108,78 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **GPT-5.6 (Sol, Terra, Luna) context window corrected to 272k** (carried
+  forward from 0.5.8). The catalog listed the 5.6 generation at 372k; the
+  effective window is 272k on both the Codex (ChatGPT subscription) and OpenAI
+  direct-API paths. Auto-compaction thresholds, forced `/compact` budgets, and the
+  `fermix doctor` context report key off the corrected value; the older `gpt-5.5` /
+  `gpt-5.4` / `gpt-5.4-mini` windows are unchanged.
+- **Live-voice replies are quieter and shorter.** The realtime seed no longer
+  licenses pre-announcing or narrating tool use ("act and lead with the result; a
+  slow action stays silent until you have the answer"), and the default length
+  tightened to one sentence, two at most — the "or multi-step" clause had made
+  narration the default rather than the exception (computer-use especially).
+- **Built-in tool triggers lead with when to act, not just when not to.** The
+  `when_to_use` for `web_search`/`web_fetch`/`subagents`/`memory_recall` now opens
+  with the affirmative trigger (the answer is current/changing, you already have
+  the URL, the request fans out, it may depend on stored facts) before its routing
+  exclusions — the documented lever for should-call rate on tool-conservative models.
+- **Time-sensitive facts are grounded before answering from memory.** A broad
+  "Verify, Don't Guess" principle now covers changeable external facts (rates,
+  figures, standings), not just local machine/repo state — verify with a tool
+  before answering, however sure the model feels. (Raised the capability-eval
+  web-research fire rate 32% → 68% with no query changes.)
+- **The agent holds an evidence-backed answer under pushback.** A new "Pushback
+  Gets Diligence, Not Deference" rule: re-check before conceding a challenge,
+  reconcile an apparent contradiction rather than capitulating, and change the
+  answer only when evidence changes it — confidence tracks evidence in both
+  directions, no caving and no digging in.
 - **The default transcription model is now `gpt-4o-mini-transcribe`** (was the
   legacy `whisper-1`) — better accuracy on the same OpenAI endpoint. Set
   `[fermix_core.transcription] model` to pin a different model.
 
 ### Fixed
 
+- **Voice calls no longer freeze after a computer-use (or any slow) tool run.**
+  The realtime `SessionServer` is now a non-blocking coordinator — tool calls run
+  off the session loop on a supervised task, so mic audio, interrupts, and stop
+  keep flowing while a tool runs — and the connection handler owns its socket so
+  the pet always sees EOF on teardown. (Fixes a four-defect deadlock chain that
+  wedged the companion mid-call.)
+- **Anthropic models now actually reason on time-sensitive turns.** Opus 4.8 (and
+  4.6+/Sonnet 5/Fable/Mythos) runs without thinking unless the request carries
+  `thinking: {type: "adaptive"}` — `reasoning_effort` alone only calibrates token
+  spend — so the daemon now sends adaptive thinking on models that support it
+  (Haiku 4.5 stays gated off). The non-streaming clamp and buffered receive window
+  grew to fit thinking plus the visible answer.
+- **The OpenAI direct-API (api-key) path works again.** The Responses adapter was
+  sending `temperature`, which every model it serves (the gpt-5 reasoning family)
+  rejects with a 400 — breaking the whole direct-API catalog (the dev daemon never
+  saw it because it rides the Codex OAuth adapter). Temperature is dropped from the
+  Responses payloads; ChatCompletions is unaffected.
+- **`web_search` no longer degrades to DuckDuckGo after an idle gap.** All seven
+  search backends now route through the shared hardened Finch pool (15s idle cap +
+  one stale-socket retry) instead of per-request Req options that silently ran on
+  an infinite-idle pool — Cloudflare closed those keepalives and Finch handed out
+  the deadest one first, so the first searches after idle each burned a dead socket
+  (45 occurrences since June). `fermix doctor --full` now starts the pool before
+  its live probes.
+- **A connect stall on a continuation call no longer kills the whole run.** The
+  Codex adapter mislabeled a ~5s TCP/TLS connect stall as between-chunk stream
+  starvation and had no retry seam for continuations, so a mid-run blip was fatal
+  (and the failure-report delivery died on the same blip). Transport `stage` is now
+  a measured value, and continuations get bounded in-place retry for exactly the
+  proven zero-data timeout class (2 attempts, no tool replay, no provider switch) —
+  including scheduled runs.
+- **Scheduled jobs honor their configured timeout.** `Jobs.Runner` resolved
+  timeout precedence by key *presence* rather than value, so the Scheduler's
+  always-present-nil `timeout_ms` shadowed each job's own `timeout_seconds` /
+  `inactivity_timeout_seconds` — jobs set for longer were killed at the 30-minute
+  default and the inactivity watchdog never armed. Now keyed on the value.
+- **Codex-style API errors surface their detail, and wire booleans are preserved.**
+  Provider error composition falls back to a top-level `detail` field (Codex
+  `{"detail": …}` errors were showing a generic message), and the introspection
+  wire no longer stringifies a bare `true`/`false`/`nil`.
 - **Failed voice-note transcription no longer drops silently.** When
   transcription isn't configured, the audio is over the size cap, or the provider
   errors, the sender now receives a specific, actionable reply (not configured →
@@ -72,6 +188,27 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gateway logged the error and the sender heard nothing. A `[fermix_core.transcription]
   max_file_mb` cap (default 20, aligned with Telegram's bot limit) is enforced
   before download when the size is declared, after download otherwise.
+
+### Internal
+
+- **Multi-OS CI gate + disposable eval/benchmark boxes (M22).** The PR check job
+  is now a 3-leg matrix (linux-x64, linux-arm64, macOS-arm64) — 3 of the 4 shipped
+  Burrito targets had never run the suite in CI. The eval stack (including the
+  tiers too dangerous for a dev machine) runs unattended on disposable cloud boxes,
+  a destructive run additionally requires `FERMIX_EVAL_DISPOSABLE=1`, and any failed
+  eval tier auto-files a deduped GitHub issue. Branch protection: the required check
+  splits into three per-leg names.
+- **Eval boxes and the benchmark harness use a hosted Opik + an external judge.**
+  Boxes talk to Comet-hosted Opik over its API (the in-box Docker stack is gone),
+  and the local harness calls the external judge API directly (`make
+  capability-auto` seeds and tears down a throwaway capability daemon); new
+  chief-of-staff / epistemic-integrity suites added.
+- **compux pinned to v0.5.0 (protocol 3)** — the sidecar library behind computer
+  use, carrying the new idle-detection actions the coexistence arbiter uses; the
+  fermix pin verifies against the v0.5.0 signed-release checksum.
+- Docs: `self_knowledge`, README, and wiki refreshed (reasoning-effort per-model
+  ceiling, `schedule_job` timeout args, bootstrap-template drift, FermixPet cask
+  migration, provider/channel/voice sections).
 
 ## [0.5.7] - 2026-07-11
 
