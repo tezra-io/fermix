@@ -703,8 +703,11 @@ defmodule FermixCore.Memory.ConversationStoreTest do
       log =
         capture_log(fn ->
           assert :ok = ConversationStore.add_message(@key, "assistant", "retry me", server: store)
-          assert_receive {:insert_attempt, "assistant", "retry me"}
-          assert_receive {:insert_attempt, "assistant", "retry me"}
+          # The durable write + its retry are async; a generous bound (not the
+          # 100ms assert_receive default) keeps the second attempt from racing CI
+          # load. assert_receive still returns the instant the message arrives.
+          assert_receive {:insert_attempt, "assistant", "retry me"}, 2_000
+          assert_receive {:insert_attempt, "assistant", "retry me"}, 2_000
         end)
 
       assert log =~ "conversation durable write failed; retrying attempt 2/2"
