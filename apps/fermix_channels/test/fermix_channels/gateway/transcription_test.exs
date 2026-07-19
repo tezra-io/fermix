@@ -85,11 +85,21 @@ defmodule FermixChannels.Gateway.TranscriptionTest do
     test_pid = self()
     handler_id = "test-transcription-message-#{System.unique_integer()}"
 
+    # This file is `async: true`, and a :telemetry handler is process-global: it
+    # fires for events emitted by ANY concurrent test, not just this one.
+    # dispatcher_test.exs (also async, also channel "whatsapp") emits this same
+    # event with `status: :error` on its transcription-failure cases, which would
+    # land in this mailbox and make `assert_receive` below grab a foreign event.
+    # `:telemetry.execute/3` runs handlers in the *emitting* process, and this
+    # test's code-under-test emits synchronously in-process, so scoping to
+    # `self() == test_pid` forwards only this test's own event.
     :telemetry.attach(
       handler_id,
       [:fermix, :transcription, :message],
       fn event, measurements, metadata, _config ->
-        send(test_pid, {:telemetry, event, measurements, metadata})
+        if self() == test_pid do
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end
       end,
       nil
     )
