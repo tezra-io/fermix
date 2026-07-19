@@ -17,8 +17,9 @@ jobs:
   check:
     # One leg per shipped-and-executed platform (M22 T0): the release builds
     # macos_aarch64 / macos_x86_64 / linux_aarch64 / linux_x86_64, and before
-    # this matrix only linux_x86_64 ever ran the suite. Each leg's display name
-    # is a branch-protection required check — renaming a leg breaks the gate.
+    # this matrix only linux_x86_64 ever ran the suite. The `gate` job below
+    # aggregates these legs into the single branch-protection required check, so
+    # legs can be renamed/added/removed without touching branch protection.
     name: compile · format · credo · test (${{ matrix.leg }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -134,3 +135,21 @@ jobs:
             fail=1
           fi
           exit "$fail"
+
+  # Aggregate gate: the SINGLE stable check name that branch protection requires
+  # (`compile · format · credo · test`), decoupled from the OS-matrix leg names.
+  # Green iff every `check` leg passed; `if: always()` so a failed/skipped matrix
+  # still produces a definitive RED here rather than a skipped required check that
+  # would itself wedge the merge.
+  gate:
+    name: compile · format · credo · test
+    runs-on: ubuntu-24.04
+    needs: [check]
+    if: always()
+    steps:
+      - name: Require every matrix leg to have passed
+        env:
+          CHECK_RESULT: ${{ needs.check.result }}
+        run: |
+          echo "check (matrix) result: $CHECK_RESULT"
+          [ "$CHECK_RESULT" = "success" ] || exit 1
