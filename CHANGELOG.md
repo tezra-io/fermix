@@ -209,6 +209,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Docs: `self_knowledge`, README, and wiki refreshed (reasoning-effort per-model
   ceiling, `schedule_job` timeout args, bootstrap-template drift, FermixPet cask
   migration, provider/channel/voice sections).
+## [0.5.8] - 2026-07-12
+
+### Changed
+
+- **GPT-5.6 (Sol, Terra, Luna) context window corrected to 272k.** The catalog
+  listed the 5.6 generation at 372k; the effective window is 272k on both the
+  Codex (ChatGPT subscription) and OpenAI direct-API paths, which still serve
+  the same window for this generation. Auto-compaction thresholds, forced
+  `/compact` budgets, and the `fermix doctor` context report now key off the
+  corrected value. The older `gpt-5.5` / `gpt-5.4` / `gpt-5.4-mini` windows are
+  unchanged.
 
 ## [0.5.7] - 2026-07-11
 
