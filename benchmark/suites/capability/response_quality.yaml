@@ -1,7 +1,8 @@
 suite: cap_response_quality
+risk: host_readonly
 title: "Capability — response quality / taste (judge-scored, SOFT axis)"
 # SOFT axis: the runner EXCLUDES this suite from the correctness sweep (`make capability`,
-# `make capability-judged`) so its noisy 0..1 judge scores never fold into task-success or
+# default `make capability`) so its noisy 0..1 judge scores never fold into task-success or
 # share the capability tasks_hash. Run it deliberately on its own axis:
 #   uv run bin/run_capability.py --suite cap_response_quality --judge --threshold 0.5
 soft: true
@@ -18,9 +19,12 @@ description: >
      self-prefers. Never let the daemon's own model grade this.
    * Read it as its OWN soft axis, on `mean_success` (the judge's average 0..1 quality
      score) — NOT pass^k, which binarizes at the pass threshold and is meaningless for a
-     fractional taste score (add `--threshold 0.5` if you want a pass^k at all). It has a
-     distinct tasks_hash, so the leaderboard keeps it in a separate row from the capability
-     composite — do NOT average taste into the correctness score; judge scores are noisy
+     fractional taste score (add `--threshold 0.5` if you want a pass^k at all). Because
+     this is a soft-only selection, the runner appends the soft suite name to the run's
+     config_id (a soft-axis suffix, e.g. `<model>:cap_response_quality`), so the leaderboard
+     keeps it in a separate row from the capability composite — the two axes auto-detect the
+     SAME served model, and the store is keyed on config_id, so the suffix is what prevents
+     one from overwriting the other — do NOT average taste into the correctness score; judge scores are noisy
      (LLM judges favour length / their own style), so this is a DIRECTIONAL signal, a trend,
      not a hard gate.
 

@@ -22,17 +22,39 @@ defmodule Fermix.CLI.VoiceCommand do
   defp print_status(json?) do
     case Client.request("health") do
       {:ok, %{"status" => "ok", "health" => health}} ->
-        print_realtime_status("online", Map.get(health, "realtime", %{}), json?)
+        print_realtime_status("online", realtime_map(health), json?)
 
       {:ok, other} ->
         unexpected(other)
 
       {:error, :not_running} ->
         health = Health.report() |> Jason.encode!() |> Jason.decode!()
-        print_realtime_status("offline", Map.get(health, "realtime", %{}), json?)
+        print_realtime_status("offline", realtime_map(health), json?)
 
       {:error, reason} ->
         error(reason)
+    end
+  end
+
+  # Realtime authenticates with the plain `openai` provider key, which a Codex
+  # subscription/OAuth login does not provide. Surface its presence so an
+  # enabled-but-keyless companion is diagnosable without waiting for a call to
+  # fail. Both the human and --json outputs carry it.
+  defp realtime_map(health) do
+    realtime = Map.get(health, "realtime", %{})
+    Map.put(realtime, "openai_api_key_present?", openai_key_present?(realtime))
+  end
+
+  defp openai_key_present?(realtime) do
+    Map.get(realtime, "enabled", false) and
+      match?({:ok, _}, FermixCore.Config.provider_api_key(:openai))
+  end
+
+  defp realtime_key_label(realtime) do
+    cond do
+      not Map.get(realtime, "enabled", false) -> "n/a (disabled)"
+      Map.get(realtime, "openai_api_key_present?", false) -> "present"
+      true -> "MISSING — Realtime needs an OpenAI sk- key (Codex OAuth won't authorize it)"
     end
   end
 
@@ -47,6 +69,7 @@ defmodule Fermix.CLI.VoiceCommand do
     IO.puts("enabled: #{Map.get(realtime, "enabled", false)}")
     IO.puts("provider: #{Map.get(realtime, "provider") || "none"}")
     IO.puts("model: #{Map.get(realtime, "model") || "none"}")
+    IO.puts("realtime key: #{realtime_key_label(realtime)}")
     IO.puts("socket: #{Map.get(realtime, "socket_path") || "none"}")
     IO.puts("companion connected: #{Map.get(realtime, "companion_connected?", false)}")
     0

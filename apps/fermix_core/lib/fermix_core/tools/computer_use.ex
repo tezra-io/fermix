@@ -216,6 +216,16 @@ defmodule FermixCore.Tools.ComputerUse do
       %{
         tag: "not active",
         description: "computer-use is not enabled / no attended session in this context"
+      },
+      %{
+        tag: "user_active",
+        description:
+          "the human is using the machine; a disturbing action was held back to avoid " <>
+            "fighting for the cursor (coexistence). Wait for them to pause or hand control back"
+      },
+      %{
+        tag: "paused",
+        description: "the human paused computer use with /pause; refused until they run /resume"
       }
     ]
   end
@@ -227,12 +237,15 @@ defmodule FermixCore.Tools.ComputerUse do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(params, context) when is_map(params) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    result = dispatch(params, context)
+    {result, courtesy} = dispatch(params, context)
     duration = System.monotonic_time(:millisecond) - start
     success = match?({:ok, %{success: true}}, result)
 
+    # `courtesy` records the coexistence outcome (V3 R0) so a trace shows when the
+    # agent proceeded, deferred to, or yielded the seat to a present human — or
+    # `:na` when courtesy didn't apply (unavailable session, strict refusal, etc.).
     ToolTelemetry.exec("computer_use", context, success, duration,
-      metadata: %{action: Map.get(params, "action")},
+      metadata: %{action: Map.get(params, "action"), courtesy: courtesy},
       input: params,
       result: result
     )
@@ -245,12 +258,13 @@ defmodule FermixCore.Tools.ComputerUse do
   # the tool starts/reuses it through `SessionManager.ensure/3` keyed by the turn's
   # `conversation_key` — so the OS-driver process opens only when the tool is actually
   # used, and is reused across actions in the same conversation.
+  # Returns `{tool_result, courtesy_outcome}`; the caller emits the courtesy dim.
   defp dispatch(params, context) do
     config = Map.get(context, :computer_use_config) || Config.current()
 
     case resolve_session(context, config) do
       {:ok, session} -> run(session, params)
-      {:error, reason} -> {:ok, Tool.error(unavailable_message(reason))}
+      {:error, reason} -> {{:ok, Tool.error(unavailable_message(reason))}, :na}
     end
   end
 
@@ -296,29 +310,44 @@ defmodule FermixCore.Tools.ComputerUse do
         perform(session, request)
 
       {:error, {:refused, :strict_mode}} ->
-        {:ok,
-         Tool.error(
-           "computer use is in strict (look-only) access — only screenshot, mouse_move, and wait " <>
-             "run; this mutating action was refused. Ask the owner to switch access to standard to act."
-         )}
+        {{:ok,
+          Tool.error(
+            "computer use is in strict (look-only) access — only screenshot, mouse_move, and wait " <>
+              "run; this mutating action was refused. Ask the owner to switch access to standard to act."
+          )}, :na}
+
+      # The human reclaimed the machine with /pause. Stop; do NOT retry (a retry loop
+      # would burn iterations against a hold the model can't clear).
+      {:error, {:refused, :paused}} ->
+        {{:ok,
+          Tool.error(
+            "computer use is paused — the user took the machine back with /pause. Do not retry; " <>
+              "stop and tell them you'll continue when they run /resume."
+          )}, :paused}
 
       {:error, reason} ->
-        {:ok, Tool.error("invalid action: #{format_reason(reason)}")}
+        {{:ok, Tool.error("invalid action: #{format_reason(reason)}")}, :na}
     end
   end
 
   defp perform(session, request) do
     case Session.execute(session, request) do
-      {:ok, %{image: nil, summary: summary}} ->
-        {:ok, Tool.success(summary)}
+      {:ok, %{image: nil, summary: summary} = result} ->
+        {{:ok, Tool.success(summary)}, courtesy_of(result)}
 
-      {:ok, %{image: image, summary: summary}} ->
-        {:ok, Tool.success_with_images(summary, [image])}
+      {:ok, %{image: image, summary: summary} = result} ->
+        {{:ok, Tool.success_with_images(summary, [image])}, courtesy_of(result)}
+
+      {:error, :user_active} ->
+        {{:ok, Tool.error(action_error_message(:user_active))}, :yielded}
 
       {:error, reason} ->
-        {:ok, Tool.error(action_error_message(reason))}
+        {{:ok, Tool.error(action_error_message(reason))}, :na}
     end
   end
+
+  defp courtesy_of(%{courtesy: courtesy}) when is_atom(courtesy), do: courtesy
+  defp courtesy_of(_result), do: :off
 
   # A sidecar action error that maps to a known, non-transient host condition gets
   # an honest, general diagnosis (no app-specific examples — the model decides what
@@ -329,6 +358,13 @@ defmodule FermixCore.Tools.ComputerUse do
       "process has no active GUI session. Computer use cannot see or control the " <>
       "desktop until there is an unlocked, awake display; retrying will not help " <>
       "until that changes."
+  end
+
+  # Coexistence (V3 R0): the human is actively using the machine, so a disturbing
+  # action was held back rather than fighting them for the cursor.
+  defp action_error_message(:user_active) do
+    "the user is actively using the machine right now, so this action was held back to " <>
+      "avoid taking the cursor from them. Wait for them to pause, or ask them to let you continue."
   end
 
   defp action_error_message(reason), do: "action failed: #{format_reason(reason)}"

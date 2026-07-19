@@ -1,4 +1,5 @@
 suite: cap_hard
+risk: host_readonly
 title: "Capability — hard discriminating tier (CANDIDATES, unvalidated)"
 description: >
   UNVALIDATED candidate tasks aimed at the saturation gap: the current deterministic tier is

@@ -1,4 +1,5 @@
 suite: ultra
+risk: expensive
 title: "/ultra — wide fan-out on complex multi-part tasks"
 description: >
   Exercises /ultra: each query starts with "/ultra ", which the gateway tags

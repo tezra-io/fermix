@@ -20,6 +20,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
+  alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
 
@@ -59,6 +60,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:image_backend, atom() | String.t()}
           | {:image_model, String.t()}
           | {:google_api_key, String.t()}
+          | {:transcription_backend, atom() | String.t()}
+          | {:transcription_model, String.t()}
+          | {:transcription_api_key, String.t()}
           | {:telegram_bot_token, String.t()}
           | {:telegram_owner_user_id, String.t()}
           | {:whatsapp_access_token, String.t()}
@@ -602,6 +606,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_computer_use_config(answers)
       |> put_web_search_config(answers)
       |> put_image_config(answers)
+      |> put_transcription_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
       |> put_whatsapp_config(answers)
       |> put_discord_config(answers)
@@ -1602,7 +1607,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_image_backend(value) when is_binary(value) do
     case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google) -> backend
+      backend when backend in ~w(openai xai google openai_codex) -> backend
       invalid -> raise ArgumentError, "invalid image_backend #{inspect(invalid)}"
     end
   end
@@ -1634,6 +1639,142 @@ defmodule FermixCore.Setup.Wizard do
       :fermix_core,
       Keyword.put(fermix_core, :tools, Keyword.put(tools, :generate_image, generate_image))
     )
+  end
+
+  defp put_transcription_config(snapshot, answers) do
+    backend = normalize_transcription_backend(Keyword.get(answers, :transcription_backend))
+    current_backend = current_transcription_backend(snapshot)
+
+    model =
+      transcription_model(backend, Keyword.get(answers, :transcription_model), current_backend)
+
+    values =
+      [backend: backend, model: nilify_drop(model)]
+      |> put_transcription_api_key(backend || current_backend, answers)
+      |> reject_nil_values()
+
+    commit_transcription_config(snapshot, values, model)
+  end
+
+  # `--transcription-api-key` stores the key under the CURRENTLY-SELECTED backend's
+  # slot: the `--transcription-backend` answer if given, else the backend already
+  # configured in the snapshot. Deepgram's slot is its only source; openai/xai
+  # slots override the reused chat-provider key. Fail loud if a key is supplied
+  # with no backend to route it to (Rule #12 — no silent swallow).
+  defp put_transcription_api_key(values, effective_backend, answers) do
+    case Keyword.get(answers, :transcription_api_key) do
+      value when value in [nil, ""] ->
+        values
+
+      value ->
+        {config_key, secret_key} = transcription_key_slot(effective_backend)
+        Keyword.put(values, config_key, secret_snapshot_value(secret_key, value))
+    end
+  end
+
+  defp transcription_key_slot("openai"), do: {:openai_api_key, :transcription_openai_api_key}
+  defp transcription_key_slot("xai"), do: {:xai_api_key, :transcription_xai_api_key}
+  defp transcription_key_slot("deepgram"), do: {:deepgram_api_key, :deepgram_api_key}
+
+  defp transcription_key_slot(other) do
+    raise ArgumentError,
+          "--transcription-api-key needs a --transcription-backend (or an already-configured " <>
+            "backend) to know which key slot to set; got #{inspect(other)}"
+  end
+
+  # A switch to the modelless xai backend (`:drop`) actively deletes any stale
+  # `model` key from the snapshot before merging, so config.toml never carries an
+  # OpenAI-shaped model alongside `backend = "xai"`. Every other case only merges
+  # the resolved values (a nil model is dropped, so a same-backend re-run keeps an
+  # operator-pinned model).
+  defp commit_transcription_config(snapshot, values, :drop) do
+    snapshot
+    |> drop_transcription_model()
+    |> maybe_update_transcription_config(values)
+  end
+
+  defp commit_transcription_config(snapshot, values, _model),
+    do: maybe_update_transcription_config(snapshot, values)
+
+  defp maybe_update_transcription_config(snapshot, []), do: snapshot
+
+  defp maybe_update_transcription_config(snapshot, values),
+    do: update_transcription_config(snapshot, values)
+
+  defp nilify_drop(:drop), do: nil
+  defp nilify_drop(model), do: model
+
+  defp drop_transcription_model(snapshot) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    transcription = fermix_core |> Keyword.get(:transcription, []) |> Keyword.delete(:model)
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :transcription, transcription))
+  end
+
+  defp normalize_transcription_backend(nil), do: nil
+  defp normalize_transcription_backend(""), do: nil
+
+  defp normalize_transcription_backend(value) when is_atom(value),
+    do: normalize_transcription_backend(Atom.to_string(value))
+
+  defp normalize_transcription_backend(value) when is_binary(value) do
+    case value |> String.trim() |> String.downcase() do
+      backend when backend in ~w(openai xai deepgram) -> backend
+      invalid -> raise ArgumentError, "invalid transcription_backend #{inspect(invalid)}"
+    end
+  end
+
+  defp normalize_transcription_backend(value) do
+    raise ArgumentError, "invalid transcription_backend #{inspect(value)}"
+  end
+
+  # `model` is a single shared key. An explicit model always wins. Otherwise, snap
+  # the model to the new backend's default ONLY when the backend actually changes,
+  # so a Deepgram backend never inherits the OpenAI-shaped default and 400s (M21
+  # §5.4 coherence caveat), and the modelless xai backend drops the model entirely
+  # (its `default_model/1` is `{:error, :modelless}`) — while a same-backend re-run
+  # with no model flag leaves any operator-pinned model untouched (`nil` ⇒ dropped,
+  # merge keeps it).
+  defp transcription_model(_backend, model, _current) when is_binary(model) do
+    case String.trim(model) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp transcription_model(nil, _model, _current), do: nil
+
+  defp transcription_model(backend, nil, current) when is_binary(backend) do
+    if backend == current do
+      nil
+    else
+      snap_default_transcription_model(backend)
+    end
+  end
+
+  defp snap_default_transcription_model(backend) do
+    case TranscriptionRegistry.default_model(backend) do
+      {:ok, model} -> model
+      {:error, :modelless} -> :drop
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp current_transcription_backend(snapshot) do
+    snapshot
+    |> Map.get(:fermix_core, [])
+    |> Keyword.get(:transcription, [])
+    |> Keyword.get(:backend)
+  end
+
+  defp update_transcription_config(snapshot, values) do
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+
+    transcription =
+      fermix_core
+      |> Keyword.get(:transcription, [])
+      |> Keyword.merge(values)
+
+    Map.put(snapshot, :fermix_core, Keyword.put(fermix_core, :transcription, transcription))
   end
 
   defp put_whatsapp_config(snapshot, answers) do

@@ -59,6 +59,8 @@ defmodule FermixChannels.Channels.WhatsAppTest do
   end
 
   defmodule FakeTranscriptionBackend do
+    def name, do: :fake_transcription
+
     def transcribe(path, opts) do
       send(
         Keyword.fetch!(opts, :test_pid),

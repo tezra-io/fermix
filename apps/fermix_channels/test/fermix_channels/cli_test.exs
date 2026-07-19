@@ -37,6 +37,18 @@ defmodule FermixChannels.CLITest do
       assert message.chat_id == "cli"
       assert message.reply_target == "cli"
       assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
+      assert message.request_cwd == nil
+    end
+
+    test "sets request_cwd from the cwd opt, and nil for a blank/absent cwd" do
+      assert {:ok, [with_cwd]} = CLI.parse_input("hello", cwd: "/home/owner/project")
+      assert with_cwd.request_cwd == "/home/owner/project"
+
+      assert {:ok, [blank]} = CLI.parse_input("hello", cwd: "  ")
+      assert blank.request_cwd == nil
+
+      assert {:ok, [absent]} = CLI.parse_input("hello")
+      assert absent.request_cwd == nil
     end
 
     test "accepts a custom session id" do

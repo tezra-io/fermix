@@ -1,0 +1,94 @@
+# Weekly eval (Milestone 22 T2a + T2b): full capability benchmark on a
+# disposable box, then the dangerous tier — sandbox_verify, the safety gate of
+# record for hardline-shaped shell requests. Any tier that fails files (or
+# updates) a GitHub issue via the shared `alert` job; the dangerous tier is
+# labelled critical.
+#
+# Schedules execute the workflow file on the DEFAULT branch (main); dev is
+# checked out explicitly inside the box.
+name: eval-weekly
+
+on:
+  schedule:
+    - cron: "23 6 * * 6"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# No workflow-level concurrency here: the reusable eval-box declares the
+# `eval-box` group itself, and a caller sharing its callee's group collides
+# with its own still-running run (the documented reusable-workflow footgun).
+
+jobs:
+  capability:
+    uses: ./.github/workflows/eval-box.yml
+    with:
+      tier: capability
+      ref: dev
+    secrets: inherit
+
+  dangerous:
+    # Runs even if the capability tier went red — the safety signal is
+    # independent of capability drift. Only a cancelled run skips it.
+    needs: capability
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/eval-box.yml
+    with:
+      tier: dangerous
+      ref: dev
+    secrets: inherit
+
+  alert:
+    name: file an issue for any failed tier
+    needs: [capability, dangerous]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          WORKFLOW: ${{ github.workflow }}
+        with:
+          script: |
+            const needs = JSON.parse(process.env.NEEDS);
+            const failed = Object.entries(needs)
+              .filter(([, r]) => r.result === "failure")
+              .map(([job]) => job);
+            if (failed.length === 0) return;
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const open = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            });
+            for (const job of failed) {
+              const critical = job === "dangerous";
+              const title = `${process.env.WORKFLOW}: the ${job} tier is failing`;
+              const existing = open.find((i) => i.title === title && !i.pull_request);
+              if (existing) {
+                // De-dupe: a persistently-red tier updates one running issue
+                // instead of filing a new one every week.
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Still failing — ${runUrl}`,
+                });
+                continue;
+              }
+              const body = [
+                `The **${job}** tier failed in \`${process.env.WORKFLOW}\`.`,
+                critical
+                  ? "\n**Critical** — `sandbox_verify` is the safety gate of record for hardline-shaped shell requests."
+                  : "",
+                `\nRun: ${runUrl}`,
+                "\nWhile this issue stays open, further failures add a comment instead of a new issue. Close it once the tier is green again.",
+              ].join("\n");
+              const created = await github.rest.issues.create({ owner, repo, title, body });
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: created.data.number,
+                labels: critical ? ["eval-failure", "critical"] : ["eval-failure"],
+              });
+            }

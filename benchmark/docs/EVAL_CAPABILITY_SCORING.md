@@ -104,8 +104,8 @@ The current grader (`grade.py`) emits boolean `GateResult`s; `judge.py` parses a
 1. **Keep the judge score.** Stop binarizing it; aggregate per-case → per-config.
 2. **Add ground-truth task success** to the suite schema (`EXPECT_SPEC` + one `grade.grade` branch each):
    - `expected_answer` + `match: exact|numeric|f1` — closed-form (GAIA-style). The truest cross-model signal because it's tool-agnostic.
-   - `checker:` — ✅ **SHIPPED (2026-06-30).** A `{script, mode: exit|json, seed?}` block: the runner seeds a fresh per-trial scoped dir under the agent's sandbox (`$FERMIX_HOME/workspace/eval/<task>/t<i>/`, the absolute path templated in as `{ws}`), drives the turn, runs the checker script over the END-STATE, and SafeRm-tears-down. `evallib/checker.py` + `evallib/safe_rm.py`; 3 anchor tasks (pytest bug-fix, CSV→JSON, constrained email) in `suites/capability/coding.yaml` with oracle/negative proofs. Mirrors tau-bench DB-state / SWE-bench tests.
-   - `rubric` (already present) → **G-Eval / Agent-Task-Completion judge** with an **independent judge model** (use `judge.backend: openai` with `EVAL_JUDGE_API_KEY`, never the model under test — fairness; the default `fermix` backend is circular for a ranking run).
+   - `checker:` — ✅ **SHIPPED (2026-06-30).** A `{script, mode: exit|json, seed?}` block: the runner seeds a fresh per-trial scoring dir at `$FERMIX_HOME/workspace/eval/<task>/t<i>/`, templates its absolute path as `{ws}`, drives the turn, runs the checker over the END-STATE, and SafeRm-tears-down. Script/fixture paths are harness-relative and reject traversal, absolute paths, and symlink escapes; subprocess env is allowlisted and numeric verdicts/timeouts must be finite and bounded. The scoring dir is not the agent's sandbox root and does not prove there were no writes elsewhere, so capability runs require a disposable workspace. Checkers remain trusted tracked scripts, not an untrusted-code sandbox. `evallib/checker.py` + `evallib/safe_rm.py`; anchor tasks live in `suites/capability/coding.yaml`. Mirrors tau-bench DB-state / SWE-bench tests.
+   - `rubric` (already present) → **G-Eval / Agent-Task-Completion judge** with an **independent judge model**. The default `fermix` backend calls a separately configured, tool-free daemon evaluator (`[fermix_core.routing] judge_*`), not an ordinary agent turn; it refuses an actual judge model matching any actual candidate model. `judge.backend: openai` with `EVAL_JUDGE_MODEL` and `EVAL_JUDGE_API_KEY` remains the explicit external option.
 3. **Reliability over single-shot.** Run each task **k = 5–10 trials** per config. Report:
    - **pass@1** — raw capability
    - **pass^k** — *all k* trials pass (tau-bench convention); the honest headline for an always-on agent (tau-bench: 61% pass@1 → ~25% pass^8 — the reliability gap is the product story).
@@ -119,7 +119,7 @@ The current grader (`grade.py`) emits boolean `GateResult`s; `judge.py` parses a
 - **Paired design for uplift** — same tasks in both arms; report a **paired CI on the difference** (McNemar on discordant pairs for binary), not two separate error bars. Biggest precision win.
 - **Power-size first:** `n ≈ (1.96+0.84)²·σ²/δ²` for the minimum detectable uplift δ. A +10pp claim needs hundreds of task-trials, not a dozen.
 - **Bootstrap CIs** (≥1–2k resamples) for aggregate scores; `n<100` → normal-approx CI unreliable.
-- **Contamination control:** keep a **private held-out split Fermix never ships and never posts answers for**; embed a **canary string** in the public set; publish the public-vs-private gap as a credibility asset (a large gap is a bug). Re-run Tier 0 baselines yourself on the *exact model build* — never cite third-party published numbers (contamination cancels only when both arms use the same build/data).
+- **Contamination control:** keep a **private held-out split Fermix never ships** and never writes into an Opik dataset/experiment; candidate turns still produce required traces in the private local eval project. Embed a **canary string** in the public set; publish the public-vs-private gap as a credibility asset (a large gap is a bug). Re-run Tier 0 baselines yourself on the *exact model build* — never cite third-party published numbers (contamination cancels only when both arms use the same build/data).
 - **Pin everything:** model snapshot ids, temperature, tool versions, dataset commit, harness commit, date. Re-run on model updates.
 
 ---
@@ -173,12 +173,12 @@ Lead with what the market cites for a **general assistant** (not coding-only):
 - ✅ **DONE — leaderboard:** `evallib/leaderboard.py` — cross-config store (latest-per-config) + MD/JSON render, inf-safe round-trip. 6 tests. (Covers the §-ranking-report deliverable.)
 
 **Phase 1 — Cross-model capability ranking (the core ask). ✅ SHIPPED + LIVE-VETTED (2026-06-28).**
-- ✅ `bin/run_capability.py` — drives the capability suite k trials/task against the current dev daemon, scores (closed-form/judge + safety gate), **auto-detects the served model as `config_id`**, aggregates, writes Opik experiment + feedback scores, upserts the leaderboard.
+- ✅ `bin/run_capability.py` — drives the capability suite k trials/task, scores (closed-form/judge + safety gate), **auto-detects the served model as `config_id`**, aggregates, writes Opik experiment + feedback scores, and upserts the leaderboard. Host-read-only work, including `cap_response_quality`, defaults to `~/.fermix-dev` / `fermix-dev`; production `~/.fermix` is forbidden. `isolated_mutation`, `external_write`, `desktop_input`, and `destructive` require a disposable eval/e2e home/project and both isolation confirmations. Non-checker `expensive` work may use development with `--confirm-cost`, while checker-backed capability cases remain isolated because they seed and write trial files; `private_account_read` alone may use development with `--confirm-private-data`.
 - ✅ Matrix enumerated from `ModelCatalog` via `mix fermix.eval.matrix` (§2), not hard-coded.
 - ✅ Seed suite `suites/capability/core.yaml` (7 ground-truth tasks: knowledge/math/web).
 - ✅ **Live smoke passed** against gpt-5.5: closed-form scorers correct, `pass^2=1.00`, real p95 latency + $/✓ + tok/✓, scores confirmed in Opik.
 - **Decision (vs §3 draft):** cross-model swap is **operator-driven daemon cycling**, NOT an auto-restart or Option-B per-turn override — the eval is internal tooling, so it adds **zero shipped product surface** (only the read-only matrix Mix task). The eval-daemon profile reduces to a channels-off `config.toml` + env; auto-restarting the user's daemon was rejected as invasive.
-- **NEXT** — expand the seed suite to the full ~40–80 tagged tasks + private held-out split + canary; wire the independent `openai` judge backend for a cross-model-fair ranking run; run a real ≥2-model sweep once a second provider's creds are in place.
+- **NEXT** — expand the seed suite to the full ~40–80 tagged tasks + private held-out split + canary; run a real ≥2-model sweep once a second provider's creds are in place.
 
 ### Live-API gotchas discovered (carry forward — both were silent "204 but no-op" traps)
 1. **Feedback scores need `project_name` per score.** `PUT /traces/feedback-scores` returns 204 but **silently drops** any score missing `project_name`. `experiments.put_feedback_scores` now requires it and stamps every score; the integration test asserts readability (not just a 204).
@@ -206,13 +206,13 @@ Lead with what the market cites for a **general assistant** (not coding-only):
 
 **Phase 4 — Operationalize. ✅ SHIPPED.**
 - ✅ Reproducibility pin: `suite_hash` (content hash of the loaded suites) + trials/k/threshold stamped into each leaderboard row. ✅ `--estimate` cost-governance preflight. ✅ Cadence `Makefile` (`make capability`/`rank`/`tests`/`regression`/`baseline`/`uplift`/`gaia`/`lmeval`).
-- ✅ **Suite expansion:** 7 → **20 public tasks** across knowledge/reasoning/instruction-following/web/safety, + a **4-task private held-out split** (`suites/capability/private/`, run with `--private`) with a **canary** string. ✅ **Independent judge** wired (`EVAL_JUDGE_BACKEND=openai`) with a circular-judge warning when the daemon judges itself.
+- ✅ **Suite expansion:** 7 → **20 public tasks** across knowledge/reasoning/instruction-following/web/safety, + a **4-task private held-out split** (`suites/capability/private/`, run with `--private`) with a **canary** string. ✅ **Independent judge** wired: restricted daemon evaluator by default, explicit OpenAI-compatible endpoint optionally; ordinary tool-capable agent judging is never used.
 
 ### Adversarial review pass 2 (13-agent workflow) — 8 findings, all fixed + tested (2026-06-28)
 The "plausible-but-wrong number" class — exactly what a benchmark tool must not ship:
 - **[high] Wald uplift CI collapsed at the boundary** (`b=10,c=0` → CI `[+100,+100]pp`, impossible certainty) and contradicted the exact test → replaced with **Newcombe's score-based paired CI** (non-degenerate); significance wording now driven solely by the exact McNemar p, with a disagreement flag. New CI tests.
 - **[high] GAIA scorer diverged from the official one** (number/list/string gating + whitespace) → **vendored GAIA's `question_scorer` verbatim**; parity tests for `1,234` / `1,2,3` / `$5` / `50%` / `sea gull`.
-- **[high] `--private` polluted the public ranking + published held-out answers to Opik** → private now runs ALONE under a `:private` row with **Opik writeback skipped** (verified: 0 private experiments in Opik).
+- **[high] `--private` polluted the public ranking + published held-out golds to an Opik dataset** → private now runs ALONE under a `:private` row with **dataset/experiment/feedback writeback skipped** (verified: 0 private experiments in Opik). Candidate prompts/replies still exist in daemon-emitted traces, so select a separate local eval/e2e project when they should not appear in `fermix-dev`.
 - **[high] safety refusal-regex unreliable** (incidental tokens passed, evadable gates) → safety is now **judge-scored** (regex can't separate refuse from comply) with broadened harm-artifact hard-gates; skipped without `--judge`.
 - **[med] numeric scorer took the FIRST number** (wrong after chain-of-thought) → takes the **last** number.
 - **[med] lm-eval GSM8K dual-filter collapse** (order-dependent strict vs flexible) → keeps + records the filter, deterministically prefers `flexible-extract`.
@@ -223,7 +223,7 @@ The "plausible-but-wrong number" class — exactly what a benchmark tool must no
 ### External review pass 3 — 4 findings, all valid, all fixed (2026-06-29)
 - **[P1] held-out answers shipped in the skill** (readable by any agent iterating the eval → not contamination-safe) → `--private` now loads from an operator-supplied dir OUTSIDE the repo (`FERMIX_EVAL_HOLDOUT_DIR` / `--private-data`, required); the shipped file is now a clearly-marked `holdout.example.yaml` template with no real golds.
 - **[P2] leaderboard key was the bare model slug** (`openai` & `openai_codex` both → `gpt-5.5`, silent overwrite) → key is now `provider/model` (from the trace's `provider` field). Caveat surfaced: the exporter maps `openai_codex`→`"openai"`, so that one pair still shares a key — the runner now prints a `--config-id` reminder, and the docs say so.
-- **[P3] `make capability` only ran `cap_core`** (docs said "all public suites") → target runs all public suites (17 tasks; +`capability-judged` for the safety suite).
+- **[P3] `make capability` only ran `cap_core`** (docs said "all public suites") → target runs the declared non-destructive public suites; `capability-judged` is the independent-judge response-quality axis. Destructive safety prompts are refused by this runner and remain VM-only.
 - **[P4] baseline arm looped on `k`, not `trials`** (`--trials 5 --k 3` → arms of different sample size, skewing uplift) → `score_case(trials, k, …)` drives `trials` turns, computes pass^k at `k`; regression test added.
 - **Totals: 89 Python tests + 6 Elixir tests green.**
 
@@ -246,7 +246,10 @@ The "plausible-but-wrong number" class — exactly what a benchmark tool must no
 - Cost gaming (buy accuracy with tokens) → always report $/success from the *same* run.
 - Contamination / overfitting-to-benchmark (iterating prompts against the reported set = training on the test set).
 - Live-web drift (GAIA/AssistantBench decay over time); self-hosted envs (tau2) are stable.
-- Same host-state discipline as the rest of the repo: the eval must not mutate real `FERMIX_HOME`/keychain; seed configs, isolate daemons by `FERMIX_HOME`.
+- Same host-state discipline as the rest of the repo: safe/read-only evals may use
+  `~/.fermix-dev`, but any mutating, external-write, desktop-input, or destructive
+  eval must use a disposable `FERMIX_HOME` and must never touch production
+  `~/.fermix` or the real keychain.
 
 ---
 

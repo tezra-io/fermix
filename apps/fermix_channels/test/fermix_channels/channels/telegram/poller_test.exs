@@ -150,7 +150,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       assert_receive {:get_updates, startup_body}, 1_000
       assert startup_body["offset"] == 0
       assert startup_body["timeout"] == 0
-      assert startup_body["allowed_updates"] == ["message"]
+      assert startup_body["allowed_updates"] == ["message", "callback_query"]
       assert_offset(pid, 0)
 
       send(pid, :poll)
@@ -158,7 +158,7 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       assert_receive {:get_updates, poll_body}, 1_000
       assert poll_body["offset"] == 0
       assert poll_body["timeout"] == 50
-      assert poll_body["allowed_updates"] == ["message"]
+      assert poll_body["allowed_updates"] == ["message", "callback_query"]
     end
 
     test "advances offset after processing updates" do
@@ -278,6 +278,66 @@ defmodule FermixChannels.Channels.Telegram.PollerTest do
       assert_receive {:"$gen_cast", {:ingest, %{content: "hello"}}}, 1_000
       assert_receive {:"$gen_cast", {:ingest, %{content: "world"}}}, 1_000
       assert_offset(pid, 102)
+    end
+  end
+
+  describe "callback_query (inline Approve button)" do
+    test "forwards a tap as a synthesized /confirm and acks the callback" do
+      test_pid = self()
+
+      callback_update = %{
+        "update_id" => 300,
+        "callback_query" => %{
+          "id" => "cbq-1",
+          "data" => "grant:TOK98765",
+          "from" => %{"id" => 111, "username" => "alice"},
+          "message" => %{"message_id" => 55, "chat" => %{"id" => 42}}
+        }
+      }
+
+      # Path-aware stub: getUpdates draws from the sequence; the ack endpoints
+      # answer ok without consuming the sequence (they'd otherwise desync it).
+      {:ok, seq} = Agent.start_link(fn -> [{:ok, []}, {:ok, [callback_update]}] end)
+
+      Req.Test.stub(:telegram_poller, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        send(test_pid, {:tg_call, conn.request_path, decoded})
+
+        updates =
+          if String.ends_with?(conn.request_path, "/getUpdates") do
+            Agent.get_and_update(seq, fn
+              [next] -> {next, [next]}
+              [next | rest] -> {next, rest}
+            end)
+            |> elem(1)
+          else
+            []
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true, "result" => updates}))
+      end)
+
+      pid = start_poller()
+      send(pid, :poll)
+      assert_receive {:tg_call, startup_path, _}, 1_000
+      assert String.ends_with?(startup_path, "/getUpdates")
+
+      send(pid, :poll)
+
+      # The tap funnels through as the synthesized /confirm inbound message.
+      assert_receive {:"$gen_cast", {:ingest, %{content: "/confirm TOK98765", chat_id: "42"}}},
+                     1_000
+
+      # ...and the poller clears the spinner and strips the used button.
+      assert_receive {:tg_call, "/bottest-bot-token/answerCallbackQuery", ack}, 1_000
+      assert ack["callback_query_id"] == "cbq-1"
+      assert_receive {:tg_call, "/bottest-bot-token/editMessageReplyMarkup", edit}, 1_000
+      assert edit["message_id"] == 55
+
+      assert_offset(pid, 301)
     end
   end
 end

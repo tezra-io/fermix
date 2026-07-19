@@ -50,6 +50,7 @@ defmodule FermixChannels.CLI do
           channel: @channel,
           chat_id: session_id,
           reply_target: session_id,
+          request_cwd: request_cwd(opts),
           metadata: %{source: :cli, user_id: "cli", chat_type: "private"},
           media_parts: media_parts
         })
@@ -87,6 +88,12 @@ defmodule FermixChannels.CLI do
              agent_server: Keyword.get(opts, :agent_server, Queue),
              reply_fn: fn
                {:text, text} ->
+                 send(parent, {ref, {:reply, text}})
+                 :ok
+
+               # The one-tap button is Telegram-only; the CLI gets the prompt text,
+               # which carries the tap-to-copy `/confirm <token>` command.
+               {:approval_prompt, text, _token} ->
                  send(parent, {ref, {:reply, text}})
                  :ok
 
@@ -161,6 +168,21 @@ defmodule FermixChannels.CLI do
 
   defp default_sender do
     System.get_env("USER") || "operator"
+  end
+
+  # A non-blank string cwd, or nil. The daemon forwards the CLI's origin cwd
+  # verbatim; this is the single boundary that validates it before it lands on
+  # the message, so a missing/blank/non-string value stays nil and the sandbox
+  # falls back to its defaults.
+  defp request_cwd(opts) do
+    case Keyword.get(opts, :cwd) do
+      cwd when is_binary(cwd) ->
+        trimmed = String.trim(cwd)
+        if trimmed == "", do: nil, else: trimmed
+
+      _ ->
+        nil
+    end
   end
 
   defp maybe_emit_inbound_message({:ok, messages}, duration_us) when messages != [] do

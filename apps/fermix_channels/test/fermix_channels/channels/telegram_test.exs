@@ -75,8 +75,46 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert msg.metadata.user_id == "111"
     end
 
-    test "returns {:ok, []} for non-message updates" do
-      assert {:ok, []} = Telegram.parse_update(%{"callback_query" => %{}})
+    test "returns {:ok, []} for a callback_query without data" do
+      assert {:ok, []} = Telegram.parse_update(%{"callback_query" => %{"id" => "x"}})
+    end
+
+    test "ignores a callback_query whose payload is not grant-namespaced" do
+      update = %{
+        "callback_query" => %{
+          "id" => "cbq-1",
+          "data" => "AB12CD34",
+          "from" => %{"id" => 111, "username" => "alice"},
+          "message" => %{"message_id" => 55, "chat" => %{"id" => 123, "type" => "private"}}
+        }
+      }
+
+      assert {:ok, []} = Telegram.parse_update(update)
+    end
+
+    test "synthesizes a /confirm message from an inline-button (callback_query) tap" do
+      update = %{
+        "callback_query" => %{
+          "id" => "cbq-1",
+          "data" => "grant:AB12CD34",
+          "from" => %{"id" => 111, "username" => "alice"},
+          "message" => %{
+            "message_id" => 55,
+            "chat" => %{"id" => 123, "type" => "private"},
+            "message_thread_id" => 9
+          }
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      # Funnels through the exact typed-/confirm path; origin fields come from the
+      # callback (from.id is Telegram-authenticated).
+      assert msg.content == "/confirm AB12CD34"
+      assert msg.channel == "telegram"
+      assert msg.chat_id == "123"
+      assert msg.reply_target == "123"
+      assert msg.thread_ts == 9
+      assert msg.metadata.user_id == "111"
     end
 
     test "parses a photo message into an image attachment ref (largest variant, file_id only)" do
@@ -136,6 +174,148 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert {:ok, [msg]} = Telegram.parse_update(update)
       refute Map.has_key?(msg.metadata, :media_group_id)
     end
+
+    test "parses a voice note into an audio attachment (audio/ogg, file_id only)" do
+      update = %{
+        "message" => %{
+          "message_id" => 10,
+          "voice" => %{
+            "file_id" => "voice-1",
+            "duration" => 4,
+            "mime_type" => "audio/ogg",
+            "file_size" => 12_345
+          },
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.content == ""
+
+      assert [
+               %{
+                 kind: :audio,
+                 file_id: "voice-1",
+                 mime_type: "audio/ogg",
+                 size_bytes: 12_345,
+                 url: nil
+               }
+             ] = msg.attachments
+    end
+
+    test "keeps a voice-note caption as message content alongside the audio attachment" do
+      update = %{
+        "message" => %{
+          "message_id" => 11,
+          "caption" => "summarize this",
+          "voice" => %{"file_id" => "voice-2", "file_size" => 500},
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.content == "summarize this"
+      assert [%{kind: :audio, file_id: "voice-2", mime_type: "audio/ogg"}] = msg.attachments
+    end
+
+    test "parses an audio file using its declared mime type" do
+      update = %{
+        "message" => %{
+          "message_id" => 12,
+          "audio" => %{"file_id" => "audio-1", "mime_type" => "audio/mpeg", "file_size" => 999},
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+
+      assert [
+               %{
+                 kind: :audio,
+                 file_id: "audio-1",
+                 mime_type: "audio/mpeg",
+                 size_bytes: 999,
+                 url: nil
+               }
+             ] = msg.attachments
+    end
+
+    test "parses a video note into an audio attachment tagged video/mp4" do
+      update = %{
+        "message" => %{
+          "message_id" => 13,
+          "video_note" => %{
+            "file_id" => "vnote-1",
+            "length" => 240,
+            "duration" => 8,
+            "file_size" => 7_777
+          },
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+
+      assert [
+               %{
+                 kind: :audio,
+                 file_id: "vnote-1",
+                 mime_type: "video/mp4",
+                 size_bytes: 7_777,
+                 url: nil
+               }
+             ] = msg.attachments
+    end
+
+    test "parses an audio-MIME document into an audio attachment" do
+      update = %{
+        "message" => %{
+          "message_id" => 14,
+          "document" => %{
+            "file_id" => "doc-1",
+            "mime_type" => "audio/x-wav",
+            "file_name" => "memo.wav",
+            "file_size" => 4_242
+          },
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+
+      assert [
+               %{
+                 kind: :audio,
+                 file_id: "doc-1",
+                 mime_type: "audio/x-wav",
+                 size_bytes: 4_242,
+                 url: nil
+               }
+             ] = msg.attachments
+    end
+
+    test "leaves a non-audio document unparsed (unchanged behavior)" do
+      update = %{
+        "message" => %{
+          "message_id" => 15,
+          "document" => %{
+            "file_id" => "doc-2",
+            "mime_type" => "application/pdf",
+            "file_size" => 4_242
+          },
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+      assert msg.attachments == []
+    end
   end
 
   # -- download_attachment/2 --
@@ -151,6 +331,47 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert {:error, {:byte_cap_exceeded, _actual, _allowed}} =
                Telegram.download_attachment(%{}, attachment)
+    end
+
+    test "refuses an over-cap voice note by declared size before any network call" do
+      attachment = %{
+        kind: :audio,
+        file_id: "voice-big",
+        mime_type: "audio/ogg",
+        size_bytes: 21 * 1_024 * 1_024
+      }
+
+      assert {:error, {:byte_cap_exceeded, _actual, _allowed}} =
+               Telegram.download_attachment(%{}, attachment)
+    end
+
+    test "a mime-less audio attachment gets its extension from the getFile file_path (not .bin)" do
+      # Telegram makes the Audio `mime_type` optional; a clip without it must not
+      # land in a `.bin` temp file (which the hosted backends reject as
+      # application/octet-stream). The getFile `file_path` carries the real ext.
+      Req.Test.stub(:telegram, fn conn ->
+        if String.ends_with?(conn.request_path, "/getFile") do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(
+            200,
+            Jason.encode!(%{"ok" => true, "result" => %{"file_path" => "music/track.mp3"}})
+          )
+        else
+          Plug.Conn.send_resp(conn, 200, "AUDIOBYTES")
+        end
+      end)
+
+      attachment = %{kind: :audio, file_id: "audio-nomime", mime_type: nil}
+
+      assert {:ok, path} = Telegram.download_attachment(%{}, attachment)
+
+      try do
+        assert Path.extname(path) == ".mp3"
+        assert File.read!(path) == "AUDIOBYTES"
+      after
+        FermixTestSupport.SafeRm.rm!(path)
+      end
     end
   end
 
@@ -393,6 +614,96 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert {:error, _reason} =
                send_msg("123", "hello")
+    end
+
+    test "a plain text send carries no reply_markup (no button regression)" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = send_msg("123", "hello")
+
+      assert_received {:telegram_request, _path, body}
+      refute Map.has_key?(body, "reply_markup")
+    end
+  end
+
+  # -- send_approval/3 (one-tap Approve button) --
+
+  describe "send_approval/3" do
+    defp approval_message(chat_id, thread_ts \\ nil) do
+      Message.new!(%{
+        id: "1",
+        content: "x",
+        sender: "alice",
+        channel: "telegram",
+        chat_id: chat_id,
+        reply_target: chat_id,
+        thread_ts: thread_ts
+      })
+    end
+
+    test "attaches an inline Approve button whose callback_data is the grant-namespaced token" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok =
+               Telegram.send_approval(
+                 approval_message("123"),
+                 "Approve with `/confirm TOK12345`",
+                 "TOK12345"
+               )
+
+      assert_received {:telegram_request, path, body}
+      assert path == "/bottest-bot-token/sendMessage"
+      assert body["chat_id"] == "123"
+      assert body["text"] =~ "Approve"
+
+      assert body["reply_markup"]["inline_keyboard"] == [
+               [%{"text" => "✅ Approve", "callback_data" => "grant:TOK12345"}]
+             ]
+    end
+
+    test "carries the forum thread id when the origin has one" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok = Telegram.send_approval(approval_message("123", 77), "approve", "TOK12345")
+
+      assert_received {:telegram_request, _path, body}
+      assert body["message_thread_id"] == 77
+    end
+  end
+
+  # -- acknowledge_callback/2 (spinner + strip used button) --
+
+  describe "acknowledge_callback/2" do
+    test "answers the callback query and strips the used button" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      callback = %{
+        "id" => "cbq-9",
+        "message" => %{"message_id" => 55, "chat" => %{"id" => 123}}
+      }
+
+      assert :ok =
+               Telegram.acknowledge_callback(callback, req_options: [plug: {Req.Test, :telegram}])
+
+      assert_received {:telegram_request, "/bottest-bot-token/answerCallbackQuery", answer_body}
+      assert answer_body["callback_query_id"] == "cbq-9"
+
+      assert_received {:telegram_request, "/bottest-bot-token/editMessageReplyMarkup", edit_body}
+      assert edit_body["chat_id"] == "123"
+      assert edit_body["message_id"] == 55
+      assert edit_body["reply_markup"]["inline_keyboard"] == []
+    end
+
+    test "answers the query even when the callback carries no message to edit" do
+      stub_telegram(self(), 200, %{"ok" => true})
+
+      assert :ok =
+               Telegram.acknowledge_callback(%{"id" => "cbq-9"},
+                 req_options: [plug: {Req.Test, :telegram}]
+               )
+
+      assert_received {:telegram_request, "/bottest-bot-token/answerCallbackQuery", _body}
+      refute_received {:telegram_request, "/bottest-bot-token/editMessageReplyMarkup", _}
     end
   end
 

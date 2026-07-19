@@ -266,7 +266,7 @@ defmodule FermixCore.Jobs.Registry do
          created_by_agent_id: optional_string(attrs, :created_by_agent_id, @default_agent_id),
          created_by_session_id: optional_string(attrs, :created_by_session_id, nil),
          created_by_channel: optional_string(attrs, :created_by_channel, nil),
-         created_by_trust: optional_string(attrs, :created_by_trust, "operator"),
+         created_by_trust: required_trust(attrs),
          expires_at: expires_at
        }}
     end
@@ -362,6 +362,20 @@ defmodule FermixCore.Jobs.Registry do
     |> case do
       "" -> "job"
       slug -> slug
+    end
+  end
+
+  # Every job carries the creator's trust — there is no default. A missing or
+  # out-of-vocabulary value fails creation loudly (caught by the ArgumentError
+  # rescue in normalize_create_attrs, surfaced as {:error, message}).
+  defp required_trust(attrs) do
+    case fetch_field(attrs, :created_by_trust) do
+      trust when trust in ["operator", "guest"] ->
+        trust
+
+      other ->
+        raise ArgumentError,
+              "created_by_trust must be \"operator\" or \"guest\", got: #{inspect(other)}"
     end
   end
 

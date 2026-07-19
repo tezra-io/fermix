@@ -1,4 +1,5 @@
 suite: knowledge_qa
+risk: host_readonly
 title: "Knowledge Q&A — answer directly from reasoning, no tools"
 description: >
   The foundational smoke test: plain reasoning and Q&A the model should answer
@@ -27,7 +28,7 @@ scenarios:
         query: "What's 15% of 240? Just the number is fine."
         expect:
           reply_matches: "(?i)\\b36\\b"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -36,7 +37,7 @@ scenarios:
         query: "If a train leaves at 2:15pm and arrives at 4:45pm, how long was the trip?"
         expect:
           reply_matches: "(?i)2\\s*(hours?|hrs?)\\s*(and\\s*)?30\\s*min|2\\s*h(ours?)?\\s*30|two and a half|150\\s*min"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -45,7 +46,7 @@ scenarios:
         query: "I have 3 red socks and 4 blue socks in a drawer. If I pull two socks at random, can I be sure they match? Yes or no, and why."
         expect:
           reply_matches: "(?i)\\bno\\b"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 3
           max_cost_usd: 0.4
           max_duration_ms: 60000
@@ -60,7 +61,7 @@ scenarios:
         query: "In one sentence, what is photosynthesis?"
         expect:
           reply_matches: "(?i)(?=.*(sun|solar|light|radia|photon))(?=.*(energ|sugar|glucose|food|carbohydrate|organic|nourish))"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -69,7 +70,7 @@ scenarios:
         query: "What does the word 'inflation' mean in economics?"
         expect:
           reply_matches: "(?i)(general|overall|sustained).*(rise|increase).*pric|pric.*(rise|increase|go(ing)? up)|purchasing power"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -78,7 +79,7 @@ scenarios:
         query: "What does it mean for an HTTP method to be idempotent?"
         expect:
           reply_matches: "(?i)(same|identical).*(result|effect|state)|repeat(ed|ing)?.*(no|same|without).*(additional|further|extra|different)|multiple.*(times|requests).*same"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.4
           max_duration_ms: 60000
@@ -123,7 +124,7 @@ scenarios:
         query: "What's the shortest way to reverse a string in Python?"
         expect:
           reply_matches: "(?i)\\[::-1\\]"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.4
           max_duration_ms: 60000
@@ -132,7 +133,7 @@ scenarios:
         query: "In Python, what's the main difference between a list and a tuple?"
         expect:
           reply_matches: "(?i)mutab|immutab|can(no|')?t.*(change|modif|reassign)|tuples?.*(fixed|immutable)"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.4
           max_duration_ms: 60000
@@ -141,7 +142,7 @@ scenarios:
         query: "In a FizzBuzz, which operator do you use to check if a number is divisible by 3?"
         expect:
           reply_matches: "(?i)modul(o|us)|remainder|%|mod\\b"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -156,7 +157,7 @@ scenarios:
         query: "Quick comparison: what's the key difference between TCP and UDP?"
         expect:
           reply_matches: "(?i)(reliab|connection|ordered|guarantee|acknowledge).*tcp|tcp.*(reliab|connection|ordered|guarantee)|udp.*(faster|connectionless|no\\s*guarantee|unreliable|lossy)"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.4
           max_duration_ms: 60000
@@ -165,7 +166,7 @@ scenarios:
         query: "Which is larger, one million or one thousand thousand?"
         expect:
           reply_matches: "(?i)equal|same|both.*(equal|same)|1,?000,?000|one million.*=.*thousand thousand|they(')?re the same"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.3
           max_duration_ms: 60000
@@ -174,7 +175,7 @@ scenarios:
         query: "In one or two lines, how is a GPU different from a CPU?"
         expect:
           reply_matches: "(?i)parallel|many (small )?cores|thousands of cores|graphics|throughput.*latency|cpu.*(few|fewer|general).*core"
-          tools_none: [web_search, shell, file_read]
+          max_tool_calls: 0
           max_iterations: 2
           max_cost_usd: 0.4
           max_duration_ms: 60000

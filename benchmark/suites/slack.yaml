@@ -15,8 +15,9 @@
 # any channel whose history is read.
 #
 # PRIVACY NOTE: channel names, messages, and member info land in local Opik
-# traces (the dev daemon captures content). Local-only; purge with --purge.
+# traces (the dev daemon captures content). Clean one run with --purge-run <run-id>.
 suite: slack
+risk: private_account_read
 title: "Slack — workspace read paths + read-only honesty"
 description: >
   Verifies the enabled Slack plugin end-to-end through the real agent path:

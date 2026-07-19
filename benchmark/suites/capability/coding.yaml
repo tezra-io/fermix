@@ -1,4 +1,5 @@
 suite: cap_coding
+risk: isolated_mutation
 title: "Capability — coding & artifact tasks (end-state checker scored)"
 description: >
   Realistic agent tasks graded by a programmatic CHECKER over the sandbox

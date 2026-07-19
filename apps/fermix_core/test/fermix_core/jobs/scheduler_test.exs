@@ -102,6 +102,34 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  defmodule FaultRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo GenServer that injects a
+    # `{:error, :injected_fault}` reply for exactly one request tag and forwards
+    # everything else. Lets a scheduler tick fail on a chosen path (scan, expiry
+    # lookup, stale-skip store, claim) with no host-state mutation.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      {:ok, %{real: Keyword.fetch!(opts, :real), fail: Keyword.fetch!(opts, :fail)}}
+    end
+
+    @impl true
+    def handle_call(request, _from, %{fail: fail, real: real} = state) do
+      if request_tag(request) == fail do
+        {:reply, {:error, :injected_fault}, state}
+      else
+        {:reply, GenServer.call(real, request), state}
+      end
+    end
+
+    defp request_tag(request) when is_tuple(request), do: elem(request, 0)
+    defp request_tag(request) when is_atom(request), do: request
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-jobs-scheduler-#{unique}.db")
@@ -127,6 +155,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Frequent Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check project status."
@@ -168,6 +197,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Slow Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check slowly."
@@ -201,6 +231,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Editable Check",
                  description: "Original description",
                  schedule: "every 15 minutes",
@@ -245,6 +276,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Temporary Quote",
                  schedule: "every 15 minutes",
                  task_prompt: "Send a temporary quote.",
@@ -280,6 +312,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Crashy Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Crash during the fake runner."
@@ -315,6 +348,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Pending Delivery Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Complete, then crash before delivery.",
@@ -370,6 +404,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Soon Reminder",
                  schedule: DateTime.to_iso8601(run_at),
                  task_prompt: "Run soon."
@@ -400,6 +435,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Stale Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check after a long sleep."
@@ -437,6 +473,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Recent Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check shortly after the due time."
@@ -466,6 +503,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Stale Temporary Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check until expiry.",
@@ -501,6 +539,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Late One-off",
                  schedule: DateTime.to_iso8601(~U[2026-05-02 14:00:00Z]),
                  task_prompt: "Fire even if the daemon was asleep."
@@ -533,6 +572,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "On Demand",
                  schedule: "every 15 minutes",
                  task_prompt: "Run when asked."
@@ -571,6 +611,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Busy Job",
                  schedule: "every 15 minutes",
                  task_prompt: "Run slowly."
@@ -594,6 +635,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Paused Job",
                  schedule: "every 15 minutes",
                  task_prompt: "Should not run while paused."
@@ -615,6 +657,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Expired Job",
                  schedule: "every 15 minutes",
                  task_prompt: "Should not run past expiry.",
@@ -644,6 +687,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Tool Triggered",
                  schedule: "every 15 minutes",
                  task_prompt: "Run from the tool."
@@ -690,6 +734,279 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert result.error =~ "Not found"
   end
 
+  describe "terminal disabled state on unparseable schedules" do
+    test "disables a due job whose schedule no longer parses (claim branch)", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      broken = seed_broken_schedule_job(repo, next_run_at: ~U[2026-05-02 14:10:00Z])
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_delay_ms: 1,
+          run_freshness_window_seconds: 3600
+        )
+
+      # Five minutes late: due and inside the freshness window, so it reaches the
+      # claim branch (not stale). The claim patch can't parse the schedule.
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      refute_receive {:job_runner, :started, _run_id, _job_id}, 100
+
+      assert {:ok, disabled} = Registry.get_job(broken.id, repo: repo)
+      assert disabled.state == "disabled"
+      assert disabled.enabled? == false
+      assert disabled.last_error =~ "schedule no longer parses"
+
+      # Terminal: the disabled job never appears in the due scan again.
+      assert {:ok, due} = Repo.due_scheduled_jobs(~U[2026-05-02 14:20:00Z], server: repo)
+      refute Enum.any?(due, &(&1.id == broken.id))
+    end
+
+    test "disables a stale recurring job whose schedule no longer parses (stale-skip branch)", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      broken = seed_broken_schedule_job(repo, next_run_at: ~U[2026-05-02 14:00:00Z])
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_delay_ms: 1,
+          run_freshness_window_seconds: 3600
+        )
+
+      # Two hours late: past the freshness window, so it reaches the stale-skip
+      # recompute — which parses the same broken expression.
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 16:00:00Z])
+      refute_receive {:job_runner, :started, _run_id, _job_id}, 100
+
+      assert {:ok, disabled} = Registry.get_job(broken.id, repo: repo)
+      assert disabled.state == "disabled"
+      assert disabled.enabled? == false
+      assert disabled.last_error =~ "schedule no longer parses"
+    end
+
+    test "resume of a still-broken disabled job fails loudly", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      broken = seed_broken_schedule_job(repo, next_run_at: ~U[2026-05-02 14:10:00Z])
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_delay_ms: 1,
+          run_freshness_window_seconds: 3600
+        )
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert {:ok, %{state: "disabled"}} = Registry.get_job(broken.id, repo: repo)
+
+      # Resume re-parses the schedule; still broken, so it fails loudly and the
+      # job stays disabled (edit first, then resume).
+      assert {:error, _reason} = Registry.resume_job(broken.id, repo: repo, scheduler: nil)
+      assert {:ok, still} = Registry.get_job(broken.id, repo: repo)
+      assert still.state == "disabled"
+    end
+  end
+
+  # These assert the timer re-arm, which reads the wall clock (Process.send_after
+  # + Process.read_timer), so the due times are real-clock-relative: the seeded
+  # job is genuinely past-due now. That keeps the scheduler's own init auto-tick
+  # (fired at the real now) and the explicit tick on the SAME branch, so every
+  # tick errors and floors the next timer at @due_error_backoff_ms.
+  describe "due-tick failure backoff" do
+    test "a scan failure re-arms the due timer at the backoff floor", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      # No job seeded: the scan itself faults, so nothing else runs this tick.
+      fault = start_fault_repo(repo, :due_scheduled_jobs)
+      scheduler = start_scheduler(fault, runner_supervisor, timer_enabled: true)
+
+      assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
+      assert_due_timer_backoff(scheduler)
+    end
+
+    test "an expiry-lookup failure re-arms the due timer at the backoff floor", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      now = DateTime.utc_now()
+      seed_due_job(repo, name: "Expiry Fault", expires_at: DateTime.add(now, -60, :second))
+      fault = start_fault_repo(repo, :get_scheduled_job)
+      scheduler = start_scheduler(fault, runner_supervisor, timer_enabled: true)
+
+      assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
+      assert_due_timer_backoff(scheduler)
+    end
+
+    test "a stale-skip store failure re-arms the due timer at the backoff floor", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      now = DateTime.utc_now()
+      # Two hours past due → stale-skip branch; the advance store faults.
+      seed_due_job(repo, name: "Stale Fault", due_at: DateTime.add(now, -7200, :second))
+      fault = start_fault_repo(repo, :upsert_scheduled_job)
+
+      scheduler =
+        start_scheduler(fault, runner_supervisor,
+          timer_enabled: true,
+          run_freshness_window_seconds: 3600
+        )
+
+      assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
+      assert_due_timer_backoff(scheduler)
+    end
+
+    test "a claim failure re-arms the due timer at the backoff floor", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      now = DateTime.utc_now()
+      # Five minutes past due → inside the freshness window (claim branch, not
+      # stale-skip); the atomic claim faults.
+      seed_due_job(repo, name: "Claim Fault", due_at: DateTime.add(now, -300, :second))
+      fault = start_fault_repo(repo, :claim_due_job)
+
+      scheduler =
+        start_scheduler(fault, runner_supervisor,
+          timer_enabled: true,
+          run_freshness_window_seconds: 3600
+        )
+
+      assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
+      assert_due_timer_backoff(scheduler)
+    end
+  end
+
+  describe "admission control" do
+    test "at max_active_runs the tick claims nothing; a freed slot lets the job run", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job_a} = seed_recurring_job(repo, "Admission A")
+      {:ok, job_b} = seed_recurring_job(repo, "Admission B")
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor,
+          runner_delay_ms: 300,
+          max_active_runs: 1
+        )
+
+      # Both are due, but the cap is 1: exactly one claims, the other is deferred
+      # and stays scheduled (no run row).
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id1, _job1}, 1_000
+      refute_receive {:job_runner, :started, _run_id, _job2}, 150
+      assert total_runs(repo, [job_a.id, job_b.id]) == 1
+
+      # Let the slot free, then a later tick claims the deferred job. The Runner
+      # sends :completed before it exits, and the DynamicSupervisor removes the
+      # child asynchronously after that exit — so gate the second tick on the
+      # supervisor actually reporting a free slot (the same occupancy source
+      # at_capacity? reads), never on :completed alone.
+      assert_receive {:job_runner, :completed, ^run_id1, _job1}, 1_000
+      assert eventually(fn -> DynamicSupervisor.count_children(runner_supervisor).active == 0 end)
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id2, _job2}, 1_000
+      assert run_id2 != run_id1
+      assert_receive {:job_runner, :completed, ^run_id2, _job2}, 1_000
+      assert total_runs(repo, [job_a.id, job_b.id]) == 2
+    end
+  end
+
+  defp seed_broken_schedule_job(repo, opts) do
+    {:ok, job} =
+      Registry.create_job(
+        %{
+          created_by_trust: "operator",
+          name: "Broken Schedule",
+          schedule: "every 15 minutes",
+          task_prompt: "Runs on a schedule that later breaks."
+        },
+        repo: repo,
+        now: ~U[2026-05-02 13:00:00Z]
+      )
+
+    # Corrupt the stored expression to one that no longer parses, keeping the job
+    # scheduled/enabled and due (a config only reachable by a direct write — the
+    # registry validates schedules on create/update).
+    {:ok, broken} =
+      Repo.upsert_scheduled_job(
+        Map.merge(job, %{
+          schedule_expr: "not a real schedule",
+          next_run_at: Keyword.fetch!(opts, :next_run_at),
+          state: "scheduled",
+          enabled?: true
+        }),
+        server: repo
+      )
+
+    broken
+  end
+
+  # A recurring job forced past-due via a direct next_run_at write (the registry
+  # always parses "every 15 minutes" into a FUTURE next_run_at). `due_at`/
+  # `expires_at` are real-clock-relative so the scheduler's init auto-tick agrees
+  # with the explicit tick.
+  defp seed_due_job(repo, opts) do
+    now = DateTime.utc_now()
+    due_at = Keyword.get(opts, :due_at, DateTime.add(now, -60, :second))
+
+    {:ok, job} =
+      Registry.create_job(
+        %{
+          created_by_trust: "operator",
+          name: Keyword.fetch!(opts, :name),
+          schedule: "every 15 minutes",
+          task_prompt: "Run."
+        },
+        repo: repo,
+        now: now
+      )
+
+    merged =
+      job
+      |> Map.merge(%{next_run_at: due_at, state: "scheduled", enabled?: true})
+      |> maybe_put(:expires_at, Keyword.get(opts, :expires_at))
+
+    {:ok, seeded} = Repo.upsert_scheduled_job(merged, server: repo)
+    seeded
+  end
+
+  defp seed_recurring_job(repo, name) do
+    Registry.create_job(
+      %{
+        created_by_trust: "operator",
+        name: name,
+        schedule: "every 15 minutes",
+        task_prompt: "Run."
+      },
+      repo: repo,
+      now: ~U[2026-05-02 14:00:00Z]
+    )
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp start_fault_repo(real, fail) do
+    {:ok, pid} = start_supervised({FaultRepo, real: real, fail: fail})
+    pid
+  end
+
+  defp assert_due_timer_backoff(scheduler) do
+    state = :sys.get_state(scheduler)
+    assert is_reference(state.due_timer)
+    remaining = Process.read_timer(state.due_timer)
+    assert is_integer(remaining)
+    assert remaining > 4_000 and remaining <= 5_000
+  end
+
+  defp total_runs(repo, job_ids) do
+    Enum.reduce(job_ids, 0, fn job_id, acc -> acc + run_count(repo, job_id) end)
+  end
+
   defp start_scheduler(repo, runner_supervisor, opts) do
     name = :"jobs_scheduler_#{System.unique_integer([:positive])}"
 
@@ -715,7 +1032,8 @@ defmodule FermixCore.Jobs.SchedulerTest do
              )
          ],
          runner_notify: self(),
-         runner_delay_ms: Keyword.get(opts, :runner_delay_ms, 0)
+         runner_delay_ms: Keyword.get(opts, :runner_delay_ms, 0),
+         max_active_runs: Keyword.get(opts, :max_active_runs, 4)
        ]}
     )
 

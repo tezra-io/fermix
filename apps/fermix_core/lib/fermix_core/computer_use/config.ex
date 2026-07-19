@@ -31,6 +31,7 @@ defmodule FermixCore.ComputerUse.Config do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
 
   @type access :: :strict | :standard | :open
+  @type courtesy :: :off | :yield
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
@@ -38,7 +39,9 @@ defmodule FermixCore.ComputerUse.Config do
           display: non_neg_integer(),
           screenshot_after?: boolean(),
           max_actions: pos_integer(),
-          max_retained_screenshots: pos_integer()
+          max_retained_screenshots: pos_integer(),
+          courtesy: courtesy(),
+          courtesy_idle_ms: pos_integer()
         }
 
   defstruct enabled?: false,
@@ -46,7 +49,9 @@ defmodule FermixCore.ComputerUse.Config do
             display: 0,
             screenshot_after?: true,
             max_actions: 80,
-            max_retained_screenshots: 3
+            max_retained_screenshots: 3,
+            courtesy: :yield,
+            courtesy_idle_ms: 1_000
 
   @spec current() :: t()
   def current do
@@ -71,7 +76,9 @@ defmodule FermixCore.ComputerUse.Config do
       display: non_neg_int(config, :display, 0),
       screenshot_after?: bool(config, :screenshot_after, true),
       max_actions: positive_int(config, :max_actions, 80),
-      max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3)
+      max_retained_screenshots: positive_int(config, :max_retained_screenshots, 3),
+      courtesy: courtesy(config),
+      courtesy_idle_ms: positive_int(config, :courtesy_idle_ms, 1_000)
     }
 
     validate!(cu)
@@ -89,7 +96,10 @@ defmodule FermixCore.ComputerUse.Config do
       display: cu.display,
       screenshot_after: cu.screenshot_after?,
       max_actions: cu.max_actions,
-      max_retained_screenshots: cu.max_retained_screenshots
+      max_retained_screenshots: cu.max_retained_screenshots,
+      # Persist as a string — TOML has no atom type; `courtesy/1` reads it back.
+      courtesy: Atom.to_string(cu.courtesy),
+      courtesy_idle_ms: cu.courtesy_idle_ms
     ]
   end
 
@@ -113,6 +123,29 @@ defmodule FermixCore.ComputerUse.Config do
 
       value ->
         raise ArgumentError, "computer_use.#{key} must be a boolean, got: #{inspect(value)}"
+    end
+  end
+
+  # `courtesy` is the coexistence posture (docs/design/COMPUTER_USE_V3_COEXISTENCE.md
+  # R0): `:yield` (default) has the agent step aside for a present human; `:off`
+  # disables the arbitration. Accepts atom or string (TOML persists it as a string).
+  defp courtesy(config) do
+    case lookup(config, :courtesy) do
+      nil ->
+        :yield
+
+      value when value in [:off, :yield] ->
+        value
+
+      "off" ->
+        :off
+
+      "yield" ->
+        :yield
+
+      value ->
+        raise ArgumentError,
+              "computer_use.courtesy must be :off or :yield, got: #{inspect(value)}"
     end
   end
 

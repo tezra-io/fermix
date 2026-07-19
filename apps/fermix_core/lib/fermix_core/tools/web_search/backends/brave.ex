@@ -53,33 +53,21 @@ defmodule FermixCore.Tools.WebSearch.Backends.Brave do
   end
 
   defp request_options(context, query, api_key) do
-    [
-      retry: false,
-      receive_timeout: 15_000,
-      connect_options: [timeout: 3_000],
+    Support.request_options(context,
       headers: [
         {"accept", "application/json"},
         {"accept-encoding", "gzip"},
         {"x-subscription-token", api_key}
       ],
       params: [q: query, count: 10, safesearch: "moderate"]
-    ]
-    |> Keyword.merge(Map.get(context, :req_options, []))
-    |> Keyword.put(:redirect, false)
+    )
   end
 
   defp run_search(request_options, context) do
     with :ok <- Guard.validate(@endpoint, resolver: resolver(context)),
-         {:ok, response} <- get_search(request_options),
+         {:ok, response} <- Support.request(:get, @endpoint, request_options),
          {:ok, body} <- Support.response_json(response) do
       parse_results(body)
-    end
-  end
-
-  defp get_search(request_options) do
-    case Req.get(@endpoint, request_options) do
-      {:ok, response} -> {:ok, response}
-      {:error, reason} -> {:error, "network: #{inspect(reason)}"}
     end
   end
 

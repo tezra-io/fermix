@@ -1,4 +1,5 @@
 suite: web
+risk: host_readonly
 title: "Web research — search, fetch, and summarize"
 description: >
   Exercises the assistant's web-research capability: searching the live web for

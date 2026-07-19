@@ -18,7 +18,7 @@ defmodule FermixCore.Plugins.Health do
     full? = Keyword.get(opts, :full?, false)
 
     with {:ok, plugin} <- Registry.find(name),
-         status <- Status.status(plugin),
+         status <- Status.status(plugin, Keyword.take(opts, [:probe])),
          :ok <- require_ready(status) do
       if full?, do: live_probe(plugin, opts), else: {:ok, %{status: status, live_probe?: false}}
     end

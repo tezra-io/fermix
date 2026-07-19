@@ -63,18 +63,18 @@ def cmd_status(args):
             print(f"fermix {resp.get('version','?')} "
                   f"(pid {resp.get('pid','?')}, uptime {resp.get('uptime_ms','?')}ms)")
         sys.exit(0)
-    except (ConnectionRefusedError, FileNotFoundError, OSError):
-        if as_json:
-            print(json.dumps({"status": "error", "error": "not_running"}))
-        else:
-            print("fermix status: :not_running", file=sys.stderr)
-        sys.exit(3)
     except TimeoutError:
         if as_json:
             print(json.dumps({"status": "error", "error": "timeout"}))
         else:
             print("fermix status: :timeout", file=sys.stderr)
         sys.exit(1)
+    except OSError:
+        if as_json:
+            print(json.dumps({"status": "error", "error": "not_running"}))
+        else:
+            print("fermix status: :not_running", file=sys.stderr)
+        sys.exit(3)
 
 
 def _read_image(path):
@@ -116,12 +116,12 @@ def cmd_ask(args):
                            timeout_s=timeout_ms / 1000.0 + 10.0)
         print(json.dumps(resp))
         sys.exit(0 if resp.get("status") == "ok" else 1)
-    except (ConnectionRefusedError, FileNotFoundError, OSError):
-        print(json.dumps({"status": "error", "error": "not_running"}))
-        sys.exit(3)
     except TimeoutError:
         print(json.dumps({"status": "error", "error": "timeout"}))
         sys.exit(1)
+    except OSError:
+        print(json.dumps({"status": "error", "error": "not_running"}))
+        sys.exit(3)
 
 
 if __name__ == "__main__":

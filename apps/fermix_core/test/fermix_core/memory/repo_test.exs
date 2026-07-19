@@ -39,7 +39,7 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "opens sqlite, enables wal mode, and runs the base migration", %{repo: repo} do
     assert {:ok, "wal"} = Repo.journal_mode(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]} = Repo.migration_versions(server: repo)
   end
 
   test "enabled_server returns nil when a named repo exits during lookup" do
@@ -52,10 +52,10 @@ defmodule FermixCore.Memory.RepoTest do
 
   test "rerunning migrations is idempotent", %{repo: repo} do
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]} = Repo.migration_versions(server: repo)
 
     assert :ok = Repo.migrate(server: repo)
-    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]} = Repo.migration_versions(server: repo)
+    assert {:ok, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]} = Repo.migration_versions(server: repo)
   end
 
   test "fermix_md migration rewrites resource_path so rollback targets FERMIX.md", %{
@@ -210,6 +210,47 @@ defmodule FermixCore.Memory.RepoTest do
     end
   end
 
+  test "trust-check migration rewrites post-v7 core rows to operator", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    assert :ok = Repo.migrate(server: repo)
+
+    # Reconstruct a pre-v11 row minted with the old 'core' default (post-v7):
+    # rebuild the table to its unchecked, DEFAULT 'core' shape, insert a
+    # defaulted-trust row, and drop the v11 marker so the next migrate re-runs
+    # the rebuild against the legacy row (the rollback-binary shape).
+    seed_legacy_core_job(db_path, "legacy_core_job")
+    drop_migration_version(db_path, 11)
+
+    assert :ok = Repo.migrate(server: repo)
+
+    assert {:ok, job} = Repo.get_scheduled_job("legacy_core_job", server: repo)
+    assert job.created_by_trust == "operator"
+  end
+
+  test "trust-check migration enforces the trust vocabulary at the schema", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    assert :ok = Repo.migrate(server: repo)
+
+    assert {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+
+    try do
+      # The retired 'core' value fails the CHECK constraint.
+      assert {:error, _core} = insert_scheduled_job_trust(conn, "constraint_core", "core")
+
+      # Omitting the column fails NOT NULL — the default was dropped.
+      assert {:error, _missing} = insert_scheduled_job_trust(conn, "constraint_missing", :omit)
+
+      # The live vocabulary still inserts.
+      assert :ok = insert_scheduled_job_trust(conn, "constraint_guest", "guest")
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
   test "supports resource registry and revision queries through the repo API", %{repo: repo} do
     resource = %{
       agent_id: "main",
@@ -278,6 +319,15 @@ defmodule FermixCore.Memory.RepoTest do
 
     assert {:error, :not_found} = Repo.get_scheduled_job("daily_digest", server: repo)
     assert {:error, :not_found} = Repo.get_memory_source("job:atomic_failure", server: repo)
+  end
+
+  test "normalizing a scheduled job requires created_by_trust", %{repo: repo} do
+    attrs = Map.delete(scheduled_job_attrs(), :created_by_trust)
+
+    # The schema-layer normalize asserts the key (no silent default) — a
+    # missing trust raises inside the repo rather than persisting a defaulted
+    # row, so the caller sees a loud exit.
+    assert catch_exit(Repo.upsert_scheduled_job(attrs, server: repo))
   end
 
   test "supports message CRUD through the repo API", %{repo: repo} do
@@ -729,6 +779,87 @@ defmodule FermixCore.Memory.RepoTest do
     :ok = Sqlite3.close(conn)
   end
 
+  # Rebuild scheduled_jobs into its pre-v11 shape (no CHECK, created_by_trust
+  # DEFAULT 'core') and insert a row that inherits that default — a raw
+  # connection has foreign keys off, so dropping the checked table does not
+  # cascade and the memory_source_id reference is not enforced.
+  defp seed_legacy_core_job(db_path, id) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readwrite)
+    :ok = Sqlite3.execute(conn, "PRAGMA busy_timeout = 2000;")
+
+    :ok =
+      Sqlite3.execute(conn, """
+      DROP TABLE scheduled_jobs;
+      #{legacy_scheduled_jobs_ddl()}
+      INSERT INTO scheduled_jobs
+        (id, name, schedule_kind, schedule_expr, timezone, task_prompt, memory_source_id)
+      VALUES
+        ('#{id}', 'Legacy', 'interval', 'every 15 minutes', 'UTC', 'Run.', 'job:#{id}');
+      """)
+
+    :ok = Sqlite3.close(conn)
+  end
+
+  defp insert_scheduled_job_trust(conn, id, :omit) do
+    Sqlite3.execute(conn, """
+    INSERT INTO scheduled_jobs
+      (id, name, schedule_kind, schedule_expr, timezone, task_prompt, memory_source_id)
+    VALUES ('#{id}', 'X', 'interval', 'every 15 minutes', 'UTC', 'Run.', 'job:#{id}');
+    """)
+  end
+
+  defp insert_scheduled_job_trust(conn, id, trust) do
+    Sqlite3.execute(conn, """
+    INSERT INTO scheduled_jobs
+      (id, name, schedule_kind, schedule_expr, timezone, task_prompt, memory_source_id,
+       created_by_trust)
+    VALUES ('#{id}', 'X', 'interval', 'every 15 minutes', 'UTC', 'Run.', 'job:#{id}', '#{trust}');
+    """)
+  end
+
+  defp legacy_scheduled_jobs_ddl do
+    """
+    CREATE TABLE scheduled_jobs (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      schedule_kind TEXT NOT NULL,
+      schedule_expr TEXT NOT NULL,
+      timezone TEXT NOT NULL,
+      next_run_at TEXT,
+      task_prompt TEXT NOT NULL,
+      skill_name TEXT,
+      session_mode TEXT NOT NULL DEFAULT 'isolated',
+      provider TEXT,
+      model TEXT,
+      max_iterations INTEGER NOT NULL DEFAULT 100,
+      timeout_seconds INTEGER,
+      inactivity_timeout_seconds INTEGER,
+      capability_policy_json TEXT,
+      allowed_tools_json TEXT,
+      memory_source_id TEXT NOT NULL REFERENCES memory_sources(id) ON DELETE RESTRICT,
+      memory_read_scopes_json TEXT,
+      memory_write_scope TEXT,
+      main_visible INTEGER NOT NULL DEFAULT 1,
+      delivery_mode TEXT NOT NULL DEFAULT 'none',
+      delivery_target_json TEXT,
+      silent_marker TEXT NOT NULL DEFAULT '[SILENT]',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      state TEXT NOT NULL DEFAULT 'scheduled',
+      last_run_at TEXT,
+      last_status TEXT,
+      last_error TEXT,
+      created_by_agent_id TEXT NOT NULL DEFAULT 'main',
+      created_by_session_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+      expires_at TEXT,
+      created_by_channel TEXT,
+      created_by_trust TEXT NOT NULL DEFAULT 'core'
+    );
+    """
+  end
+
   defp sha256_hex(content) do
     :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
   end
@@ -768,7 +899,8 @@ defmodule FermixCore.Memory.RepoTest do
         timezone: "UTC",
         next_run_at: ~U[2026-05-02 14:15:00Z],
         task_prompt: "Summarize changes.",
-        memory_source_id: "job:daily_digest"
+        memory_source_id: "job:daily_digest",
+        created_by_trust: "operator"
       },
       overrides
     )

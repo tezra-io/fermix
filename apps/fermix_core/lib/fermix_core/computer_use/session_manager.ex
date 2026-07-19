@@ -64,6 +64,31 @@ defmodule FermixCore.ComputerUse.SessionManager do
     end
   end
 
+  @doc """
+  Pause the computer-use session for `context`'s conversation (`/pause`): the human
+  is reclaiming the machine. Unlike `abort/1`, the session, its TCC-warm sidecar, and
+  the task stay ALIVE and resumable — `pause` just flips the session's guard so it
+  refuses actions until `resume/1`. Returns `:paused` if one was running, `:no_session`
+  otherwise. Idempotent + race-safe (a clean no-op when the registry is absent).
+  """
+  @spec pause(map()) :: :paused | :no_session
+  def pause(context) when is_map(context), do: signal(context, &Session.pause/1, :paused)
+
+  @doc "Resume a paused session (`/resume`). Returns `:resumed` or `:no_session`."
+  @spec resume(map()) :: :resumed | :no_session
+  def resume(context) when is_map(context), do: signal(context, &Session.resume/1, :resumed)
+
+  defp signal(context, fun, ok_tag) do
+    with true <- registry_running?(),
+         true <- Map.has_key?(context, :conversation_key),
+         {:ok, pid} <- lookup(context) do
+      fun.(pid)
+      ok_tag
+    else
+      _ -> :no_session
+    end
+  end
+
   # The registry only exists while computer-use is enabled + ready — its whole
   # supervisor is gated on `ComputerUse.ready?/0`. A teardown backstop runs on
   # EVERY attended-surface exit (incl. when CU is disabled), so it must be a clean

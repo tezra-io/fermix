@@ -67,6 +67,31 @@ defmodule FermixChannels.Channels.Discord.Gateway.SocketTest do
     assert message.content == "hello socket"
   end
 
+  test "routes INTERACTION_CREATE frames to the gateway process" do
+    # Point the socket's gateway at the test process so the raw dispatch is
+    # observable as a plain cast, without standing up the full ack/confirm path.
+    state = socket_state(self())
+
+    event =
+      Jason.encode!(%{
+        op: 0,
+        s: 43,
+        t: "INTERACTION_CREATE",
+        d: %{
+          id: "interaction-1",
+          token: "interaction-token-1",
+          type: 3,
+          channel_id: "dm-channel-1",
+          data: %{custom_id: "grant:TOK12345"},
+          user: %{id: "111", username: "alice"}
+        }
+      })
+
+    assert {:ok, _state} = Socket.handle_frame({:text, event}, state)
+
+    assert_receive {:"$gen_cast", {:gateway_event, %{"t" => "INTERACTION_CREATE"}}}
+  end
+
   test "resumes an invalidated session when Discord marks it resumable" do
     state = %{socket_state(self()) | session_id: "session-1", sequence: 42}
     invalid_session = Jason.encode!(%{op: 9, d: true})

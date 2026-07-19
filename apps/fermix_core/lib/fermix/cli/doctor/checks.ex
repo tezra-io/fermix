@@ -12,11 +12,13 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.Service
   alias Fermix.CLI.Upgrade.Manifest
+  alias Fermix.CLI.VersionSkew
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Resource.Registry, as: ResourceRegistry
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Mode, as: SandboxMode
@@ -59,11 +61,13 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  @spec daemon_socket() :: result()
-  def daemon_socket do
-    case Client.status() do
+  @spec daemon_socket(keyword()) :: result()
+  def daemon_socket(opts \\ []) do
+    client = Keyword.get(opts, :client, &Client.status/0)
+
+    case client.() do
       {:ok, %{"status" => "ok", "version" => version, "uptime_ms" => uptime_ms}} ->
-        ok("daemon socket", "running, version #{version}, up #{format_uptime(uptime_ms)}")
+        daemon_socket_result(version, uptime_ms)
 
       {:ok, other} ->
         warn("daemon socket", "unexpected reply: #{inspect(other)}")
@@ -73,6 +77,18 @@ defmodule Fermix.CLI.Doctor.Checks do
 
       {:error, reason} ->
         fail("daemon socket", inspect(reason))
+    end
+  end
+
+  # A daemon on a different version than this binary is the stale state a
+  # package-manager upgrade leaves behind (brew swaps the binary on disk,
+  # the service keeps running the old release) — warn, don't pass.
+  defp daemon_socket_result(version, uptime_ms) do
+    detail = "running, version #{version}, up #{format_uptime(uptime_ms)}"
+
+    case VersionSkew.note(version) do
+      nil -> ok("daemon socket", detail)
+      note -> warn("daemon socket", "#{detail}; #{note}")
     end
   end
 
@@ -368,6 +384,63 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp format_image_generation(%{backend: backend}) do
     ok("image generation", "backend #{backend} configured")
+  end
+
+  @doc """
+  Transcription backend health: which speech-to-text backend is selected and
+  whether its credential resolves. Offline only — never transcribes. Voice notes
+  are optional, but the default backend is keyed (openai reuses the chat key), so
+  a selected-backend-with-no-credential is a warning (the invisible-key-coupling
+  the milestone exists to surface), not a hard failure.
+  """
+  @spec realtime() :: result()
+  def realtime do
+    config = RealtimeConfig.current()
+
+    if config.enabled? do
+      realtime_key_status(config)
+    else
+      ok("realtime voice", "disabled")
+    end
+  end
+
+  # Realtime uses the plain `openai` provider key, not the Codex provider. A
+  # Codex subscription / OAuth login configures `openai_codex` and does NOT
+  # authorize the Realtime API, so an enabled companion with only Codex auth
+  # fails at call time with no obvious cause. Surface it here.
+  defp realtime_key_status(config) do
+    case FermixCore.Config.provider_api_key(:openai) do
+      {:ok, _key} ->
+        ok("realtime voice", "enabled; OpenAI Realtime key present (model #{config.model})")
+
+      {:error, _reason} ->
+        warn(
+          "realtime voice",
+          "enabled but no OpenAI API key — the Realtime API needs an OpenAI Platform key (sk-...); " <>
+            "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
+        )
+    end
+  end
+
+  @spec transcription() :: result()
+  def transcription do
+    ProviderProbe.transcription_report()
+    |> format_transcription()
+  end
+
+  defp format_transcription(%{status: :error, error: error}) do
+    warn("transcription", error)
+  end
+
+  defp format_transcription(%{credential_present?: false} = report) do
+    warn(
+      "transcription",
+      "backend #{report.backend} not configured — set a key in Transcription setup"
+    )
+  end
+
+  defp format_transcription(%{backend: backend}) do
+    ok("transcription", "backend #{backend} configured")
   end
 
   @doc """

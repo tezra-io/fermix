@@ -24,6 +24,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Daily Digest",
                  description: "Summarize the morning project state.",
                  schedule: "every 15 minutes",
@@ -71,6 +72,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Deep Digest",
                  schedule: "every 15 minutes",
                  task_prompt: "Investigate the project state deeply."
@@ -85,6 +87,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "One Shot Reminder",
                  schedule: "2099-05-03T12:00:00Z",
                  task_prompt: "Remind me to review the launch notes."
@@ -114,6 +117,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Running Job",
                  schedule: "every 15 minutes",
                  task_prompt: "Keep running."
@@ -144,6 +148,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Frequent Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check project status."
@@ -169,6 +174,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Expired Reminder",
                  schedule: "2026-05-03T12:00:00Z",
                  task_prompt: "Remind me."
@@ -193,6 +199,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Temporary Check",
                  schedule: "every 15 minutes",
                  task_prompt: "Check temporarily.",
@@ -218,7 +225,12 @@ defmodule FermixCore.Jobs.RegistryTest do
   test "update_job revises the task prompt without disturbing the schedule", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(
-               %{name: "Weather", schedule: "every 15 minutes", task_prompt: "Send weather."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Weather",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Send weather."
+               },
                repo: repo,
                now: ~U[2026-05-02 14:00:00Z]
              )
@@ -239,7 +251,12 @@ defmodule FermixCore.Jobs.RegistryTest do
   test "update_job accepts the task alias, reschedules, and syncs the source", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(
-               %{name: "Digest", schedule: "every 15 minutes", task_prompt: "Old."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Digest",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Old."
+               },
                repo: repo,
                now: ~U[2026-05-02 14:00:00Z]
              )
@@ -266,6 +283,7 @@ defmodule FermixCore.Jobs.RegistryTest do
     assert {:ok, job} =
              Registry.create_job(
                %{
+                 created_by_trust: "operator",
                  name: "Pinned",
                  schedule: "every 15 minutes",
                  task_prompt: "Run on a pinned route.",
@@ -287,7 +305,12 @@ defmodule FermixCore.Jobs.RegistryTest do
        %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(
-               %{name: "Repin", schedule: "every 15 minutes", task_prompt: "Run."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Repin",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run."
+               },
                repo: repo
              )
 
@@ -315,7 +338,12 @@ defmodule FermixCore.Jobs.RegistryTest do
   test "update_job rejects an empty patch and unknown jobs", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(
-               %{name: "Empty", schedule: "every 15 minutes", task_prompt: "Do."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Empty",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Do."
+               },
                repo: repo
              )
 
@@ -326,7 +354,12 @@ defmodule FermixCore.Jobs.RegistryTest do
   test "update_job rejects an invalid schedule and leaves the job unchanged", %{repo: repo} do
     assert {:ok, job} =
              Registry.create_job(
-               %{name: "Stable", schedule: "every 15 minutes", task_prompt: "Keep."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Stable",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Keep."
+               },
                repo: repo,
                now: ~U[2026-05-02 14:00:00Z]
              )
@@ -342,7 +375,12 @@ defmodule FermixCore.Jobs.RegistryTest do
   test "rejects invalid schedules before writing anything", %{repo: repo} do
     assert {:error, {:invalid_schedule, "sometimes"}} =
              Registry.create_job(
-               %{name: "Bad", schedule: "sometimes", task_prompt: "Do a thing."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Bad",
+                 schedule: "sometimes",
+                 task_prompt: "Do a thing."
+               },
                repo: repo
              )
 
@@ -350,10 +388,46 @@ defmodule FermixCore.Jobs.RegistryTest do
 
     assert {:error, {:invalid_schedule, "99 * * * *"}} =
              Registry.create_job(
-               %{name: "Bad Cron", schedule: "99 * * * *", task_prompt: "Do a thing."},
+               %{
+                 created_by_trust: "operator",
+                 name: "Bad Cron",
+                 schedule: "99 * * * *",
+                 task_prompt: "Do a thing."
+               },
                repo: repo
              )
 
+    assert {:ok, []} = Registry.list_jobs(repo: repo)
+  end
+
+  test "create_job fails loudly when created_by_trust is missing", %{repo: repo} do
+    assert {:error, reason} =
+             Registry.create_job(
+               %{
+                 name: "No Trust",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run."
+               },
+               repo: repo
+             )
+
+    assert reason =~ "created_by_trust"
+    assert {:ok, []} = Registry.list_jobs(repo: repo)
+  end
+
+  test "create_job rejects an out-of-vocabulary created_by_trust", %{repo: repo} do
+    assert {:error, reason} =
+             Registry.create_job(
+               %{
+                 name: "Bad Trust",
+                 schedule: "every 15 minutes",
+                 task_prompt: "Run.",
+                 created_by_trust: "core"
+               },
+               repo: repo
+             )
+
+    assert reason =~ "created_by_trust"
     assert {:ok, []} = Registry.list_jobs(repo: repo)
   end
 end

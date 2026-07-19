@@ -6,17 +6,27 @@ defmodule FermixCore.Sandbox.Mode do
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.PathPolicy
 
-  @common_project_dirs ~w(projects src code work dev)
-
   @spec effective_roots(Config.t() | map() | keyword()) :: [String.t()]
-  def effective_roots(config) do
+  def effective_roots(config), do: effective_roots(config, nil)
+
+  # `request_cwd` is the working directory of the current turn's origin (the dir
+  # the owner ran `fermix ask` from), threaded from the tool context. Standard
+  # mode admits it as a root when it is a real directory strictly inside the OS
+  # home, so the agent "works where you are" without a grant. `os_home` itself is
+  # never admitted (that would silently widen standard to all of $HOME — the
+  # exact grant `ConfigMutation` refuses). Open mode's `os_home` root already
+  # covers it and strict never admits it. Candidate roots are canonicalized
+  # (symlink-resolved) before the containment and blocked-root gates, so a
+  # request cwd that is a symlink escaping the OS home cannot be admitted, and a
+  # blocked directory cannot be re-admitted through the request cwd.
+  @spec effective_roots(Config.t() | map() | keyword(), String.t() | nil) :: [String.t()]
+  def effective_roots(config, request_cwd) do
     config = Config.normalize(config)
 
-    config
-    |> mode_roots()
-    |> Kernel.++(config.allowed_roots)
+    (mode_roots(config) ++ request_roots(config, request_cwd) ++ config.allowed_roots)
+    |> Enum.map(&canonical_dir/1)
     |> reject_blocked(config.blocked_roots)
-    |> uniq_existing_or_configured()
+    |> Enum.uniq()
   end
 
   @spec default_working_dir(Config.t() | map() | keyword()) :: String.t()
@@ -40,44 +50,77 @@ defmodule FermixCore.Sandbox.Mode do
     end
   end
 
+  @typedoc "Where an effective root came from: `:granted` (config `allowed_roots`) vs `:mode` (workspace / launch cwd / request cwd / os_home)."
+  @type provenance :: :granted | :mode
+
+  @spec root_provenance(Config.t() | map() | keyword()) :: [{String.t(), provenance()}]
+  def root_provenance(config), do: root_provenance(config, nil)
+
+  # Annotate each effective root by provenance so the owner can tell an explicit
+  # grant from an automatic mode root. Both `allowed_roots` and the effective
+  # roots are compared in canonical (symlink-resolved) form — a raw config value
+  # can differ from its effective form only by a symlinked prefix, so a string
+  # compare against the unresolved config would mislabel a granted root as mode.
+  @spec root_provenance(Config.t() | map() | keyword(), String.t() | nil) ::
+          [{String.t(), provenance()}]
+  def root_provenance(config, request_cwd) do
+    config = Config.normalize(config)
+    granted = MapSet.new(config.allowed_roots, &canonical_dir/1)
+
+    config
+    |> effective_roots(request_cwd)
+    |> Enum.map(fn root -> {root, provenance(root, granted)} end)
+  end
+
+  defp provenance(root, granted) do
+    if MapSet.member?(granted, root), do: :granted, else: :mode
+  end
+
   defp mode_roots(%Config{mode: :strict} = config), do: [config.workspace_root]
-  defp mode_roots(%Config{mode: :open} = config), do: [config.home]
+  defp mode_roots(%Config{mode: :open} = config), do: [config.os_home]
 
   defp mode_roots(%Config{mode: :standard} = config) do
-    [config.workspace_root, launch_root(config.home) | common_project_roots(config.home)]
+    [config.workspace_root, launch_root(config.os_home)]
     |> Enum.reject(&is_nil/1)
   end
 
-  defp launch_root(home) do
-    launch = launch_cwd()
+  defp request_roots(%Config{mode: :standard, os_home: os_home}, request_cwd)
+       when is_binary(request_cwd) do
+    canonical = canonical_dir(request_cwd)
 
-    if under_home?(launch, home), do: launch, else: nil
+    if File.dir?(canonical) and strictly_under_home?(canonical, os_home),
+      do: [canonical],
+      else: []
   end
 
-  defp common_project_roots(home) do
-    home
-    |> then(fn root -> Enum.map(@common_project_dirs, &Path.join(root, &1)) end)
-    |> Enum.filter(&File.dir?/1)
+  defp request_roots(_config, _request_cwd), do: []
+
+  defp launch_root(os_home) do
+    launch = canonical_dir(launch_cwd())
+
+    if strictly_under_home?(launch, os_home), do: launch, else: nil
   end
 
   defp reject_blocked(roots, blocked_roots) do
-    Enum.reject(roots, fn root ->
-      Enum.any?(blocked_roots, &inside_or_equal?(root, &1))
-    end)
-  end
+    blocked = Enum.map(blocked_roots, &canonical_dir/1)
 
-  defp uniq_existing_or_configured(roots) do
-    roots
-    |> Enum.map(&Path.expand/1)
-    |> Enum.map(&canonical_dir/1)
-    |> Enum.uniq()
+    Enum.reject(roots, fn root ->
+      Enum.any?(blocked, &inside_or_equal?(root, &1))
+    end)
   end
 
   defp canonical_dir(path) do
     PathPolicy.canonical_path(path)
   end
 
-  defp under_home?(path, home), do: inside_or_equal?(Path.expand(path), Path.expand(home))
+  # Strictly inside the OS home — `os_home` itself is excluded so admitting the
+  # request/launch cwd can never widen standard mode to all of $HOME. Both
+  # operands are canonical (symlink-resolved) so a symlinked cwd cannot escape.
+  defp strictly_under_home?(path, home) do
+    home = canonical_dir(home)
+    path != home and String.starts_with?(path, home <> "/")
+  end
+
   defp allowed_root?(path, roots), do: Enum.any?(roots, &inside_or_equal?(path, &1))
   defp inside_or_equal?(path, root), do: path == root or String.starts_with?(path, root <> "/")
 

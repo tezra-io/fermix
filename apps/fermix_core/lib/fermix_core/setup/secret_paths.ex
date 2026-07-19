@@ -102,6 +102,33 @@ defmodule FermixCore.Setup.SecretPaths do
       sandbox_env: false
     },
     %{
+      key: :transcription_openai_api_key,
+      env: "TRANSCRIPTION_OPENAI_API_KEY",
+      path: [:fermix_core, :transcription, :openai_api_key],
+      functionality: "OpenAI transcription backend (override for the chat key)",
+      optional?: true,
+      # BEAM-internal HTTP (no subprocess), so it is not exposed via [sandbox.env].
+      sandbox_env: false
+    },
+    %{
+      key: :transcription_xai_api_key,
+      env: "TRANSCRIPTION_XAI_API_KEY",
+      path: [:fermix_core, :transcription, :xai_api_key],
+      functionality: "SpaceXAI transcription backend (override for the chat key)",
+      optional?: true,
+      # BEAM-internal HTTP (no subprocess), so it is not exposed via [sandbox.env].
+      sandbox_env: false
+    },
+    %{
+      key: :deepgram_api_key,
+      env: "DEEPGRAM_API_KEY",
+      path: [:fermix_core, :transcription, :deepgram_api_key],
+      functionality: "Deepgram transcription backend",
+      optional?: true,
+      # BEAM-internal HTTP (no subprocess), so it is not exposed via [sandbox.env].
+      sandbox_env: false
+    },
+    %{
       key: :google_oauth_client_secret,
       env: "GOOGLE_OAUTH_CLIENT_SECRET",
       path: [:fermix_core, :oauth, "google", :client_secret]

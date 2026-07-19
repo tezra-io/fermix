@@ -1,0 +1,7 @@
+{"type":"client_hello","protocol_version":1}
+{"type":"call_start"}
+{"type":"audio_chunk","audio":"MTIzNA=="}
+{"type":"interrupt"}
+{"type":"interrupt","audio_end_ms":1500}
+{"type":"mute","enabled":true}
+{"type":"call_stop"}

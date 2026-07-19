@@ -128,8 +128,9 @@ config :fermix_core, :prompt_bootstrap,
   accounting_enabled: true
 
 config :fermix_core, :transcription,
-  backend: FermixCore.Transcription.OpenAI,
-  model: "whisper-1"
+  backend: "openai",
+  model: "gpt-4o-mini-transcribe",
+  max_file_mb: 20
 
 config :fermix_channels,
   telegram: [

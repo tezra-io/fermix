@@ -144,6 +144,7 @@ defmodule FermixCore.Tools.ScheduleJob do
          {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context),
          {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context),
          {:ok, skill_name} <- validate_skill_name(args, context),
+         {:ok, created_by_trust} <- require_source_trust(context),
          {:ok, {provider, model}} <- Support.validate_route_pin(args) do
       attrs = %{
         name: name,
@@ -164,7 +165,7 @@ defmodule FermixCore.Tools.ScheduleJob do
         created_by_agent_id: Map.get(context, :memory_agent_id, "main"),
         created_by_session_id: origin_session_id(context),
         created_by_channel: Map.get(context, :source_channel),
-        created_by_trust: encode_trust(Map.get(context, :source_trust))
+        created_by_trust: created_by_trust
       }
 
       case Registry.create_job(attrs, repo: Support.repo(context)) do
@@ -232,8 +233,19 @@ defmodule FermixCore.Tools.ScheduleJob do
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp encode_trust(nil), do: "core"
-  defp encode_trust(trust) when is_atom(trust), do: Atom.to_string(trust)
+  # A scheduled job inherits its creator's trust. A context with no
+  # source_trust cannot create jobs — surface a clear tool error to the model
+  # instead of minting a trust the caller never had.
+  defp require_source_trust(context) do
+    case Map.get(context, :source_trust) do
+      trust when is_atom(trust) and not is_nil(trust) ->
+        {:ok, Atom.to_string(trust)}
+
+      _absent ->
+        {:error,
+         "schedule_job requires a source_trust in context; this context cannot create scheduled jobs."}
+    end
+  end
 
   defp origin_session_id(%{conversation_key: {channel, chat_id, thread_scope}}) do
     Enum.map_join([channel, chat_id, thread_scope], ":", &target_part/1)

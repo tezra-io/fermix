@@ -11,10 +11,10 @@ suite (`docs/design/E2E_TEST_PLAN.md`). Nothing here stubs the model.
 YAML case  ──►  fermix ask --json --session <unique>   (FERMIX_HOME=~/.fermix-dev)
                      │  real turn in the Opik-enabled dev daemon
                      ▼
-              Opik (localhost:5173)  ──►  trace + spans for that thread_id
+              Opik project fermix-dev  ──►  trace + spans for that thread_id
                      ▼
         grade: structural gates (tools/order/errors/cost/latency/reply)
-             + optional LLM judge (rubric)  ──►  MD / HTML / JSON report
+             + required judge for judged rubrics  ──►  MD / HTML / JSON report
 ```
 
 Correlation is exact: each case gets a unique `--session`, which becomes the Opik
@@ -28,11 +28,16 @@ capability runner asks *"how good is the model at getting tasks done with Fermix
 tools"* — an objective **task-success score**, ranked across models.
 
 ```sh
-# Score the model the dev daemon currently serves (auto-detected from the trace):
-uv run bin/run_capability.py --trials 5                   # all public capability suites
-uv run bin/run_capability.py --suite cap_web_research --trials 3  # one suite
+# Judge response quality on the development daemon (auto-detected from the trace):
+uv run bin/run_capability.py --suite cap_response_quality --trials 5 --judge
+
+# Full public sweep includes isolated-mutation and expensive tasks:
+FERMIX_EVAL_HOME=~/.fermix-capability-eval \
+  OPIK_PROJECT=fermix-capability-eval \
+  uv run bin/run_capability.py --trials 5 --confirm-daemon-isolated \
+  --confirm-isolated-env --confirm-cost
 uv run bin/run_capability.py --estimate --trials 5        # turn-count/cost plan, no spend
-uv run bin/run_capability.py --private --trials 5         # + the held-out split (gap check)
+uv run bin/run_capability.py --private --trials 5
 uv run bin/run_capability.py --rank-only                  # re-render the leaderboard
 uv run bin/run_capability.py --check                      # preconditions only
 ```
@@ -52,10 +57,21 @@ How it scores (see `docs/design/EVAL_CAPABILITY_SCORING.md`):
   OUTSIDE the repo** (`FERMIX_EVAL_HOLDOUT_DIR` / `--private-data`, run with
   `--private`) — answers are never shipped in the skill (they'd be readable by any
   agent iterating the eval); see `suites/capability/private/holdout.example.yaml`.
-- Rubric-only tasks use the LLM judge with `--judge`. **For a FAIR cross-model
-  ranking, the judge must be independent of the model under test** — set
-  `EVAL_JUDGE_BACKEND=openai` + `EVAL_JUDGE_API_KEY` (the default `fermix` backend
-  judges via the daemon = circular; the runner warns).
+  `--private` skips Opik dataset/experiment/feedback writeback, but candidate
+  prompts and replies still enter the configured trace store because trace evidence
+  is the scoring source. Choose a separate local eval/e2e project when the
+  held-out material should not appear in `fermix-dev`.
+- Rubric-only tasks use an **independent external LLM judge** with `--judge` —
+  the OpenAI API, called directly by the harness (no daemon or core involvement).
+  Set `judge.backend: openai` and `judge.model` in **this benchmark's config**
+  (`config.yaml` / `behavioral_config.yaml`); the model must differ from the
+  candidate (the harness refuses a match). The call authenticates with
+  `EVAL_JUDGE_API_KEY`, which the `make` judged targets resolve from the same
+  OpenAI key the daemon uses (macOS keychain `fermix:OPENAI_API_KEY`) — export it
+  to override, or `EVAL_JUDGE_BASE_URL` / `EVAL_JUDGE_MODEL` to point elsewhere.
+  Because it's a different provider from the daemon's candidate model, it is a
+  genuinely independent oracle. The judge scores only prose; structural gates
+  remain the hard safety/flow signal.
 - Each task runs **k trials**; results aggregate to **pass@1** (capability),
   **pass^k** (reliability — all k pass), **tokens/✓** and **$/✓** (efficiency),
   **p95 latency**, with **safety as a hard gate** (a `tools_none`/`reply_not_matches`
@@ -66,8 +82,9 @@ How it scores (see `docs/design/EVAL_CAPABILITY_SCORING.md`):
   ranked by composite = 0.7·success + 0.3·efficiency (axis: `tokens` default,
   provider-neutral; `cost` only where Opik priced the trace — OpenAI/Google).
 
-**Cross-MODEL sweep (operator-driven — we never restart your daemon):** point the
-dev daemon at the next provider+model in `~/.fermix-dev/config.toml`, restart it,
+**Cross-MODEL sweep (operator-driven — the runner never restarts the daemon):**
+point the isolated capability daemon at the next provider+model in
+`~/.fermix-capability-eval/config.toml`, restart it with the safe launch flags,
 run `run_capability.py` again. Each run auto-detects the served model and adds a
 leaderboard row; the board re-ranks. The matrix of rankable configs comes from
 `mix fermix.eval.matrix` (provider×model, generated from the live catalog).
@@ -75,18 +92,61 @@ leaderboard row; the board re-ranks. The matrix of rankable configs comes from
 ## Preconditions (check these first, fail loud if missing)
 
 1. **Opik up**: `curl -s -m5 http://localhost:5173/api/v1/private/projects` returns JSON.
-2. **Opik-enabled dev daemon up**: the daemon at `~/.fermix-dev` must be running
-   **with `FERMIX_OPIK_ENABLED=1`** (trace export) **and `FERMIX_BROWSER_HEADLESS=1`**
-   (runs the browser tool's Chrome in `--headless=new` so browser/web eval turns don't
-   open focus-stealing windows on your Mac; screenshots/vision unaffected). The brew
-   daemon at `~/.fermix` does NOT export, so it can't be used.
-   Verify: `FERMIX_HOME=~/.fermix-dev fermix status --json` is reachable (not `not_running`).
-   If it is down, tell the user to start it; do not silently fall back to `~/.fermix`.
-3. **uv installed** (`brew install uv`, or the Astral installer). The runner is a
+2. **Opik-enabled development daemon up**: safe/read-only behavioral runs and the
+   response-quality capability suite default to `~/.fermix-dev` and Opik project
+   `fermix-dev`. The production home `~/.fermix` is always rejected.
+3. **Judge key for judged runs**: set `judge.backend: openai` + `judge.model` in
+   the benchmark config; the external judge authenticates with `EVAL_JUDGE_API_KEY`,
+   which the `make` judged targets resolve from the daemon's configured OpenAI key
+   (keychain `fermix:OPENAI_API_KEY`). The judge model must differ from the candidate.
+4. **uv installed** (`brew install uv`, or the Astral installer). The runner is a
    self-contained `uv run` script — its only dependency (PyYAML) is declared inline
    (PEP 723) and fetched/cached on first run. No venv to set up.
 
-The runner's `--check` does 1+2+3 for you and prints exactly what's missing.
+The runner's `--check` verifies connectivity and the configured home, project,
+and sandbox declaration; add `--judge` to preflight the restricted judge route
+without making a model call. Safe/read-only runs need no isolation attestation.
+
+Only `isolated_mutation`, `external_write`, `desktop_input`, and `destructive`
+profiles require a disposable eval/e2e home and project plus both
+`--confirm-daemon-isolated` and `--confirm-isolated-env`. Conventional pairs are
+`~/.fermix-eval` / `fermix-eval` for behavioral runs and
+`~/.fermix-capability-eval` / `fermix-capability-eval` for capability runs. The
+disposable daemon must have no unrelated channels or realtime, use a headless
+browser, and keep a strict sandbox below its home. The flags attest that the
+already-running daemon was restarted with that setup; they are not proof or
+containment.
+
+A disposable behavioral daemon's config must include a boundary like this,
+alongside a separately configured provider:
+
+```toml
+[sandbox]
+mode = "strict"
+workspace_root = "/absolute/path/to/.fermix-eval/workspace"
+allowed_roots = []
+```
+
+Use a sanitized disposable local clone/snapshot there, with its own `.git` for git
+scenarios; overlay the current change, but copy no `.env`, credentials, normal
+Fermix homes, or build caches. The runner requires the disposable workspace
+`HEAD` to match the harness checkout and records both; dirty overlay content is
+operator-attested, not byte-compared. Then start with no channel configured — the
+channels app must stay up because it owns the CLI-ask turn queue
+(`FermixChannels.Gateway.Queue`, so `--no-channels` would break every turn), but
+with no bot token in this fresh home no adapter actually polls:
+
+```sh
+FERMIX_HOME=~/.fermix-eval FERMIX_OPIK_ENABLED=1 \
+FERMIX_OPIK_PROJECT=fermix-eval FERMIX_BROWSER_HEADLESS=1 \
+mix fermix.dev --no-realtime
+```
+
+Operator-assisted Telegram cases need a live bot: configure only a dedicated eval
+bot in this fresh home, keep `--no-realtime`, and stop it after the named operator
+run. Never reuse a personal or production bot. Multimodal cases need the dedicated
+bot but not streaming; only the streaming suite requires Telegram
+`streaming = "draft"` or `"block"`.
 
 ## Running
 
@@ -97,24 +157,77 @@ invokes uv). The first run auto-fetches PyYAML:
 cd benchmark
 uv run bin/run_eval.py --check              # verify preconditions only
 
-# Validate suites without spending tokens (no daemon calls):
-uv run bin/run_eval.py --dry-run
+# Validate and plan the recommended core without spending tokens or daemon calls:
+uv run bin/run_eval.py --tag host-safe-core --judge --dry-run
 
-# Run one suite (structural gates only — no LLM-judge cost):
-uv run bin/run_eval.py --suite memory
+# Run one host-read-only behavioral suite on ~/.fermix-dev:
+uv run bin/run_eval.py --suite conversation --judge
 
 # Run specific scenarios, with the LLM judge on:
-uv run bin/run_eval.py --suite memory --scenario store_recall_roundtrip --judge
+uv run bin/run_eval.py --suite chief_of_staff \
+  --scenario briefing_reprioritization --judge
 
-# Run everything (expensive — every case is a real gpt-5.x turn):
-uv run bin/run_eval.py --all
+# Every scenario in the host-read-only profile (higher risks stay excluded):
+uv run bin/run_eval.py --all --judge
+
+# Recommended change-by-change regression and bounded qualitative repetition:
+uv run bin/run_eval.py --tag host-safe-core --judge
+uv run bin/run_eval.py --suite epistemic_integrity --judge --repeat 3
 ```
 
 Key flags: `--suite NAME` (repeatable), `--scenario ID` (repeatable),
-`--tag TAG`, `--all`, `--judge` (enable rubric grading), `--dry-run`
+`--case ID` (repeatable), `--tag TAG`, `--all` (host-read-only only),
+`--profile PROFILE`, `--judge`,
+`--repeat 1..3`, `--dry-run`
 (validate + plan only), `--check` (preconditions only), `--max-cases N`
-(cap spend), `--out DIR`, `--purge` (delete this skill's own eval traces),
+(limit driven case trials; not a dollar/spend cap), `--out DIR`,
+`--purge-run RUN_ID` (exact-run preview), `--confirm-daemon-isolated` (isolated
+profiles only), and
 `--operator` (include operator-assisted cases — see below).
+
+Every explicit suite/scenario/case/tag value must match within the selected
+profiles; a typo or a selector dropped by another filter is a usage error, never
+a silently smaller run. Real `desktop_input`, `external_write`, and `destructive`
+runs must resolve to exactly one named scenario or case. Their broader selections
+are available only as `--dry-run` plans; destructive execution also requires
+private-data consent.
+
+If any planned case has both `judge: true` and a rubric, `--judge` is mandatory;
+the runner refuses a structural-only false green. Rubrics on `judge: false`
+cases are manual review guidance; without a recorded verdict the case is
+`INCOMPLETE`, never PASS.
+
+Behavioral query text may contain `__EVAL_REPO_ROOT__`. Before driving the turn,
+`run_eval.py` expands it to the current harness checkout's absolute path. Use the
+token for repo-read scenarios so they address this checkout even when the
+development daemon's sandbox workspace is elsewhere.
+
+Chief-of-staff action judgment extends beyond the host-safe core. The named
+`jobs/clarify_before_scheduling` scenario exposes real isolated job mutation and
+requires clarification before scheduling. The named
+`subagents/autonomous_delegation_judgment` scenario pairs a broad dossier review
+with a tiny direct task without prescribing a route. Its judge evaluates whether
+the chosen direct or delegated workflow was proportionate and complete. It is
+intentionally non-deterministic and expensive, so use `--repeat 3`,
+`--profile expensive`, and `--confirm-cost`. This non-checker behavioral
+scenario may use the development daemon.
+
+Every scenario declares `risk: host_readonly | isolated_mutation |
+private_account_read | external_write | desktop_input | destructive | expensive`.
+Unclassified scenarios cannot run. `isolated_mutation`, `external_write`,
+`desktop_input`, and `destructive` require a disposable eval/e2e home/project and
+both isolation confirmations. Private reads may use development with
+`--confirm-private-data`; non-checker expensive cases may use development with
+`--confirm-cost`. Checker-backed capability cases always require the disposable
+capability home because their trials seed and write workspace files. Desktop
+input and external writes also require
+`--confirm-private-data`; destructive cases additionally require
+`--confirm-private-data`, `--dangerous`, and a named selection. These flags are
+attestations, not containment.
+
+A suite or scenario may add `confirm_cost: true` to another primary risk. The
+runner then requires `--confirm-cost` as well; image generation uses this to keep
+both its isolation and provider-spend acknowledgements.
 
 ## Streaming suite (partly operator-assisted)
 
@@ -125,7 +238,7 @@ Key flags: `--suite NAME` (repeatable), `--scenario ID` (repeatable),
   by design).
 - **`telegram_draft_stream`** needs a human: real Telegram inbound cannot be
   synthesized (real Bot API, polling transport), so with `--operator` the
-  runner prints ONE message for you to send to the dev bot from your phone
+  runner prints ONE message for you to send to the dedicated eval bot from your phone
   (it embeds a unique `(eval:e2e-mark-…)` marker), then finds the resulting
   `telegram:*` trace by that marker and grades it automatically:
   `stream:open` + `stream:seal` spans present, no `stream:discard`.
@@ -134,24 +247,30 @@ Key flags: `--suite NAME` (repeatable), `--scenario ID` (repeatable),
 Preconditions for the operator cases (the runner prechecks the config half):
 the dev daemon binary includes the streaming feature,
 `[fermix_channels.telegram] streaming = "draft"` is set in
-`~/.fermix-dev/config.toml`, and the daemon was **restarted** after enabling.
+`~/.fermix-eval/config.toml`, and the daemon was **restarted** after enabling.
 
 ```sh
-uv run bin/run_eval.py --suite streaming                       # automated tier only
-uv run bin/run_eval.py --suite streaming --operator            # + the Telegram cases
-uv run bin/run_eval.py --suite streaming --tag safety          # just the CLI-negative gate
+uv run bin/run_eval.py --suite streaming                            # automated tier only
+uv run bin/run_eval.py --suite streaming --scenario telegram_draft_stream --operator \
+  --profile external_write --confirm-isolated-env \
+  --confirm-private-data --confirm-daemon-isolated              # dedicated eval bot only
+uv run bin/run_eval.py --suite streaming --tag safety           # just the CLI-negative gate
 ```
 
-Note: operator-case traces live on your real `telegram:*` thread — `--purge`
-never touches them (it only deletes `e2e-*` threads).
+Note: operator-case traces live on your real `telegram:*` thread. Exact-run
+purge includes only turns bearing that run's exact `(eval:e2e-mark-<run-id>-…)`
+marker; always preview the count before confirming deletion.
+Operator turns have no honest CLI wall-clock because a human sends the message;
+they grade trace/tool/cost evidence but explicitly omit the latency gate.
 
 ## Provider parity suite (one daemon, one provider, cycle to compare)
 
 `suites/provider_parity.yaml` is a single behavioural battery — it runs the same
 seven scenarios (plain reasoning, web_search tool use, a local shell call, a
 parallel-subagent fan-out, a memory store→recall round-trip, strict
-instruction-following, harmful-request refusal) against **whatever provider the dev
-daemon currently serves as primary**, so behaviour can be compared task-for-task.
+instruction-following, harmful-request refusal) against **whatever provider the
+configured daemon currently serves as primary**, so behaviour can be compared
+task-for-task.
 (It replaces the seven byte-identical `provider_*` suites that differed only by a
 model-slug pin and failed six-at-a-time under `--all`.)
 
@@ -161,8 +280,18 @@ matrix is run by **cycling the daemon**, one provider at a time — exactly like
 capability sweep:
 
 1. Set the primary provider + model in `~/.fermix-dev/config.toml`.
-2. Restart the dev daemon (`FERMIX_HOME=~/.fermix-dev`).
-3. Run the parity suite: `uv run bin/run_eval.py --suite provider_parity`.
+2. Restart the development daemon (`FERMIX_HOME=~/.fermix-dev`).
+3. Run its five host-read-only scenarios:
+   `uv run bin/run_eval.py --suite provider_parity --judge`.
+   For all seven scenarios, restart a disposable eval/e2e daemon and explicitly
+   include and confirm both higher-risk tiers:
+
+   ```sh
+   FERMIX_EVAL_HOME=~/.fermix-eval OPIK_PROJECT=fermix-eval \
+     uv run bin/run_eval.py --suite provider_parity --judge \
+     --profile host_readonly --profile expensive --profile isolated_mutation \
+     --confirm-cost --confirm-isolated-env --confirm-daemon-isolated
+   ```
 4. Repeat for the next provider.
 
 **No model-slug pin.** The suite deliberately drops the old
@@ -175,8 +304,7 @@ scenario-level `main_model_matches` override for that run.
 **Daemon preconditions for full coverage** (else those scenarios fail *uniformly*
 across providers — a daemon gap, not a provider difference): shell enabled with a
 sandbox workspace, and a working `web_search` backend. The memory round-trip gates
-on the **reply** (the CLI eval path emits no `memory_store` span — see
-`memory.yaml`), not on a tool span.
+both the explicit store turn's `memory_store` span and the recalled reply.
 
 **Severity / safety note.** The `harmful_request_refusal` scenario is
 `severity: normal` here on purpose: it is a parity *comparison* of refusal
@@ -186,24 +314,29 @@ model actually emit the bomb recipe / phishing email / keylogger?); the
 refusal-phrasing `reply_matches` is broad but softer, so it does not flip a parity
 run's exit code on phrasing alone.
 
-**Cost.** Seven providers × six scenarios is a large matrix — run providers
-selectively and use `--max-cases` to bound spend. Note OAuth-billed routes
+**Cost.** Seven providers × seven scenarios is a large matrix — run providers
+selectively and use `--max-cases` to limit driven case trials; it is not a dollar
+cap. Note OAuth-billed routes
 (`openai_codex`, and any OAuth-mode provider) report `$0.00` to the trace, so
 `max_cost_usd` gates pass *vacuously* there — they bound the API-key paths only.
 
 ## Keeping Opik tidy
 
-The skill drives the **shared** dev daemon, whose Opik project also collects your
-real Telegram/CLI usage, scheduled jobs, and any `mix test` runs that had Opik
-enabled. The skill itself only adds: the suite case turns (thread `cli:e2e-…`) and,
-with `--judge`, one judge turn per case (`cli:e2e-judge-…`). To manage the clutter:
+Safe/read-only behavioral runs share the development daemon and `fermix-dev`
+project. Unique `e2e-` thread ids keep them filterable from ordinary development
+traffic. The four isolated profiles use a dedicated disposable daemon/project.
+To manage the traces:
 
-- **See only eval traces:** in the Opik UI, filter by thread_id `contains e2e-`.
-- **Quieter judge:** the default `fermix` judge runs through the daemon (so judge
-  turns show in Opik). Set `judge.backend: openai` (with `EVAL_JUDGE_API_KEY`) or
-  `none` in `config.yaml` to keep judging off the daemon entirely.
-- **Purge the skill's traces:** `uv run bin/run_eval.py --purge` deletes only the
-  `e2e-*` threads it created — never your Telegram/job/test traces.
+- **See only eval traces:** filter CLI/judge threads by `thread_id contains e2e-`;
+  operator turns stay on `telegram:*` and carry the exact run marker in input.
+- **Independent judge:** `--judge` calls the OpenAI API directly (no daemon or
+  Fermix agent turn), so it is a genuinely independent oracle. The judge model
+  must differ from the candidate (the harness refuses a match). Evidence is capped
+  at 64 KiB and the returned verdict is byte-bounded; a missing, unknown, or
+  truncated completion becomes `INCOMPLETE` rather than a score.
+- **Purge one run:** `--purge-run 20260715T151102Z01234567` previews CLI, judge, and
+  exact-marked operator turns for that run; add `--confirm-purge` only after
+  reviewing the count.
 - **Test pollution is hard-gated off:** `FermixOpik.enabled?/0` returns `false`
   under `:test` regardless of `FERMIX_OPIK_ENABLED`, so `mix test` no longer
   exports fixture telemetry even with the flag exported in your shell — you don't
@@ -216,7 +349,7 @@ with `--judge`, one judge turn per case (`cli:e2e-judge-…`). To manage the clu
 against the OpenAI image backend. Two preconditions, both fail loud rather than
 silently mis-grade:
 
-1. The dev daemon must have the backend enabled —
+1. The disposable eval daemon must have the backend enabled —
    `[fermix_core.tools.generate_image]` with `backend = "openai"` — or the tool
    is not registered and the two labeled route-sanity scenarios fail their
    `tools_any: [generate_image]` gate (the "wrong daemon" signal).
@@ -229,23 +362,38 @@ silently mis-grade:
 
 Image generation is modeled as a provider call with `tokens: %{}` (zero trace
 cost), but each case still spends real OpenAI image credits for the picture it
-renders before delivery fails. Run it explicitly, not in a blind `--all`:
-`uv run bin/run_eval.py --suite generate_image`.
+renders before delivery fails. Each case also writes a media file, so run it
+explicitly against the disposable eval home, not in a blind `--all`:
 
-## Cost & latency (warn the user before `--all`)
+```sh
+FERMIX_EVAL_HOME=~/.fermix-eval OPIK_PROJECT=fermix-eval \
+  uv run bin/run_eval.py --suite generate_image --profile isolated_mutation \
+  --confirm-daemon-isolated --confirm-isolated-env --confirm-cost --judge
+```
 
-The dev daemon runs `gpt-5.x` at high effort: **~$0.2–0.6 and ~15–45 s per turn**.
-A full run is dozens of turns → tens of dollars and many minutes. Default to a
-single `--suite` or `--scenario`. Use `--max-cases` to bound spend. The runner
-prints an estimated turn count before driving anything and honors per-case
-`max_cost_usd` / `max_duration_ms` budgets as gates.
+## Cost & latency
+
+Every driven turn is a real provider call and may be billed; price and latency
+depend on the configured provider/model. A host-read-only `--all` may still be
+hundreds of turns. Inspect it with `--dry-run`; normally use
+`--tag host-safe-core`, a suite, or a scenario. `--max-cases` bounds driven case
+trials; skipped operator-only cases do not consume it. It does not bound billed
+dollars: judge calls, retries, provider pricing, and unpriced OAuth traces can
+change actual spend. Reports label trace totals as candidate trace cost, count
+judge calls, include API-reported judge tokens when available, and do not claim
+unknown judge cost is included. Per-case cost/duration expectations remain
+regression gates.
 
 ## After a run
 
 - Reports land in `reports/<UTC-timestamp>/` → `report.md`, `report.html`, `results.json`.
 - Surface the MD summary to the user; offer the HTML for the full view.
 - Each case row links to its Opik trace (`http://localhost:5173/.../traces/<id>`).
-- Exit code is non-zero if any **critical** scenario failed a structural gate.
+- Results are `PASS`, `FAIL`, or `INCOMPLETE`. Any selected regression fails
+  non-zero; missing telemetry/judge evidence, zero cases, or required skips are
+  `INCOMPLETE` (exit 4). Opik failures after preflight are preserved as incomplete
+  report evidence instead of escaping as a traceback. Report prompts, replies,
+  judge rationale, and all error strings are redacted unless `--include-content`.
 
 ## Authoring / editing suites
 
@@ -253,5 +401,8 @@ Suites live in `suites/*.yaml`, one per subsystem. Schema + the full expectation
 vocabulary are in `suites/SCHEMA.md`. Rules: every scenario has **≥2 cases**
 (critical/safety scenarios have more); structural gates must tolerate real-LLM
 variation (prefer `tools_any` / `reply_matches` over exact sequences); always pin
-a safety gate where one applies (`tools_none`, hardline-not-executed, etc.).
+a safety gate where one applies (`tools_none`, hardline-not-executed, etc.). Use
+`__EVAL_REPO_ROOT__` rather than assuming the daemon workspace is the checkout in
+behavioral repo-read prompts.
+
 `--dry-run` validates every suite against the schema.

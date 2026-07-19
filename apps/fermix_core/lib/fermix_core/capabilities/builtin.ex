@@ -27,6 +27,10 @@ defmodule FermixCore.Capabilities.Builtin do
     "skill_run" => %{policy_class: :exec, hidden_from_agent?: false},
     "skill_list" => %{policy_class: :read_only, hidden_from_agent?: false},
     "subagents" => %{policy_class: :external_api, hidden_from_agent?: false},
+    # Owner-only, like subagents: `:external_api` is in the operator's default
+    # policy but the guest deny-list, so a guest never gets this control tool in
+    # their surface (the advertise?/execute gates are the hard barriers regardless).
+    "request_directory_access" => %{policy_class: :external_api, hidden_from_agent?: false},
     "model_routing_config" => %{policy_class: :read_write, hidden_from_agent?: false},
     "tool_help" => %{policy_class: :read_only, hidden_from_agent?: false},
     "tool_search" => %{policy_class: :read_only, hidden_from_agent?: false},

@@ -26,11 +26,12 @@ defmodule FermixCore.Sandbox do
   def shell_plan(command, requested_dir, context) when is_binary(command) and is_map(context) do
     config = config_from(context)
     protected_roots = PathPolicy.protected_paths(config)
+    effective_roots = effective_roots_for(config, context)
 
     with :allow <- hardline_decision(command, context),
          {:ok, working_dir} <-
-           resolve_working_dir(requested_dir, config, context, protected_roots),
-         :allow <- enforce_exec(working_dir, context, config, protected_roots),
+           resolve_working_dir(requested_dir, config, context, protected_roots, effective_roots),
+         :allow <- enforce_exec(working_dir, context, config, protected_roots, effective_roots),
          {:ok, env} <- Env.build(config) do
       {:ok, %{working_dir: working_dir, env: env}}
     else
@@ -45,7 +46,7 @@ defmodule FermixCore.Sandbox do
       when is_binary(path) and is_atom(operation) and is_map(context) do
     config = config_from(context)
     protected_roots = PathPolicy.protected_paths(config)
-    effective_roots = Mode.effective_roots(config)
+    effective_roots = effective_roots_for(config, context)
 
     with {:ok, resolved} <-
            PathPolicy.resolve_write_path(path, config, context, protected_roots, effective_roots),
@@ -71,7 +72,7 @@ defmodule FermixCore.Sandbox do
       when is_binary(path) and is_atom(operation) and is_map(context) do
     config = config_from(context)
     protected_roots = PathPolicy.protected_paths(config)
-    effective_roots = Mode.effective_roots(config)
+    effective_roots = effective_roots_for(config, context)
 
     with {:ok, resolved} <-
            PathPolicy.resolve_read_path(path, config, context, protected_roots, effective_roots),
@@ -112,7 +113,7 @@ defmodule FermixCore.Sandbox do
       when is_list(paths) and is_atom(operation) and is_map(context) do
     config = config_from(context)
     protected_roots = PathPolicy.protected_paths(config)
-    effective_roots = Mode.effective_roots(config)
+    effective_roots = effective_roots_for(config, context)
 
     case PathPolicy.resolve_working_dir(
            Map.get(context, :cwd),
@@ -149,7 +150,7 @@ defmodule FermixCore.Sandbox do
   def working_dir(path, operation, context) when is_atom(operation) and is_map(context) do
     config = config_from(context)
     protected_roots = PathPolicy.protected_paths(config)
-    effective_roots = Mode.effective_roots(config)
+    effective_roots = effective_roots_for(config, context)
 
     with {:ok, resolved} <-
            PathPolicy.resolve_working_dir(path, config, context, protected_roots, effective_roots),
@@ -187,21 +188,14 @@ defmodule FermixCore.Sandbox do
     end
   end
 
-  # Exec decision for shell_plan: reuses the config + protected roots already
-  # resolved for the working-dir decision instead of re-resolving via enforce/3.
-  defp enforce_exec(working_dir, context, config, protected_roots) do
+  # Exec decision for shell_plan: reuses the config + root sets already resolved
+  # for the working-dir decision instead of re-resolving via enforce/3.
+  defp enforce_exec(working_dir, context, config, protected_roots, effective_roots) do
     request = %{operation: :shell, working_dir: working_dir}
 
     working_dir
-    |> path_decision(config, protected_roots)
+    |> path_decision(config, protected_roots, effective_roots)
     |> Decision.emit(metadata(:exec, request, context))
-  end
-
-  defp path_decision(path, config, protected_roots) do
-    case PathPolicy.allowed_path?(path, config, protected_roots) do
-      :ok -> :allow
-      {:error, reason} -> {:deny, reason}
-    end
   end
 
   # Enforcement for read/write/working-dir reusing the config + root sets the
@@ -265,8 +259,14 @@ defmodule FermixCore.Sandbox do
     end
   end
 
-  defp resolve_working_dir(requested_dir, config, context, protected_roots) do
-    case PathPolicy.resolve_working_dir(requested_dir, config, context, protected_roots) do
+  defp resolve_working_dir(requested_dir, config, context, protected_roots, effective_roots) do
+    case PathPolicy.resolve_working_dir(
+           requested_dir,
+           config,
+           context,
+           protected_roots,
+           effective_roots
+         ) do
       {:ok, dir} ->
         {:ok, dir}
 
@@ -283,6 +283,14 @@ defmodule FermixCore.Sandbox do
 
   defp config_from(%{sandbox_config: config}), do: Config.normalize(config)
   defp config_from(_context), do: Config.current()
+
+  # Effective roots for a context-bearing tool operation, threading the turn's
+  # request cwd (`context.cwd`, set only for a trusted operator origin) into
+  # standard-mode admission. Context-free callers (CLI `sandbox explain`,
+  # ConfigMutation validation) use `Mode.effective_roots/1` directly.
+  defp effective_roots_for(config, context) do
+    Mode.effective_roots(config, Map.get(context, :cwd))
+  end
 
   defp metadata(policy_class, request, context) do
     %{

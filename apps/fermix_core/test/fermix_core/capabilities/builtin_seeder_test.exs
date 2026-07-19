@@ -69,6 +69,17 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
     assert CapabilityRegistry.find(reg, "computer_use") == :error
   end
 
+  # The installed-check resolves through Compux.Binary.target/0, which supports
+  # fewer hosts than Manifest.target_for_host/0 (no linux-aarch64) — on those
+  # hosts an installed sidecar is impossible, so this test cannot pass there.
+  case Compux.Binary.target() do
+    {:ok, _target} ->
+      :ok
+
+    {:error, reason} ->
+      @tag skip: "compux sidecar unsupported on this host: #{inspect(reason)}"
+  end
+
   test "seeds computer_use with :gui_control when enabled AND the sidecar is installed", %{
     home: home,
     registry: reg,

@@ -5,6 +5,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Registry
@@ -177,6 +178,159 @@ defmodule FermixCore.Jobs.RunnerTest do
          model: "mock",
          provider_state: %{rest: []}
        }}
+    end
+  end
+
+  defmodule ToolThenTransientAdapter do
+    @moduledoc false
+    # First LLM call requests a tool; after the tool executes, the follow-up
+    # `continue/3` fails with the connection-unavailable transport signature.
+    # This exercises the retry idempotency gate: a transient loss AFTER a tool
+    # ran must NOT replay the whole loop (and its side effects).
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_then_transient, :chat})
+
+      {:ok,
+       %{
+         content: "",
+         tool_calls: [%{id: "fc_1", call_id: "call_1", name: "gate_tool", arguments: "{}"}],
+         usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+         model: "mock",
+         provider_state: %{}
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_then_transient, :continue})
+
+      {:error,
+       {:provider_transport_error,
+        %{
+          provider: :openai_codex,
+          adapter: :codex,
+          reason: :connection_unavailable,
+          kind: :connection_unavailable,
+          message: "Codex could not obtain an HTTP connection (transient).",
+          stage: :before_response
+        }}}
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule FanoutAdapter do
+    @moduledoc false
+    # Serves BOTH the main cron loop and its `subagents` workers off one module
+    # (the loop-context routing seam threads it to workers as `:provider`). The
+    # main loop carries `test_pid` in its adapter_opts (from the Runner) and is
+    # scripted to request a two-task fan-out, then synthesize; workers carry no
+    # test_pid (AgentServer's adapter path passes only `model`), are identified
+    # by their subagent system prompt, return findings, and record their
+    # advertised capability surface into a named Agent for confinement asserts.
+    @behaviour FermixCore.Providers.Adapter
+
+    @worker_caps :fanout_worker_caps
+
+    def reset_worker_caps do
+      case Process.whereis(@worker_caps) do
+        nil -> Agent.start_link(fn -> [] end, name: @worker_caps)
+        _pid -> Agent.update(@worker_caps, fn _ -> [] end)
+      end
+
+      :ok
+    end
+
+    def worker_caps, do: Agent.get(@worker_caps, & &1)
+
+    @impl true
+    def chat(messages, capabilities, opts) do
+      names = Enum.map(capabilities, & &1.name)
+
+      if worker?(messages) do
+        record_worker_caps(names)
+        {:ok, terminal_turn("worker findings")}
+      else
+        report(opts, {:main_caps, names})
+        {:ok, main_first_turn(names)}
+      end
+    end
+
+    @impl true
+    def continue(_provider_state, tool_results, opts) do
+      report(opts, {:aggregated, tool_results})
+      {:ok, terminal_turn("fan-out synthesized")}
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+    @impl true
+    def parse_tool_calls(_response), do: []
+    @impl true
+    def parse_response(response), do: response
+    @impl true
+    def supports_streaming?, do: false
+
+    defp worker?(messages) do
+      Enum.any?(messages, fn m ->
+        content = Map.get(m, :content, Map.get(m, "content", ""))
+        is_binary(content) and String.contains?(content, "temporary Fermix subagent")
+      end)
+    end
+
+    defp main_first_turn(names) do
+      if "subagents" in names do
+        args = %{"tasks" => [%{"id" => "a", "task" => "do a"}, %{"id" => "b", "task" => "do b"}]}
+
+        %{
+          content: "",
+          tool_calls: [
+            %{id: "fc_1", call_id: "call_1", name: "subagents", arguments: Jason.encode!(args)}
+          ],
+          provider_state: %{rest: []},
+          usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+          model: "mock"
+        }
+      else
+        terminal_turn("no subagents available")
+      end
+    end
+
+    defp terminal_turn(content) do
+      %{
+        content: content,
+        tool_calls: [],
+        provider_state: %{rest: []},
+        usage: %{prompt_tokens: 1, completion_tokens: 0, total_tokens: 1},
+        model: "mock"
+      }
+    end
+
+    defp record_worker_caps(names) do
+      case Process.whereis(@worker_caps) do
+        nil -> :ok
+        _pid -> Agent.update(@worker_caps, fn prior -> prior ++ [names] end)
+      end
+    end
+
+    defp report(opts, message) do
+      case Keyword.get(opts, :test_pid) do
+        pid when is_pid(pid) -> send(pid, message)
+        _ -> :ok
+      end
     end
   end
 
@@ -422,6 +576,96 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       default_timeout_ms: 20,
+      adapter_opts: [sleep_ms: 200],
+      script: [%{content: "too late"}]
+    )
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "wall-clock timeout after 20ms"
+  end
+
+  test "job timeout_seconds is honored when the caller passes timeout_ms: nil", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Job Wall Clock",
+               schedule: "every 15 minutes",
+               task_prompt: "This adapter hangs past the job's own wall-clock timeout.",
+               timeout_seconds: 1
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      timeout_ms: nil,
+      adapter_opts: [sleep_ms: 5_000],
+      script: [%{content: "too late"}],
+      exit_timeout_ms: 3_000
+    )
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "wall-clock timeout after 1000ms"
+  end
+
+  test "job inactivity_timeout_seconds is honored when the caller passes inactivity_timeout_ms: nil",
+       %{
+         repo: repo,
+         capability_registry: capability_registry,
+         output_base_dir: output_base_dir
+       } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Job Inactivity",
+               schedule: "every 15 minutes",
+               task_prompt: "This adapter goes silent past the job's inactivity timeout.",
+               inactivity_timeout_seconds: 1
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      inactivity_timeout_ms: nil,
+      adapter_opts: [sleep_ms: 5_000],
+      script: [%{content: "too late"}],
+      exit_timeout_ms: 3_000
+    )
+
+    assert {:ok, timed_out_run} = Repo.get_job_run(run.id, server: repo)
+    assert timed_out_run.status == "timeout"
+    assert timed_out_run.error =~ "inactivity timeout after 1000ms"
+  end
+
+  test "an explicit caller timeout_ms still overrides the job's timeout_seconds", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo,
+               name: "Caller Override",
+               schedule: "every 15 minutes",
+               task_prompt: "The caller's explicit timeout wins over the job column.",
+               timeout_seconds: 3_600
+             )
+
+    assert_runner_exits_normally(
+      job,
+      run,
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir,
+      timeout_ms: 20,
       adapter_opts: [sleep_ms: 200],
       script: [%{content: "too late"}]
     )
@@ -824,6 +1068,10 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert delivered_run.delivery_error == nil
   end
 
+  # The `Keyword.get(opts, :timeout_ms)` shape below is load-bearing: it mirrors
+  # Jobs.Scheduler, which always passes these keys and lets the value be nil when
+  # unset. Do not "clean it up" into conditional puts — that would stop exercising
+  # the caller shape that shadowed per-job timeouts.
   defp assert_runner_exits_normally(job, run, opts) do
     parent = self()
     script = Keyword.fetch!(opts, :script)
@@ -849,7 +1097,9 @@ defmodule FermixCore.Jobs.RunnerTest do
       )
 
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 1_000
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal},
+                   Keyword.get(opts, :exit_timeout_ms, 1_000)
   end
 
   defp create_claimed_job(repo, attrs) do
@@ -862,7 +1112,8 @@ defmodule FermixCore.Jobs.RunnerTest do
                %{
                  name: "Scheduled Job",
                  schedule: "every 15 minutes",
-                 task_prompt: "Run."
+                 task_prompt: "Run.",
+                 created_by_trust: "operator"
                },
                Enum.into(attrs, %{})
              ),
@@ -940,6 +1191,314 @@ defmodule FermixCore.Jobs.RunnerTest do
         Runner.provider_atom(:gemini)
       end
     end
+  end
+
+  describe "effective_trust/1" do
+    test "maps the stored vocabulary and raises on anything else" do
+      assert Runner.effective_trust(%{created_by_trust: "operator"}) == :operator
+      assert Runner.effective_trust(%{created_by_trust: "guest"}) == :guest
+
+      # Post-migration the schema only stores operator/guest; an out-of-
+      # vocabulary value can only be a corrupt row, so the run fails loudly.
+      assert_raise FunctionClauseError, fn ->
+        Runner.effective_trust(%{created_by_trust: "core"})
+      end
+    end
+  end
+
+  describe "scheduled-run delegation (§11)" do
+    setup do
+      :ok = FanoutAdapter.reset_worker_caps()
+      :ok
+    end
+
+    test "an operator job fans out via subagents; workers nest under the run session", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+        )
+
+      test_pid = self()
+      handler = "runner-fanout-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :agent, :start],
+        fn _event, _measurements, metadata, _config ->
+          send(test_pid, {:agent_start, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Fan Out",
+                 task_prompt: "Delegate two independent parts.",
+                 created_by_trust: "operator"
+               )
+
+      start_fanout_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir
+      )
+
+      # subagents is both advertised (operator, depth 0) and executable now.
+      assert_receive {:main_caps, main_names}, 1_000
+      assert "subagents" in main_names
+
+      # Both workers nest under the run's session_id (cron_<job>_<ts>), not an
+      # orphan trace — proof the routing seam threaded parent_session.
+      assert_receive {:agent_start, %{name: "subagent:a", parent_session: parent_a}}, 2_000
+      assert_receive {:agent_start, %{name: "subagent:b", parent_session: parent_b}}, 2_000
+      assert parent_a == run.session_id
+      assert parent_b == run.session_id
+
+      # Results aggregate: the fan-out result handed back to the main loop's
+      # continuation carries both workers, both completed.
+      assert_receive {:aggregated, [%{output: json}]}, 2_000
+      summary = Jason.decode!(json)["summary"]
+      assert summary["requested"] == 2
+      assert summary["completed"] == 2
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+      assert stored_run.final_response == "fan-out synthesized"
+    end
+
+    test "a tool-confined operator job bounds its workers to the same allowlist", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+        )
+
+      :ok =
+        CapabilityRegistry.register(capability_registry, test_capability("web_like", :network))
+
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          test_capability("blocked_tool", :network)
+        )
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Confined Fanout",
+                 task_prompt: "Delegate within the ceiling.",
+                 created_by_trust: "operator",
+                 allowed_tools: ["subagents", "web_like"]
+               )
+
+      start_fanout_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir
+      )
+
+      assert_receive {:main_caps, main_names}, 1_000
+      assert "subagents" in main_names
+      assert "web_like" in main_names
+      refute "blocked_tool" in main_names
+
+      assert_receive {:aggregated, _tool_results}, 2_000
+
+      # Both workers inherit exactly the job's tool ceiling: web_like is
+      # advertised, subagents is inert in a worker (depth guard + §12 gate drops
+      # it from the wire), and blocked_tool was never in the allowlist.
+      worker_caps = FanoutAdapter.worker_caps()
+      assert length(worker_caps) == 2
+      assert Enum.all?(worker_caps, &(&1 == ["web_like"]))
+    end
+
+    test "a skill-confined operator job bounds its workers to the skill allowlist", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+        )
+
+      :ok =
+        CapabilityRegistry.register(capability_registry, test_capability("web_like", :network))
+
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          test_capability("blocked_tool", :network)
+        )
+
+      # Operator job with no own allowlist, confined only by the named skill's
+      # allowlist. The run's effective allowlist is the skill ∩ job intersection,
+      # and §11.2 stamps that same value into the tool context the workers read.
+      {:ok, skills} =
+        SkillRegistryStub.start_link(%{
+          "research" => skill_definition("research", allowed_tools: ["subagents", "web_like"])
+        })
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Skill Confined Fanout",
+                 task_prompt: "Delegate as the research skill.",
+                 created_by_trust: "operator",
+                 skill_name: "research"
+               )
+
+      start_fanout_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        skill_registry: skills,
+        output_base_dir: output_base_dir
+      )
+
+      assert_receive {:main_caps, main_names}, 1_000
+      assert "subagents" in main_names
+      assert "web_like" in main_names
+      refute "blocked_tool" in main_names
+
+      assert_receive {:aggregated, _tool_results}, 2_000
+
+      # The skill ∩ job intersection reaches the workers: web_like is advertised,
+      # subagents is inert in a worker (depth guard + §12 gate drops it from the
+      # wire), and blocked_tool was never in the skill allowlist.
+      worker_caps = FanoutAdapter.worker_caps()
+      assert length(worker_caps) == 2
+      assert Enum.all?(worker_caps, &(&1 == ["web_like"]))
+    end
+
+    test "a guest job never sees subagents (policy-class exclusion)", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok =
+        CapabilityRegistry.register(
+          capability_registry,
+          BuiltinCapability.from_tool_module(FermixCore.Tools.Subagents)
+        )
+
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("guest_read"))
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Guest No Fanout",
+                 task_prompt: "Try to delegate.",
+                 created_by_trust: "guest"
+               )
+
+      start_fanout_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir
+      )
+
+      # subagents is policy class :external_api, which the guest surface excludes
+      # — asserted at the cron seam, so guest cron fan-out is impossible.
+      assert_receive {:main_caps, names}, 1_000
+      refute "subagents" in names
+      assert "guest_read" in names
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "ok"
+    end
+
+    test "a provider-pinned job threads its own route to workers, not the global primary", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, _} = Agent.start_link(fn -> nil end, name: :runner_route_probe)
+      on_exit(fn -> stop_probe_agent() end)
+
+      :ok = CapabilityRegistry.register(capability_registry, route_probe_capability())
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Pinned Fanout",
+                 task_prompt: "Delegate on the pinned route.",
+                 created_by_trust: "operator",
+                 provider: "xai",
+                 model: "grok-4.3"
+               )
+
+      # A probe tool records the loop context's ordered_routes — the exact seam
+      # `subagents.base_spawn_opts` reads to place workers. The main loop uses
+      # the injected stub adapter, so this is hermetic; the pin still resolves
+      # into the worker route chain rather than falling back to the primary.
+      assert_runner_exits_normally(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        script: [
+          %{tool_calls: [route_probe_call()]},
+          %{content: "done"}
+        ]
+      )
+
+      routes = Agent.get(:runner_route_probe, & &1)
+      assert [{%{provider: :xai, model: "grok-4.3"}, _opts} | _] = routes
+    end
+
+    defp start_fanout_runner(job, run, opts) do
+      parent = self()
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: Keyword.fetch!(opts, :repo),
+          job: job,
+          run: run,
+          notify: parent,
+          capability_registry: Keyword.fetch!(opts, :capability_registry),
+          skill_registry: Keyword.get(opts, :skill_registry),
+          adapter: FanoutAdapter,
+          adapter_opts: [test_pid: parent],
+          output_base_dir: Keyword.fetch!(opts, :output_base_dir)
+        )
+
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 3_000
+    end
+
+    defp route_probe_call do
+      %{id: "fc_probe", call_id: "call_probe", name: "route_probe", arguments: "{}"}
+    end
+
+    defp route_probe_capability do
+      Capability.new(%{
+        name: "route_probe",
+        description: "records the loop context's ordered_routes",
+        parameters: %{"type" => "object", "properties" => %{}},
+        kind: :builtin,
+        executor: {__MODULE__, :execute_route_probe, []},
+        policy_class: :read_only
+      })
+    end
+
+    defp stop_probe_agent do
+      case Process.whereis(:runner_route_probe) do
+        nil -> :ok
+        pid -> Agent.stop(pid)
+      end
+    end
+  end
+
+  def execute_route_probe(_args, context) do
+    Agent.update(:runner_route_probe, fn _ -> Map.get(context, :ordered_routes) end)
+    {:ok, %{success: true, output: "probed"}}
   end
 
   describe "cron model routing" do
@@ -1333,6 +1892,49 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
       assert stored_run.status == "error"
       assert stored_run.error =~ "deterministic provider bug"
+    end
+
+    test "does NOT retry a connection-unavailable failure after a tool has executed", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      :ok = CapabilityRegistry.register(capability_registry, test_capability("gate_tool"))
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Post Tool Loss",
+                 task_prompt: "Run.",
+                 allowed_tools: ["gate_tool"]
+               )
+
+      parent = self()
+
+      {:ok, pid} =
+        Runner.start_link(
+          repo: repo,
+          job: job,
+          run: run,
+          notify: parent,
+          capability_registry: capability_registry,
+          adapter: ToolThenTransientAdapter,
+          adapter_opts: [test_pid: parent],
+          output_base_dir: output_base_dir,
+          network_readiness_enabled: false,
+          delay_fn: fn _ms -> :ok end
+        )
+
+      ref = Process.monitor(pid)
+
+      # A tool ran, then the follow-up call lost its connection. The gate stops
+      # the whole-loop retry, so the loop is never replayed — no second chat.
+      assert_receive {:tool_then_transient, :chat}, 1_000
+      assert_receive {:tool_then_transient, :continue}, 1_000
+      refute_receive {:tool_then_transient, :chat}, 200
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2_000
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "error"
     end
 
     defp start_counter, do: Agent.start_link(fn -> 0 end)

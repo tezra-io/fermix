@@ -1,4 +1,5 @@
 suite: shell
+risk: host_readonly
 title: "Shell — safe, read-only command execution"
 description: >
   Exercises the assistant's ability to answer questions that require running a
@@ -69,7 +70,7 @@ scenarios:
           max_duration_ms: 60000
         rubric: "Reports the files present in the current directory, obtained by running a listing command."
       - id: count_lines
-        query: "How many lines are in the README file?"
+        query: "How many lines are in __EVAL_REPO_ROOT__/README.md?"
         expect:
           tools_any: [shell]
           no_tool_errors: false  # model may glob_search to locate README first; errors are exploratory, not failures

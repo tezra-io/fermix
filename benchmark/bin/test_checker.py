@@ -8,6 +8,7 @@
 `checker:` block validation. Pure / temp-dir; no daemon. Run: `uv run bin/test_checker.py`."""
 from __future__ import annotations
 
+import math
 import os
 import stat
 import sys
@@ -94,6 +95,64 @@ def test_checker_sees_workspace_and_reply_env(tmp_path):
     assert r.score == 1.0
 
 
+def test_checker_subprocess_env_does_not_inherit_secrets(tmp_path, monkeypatch):
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    monkeypatch.setenv("FERMIX_EVAL_SHOULD_NOT_LEAK", "secret")
+    _script(tmp_path, "checkers/env-clean.sh",
+            '#!/bin/sh\n[ -n "$PATH" ] && [ -z "$FERMIX_EVAL_SHOULD_NOT_LEAK" ]\n')
+    r = checker.run_checker(str(tmp_path),
+                            {"script": "checkers/env-clean.sh", "mode": "exit"},
+                            scoped_dir=str(tmp_path), reply="")
+    assert r.score == 1.0 and r.error is None
+
+
+@pytest.mark.parametrize("script_path", [
+    "/tmp/checker.sh", "../checker.sh", r"C:\tmp\checker.sh", r"\\server\share\checker.sh",
+])
+def test_checker_rejects_absolute_and_traversal_script_paths(tmp_path, script_path):
+    r = checker.run_checker(str(tmp_path), {"script": script_path, "mode": "exit"},
+                            scoped_dir=str(tmp_path), reply="")
+    assert r.score == 0.0 and r.error and "path" in r.error.lower()
+
+
+def test_checker_rejects_script_symlink_escape(tmp_path):
+    harness = tmp_path / "harness"
+    checkers = harness / "checkers"
+    checkers.mkdir(parents=True)
+    outside = _script(tmp_path, "outside.sh", "#!/bin/sh\nexit 0\n")
+    os.symlink(outside, checkers / "escape.sh")
+    r = checker.run_checker(str(harness),
+                            {"script": "checkers/escape.sh", "mode": "exit"},
+                            scoped_dir=str(tmp_path), reply="")
+    assert r.score == 0.0 and r.error and "outside" in r.error.lower()
+
+
+def test_checker_rejects_unknown_mode_before_execution(tmp_path):
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
+    r = checker.run_checker(str(tmp_path), {"script": "checkers/ok.sh", "mode": "yaml"},
+                            scoped_dir=str(tmp_path), reply="")
+    assert r.score == 0.0 and r.error and "mode" in r.error.lower()
+
+
+@pytest.mark.parametrize("timeout_s", [0, -1, math.inf, math.nan, True, "1", 10**1000])
+def test_checker_rejects_invalid_timeout_override(tmp_path, timeout_s):
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
+    r = checker.run_checker(str(tmp_path), {"script": "checkers/ok.sh", "mode": "exit"},
+                            scoped_dir=str(tmp_path), reply="", timeout_s=timeout_s)
+    assert r.score == 0.0 and r.error and "timeout" in r.error.lower()
+
+
+@pytest.mark.parametrize("timeout_ms", [0, -1, math.inf, math.nan, True, "1000", 10**1000])
+def test_checker_rejects_invalid_spec_timeout(tmp_path, timeout_ms):
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    _script(tmp_path, "checkers/ok.sh", "#!/bin/sh\nexit 0\n")
+    spec = {"script": "checkers/ok.sh", "mode": "exit", "timeout_ms": timeout_ms}
+    r = checker.run_checker(str(tmp_path), spec, scoped_dir=str(tmp_path), reply="")
+    assert r.score == 0.0 and r.error and "timeout" in r.error.lower()
+
+
 def test_checker_missing_script_records_error(tmp_path):
     r = checker.run_checker(str(tmp_path), {"script": "checkers/nope.sh", "mode": "exit"},
                             scoped_dir=str(tmp_path), reply="")
@@ -104,6 +163,18 @@ def test_checker_bad_json_records_error(tmp_path):
     os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
     _script(tmp_path, "checkers/garbage.sh", "#!/bin/sh\necho not-json\n")
     r = checker.run_checker(str(tmp_path), {"script": "checkers/garbage.sh", "mode": "json"},
+                            scoped_dir=str(tmp_path), reply="")
+    assert r.score == 0.0 and r.error
+
+
+@pytest.mark.parametrize(
+    "score", ["NaN", "Infinity", "-0.1", "1.1", "true", '"0.5"', "1" + "0" * 400])
+def test_checker_rejects_non_finite_out_of_range_or_non_numeric_score(tmp_path, score):
+    os.makedirs(os.path.join(str(tmp_path), "checkers"), exist_ok=True)
+    body = f'#!/bin/sh\necho \'{{"score": {score}, "detail": "bad"}}\'\n'
+    _script(tmp_path, "checkers/bad-score.sh", body)
+    r = checker.run_checker(str(tmp_path),
+                            {"script": "checkers/bad-score.sh", "mode": "json"},
                             scoped_dir=str(tmp_path), reply="")
     assert r.score == 0.0 and r.error
 
@@ -136,6 +207,22 @@ def test_validate_checker_requires_script_and_mode():
     assert any("mode" in p for p in problems)
 
 
+@pytest.mark.parametrize("key,value", [
+    ("script", "/tmp/checker.py"),
+    ("script", "../checker.py"),
+    ("script", r"C:\tmp\checker.py"),
+    ("seed", "/tmp/fixtures"),
+    ("seed", "../fixtures"),
+    ("seed", r"\\server\share\fixtures"),
+])
+def test_validate_checker_rejects_absolute_and_traversal_paths(key, value):
+    spec = {"script": "checkers/x.py", "mode": "exit"}
+    spec[key] = value
+    problems: list[str] = []
+    suites._validate_checker(spec, "x", problems)
+    assert any(key in problem and "relative" in problem for problem in problems)
+
+
 def test_checker_and_score_mutually_exclusive():
     # a case can't carry both `score:` and `checker:` — validated in _load_one
     problems: list[str] = []
@@ -151,9 +238,56 @@ BENCH = os.path.dirname(HERE)                       # HERE = bin/ -> benchmark/
 
 
 def _seed(tmp_path, fixture_rel):
-    scoped = os.path.join(str(tmp_path), "ws")
-    checker.seed_workspace(scoped, os.path.join(BENCH, fixture_rel) if fixture_rel else None)
+    cleanup_root = os.path.join(str(tmp_path), "cleanup")
+    scoped = os.path.join(cleanup_root, "task", "t0")
+    checker.seed_workspace(scoped, BENCH, fixture_rel, cleanup_root)
     return scoped
+
+
+@pytest.mark.parametrize("fixture_path", [
+    "", "/tmp/fixtures", "../fixtures", r"C:\tmp\fixtures", r"\\server\share\fixtures",
+])
+def test_seed_workspace_rejects_invalid_fixture_paths(tmp_path, fixture_path):
+    harness = tmp_path / "harness"
+    harness.mkdir()
+    cleanup_root = tmp_path / "cleanup"
+    scoped = cleanup_root / "task" / "t0"
+    with pytest.raises(checker.CheckerBoundaryError):
+        checker.seed_workspace(str(scoped), str(harness), fixture_path, str(cleanup_root))
+
+
+def test_seed_workspace_rejects_fixture_symlink_escape(tmp_path):
+    harness = tmp_path / "harness"
+    fixtures = harness / "fixtures"
+    fixtures.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    os.symlink(outside, fixtures / "escape")
+    cleanup_root = tmp_path / "cleanup"
+    scoped = cleanup_root / "task" / "t0"
+    with pytest.raises(checker.CheckerBoundaryError):
+        checker.seed_workspace(str(scoped), str(harness), "fixtures/escape", str(cleanup_root))
+
+
+def test_seed_workspace_rejects_nested_fixture_symlink(tmp_path):
+    harness = tmp_path / "harness"
+    seed = harness / "fixtures" / "seed"
+    seed.mkdir(parents=True)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("secret")
+    os.symlink(outside, seed / "leak.txt")
+    cleanup_root = tmp_path / "cleanup"
+    scoped = cleanup_root / "task" / "t0"
+    with pytest.raises(checker.CheckerBoundaryError):
+        checker.seed_workspace(str(scoped), str(harness), "fixtures/seed", str(cleanup_root))
+
+
+def test_seed_workspace_requires_explicit_root_containing_target(tmp_path):
+    scoped = tmp_path / "outside" / "task" / "t0"
+    cleanup_root = tmp_path / "cleanup"
+    with pytest.raises(safe_rm.SafeRmError):
+        checker.seed_workspace(str(scoped), str(tmp_path), None, str(cleanup_root))
+    assert not scoped.exists()
 
 
 def test_anchor_pytest_bugfix_oracle_accepts_bug_rejects(tmp_path):

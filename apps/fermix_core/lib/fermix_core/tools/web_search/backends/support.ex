@@ -2,8 +2,50 @@ defmodule FermixCore.Tools.WebSearch.Backends.Support do
   @moduledoc false
 
   alias FermixCore.Net.Guard
+  alias FermixCore.Net.HttpClient
 
   @type result :: %{title: String.t(), url: String.t(), snippet: String.t()}
+
+  @doc """
+  Shared Req options for every search-backend HTTP call: Req-level retry off
+  (the single stale-socket retry lives in `Net.HttpClient`), a bounded receive
+  timeout, the backend-specific options, the `context.req_options` test seam,
+  and redirects forced off (a provider 3xx must surface as an error, never be
+  followed with a credential attached).
+  """
+  @spec request_options(map(), keyword()) :: keyword()
+  def request_options(context, options) when is_map(context) and is_list(options) do
+    ([retry: false, receive_timeout: 15_000] ++ options)
+    |> Keyword.merge(Map.get(context, :req_options, []))
+    |> Keyword.put(:redirect, false)
+  end
+
+  @doc """
+  Runs a search-backend HTTP call through `Net.HttpClient` on the shared
+  `FermixCore.Finch` pool: idle-capped connections plus a single retry on a
+  stale-socket `:closed`. Per-request `connect_options` are forbidden here
+  (Req raises when combined with `:finch`) — the backends' connect budget
+  lives in the per-host pool entries in `FermixCore.Application.finch_pools/0`.
+  Transport failures normalize to the shared `"network: ..."` error string.
+  """
+  @spec request(:get | :post, String.t(), keyword()) ::
+          {:ok, Req.Response.t()} | {:error, String.t()}
+  def request(method, url, request_options)
+      when method in [:get, :post] and is_binary(url) and is_list(request_options) do
+    if Keyword.has_key?(request_options, :connect_options) do
+      raise ArgumentError,
+            "web_search backends must not pass :connect_options (Req forbids it with :finch, " <>
+              "and it forks the request off the shared hardened pool) — per-host connect " <>
+              "timeouts live in FermixCore.Application.finch_pools/0"
+    end
+
+    req = Req.new([method: method, url: url] ++ request_options)
+
+    case HttpClient.request(req, "web_search #{URI.parse(url).host}") do
+      {:ok, response} -> {:ok, response}
+      {:error, exception} -> {:error, "network: #{inspect(exception)}"}
+    end
+  end
 
   @spec credential(keyword(), atom(), String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def credential(opts, key, label) when is_list(opts) and is_atom(key) and is_binary(label) do

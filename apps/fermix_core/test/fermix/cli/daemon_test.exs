@@ -189,6 +189,34 @@ defmodule Fermix.CLI.DaemonTest do
     assert Keyword.get(opts, :timeout_ms) == 1_000
   end
 
+  test "agent_message decodes the request cwd param and forwards it to the bridge", %{
+    socket_path: socket_path
+  } do
+    assert {:ok, _reply} =
+             Client.agent_message(
+               %{"content" => "hello", "cwd" => "/home/owner/project"},
+               socket_path: socket_path,
+               timeout: 2_000
+             )
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :cwd) == "/home/owner/project"
+  end
+
+  test "agent_message forwards a nil cwd when the param is absent", %{
+    socket_path: socket_path
+  } do
+    assert {:ok, _reply} =
+             Client.agent_message(
+               %{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 2_000
+             )
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :cwd) == nil
+  end
+
   test "agent_message returns empty input errors without calling the bridge", %{
     socket_path: socket_path
   } do

@@ -1,8 +1,8 @@
-"""Drive real turns into the Opik-enabled dev daemon via `fermix ask`.
+"""Drive real turns into the configured Opik-enabled daemon via `fermix ask`.
 
 `fermix ask --json --session S --timeout MS <query>` connects to the daemon's
-unix socket at `$FERMIX_HOME/daemon.sock` (we point FERMIX_HOME at ~/.fermix-dev,
-the Opik-enabled daemon) and runs one real agent turn. Reply envelope:
+unix socket at `$FERMIX_HOME/daemon.sock`; the caller supplies the configured home
+for its eval tier. It runs one real agent turn. Reply envelope:
   {"status":"ok","response":...,"session_id":...}
   {"status":"error","error":...}            # exit 1
   {"status":"error","error":"not_running"}  # exit 3 — daemon down
@@ -88,6 +88,20 @@ class DriveResult:
     # True when `response` is a usage-limit/rate-limit/quota reply — the turn ran
     # but Fermix declined the work, so callers should abort rather than score it.
     usage_limited: bool = False
+
+
+def settled_elapsed_ms(result: DriveResult, settle_started: float,
+                       now_monotonic: float | None = None) -> float:
+    """End-to-end latency for grading after a server trace settles.
+
+    A normal CLI response already spans the whole turn. When the CLI itself timed
+    out, include the additional trace-correlation and settle wait so a late server
+    completion cannot pass a latency budget using only the subprocess timeout.
+    """
+    if result.status != "timeout":
+        return result.elapsed_ms
+    finished = time.monotonic() if now_monotonic is None else now_monotonic
+    return result.elapsed_ms + max(0.0, finished - settle_started) * 1000.0
 
 
 def _parse_envelope(stdout: str) -> dict | None:
@@ -179,7 +193,7 @@ def _log_and_wait(label: str, n: int, total: int, wait_s: int, res: DriveResult)
 
 
 def daemon_reachable(cfg) -> tuple[bool, str]:
-    """True iff the Opik-enabled dev daemon answers its control socket."""
+    """True iff the configured Opik-enabled daemon answers its control socket."""
     cmd = [cfg.daemon.fermix_bin, "status", "--json"]
     try:
         proc = subprocess.run(cmd, env=cfg.env, capture_output=True, text=True, timeout=15)

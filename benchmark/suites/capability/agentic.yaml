@@ -1,4 +1,5 @@
 suite: cap_agentic
+risk: isolated_mutation
 title: "Capability — complex agentic tasks (delegation, scheduling, self-modification)"
 description: >
   Multi-step agentic tasks that a single-shot answer can't fake — the kind that separate a
@@ -15,6 +16,7 @@ defaults:
 
 scenarios:
   - id: delegate_and_synthesize
+    risk: expensive
     title: "Fan out to parallel subagents, then synthesize covering every branch"
     severity: normal
     tags: [capability, agentic, subagents, delegation]

@@ -30,6 +30,19 @@ defmodule Fermix.CLI.StatusCommandTest do
     :ok
   end
 
+  test "plain status prints the running line without a skew warning when versions match" do
+    test_self = self()
+
+    output =
+      capture_io(fn ->
+        send(test_self, {:status_exit, StatusCommand.run([])})
+      end)
+
+    assert_receive {:status_exit, 0}
+    assert output =~ "fermix: running (pid "
+    refute output =~ "warning:"
+  end
+
   test "status --json prints the overview snapshot as JSON" do
     test_self = self()
 
