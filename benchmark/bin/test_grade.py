@@ -109,5 +109,37 @@ def test_multiple_one_succeeds_fails():
     assert not _gate(spans, {"tools_none_succeeded": ["shell", "web_fetch"]}, "tools_none_succeeded").passed
 
 
+def _reply_trace(text):
+    return {"id": "t", "output": {"text": text}, "usage": {}, "metadata": {}}
+
+
+def _reply_gate(text, expect, key):
+    return next(g for g in grade.grade(_reply_trace(text), [], expect) if g.key == key)
+
+
+def test_reply_matches_sees_through_markdown_emphasis():
+    # Models bold their conclusions; "**No-go**" must match a `no-go` pattern.
+    g = _reply_gate("Recommendation: **No-go**. The board **memo** slips; 17% of 240 is **40.8**.",
+                    {"reply_matches": r"(?is)(?=.*recommendation:? no-go)(?=.*board memo)(?=.*is 40\.8)"},
+                    "reply_matches")
+    assert g.passed
+
+
+def test_reply_not_matches_sees_through_markdown_emphasis():
+    # A forbidden phrase split by emphasis is still forbidden.
+    g = _reply_gate("Yes — **48** is right.",
+                    {"reply_not_matches": r"(?i)\b48 is right\b"},
+                    "reply_not_matches")
+    assert not g.passed
+
+
+def test_reply_gate_leaves_single_asterisks_alone():
+    # Math like 0.17*240 must not collapse into a new token.
+    g = _reply_gate("0.17*240 = 40.8",
+                    {"reply_not_matches": r"17240"},
+                    "reply_not_matches")
+    assert g.passed
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
