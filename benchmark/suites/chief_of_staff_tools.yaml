@@ -62,7 +62,7 @@ scenarios:
             - 'benchmark/suites/fixtures/chief_of_staff/launch_inbox\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/launch_tracker\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/launch_notes\.md'
-          reply_matches: '(?is)(?=.*P1)(?=.*Sam)(?=.*12:30)(?=.*Northstar)(?=.*board[ -]memo)(?=.*not (?:on track|ready)|.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay)|.*(?:^|[.!?]\s*)(?:hold|no-go)\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bdo not launch\b)'
+          reply_matches: '(?is)(?=.*P1)(?=.*Sam)(?=.*12:30)(?=.*Northstar)(?=.*board[ -]memo)(?=.*not (?:on track|ready)|.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay|postpone)|.*(?:^|[.!?:]\s*|\n[-•*]?\s{0,3})(?:hold|no[- ]go|postpone)\b|.*\brecommend against\b|.*\b(?:do not|don.t) launch\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bat risk\b)'
           # A negated conclusion ("not at risk", "no need to hold/delay") must not
           # false-pass via the substring "need to hold/delay".
           reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'

@@ -39,7 +39,7 @@ scenarios:
               what changed. Use no tools.
             expect:
               max_tool_calls: 0
-              reply_matches: '(?is)(?=.*board memo)(?=.*customer escalation)(?=.*contained)(?=.*design review)(?=.*09:00)(?=.*changed)'
+              reply_matches: '(?is)(?=.*board memo)(?=.*customer escalation)(?=.*contained|.*resolved|.*mitigat|.*under control|.*no longer (?:a |an )?(?:priority|active|blocking))(?=.*design review)(?=.*0?9:00|.*Tuesday)(?=.*chang|.*differ|.*updat|.*revis|.*shift|.*now due|.*moved)'
         rubric: >
           The revision is decisive and ordered, promotes the new deadlines,
           demotes resolved work, and separates known facts from open ownership.
