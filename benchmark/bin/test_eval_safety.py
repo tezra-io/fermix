@@ -484,6 +484,7 @@ def test_control_modes_are_mutually_exclusive():
     args = SimpleNamespace(
         max_cases=0,
         repeat=1,
+        fail_retries=0,
         confirm_purge=True,
         purge_run="20260715T151102Z",
         dry_run=True,
@@ -806,6 +807,115 @@ def test_new_run_ids_are_collision_resistant_even_with_the_same_timestamp(monkey
     assert first != second
     assert first.endswith("01234567")
     assert opik.valid_run_id(first)
+
+
+def _scripted_run_case(monkeypatch, outcomes):
+    remaining = iter(outcomes)
+    seen_trials = []
+
+    def scripted(_cfg, _client, _suite, _scn, case, _run_id, trial, _judge_on):
+        seen_trials.append(trial)
+        outcome = next(remaining)
+        return {"id": case.id, "trial": trial, "outcome": outcome,
+                "passed": outcome == "pass", "incomplete": outcome == "incomplete",
+                "gate_passed": outcome == "pass", "turns": [], "rubric": None}
+
+    monkeypatch.setattr(run_eval, "run_case", scripted)
+    return seen_trials
+
+
+def _one_case_jobs(tmp_path):
+    suite = _write_suite(tmp_path, "host_readonly")
+    return run_eval.case_jobs([(suite, suite.scenarios)], repeat=1, max_cases=1)
+
+
+def test_fail_retries_unreproduced_failure_passes_and_is_marked_flaky(
+        tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail", "pass", "pass"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "pass"
+    assert case["attempt_outcomes"] == ["fail", "pass", "pass"]
+    assert case["flaky"] is True
+    assert seen_trials == [1, 2, 3]
+    reliability = run_eval.reliability_summary(results)
+    assert reliability[0]["status"] == "flaky"
+    assert reliability[0]["trials"] == 3
+
+
+def test_fail_retries_reproduced_failure_stays_fail_and_stops_early(
+        tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail", "fail", "pass"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "fail"
+    assert case["attempt_outcomes"] == ["fail", "fail"]
+    assert case["flaky"] is False
+    assert seen_trials == [1, 2]
+
+
+def test_fail_retries_second_fail_on_last_attempt_is_final(tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail", "pass", "fail"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "fail"
+    assert case["attempt_outcomes"] == ["fail", "pass", "fail"]
+    assert seen_trials == [1, 2, 3]
+
+
+def test_fail_retries_default_zero_keeps_single_trial_verdict(tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["fail"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False)
+    case = results[0]["scenarios"][0]["cases"][0]
+    assert case["outcome"] == "fail"
+    assert "attempt_outcomes" not in case
+    assert seen_trials == [1]
+
+
+def test_fail_retries_does_not_retry_a_pass_or_an_incomplete(tmp_path, monkeypatch):
+    seen_trials = _scripted_run_case(monkeypatch, ["pass"])
+    run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    assert seen_trials == [1]
+
+    seen_trials = _scripted_run_case(monkeypatch, ["incomplete"])
+    results, _skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), _one_case_jobs(tmp_path),
+        "20260723T000000Z01234567", False, False, fail_retries=2)
+    assert seen_trials == [1]
+    assert results[0]["scenarios"][0]["cases"][0]["outcome"] == "incomplete"
+
+
+def test_fail_retries_trial_numbers_stay_unique_under_repeat(tmp_path, monkeypatch):
+    suite = _write_suite(tmp_path, "host_readonly")
+    jobs = run_eval.case_jobs([(suite, suite.scenarios)], repeat=2, max_cases=2)
+    jobs = [job for job in jobs if job[2].id == "one"]
+    seen_trials = _scripted_run_case(
+        monkeypatch, ["fail", "pass", "pass", "fail", "fail"])
+    run_eval._execute_jobs(
+        SimpleNamespace(), object(), jobs,
+        "20260723T000000Z01234567", False, False, fail_retries=2, repeat=2)
+    assert seen_trials == [1, 3, 5, 2, 4]
+
+
+def test_fail_retries_argument_is_bounded():
+    common = {"repeat": 1, "max_cases": 0, "confirm_purge": False,
+              "purge_run": None, "dry_run": False, "check": False}
+    assert run_eval._argument_error(
+        SimpleNamespace(fail_retries=3, **common)) is not None
+    assert run_eval._argument_error(
+        SimpleNamespace(fail_retries=-1, **common)) is not None
+    assert run_eval._argument_error(
+        SimpleNamespace(fail_retries=2, **common)) is None
 
 
 def test_post_preflight_opik_failure_becomes_incomplete_report_evidence(
