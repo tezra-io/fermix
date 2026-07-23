@@ -141,6 +141,7 @@ def test_selected_judged_rubric_cannot_run_as_structural_only(tmp_path):
         ({"cases": 1, "cases_failed": 0, "cases_incomplete": 1}, 1, 0, "incomplete"),
         ({"cases": 1, "cases_failed": 0, "cases_incomplete": 0}, 2, 1, "incomplete"),
         ({"cases": 1, "cases_failed": 1, "cases_incomplete": 0}, 1, 0, "fail"),
+        ({"cases": 2, "cases_failed": 1, "cases_incomplete": 1}, 2, 0, "fail"),
         ({"cases": 1, "cases_failed": 0, "cases_incomplete": 0}, 1, 0, "pass"),
     ],
 )
@@ -823,6 +824,37 @@ def test_post_preflight_opik_failure_becomes_incomplete_report_evidence(
     assert skipped == 0
     assert case["outcome"] == "incomplete"
     assert "Opik evidence unavailable" in case["turns"][0]["drive_error"]
+
+
+def test_post_preflight_opik_failure_still_writes_all_reports(tmp_path, monkeypatch):
+    suite = _write_suite(tmp_path, "host_readonly")
+    chosen = [(suite, suite.scenarios)]
+
+    def fail_after_preflight(*_args, **_kwargs):
+        raise opik.OpikError("GET traces failed after 3 attempts")
+
+    monkeypatch.setattr(run_eval, "run_case", fail_after_preflight)
+    suite_results, skipped = run_eval._execute_jobs(
+        SimpleNamespace(), object(), run_eval.case_jobs(chosen, repeat=1, max_cases=1),
+        "20260715T151102Z01234567", False, False)
+    out_dir = tmp_path / "reports"
+    cfg = SimpleNamespace(
+        daemon=SimpleNamespace(fermix_home=str(tmp_path / "home")),
+        opik=SimpleNamespace(project="fermix-eval-test"),
+        judge=SimpleNamespace(backend="fermix", model=None, enabled=False),
+        skill_dir=str(tmp_path),
+    )
+    args = SimpleNamespace(
+        judge=False, include_content=False, repeat=1, max_cases=1, out=str(out_dir))
+
+    exit_code = run_eval._write_run_reports(
+        cfg, args, chosen, {"host_readonly"}, "20260715T151102Z01234567",
+        run_eval.now_utc(), suite_results, planned_cases=1, skipped_required=skipped)
+
+    assert exit_code == 4
+    assert json.loads((out_dir / "results.json").read_text())["outcome"] == "incomplete"
+    assert (out_dir / "report.md").is_file()
+    assert (out_dir / "report.html").is_file()
 
 
 def test_later_turn_opik_failure_preserves_already_graded_turn_evidence(

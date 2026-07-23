@@ -17,6 +17,7 @@ error_info, total_estimated_cost, start_time.
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
@@ -31,6 +32,7 @@ class OpikError(Exception):
 
 
 _CORRELATION_KEYS = ("eval_run_id", "case_id", "turn_index")
+_GET_RETRY_DELAYS_S = (0.5, 1.0)
 _RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z(?:[a-f0-9]{8})?$")
 
 
@@ -144,14 +146,22 @@ class OpikClient:
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers=self._headers({"Accept": "application/json"}))
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.load(resp)
-        except urllib.error.URLError as exc:
-            raise OpikError(f"GET {url}: {exc}") from exc
-        except json.JSONDecodeError as exc:
-            raise OpikError(f"GET {url}: bad JSON: {exc}") from exc
+        headers = self._headers({"Accept": "application/json"})
+        attempts = len(_GET_RETRY_DELAYS_S) + 1
+        for attempt in range(attempts):
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.load(resp)
+            except urllib.error.HTTPError as exc:
+                raise OpikError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise OpikError(f"GET {url}: bad JSON: {exc}") from exc
+            except (OSError, http.client.HTTPException) as exc:
+                if attempt + 1 == attempts:
+                    raise OpikError(
+                        f"GET {url} failed after {attempts} attempts: {exc}") from exc
+                time.sleep(_GET_RETRY_DELAYS_S[attempt])
 
     def _post(self, path: str, body: dict) -> int:
         req = urllib.request.Request(
