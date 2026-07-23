@@ -178,7 +178,11 @@ uv run bin/run_eval.py --suite epistemic_integrity --judge --repeat 3
 Key flags: `--suite NAME` (repeatable), `--scenario ID` (repeatable),
 `--case ID` (repeatable), `--tag TAG`, `--all` (host-read-only only),
 `--profile PROFILE`, `--judge`,
-`--repeat 1..3`, `--dry-run`
+`--repeat 1..3`, `--fail-retries 0..2` (a failed case is re-driven on a fresh
+session and fails only if the failure reproduces on a second attempt; a cleared
+case passes but is counted and reported as flaky — the CI regression tier uses
+`--fail-retries 2` so single-sample model nondeterminism cannot redden the
+nightly), `--dry-run`
 (validate + plan only), `--check` (preconditions only), `--max-cases N`
 (limit driven case trials; not a dollar/spend cap), `--out DIR`,
 `--purge-run RUN_ID` (exact-run preview), `--confirm-daemon-isolated` (isolated

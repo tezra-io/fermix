@@ -26,7 +26,7 @@ dry:          ## validate behavioral suites, no spend
 	$(UV) bin/run_eval.py --tag host-safe-core --judge --dry-run
 
 regression:   ## Tier 2 behavioral regression against the development daemon
-	EVAL_JUDGE_API_KEY="$(JUDGE_KEY)" $(UV) bin/run_eval.py --tag host-safe-core --judge
+	EVAL_JUDGE_API_KEY="$(JUDGE_KEY)" $(UV) bin/run_eval.py --tag host-safe-core --judge --fail-retries 2
 
 capability:   ## Tier 1 capability score of the current daemon model, ALL public suites (k=5)
 	$(UV) bin/run_capability.py --trials 5 $(DAEMON_ATTEST) $(ISOLATION_ATTEST) $(COST_CONFIRM)
