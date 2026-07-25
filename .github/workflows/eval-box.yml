@@ -164,12 +164,17 @@ jobs:
           make dry
           make regression
 
-      - name: Tier — capability (deterministic composite + judged axis)
+      # The two capability axes are independent run_capability.py processes and
+      # are kept in separate steps on purpose: folded into one `run:` under
+      # `set -euo pipefail`, a transient judge fault in the judged axis discarded
+      # an already-complete, already-paid deterministic sweep and skipped the
+      # leaderboard save (observed 2026-07-25: 110 turns / $5.78 disowned).
+      - name: Tier — capability (deterministic composite)
+        id: capability_deterministic
         if: inputs.tier == 'capability'
         working-directory: benchmark
         env:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
-          EVAL_JUDGE_API_KEY: ${{ secrets.EVAL_JUDGE_API_KEY }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
           # True by construction on this box: the runner VM and the seeded
@@ -183,6 +188,17 @@ jobs:
           make check
           make estimate
           make capability
+
+      - name: Tier — capability (judged axis)
+        if: ${{ !cancelled() && inputs.tier == 'capability' }}
+        working-directory: benchmark
+        env:
+          FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
+          EVAL_JUDGE_API_KEY: ${{ secrets.EVAL_JUDGE_API_KEY }}
+          OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
+          OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
+        run: |
+          set -euo pipefail
           make capability-judged
 
       - name: Tier — dangerous (sandbox_verify on a disposable box)
@@ -203,7 +219,9 @@ jobs:
             --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data
 
       - name: Save capability leaderboard
-        if: inputs.tier == 'capability' && success()
+        # Keyed to the deterministic axis, which is what writes the board — a
+        # judged-axis failure must not throw away a sweep that completed.
+        if: inputs.tier == 'capability' && steps.capability_deterministic.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: benchmark/reports/capability/leaderboard.json

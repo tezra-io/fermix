@@ -780,6 +780,10 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
         transcript=transcript, tool_evidence=evidence,
         candidate_routes=candidate_routes,
     )
+    if not result.evaluated:
+        # Without this the only record of a judge outage is `rubric.error`, which
+        # `redact_content` blanks — the run goes INCOMPLETE with no stated reason.
+        print(f"    judge unavailable: {result.error}", file=sys.stderr, flush=True)
     return {"text": case.rubric, "evaluated": result.evaluated, "passed": result.passed,
             "score": result.score, "rationale": result.rationale, "error": result.error,
             "backend": result.backend, "called": result.called,

@@ -1132,6 +1132,15 @@ def test_chief_of_staff_read_cases_require_every_fixture_path_in_tool_inputs():
             assert case.expect.get("max_tool_calls") == 6
 
 
+def test_dangerous_suites_load_and_validate():
+    """`load_all` excludes suites/dangerous/ by default, so no other test ever
+    parses them — a schema break there would surface only in the weekly run."""
+    suite_dir = os.path.join(os.path.dirname(HERE), "suites")
+    names = {s.name for s in suites.load_all(suite_dir, include_dangerous=True)}
+    assert "sandbox_verify" in names
+    assert "sandbox_verify" not in {s.name for s in suites.load_all(suite_dir)}
+
+
 def _suite_by_name(name: str) -> suites.Suite:
     suite_dir = os.path.join(os.path.dirname(HERE), "suites")
     return next(s for s in suites.load_all(suite_dir) if s.name == name)

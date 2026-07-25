@@ -10,10 +10,12 @@ Structural gates remain the hard safety/flow signal; the judge only scores prose
 
 from __future__ import annotations
 
+import http.client
 import json
 import math
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -22,6 +24,11 @@ _MAX_JUDGE_PAYLOAD_BYTES = 64 * 1024
 _MAX_JUDGE_OUTPUT_BYTES = 16 * 1024
 _MAX_JUDGE_OUTPUT_TOKENS = 2_048
 _MAX_JUDGE_HTTP_RESPONSE_BYTES = 64 * 1024
+# Four attempts over ~13s. The judge is an external provider whose 5xx is the
+# documented transient class, so one bad minute must not void a whole run.
+_JUDGE_RETRY_DELAYS_S = (1.0, 3.0, 9.0)
+_JUDGE_HTTP_TIMEOUT_S = 30
+_RETRYABLE_JUDGE_STATUS = frozenset({500, 502, 503, 504})
 _COMPLETION_REASONS = {"stop", "end_turn", "stop_sequence", "completed"}
 _TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
 
@@ -103,8 +110,11 @@ def _unique_object(pairs: list[tuple]) -> dict:
 def _verdict_from(text: str, backend: str) -> JudgeResult:
     data = _extract_json(text or "")
     if data is None or set(data) != {"pass", "score", "rationale"}:
-        preview = repr(text)[:160]
-        return _failure(backend, f"judge returned invalid verdict shape: {preview}")
+        # Shape only, never the text: this string is reported verbatim and the
+        # verdict body is the judge's prose about the candidate.
+        shape = "not a JSON object" if data is None else f"{len(data)} key(s)"
+        return _failure(backend, "judge returned invalid verdict shape: "
+                                 f"{shape}, {len(text or '')} char(s)")
     passed = data["pass"]
     score = data["score"]
     rationale = data["rationale"]
@@ -254,6 +264,36 @@ def _ssl_context() -> ssl.SSLContext:
     return ctx
 
 
+def _post_judge(url: str, body: bytes, headers: dict) -> bytes:
+    """POST one verdict request, retrying ONLY transient transport/5xx faults.
+
+    Bounded at len(_JUDGE_RETRY_DELAYS_S) + 1 attempts; at the cap the last
+    exception propagates so the caller records a fail-loud judge error and the
+    case stays INCOMPLETE. Response parsing stays outside this loop on purpose:
+    a malformed or rejecting verdict must never be re-rolled.
+
+    This deliberately inverts `opik.OpikClient._get`, which raises HTTPError
+    unretried. That read targets a first-party service where a 5xx is a real
+    infra fault worth surfacing; the judge targets an external provider where
+    5xx is the documented transient class.
+    """
+    attempts = len(_JUDGE_RETRY_DELAYS_S) + 1
+    for attempt in range(attempts):
+        req = urllib.request.Request(url, data=body, headers=headers)
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=_JUDGE_HTTP_TIMEOUT_S, context=_ssl_context()) as resp:
+                return resp.read(_MAX_JUDGE_HTTP_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as exc:
+            # Ordering is load-bearing: HTTPError ⊂ URLError ⊂ OSError.
+            if exc.code not in _RETRYABLE_JUDGE_STATUS or attempt + 1 == attempts:
+                raise
+        except (OSError, http.client.HTTPException):
+            if attempt + 1 == attempts:
+                raise
+        time.sleep(_JUDGE_RETRY_DELAYS_S[attempt])
+
+
 def _judge_openai(cfg, data: dict, candidates: list[dict]) -> JudgeResult:
     api_key = os.environ.get("EVAL_JUDGE_API_KEY")
     if not api_key:
@@ -263,13 +303,10 @@ def _judge_openai(cfg, data: dict, candidates: list[dict]) -> JudgeResult:
         return _failure("openai", separation_error)
     base = os.environ.get("EVAL_JUDGE_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     body = _openai_request_body(cfg, data)
-    req = urllib.request.Request(
-        base + "/chat/completions", data=body,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    )
+    url = base + "/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     try:
-        with urllib.request.urlopen(req, timeout=60, context=_ssl_context()) as resp:
-            raw = resp.read(_MAX_JUDGE_HTTP_RESPONSE_BYTES + 1)
+        raw = _post_judge(url, body, headers)
         if len(raw) > _MAX_JUDGE_HTTP_RESPONSE_BYTES:
             return _failure(
                 "openai", "openai judge response exceeds the response byte cap", called=True)
@@ -299,9 +336,9 @@ def _judge_openai(cfg, data: dict, candidates: list[dict]) -> JudgeResult:
              result.total_tokens) = _usage_from(response_data.get("usage"))
             return result
         content = choice["message"]["content"]
-    except (urllib.error.URLError, TimeoutError, KeyError, IndexError,
-            AttributeError, json.JSONDecodeError, TypeError, UnicodeDecodeError,
-            ValueError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+            KeyError, IndexError, AttributeError, json.JSONDecodeError, TypeError,
+            UnicodeDecodeError, ValueError) as exc:
         return _failure("openai", f"openai judge error: {exc}", called=True)
 
     if not isinstance(content, str):

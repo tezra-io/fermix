@@ -16,7 +16,7 @@ help:
 	@echo "targets: tests check dry regression capability capability-auto capability-judged capability-readonly estimate rank baseline uplift gaia lmeval"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade eval_safety seed_home opik_client; do \
+	@for t in scoring aggregate leaderboard experiments uplift baseline lmeval gaia capability_runner checker grade judge eval_safety seed_home opik_client; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
