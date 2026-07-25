@@ -21,6 +21,8 @@ defmodule FermixCore.Memory.Repo do
   @memory_review_migration_version 9
   @taxonomy_migration_version 10
   @trust_check_migration_version 11
+  @harness_runs_migration_version 12
+  @harness_continuation_migration_version 13
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -408,6 +410,102 @@ defmodule FermixCore.Memory.Repo do
     ON messages(agent_id, owner_id, channel, chat_id, thread_scope, role, id);
   """
 
+  @harness_runs_schema_sql """
+  CREATE TABLE IF NOT EXISTS harness_runs (
+    id TEXT PRIMARY KEY,
+    vendor TEXT NOT NULL CHECK (vendor IN ('codex', 'claude', 'codex_cloud')),
+    rail TEXT NOT NULL CHECK (rail IN ('local', 'cloud')),
+    status TEXT NOT NULL CHECK (status IN (
+      'starting', 'submitting', 'running', 'polling',
+      'completed', 'failed', 'blocked', 'cancelled', 'interrupted'
+    )),
+    reason TEXT,
+    cwd TEXT NOT NULL,
+    worktree_root TEXT NOT NULL,
+    lock_roots_json TEXT NOT NULL,
+    artifacts_dir TEXT NOT NULL,
+    resumable INTEGER NOT NULL DEFAULT 1,
+    vendor_session_id TEXT,
+    exit_code INTEGER,
+    framing_errors INTEGER NOT NULL DEFAULT 0,
+    artifact_truncated INTEGER NOT NULL DEFAULT 0,
+    usage_json TEXT,
+    diagnostics_tail TEXT,
+    origin_kind TEXT NOT NULL CHECK (origin_kind IN ('chat', 'scheduled')),
+    origin_session_id TEXT NOT NULL,
+    parent_job_id TEXT,
+    delivery_mode TEXT NOT NULL,
+    platform TEXT,
+    destination TEXT,
+    thread TEXT,
+    send_opts_json TEXT,
+    delivery_status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (delivery_status IN ('pending', 'delivered', 'dead_letter')),
+    delivery_attempts INTEGER NOT NULL DEFAULT 0,
+    next_delivery_at TEXT,
+    last_delivery_error TEXT,
+    task_id TEXT,
+    task_url TEXT,
+    next_poll_at TEXT,
+    poll_deadline TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    started_at TEXT,
+    first_event_at TEXT,
+    last_event_at TEXT,
+    completed_at TEXT,
+    delivered_at TEXT
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_harness_runs_status
+    ON harness_runs(status, created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_harness_runs_delivery_status
+    ON harness_runs(delivery_status, created_at DESC);
+  """
+
+  # Completion-continuation chain depth (CODING_HARNESS_ORCHESTRATION §23.2): the
+  # depth of the turn that launched the run (0 for an owner-typed request), read
+  # at terminalization to bound the chain. Appended by ALTER so a migrated and a
+  # freshly created database share one column order (`SELECT *` is positional).
+  @harness_continuation_schema_sql """
+  ALTER TABLE harness_runs ADD COLUMN continuation_depth INTEGER NOT NULL DEFAULT 0;
+  """
+
+  # Active statuses hold workspace locks and count against `max_active`. The
+  # literal is inlined into WHERE clauses only (never interpolated with data),
+  # so it is safe as a SQL fragment.
+  @harness_active_status_sql "'starting', 'submitting', 'running', 'polling'"
+
+  # Column classes for the dynamic UPDATE set-clause builder. Every settable
+  # column is allowlisted here by type; an unknown key raises (no silent drop).
+  @harness_run_timestamp_cols [
+    :started_at,
+    :first_event_at,
+    :last_event_at,
+    :completed_at,
+    :delivered_at,
+    :next_delivery_at,
+    :next_poll_at,
+    :poll_deadline
+  ]
+  @harness_run_bool_cols [:resumable, :artifact_truncated]
+  # `:status` is deliberately absent: the only legitimate status writer is
+  # `terminalize_harness_run_row/4`, which prepends the status assignment itself
+  # under an active-status guard. The generic UPDATE path rejects `:status` up
+  # front (`update_harness_run_row/3`), so record_progress/record_session/
+  # mark_delivery can never resurrect a terminal row to an active status.
+  @harness_run_plain_cols [
+    :reason,
+    :vendor_session_id,
+    :exit_code,
+    :framing_errors,
+    :diagnostics_tail,
+    :delivery_status,
+    :delivery_attempts,
+    :last_delivery_error,
+    :task_id,
+    :task_url
+  ]
+
   @type message_attrs :: %{
           required(:agent_id) => String.t(),
           required(:owner_id) => String.t(),
@@ -657,6 +755,8 @@ defmodule FermixCore.Memory.Repo do
   @type scheduled_job_row :: map()
   @type job_run_row :: map()
   @type memory_source_row :: map()
+  @type harness_run_attrs :: map()
+  @type harness_run_row :: map()
 
   @type state :: %{
           enabled: boolean(),
@@ -973,6 +1073,94 @@ defmodule FermixCore.Memory.Repo do
     call({:list_job_runs, selector, Keyword.get(opts, :limit, 20)}, opts)
   end
 
+  @doc """
+  Atomically admits a coding-harness run.
+
+  Runs inside a single `BEGIN IMMEDIATE` transaction: it refuses when
+  `max_active` active runs already exist (`{:error, :max_active}`) or when any
+  active run already holds one of `attrs.lock_roots`
+  (`{:error, {:workspace_locked, root}}`), otherwise inserts the row. The Repo
+  is config-free: the caller (`FermixCore.Harness.Ledger`) reads `max_active`
+  and passes it in.
+  """
+  @spec admit_harness_run(harness_run_attrs(), pos_integer(), keyword()) ::
+          {:ok, harness_run_row()}
+          | {:error, :max_active | {:workspace_locked, String.t()} | term()}
+  def admit_harness_run(attrs, max_active, opts \\ [])
+      when is_map(attrs) and is_integer(max_active) and max_active > 0 do
+    call({:admit_harness_run, attrs, max_active}, opts)
+  end
+
+  @doc """
+  Transitions an active run to a terminal `status`, setting `completed_at` and
+  releasing its workspace locks (only active rows hold locks).
+
+  Guarded on the current status still being active: a second terminalize of the
+  same run returns `{:error, :already_terminal}`; an unknown id returns
+  `{:error, :not_found}`.
+  """
+  @spec terminalize_harness_run(String.t(), String.t(), map(), keyword()) ::
+          {:ok, harness_run_row()} | {:error, :already_terminal | :not_found | term()}
+  def terminalize_harness_run(id, status, fields, opts \\ [])
+      when is_binary(id) and is_binary(status) and is_map(fields) do
+    call({:terminalize_harness_run, id, status, fields}, opts)
+  end
+
+  @spec update_harness_run(String.t(), map(), keyword()) ::
+          {:ok, harness_run_row()} | {:error, :not_found | term()}
+  def update_harness_run(id, fields, opts \\ [])
+      when is_binary(id) and is_map(fields) and map_size(fields) > 0 do
+    call({:update_harness_run, id, fields}, opts)
+  end
+
+  @doc """
+  Transitions a local run `starting` → `running` on its first stream event via a
+  single guarded UPDATE. A terminal or already-`running` row is left untouched
+  (the current row is returned); an unknown id is `{:error, :not_found}`.
+  """
+  @spec mark_harness_run_running(String.t(), keyword()) ::
+          {:ok, harness_run_row()} | {:error, :not_found | term()}
+  def mark_harness_run_running(id, opts \\ []) when is_binary(id) do
+    call({:mark_harness_run_running, id}, opts)
+  end
+
+  @doc """
+  Transitions a cloud run `submitting` → `polling` once its task id lands, setting
+  the poll schedule (`task_id`, `task_url`, `next_poll_at`, `poll_deadline`) in the
+  same guarded UPDATE. A terminal or already-`polling` row is left untouched (its
+  current state is returned, the poll fields NOT re-applied); an unknown id is
+  `{:error, :not_found}`. Like `mark_harness_run_running/2`, this is a guarded
+  status writer distinct from the generic update path (which rejects `:status`).
+  """
+  @spec promote_harness_run_polling(String.t(), map(), keyword()) ::
+          {:ok, harness_run_row()} | {:error, :not_found | term()}
+  def promote_harness_run_polling(id, fields, opts \\ [])
+      when is_binary(id) and is_map(fields) do
+    call({:promote_harness_run_polling, id, fields}, opts)
+  end
+
+  @spec get_harness_run(String.t(), keyword()) ::
+          {:ok, harness_run_row()} | {:error, :not_found | term()}
+  def get_harness_run(id, opts \\ []) when is_binary(id) do
+    call({:get_harness_run, id}, opts)
+  end
+
+  @spec list_harness_runs(map(), keyword()) :: {:ok, [harness_run_row()]} | {:error, term()}
+  def list_harness_runs(selector \\ %{}, opts \\ []) when is_map(selector) do
+    call({:list_harness_runs, selector, Keyword.get(opts, :limit, 50)}, opts)
+  end
+
+  @spec active_harness_runs(keyword()) :: {:ok, [harness_run_row()]} | {:error, term()}
+  def active_harness_runs(opts \\ []) do
+    call(:active_harness_runs, opts)
+  end
+
+  @spec pending_harness_deliveries(DateTime.t(), keyword()) ::
+          {:ok, [harness_run_row()]} | {:error, term()}
+  def pending_harness_deliveries(%DateTime{} = now, opts \\ []) do
+    call({:pending_harness_deliveries, now}, opts)
+  end
+
   @spec upsert_memory_source(memory_source_attrs(), keyword()) ::
           {:ok, memory_source_row()} | {:error, term()}
   def upsert_memory_source(attrs, opts \\ []) when is_map(attrs) do
@@ -1261,6 +1449,51 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:admit_harness_run, attrs, max_active}, _from, state) do
+    reply = with_connection(state, &admit_harness_run_tx(&1, attrs, max_active))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:terminalize_harness_run, id, status, fields}, _from, state) do
+    reply = with_connection(state, &terminalize_harness_run_row(&1, id, status, fields))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_harness_run, id, fields}, _from, state) do
+    reply = with_connection(state, &update_harness_run_row(&1, id, fields))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mark_harness_run_running, id}, _from, state) do
+    reply = with_connection(state, &mark_harness_run_running_row(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:promote_harness_run_polling, id, fields}, _from, state) do
+    reply = with_connection(state, &promote_harness_run_polling_row(&1, id, fields))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_harness_run, id}, _from, state) do
+    reply = with_connection(state, &fetch_harness_run(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_harness_runs, selector, limit}, _from, state) do
+    reply = with_connection(state, &fetch_harness_runs(&1, selector, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:active_harness_runs, _from, state) do
+    reply = with_connection(state, &fetch_active_harness_runs/1)
+    {:reply, reply, state}
+  end
+
+  def handle_call({:pending_harness_deliveries, now}, _from, state) do
+    reply = with_connection(state, &fetch_pending_harness_deliveries(&1, now))
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_memory_source, attrs}, _from, state) do
     reply = with_connection(state, &upsert_memory_source_row(&1, attrs))
     {:reply, reply, state}
@@ -1328,7 +1561,9 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_fermix_md_rename_migration(conn, versions),
          :ok <- apply_memory_review_migration(conn, versions),
          :ok <- apply_taxonomy_migration(conn, versions),
-         :ok <- apply_trust_check_migration(conn, versions) do
+         :ok <- apply_trust_check_migration(conn, versions),
+         :ok <- apply_harness_runs_migration(conn, versions),
+         :ok <- apply_harness_continuation_migration(conn, versions) do
       :ok
     end
   end
@@ -1539,6 +1774,38 @@ defmodule FermixCore.Memory.Repo do
              ) do
         Sqlite3.execute(conn, "PRAGMA foreign_keys=ON;")
       end
+    end
+  end
+
+  defp apply_harness_runs_migration(conn, versions) do
+    if Enum.member?(versions, @harness_runs_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_runs_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_runs_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_continuation_migration(conn, versions) do
+    if Enum.member?(versions, @harness_continuation_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_continuation_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_continuation_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -2658,6 +2925,274 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # Atomic admission: BEGIN IMMEDIATE -> capacity gate -> lock gate -> INSERT ->
+  # COMMIT. Mirrors `transact_claim/2`; a `:busy` on BEGIN never opened the tx so
+  # it passes through without a ROLLBACK, every other error rolls back.
+  defp admit_harness_run_tx(conn, attrs, max_active) do
+    run = normalize_harness_run_attrs(attrs)
+
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
+         result <- admit_harness_run_in_tx(conn, run, max_active),
+         :ok <- finish_harness_admit(conn, result) do
+      result
+    else
+      {:error, :busy} -> {:error, :busy}
+      {:error, reason} -> rollback_harness_admit(conn, reason)
+    end
+  end
+
+  defp admit_harness_run_in_tx(conn, run, max_active) do
+    with :ok <- ensure_harness_capacity(conn, max_active),
+         :ok <- ensure_harness_lock_free(conn, run.lock_roots) do
+      insert_harness_run_row(conn, run)
+    end
+  end
+
+  defp ensure_harness_capacity(conn, max_active) do
+    with {:ok, [[count]]} <-
+           query_all(
+             conn,
+             "SELECT COUNT(*) FROM harness_runs WHERE status IN (#{@harness_active_status_sql})",
+             []
+           ) do
+      if count < max_active, do: :ok, else: {:error, :max_active}
+    end
+  end
+
+  defp ensure_harness_lock_free(conn, lock_roots) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             "SELECT lock_roots_json FROM harness_runs WHERE status IN (#{@harness_active_status_sql})",
+             []
+           ) do
+      held = Enum.flat_map(rows, fn [json] -> Jason.decode!(json) end)
+      harness_lock_conflict(lock_roots, held)
+    end
+  end
+
+  defp harness_lock_conflict(lock_roots, held) do
+    case Enum.find(lock_roots, fn root -> root in held end) do
+      nil -> :ok
+      root -> {:error, {:workspace_locked, root}}
+    end
+  end
+
+  defp finish_harness_admit(conn, {:ok, _run}), do: execute(conn, "COMMIT", [])
+  defp finish_harness_admit(_conn, {:error, reason}), do: {:error, reason}
+
+  defp rollback_harness_admit(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
+  end
+
+  defp insert_harness_run_row(conn, run) do
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO harness_runs (
+               id,
+               vendor,
+               rail,
+               status,
+               reason,
+               cwd,
+               worktree_root,
+               lock_roots_json,
+               artifacts_dir,
+               resumable,
+               vendor_session_id,
+               exit_code,
+               framing_errors,
+               artifact_truncated,
+               usage_json,
+               diagnostics_tail,
+               origin_kind,
+               origin_session_id,
+               parent_job_id,
+               delivery_mode,
+               platform,
+               destination,
+               thread,
+               send_opts_json,
+               delivery_status,
+               delivery_attempts,
+               next_delivery_at,
+               last_delivery_error,
+               task_id,
+               task_url,
+               next_poll_at,
+               poll_deadline,
+               created_at,
+               started_at,
+               first_event_at,
+               last_event_at,
+               completed_at,
+               delivered_at,
+               continuation_depth
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             """,
+             harness_run_insert_params(run)
+           ),
+         {:ok, row} <- fetch_harness_run(conn, run.id) do
+      {:ok, row}
+    end
+  end
+
+  # Terminal transition: a single guarded UPDATE (`WHERE status IN active`) so a
+  # re-terminalize touches zero rows. `Sqlite3.changes/1` after the UPDATE tells
+  # a real transition (1) from a rejected one (0), which is then classified as
+  # `:not_found` vs `:already_terminal`.
+  defp terminalize_harness_run_row(conn, id, status, fields) do
+    # `status` is written here and nowhere else (it is not in the generic
+    # updatable-column allowlist). Prepend it to the set clause so the terminal
+    # transition is the single status writer; `completed_at` defaults to now.
+    set_fields = Map.put_new(fields, :completed_at, DateTime.utc_now())
+    {set_sql, params} = harness_run_set_clause(set_fields)
+
+    with :ok <-
+           execute(
+             conn,
+             "UPDATE harness_runs SET status = ?, #{set_sql} " <>
+               "WHERE id = ? AND status IN (#{@harness_active_status_sql})",
+             [status | params] ++ [id]
+           ) do
+      interpret_harness_terminalize(conn, id)
+    end
+  end
+
+  defp interpret_harness_terminalize(conn, id) do
+    case Sqlite3.changes(conn) do
+      {:ok, 1} -> fetch_harness_run(conn, id)
+      {:ok, 0} -> harness_terminalize_rejection(conn, id)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp harness_terminalize_rejection(conn, id) do
+    case fetch_harness_run(conn, id) do
+      {:ok, _row} -> {:error, :already_terminal}
+      {:error, :not_found} -> {:error, :not_found}
+    end
+  end
+
+  # `status` transitions only through `terminalize_harness_run_row/4` (the single
+  # guarded writer). The generic update path must never carry `:status`, or a
+  # terminal row could be silently resurrected to an active status — re-acquiring
+  # a phantom workspace lock and capacity outside admission.
+  defp update_harness_run_row(_conn, _id, %{status: _status}) do
+    {:error, :status_not_updatable}
+  end
+
+  defp update_harness_run_row(conn, id, fields) do
+    {set_sql, params} = harness_run_set_clause(fields)
+
+    with :ok <-
+           execute(conn, "UPDATE harness_runs SET #{set_sql} WHERE id = ?", params ++ [id]) do
+      fetch_harness_run(conn, id)
+    end
+  end
+
+  # `starting` → `running` on first event: a single guarded UPDATE so a terminal
+  # or already-`running` row is never resurrected to an active status out of band.
+  # `status` is written only here and in `terminalize_harness_run_row/4` (the
+  # generic update path rejects it). The row is fetched regardless of whether the
+  # guard matched, so a no-op flip returns the current row rather than an error.
+  defp mark_harness_run_running_row(conn, id) do
+    with :ok <-
+           execute(
+             conn,
+             "UPDATE harness_runs SET status = 'running' WHERE id = ? AND status = 'starting'",
+             [id]
+           ) do
+      fetch_harness_run(conn, id)
+    end
+  end
+
+  # `submitting` → `polling` once the task id lands: a single guarded UPDATE
+  # prepending the status assignment (the single-status-writer discipline, like
+  # `mark_harness_run_running_row/2`) and setting the poll schedule in the same
+  # statement. `status` is written only here, in `mark_harness_run_running_row/2`,
+  # and in `terminalize_harness_run_row/4`; the generic update path rejects it. The
+  # row is fetched regardless of the guard so a no-op flip returns the current row.
+  defp promote_harness_run_polling_row(conn, id, fields) do
+    {set_sql, params} = harness_run_set_clause(fields)
+
+    with :ok <-
+           execute(
+             conn,
+             "UPDATE harness_runs SET status = 'polling', #{set_sql} " <>
+               "WHERE id = ? AND status = 'submitting'",
+             params ++ [id]
+           ) do
+      fetch_harness_run(conn, id)
+    end
+  end
+
+  defp fetch_harness_run(conn, id) do
+    with {:ok, rows} <- query_all(conn, "SELECT * FROM harness_runs WHERE id = ? LIMIT 1", [id]) do
+      case rows do
+        [row] -> {:ok, harness_run_row(row)}
+        [] -> {:error, :not_found}
+      end
+    end
+  end
+
+  defp fetch_harness_runs(conn, selector, limit) do
+    {where_sql, params} = harness_run_where_clause(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM harness_runs
+             WHERE #{where_sql}
+             ORDER BY created_at DESC, id ASC
+             LIMIT ?
+             """,
+             params ++ [limit]
+           ) do
+      {:ok, Enum.map(rows, &harness_run_row/1)}
+    end
+  end
+
+  defp fetch_active_harness_runs(conn) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM harness_runs
+             WHERE status IN (#{@harness_active_status_sql})
+             ORDER BY created_at ASC, id ASC
+             """,
+             []
+           ) do
+      {:ok, Enum.map(rows, &harness_run_row/1)}
+    end
+  end
+
+  defp fetch_pending_harness_deliveries(conn, now) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM harness_runs
+             WHERE delivery_status = 'pending'
+               AND status NOT IN (#{@harness_active_status_sql})
+               AND (next_delivery_at IS NULL OR next_delivery_at <= ?)
+             ORDER BY created_at ASC, id ASC
+             """,
+             [timestamp_string(now)]
+           ) do
+      {:ok, Enum.map(rows, &harness_run_row/1)}
+    end
+  end
+
   defp upsert_memory_source_row(conn, attrs) do
     source = normalize_memory_source_attrs(attrs)
 
@@ -2929,6 +3464,50 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
+  defp normalize_harness_run_attrs(attrs) do
+    %{
+      id: fetch_string!(attrs, :id),
+      vendor: fetch_string!(attrs, :vendor),
+      rail: fetch_string!(attrs, :rail),
+      status: fetch_string!(attrs, :status),
+      reason: optional_string!(attrs, :reason),
+      cwd: fetch_string!(attrs, :cwd),
+      worktree_root: fetch_string!(attrs, :worktree_root),
+      lock_roots: fetch_lock_roots!(attrs),
+      artifacts_dir: fetch_string!(attrs, :artifacts_dir),
+      resumable: bool_with_default!(attrs, :resumable, true),
+      vendor_session_id: optional_string!(attrs, :vendor_session_id),
+      exit_code: optional_non_negative_integer!(attrs, :exit_code),
+      framing_errors: non_negative_integer_with_default!(attrs, :framing_errors, 0),
+      artifact_truncated: bool_with_default!(attrs, :artifact_truncated, false),
+      usage: Map.get(attrs, :usage),
+      diagnostics_tail: optional_string!(attrs, :diagnostics_tail),
+      origin_kind: fetch_string!(attrs, :origin_kind),
+      origin_session_id: fetch_string!(attrs, :origin_session_id),
+      continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
+      parent_job_id: optional_string!(attrs, :parent_job_id),
+      delivery_mode: fetch_string!(attrs, :delivery_mode),
+      platform: optional_string!(attrs, :platform),
+      destination: optional_string!(attrs, :destination),
+      thread: optional_string!(attrs, :thread),
+      send_opts: Map.get(attrs, :send_opts),
+      delivery_status: string_with_default!(attrs, :delivery_status, "pending"),
+      delivery_attempts: non_negative_integer_with_default!(attrs, :delivery_attempts, 0),
+      next_delivery_at: optional_timestamp_string(Map.get(attrs, :next_delivery_at)),
+      last_delivery_error: optional_string!(attrs, :last_delivery_error),
+      task_id: optional_string!(attrs, :task_id),
+      task_url: optional_string!(attrs, :task_url),
+      next_poll_at: optional_timestamp_string(Map.get(attrs, :next_poll_at)),
+      poll_deadline: optional_timestamp_string(Map.get(attrs, :poll_deadline)),
+      created_at: timestamp_string(Map.get(attrs, :created_at, DateTime.utc_now())),
+      started_at: optional_timestamp_string(Map.get(attrs, :started_at)),
+      first_event_at: optional_timestamp_string(Map.get(attrs, :first_event_at)),
+      last_event_at: optional_timestamp_string(Map.get(attrs, :last_event_at)),
+      completed_at: optional_timestamp_string(Map.get(attrs, :completed_at)),
+      delivered_at: optional_timestamp_string(Map.get(attrs, :delivered_at))
+    }
+  end
+
   defp normalize_memory_source_attrs(attrs) do
     %{
       id: fetch_string!(attrs, :id),
@@ -3164,6 +3743,82 @@ defmodule FermixCore.Memory.Repo do
     ]
   end
 
+  defp harness_run_insert_params(run) do
+    [
+      run.id,
+      run.vendor,
+      run.rail,
+      run.status,
+      run.reason,
+      run.cwd,
+      run.worktree_root,
+      Jason.encode!(run.lock_roots),
+      run.artifacts_dir,
+      bool_to_int(run.resumable),
+      run.vendor_session_id,
+      run.exit_code,
+      run.framing_errors,
+      bool_to_int(run.artifact_truncated),
+      encode_metadata(run.usage),
+      run.diagnostics_tail,
+      run.origin_kind,
+      run.origin_session_id,
+      run.parent_job_id,
+      run.delivery_mode,
+      run.platform,
+      run.destination,
+      run.thread,
+      encode_metadata(run.send_opts),
+      run.delivery_status,
+      run.delivery_attempts,
+      run.next_delivery_at,
+      run.last_delivery_error,
+      run.task_id,
+      run.task_url,
+      run.next_poll_at,
+      run.poll_deadline,
+      run.created_at,
+      run.started_at,
+      run.first_event_at,
+      run.last_event_at,
+      run.completed_at,
+      run.delivered_at,
+      run.continuation_depth
+    ]
+  end
+
+  # Dynamic UPDATE set-clause. Column names come only from the allowlisted key
+  # classes (never from data), so the interpolated fragment is injection-safe;
+  # an unlisted key raises rather than silently dropping.
+  defp harness_run_set_clause(fields) do
+    {clauses, params} =
+      fields
+      |> Enum.map(&harness_run_set_entry/1)
+      |> Enum.unzip()
+
+    {Enum.join(clauses, ", "), params}
+  end
+
+  defp harness_run_set_entry({key, value}) when key in @harness_run_timestamp_cols do
+    {"#{key} = ?", optional_timestamp_string(value)}
+  end
+
+  defp harness_run_set_entry({key, value}) when key in @harness_run_bool_cols do
+    {"#{key} = ?", bool_to_int(value)}
+  end
+
+  defp harness_run_set_entry({:usage, value}) do
+    {"usage_json = ?", encode_metadata(value)}
+  end
+
+  defp harness_run_set_entry({key, value}) when key in @harness_run_plain_cols do
+    {"#{key} = ?", value}
+  end
+
+  defp harness_run_set_entry({key, _value}) do
+    raise ArgumentError, "harness_runs column #{inspect(key)} is not updatable"
+  end
+
   defp memory_source_upsert_params(source) do
     [
       source.id,
@@ -3245,6 +3900,16 @@ defmodule FermixCore.Memory.Repo do
     |> Enum.sort_by(fn {key, _value} -> key end)
     |> Enum.map_reduce([], fn {key, value}, params ->
       {"#{job_run_column_name(key)} = ?", params ++ [value]}
+    end)
+    |> join_where_clause()
+  end
+
+  defp harness_run_where_clause(selector) do
+    selector
+    |> Enum.filter(fn {_key, value} -> not is_nil(value) end)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_reduce([], fn {key, value}, params ->
+      {"#{harness_run_column_name(key)} = ?", params ++ [value]}
     end)
     |> join_where_clause()
   end
@@ -3410,6 +4075,21 @@ defmodule FermixCore.Memory.Repo do
   end
 
   defp job_run_column_name(key) when key in [:id, :job_id, :session_id, :trigger, :status] do
+    Atom.to_string(key)
+  end
+
+  defp harness_run_column_name(key)
+       when key in [
+              :id,
+              :vendor,
+              :rail,
+              :status,
+              :origin_kind,
+              :origin_session_id,
+              :parent_job_id,
+              :delivery_status,
+              :task_id
+            ] do
     Atom.to_string(key)
   end
 
@@ -3894,6 +4574,90 @@ defmodule FermixCore.Memory.Repo do
     }
   end
 
+  defp harness_run_row([
+         id,
+         vendor,
+         rail,
+         status,
+         reason,
+         cwd,
+         worktree_root,
+         lock_roots_json,
+         artifacts_dir,
+         resumable,
+         vendor_session_id,
+         exit_code,
+         framing_errors,
+         artifact_truncated,
+         usage_json,
+         diagnostics_tail,
+         origin_kind,
+         origin_session_id,
+         parent_job_id,
+         delivery_mode,
+         platform,
+         destination,
+         thread,
+         send_opts_json,
+         delivery_status,
+         delivery_attempts,
+         next_delivery_at,
+         last_delivery_error,
+         task_id,
+         task_url,
+         next_poll_at,
+         poll_deadline,
+         created_at,
+         started_at,
+         first_event_at,
+         last_event_at,
+         completed_at,
+         delivered_at,
+         continuation_depth
+       ]) do
+    %{
+      id: id,
+      vendor: vendor,
+      rail: rail,
+      status: status,
+      reason: reason,
+      cwd: cwd,
+      worktree_root: worktree_root,
+      lock_roots: Jason.decode!(lock_roots_json),
+      artifacts_dir: artifacts_dir,
+      resumable: int_to_bool(resumable),
+      vendor_session_id: vendor_session_id,
+      exit_code: exit_code,
+      framing_errors: framing_errors,
+      artifact_truncated: int_to_bool(artifact_truncated),
+      usage: decode_metadata(usage_json),
+      diagnostics_tail: diagnostics_tail,
+      origin_kind: origin_kind,
+      origin_session_id: origin_session_id,
+      continuation_depth: continuation_depth,
+      parent_job_id: parent_job_id,
+      delivery_mode: delivery_mode,
+      platform: platform,
+      destination: destination,
+      thread: thread,
+      send_opts: decode_metadata(send_opts_json),
+      delivery_status: delivery_status,
+      delivery_attempts: delivery_attempts,
+      next_delivery_at: parse_optional_timestamp(next_delivery_at),
+      last_delivery_error: last_delivery_error,
+      task_id: task_id,
+      task_url: task_url,
+      next_poll_at: parse_optional_timestamp(next_poll_at),
+      poll_deadline: parse_optional_timestamp(poll_deadline),
+      created_at: parse_timestamp!(created_at),
+      started_at: parse_optional_timestamp(started_at),
+      first_event_at: parse_optional_timestamp(first_event_at),
+      last_event_at: parse_optional_timestamp(last_event_at),
+      completed_at: parse_optional_timestamp(completed_at),
+      delivered_at: parse_optional_timestamp(delivered_at)
+    }
+  end
+
   defp memory_source_row([
          id,
          source_type,
@@ -4000,6 +4764,19 @@ defmodule FermixCore.Memory.Repo do
       nil -> default
       value -> positive_integer_value!(key, value)
     end
+  end
+
+  defp non_negative_integer_with_default!(attrs, key, default) do
+    case Map.get(attrs, key, default) do
+      nil -> default
+      value -> non_negative_integer_value!(key, value)
+    end
+  end
+
+  defp fetch_lock_roots!(attrs) do
+    attrs
+    |> Map.fetch!(:lock_roots)
+    |> list_of_strings!(:lock_roots)
   end
 
   defp string_with_default!(attrs, key, default) do

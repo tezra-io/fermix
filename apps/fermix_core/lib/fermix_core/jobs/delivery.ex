@@ -7,15 +7,11 @@ defmodule FermixCore.Jobs.Delivery do
   contract dynamically.
   """
 
-  require Logger
-
-  alias FermixCore.Net.HttpClient
+  alias FermixCore.Delivery.ChannelSend
 
   @type delivery_result :: {:ok, String.t()} | {:error, term()}
 
   @default_timeout_ms 60_000
-  @default_delivery_attempts 3
-  @default_delivery_backoff_ms 1_000
 
   @spec initial_status(map(), String.t() | nil) :: String.t()
   def initial_status(job, text) do
@@ -70,40 +66,7 @@ defmodule FermixCore.Jobs.Delivery do
   def silent?(_text, _marker), do: false
 
   defp deliver_with_timeout(job, text, opts, timeout_ms) do
-    parent = self()
-    result_ref = make_ref()
-
-    {pid, monitor_ref} =
-      spawn_monitor(fn ->
-        send(parent, {result_ref, deliver(job, text, opts)})
-      end)
-
-    receive do
-      {^result_ref, result} ->
-        Process.demonitor(monitor_ref, [:flush])
-        result
-
-      {:DOWN, ^monitor_ref, :process, _pid, reason} ->
-        {:error, {:delivery_crashed, reason}}
-    after
-      timeout_ms ->
-        Process.exit(pid, :kill)
-        flush_delivery_messages(monitor_ref, result_ref)
-        {:error, :delivery_timeout}
-    end
-  end
-
-  defp flush_delivery_messages(monitor_ref, result_ref) do
-    receive do
-      {:DOWN, ^monitor_ref, :process, _pid, _reason} ->
-        flush_delivery_messages(monitor_ref, result_ref)
-
-      {^result_ref, _result} ->
-        flush_delivery_messages(monitor_ref, result_ref)
-    after
-      0 ->
-        :ok
-    end
+    ChannelSend.with_timeout(timeout_ms, fn -> deliver(job, text, opts) end)
   end
 
   defp bounded_timeout?(timeout_ms), do: is_integer(timeout_ms) and timeout_ms >= 0
@@ -113,71 +76,14 @@ defmodule FermixCore.Jobs.Delivery do
   end
 
   defp deliver_to_channel(job, text, opts) do
-    with {:ok, target} <- delivery_target(job),
-         {:ok, adapter} <- delivery_adapter(target.platform, opts) do
+    with {:ok, target} <- delivery_target(job) do
       send_opts = target.opts ++ delivery_opts(opts)
-      max_attempts = Keyword.get(opts, :delivery_max_attempts, @default_delivery_attempts)
-      backoff_ms = Keyword.get(opts, :delivery_backoff_ms, @default_delivery_backoff_ms)
 
-      # An unattended scheduled run already did its work, so a momentary HTTP
-      # pool-checkout timeout (common right after wake-from-sleep) must not lose
-      # its delivery. Retry the send with bounded backoff — but only on the
-      # transient connection-unavailable error, which means the request never
-      # obtained a connection (so a retry cannot duplicate a sent message).
-      # Every other error fails fast. Each attempt also waits out the shared
-      # 15s pool-checkout budget (see `FermixCore.Net.HttpClient`), so this
-      # loop is a wide-enough floor for a residual post-wake checkout timeout.
-      # Keep `max_attempts × pool_timeout + backoffs` under the outer
-      # `deliver_with_timeout` ceiling (`timeout_ms`) so a retry is never killed
-      # mid-flight into the no-retry `:delivery_timeout` path.
-      Enum.reduce_while(1..max_attempts, {:error, :not_attempted}, fn attempt, _acc ->
-        send_with_rescue(adapter, target.destination, text, send_opts)
-        |> decide_delivery_attempt(attempt, max_attempts, backoff_ms)
-      end)
-    else
-      {:error, reason} -> {:error, reason}
+      case ChannelSend.send(target.platform, target.destination, text, send_opts, opts) do
+        :ok -> {:ok, "sent"}
+        {:error, reason} -> {:error, reason}
+      end
     end
-  end
-
-  # Some channel send paths surface the Finch pool-checkout timeout as a raised
-  # RuntimeError rather than an {:error, _} tuple (mirrors
-  # `FermixCore.Net.HttpClient.run/2`). Unwrapped inside the spawned delivery
-  # process, that raise crashes the run and silently drops the message — the
-  # `{:delivery_crashed, %RuntimeError{}}` failures seen in the live DB.
-  # Convert it to the {:error, exception} the retry loop already classifies, so
-  # a transient pool timeout is retried, not lost. Only RuntimeError is rescued
-  # — a programming error (ArgumentError, …) still crashes loud. Log before
-  # returning (mirrors `HttpClient.run/2`) so a genuine non-transient
-  # RuntimeError leaves a trace instead of being silently surfaced as a plain
-  # delivery failure.
-  defp send_with_rescue(adapter, destination, text, opts) do
-    adapter.send_message(destination, text, opts)
-  rescue
-    exception in [RuntimeError] ->
-      Logger.warning("Delivery send raised: #{Exception.message(exception)}")
-      {:error, exception}
-  end
-
-  defp decide_delivery_attempt(:ok, _attempt, _max_attempts, _backoff_ms) do
-    {:halt, {:ok, "sent"}}
-  end
-
-  defp decide_delivery_attempt({:error, reason}, attempt, max_attempts, backoff_ms)
-       when attempt < max_attempts do
-    if HttpClient.connection_unavailable?(reason) do
-      Process.sleep(backoff_ms * attempt)
-      {:cont, {:error, reason}}
-    else
-      {:halt, {:error, reason}}
-    end
-  end
-
-  defp decide_delivery_attempt({:error, reason}, _attempt, _max_attempts, _backoff_ms) do
-    {:halt, {:error, reason}}
-  end
-
-  defp decide_delivery_attempt(other, _attempt, _max_attempts, _backoff_ms) do
-    {:halt, {:error, {:unexpected_delivery_result, other}}}
   end
 
   defp delivery_target(%{delivery_target: target}) when is_map(target) and map_size(target) > 0 do
@@ -217,55 +123,6 @@ defmodule FermixCore.Jobs.Delivery do
     end
   end
 
-  defp delivery_adapter(platform, opts) do
-    case Keyword.get(opts, :adapter) do
-      adapter when is_atom(adapter) and not is_nil(adapter) ->
-        ensure_adapter(adapter)
-
-      _nil ->
-        configured_adapter(platform, opts)
-    end
-  end
-
-  defp configured_adapter(platform, opts) do
-    channels = Keyword.get(opts, :channels, default_channels())
-
-    channels
-    |> fetch_channel(platform)
-    |> case do
-      nil -> {:error, {:unsupported_delivery_platform, platform}}
-      adapter -> ensure_adapter(adapter)
-    end
-  end
-
-  defp fetch_channel(channels, platform) when is_map(channels) do
-    Map.get(channels, platform) || Map.get(channels, platform_atom(platform))
-  end
-
-  defp fetch_channel(channels, platform) when is_list(channels) do
-    Keyword.get(channels, platform_atom(platform)) || Keyword.get(channels, platform)
-  end
-
-  defp fetch_channel(_channels, _platform), do: nil
-
-  defp platform_atom("telegram"), do: :telegram
-  defp platform_atom("slack"), do: :slack
-  defp platform_atom("discord"), do: :discord
-  defp platform_atom("signal"), do: :signal
-  defp platform_atom("whatsapp"), do: :whatsapp
-  defp platform_atom("cli"), do: :cli
-  defp platform_atom(_platform), do: nil
-
-  defp ensure_adapter(adapter) when is_atom(adapter) do
-    if Code.ensure_loaded?(adapter) and function_exported?(adapter, :send_message, 3) do
-      {:ok, adapter}
-    else
-      {:error, {:invalid_delivery_adapter, adapter}}
-    end
-  end
-
-  defp ensure_adapter(adapter), do: {:error, {:invalid_delivery_adapter, adapter}}
-
   defp target_string(target, key, fallback_key) do
     target_string(target, [key, fallback_key])
   end
@@ -299,12 +156,6 @@ defmodule FermixCore.Jobs.Delivery do
   defp put_target_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp delivery_opts(opts), do: Keyword.get(opts, :delivery_opts, [])
-
-  defp default_channels do
-    :fermix_core
-    |> Application.get_env(:jobs, [])
-    |> Keyword.get(:delivery_channels, %{})
-  end
 
   defp delivery_mode(job), do: Map.get(job, :delivery_mode, "none")
 end

@@ -52,6 +52,33 @@ defmodule FermixCore.TimeoutsTest do
     end
   end
 
+  describe "coding-harness tiered stall watchdog invariant" do
+    test "first_event < inactivity < wall_clock at the config defaults" do
+      # Establish the default `[fermix_core.harness]` baseline in the test itself
+      # (the inactivity/wall-clock delegators read global app env; a leaked
+      # override must not decide the assertion — hermetic-config rule).
+      with_harness_defaults(fn ->
+        assert Timeouts.harness_first_event() == 120_000
+        assert Timeouts.harness_first_event() < Timeouts.harness_inactivity()
+        assert Timeouts.harness_inactivity() < Timeouts.harness_wall_clock()
+      end)
+    end
+
+    test "the config delegators track [fermix_core.harness] at call time" do
+      prior = Application.get_env(:fermix_core, :harness)
+
+      Application.put_env(:fermix_core, :harness,
+        inactivity_minutes: 3,
+        default_timeout_minutes: 7
+      )
+
+      on_exit(fn -> restore_harness(prior) end)
+
+      assert Timeouts.harness_inactivity() == 3 * 60_000
+      assert Timeouts.harness_wall_clock() == 7 * 60_000
+    end
+  end
+
   describe "ctx gating (FermixCore.Timeouts.Telemetry)" do
     test "correlation ids ride always-on; context is omitted when capture is off" do
       attach([:fermix, :timeout, :expired])
@@ -104,4 +131,14 @@ defmodule FermixCore.TimeoutsTest do
     on_exit(fn -> Application.put_env(:fermix_core, :telemetry, prior) end)
     fun.()
   end
+
+  defp with_harness_defaults(fun) do
+    prior = Application.get_env(:fermix_core, :harness)
+    Application.put_env(:fermix_core, :harness, [])
+    on_exit(fn -> restore_harness(prior) end)
+    fun.()
+  end
+
+  defp restore_harness(nil), do: Application.delete_env(:fermix_core, :harness)
+  defp restore_harness(value), do: Application.put_env(:fermix_core, :harness, value)
 end

@@ -1,0 +1,66 @@
+suite: cap_harness
+risk: isolated_mutation
+title: "Capability — coding-harness delegation (end-state checker scored)"
+description: >
+  Scores whether Fermix can drive a DELEGATED coding run to a landed result:
+  turn a seeded buggy project into a git repo whose committed tree passes the
+  visible AND hidden tests, with the fix produced by a vendor coding CLI run
+  (codex_run / claude_code_run) — not by Fermix editing directly. Delegation is
+  enforced by requires_tools provenance (a trial where no harness tool fired
+  scores zero); correctness is enforced by the end-state checker (git repo,
+  committed clean tree, all tests pass). Succeeding requires real harness
+  driving: picking a vendor, granting it write access via its own schema'd
+  params (codex sandbox / claude permission mode), waiting out or tracking the
+  detached run, and confirming the landed commit.
+
+  PRECONDITIONS beyond cap_coding's: the capability daemon must run a
+  harness-enabled build with the codex and claude CLIs on PATH at daemon boot
+  (tool advertisement is a boot snapshot), authenticated via the operator's own
+  ~/.codex and ~/.claude logins. Each trial spawns a real vendor CLI run under
+  those subscription logins — vendor-side spend is real and is not visible in
+  Opik turn cost.
+defaults:
+  judge: false
+  timeout_ms: 600000
+
+scenarios:
+  - id: delegated_end_state
+    title: "Delegate a bugfix to a coding CLI; verify the committed end-state"
+    severity: normal
+    tags: [capability, harness, checker]
+    cases:
+      - id: harness_delegated_bugfix
+        query: >
+          In {ws} there's a tiny Python project (greeter.py) with a failing test
+          — run `python -m pytest tests/` from {ws} to see it. First initialize
+          {ws} as a git repository and commit the current state. Then have one
+          of your coding agents (codex or claude) fix the bug in
+          {ws}/greeter.py so ALL tests pass and commit the fix in that repo —
+          delegate the fix to a coding-agent run rather than patching it
+          yourself. The run continues in the background after your turn ends, so
+          you do not need to wait for it or check on it. Do not edit the tests.
+        requires_tools: [codex_run, claude_code_run]
+        checker:
+          script: "suites/capability/checkers/harness_delegated_fix.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/harness_greeter"
+          timeout_ms: 600000
+
+      - id: harness_delegated_feature
+        query: >
+          In {ws} there's a tiny working Python CLI (greet.py) — `python
+          greet.py NAME` prints one greeting line. First initialize {ws} as a
+          git repository and commit the current state. Then have one of your
+          coding agents (codex or claude) add a `--repeat N` flag so that
+          `python greet.py NAME --repeat N` prints the greeting line exactly N
+          times, one per line, with the default remaining a single line — and
+          commit the change in that repo. Delegate the implementation to a
+          coding-agent run rather than writing it yourself. The run continues in
+          the background after your turn ends, so you do not need to wait for it or
+          check on it. Keep the existing behavior and tests working.
+        requires_tools: [codex_run, claude_code_run]
+        checker:
+          script: "suites/capability/checkers/harness_delegated_feature.sh"
+          mode: exit
+          seed: "suites/capability/fixtures/code/harness_greet_cli"
+          timeout_ms: 600000

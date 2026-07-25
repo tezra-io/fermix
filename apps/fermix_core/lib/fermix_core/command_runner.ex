@@ -34,7 +34,20 @@ defmodule FermixCore.CommandRunner do
           | {:dynamic_supervisor, atom() | pid()}
         ]
 
+  @type stream_opts :: [
+          {:cwd, String.t() | nil}
+          | {:env, [{String.t() | charlist(), String.t() | charlist()}]}
+          | {:timeout_ms, pos_integer()}
+          | {:max_output_bytes, pos_integer()}
+          | {:kill_grace_ms, pos_integer()}
+          | {:dynamic_supervisor, atom() | pid()}
+          | {:stream_to, pid()}
+          | {:ack_window, pos_integer()}
+          | {:pending_bytes_max, pos_integer()}
+        ]
+
   @type result :: %{exit: integer(), stdout: binary(), truncated?: boolean()}
+  @type stream_result :: %{host: pid(), ref: reference(), os_pid: integer() | nil}
   @type limits :: %{
           timeout_ms: pos_integer(),
           max_output_bytes: pos_integer(),
@@ -83,6 +96,34 @@ defmodule FermixCore.CommandRunner do
     end
   end
 
+  @doc """
+  Starts a command in async streaming mode under a supervised `CommandHost`.
+
+  Unlike `run/3`, this never blocks: it returns immediately with the host pid,
+  a stream `ref`, and the child's `os_pid` (the pgid). Raw output is forwarded
+  to `stream_to` (default the caller) as `{:command_host_data, ref, chunk}`
+  messages under an ack-window flow-control valve, and the run ends with exactly
+  one `{:command_host_exit, ref, result}` message (see `CommandHost`).
+
+  Streaming is a second consumption configuration of the SAME supervised host,
+  like `supervised:` is for `run/3`; all ownership/sweep semantics are inherited
+  unchanged. Supervised-only: a missing supervisor **raises before any OS process
+  spawns** (like `run/3`). A missing executable is refused the same way as `run/3`.
+
+  Stream opts extend the shared opts with `stream_to:` (default `self()`),
+  `ack_window:` (default 64), and `pending_bytes_max:` (default 8 MB).
+  """
+  @spec start_stream(String.t(), [String.t()], stream_opts()) ::
+          {:ok, stream_result()} | {:error, reason()}
+  def start_stream(executable, args, opts \\ [])
+      when is_binary(executable) and is_list(args) and is_list(opts) do
+    if File.exists?(executable) do
+      start_stream_supervised(executable, args, opts)
+    else
+      {:error, {:executable_not_found, executable}}
+    end
+  end
+
   @doc false
   @spec build_limits(opts()) :: limits()
   def build_limits(opts) when is_list(opts) do
@@ -108,6 +149,17 @@ defmodule FermixCore.CommandRunner do
     ]
     |> maybe_put_cwd(Keyword.get(opts, :cwd))
     |> maybe_put_env(Keyword.get(opts, :env, []))
+  end
+
+  # Streaming-mode port opts = the shared buffered opts plus `:in`. A default
+  # spawn_executable port holds the child's stdin open forever; `codex exec`
+  # reads non-TTY stdin to EOF and would block indefinitely. `:in` gives the
+  # child immediate stdin EOF while stdout capture and `:exit_status` keep
+  # working. Buffered mode never uses this — it stays byte-for-byte unchanged.
+  @doc false
+  @spec build_stream_port_opts([String.t()], stream_opts()) :: keyword()
+  def build_stream_port_opts(args, opts) when is_list(args) and is_list(opts) do
+    [:in | build_port_opts(args, opts)]
   end
 
   # Daemon path: start a supervised host (fail loud if the supervisor is absent —
@@ -148,6 +200,34 @@ defmodule FermixCore.CommandRunner do
 
       {:DOWN, ^mon, :process, ^host, reason} ->
         {:error, {:command_host_crashed, reason}}
+    end
+  end
+
+  # Streaming daemon path: start a supervised host, then read back the os_pid it
+  # sends during init. The host emits {:command_host_started, ref, os_pid} before
+  # its receive loop can process any exit, so this is race-free even for a
+  # fast-exiting child (a blocking os_pid call could miss a host that already
+  # stopped).
+  defp start_stream_supervised(executable, args, opts) do
+    dyn_sup = Keyword.get(opts, :dynamic_supervisor, FermixCore.CommandHost.Supervisor)
+    supervisor = resolve_supervisor!(dyn_sup)
+    stream_to = Keyword.get(opts, :stream_to, self())
+    ref = make_ref()
+    child = {FermixCore.CommandHost, {:stream, self(), stream_to, ref, executable, args, opts}}
+
+    case DynamicSupervisor.start_child(supervisor, child) do
+      {:ok, host} -> await_stream_start(host, ref)
+      {:error, reason} -> {:error, {:command_host_crashed, reason}}
+    end
+  end
+
+  defp await_stream_start(host, ref) do
+    receive do
+      {:command_host_started, ^ref, os_pid} ->
+        {:ok, %{host: host, ref: ref, os_pid: os_pid}}
+    after
+      5_000 ->
+        {:error, {:command_host_crashed, :no_start_ack}}
     end
   end
 

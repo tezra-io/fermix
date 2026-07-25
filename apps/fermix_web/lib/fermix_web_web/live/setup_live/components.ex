@@ -27,6 +27,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :doctor_probe_running?, :boolean, default: false
   attr :memory_form, :map, required: true
   attr :personalization_form, :map, required: true
+  attr :harness_setup, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
   attr :live_models, :any, default: nil
@@ -111,6 +112,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               doctor_probe_running?={@doctor_probe_running?}
               memory_form={@memory_form}
               personalization_form={@personalization_form}
+              harness_setup={@harness_setup}
               provider_form={@provider_form}
               provider_models={@provider_models}
               live_models={@live_models}
@@ -236,6 +238,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :doctor_probe_running?, :boolean, default: false
   attr :memory_form, :map, required: true
   attr :personalization_form, :map, required: true
+  attr :harness_setup, :map, required: true
   attr :provider_form, :map, required: true
   attr :provider_models, :list, required: true
   attr :live_models, :any, default: nil
@@ -265,6 +268,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp render_active_pane("media", assigns), do: media_pane(assigns)
   defp render_active_pane("transcription", assigns), do: transcription_pane(assigns)
   defp render_active_pane("sandbox", assigns), do: sandbox_pane(assigns)
+  defp render_active_pane("coding", assigns), do: coding_pane(assigns)
   defp render_active_pane("memory", assigns), do: memory_pane(assigns)
   defp render_active_pane("personalization", assigns), do: personalization_pane(assigns)
   defp render_active_pane("doctor", assigns), do: doctor_pane(assigns)
@@ -1603,6 +1607,122 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
+  defp coding_pane(assigns) do
+    ~H"""
+    <div>
+      <.pane_header
+        title="Coding agents"
+        subtitle="Hand off repository work — reviewing PRs, fixing bugs, building features — to the Codex or Claude Code CLI on this machine."
+      />
+      <form phx-submit="save_coding" class="mt-6 space-y-5">
+        <.harness_card harness_setup={@harness_setup} />
+        <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save coding agents" />
+      </form>
+    </div>
+    """
+  end
+
+  attr :harness_setup, :map, required: true
+
+  # Coding-harness card (design §7.4). When at least one CLI is detected: the
+  # first-use consent toggle (blue when on) plus a "Coding CLI" dropdown that
+  # doubles as the vendor/auth status display — every vendor is listed with its
+  # network-free auth state, uninstalled ones disabled, and the selection routes
+  # which run tool is advertised when more than one is installed. When no CLI is
+  # detected the toggle is disabled with an install prompt. Inputs post inside
+  # the Coding Agents tab form.
+  defp harness_card(assigns) do
+    assigns =
+      assign(assigns, :any_detected?, Enum.any?(assigns.harness_setup.vendors, & &1.available?))
+
+    ~H"""
+    <section class="space-y-5" data-harness-card>
+      <div :if={@any_detected?} class="space-y-5">
+        <div class="form-control" data-harness-consent={to_string(@harness_setup.approved)}>
+          <label class="label cursor-pointer justify-start gap-3">
+            <input type="hidden" name="coding_form[harness_approved]" value="false" />
+            <input
+              type="checkbox"
+              name="coding_form[harness_approved]"
+              value="true"
+              checked={@harness_setup.approved}
+              class="toggle toggle-sm toggle-primary"
+            />
+            <span class="label-text text-sm font-medium">
+              Allow coding agents to run on this machine
+            </span>
+          </label>
+          <span class="label pt-0 text-xs text-base-content/60">
+            {harness_consent_status(@harness_setup.approved)}
+          </span>
+        </div>
+
+        <label class="form-control w-full max-w-sm">
+          <span class="label pb-1 text-sm font-medium">Coding CLI</span>
+          <select
+            name="coding_form[harness_default_vendor]"
+            class="select select-bordered w-full bg-base-100"
+          >
+            <option value="" selected={@harness_setup.default_vendor in [nil, ""]}>
+              No preference
+            </option>
+            <option
+              :for={vendor <- @harness_setup.vendors}
+              value={vendor.vendor}
+              selected={@harness_setup.default_vendor == vendor.vendor}
+              disabled={not vendor.available?}
+            >
+              {harness_vendor_label(vendor.vendor)} — {harness_vendor_status(vendor)}
+            </option>
+          </select>
+          <span class="label pt-1 text-xs text-base-content/60">
+            Which CLI to prefer when a request doesn't name one.
+          </span>
+        </label>
+      </div>
+
+      <div :if={not @any_detected?} class="form-control opacity-60" data-harness-none>
+        <label class="label justify-start gap-3">
+          <input type="checkbox" disabled class="toggle toggle-sm" />
+          <span class="label-text text-sm font-medium">
+            Allow coding agents to run on this machine
+          </span>
+        </label>
+        <span class="label pt-0 text-xs text-base-content/60">
+          No coding CLI detected. Install the Codex or Claude Code CLI, then restart Fermix to
+          enable coding agents.
+        </span>
+      </div>
+
+      <div class="space-y-1 border-t border-base-300 pt-3">
+        <p class="text-xs text-base-content/50" data-harness-cloud-note>
+          Cloud runs (Codex cloud) are off in this release; only local repository runs are available.
+        </p>
+        <p class="text-xs text-base-content/50">
+          Each CLI keeps its own login — Fermix reads it, never changes it.
+        </p>
+      </div>
+    </section>
+    """
+  end
+
+  defp harness_consent_status(true), do: "On — coding runs use your Codex / Claude Code logins."
+  defp harness_consent_status(_false), do: "Off — approve before the first coding run."
+
+  defp harness_vendor_label("codex"), do: "Codex"
+  defp harness_vendor_label("claude"), do: "Claude Code"
+  defp harness_vendor_label(vendor), do: vendor
+
+  defp harness_vendor_status(%{available?: false}), do: "not installed"
+
+  defp harness_vendor_status(%{version: version, auth: auth}) do
+    "#{version || "installed"} · #{harness_auth_label(auth)}"
+  end
+
+  defp harness_auth_label(:authenticated), do: "authenticated"
+  defp harness_auth_label(:unverified), do: "installed; auth unverified"
+  defp harness_auth_label(:absent), do: "not authenticated"
+
   defp doctor_pane(assigns) do
     ~H"""
     <div>
@@ -2835,7 +2955,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   # Panes that persist via a single "Save" button — these get the unsaved-edits
   # hint. Plugins and Doctor act per item/probe, so a pane-level hint doesn't fit.
   defp form_pane?(tab_id),
-    do: tab_id in ~w(provider realtime channels search sandbox memory personalization)
+    do: tab_id in ~w(provider realtime channels search sandbox coding memory personalization)
 
   defp tab_status(%{component: nil}, _report), do: :ready
   defp tab_status(%{component: "provider:*"}, report), do: status_by_prefix(report, "provider:")

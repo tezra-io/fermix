@@ -14,6 +14,11 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias Fermix.CLI.Upgrade.Manifest
   alias Fermix.CLI.VersionSkew
   alias FermixCore.Auth.Store, as: AuthStore
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Harness.Artifacts, as: HarnessArtifacts
+  alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Harness.Ledger, as: HarnessLedger
+  alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Prompt.TemplateRenderer
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
@@ -31,6 +36,11 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @sandbox_trace_days 7
   @sandbox_trace_limit 20
+
+  # {vendor, run-tool name} pairs — the boot-registry vs current-PATH mismatch
+  # (§7.3) compares each run tool's registration against its vendor's detection.
+  @harness_run_tools [{"codex", "codex_run"}, {"claude", "claude_code_run"}]
+  @bytes_per_gb 1_073_741_824
 
   @spec readiness() :: result()
   def readiness do
@@ -519,6 +529,239 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp computer_use_input_hint(probe) do
     "input control is not available (#{probe.platform}/#{probe.display_server})."
   end
+
+  @doc """
+  Coding-harness health (design §13): per-vendor binary + version + network-free
+  auth state, boot-registry vs current-PATH mismatch (§7.3), run counts
+  (active/pending/dead-letter), and artifact quota usage. Returns `nil` to skip
+  when the harness is disabled AND no vendor CLI is present.
+
+  Vendor detection, the capability registry, run counts, and the quota probe are
+  all injectable (`:detections`, `:registry`, `:counts`, `:quota`,
+  `:harness_enabled`) so the check unit-tests hermetically. Run counts and the
+  registry lookup degrade to a skip when the memory repo / registry are
+  unavailable (the tree-less CLI), never a crash.
+  """
+  @spec harness(keyword()) :: result() | nil
+  def harness(opts \\ []) when is_list(opts) do
+    enabled? = Keyword.get_lazy(opts, :harness_enabled, &HarnessConfig.enabled?/0)
+    # `fermix doctor` is a tree-less CLI verb, so the vendor `--version` probe must
+    # run unsupervised (a supervised host needs the daemon's CommandHost tree).
+    detections = Keyword.get_lazy(opts, :detections, &harness_detect_all/0)
+
+    cond do
+      not enabled? and not any_vendor_available?(detections) -> nil
+      enabled? -> enabled_harness_result(detections, opts)
+      true -> disabled_harness_result(detections)
+    end
+  end
+
+  # `fermix doctor` is a tree-less CLI verb, so the default probe runs the vendor
+  # `--version` unsupervised and reads `~/.codex`/`~/.claude`. `config/test.exs`
+  # overrides `:harness_vendor_detector` with an inert stub so `mix test` never
+  # spawns a real CLI or touches host auth (the SecretWriterStub precedent).
+  defp harness_detect_all do
+    case Application.get_env(:fermix_core, :harness_vendor_detector) do
+      fun when is_function(fun, 0) -> fun.()
+      _unset -> HarnessVendors.detect_all(supervised: false)
+    end
+  end
+
+  defp any_vendor_available?(detections) do
+    Enum.any?(detections, fn {_vendor, detection} -> detection.available? end)
+  end
+
+  # Enabled: the feature is on, so no CLI at all is a real fault (fail); an
+  # installed-but-unauthenticated vendor, a boot/PATH mismatch, dead-lettered
+  # deliveries, or a breached quota each warn; otherwise ok.
+  defp enabled_harness_result(detections, opts) do
+    counts = harness_counts(opts)
+    quota = harness_quota(opts)
+    mismatch = harness_mismatch(detections, opts)
+
+    detail =
+      [
+        harness_vendor_detail(detections),
+        harness_consent_detail(opts),
+        harness_counts_detail(counts),
+        harness_quota_detail(quota),
+        mismatch
+      ]
+      |> Enum.reject(&(&1 in [nil, ""]))
+      |> Enum.join("; ")
+
+    %{
+      name: "coding harness",
+      status: harness_status(detections, counts, quota, mismatch),
+      detail: detail
+    }
+  end
+
+  # Disabled but a CLI is present (else `harness/1` skipped): a valid config, not
+  # a fault — report the detected vendors and how to turn the feature on.
+  defp disabled_harness_result(detections) do
+    ok(
+      "coding harness",
+      "disabled in config; #{harness_vendor_detail(detections)} — enable [fermix_core.harness] to use"
+    )
+  end
+
+  defp harness_status(detections, counts, quota, mismatch) do
+    cond do
+      harness_quota_fail?(quota) -> :fail
+      harness_warn?(detections, counts, quota, mismatch) -> :warn
+      true -> :ok
+    end
+  end
+
+  # A breached artifact quota HARD-BLOCKS admission (no new run can start), so it
+  # is the one harness fail. Everything else — no/absent CLI while enabled, a
+  # boot/PATH mismatch, dead-letters, low free space — is operator-actionable but
+  # not a hard block, so it warns (keeping `fermix doctor`'s exit code honest:
+  # the on-by-default harness with no CLI installed must not fail the whole run).
+  defp harness_quota_fail?({:error, {:artifact_quota, %{kind: :quota_exceeded}}}), do: true
+  defp harness_quota_fail?(_other), do: false
+
+  defp harness_warn?(detections, counts, quota, mismatch) do
+    not any_vendor_available?(detections) or mismatch != nil or
+      harness_quota_warn?(quota) or harness_dead_letter?(counts) or
+      harness_unauthenticated?(detections)
+  end
+
+  defp harness_unauthenticated?(detections) do
+    Enum.any?(detections, fn {_vendor, detection} ->
+      detection.available? and detection.auth == :absent
+    end)
+  end
+
+  defp harness_dead_letter?(:skipped), do: false
+  defp harness_dead_letter?(%{dead_letter: dead_letter}), do: dead_letter > 0
+
+  defp harness_quota_warn?(:ok), do: false
+
+  defp harness_quota_warn?({:error, {:artifact_quota, %{kind: kind}}}),
+    do: kind in [:below_min_free, :free_space_unknown]
+
+  # First-use consent state (design §22): info-grade only — never a warn/fail by
+  # itself, so it never enters `harness_status/4`. Injectable (`:harness_approved`)
+  # so the check unit-tests without touching Application env.
+  defp harness_consent_detail(opts) do
+    approved? = Keyword.get_lazy(opts, :harness_approved, &HarnessConfig.approved?/0)
+    if approved?, do: "consent: approved", else: "consent: not yet approved"
+  end
+
+  # Per-vendor one-liner: name + version (or "not installed") + auth word.
+  defp harness_vendor_detail(detections) do
+    detections
+    |> Map.values()
+    |> Enum.sort_by(& &1.vendor)
+    |> Enum.map_join(", ", &harness_vendor_line/1)
+  end
+
+  defp harness_vendor_line(%{vendor: vendor, available?: false}), do: "#{vendor} not installed"
+
+  defp harness_vendor_line(%{vendor: vendor, version: version, auth: auth}) do
+    "#{vendor} #{version || "installed"} (#{harness_auth_word(auth)})"
+  end
+
+  defp harness_auth_word(:authenticated), do: "authenticated"
+  defp harness_auth_word(:unverified), do: "auth unverified"
+  defp harness_auth_word(:absent), do: "not authenticated"
+
+  # Boot registry (which run tools seeded at boot) vs current-PATH detection: a
+  # disagreement means a CLI was installed/removed since boot and a restart syncs
+  # the advertised tools. Skipped (nil) when the registry is unavailable.
+  defp harness_mismatch(detections, opts) do
+    registry = Keyword.get(opts, :registry, CapabilityRegistry)
+
+    case harness_registry_snapshot(registry) do
+      :unavailable -> nil
+      registered -> mismatch_from_snapshot(detections, registered)
+    end
+  end
+
+  defp harness_registry_snapshot(registry) do
+    Map.new(@harness_run_tools, fn {_vendor, tool} ->
+      {tool, match?({:ok, _capability}, CapabilityRegistry.find(registry, tool))}
+    end)
+  rescue
+    ArgumentError -> :unavailable
+  end
+
+  defp mismatch_from_snapshot(detections, registered) do
+    mismatched =
+      @harness_run_tools
+      |> Enum.filter(fn {vendor, tool} ->
+        Map.fetch!(registered, tool) != vendor_available?(detections, vendor)
+      end)
+      |> Enum.map(fn {vendor, _tool} -> vendor end)
+
+    case mismatched do
+      [] ->
+        nil
+
+      vendors ->
+        "restart to sync #{Enum.join(vendors, ", ")} (boot registry differs from current PATH)"
+    end
+  end
+
+  defp vendor_available?(detections, vendor) do
+    case Map.get(detections, vendor) do
+      %{available?: available?} -> available?
+      _absent -> false
+    end
+  end
+
+  # Run counts via the ledger; the memory repo may be unavailable in this VM
+  # (the tree-less CLI / bootstrap_template_drift pattern), so guard the exit and
+  # skip honestly.
+  defp harness_counts(opts) do
+    case Keyword.fetch(opts, :counts) do
+      {:ok, counts} -> counts
+      :error -> fetch_harness_counts()
+    end
+  end
+
+  defp fetch_harness_counts do
+    with {:ok, active} <- HarnessLedger.active_runs(),
+         {:ok, pending} <- HarnessLedger.list(%{delivery_status: "pending"}, limit: 200),
+         {:ok, dead} <- HarnessLedger.list(%{delivery_status: "dead_letter"}, limit: 200) do
+      %{active: length(active), pending: length(pending), dead_letter: length(dead)}
+    else
+      _unavailable -> :skipped
+    end
+  catch
+    :exit, _reason -> :skipped
+  end
+
+  defp harness_counts_detail(:skipped), do: "run counts skipped (memory repo unavailable)"
+
+  defp harness_counts_detail(%{active: active, pending: pending, dead_letter: dead_letter}) do
+    "#{active} active, #{pending} pending delivery, #{dead_letter} dead-letter"
+  end
+
+  defp harness_quota(opts) do
+    case Keyword.fetch(opts, :quota) do
+      {:ok, quota} -> quota
+      :error -> HarnessArtifacts.admission_check()
+    end
+  end
+
+  defp harness_quota_detail(:ok), do: "artifacts within quota"
+
+  defp harness_quota_detail({:error, {:artifact_quota, detail}}), do: harness_quota_issue(detail)
+
+  defp harness_quota_issue(%{kind: :quota_exceeded, used_bytes: used, quota_bytes: quota}) do
+    "artifact quota exceeded (#{harness_gb(used)}/#{harness_gb(quota)} GB)"
+  end
+
+  defp harness_quota_issue(%{kind: :below_min_free, free_bytes: free}) do
+    "low free space (#{harness_gb(free)} GB free)"
+  end
+
+  defp harness_quota_issue(%{kind: :free_space_unknown}), do: "free space unknown"
+
+  defp harness_gb(bytes), do: Float.round(bytes / @bytes_per_gb, 1)
 
   defp computer_use_capture_hint(%{platform: "macos"}) do
     "screen capture is NOT granted — captures return wallpaper only. Grant Screen " <>

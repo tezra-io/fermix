@@ -123,6 +123,14 @@ config :fermix_core, :jobs,
     "cli" => FermixChannels.CLI
   }
 
+# Coding-harness completion continuation (CODING_HARNESS_ORCHESTRATION §23.2): the
+# channels-side module that re-ingests a finished chat-origin run's notice into its
+# conversation. Injected by module because fermix_core must not compile-depend on
+# fermix_channels — the same pattern as `:jobs` `delivery_channels` above.
+config :fermix_core,
+       :harness_continuation_dispatcher,
+       FermixChannels.Harness.ContinuationDispatcher
+
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.expand("~/.fermix/bootstrap"),
   accounting_enabled: true

@@ -18,6 +18,13 @@ defmodule FermixCore.Capabilities.UntrustedContent do
 
   alias FermixCore.Capabilities.Capability
 
+  # Durable-memory `source_type` values whose stored value derives from an
+  # external/attacker-controllable surface (a coding-harness run summarizes
+  # untrusted repo/issue/web content, §10.3). A memory row carrying one of these
+  # renders inside the untrusted-content frame instead of raw interpolation, so
+  # the injection boundary covers recalled records, not just live tool output.
+  @untrusted_source_types ~w(coding_harness)
+
   @doc "Whether a capability's output is external/attacker-controllable content."
   @spec external?(Capability.t()) :: boolean()
   def external?(%Capability{kind: :mcp}), do: true
@@ -37,10 +44,35 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   """
   @spec wrap(term(), Capability.t() | term()) :: term()
   def wrap(output, %Capability{} = capability) when is_binary(output) do
-    if external?(capability), do: framed(output, capability.name), else: output
+    if external?(capability), do: frame(capability.name, output), else: output
   end
 
   def wrap(output, _capability), do: output
+
+  @doc """
+  Wraps `output` in the untrusted-content frame attributed to `source_name`.
+
+  The public composition behind `wrap/2` — used directly by callers (e.g.
+  `memory_recall`) that must frame attacker-controllable DATA without a
+  `%Capability{}` in hand. Non-binary `output` passes through unchanged.
+  """
+  @spec frame(String.t(), term()) :: term()
+  def frame(source_name, output) when is_binary(source_name) and is_binary(output) do
+    framed(output, source_name)
+  end
+
+  def frame(_source_name, output), do: output
+
+  @doc """
+  Whether a durable-memory `source_type` marks its stored value as
+  external/attacker-controllable content that must be framed on recall.
+  """
+  @spec untrusted_source_type?(term()) :: boolean()
+  def untrusted_source_type?(source_type) when is_binary(source_type) do
+    source_type in @untrusted_source_types
+  end
+
+  def untrusted_source_type?(_source_type), do: false
 
   defp framed(output, source) do
     """

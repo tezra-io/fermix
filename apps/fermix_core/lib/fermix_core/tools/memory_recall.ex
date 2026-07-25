@@ -13,6 +13,7 @@ defmodule FermixCore.Tools.MemoryRecall do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Search
@@ -233,7 +234,8 @@ defmodule FermixCore.Tools.MemoryRecall do
 
   defp format_search_result(%{source: :memories} = result) do
     "[memories rank=#{format_rank(result.rank)}] scope=#{result.scope_type} " <>
-      "key=#{result.key} category=#{result.category} #{source_metadata(result)} value=#{result.value}"
+      "key=#{result.key} category=#{result.category} #{source_metadata(result)} " <>
+      "value=#{render_memory_value(result)}"
   end
 
   defp format_search_result(%{source: :messages} = result) do
@@ -245,6 +247,27 @@ defmodule FermixCore.Tools.MemoryRecall do
   defp format_rank(rank) when is_float(rank) do
     :erlang.float_to_binary(rank, decimals: 4)
   end
+
+  # A recalled memory whose provenance marks it as attacker-controllable content
+  # (a coding-harness run summary derives from untrusted repo/issue/web text,
+  # §10.3) renders its VALUE inside the untrusted-content frame instead of raw
+  # interpolation. Ordinary owner/agent facts are untouched (byte-identical).
+  defp render_memory_value(%{source_type: source_type} = result) do
+    if UntrustedContent.untrusted_source_type?(source_type) do
+      UntrustedContent.frame(memory_source_label(result), result.value)
+    else
+      result.value
+    end
+  end
+
+  defp render_memory_value(result), do: result.value
+
+  defp memory_source_label(%{source_name: name}) when is_binary(name) and name != "", do: name
+
+  defp memory_source_label(%{source_type: source_type}) when is_binary(source_type),
+    do: source_type
+
+  defp memory_source_label(_result), do: "untrusted"
 
   defp source_metadata(result) do
     [

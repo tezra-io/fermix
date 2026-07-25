@@ -3,6 +3,8 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Auth.Store
+  alias FermixCore.Capabilities.Builtin
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
 
   defmodule HealthyChannel do
     def health_check(_opts), do: {:ok, %{detail: "healthy ok", latency_ms: 1}}
@@ -1052,5 +1054,255 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       last_refresh: nil,
       status: "ready"
     }
+  end
+
+  describe "harness/1" do
+    test "skips (nil) when disabled and no vendor CLI is present" do
+      assert Checks.harness(
+               harness_enabled: false,
+               detections: both_absent(),
+               counts: %{active: 0, pending: 0, dead_letter: 0},
+               quota: :ok
+             ) == nil
+    end
+
+    test "disabled but a CLI present is a quiet ok naming how to enable" do
+      result =
+        Checks.harness(
+          harness_enabled: false,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          counts: :skipped,
+          quota: :ok
+        )
+
+      assert result.name == "coding harness"
+      assert result.status == :ok
+      assert result.detail =~ "disabled in config"
+      assert result.detail =~ "enable [fermix_core.harness]"
+    end
+
+    test "enabled with an authenticated vendor and a synced registry is ok" do
+      registry = registry_with([FermixCore.Tools.CodexRun, FermixCore.Tools.ClaudeCodeRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", true, "claude 2.0.0", :authenticated)
+          },
+          registry: registry,
+          counts: %{active: 1, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "codex codex 1.0.0 (authenticated)"
+      assert result.detail =~ "1 active, 0 pending delivery, 0 dead-letter"
+      assert result.detail =~ "artifacts within quota"
+    end
+
+    test "reports first-use consent state as an info-grade detail, never changing status" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      base = [
+        harness_enabled: true,
+        detections: %{
+          "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+          "claude" => detection("claude", false, nil, :absent)
+        },
+        registry: registry,
+        counts: %{active: 0, pending: 0, dead_letter: 0},
+        quota: :ok
+      ]
+
+      not_yet = Checks.harness(Keyword.put(base, :harness_approved, false))
+      assert not_yet.detail =~ "consent: not yet approved"
+      assert not_yet.status == :ok
+
+      approved = Checks.harness(Keyword.put(base, :harness_approved, true))
+      assert approved.detail =~ "consent: approved"
+      assert approved.status == :ok
+    end
+
+    test "enabled with no vendor CLI at all warns (the feature can't run, but doesn't hard-fail)" do
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: both_absent(),
+          registry: empty_registry(),
+          counts: :skipped,
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "codex not installed"
+      assert result.detail =~ "claude not installed"
+    end
+
+    test "installed but unauthenticated vendor warns" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :absent),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "codex codex 1.0.0 (not authenticated)"
+    end
+
+    test "dead-letter deliveries warn with the count surfaced" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          registry: registry,
+          counts: %{active: 0, pending: 1, dead_letter: 2},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "2 dead-letter"
+    end
+
+    test "a boot-registry vs current-PATH disagreement warns to restart" do
+      # codex is on PATH now but was NOT registered at boot (empty registry) —
+      # a restart would sync the advertised tools.
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          registry: empty_registry(),
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota: :ok
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "restart to sync codex"
+    end
+
+    test "a breached artifact quota fails (admission is hard-blocked)" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota:
+            {:error,
+             {:artifact_quota,
+              %{
+                kind: :quota_exceeded,
+                used_bytes: 6 * 1_073_741_824,
+                quota_bytes: 5 * 1_073_741_824
+              }}}
+        )
+
+      assert result.status == :fail
+      assert result.detail =~ "artifact quota exceeded"
+    end
+
+    test "low free space warns without hard-failing" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          registry: registry,
+          counts: %{active: 0, pending: 0, dead_letter: 0},
+          quota:
+            {:error,
+             {:artifact_quota,
+              %{
+                kind: :below_min_free,
+                free_bytes: 1_073_741_824,
+                min_free_bytes: 2 * 1_073_741_824
+              }}}
+        )
+
+      assert result.status == :warn
+      assert result.detail =~ "low free space"
+    end
+
+    test "unavailable run counts skip honestly instead of crashing" do
+      registry = registry_with([FermixCore.Tools.CodexRun])
+
+      result =
+        Checks.harness(
+          harness_enabled: true,
+          detections: %{
+            "codex" => detection("codex", true, "codex 1.0.0", :authenticated),
+            "claude" => detection("claude", false, nil, :absent)
+          },
+          registry: registry,
+          counts: :skipped,
+          quota: :ok
+        )
+
+      assert result.status == :ok
+      assert result.detail =~ "run counts skipped"
+    end
+  end
+
+  defp both_absent do
+    %{
+      "codex" => detection("codex", false, nil, :absent),
+      "claude" => detection("claude", false, nil, :absent)
+    }
+  end
+
+  defp detection(vendor, available?, version, auth) do
+    %{
+      vendor: vendor,
+      binary: if(available?, do: "/usr/bin/#{vendor}"),
+      available?: available?,
+      version: version,
+      auth: auth
+    }
+  end
+
+  defp registry_with(tool_modules) do
+    name = :"harness_doctor_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: name})
+
+    Enum.each(tool_modules, fn module ->
+      :ok = CapabilityRegistry.register(name, Builtin.from_tool_module(module))
+    end)
+
+    name
+  end
+
+  defp empty_registry do
+    name = :"harness_doctor_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: name})
+    name
   end
 end

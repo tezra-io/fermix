@@ -57,7 +57,19 @@ defmodule FermixCore.Capabilities.Builtin do
     # Operator-only (registry.ex), never delegated to subagents (subagents.ex). Only
     # seeded when `ComputerUse.ready?()` (BuiltinSeeder), so an unready/disabled
     # daemon never advertises it.
-    "computer_use" => %{policy_class: :gui_control, hidden_from_agent?: false}
+    "computer_use" => %{policy_class: :gui_control, hidden_from_agent?: false},
+    # Coding harness (design §7.1). The run tools are `:exec` — dispatchable inside
+    # an operator's `:exec` ceiling — but the execute-time `Harness.Authorization`
+    # gate (attended operator or allowlisted cron) is the real barrier, not the
+    # policy class. Only seeded when the harness is enabled AND the vendor CLI is
+    # present (BuiltinSeeder), so a disabled daemon never advertises them.
+    "codex_run" => %{policy_class: :exec, hidden_from_agent?: false},
+    "claude_code_run" => %{policy_class: :exec, hidden_from_agent?: false},
+    "codex_cloud_run" => %{policy_class: :exec, hidden_from_agent?: false},
+    "list_coding_runs" => %{policy_class: :read_only, hidden_from_agent?: false},
+    "get_coding_run" => %{policy_class: :read_only, hidden_from_agent?: false},
+    "cancel_coding_run" => %{policy_class: :read_write, hidden_from_agent?: false},
+    "stop_tracking_coding_run" => %{policy_class: :read_write, hidden_from_agent?: false}
   }
 
   @doc """

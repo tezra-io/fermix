@@ -16,8 +16,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse
+  alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.Harness.Vendors
 
   require Logger
+
+  @compiled_env Mix.env()
 
   @builtin_tool_modules [
     FermixCore.Tools.Shell,
@@ -102,6 +106,41 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   # which (with the save+restart enable flow) is the readiness-transition trigger.
   @computer_use_tool_modules [FermixCore.Tools.ComputerUse]
 
+  # Coding harness: seeded only when the harness is enabled (config) AND the
+  # relevant vendor CLI is detected at boot — the §7.3 boot snapshot. The two run
+  # tools seed per-vendor (codex_run needs `codex`, claude_code_run needs
+  # `claude`); the history/manage tools seed whenever EITHER CLI is present, since
+  # they operate on run history. Availability is snapshotted here: installing a
+  # CLI or changing config takes effect on the next daemon restart.
+  @harness_local_run_modules [
+    {"codex", FermixCore.Tools.CodexRun},
+    {"claude", FermixCore.Tools.ClaudeCodeRun}
+  ]
+  # The cloud run + its stop-tracking manage tool ride the codex CLI (cloud is a
+  # `codex cloud` subcommand + ChatGPT auth), so both seed with the `codex` vendor
+  # — but ONLY when `[fermix_core.harness] cloud_enabled` is true. The cloud rail
+  # is off by default this release: with it off these tools never seed, so they
+  # never advertise or dispatch (the manager cloud lifecycle stays in-tree, simply
+  # never entered). Flip the flag + restart to revive it.
+  @harness_cloud_run_modules [
+    {"codex", FermixCore.Tools.CodexCloudRun},
+    {"codex", FermixCore.Tools.StopTrackingCodingRun}
+  ]
+  @harness_history_modules [
+    FermixCore.Tools.ListCodingRuns,
+    FermixCore.Tools.GetCodingRun,
+    FermixCore.Tools.CancelCodingRun
+  ]
+  @harness_tool_modules [
+    FermixCore.Tools.CodexRun,
+    FermixCore.Tools.CodexCloudRun,
+    FermixCore.Tools.ClaudeCodeRun,
+    FermixCore.Tools.ListCodingRuns,
+    FermixCore.Tools.GetCodingRun,
+    FermixCore.Tools.CancelCodingRun,
+    FermixCore.Tools.StopTrackingCodingRun
+  ]
+
   @doc """
   Every built-in tool module that can be seeded into the capability registry —
   the unconditional ones plus the conditionally-seeded bridge and computer-use
@@ -111,13 +150,30 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   """
   @spec builtin_tool_modules() :: [module()]
   def builtin_tool_modules,
-    do: @builtin_tool_modules ++ @bridge_tool_modules ++ @computer_use_tool_modules
+    do:
+      @builtin_tool_modules ++
+        @bridge_tool_modules ++ @computer_use_tool_modules ++ @harness_tool_modules
 
   defp builtin_modules(opts) do
     case Keyword.fetch(opts, :tool_modules) do
-      {:ok, modules} -> modules
-      :error -> @builtin_tool_modules ++ bridge_modules() ++ computer_use_modules()
+      {:ok, modules} ->
+        modules
+
+      :error ->
+        @builtin_tool_modules ++
+          bridge_modules() ++ computer_use_modules() ++ auto_harness_modules()
     end
+  end
+
+  # `mix test` boots the app tree, and ConfigStore replaces `:harness` at boot
+  # (defaulting `enabled: true`) while both vendor CLIs are typically on the
+  # dev/CI PATH — so auto-seeding would pull the harness tools into the shared
+  # test registry and perturb registry-wide tests. Suppress that on the
+  # compile-time env (release-safe; the FermixOpik.enabled? pattern). Production
+  # seeds normally, and `harness_modules/1` stays directly callable so the
+  # gating logic is still exercised hermetically.
+  defp auto_harness_modules do
+    if @compiled_env == :test, do: [], else: harness_modules()
   end
 
   defp bridge_modules do
@@ -127,4 +183,48 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
   defp computer_use_modules do
     if ComputerUse.ready?(), do: @computer_use_tool_modules, else: []
   end
+
+  @doc """
+  The coding-harness tool modules that would be seeded given the current config
+  and vendor detection — `[]` when the harness is disabled or no vendor CLI is
+  present. The cloud run + stop-tracking tools are additionally gated on
+  `cloud_enabled?` (off by default this release). Exposed (with injectable
+  `:harness_enabled`/`:cloud_enabled`/`:vendor_available_fn` seams) so the
+  seeding-gating test stays hermetic.
+  """
+  @spec harness_modules(keyword()) :: [module()]
+  def harness_modules(opts \\ []) when is_list(opts) do
+    if harness_enabled?(opts), do: detected_harness_modules(opts), else: []
+  end
+
+  defp harness_enabled?(opts) do
+    Keyword.get_lazy(opts, :harness_enabled, &HarnessConfig.enabled?/0)
+  end
+
+  defp cloud_enabled?(opts) do
+    Keyword.get_lazy(opts, :cloud_enabled, &HarnessConfig.cloud_enabled?/0)
+  end
+
+  defp detected_harness_modules(opts) do
+    available? = Keyword.get(opts, :vendor_available_fn, &Vendors.available?/1)
+
+    run_modules =
+      opts
+      |> run_module_specs()
+      |> Enum.filter(fn {vendor, _module} -> available?.(vendor) end)
+      |> Enum.map(fn {_vendor, module} -> module end)
+
+    run_modules ++ history_modules(run_modules)
+  end
+
+  defp run_module_specs(opts) do
+    if cloud_enabled?(opts) do
+      @harness_local_run_modules ++ @harness_cloud_run_modules
+    else
+      @harness_local_run_modules
+    end
+  end
+
+  defp history_modules([]), do: []
+  defp history_modules(_run_modules), do: @harness_history_modules
 end

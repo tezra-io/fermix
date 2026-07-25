@@ -23,6 +23,7 @@ defmodule FermixChannels.Gateway do
   alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
   alias FermixChannels.Gateway.Transcription
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Telemetry
@@ -451,14 +452,10 @@ defmodule FermixChannels.Gateway do
   defp maybe_put_context_opt(context, _key, nil), do: context
   defp maybe_put_context_opt(context, key, value), do: Map.put(context, key, value)
 
-  defp conversation_key(%Message{channel: channel, chat_id: chat_id, thread_ts: thread_ts})
-       when not is_nil(thread_ts) do
-    {channel, chat_id, thread_ts}
-  end
-
-  defp conversation_key(%Message{channel: channel, chat_id: chat_id, thread_scope: thread_scope}) do
-    {channel, chat_id, thread_scope}
-  end
+  # The command surface must key the SAME conversation the queue and the turn key
+  # (`/compact`, `/clear` operate on that history), so this derives it from the one
+  # canonical helper instead of re-deriving the tuple here.
+  defp conversation_key(%Message{} = message), do: ConversationKey.from(message)
 
   defp bot_name_for(channel) when is_binary(channel) do
     channel

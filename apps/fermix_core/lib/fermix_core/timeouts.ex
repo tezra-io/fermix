@@ -27,11 +27,14 @@ defmodule FermixCore.Timeouts do
 
   The values below are compile-time literals (greppable, doc-attachable). Config
   driven, operator-tunable single-global timeouts are exposed as thin runtime
-  delegators that read their config owner at call time — there are none yet.
-  Per-entity timeouts that vary (e.g. a scheduled job's `:timeout_seconds`) are
-  **not** indexed here: there is no single value to name.
+  delegators that read their config owner at call time — `harness_inactivity/0`
+  and `harness_wall_clock/0` are the first, reading `Harness.Config`. Per-entity
+  timeouts that vary (e.g. a scheduled job's `:timeout_seconds`, or a coding
+  harness run's per-invocation `timeout_minutes`) are **not** indexed here: there
+  is no single value to name — the delegators expose only the configured default.
   """
 
+  alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Timeouts.Telemetry
 
   require Logger
@@ -59,6 +62,38 @@ defmodule FermixCore.Timeouts do
   @doc "Minimum cushion the outer call must keep over the inner receive (invariant)."
   @spec cu_call_cushion() :: pos_integer()
   def cu_call_cushion, do: @cu_call_cushion_ms
+
+  # --- Coding harness -------------------------------------------------------
+  # The tiered stall watchdog for a local harness run (design §9.2): a fixed
+  # first-event deadline plus two config-driven deadlines. Only the wall clock is
+  # a true failure (the run terminates `failed/:timeout`, routed through
+  # `expired/3`); first-event and inactivity are advisory notices, so they are
+  # NOT routed through `expired/3` (scope rule above — failure deadlines only).
+  #
+  # INVARIANT: harness_first_event() < harness_inactivity() < harness_wall_clock()
+  # at their defaults, so the tiers escalate in order (a first-event notice, then
+  # an inactivity notice, then termination). Locked by a test in timeouts_test.exs.
+  @harness_first_event_ms 120_000
+
+  @doc "Fixed deadline to the first stream event before the auth/config notice fires."
+  @spec harness_first_event() :: pos_integer()
+  def harness_first_event, do: @harness_first_event_ms
+
+  @doc """
+  Config-driven inactivity deadline (`inactivity_minutes`) between events before
+  the stall notice fires. Advisory — the run continues; not a `expired/3` failure.
+  """
+  @spec harness_inactivity() :: pos_integer()
+  def harness_inactivity, do: HarnessConfig.inactivity_minutes() * 60_000
+
+  @doc """
+  Config-driven default wall-clock deadline (`default_timeout_minutes`) after
+  which a run is terminated `failed/:timeout`. This is the DEFAULT only; a run's
+  actual wall clock is its per-invocation `timeout_minutes` and the firing (from
+  `CommandHost`'s timer) routes the measured ms through `expired/3`.
+  """
+  @spec harness_wall_clock() :: pos_integer()
+  def harness_wall_clock, do: HarnessConfig.default_timeout_minutes() * 60_000
 
   @doc """
   Record a fired failure timeout and return its firing-site error shape.

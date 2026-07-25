@@ -9,6 +9,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Agents.AgentDefinition
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Harness.Config, as: HarnessConfig
 
   @type skill :: AgentDefinition.t()
 
@@ -23,6 +24,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     :scheduling,
     :memory,
     :delegation,
+    :harness,
     :skill_admin,
     :config,
     :channel,
@@ -37,6 +39,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     scheduling: "Scheduling",
     memory: "Memory",
     delegation: "Delegation",
+    harness: "Coding Harness",
     skill_admin: "Skill Admin",
     config: "Configuration",
     channel: "Channel",
@@ -137,6 +140,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     body =
       capabilities
       |> Enum.reject(&(&1.metadata[:category] == :plugin))
+      |> Enum.reject(&harness_when_unusable?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -144,15 +148,79 @@ defmodule FermixCore.Prompt.RuntimeSections do
     "## Built-in Capability Catalog\n#{body}"
   end
 
-  defp format_category({category, capabilities}) do
-    lines =
-      capabilities
-      |> Enum.sort_by(& &1.name)
-      |> Enum.map_join("\n", fn capability ->
-        "- `#{capability.name}` — #{capability.metadata[:when_to_use] || capability.description}"
-      end)
+  # Design §23.4 collapses the harness into two states, and the prompt must follow
+  # the wire: the run tools are seeded on CLI detection alone but advertise only
+  # when the harness is USABLE (`enabled` + `approved`). Rendering the section
+  # while they are unadvertised is the dead end §23.4 removed — steering that
+  # names tools the model cannot call. Unusable ⇒ the whole category drops and
+  # Fermix silently codes with its own file/shell tools.
+  defp harness_when_unusable?(capability) do
+    capability.metadata[:category] == :harness and not harness_usable?()
+  end
 
-    "### #{Map.get(@category_labels, category, titleize(category))}\n#{lines}"
+  defp harness_usable?, do: HarnessConfig.enabled?() and HarnessConfig.approved?()
+
+  # The coding-harness category carries a section-level PREAMBLE line (design
+  # §7.4) before its tool list — a new touchpoint, rendered only when the bucket
+  # is non-empty (i.e. harness tools are registered this boot). The preamble
+  # steers repo coding work through a harness run and, when configured, names the
+  # preferred vendor.
+  defp format_category({:harness, capabilities}) do
+    "### #{@category_labels.harness}\n#{harness_preamble(capabilities)}#{capability_lines(capabilities)}"
+  end
+
+  defp format_category({category, capabilities}) do
+    "### #{Map.get(@category_labels, category, titleize(category))}\n#{capability_lines(capabilities)}"
+  end
+
+  defp capability_lines(capabilities) do
+    capabilities
+    |> Enum.sort_by(& &1.name)
+    |> Enum.map_join("\n", fn capability ->
+      "- `#{capability.name}` — #{capability.metadata[:when_to_use] || capability.description}"
+    end)
+  end
+
+  # The owner-authored delegation-steering principle (design §7.4). Names the
+  # failure class (repository work → harness run; incidental → your own hands)
+  # rather than example-specific patterns.
+  defp harness_preamble(capabilities) do
+    base =
+      "Delegating repository work. When a coding harness is available, route work " <>
+        "that means understanding or changing a codebase — reviewing a PR or recent " <>
+        "changes, diagnosing and fixing a bug (a real fix needs root-cause analysis, " <>
+        "which is the harness's job, not a patch guessed from the symptom), " <>
+        "implementing or refactoring a feature, working through a GitHub or local " <>
+        "repository — to a harness run rather than doing it yourself with file edits. " <>
+        "Reserve your own direct tools for the genuinely incidental: running a quick " <>
+        "calculation or one-off script via the shell, reading a file to answer a " <>
+        "question, scratch work outside any project. For repository work the harness " <>
+        "is the default; your own hands are for the small, non-repo touches."
+
+    "#{base}#{vendor_preference(capabilities)}\n"
+  end
+
+  # The vendor steer renders only when a default_vendor is configured AND both
+  # vendor CLIs are registered this boot (both run tools present in the bucket).
+  # It names both tools and states that the non-default vendor stays reachable on
+  # explicit request — because `default_vendor` now filters the non-default tool
+  # off the advertised wire (advertisement gate), so the model must learn the
+  # alternate name here to override.
+  defp vendor_preference(capabilities) do
+    vendor = HarnessConfig.default_vendor()
+
+    if is_binary(vendor) and both_run_tools?(capabilities) do
+      " When the request does not name a vendor, prefer `#{vendor}`; both " <>
+        "`codex_run` and `claude_code_run` remain available, so run the other on an " <>
+        "explicit request even if only one is listed above."
+    else
+      ""
+    end
+  end
+
+  defp both_run_tools?(capabilities) do
+    names = MapSet.new(capabilities, & &1.name)
+    MapSet.member?(names, "codex_run") and MapSet.member?(names, "claude_code_run")
   end
 
   defp category_index(category) do
