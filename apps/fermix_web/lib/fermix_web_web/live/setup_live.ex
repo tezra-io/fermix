@@ -13,6 +13,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
+  alias FermixCore.Harness.Vendors, as: HarnessVendors
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Catalog, as: PluginCatalog
@@ -54,6 +55,7 @@ defmodule FermixWebWeb.SetupLive do
     %{id: "search", label: "Search", component: nil, description: "Web search"},
     %{id: "media", label: "Media", component: nil, description: "Image generation"},
     %{id: "sandbox", label: "Sandbox", component: nil, description: "Execution policy"},
+    %{id: "coding", label: "Coding Agents", component: nil, description: "Delegated coding CLIs"},
     %{id: "memory", label: "Memory", component: nil, description: "Recall tuning"},
     %{
       id: "personalization",
@@ -106,6 +108,12 @@ defmodule FermixWebWeb.SetupLive do
     :signal_account,
     :signal_owner_user_id
   ]
+  # `default_vendor` gates which run tool advertises AND feeds the runtime prompt
+  # steer (rendered from the cached profile), so a change wants a daemon restart
+  # to fully take effect. Consent (`approved`) is read live at execute time AND
+  # now gates whether the harness section renders at all (design §23.4), so it is
+  # restart-flagged for the same cached-profile reason.
+  @harness_restart_keys [:harness_default_vendor, :harness_approved]
 
   @impl true
   def mount(params, session, socket) do
@@ -539,6 +547,21 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, save_answers(socket, answers, "Personalization saved.", Map.get(root, "__nav"))}
   end
 
+  # The Coding Agents tab: consent (`approved`) + the default-vendor selector,
+  # both routed through the same `[fermix_core.harness]` wizard reducers the
+  # personalization card used before this tab existed.
+  def handle_event("save_coding", %{"coding_form" => params} = root, socket) do
+    answers =
+      []
+      |> maybe_put_harness_vendor(params)
+      |> maybe_put_harness_approved(params)
+
+    {:noreply,
+     save_answers(socket, answers, "Coding agents saved.", Map.get(root, "__nav"),
+       restart_required?: runtime_restart_answers?(answers)
+     )}
+  end
+
   def handle_event("run_doctor", _params, socket) do
     if socket.assigns.doctor_probe_running? do
       {:noreply, socket}
@@ -655,6 +678,7 @@ defmodule FermixWebWeb.SetupLive do
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
+      harness_setup={@harness_setup}
       codex_auth={@codex_auth}
       codex_auth_running?={codex_auth_running?(@codex_auth_tasks)}
       codex_auth_url={@codex_auth_url}
@@ -710,6 +734,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:sandbox_form, build_sandbox_form(snapshot))
     |> assign(:memory_form, build_memory_form(snapshot))
     |> assign(:personalization_form, build_personalization_form(snapshot))
+    |> assign(:harness_setup, build_harness_setup(snapshot))
     |> assign(:tool_summary, tool_summary())
     |> assign(:skill_summary, skill_summary())
     |> assign(:plugin_summary, plugin_summary(snapshot))
@@ -812,7 +837,12 @@ defmodule FermixWebWeb.SetupLive do
     do: assign(socket, :saved_flash, %{kind: :error, message: message})
 
   defp runtime_restart_answers?(answers) do
-    restart_keys = @provider_restart_keys ++ @realtime_restart_keys ++ @channel_restart_keys
+    restart_keys =
+      @provider_restart_keys ++
+        @realtime_restart_keys ++
+        @channel_restart_keys ++
+        @harness_restart_keys
+
     Enum.any?(answers, fn {key, _value} -> key in restart_keys end)
   end
 
@@ -1291,6 +1321,32 @@ defmodule FermixWebWeb.SetupLive do
       compaction_threshold: safe_string(CompactionConfig.threshold(compaction)),
       review_interval_hours: safe_string(Keyword.get(memory, :review_interval_hours, 24))
     }
+  end
+
+  # The harness card (design §7.4): detected vendor CLIs + their network-free
+  # auth state, plus the configured default_vendor. The detector is a `:fermix_web`
+  # test seam (like `:doctor_probe_opts`): production defaults to the real
+  # `Vendors.detect_all/0` (which probes each CLI's `--version` in a subprocess and
+  # reads `~/.codex`/`~/.claude`), while `config/test.exs` overrides it with an
+  # inert stub so `mix test` never spawns a vendor CLI or touches host auth.
+  defp build_harness_setup(snapshot) do
+    detections =
+      harness_detector().()
+      |> Map.values()
+      |> Enum.sort_by(& &1.vendor)
+
+    harness = get_fermix_core(snapshot, :harness)
+
+    %{
+      vendors: detections,
+      both_detected?: length(detections) >= 2 and Enum.all?(detections, & &1.available?),
+      default_vendor: Keyword.get(harness, :default_vendor),
+      approved: Keyword.get(harness, :approved, false)
+    }
+  end
+
+  defp harness_detector do
+    Application.get_env(:fermix_web, :harness_detector, &HarnessVendors.detect_all/0)
   end
 
   defp build_personalization_form(snapshot) do
@@ -2515,6 +2571,29 @@ defmodule FermixWebWeb.SetupLive do
       answers
     else
       [{key, value} | answers]
+    end
+  end
+
+  # The harness default-vendor <select> is rendered only when BOTH vendor CLIs
+  # are detected, so its param is present exactly when the operator could choose.
+  # Pass it through even when blank ("" = no preference) so the wizard clears an
+  # existing pin; absence (selector not rendered) preserves it (design §7.4).
+  defp maybe_put_harness_vendor(answers, params) do
+    case Map.fetch(params, "harness_default_vendor") do
+      {:ok, value} when is_binary(value) -> [{:harness_default_vendor, value} | answers]
+      _absent -> answers
+    end
+  end
+
+  # The harness consent toggle (design §22). A hidden "false" input pairs with the
+  # checkbox so the param is present both ways — checked posts "true", unchecked
+  # posts "false" — letting the operator both grant and revoke consent from the
+  # card. Absent (card not rendered) preserves the existing value.
+  defp maybe_put_harness_approved(answers, params) do
+    case Map.fetch(params, "harness_approved") do
+      {:ok, "true"} -> [{:harness_approved, true} | answers]
+      {:ok, "false"} -> [{:harness_approved, false} | answers]
+      _absent -> answers
     end
   end
 

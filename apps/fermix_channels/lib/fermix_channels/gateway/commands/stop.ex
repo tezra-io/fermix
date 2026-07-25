@@ -34,18 +34,26 @@ defmodule FermixChannels.Gateway.Commands.Stop do
     []
     |> put_server(:queue, Map.get(context, :agent_server))
     |> put_server(:work_registry, Map.get(context, :work_registry))
+    |> put_server(:harness, Map.get(context, :harness_manager))
   end
 
   defp put_server(opts, _key, nil), do: opts
   defp put_server(opts, key, server), do: Keyword.put(opts, key, server)
 
-  defp reply(%{active_turns: 0, queued_messages: 0, background_tasks: 0}),
+  defp reply(%{active_turns: 0, queued_messages: 0, background_tasks: 0, harness_runs: 0}),
     do: "No active Fermix execution to stop."
 
-  defp reply(%{active_turns: turns, queued_messages: messages, background_tasks: tasks}) do
+  defp reply(%{
+         active_turns: turns,
+         queued_messages: messages,
+         background_tasks: tasks,
+         harness_runs: harness_runs
+       }) do
     "Stopped Fermix execution — cancelled #{count(turns, "active turn")}, " <>
-      "cleared #{count(messages, "queued message")}, and stopped " <>
-      "#{count(tasks, "background task")}. Scheduled jobs and voice are not affected by /stop."
+      "cleared #{count(messages, "queued message")}, stopped " <>
+      "#{count(tasks, "background task")}, and cancelled " <>
+      "#{count(harness_runs, "coding run")} (including any a scheduled job started). " <>
+      "Scheduled jobs themselves and voice are not affected by /stop."
   end
 
   defp count(1, noun), do: "1 #{noun}"

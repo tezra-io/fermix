@@ -10,6 +10,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   """
 
   alias FermixCore.Agents.LifecycleTelemetry
+  alias FermixCore.Harness.Telemetry, as: HarnessTelemetry
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
   alias FermixCore.Trace
@@ -205,6 +206,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
       @realtime_events ++
       LifecycleTelemetry.trace_event_definitions() ++
       JobTelemetry.trace_event_definitions() ++
+      HarnessTelemetry.trace_event_definitions() ++
       SoulTelemetry.trace_event_definitions()
   end
 

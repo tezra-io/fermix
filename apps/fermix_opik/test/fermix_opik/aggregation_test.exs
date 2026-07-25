@@ -673,4 +673,153 @@ defmodule FermixOpik.AggregationTest do
     assert [%{trace: trace}] = drained
     refute Map.has_key?(trace, :thread_id)
   end
+
+  test "a harness run is its own root trace, correlated to the turn but never nested" do
+    # The harness run spawns from main-1, but its run_start hard-codes
+    # parent_session: nil, so it opens a standalone root even while main-1's
+    # session is live — and finishes after main-1 already closed and shipped,
+    # without resurrecting or nesting into the turn's trace.
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 200},
+         %{
+           provider: :openai,
+           model: "gpt-5",
+           status: :ok,
+           session_id: "main-1",
+           tokens: %{prompt: 5, completion: 5}
+         }},
+        {[:fermix, :harness, :run_start], %{},
+         %{
+           agent: "harness:codex",
+           run_id: "hr_abc",
+           vendor: "codex",
+           rail: "local",
+           origin_kind: "chat",
+           origin_session_id: "main-1",
+           session_id: "harness_hr_abc"
+         }},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+         %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+        {[:fermix, :provider, :call], %{duration_ms: 900},
+         %{
+           provider: :openai_codex,
+           model: "gpt-5-codex",
+           status: :ok,
+           session_id: "harness_hr_abc",
+           tokens: %{prompt: 20, completion: 10}
+         }},
+        {[:fermix, :harness, :run_complete], %{duration_ms: 1_100},
+         %{
+           agent: "harness:codex",
+           run_id: "hr_abc",
+           vendor: "codex",
+           origin_session_id: "main-1",
+           session_id: "harness_hr_abc",
+           status: "completed",
+           reason: nil,
+           exit_code: 0,
+           usage: %{total_cost_usd: 0.02}
+         }}
+      ])
+
+    # Two distinct root traces: the turn and the harness run never share a trace id.
+    names = closed |> Enum.map(& &1.trace.name) |> Enum.sort()
+    assert names == ["agent:main", "harness:codex"]
+    ids = closed |> Enum.map(& &1.trace.id) |> Enum.uniq()
+    assert length(ids) == 2
+
+    harness = Enum.find(closed, &(&1.trace.name == "harness:codex"))
+    assert "harness" in harness.trace.tags
+    assert harness.trace.metadata.origin_session_id == "main-1"
+    assert harness.trace.metadata.vendor == "codex"
+    assert harness.trace.metadata.exit_code == 0
+
+    # The harness run's own provider.call nested under its wrapper, not the turn.
+    wrapper = span_named(harness.spans, "harness:codex")
+    [llm] = spans_of_type(harness.spans, "llm")
+    assert llm.parent_span_id == wrapper.id
+    assert llm.trace_id == harness.trace.id
+    assert llm.model == "gpt-5-codex"
+
+    # The turn trace carries only its own llm span, not the harness one.
+    turn = Enum.find(closed, &(&1.trace.name == "agent:main"))
+    assert [turn_llm] = spans_of_type(turn.spans, "llm")
+    assert turn_llm.model == "gpt-5"
+  end
+
+  test "a harness progress event nests as a child span under the run trace" do
+    {_state, closed} =
+      run([
+        {[:fermix, :harness, :run_start], %{},
+         %{
+           agent: "harness:codex",
+           run_id: "hr_p",
+           vendor: "codex",
+           origin_session_id: "main-1",
+           session_id: "harness_hr_p"
+         }},
+        {[:fermix, :harness, :progress], %{events: 12, framing_errors: 0},
+         %{
+           agent: "harness:codex",
+           run_id: "hr_p",
+           vendor: "codex",
+           session_id: "harness_hr_p",
+           phase: "running"
+         }},
+        {[:fermix, :harness, :run_complete], %{duration_ms: 500},
+         %{
+           agent: "harness:codex",
+           run_id: "hr_p",
+           vendor: "codex",
+           session_id: "harness_hr_p",
+           status: "completed",
+           exit_code: 0
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "harness:codex"
+
+    wrapper = span_named(spans, "harness:codex")
+    progress = span_named(spans, "harness:progress")
+    assert progress.parent_span_id == wrapper.id
+    assert progress.trace_id == trace.id
+    assert progress.metadata.events == 12
+    assert progress.metadata.framing_errors == 0
+    assert progress.metadata.phase == "running"
+  end
+
+  test "a harness run is swept by its max duration, not the idle TTL" do
+    # Tiny idle TTL so a last_seen-based sweep would fire immediately; the harness
+    # run must instead survive until its max_duration (+ grace) passes.
+    agg = Aggregation.new(project: "fermix", ttl_ms: 1)
+
+    {agg, []} =
+      Aggregation.apply_event(
+        agg,
+        [:fermix, :harness, :run_start],
+        %{},
+        %{
+          agent: "harness:codex",
+          run_id: "hr_slow",
+          vendor: "codex",
+          origin_session_id: "main-1",
+          session_id: "harness_hr_slow",
+          max_duration_ms: 1_000
+        },
+        %{at: ~U[2026-06-02 12:00:00.000Z], mono: 0}
+      )
+
+    # mono is microseconds; floor = (1_000 + 60_000) * 1_000 = 61_000_000us.
+    # Well past the 1us idle TTL but within the duration floor: NOT swept.
+    {agg, []} = Aggregation.sweep(agg, 500_000)
+
+    # Past max_duration + grace: swept as one harness trace.
+    {_agg, closed} = Aggregation.sweep(agg, 61_000_001)
+    assert [%{trace: trace}] = closed
+    assert trace.name == "harness:codex"
+    assert "harness" in trace.tags
+    assert trace.metadata.origin_session_id == "main-1"
+  end
 end

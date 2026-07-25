@@ -120,7 +120,9 @@ defmodule FermixCore.Tools.Shell do
       else
         {:error, reason} ->
           {{:ok, Tool.error(format_error(reason))},
-           Map.put(trace, :failure, sandbox_failure_tag(reason))}
+           trace
+           |> Map.put(:failure, sandbox_failure_tag(reason))
+           |> maybe_put_policy_enforcement(reason)}
       end
     else
       :error ->
@@ -183,6 +185,15 @@ defmodule FermixCore.Tools.Shell do
 
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: "Sandbox denied shell command: #{inspect(reason)}"
+
+  # Reached only from the `shell_plan/3` else-branch, i.e. strictly before
+  # run_command/4 — that is what makes the `pre_execution` stamp true here.
+  defp maybe_put_policy_enforcement(metadata, reason) do
+    case Sandbox.pre_execution_denial(reason) do
+      nil -> metadata
+      enforcement -> Map.put(metadata, :policy_enforcement, enforcement)
+    end
+  end
 
   defp maybe_put_error_summary(metadata, {:ok, %{success: false, error: error}})
        when is_binary(error) do

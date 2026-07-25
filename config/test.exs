@@ -43,6 +43,34 @@ config :fermix_core, :jobs,
   delivery_timeout_ms: 60_000,
   delivery_channels: %{}
 
+# Coding-harness workers (Manager + DeliveryWorker) are always in the tree, but
+# their timers, boot reconciliation, and artifact GC must stay dark in tests so
+# the app-tree instances never touch the real Memory.Repo or FERMIX_HOME. Tests
+# that exercise these workers start their own instances with `timer_enabled: true`
+# and injected repo/runs_root seams.
+config :fermix_core, :harness_workers_enabled, false
+
+# Completion continuation is OFF in tests (config.exs wires the channels-side
+# dispatcher for dev/prod): `mix test` must never re-ingest a synthesized message
+# into the live gateway/agent queue. A terminal run then takes the plain durable
+# delivery path. Continuation tests inject their own dispatcher stub through the
+# Manager's `:continuation_dispatcher` seam.
+config :fermix_core, :harness_continuation_dispatcher, nil
+
+# Hermetic default: `mix test` must never spawn a vendor `--version` probe or read
+# the operator's `~/.codex`/`~/.claude`. The setup harness card (`:fermix_web`) and
+# the doctor harness check (`:fermix_core`) both resolve their detector from config,
+# so override both with an inert "no CLI installed" stub (the shape `Harness.Vendors`
+# returns on a bare host). Tests exercising real detection inject their own seam.
+harness_absent_detector = fn ->
+  Map.new(["codex", "claude"], fn vendor ->
+    {vendor, %{vendor: vendor, binary: nil, available?: false, version: nil, auth: :absent}}
+  end)
+end
+
+config :fermix_core, :harness_vendor_detector, harness_absent_detector
+config :fermix_web, :harness_detector, harness_absent_detector
+
 config :fermix_core, :prompt_bootstrap,
   bootstrap_dir: Path.join(System.tmp_dir!(), "fermix-test-bootstrap"),
   accounting_enabled: true

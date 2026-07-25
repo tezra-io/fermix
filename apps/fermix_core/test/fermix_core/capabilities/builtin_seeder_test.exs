@@ -96,6 +96,118 @@ defmodule FermixCore.Capabilities.BuiltinSeederTest do
     assert cap.metadata.category == :computer
   end
 
+  # --- Coding-harness seeding gate (§7.3 boot snapshot) -------------------
+
+  describe "harness_modules/1 gating" do
+    test "seeds nothing when the harness is disabled, even if both CLIs are present" do
+      assert BuiltinSeeder.harness_modules(
+               harness_enabled: false,
+               vendor_available_fn: fn _vendor -> true end
+             ) == []
+    end
+
+    test "seeds nothing when enabled but no vendor CLI is detected" do
+      assert BuiltinSeeder.harness_modules(
+               harness_enabled: true,
+               vendor_available_fn: fn _vendor -> false end
+             ) == []
+    end
+
+    test "codex-only detection seeds codex_run plus the shared history tools" do
+      modules =
+        BuiltinSeeder.harness_modules(
+          harness_enabled: true,
+          cloud_enabled: false,
+          vendor_available_fn: fn
+            "codex" -> true
+            _ -> false
+          end
+        )
+
+      assert FermixCore.Tools.CodexRun in modules
+      refute FermixCore.Tools.ClaudeCodeRun in modules
+      assert FermixCore.Tools.ListCodingRuns in modules
+      assert FermixCore.Tools.GetCodingRun in modules
+      assert FermixCore.Tools.CancelCodingRun in modules
+      # The cloud rail is OFF by default this release — the codex-gated cloud tools
+      # are not seeded even though the codex CLI is present.
+      refute FermixCore.Tools.CodexCloudRun in modules
+      refute FermixCore.Tools.StopTrackingCodingRun in modules
+    end
+
+    test "the cloud tools seed only when cloud_enabled AND the codex CLI is present" do
+      cloud_on =
+        BuiltinSeeder.harness_modules(
+          harness_enabled: true,
+          cloud_enabled: true,
+          vendor_available_fn: fn _vendor -> true end
+        )
+
+      assert FermixCore.Tools.CodexCloudRun in cloud_on
+      assert FermixCore.Tools.StopTrackingCodingRun in cloud_on
+
+      # cloud_enabled but no codex CLI → the codex-gated cloud tools stay absent.
+      claude_only =
+        BuiltinSeeder.harness_modules(
+          harness_enabled: true,
+          cloud_enabled: true,
+          vendor_available_fn: fn
+            "claude" -> true
+            _ -> false
+          end
+        )
+
+      refute FermixCore.Tools.CodexCloudRun in claude_only
+      refute FermixCore.Tools.StopTrackingCodingRun in claude_only
+    end
+
+    test "claude-only detection seeds claude_code_run plus the shared history tools" do
+      modules =
+        BuiltinSeeder.harness_modules(
+          harness_enabled: true,
+          vendor_available_fn: fn
+            "claude" -> true
+            _ -> false
+          end
+        )
+
+      assert FermixCore.Tools.ClaudeCodeRun in modules
+      refute FermixCore.Tools.CodexRun in modules
+      assert FermixCore.Tools.ListCodingRuns in modules
+      # The cloud tools are codex-gated — absent when only claude is present.
+      refute FermixCore.Tools.CodexCloudRun in modules
+      refute FermixCore.Tools.StopTrackingCodingRun in modules
+    end
+
+    test "both CLIs seed both run tools once each" do
+      modules =
+        BuiltinSeeder.harness_modules(
+          harness_enabled: true,
+          vendor_available_fn: fn _vendor -> true end
+        )
+
+      assert FermixCore.Tools.CodexRun in modules
+      assert FermixCore.Tools.ClaudeCodeRun in modules
+      assert Enum.count(modules, &(&1 == FermixCore.Tools.CodexRun)) == 1
+    end
+
+    test "all harness tools are in the classification-coverage list unconditionally" do
+      coverage = BuiltinSeeder.builtin_tool_modules()
+
+      for module <- [
+            FermixCore.Tools.CodexRun,
+            FermixCore.Tools.ClaudeCodeRun,
+            FermixCore.Tools.CodexCloudRun,
+            FermixCore.Tools.ListCodingRuns,
+            FermixCore.Tools.GetCodingRun,
+            FermixCore.Tools.CancelCodingRun,
+            FermixCore.Tools.StopTrackingCodingRun
+          ] do
+        assert module in coverage
+      end
+    end
+  end
+
   defp install_dev_local_sidecar(home, target) do
     bin_dir =
       Path.join([home, "dev-plugins", "computer_use_sidecar", "bin", target])

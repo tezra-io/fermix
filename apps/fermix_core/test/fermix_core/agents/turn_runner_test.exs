@@ -509,6 +509,28 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert context.approval_fn == nil
     end
 
+    # CODING_HARNESS_ORCHESTRATION §23.2: a coding run launched from a
+    # continuation turn must inherit depth+1, which only works if the notice's
+    # metadata depth reaches the tool-execution context. A reset to 0 here would
+    # make the chain unbounded.
+    test "threads a continuation notice's chain depth into the tool-execution context" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-continuation", %{
+          metadata: %{harness_continuation: true, harness_continuation_depth: 2}
+        })
+
+      assert context.harness_continuation_depth == 2
+    end
+
+    test "an ordinary turn carries continuation depth 0" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-plain-turn")
+
+      assert context.harness_continuation_depth == 0
+    end
+
     test "run/4 threads the stream callback into adapter_opts; run/3 stays callback-free" do
       registry_name = :"turn_runner_stream_registry_#{System.unique_integer([:positive])}"
       store_name = :"turn_runner_stream_store_#{System.unique_integer([:positive])}"
