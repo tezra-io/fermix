@@ -282,26 +282,20 @@ defmodule FermixCore.CommandHostStreamTest do
     ["-c", ~s(sh -c '#{inner}' & wait)]
   end
 
+  # ExUnit owns the supervisor's lifecycle. A hand-rolled `start_link` + `on_exit`
+  # stop cannot: the supervisor is linked to the test process, so it begins its own
+  # parent-exit shutdown the moment the test ends, racing the on_exit runner. Losing
+  # that race exits with the reason `GenServer.stop` gets back from `:sys.terminate`
+  # on an already-terminating process, which nests three deep —
+  # `{{:shutdown, {:sys, :terminate, _}}, {GenServer, :stop, _}}` — so a `catch`
+  # listing flat reasons misses it and fails whichever test's on_exit lost the race.
+  # Enumerating one more shape just moves the bug; `start_supervised!` removes the
+  # race, since ExUnit shuts the supervisor down deterministically instead.
+  # `restart: :temporary` because this is a per-test fixture, not a service: the
+  # shutdown-sweep test stops it on purpose, and the default `:permanent` would
+  # have ExUnit resurrect it mid-test.
   defp start_host_sup do
-    {:ok, sup} = DynamicSupervisor.start_link(strategy: :one_for_one)
-
-    # The supervisor is linked to the test process, so it begins its own
-    # parent-exit shutdown the moment the test ends — racing the on_exit runner.
-    # A `Process.alive?/1` guard is a TOCTOU trap (it can pass microseconds
-    # before the supervisor dies, then `stop/1` exits `:noproc`). Stop
-    # unconditionally and tolerate the already-dead cases instead.
-    on_exit(fn ->
-      try do
-        DynamicSupervisor.stop(sup)
-      catch
-        # :noproc arrives wrapped by GenServer.stop; a supervisor already in
-        # parent-exit shutdown propagates the BARE :shutdown from :sys.terminate.
-        :exit, reason when reason in [:noproc, :normal, :shutdown] -> :ok
-        :exit, {reason, _} when reason in [:noproc, :normal, :shutdown] -> :ok
-      end
-    end)
-
-    sup
+    start_supervised!({DynamicSupervisor, strategy: :one_for_one}, restart: :temporary)
   end
 
   # Waits (bounded) for a BEAM process to be dead. Monitoring a pid that already
