@@ -137,7 +137,7 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     for _ <- 1..10 do
       Task.async(fn -> dispatch_with(message("/confirm #{token}", user_id: "owner-1"), reply) end)
     end
-    |> Task.await_many(2_000)
+    |> Task.await_many(:infinity)
 
     results = for _ <- 1..10, do: race_reply()
     updated = Enum.count(results, &String.starts_with?(&1, "Sandbox updated."))
@@ -146,6 +146,13 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
     assert PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
   end
 
+  # Deliberately no wall-clock budget on the await: the property is "every
+  # concurrent first proposal succeeds", not "they finish in N ms". A proposal
+  # canonicalizes ~25 candidate paths and `PathPolicy.canonical_path/1` lists
+  # every ancestor directory of each, so the cost tracks how many entries sit in
+  # this machine's `$TMPDIR` (where the sandbox home lives) and grows as that
+  # dir fills up — a deadline here measures the host, not the code. ExUnit's
+  # per-test timeout is the backstop for a genuine hang.
   test "concurrent first proposals do not race ETS table creation", %{root: root} do
     tasks =
       for index <- 1..20 do
@@ -154,7 +161,7 @@ defmodule FermixChannels.Gateway.Commands.SandboxTest do
         end)
       end
 
-    assert Enum.all?(Task.await_many(tasks, 2_000), &(&1 == :ok))
+    assert Enum.all?(Task.await_many(tasks, :infinity), &(&1 == :ok))
   end
 
   test "explain annotates effective roots with granted vs mode provenance", %{root: root} do
