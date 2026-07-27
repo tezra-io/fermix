@@ -387,6 +387,9 @@ defmodule FermixCore.Harness.ManagerCloudTest do
         command_supervisor: ctx.host_sup,
         artifacts_opts: [runs_root: ctx.runs_root, quota_gb: 1000, min_free_gb: 0],
         delivery_opts: [adapter: RecordingAdapter],
+        # `Harness.Env` requires USER; seed it so the cloud rail's tests never read
+        # ambient host state (hermetic-tests rule).
+        user: "harness-op",
         timer_enabled: false,
         cloud_poll_ms: @poll_ms,
         cloud_poll_max_ms: 5_000,

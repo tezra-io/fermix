@@ -38,7 +38,7 @@ defmodule FermixCore.Harness.Adapter do
   An executable plan. `argv` carries `:prompt`/`:output_file` placeholders the
   `Harness.Run` fills; `cwd` is the port working directory; `extra_lock_roots`
   are writable `add_dirs` that admission must also lock; `env_names` is the extra
-  `Sandbox.Env` passthrough set beyond the reserved `HOME`/`PATH`/`TERM`.
+  `Sandbox.Env` passthrough set beyond the reserved `HOME`/`PATH`/`TERM`/`USER`.
   """
   @type plan :: %{
           binary: String.t(),

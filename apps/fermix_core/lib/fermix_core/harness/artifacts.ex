@@ -68,6 +68,26 @@ defmodule FermixCore.Harness.Artifacts do
   @spec result_path(String.t()) :: String.t()
   def result_path(dir) when is_binary(dir), do: Path.join(dir, "result.txt")
 
+  @doc """
+  Reads a run's terminal text back from `result.txt`, or `nil` when the run left
+  none. This is the harvested text in both directions: a completed run's
+  deliverable and a failed run's vendor error message (`Harness.Run` persists both).
+
+  The single reader for every consumer that sees only a ledger row — the delivery
+  retry and the `get_coding_run` tool — so the two can never disagree about which
+  runs have recoverable text.
+  """
+  @spec read_result(String.t() | nil) :: String.t() | nil
+  def read_result(dir) when is_binary(dir) do
+    case File.read(result_path(dir)) do
+      {:ok, ""} -> nil
+      {:ok, content} -> content
+      {:error, _absent} -> nil
+    end
+  end
+
+  def read_result(nil), do: nil
+
   @doc "Writes the prompt snapshot (`prompt.md`, `0600`)."
   @spec snapshot_prompt(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def snapshot_prompt(dir, prompt) when is_binary(dir) and is_binary(prompt) do

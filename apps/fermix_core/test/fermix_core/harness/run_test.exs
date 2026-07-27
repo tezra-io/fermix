@@ -115,7 +115,65 @@ defmodule FermixCore.Harness.RunTest do
     end
   end
 
+  # env_test.exs proves `Harness.Env` ASSEMBLES the identity set; this proves `Run`
+  # selects the right VALUES for it. Without a value assertion, a regression that
+  # passes the wrong user — LOGNAME, a literal "unknown", state.home's basename —
+  # spawns a perfectly healthy child that resolves the wrong keychain account and
+  # dies with "Not logged in", which is exactly the 2026-07-26 bug and exactly what
+  # every stub-CLI test is blind to.
+  describe "child environment" do
+    test "the spawned vendor receives the identity values Run resolved", ctx do
+      dump = Path.join(ctx.runs_root, "child-env.txt")
+
+      stub =
+        FakeVendorCli.write!(ctx.stub_dir,
+          lines: [~s({"type":"thread.started","thread_id":"t1"})],
+          env_dump_path: dump
+        )
+
+      {run_id, pid} = start_run(ctx, CodexExec, stub, %{user: "child-env-op"})
+
+      assert_receive {:harness_report_terminal, ^run_id, _status, _fields}, 5_000
+      refute_run_alive(pid)
+
+      env = File.read!(dump)
+      assert env =~ "USER=child-env-op"
+      assert env =~ "HOME=#{ctx.home}"
+      refute env =~ "FERMIX_TEST_SECRET"
+    end
+  end
+
   describe "failure classification" do
+    # Regression (2026-07-26): claude reports an auth failure as a well-formed
+    # `result` event with is_error, so `EventStream` counts it as an event and the
+    # diagnostics tail stays empty — the ledger row carried only `exit_1`. The
+    # vendor's text is the sole diagnosis, so a failed run must persist it to
+    # `result.txt` for the durable delivery retry, which sees only the row.
+    #
+    # The event below is the shape captured verbatim from that run's events.jsonl
+    # (note `subtype: "success"` alongside `is_error: true` — the classification
+    # rides the exit code, not either field).
+    test "a failed run persists the vendor's own error text as its result artifact", ctx do
+      stub =
+        FakeVendorCli.write!(ctx.stub_dir,
+          lines: [
+            ~s({"type":"system","subtype":"init","session_id":"#{@claude_session}"}),
+            ~s({"type":"result","subtype":"success","is_error":true,) <>
+              ~s("result":"Not logged in · Please run /login"})
+          ],
+          exit_code: 1
+        )
+
+      {run_id, pid} = start_run(ctx, ClaudeHeadless, stub, %{})
+
+      assert_receive {:harness_report_terminal, ^run_id, "failed", fields}, 5_000
+      refute_run_alive(pid)
+
+      assert fields.reason == "exit_1"
+      assert fields.result_text == "Not logged in · Please run /login"
+      assert File.read!(result_path(ctx.runs_root, run_id)) =~ "Not logged in"
+    end
+
     test "a non-zero exit is failed/:exit_<code> regardless of events", ctx do
       stub =
         FakeVendorCli.write!(ctx.stub_dir,
@@ -336,6 +394,10 @@ defmodule FermixCore.Harness.RunTest do
           repo: ctx.repo,
           runs_root: ctx.runs_root,
           home: ctx.home,
+          # Seeded like `home` and for the same reason: `user/1` otherwise reads the
+          # host's USER, and `Harness.Env` now requires it — a bare container or a
+          # `User=`-less systemd unit would fail every run test on ambient state.
+          user: "harness-op",
           command_supervisor: ctx.sup,
           wall_clock_ms: 30_000,
           first_event_ms: 5_000,

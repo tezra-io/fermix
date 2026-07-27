@@ -201,6 +201,32 @@ defmodule FermixCore.Harness.DeliveryTest do
       assert message =~ "Resume: cd /repo && codex exec resume sess-2 --json"
     end
 
+    # Regression: "reason: exit_1" tells the owner nothing. When the vendor
+    # explained itself on its terminal event, that text is the whole diagnosis and
+    # must reach the delivered message.
+    test "a failed run leads with the vendor's own error text when it has one" do
+      row =
+        completed_row(%{
+          id: "hr_000000000009",
+          status: "failed",
+          cwd: "/repo",
+          reason: "exit_1",
+          diagnostics_tail: nil
+        })
+
+      message = Delivery.compose(row, "Not logged in · Please run /login")
+
+      assert message =~ "Not logged in · Please run /login"
+      assert message =~ "reason: exit_1"
+
+      # Position, not just presence: reordering failed_body/2 would keep bare
+      # presence assertions green while the message opened with "reason: exit_1"
+      # again — the exact uninformative lead this change removed.
+      vendor_at = :binary.match(message, "Not logged in") |> elem(0)
+      reason_at = :binary.match(message, "reason: exit_1") |> elem(0)
+      assert vendor_at < reason_at
+    end
+
     test "an interrupted run offers the resume hint" do
       row =
         completed_row(%{
@@ -393,6 +419,21 @@ defmodule FermixCore.Harness.DeliveryTest do
       assert {:ok, :sent} = Delivery.deliver(row, adapter: RecordingAdapter)
       assert [{"chat-1", text, _opts}] = recorded()
       assert text =~ "Persisted result body."
+    end
+
+    # A retry long after terminalization sees only the ledger row, so the vendor's
+    # error has to survive on disk. `Harness.Run` persists it for failed runs for
+    # exactly this reader — before, `result_text_for/1` matched `"completed"` only
+    # and the diagnosis was lost on every retried failure.
+    test "reads a failed run's persisted vendor error from disk" do
+      dir = tmp_run_dir()
+      File.write!(Path.join(dir, "result.txt"), "Not logged in · Please run /login")
+
+      row = completed_row(%{status: "failed", reason: "exit_1", artifacts_dir: dir})
+
+      assert {:ok, :sent} = Delivery.deliver(row, adapter: RecordingAdapter)
+      assert [{"chat-1", text, _opts}] = recorded()
+      assert text =~ "Not logged in · Please run /login"
     end
   end
 

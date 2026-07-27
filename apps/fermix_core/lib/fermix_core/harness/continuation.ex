@@ -35,6 +35,23 @@ defmodule FermixCore.Harness.Continuation do
   @dispatch_timeout_ms 15_000
   @closing "Continue the request this run was for; if it is already satisfied, just report the outcome."
 
+  # A run that ends without a result leaves a decision, not an outcome — and the
+  # failure text above is the evidence for it. State the decision and let the agent
+  # judge it; do not classify reasons into retryable/terminal here. A programmatic
+  # router would have to predict every vendor failure mode, while the agent can
+  # simply read "Not logged in · Please run /login" and conclude that no retry will
+  # help. Naming both moves as legitimate is what stops the two observed failure
+  # modes: blind-retrying the same wall, and stopping dead on a request the agent
+  # could have served with its own tools.
+  #
+  # It must NOT claim the worktree is untouched. A `timeout`, `output_limit` or
+  # `subscriber_stalled` kill lands after the vendor ran for minutes inside the real
+  # repo, and `artifact_write` means the vendor finished and only the result file
+  # failed — so "nothing happened, redo it" would invite a second implementation on
+  # top of a half-applied one. Inspecting first is the only opening that is true for
+  # every class, and it costs the agent one cheap command.
+  @failed_closing "This run ended without reporting a result, and it may have left partial changes behind — check the working tree before redoing anything. Then decide from the failure above: run it again if the cause looks transient; if the harness cannot serve this request until someone intervenes, carry out the work yourself with your ordinary file and shell tools. Either way tell the owner plainly what failed and what it needs."
+
   @doc "Maximum continuation chain depth (design §23.2)."
   @spec max_depth() :: pos_integer()
   def max_depth, do: @max_depth
@@ -82,8 +99,9 @@ defmodule FermixCore.Harness.Continuation do
 
   @doc """
   Dispatches `row`'s completion notice through `dispatcher`. `result_text` is the
-  completed run's harvested output (`nil` otherwise). Returns whatever the
-  dispatcher reports so the caller can record delivery honestly.
+  run's harvested text — the deliverable for a completed run, the vendor's own
+  error message for a failed one (`nil` when it produced neither). Returns whatever
+  the dispatcher reports so the caller can record delivery honestly.
 
   The dispatcher runs under the same monitored watchdog the delivery path uses
   (`opts[:timeout_ms]`, default #{@dispatch_timeout_ms}ms), because the caller is
@@ -122,11 +140,28 @@ defmodule FermixCore.Harness.Continuation do
       "[coding run #{Map.get(row, :id)} finished]",
       status_line(row),
       body(row, result_text),
-      @closing
+      closing(row)
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
+
+  # An owner halt never reaches here (`continuable?/1` excludes cancelled and
+  # tracking_stopped), so every non-completed status that does is a run that tried
+  # and failed.
+  defp closing(%{status: "completed"}), do: @closing
+
+  # A cloud terminal usually means "we stopped knowing", not "nothing happened":
+  # `poll_deadline` and `submission_outcome_unknown` leave the vendor task RUNNING,
+  # and it will still produce a diff. Telling the agent to carry out the work itself
+  # would race a live task on the same repo. The cloud body already carries the task
+  # URL and the `codex cloud diff` hint, which is the honest next step. Matching on
+  # the vendor deliberately sweeps in the cloud failures where nothing IS running
+  # (a submit that never landed) — erring toward "go look" is the safe direction,
+  # and the alternative is the per-reason classification this design rejects.
+  defp closing(%{vendor: "codex_cloud"}), do: @closing
+
+  defp closing(_failed), do: @failed_closing
 
   # --- Notice construction ------------------------------------------------
 
@@ -177,12 +212,19 @@ defmodule FermixCore.Harness.Continuation do
 
   defp body(%{status: "completed"}, _absent), do: ""
 
-  defp body(row, _result_text) do
-    [reason_line(row), Map.get(row, :diagnostics_tail)]
+  # A failed run's `result_text` is the vendor's own error message. Without it the
+  # agent reads a bare `reason: exit_1`, cannot tell an auth failure from a crash,
+  # and re-launches straight into the same wall — so it leads the body, ahead of
+  # the reason word and the (stderr-only) diagnostics tail.
+  defp body(row, result_text) do
+    [vendor_line(result_text), reason_line(row), Map.get(row, :diagnostics_tail)]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n")
     |> bound()
   end
+
+  defp vendor_line(text) when is_binary(text) and text != "", do: String.trim(text)
+  defp vendor_line(_absent), do: ""
 
   defp reason_line(%{reason: reason}) when is_binary(reason) and reason != "",
     do: "reason: #{reason}"

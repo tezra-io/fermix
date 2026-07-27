@@ -400,7 +400,16 @@ defmodule FermixCore.Harness.Manager do
       command_supervisor: state.command_supervisor,
       timeout_minutes: request.timeout_minutes,
       progress: request.progress,
-      notice_fn: build_notice_fn(row, state)
+      notice_fn: build_notice_fn(row, state),
+      # The daemon-environment opts reach BOTH rails: the cloud path already read
+      # them off the state, and forwarding them here means one manager option means
+      # one thing everywhere. All three are nil in production — Run resolves them
+      # from the daemon env exactly as before — so this exists to give the local
+      # rail the same test seam the cloud rail has. Without it a local-run test can
+      # only inherit the host's identity, and USER is now a hard requirement.
+      home: state.home,
+      path: state.path,
+      user: state.user
     }
   end
 
@@ -719,7 +728,8 @@ defmodule FermixCore.Harness.Manager do
   defp cloud_built(binary, argv, state) do
     case Env.build(binary, argv, codex_home_env(),
            home: cloud_home(state),
-           path: cloud_path(state)
+           path: cloud_path(state),
+           user: cloud_user(state)
          ) do
       {:ok, built} -> {:ok, built}
       {:error, reason} -> {:error, {:env, reason}}
@@ -744,6 +754,7 @@ defmodule FermixCore.Harness.Manager do
 
   defp cloud_home(state), do: state.home || System.get_env("HOME") || System.user_home!()
   defp cloud_path(state), do: state.path || System.get_env("PATH") || "/usr/bin:/bin"
+  defp cloud_user(state), do: state.user || System.get_env("USER")
 
   # --- Cloud outcomes -----------------------------------------------------
 
@@ -1328,6 +1339,7 @@ defmodule FermixCore.Harness.Manager do
       default_find_executable: Keyword.get(opts, :find_executable, &System.find_executable/1),
       home: Keyword.get(opts, :home),
       path: Keyword.get(opts, :path),
+      user: Keyword.get(opts, :user),
       runs: %{},
       run_monitors: %{},
       gc_timer: nil

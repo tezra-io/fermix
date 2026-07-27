@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.CodingRunManageTest do
 
   alias FermixCore.Tools.CancelCodingRun
   alias FermixCore.Tools.GetCodingRun
+  alias FermixCore.Tools.HarnessSupport
   alias FermixCore.Tools.ListCodingRuns
 
   defmodule StubManager do
@@ -90,6 +91,34 @@ defmodule FermixCore.Tools.CodingRunManageTest do
                GetCodingRun.execute(%{"run_id" => @run_id}, worker(nil))
 
       assert error =~ "subagents"
+    end
+  end
+
+  # An agent that polls a run instead of awaiting its continuation must still get
+  # the diagnosis: a claude auth failure reaches the ledger as a bare `exit_1` with
+  # an empty diagnostics tail, so before `result_tail` the polling path was the one
+  # surface where the vendor's own explanation stayed invisible. It is exactly the
+  # path the agent took on 2026-07-26 — three get_coding_run calls, nothing learned.
+  describe "get_coding_run payload" do
+    test "carries the run's harvested text read back off disk" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("harness-payload")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      File.write!(Path.join(dir, "result.txt"), "Not logged in · Please run /login")
+
+      row = %{id: @run_id, status: "failed", reason: "exit_1", artifacts_dir: dir}
+
+      payload = HarnessSupport.run_payload(row, HarnessSupport.read_run_text(row))
+
+      assert payload.result_tail == "Not logged in · Please run /login"
+    end
+
+    test "is nil when the run left no text" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("harness-payload-empty")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+      row = %{id: @run_id, status: "failed", reason: "spawn", artifacts_dir: dir}
+
+      assert HarnessSupport.run_payload(row, HarnessSupport.read_run_text(row)).result_tail == nil
     end
   end
 
