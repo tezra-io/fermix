@@ -37,11 +37,33 @@ defmodule FermixCore.Tools.ComputerUse do
       "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
       "session they already have open; a `browser`/`shell` action runs in its own context and " <>
       "won't touch their screen. " <>
+      "Anything the human must SEE or act on themselves — a game you play together, a board " <>
+      "you both watch — has to be on THEIR screen: the `browser` window (visible on a desktop " <>
+      "OS) or an app opened with `shell` `open -a`. Never leave a shared activity somewhere " <>
+      "only you can see. " <>
+      "AIMING: prefer exact targets where a page or app exposes them (`browser` element " <>
+      "actions, `elements` click points); a canvas — board, map, chart — exposes none by " <>
+      "construction, which is what THIS tool is for, not a reason to stop. " <>
+      "A screen-share frame is a LOW-DETAIL awareness image, never a source of click " <>
+      "coordinates: take a fresh `screenshot` to aim. " <>
+      "ZOOM TO THE WINDOW, not just to small controls. A full-screen capture is downscaled to " <>
+      "fit one size budget, so on a large or ultrawide display most of that budget goes to " <>
+      "desktop you do not care about and the app you DO care about arrives too small to aim " <>
+      "in. A `region` crop is rescaled to that same budget on its own, so cropping to the " <>
+      "window you are working in can multiply your effective resolution several times over. " <>
+      "Call `windows` to get the exact bounds — it returns a ready-made `region` per window, " <>
+      "so you never estimate them — then pass that region on every look AND every click " <>
+      "inside it, reading coordinates in the magnified crop; zoom further for a small " <>
+      "control within it. " <>
+      "Fermix's own floating voice companion may be visible on that screen — never click it; " <>
+      "its controls end the call you are on. If it covers your target, ask the human to move it. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
       "pixel coordinates from the latest screenshot. For a SMALL or dense target, zoom first: " <>
       "`screenshot` with a `region` around it, then click/drag with the SAME region using the " <>
       "coordinates you read in the magnified crop — clicks land far more accurately. Every " <>
-      "mutating action returns a fresh screenshot: CHECK it and retry if the click missed. " <>
+      "mutating action returns a fresh check screenshot — of the SAME magnified crop when a " <>
+      "region rode the action, of the full screen otherwise: CHECK it and retry if the " <>
+      "click missed. " <>
       "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
       "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
       "before a consequential action. `elements` (read-only) lists the clickable UI elements — " <>
@@ -157,6 +179,9 @@ defmodule FermixCore.Tools.ComputerUse do
   defp base_action_description do
     "The GUI action. Read-only: screenshot, inspect, elements (list the clickable UI " <>
       "elements with a click point each — prefer this over guessing pixels), " <>
+      "windows (list the open windows, each with a ready-made `region` — use it to " <>
+      "crop to the app you are working in instead of squinting at a downscaled " <>
+      "whole screen), " <>
       "wait_for_change (block until the screen changes, then return the new frame), " <>
       "mouse_move, wait. Mutating: left_click, right_click, double_click, " <>
       "left_click_drag, scroll, type, paste (clipboard — prefer for long text), key."
@@ -325,10 +350,27 @@ defmodule FermixCore.Tools.ComputerUse do
               "stop and tell them you'll continue when they run /resume."
           )}, :paused}
 
+      # The coordinate-space guard: the last image was a magnified crop, so bare
+      # x,y would be read in full-screen space and land somewhere else. Name the
+      # exact region to re-send so this costs one turn, not a wrong click.
+      {:error, {:region_mismatch, region}} ->
+        {{:ok,
+          Tool.error(
+            "your last screenshot was a MAGNIFIED CROP of region " <>
+              "#{format_region(region)}, so the x,y you just sent would be read in " <>
+              "full-screen space and miss. Re-send this action with " <>
+              ~s(`"region": #{format_region(region)}`) <>
+              " and the coordinates you read in the magnified image — or take a " <>
+              "fresh full `screenshot` first and use full-screen coordinates."
+          )}, :na}
+
       {:error, reason} ->
         {{:ok, Tool.error("invalid action: #{format_reason(reason)}")}, :na}
     end
   end
+
+  defp format_region(%{"x" => x, "y" => y, "w" => w, "h" => h}),
+    do: ~s({"x": #{x}, "y": #{y}, "w": #{w}, "h": #{h}})
 
   defp perform(session, request) do
     case Session.execute(session, request) do

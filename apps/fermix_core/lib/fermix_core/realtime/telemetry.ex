@@ -42,9 +42,60 @@ defmodule FermixCore.Realtime.Telemetry do
     emit(:provider_error, %{}, Map.put(base(meta), :reason, Telemetry.preview(reason)))
   end
 
-  @spec call_stop(meta(), map()) :: :ok
-  def call_stop(meta, measurements) when is_map(meta) and is_map(measurements) do
-    emit(:call_stop, measurements, base(meta))
+  @doc """
+  The call ended, with WHY it ended.
+
+  Every terminal exit carries a reason — `:call_stop`, `:cost_limit`,
+  `:max_session_duration`, `:provider_disconnected` — because a teardown that
+  emitted nothing was exactly what made a live freeze invisible: the cost ceiling
+  tore a call down with no log, no telemetry, and a companion frame the pet has no
+  handler for. The reason rides as metadata; measurements stay numeric per
+  `docs/TELEMETRY_CONTRACT.md`.
+  """
+  @spec call_stop(meta(), map(), atom()) :: :ok
+  def call_stop(meta, measurements, reason \\ :call_stop)
+      when is_map(meta) and is_map(measurements) and is_atom(reason) do
+    emit(:call_stop, measurements, Map.put(base(meta), :reason, Atom.to_string(reason)))
+  end
+
+  @doc "Screen sharing started for this call (M9.5)."
+  @spec screen_feed_start(meta(), non_neg_integer()) :: :ok
+  def screen_feed_start(meta, display) when is_map(meta) and is_integer(display) do
+    emit(:screen_feed_start, %{}, Map.put(base(meta), :display, display))
+  end
+
+  @doc """
+  One screen frame appended to the live session as passive context.
+
+  `gated_out` is how many captures were dropped as unchanged since the previous
+  frame — the number that shows the change gate working (a static screen sends
+  nothing at all, so absence of this event IS the healthy case).
+  """
+  @spec frame_sent(meta(), non_neg_integer(), non_neg_integer(), String.t()) :: :ok
+  def frame_sent(meta, bytes, gated_out, detail)
+      when is_map(meta) and is_integer(bytes) and is_integer(gated_out) and is_binary(detail) do
+    emit(
+      :frame_sent,
+      %{bytes: bytes, gated_out: gated_out},
+      Map.put(base(meta), :detail, detail)
+    )
+  end
+
+  @doc """
+  A frame was dropped because the provider socket was behind. Expected and healthy
+  under load — the newest frame supersedes it — but a run full of these means the
+  uplink cannot carry the configured cadence.
+  """
+  @spec frame_dropped(meta(), non_neg_integer()) :: :ok
+  def frame_dropped(meta, bytes) when is_map(meta) and is_integer(bytes) do
+    emit(:frame_dropped, %{bytes: bytes}, base(meta))
+  end
+
+  @doc "Screen sharing ended, with the typed reason (requested / cost / capture failure)."
+  @spec screen_feed_stop(meta(), String.t(), map()) :: :ok
+  def screen_feed_stop(meta, reason, measurements)
+      when is_map(meta) and is_binary(reason) and is_map(measurements) do
+    emit(:screen_feed_stop, measurements, Map.put(base(meta), :reason, Telemetry.preview(reason)))
   end
 
   defp base(meta) do
