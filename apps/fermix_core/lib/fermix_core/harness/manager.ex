@@ -50,6 +50,7 @@ defmodule FermixCore.Harness.Manager do
   alias FermixCore.Harness.Continuation
   alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.Env
+  alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger
   alias FermixCore.Harness.MemoryWriteback
   alias FermixCore.Harness.Run
@@ -754,7 +755,9 @@ defmodule FermixCore.Harness.Manager do
 
   defp cloud_home(state), do: state.home || System.get_env("HOME") || System.user_home!()
   defp cloud_path(state), do: state.path || System.get_env("PATH") || "/usr/bin:/bin"
-  defp cloud_user(state), do: state.user || System.get_env("USER")
+  # One identity resolver for both rails (see `Harness.Run.user/1`): the cloud
+  # submit/status commands are the same vendor CLI reading the same credentials.
+  defp cloud_user(state), do: state.user || Identity.username()
 
   # --- Cloud outcomes -----------------------------------------------------
 
