@@ -50,6 +50,7 @@ defmodule FermixCore.Harness.Run do
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Env
   alias FermixCore.Harness.EventStream
+  alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger
   alias FermixCore.Harness.Prompt
   alias FermixCore.Harness.Telemetry
@@ -252,8 +253,9 @@ defmodule FermixCore.Harness.Run do
         # A named reason, not an inspected tuple: this one is an operator-actionable
         # daemon-environment problem, and `env:{:missing_opt, :user}` in the failure
         # message would send the reader hunting through Fermix instead of their
-        # service definition.
-        {:error, {:missing_opt, :user}} -> {:error, "failed", "env_missing_user"}
+        # service definition. Reaching it means neither `$USER` nor the passwd
+        # database answered — a stripped image, or a broken `id`.
+        {:error, {:missing_opt, :user}} -> {:error, "failed", "user_unresolved"}
         {:error, reason} -> {:error, "failed", "env:#{inspect(reason)}"}
       end
     end
@@ -719,12 +721,12 @@ defmodule FermixCore.Harness.Run do
   defp home(state), do: state.home || System.get_env("HOME") || System.user_home!()
   defp path(state), do: state.path || System.get_env("PATH")
 
-  # Identity, resolved the same way as HOME/PATH: from the daemon's own
-  # environment, never from tool args or sandbox config. A daemon with no USER
-  # cannot authenticate a keychain-backed vendor, so `Harness.Env` refuses the run
-  # with `{:missing_opt, :user}` rather than spawning a CLI that will fail with an
-  # opaque "Not logged in".
-  defp user(state), do: state.user || System.get_env("USER")
+  # Identity comes from the daemon's own environment, never from tool args or
+  # sandbox config. `Harness.Identity` reads `$USER` and, where the daemon has none
+  # (a container, a system-scope unit with no `User=`), the passwd database — so a
+  # USER-less Linux daemon still runs, rather than being refused for a variable its
+  # file-based vendor never reads. Unresolvable is still a pre-spawn refusal.
+  defp user(state), do: state.user || Identity.username()
 
   # --- State construction -------------------------------------------------
 
