@@ -151,7 +151,17 @@ defmodule FermixCore.Tools.Browser do
 
   @impl true
   def when_to_use do
-    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — not static text (use web_search/web_fetch), and not the page/app the user already has open on their screen (use computer_use for that; browser drives its own instance)."
+    "JavaScript/dynamic/interactive pages, forms, logins, or live data (e.g. flight prices) — " <>
+      "not static text (use web_search/web_fetch), and not the page/app the user already has " <>
+      "open on their screen (use computer_use for that; browser drives its own instance). " <>
+      "On a desktop OS this IS a real window on the user's screen (it only runs headless on a " <>
+      "display-less host, or if the operator configured that) — a separate profile from their " <>
+      "own Chrome, but one they can see and touch. That makes it the RIGHT tool for a page you " <>
+      "and the human share — a board you play on together, a dashboard you both watch. " <>
+      "`state` reports `headless`; if it is ever true the human cannot see this window, so say " <>
+      "so instead of assuming they are looking at it. A `snapshot` lists only what the page " <>
+      "exposes as elements — a canvas (board, map, chart) exposes none, so act on those by " <>
+      "pixel with `computer_use`; using both on one page is normal."
   end
 
   @impl true

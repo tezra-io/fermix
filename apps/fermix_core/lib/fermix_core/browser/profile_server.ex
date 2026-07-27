@@ -478,8 +478,16 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The Accessibility domain is CYCLED (disable → enable) so getFullAXTree is
+  # built from the CURRENT document: Chrome otherwise serves the domain's cached
+  # tree, which lags a navigation or SPA swap. Observed live (2026-07-26): a
+  # snapshot 4s after lichess navigated to the created game returned the
+  # HOMEPAGE tree under the live game url — the model went element-blind at the
+  # exact moment its game began. Same family as `live_meta/2` below, which
+  # already distrusts the cached url/title.
   defp snapshot_tab(tab, opts, state) do
     with {:ok, tab, state} <- attach(tab, state),
+         {:ok, _} <- command(state, "Accessibility.disable", %{}, tab.session_id),
          {:ok, _} <- command(state, "Accessibility.enable", %{}, tab.session_id),
          {:ok, %{"nodes" => nodes}} <-
            command(state, "Accessibility.getFullAXTree", %{}, tab.session_id),
@@ -510,11 +518,21 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp run_advanced("act", _args, %{dialogs: [_dialog | _rest]}) do
-    {:error, Error.new("dialog_blocked", "A JavaScript dialog is blocking browser actions")}
+    {:error,
+     Error.new(
+       "dialog_blocked",
+       "A JavaScript dialog is blocking browser actions. Clear it first with the " <>
+         "`dialog` action (`decision`: \"accept\" or \"dismiss\"), then retry this action."
+     )}
   end
 
   defp run_advanced("upload", _args, %{dialogs: [_dialog | _rest]}) do
-    {:error, Error.new("dialog_blocked", "A JavaScript dialog is blocking browser actions")}
+    {:error,
+     Error.new(
+       "dialog_blocked",
+       "A JavaScript dialog is blocking browser actions. Clear it first with the " <>
+         "`dialog` action (`decision`: \"accept\" or \"dismiss\"), then retry this action."
+     )}
   end
 
   defp run_advanced("focus", args, state) do
@@ -1234,13 +1252,45 @@ defmodule FermixCore.Browser.ProfileServer do
              tab.session_id
            ) do
       {:ok, center(points)}
+    else
+      {:error, error} -> {:error, no_box_hint(ref, error)}
     end
   end
 
+  # CDP's "Could not compute box model" means the node has no rendered box —
+  # on real pages almost always a visually-hidden styled input (custom radio/
+  # checkbox, the lichess time-control pattern) whose visible, clickable thing
+  # is its LABEL. Name that recovery; the raw CDP text sends the model into a
+  # retry loop on the same unclickable ref (observed live, twice).
+  defp no_box_hint(ref, %Error{message: message} = error) do
+    if message =~ "box model" do
+      Error.new(
+        "no_rendered_box",
+        "#{ref} has no rendered box — it is likely a visually-hidden styled input " <>
+          "(custom radio/checkbox) or off-screen. Click its visible LABEL ref from the " <>
+          "snapshot instead, or use kind=click_coords with x,y from a screenshot.",
+        error.details
+      )
+    else
+      error
+    end
+  end
+
+  defp no_box_hint(_ref, error), do: error
+
   defp ref_data(tab, ref, state) do
     case get_in(state.ref_maps, [tab.id, ref]) do
-      nil -> {:error, Error.new("stale_ref", "Element ref is stale or unknown: #{ref}")}
-      data -> {:ok, data}
+      nil ->
+        {:error,
+         Error.new(
+           "stale_ref",
+           "Element ref is stale or unknown: #{ref}. Refs belong to the snapshot they " <>
+             "came from, and the page has changed since. Take a fresh `snapshot` and use " <>
+             "a ref from it."
+         )}
+
+      data ->
+        {:ok, data}
     end
   end
 
