@@ -6,6 +6,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Claude Opus 5 on the Anthropic provider.** `claude-opus-5` joins the model
+  catalog (1M context, 128k output ceiling) and is offered as the best-quality
+  Anthropic choice in the CLI wizard and web setup — set it with
+  `[fermix_core.providers.anthropic] default_model = "claude-opus-5"`. It rides
+  the same adaptive-thinking + `reasoning_effort` wire as Opus 4.8.
+
+### Fixed
+
+- **Anthropic requests no longer send a sampling parameter the 5-generation
+  models reject.** `temperature` was still going out for `claude-fable-5` (and
+  any Sonnet 5 / Mythos model), which the API answers with a 400; it is now
+  dropped for the whole 5 generation as it already was for Claude 4.7/4.8.
+
 ### Changed
 
 - **Channel streaming is now on by default.** A configured channel streams its

@@ -71,12 +71,23 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # Marker left in place of an older screenshot's image bytes once it falls
   # outside the retention window (ScreenshotRetention) — keeps the textual trail.
   @screenshot_elided "[earlier screenshot omitted to bound context]"
-  # Claude 4.7+ rejects sampling params (temperature/top_p/top_k) — §5.1.
-  @no_sampling_substrings ["4-7", "4.7", "4-8", "4.8"]
+  # Claude 4.7+ and the 5 generation reject sampling params
+  # (temperature/top_p/top_k) with a 400 — §5.1.
+  @no_sampling_substrings [
+    "4-7",
+    "4.7",
+    "4-8",
+    "4.8",
+    "opus-5",
+    "sonnet-5",
+    "fable",
+    "mythos"
+  ]
   # Claude 4.6+ models run WITHOUT thinking unless `thinking: {type: adaptive}`
   # is sent explicitly (reasoning_effort alone only calibrates token spend);
   # older models (haiku-4-5 and earlier) reject the adaptive type, so the
   # param is allowlist-gated — an unknown model gets today's no-thinking wire.
+  # Opus 5 thinks by default, where the explicit adaptive type is equivalent.
   @adaptive_thinking_substrings [
     "4-6",
     "4.6",
@@ -84,6 +95,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     "4.7",
     "4-8",
     "4.8",
+    "opus-5",
     "sonnet-5",
     "fable",
     "mythos"
