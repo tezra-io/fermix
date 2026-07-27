@@ -16,6 +16,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Coding agent runs no longer fail instantly with "Not logged in" on macOS.**
+  Fermix starts the vendor CLIs in a wiped environment, and that environment was
+  missing the account name. Claude Code looks its macOS Keychain login up by
+  account, so it found nothing and every run exited within a couple of seconds
+  asking you to sign in — while the same `claude -p` worked fine from your own
+  terminal. Codex was never affected, because it reads its login from a file.
+  The account name is now part of the environment Fermix reconstructs, and a
+  daemon that does not have one refuses the run up front, naming the cause,
+  instead of starting a CLI that cannot authenticate.
+- **A failed coding run now tells you what the tool actually said.** The vendor's
+  own error was captured and then discarded, so a failure came back as a bare
+  exit code with no explanation — and the agent, unable to tell an expired login
+  from a crash, would often relaunch straight into the same wall. That message
+  now leads the completion notice, the delivered message, and `get_coding_run`.
+  The notice also asks the agent to check the working tree before redoing
+  anything (a run killed by a timeout may have left changes behind) and to say
+  plainly what failed and what it needs.
 - **Anthropic requests no longer send a sampling parameter the 5-generation
   models reject.** `temperature` was still going out for `claude-fable-5` (and
   any Sonnet 5 / Mythos model), which the API answers with a 400; it is now
