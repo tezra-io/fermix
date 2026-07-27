@@ -155,6 +155,30 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :agent,
       trace_event: "realtime_call_stop"
+    },
+    %{
+      event: [:fermix, :realtime, :screen_feed_start],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_feed_start"
+    },
+    %{
+      event: [:fermix, :realtime, :frame_sent],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_frame_sent"
+    },
+    %{
+      event: [:fermix, :realtime, :frame_dropped],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_frame_dropped"
+    },
+    %{
+      event: [:fermix, :realtime, :screen_feed_stop],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "realtime_screen_feed_stop"
     }
   ]
 

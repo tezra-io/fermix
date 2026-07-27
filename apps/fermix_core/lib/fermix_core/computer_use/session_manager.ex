@@ -6,16 +6,18 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   `ensure/3` is keyed by `conversation_key`; it resolves the session's origin from
   the call context and **fails closed** for an unattended host-mode origin (§7.6)
-  before any process or sidecar is started. The driver defaults to `PortDriver`
+  before any process or sidecar is started. It also refuses while the global
+  `CaptureHealth` breaker is open, so a wedged capture host stops being handed
+  fresh sidecars (`WATCH_HARDENING.md` §3). The driver defaults to `PortDriver`
   (the real sidecar) in production; tests inject a stub driver, so the manager is
   fully exercised without the binary.
   """
 
+  alias FermixCore.ComputerUse
+  alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
-  alias FermixCore.ComputerUse.PortDriver
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.ComputerUse.Session
-  alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
 
   @doc """
@@ -99,6 +101,7 @@ defmodule FermixCore.ComputerUse.SessionManager do
     origin = origin(context)
 
     with :ok <- precheck_host_origin(config, origin),
+         :ok <- CaptureHealth.status(),
          {:ok, driver} <- resolve_driver(opts) do
       child = {Session, session_opts(key, config, context, origin, driver)}
 
@@ -141,12 +144,7 @@ defmodule FermixCore.ComputerUse.SessionManager do
       else: {:error, {:host_start_refused, origin}}
   end
 
-  defp default_driver do
-    case SidecarInstaller.binary_path() do
-      {:ok, path} -> {:ok, {PortDriver, [binary_path: path]}}
-      {:error, reason} -> {:error, {:sidecar_unavailable, reason}}
-    end
-  end
+  defp default_driver, do: ComputerUse.driver_spec()
 
   # Fail closed by default: a turn must EXPLICITLY declare an attended origin
   # (`:interactive`/`:voice`) to start a host session. Anything that never set

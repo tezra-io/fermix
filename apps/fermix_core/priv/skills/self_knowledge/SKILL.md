@@ -77,7 +77,7 @@ Plugins are connected integrations that own a surface (an API, a vault) and regi
 
 ## Voice (macOS, off by default)
 
-The OpenAI Realtime voice companion (FermixPet) is local and off by default (`[fermix_core.realtime] enabled=true` plus an OpenAI Platform API key); the macOS app ships from the separate `tezra-io/fermix-macos` repo and connects over `$FERMIX_HOME/realtime.sock`. CLI: `fermix voice status`. Full detail: skill_view(name: "self-knowledge", file: "voice").
+The OpenAI Realtime voice companion (FermixPet) is local and off by default (`[fermix_core.realtime] enabled=true` plus an OpenAI Platform API key); the macOS app ships from the separate `tezra-io/fermix-macos` repo and connects over `$FERMIX_HOME/realtime.sock`. Inside a call the `screen_share` tool (start/stop) watches the operator's screen continuously — changed frames join the session as passive context, so a still screen costs nothing and a frame never makes you speak on its own; acting on what you see still goes through `computer_use`/`browser`. It needs computer use enabled+installed (same sidecar and Screen Recording grant), is voice-only (a text turn takes a `computer_use` screenshot instead), ends with the call, and is switched off with `[fermix_core.realtime] screen_share`. CLI: `fermix voice status`. Full detail: skill_view(name: "self-knowledge", file: "voice").
 
 ## Computer use (experimental, off by default)
 

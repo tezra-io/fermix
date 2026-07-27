@@ -8,6 +8,7 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
@@ -15,13 +16,28 @@ defmodule FermixCore.Realtime.SessionServer do
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.CostTracker
   alias FermixCore.Realtime.OpenAIClient
+  alias FermixCore.Realtime.ScreenFeed
+  alias FermixCore.Realtime.ScreenShare
   alias FermixCore.Realtime.Telemetry, as: RealtimeTelemetry
   alias FermixCore.Realtime.ToolBridge
+  alias FermixCore.Tools.Telemetry, as: ToolsTelemetry
 
   require Logger
 
   @pcm16_bytes_per_ms 48
   @minute_ms 60_000
+
+  # Screen-feed frames are cheap context, not a record: keep only the newest few
+  # in the provider conversation and evict the rest, or every retained frame is
+  # re-read (and re-billed) on every later response for the rest of the call.
+  # `low` detail is the continuous-perception end of the dial — a precision look
+  # is what `computer_use` screenshots are for, and those still go at `high`.
+  @frames_retained 2
+  @frame_detail "low"
+  # Backpressure for the queued frame path: past this many messages waiting on the
+  # socket process, the uplink is behind and the newest frame is worth more than a
+  # backlog of stale ones.
+  @max_pending_sends 4
   # `call_start` blocks while the upstream WebSocket handshake completes.
   # Keep this strictly above `OpenAIClient.handshake_timeout_ms/0` so an
   # upstream stall surfaces as a WebSockex timeout, not a GenServer.call exit.
@@ -153,7 +169,20 @@ defmodule FermixCore.Realtime.SessionServer do
            session_update_event: nil,
            provider_ready?: false,
            current_item_id: nil,
-           response_started_ms: nil
+           response_started_ms: nil,
+           # Screen perception (M9.5). The feed is started + linked by THIS process
+           # (never from a tool task, whose lifetime is one call), so it dies with
+           # the call. `screen_frame_items` are the provider item ids of the frames
+           # currently in context, newest first; `screen_share_resume?` re-opens the
+           # feed after a reconnect, since the frames + ids belong to the old
+           # server-side conversation and cannot cross it.
+           screen_feed: nil,
+           screen_display: nil,
+           screen_frame_items: [],
+           screen_share_resume?: false,
+           screen_feed_module: Keyword.get(opts, :screen_feed_module, ScreenFeed),
+           screen_feed_opts: Keyword.get(opts, :screen_feed_opts, []),
+           screen_probe: Keyword.get(opts, :screen_probe, &ComputerUseProbe.run/0)
          }}
 
       {:error, reason} ->
@@ -176,12 +205,12 @@ defmodule FermixCore.Realtime.SessionServer do
 
         {:error, reason} ->
           state.openai_client.close(openai_pid)
-          notify_provider_send_error(state, reason)
+          notify_call_start_error(state, reason)
           {:reply, {:error, reason}, state}
       end
     else
       {:error, reason} ->
-        notify_provider_send_error(state, reason)
+        notify_call_start_error(state, reason)
         {:reply, {:error, reason}, state}
     end
   end
@@ -211,8 +240,8 @@ defmodule FermixCore.Realtime.SessionServer do
       {:reply, :ok, %{state | current_item_id: nil}}
     else
       {:error, reason} ->
-        notify_provider_send_error(state, reason)
-        {:reply, {:error, reason}, drop_session(state)}
+        report_provider_send_error(state, reason)
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -226,8 +255,16 @@ defmodule FermixCore.Realtime.SessionServer do
 
   def handle_call(:call_stop, _from, state) do
     notify(state.companion, %{type: "state", state: "idle"})
-    RealtimeTelemetry.call_stop(telemetry_meta(state), usage_measurements(state.usage))
-    {:reply, :ok, drop_session(state)}
+
+    RealtimeTelemetry.call_stop(
+      telemetry_meta(state),
+      usage_measurements(state.usage),
+      :call_stop
+    )
+
+    # The call is over, so the process ends: `terminate/2` does the releasing, and
+    # nothing is left half-torn-down for a later call to inherit.
+    {:stop, {:shutdown, :call_stop}, :ok, state}
   end
 
   def handle_call({:provider_event, event}, _from, state) do
@@ -263,14 +300,25 @@ defmodule FermixCore.Realtime.SessionServer do
         enforce_audio_limits(state, usage)
 
       {:error, reason} ->
-        notify_provider_send_error(state, reason)
-        {:noreply, drop_session(state)}
+        report_provider_send_error(state, reason)
+        {:noreply, state}
     end
   end
 
-  def handle_cast({:audio_chunk, _audio}, state) do
-    Logger.debug("Realtime session dropped audio chunk with no active provider session")
+  # `openai_pid` is nil ONLY inside the bounded reconnect window. Audio arriving
+  # then is correctly discarded — the connection is coming back.
+  def handle_cast({:audio_chunk, _audio}, %{reconnect_timer: timer} = state)
+      when is_reference(timer) do
+    Logger.debug("Realtime session dropped audio chunk while reconnecting")
     {:noreply, state}
+  end
+
+  # Any OTHER chunk with no provider is the state that must not exist. End loud on
+  # the first one rather than stream audio into a void: this is the executable form
+  # of the invariant, and on its own it would have turned the incident into a
+  # 100 ms blip instead of a 43-second freeze.
+  def handle_cast({:audio_chunk, _audio}, state) do
+    {:stop, {:shutdown, :provider_session_missing}, state}
   end
 
   defp enforce_audio_limits(state, usage) do
@@ -279,13 +327,17 @@ defmodule FermixCore.Realtime.SessionServer do
         {:noreply, state}
 
       {:stop, reason} ->
+        # The companion has no handler for `usage`, so this frame alone was
+        # invisible — the ceiling used to stop the world with no log, no
+        # telemetry and nothing the operator could see. `end_call` makes it a
+        # real, traced ending.
         notify(state.companion, %{
           type: "usage",
           status: "limit_reached",
           reason: Atom.to_string(reason)
         })
 
-        {:noreply, drop_session(state)}
+        end_call(state, reason)
     end
   end
 
@@ -314,22 +366,28 @@ defmodule FermixCore.Realtime.SessionServer do
     {:noreply, apply_tool_result(error, call, %{state | pending_tool_calls: remaining})}
   end
 
+  # One screen frame from the feed. It is appended as PASSIVE context — no
+  # `response.create` — so continuous perception never spends a turn; the user's
+  # next utterance (server VAD) is what makes the newest frames matter.
+  def handle_info({:screen_feed, {:frame, frame}}, state) do
+    {:noreply, append_screen_frame(state, frame)}
+  end
+
+  def handle_info({:screen_feed, {:stopped, reason, measurements}}, state) do
+    {:noreply, note_screen_feed_stopped(state, reason, measurements)}
+  end
+
   def handle_info({:openai_realtime_disconnect, _reason}, %{session_update_event: nil} = state) do
     {:noreply, state}
   end
 
-  def handle_info({:openai_realtime_disconnect, reason}, state) do
+  def handle_info({:openai_realtime_disconnect, _reason}, state) do
     case schedule_reconnect(state) do
       {:ok, state} ->
         {:noreply, state}
 
       :exhausted ->
-        notify(state.companion, %{
-          type: "error",
-          reason: reason_to_string({:disconnected, reason})
-        })
-
-        {:noreply, drop_session(state)}
+        end_call(state, :provider_disconnected)
     end
   end
 
@@ -338,20 +396,21 @@ defmodule FermixCore.Realtime.SessionServer do
     {:noreply, state}
   end
 
-  def handle_info({:EXIT, pid, reason}, %{openai_pid: pid, session_update_event: event} = state)
+  def handle_info({:EXIT, pid, _reason}, %{openai_pid: pid, session_update_event: event} = state)
       when not is_nil(event) do
     case schedule_reconnect(state) do
       {:ok, state} ->
         {:noreply, state}
 
       :exhausted ->
-        notify(state.companion, %{
-          type: "error",
-          reason: reason_to_string({:disconnected, reason})
-        })
-
-        {:noreply, drop_session(state)}
+        end_call(state, :provider_disconnected)
     end
+  end
+
+  # The feed exited. It reports its typed reason from `terminate/2`, so this only
+  # clears the pid for the case where that message has not landed yet.
+  def handle_info({:EXIT, pid, _reason}, %{screen_feed: pid} = state) do
+    {:noreply, %{state | screen_feed: nil}}
   end
 
   def handle_info({:EXIT, _pid, _reason}, state), do: {:noreply, state}
@@ -374,26 +433,29 @@ defmodule FermixCore.Realtime.SessionServer do
             {:noreply, state}
 
           :exhausted ->
-            notify(state.companion, %{type: "error", reason: "reconnect_failed"})
-            {:noreply, drop_session(state)}
+            end_call(state, :provider_disconnected)
         end
     end
   end
 
   def handle_info(:max_session_duration, state) do
-    notify(state.companion, %{type: "error", reason: "max_session_duration"})
-    {:noreply, drop_session(state)}
+    end_call(state, :max_session_duration)
   end
 
   @impl true
   def terminate(_reason, %{tool_context: context} = state) do
-    # Backstop for any process exit (crash, supervisor shutdown, disconnect)
-    # that never reached `drop_session`: shut in-flight tool tasks down (they are
-    # `async_nolink`, so they outlive this process otherwise) and never let a
-    # host computer-use session outlive the attended voice call (§7.6). Both are
-    # idempotent — no-ops when drop_session already ran or nothing was in flight.
+    # THE teardown. Every way this call can end — `end_call`, `call_stop`, a crash,
+    # a supervisor shutdown — arrives here, so the releasing lives in exactly one
+    # place and cannot be skipped by whichever exit fired. All of it is idempotent.
     cancel_pending_tool_calls(state)
+    cancel_timers(state)
+    # Graceful, not link-propagated: the feed traps exits, and only its own
+    # `terminate/2` releases the capture sidecar (Port close alone leaves the OS
+    # process alive, which is how a leaked client wedges capture system-wide).
+    close_screen_feed(state, :requested)
+    # A host computer-use session must never outlive the attended call (§7.6).
     ComputerUseSessionManager.abort(context)
+    close_openai(state)
     :ok
   end
 
@@ -414,7 +476,10 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp build_session_update_event(state) do
     with {:ok, instructions} <- session_instructions(state) do
-      tools = ToolBridge.to_openai_tools(state.capabilities)
+      # `screen_share` is a SESSION verb, not a registry capability: it only means
+      # anything while this provider session is live, so the session advertises it
+      # (and executes it) itself, leaving `ToolBridge` a pure capability bridge.
+      tools = ToolBridge.to_openai_tools(state.capabilities) ++ ScreenShare.tools(state.config)
       {:ok, OpenAIClient.session_update_event(state.config, instructions, tools)}
     end
   end
@@ -477,13 +542,23 @@ defmodule FermixCore.Realtime.SessionServer do
         # The reconnect opens a fresh server-side conversation that never issued
         # the outstanding call_ids, so abandon any in-flight tool tasks here
         # rather than let a late result fire at (or tear down) the new session.
-        state = cancel_pending_tool_calls(state)
+        # The screen feed is suspended for the same reason — its frames and their
+        # item ids belong to the conversation that is going away — but flagged to
+        # resume, so the operator does not have to re-ask after a blip.
+        state = state |> cancel_pending_tool_calls() |> suspend_screen_feed()
+        # A socket death can produce BOTH a disconnect notice and an EXIT, so
+        # cancel any timer already armed rather than stack a second attempt on top
+        # of the first.
+        if is_reference(state.reconnect_timer), do: Process.cancel_timer(state.reconnect_timer)
         timer = Process.send_after(self(), :reconnect_attempt, delay)
 
         {:ok,
          %{
            state
            | openai_pid: nil,
+             # The provider is NOT ready while reconnecting; leaving this true let
+             # readiness-gated work (screen frames) believe it had a live session.
+             provider_ready?: false,
              reconnect_timer: timer,
              reconnect_attempts: state.reconnect_attempts + 1
          }}
@@ -491,39 +566,41 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp attempt_reconnect(state) do
-    with {:ok, openai_pid, state} <- open_openai_session(state),
-         :ok <- send_provider_event(state.openai_client, openai_pid, state.session_update_event) do
-      {:ok, openai_pid, state}
-    else
+    case open_openai_session(state) do
+      {:ok, openai_pid, state} -> resume_provider_session(state, openai_pid)
       {:error, reason} -> {:error, reason, state}
     end
   end
 
-  defp drop_session(state) do
-    # Losing the provider connection — for ANY reason: call end, max-session
-    # duration, exhausted reconnect, fatal error, usage limit, even a transient
-    # blip before a reconnect — means the model can no longer see or react, so a
-    # host computer-use session must not persist (COMPUTER_USE.md §7.6). Tear it
-    # down before dropping the socket; idempotent, and a reconnect's next action
-    # re-opens a fresh session via SessionManager.ensure. `terminate/2` is the
-    # backstop for a process death that never runs drop_session. In-flight tool
-    # tasks answer this dying connection (their call_ids die with it), so they
-    # are shut down too — no orphaned tool outlives the call, no stale output
-    # fires later.
-    ComputerUseSessionManager.abort(state.tool_context)
-    close_openai(state)
+  # A socket that opened but could not be configured is CLOSED before the next
+  # attempt: leaving it open leaks a billed upstream connection per retry, and its
+  # later EXIT would race the attempt that replaced it.
+  defp resume_provider_session(state, openai_pid) do
+    case send_provider_event(state.openai_client, openai_pid, state.session_update_event) do
+      :ok ->
+        {:ok, openai_pid, state}
 
-    state
-    |> cancel_pending_tool_calls()
-    |> cancel_timers()
-    |> Map.merge(%{
-      openai_pid: nil,
-      session_update_event: nil,
-      provider_ready?: false,
-      reconnect_attempts: 0,
-      reconnect_timer: nil,
-      current_item_id: nil
-    })
+      {:error, reason} ->
+        state.openai_client.close(openai_pid)
+        {:error, reason, state}
+    end
+  end
+
+  # The ONE terminal transition. A call that has lost its provider connection for
+  # good owns nothing worth keeping, so it ENDS: `terminate/2` releases the socket,
+  # the screen feed, the in-flight tool tasks and the computer-use session, and the
+  # socket handler's monitor tells the companion the call is over.
+  #
+  # This exists because the old teardown returned STATE. That left a session alive
+  # with `openai_pid: nil` — and since both reconnect clauses are guarded on the
+  # very fields the teardown nils, every later disconnect/EXIT was swallowed. The
+  # call then streamed audio into a void indefinitely while the companion sat on
+  # its last frame (observed: 43 s, ended only by the operator). The fix is not to
+  # detect that state — it is to make it unrepresentable.
+  defp end_call(state, reason) when is_atom(reason) do
+    notify(state.companion, %{type: "error", reason: Atom.to_string(reason)})
+    RealtimeTelemetry.call_stop(telemetry_meta(state), usage_measurements(state.usage), reason)
+    {:stop, {:shutdown, reason}, state}
   end
 
   # A tool task belongs to the provider connection whose call it answers. When
@@ -577,7 +654,15 @@ defmodule FermixCore.Realtime.SessionServer do
            RuntimeContext.build(
              agent_id: MemoryConfig.agent_id(),
              available_skills: available_skills,
-             capability_registry: capability_registry
+             capability_registry: capability_registry,
+             # REALTIME.md holds every voice rule there is — speech length, pacing,
+             # act-in-silence. Without this flag `BootstrapLoader.load_realtime/2`
+             # returns nil and `PromptComposer` drops the part, so a voice call runs
+             # on the TEXT prompt alone. That is what happened in production from
+             # 2026-05-23 (when the `prompt_loader` default that carried the flag was
+             # removed) until 2026-07-26: four rounds of prompt fixes went to a file
+             # nothing read. Only the injected-loader clause below had it.
+             realtime?: true
            ) do
       profile =
         RuntimeContext.build_profile(:operator, available_skills, capability_registry,
@@ -677,18 +762,43 @@ defmodule FermixCore.Realtime.SessionServer do
     |> Map.put(:provider_ready?, true)
     |> start_timers()
     |> notify_listening_state()
+    |> resume_screen_feed()
   end
 
-  defp handle_provider_event_internal({:input_audio_committed, _event}, state), do: state
+  # The provider COMMITTED the operator's speech as a turn — the conversation has
+  # moved on, so anything still in the companion's playback buffer belongs to the
+  # exchange before it and must not keep talking over the answer to come.
+  #
+  # This is the barge-in gap. Cancelling an in-flight response was already handled,
+  # but the Realtime API streams audio FASTER than realtime, so a long reply is often
+  # fully delivered — and therefore uncancellable — before the operator even starts
+  # speaking. Nothing then flushed the buffer: the pet played the old reply to the
+  # end and only afterwards answered what had been said over it (observed live).
+  # A commit is the provider's own decision, so acting on it cannot cut a reply off
+  # for a noise the way `speech_started` would.
+  defp handle_provider_event_internal({:input_audio_committed, _event}, state) do
+    notify(state.companion, %{type: "playback_stop"})
+    state
+  end
 
-  defp handle_provider_event_internal({:input_audio_speech_started, _event}, state), do: state
+  # Speech boundaries drive the feed's cadence: tighten it while the operator is
+  # mid-utterance so the frame they are talking ABOUT is current, relax it after.
+  # Deliberately does NOT stop playback: with full duplex the mic stays open through
+  # the assistant's speech, and mere DETECTION is not an interruption — a cough or a
+  # backchannel "mm-hmm" must not cut a reply off. The provider decides, and the two
+  # places that decision surfaces are handled: a cancelled `response.done`
+  # (`maybe_notify_cancelled_response/2`) and a committed user turn
+  # (`:input_audio_committed` below).
+  defp handle_provider_event_internal({:input_audio_speech_started, _event}, state) do
+    set_screen_feed_speaking(state, true)
+  end
 
   defp handle_provider_event_internal({:input_audio_speech_stopped, _event}, state) do
     unless is_binary(state.current_item_id) do
       notify(state.companion, %{type: "state", state: "thinking"})
     end
 
-    state
+    set_screen_feed_speaking(state, false)
   end
 
   defp handle_provider_event_internal({:assistant_transcript_done, text}, state) do
@@ -696,21 +806,12 @@ defmodule FermixCore.Realtime.SessionServer do
     %{state | assistant_transcript: text}
   end
 
-  # Run the tool OFF the session loop (async_nolink on the Realtime task
-  # supervisor). A multi-second tool used to block this GenServer's mailbox,
-  # starving `audio_chunk`/`interrupt` and wedging the whole call. The result
-  # comes back as `{ref, result}` (or `:DOWN` on crash) and is answered there.
   defp handle_provider_event_internal({:function_call, call}, state) do
     notify(state.companion, %{type: "tool_event", status: "running", name: tool_name(call)})
 
-    bridge = state.tool_bridge
-
-    task =
-      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
-        ToolBridge.execute_call(bridge, call)
-      end)
-
-    %{state | pending_tool_calls: Map.put(state.pending_tool_calls, task.ref, {task, call})}
+    if tool_name(call) == ScreenShare.tool_name(),
+      do: run_screen_share_call(call, state),
+      else: dispatch_tool_call(call, state)
   end
 
   defp handle_provider_event_internal({:response_created, _event}, state) do
@@ -731,10 +832,13 @@ defmodule FermixCore.Realtime.SessionServer do
     if active_response_race?(error) do
       handle_active_response_race(error, state)
     else
+      # Reported, not fatal. If the error is genuinely terminal OpenAI closes the
+      # socket and the disconnect/EXIT clauses handle it as the one reconnect path;
+      # tearing down here instead disarmed that path.
       Logger.warning("OpenAI Realtime error: #{inspect(error)}")
       RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
       notify(state.companion, %{type: "error", reason: reason_to_string(error)})
-      drop_session(state)
+      state
     end
   end
 
@@ -744,6 +848,264 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp handle_provider_event_internal(_event, state), do: state
+
+  # Run the tool OFF the session loop (async_nolink on the Realtime task
+  # supervisor). A multi-second tool used to block this GenServer's mailbox,
+  # starving `audio_chunk`/`interrupt` and wedging the whole call. The result
+  # comes back as `{ref, result}` (or `:DOWN` on crash) and is answered there.
+  defp dispatch_tool_call(call, state) do
+    bridge = state.tool_bridge
+
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn ->
+        ToolBridge.execute_call(bridge, call)
+      end)
+
+    %{state | pending_tool_calls: Map.put(state.pending_tool_calls, task.ref, {task, call})}
+  end
+
+  # `screen_share` is answered INLINE rather than on the task supervisor: starting
+  # the feed is a non-blocking hand-off (the feed's own continue does the sidecar
+  # work), and the reply must be built from — and mutate — this session's state.
+  #
+  # It still emits through the SHARED tool emitter: answering inline is an
+  # implementation detail, and a verb the model calls must appear in traces like
+  # every other tool. (It did not, and a live debug had to infer a stop from the
+  # feed's lifecycle event alone.)
+  defp run_screen_share_call(call, state) do
+    started_ms = System.monotonic_time(:millisecond)
+    args = call_arguments(call)
+
+    {state, outcome} =
+      case ScreenShare.decode(args) do
+        {:ok, :start, display} -> start_screen_share(call, display, state)
+        {:ok, :stop, _display} -> stop_screen_share(call, state)
+        {:error, reason} -> {answer_tool_error(call, reason, state), {:error, reason}}
+      end
+
+    emit_screen_share_telemetry(state, args, outcome, started_ms)
+    state
+  end
+
+  defp emit_screen_share_telemetry(state, args, outcome, started_ms) do
+    ToolsTelemetry.exec(
+      ScreenShare.tool_name(),
+      state.tool_context,
+      match?({:ok, _}, outcome),
+      max(0, System.monotonic_time(:millisecond) - started_ms),
+      input: args,
+      output: screen_share_output(outcome),
+      metadata: %{action: Map.get(args, "action")}
+    )
+  end
+
+  defp screen_share_output({:ok, payload}), do: payload
+  defp screen_share_output({:error, reason}), do: %{error: reason_to_string(reason)}
+
+  defp start_screen_share(call, _display, %{screen_feed: pid} = state) when is_pid(pid) do
+    answer_tool_ok(call, %{status: "already_sharing", display: state.screen_display}, state)
+  end
+
+  defp start_screen_share(call, display, state) do
+    with :ok <-
+           ScreenShare.gate(state.config, screen_share_origin(state), probe: state.screen_probe),
+         {:ok, state} <- open_screen_feed(state, display) do
+      answer_tool_ok(
+        call,
+        %{status: "sharing", display: display, note: ScreenShare.started_text(display)},
+        state
+      )
+    else
+      {:error, reason} -> {answer_tool_error(call, reason, state), {:error, reason}}
+    end
+  end
+
+  defp stop_screen_share(call, %{screen_feed: pid} = state) when is_pid(pid) do
+    answer_tool_ok(call, %{status: "stopped"}, close_screen_feed(state, :requested))
+  end
+
+  defp stop_screen_share(call, state) do
+    answer_tool_ok(call, %{status: "not_sharing"}, state)
+  end
+
+  defp open_screen_feed(state, display) do
+    opts =
+      state.screen_feed_opts
+      |> Keyword.put(:owner, self())
+      |> Keyword.put(:display, display)
+
+    case state.screen_feed_module.start_link(opts) do
+      {:ok, pid} ->
+        RealtimeTelemetry.screen_feed_start(telemetry_meta(state), display)
+        # Deliberately NO companion `state` frame. The wire's state vocabulary is
+        # closed and the companion maps anything it does not know to `idle`, so a
+        # "sharing_screen" state made the pet look like the call had ENDED the
+        # instant sharing began. A visible sharing indicator needs a real protocol
+        # addition and a paired app release (§10 non-goal), not an invented value.
+        {:ok, %{state | screen_feed: pid, screen_display: display}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # Stop the feed and forget its frames: the item ids are provider state, so they
+  # are meaningless once this feed (or this provider connection) is gone. Keeping
+  # `screen_share_resume?` separate is what lets a reconnect re-open the feed
+  # without the model asking twice.
+  defp close_screen_feed(%{screen_feed: pid} = state, reason) when is_pid(pid) do
+    state.screen_feed_module.stop(pid, reason)
+    %{state | screen_feed: nil, screen_frame_items: []}
+  end
+
+  defp close_screen_feed(state, _reason), do: %{state | screen_frame_items: []}
+
+  # A provider connection is going away (teardown OR a transient blip before a
+  # reconnect). Either way the frames in flight belong to a conversation that will
+  # not exist afterwards, so the feed stops; `resume?` remembers that the operator
+  # asked for sharing so `session.updated` can re-open it.
+  defp suspend_screen_feed(%{screen_feed: pid} = state) when is_pid(pid) do
+    %{close_screen_feed(state, :requested) | screen_share_resume?: true}
+  end
+
+  defp suspend_screen_feed(state), do: state
+
+  defp resume_screen_feed(%{screen_share_resume?: true, screen_feed: nil} = state) do
+    state = %{state | screen_share_resume?: false}
+
+    case open_screen_feed(state, state.screen_display || 0) do
+      {:ok, state} ->
+        state
+
+      {:error, reason} ->
+        Logger.warning("realtime: screen feed did not resume after reconnect: #{inspect(reason)}")
+        inject_screen_notice(state, ScreenShare.stopped_text({:capture_unavailable, reason}))
+    end
+  end
+
+  defp resume_screen_feed(state), do: state
+
+  defp screen_share_origin(state), do: Map.get(state.tool_context, :computer_use_origin, :voice)
+
+  # Frames are QUEUED, never sent with the blocking call the rest of the session
+  # uses. A frame is bulk, periodic, and disposable: waiting on it froze the call
+  # (no audio, no events) and, on the 5s deadline, tore it down. Dropping one is
+  # invisible — another is ~2s away — so the only correct failure here is to skip.
+  defp append_screen_frame(%{provider_ready?: false} = state, _frame) do
+    Logger.debug("realtime: dropped a screen frame with no ready provider session")
+    state
+  end
+
+  defp append_screen_frame(%{openai_pid: pid} = state, frame) when is_pid(pid) do
+    if state.openai_client.pending_sends(pid) > @max_pending_sends do
+      # The socket is behind. Queueing anyway would just move an unbounded backlog
+      # into its mailbox; the newest frame wins and this one is stale already.
+      RealtimeTelemetry.frame_dropped(telemetry_meta(state), frame.bytes)
+      state
+    else
+      queue_screen_frame(state, pid, frame)
+    end
+  end
+
+  defp append_screen_frame(state, _frame), do: state
+
+  defp queue_screen_frame(state, pid, frame) do
+    item_id = mint_frame_item_id()
+    {retained, evicted} = Enum.split([item_id | state.screen_frame_items], @frames_retained)
+
+    events =
+      [OpenAIClient.screen_frame_item_event(item_id, frame, @frame_detail)] ++
+        Enum.map(evicted, &OpenAIClient.delete_item_event/1)
+
+    Enum.each(events, &state.openai_client.cast_event(pid, &1))
+
+    RealtimeTelemetry.frame_sent(
+      telemetry_meta(state),
+      frame.bytes,
+      frame.gated_out,
+      @frame_detail
+    )
+
+    %{state | screen_frame_items: retained}
+  end
+
+  # A client-assigned id, so a superseded frame can be evicted by id later without
+  # having to correlate the server's `conversation.item.created` back to a frame.
+  defp mint_frame_item_id do
+    "item_fx" <> Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false)
+  end
+
+  defp note_screen_feed_stopped(state, reason, measurements) do
+    RealtimeTelemetry.screen_feed_stop(
+      telemetry_meta(state),
+      reason_to_string(reason),
+      measurements
+    )
+
+    state = %{state | screen_feed: nil, screen_frame_items: []}
+
+    # An operator-requested stop was already answered by the tool result. Any other
+    # reason means the model's eyes closed WITHOUT it asking, so it must be told —
+    # otherwise it keeps narrating a screen it can no longer see.
+    if reason == :requested,
+      do: state,
+      else: inject_screen_notice(state, ScreenShare.stopped_text(reason))
+  end
+
+  # Fermix's own status text, injected as passive context (no `response.create`):
+  # the model picks it up on its next turn instead of interrupting the operator.
+  defp inject_screen_notice(state, text) do
+    case send_openai_seq(state, [OpenAIClient.status_item_event(text)]) do
+      :ok ->
+        state
+
+      {:error, reason} ->
+        Logger.debug("realtime: could not inject screen notice: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp set_screen_feed_speaking(%{screen_feed: pid} = state, speaking?) when is_pid(pid) do
+    state.screen_feed_module.set_speaking(pid, speaking?)
+    state
+  end
+
+  defp set_screen_feed_speaking(state, _speaking?), do: state
+
+  # The feed spends a fixed share of the call's ONE budget. It stops first and the
+  # call continues: losing the eyes is recoverable and audible, ending the call is
+  # neither.
+  defp enforce_feed_budget(%{screen_feed: pid} = state) when is_pid(pid) do
+    if CostTracker.feed_over_budget?(state.usage),
+      do: close_screen_feed(state, :cost),
+      else: state
+  end
+
+  defp enforce_feed_budget(state), do: state
+
+  # Returns `{state, outcome}` so the caller emits one honest tool span for the
+  # verb it just answered.
+  defp answer_tool_ok(call, payload, state) do
+    state =
+      apply_tool_result(
+        {:ok, %{call_id: call_id(call), output: Jason.encode!(payload)}},
+        call,
+        state
+      )
+
+    {state, {:ok, payload}}
+  end
+
+  defp answer_tool_error(call, reason, state) do
+    apply_tool_result({:error, %{call_id: call_id(call), reason: reason}}, call, state)
+  end
+
+  defp call_arguments(call) do
+    case Jason.decode(Map.get(call, "arguments") || Map.get(call, :arguments) || "{}") do
+      {:ok, %{} = args} -> args
+      _other -> %{}
+    end
+  end
 
   defp apply_tool_result({:ok, output}, call, state) do
     state = send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
@@ -781,11 +1143,23 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp notify(pid, event) when is_pid(pid), do: send(pid, {:realtime, event})
 
-  defp notify_provider_send_error(state, reason) do
+  # Deliberately does NOT send the companion an `error` frame: the pet treats that
+  # as terminal (it shuts the microphone down and clears `callActive`), which is
+  # the wrong response to one dropped event on a call that is still live. The
+  # operator learns about a real loss through the reconnect/terminal path instead.
+  # A call that never connected: the companion must hear it, because there is no
+  # connection owner to recover and no call to keep alive.
+  defp notify_call_start_error(state, reason) do
     notify(state.companion, %{
       type: "error",
       reason: "provider_send_failed: #{reason_to_string(reason)}"
     })
+  end
+
+  defp report_provider_send_error(state, reason) do
+    Logger.warning("realtime: provider send failed: #{reason_to_string(reason)}")
+    RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(reason))
+    state
   end
 
   defp send_openai(%{openai_pid: pid, openai_client: client}, event) when is_pid(pid) do
@@ -794,14 +1168,16 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp send_openai(_state, _event), do: {:error, :provider_not_connected}
 
+  # A send that fails is REPORTED, never fatal. Connection liveness has exactly one
+  # owner — the socket's disconnect/EXIT clauses — and this used to be a second,
+  # contradictory one: a failed send tore the session down, nilling the very fields
+  # those clauses match on, so the reconnect that should have followed was
+  # swallowed. If the socket really is gone its own signal arrives and reconnects;
+  # if the payload was bad, ending the call would not have helped.
   defp send_openai_events(state, events) do
     case send_openai_seq(state, events) do
-      :ok ->
-        state
-
-      {:error, reason} ->
-        notify_provider_send_error(state, reason)
-        drop_session(state)
+      :ok -> state
+      {:error, reason} -> report_provider_send_error(state, reason)
     end
   end
 
@@ -859,8 +1235,10 @@ defmodule FermixCore.Realtime.SessionServer do
     :exit, reason -> {:error, reason}
   end
 
-  defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage}) do
-    tracker = CostTracker.put_reported_tokens(state.usage, usage)
+  defp maybe_apply_reported_usage(state, %{"usage" => %{} = usage} = response) do
+    # Accumulated per response and deduplicated by response id: a call has many
+    # responses, and retained screen frames are re-read by each one.
+    tracker = CostTracker.add_reported_usage(state.usage, Map.get(response, "id"), usage)
 
     notify(state.companion, %{
       type: "usage",
@@ -868,7 +1246,7 @@ defmodule FermixCore.Realtime.SessionServer do
       cost_cents: tracker.reported.cost_cents
     })
 
-    %{state | usage: tracker}
+    enforce_feed_budget(%{state | usage: tracker})
   end
 
   defp maybe_apply_reported_usage(state, _response), do: state
@@ -906,10 +1284,19 @@ defmodule FermixCore.Realtime.SessionServer do
   defp transcript_or_nil(""), do: nil
   defp transcript_or_nil(text) when is_binary(text), do: text
 
+  # `cached` rides alongside the totals because the split is what the session's own
+  # cost accounting turns on, and it was NOT recoverable after the fact: a call that
+  # tripped the cost ceiling could not be audited from its trace, only re-derived by
+  # arithmetic. A cached token costs a tenth of an uncached one, and a Realtime call
+  # re-sends its whole preamble every response, so this is most of the bill.
   defp tokens_from_usage(usage) do
     prompt = non_neg_int(Map.get(usage, "input_tokens"))
     completion = non_neg_int(Map.get(usage, "output_tokens"))
-    %{prompt: prompt, completion: completion, total: prompt + completion}
+
+    cached =
+      usage |> Map.get("input_token_details", %{}) |> Map.get("cached_tokens") |> non_neg_int()
+
+    %{prompt: prompt, completion: completion, total: prompt + completion, cached: cached}
   end
 
   defp non_neg_int(value) when is_integer(value) and value >= 0, do: value
