@@ -23,10 +23,11 @@ defmodule FermixCore.Harness.Delivery do
   Composition is a single pure function (`compose/2`, golden-tested): every
   message begins with `[run <id>]` (at-least-once run-id dedup), carries a status
   line (vendor · cwd tail · duration), and — on a non-completing run — the
-  reason, a diagnostics tail, and the vendor resume hint (or an explicit
-  "not resumable (ephemeral)" line). A chat-origin run whose continuation chain
-  hit its cap closes with `Harness.Continuation.note/0`, so the owner is told the
-  automatic follow-up stopped (§23.2) rather than wondering why nothing happened.
+  vendor's own error text (when it reported one), the reason, a diagnostics tail,
+  and the vendor resume hint (or an explicit "not resumable (ephemeral)" line).
+  A chat-origin run whose continuation chain hit its cap closes with
+  `Harness.Continuation.note/0`, so the owner is told the automatic follow-up
+  stopped (§23.2) rather than wondering why nothing happened.
   """
 
   require Logger
@@ -109,8 +110,9 @@ defmodule FermixCore.Harness.Delivery do
   end
 
   @doc """
-  Composes the terminal message for `row` (with a completed run's `result_text`,
-  or `nil`). Pure and golden-tested.
+  Composes the terminal message for `row`. `result_text` is the run's harvested
+  text — the deliverable for a completed run, the vendor's own error message for a
+  failed one (`nil` when the run produced neither). Pure and golden-tested.
   """
   @spec compose(map(), String.t() | nil) :: String.t()
   def compose(row, result_text) when is_map(row) do
@@ -257,17 +259,10 @@ defmodule FermixCore.Harness.Delivery do
 
   # --- Result harvest -----------------------------------------------------
 
-  # A completed run's authoritative result lives in its `result.txt` artifact
-  # (codex `-o`, claude harvest), so a delivery retried long after terminalization
-  # still composes the full body. Non-completing runs carry no result text.
-  defp result_text_for(%{status: "completed", artifacts_dir: dir}) when is_binary(dir) do
-    case File.read(Artifacts.result_path(dir)) do
-      {:ok, ""} -> nil
-      {:ok, content} -> content
-      {:error, _absent} -> nil
-    end
-  end
-
+  # A delivery retried long after terminalization sees only the ledger row, so the
+  # text comes back off disk through the shared reader — the deliverable for a
+  # completed run, the vendor's error message for a failed one.
+  defp result_text_for(%{artifacts_dir: dir}), do: Artifacts.read_result(dir)
   defp result_text_for(_row), do: nil
 
   # --- Composition (pure) -------------------------------------------------
@@ -328,7 +323,7 @@ defmodule FermixCore.Harness.Delivery do
 
   defp body(%{status: "completed"} = _row, result_text), do: completed_body(result_text)
 
-  defp body(row, _result_text) when is_map(row), do: failed_body(row)
+  defp body(row, result_text) when is_map(row), do: failed_body(row, result_text)
 
   defp completed_body(nil), do: ""
   defp completed_body(text) when is_binary(text), do: bound_text(text)
@@ -347,11 +342,17 @@ defmodule FermixCore.Harness.Delivery do
 
   defp diff_hint_line(_row), do: ""
 
-  defp failed_body(row) do
-    [reason_line(row), diagnostics_line(row), resume_line(row)]
+  # The vendor's own error text leads a failure message for the same reason it
+  # leads the continuation notice: "reason: exit_1" tells the owner nothing, while
+  # "Not logged in · Please run /login" is the whole diagnosis.
+  defp failed_body(row, result_text) do
+    [vendor_line(result_text), reason_line(row), diagnostics_line(row), resume_line(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
+
+  defp vendor_line(text) when is_binary(text) and text != "", do: bound_text(String.trim(text))
+  defp vendor_line(_absent), do: ""
 
   defp reason_line(%{reason: reason}) when is_binary(reason) and reason != "",
     do: "reason: #{reason}"

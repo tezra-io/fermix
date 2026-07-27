@@ -371,6 +371,30 @@ defmodule FermixCore.Harness.ManagerTest do
       assert notice.content =~ "reason: run_crashed"
     end
 
+    # The whole 2026-07-26 bug path in one test. The pieces are covered separately
+    # (Run harvests and persists, Manager forwards outcome.result_text, Continuation
+    # renders it) but the JOINT was not: the only failed-continuation test above
+    # kills the process, so `crash_outcome/0` hardcodes result_text: nil and a
+    # regression re-narrowing manager.ex's result_text to completed runs would leave
+    # every harness test green while the diagnosis silently stopped reaching the agent.
+    test "a vendor error reaches the agent's notice with both the text and the decision",
+         ctx do
+      manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
+      stub = auth_failure_stub(ctx)
+
+      {:ok, run_id} = Manager.start_run(chat_request(ctx, stub), manager)
+
+      assert await_status(ctx.repo, run_id, "failed")
+      assert Ledger.get(run_id, server: ctx.repo) |> elem(1) |> Map.get(:reason) == "exit_1"
+
+      assert_receive {:continued, notice}, 5_000
+      assert notice.content =~ "Not logged in · Please run /login"
+      assert notice.content =~ "reason: exit_1"
+      assert notice.content =~ "check the working tree before redoing anything"
+      assert notice.content =~ "carry out the work yourself"
+      refute notice.content =~ "if it is already satisfied"
+    end
+
     test "a failed dispatch leaves delivery pending so the worker delivers the text", ctx do
       Application.put_env(:fermix_core, :harness_test_continuation_reply, {:error, :boom})
       manager = start_manager(ctx, continuation_dispatcher: RecordingDispatcher)
@@ -576,7 +600,12 @@ defmodule FermixCore.Harness.ManagerTest do
         command_supervisor: ctx.host_sup,
         artifacts_opts: default_artifacts_opts(ctx),
         delivery_opts: [adapter: RecordingAdapter],
-        timer_enabled: false
+        timer_enabled: false,
+        # Seed the spawned child's identity instead of inheriting the host's:
+        # `Harness.Env` now requires USER, so without this every local-run test here
+        # would depend on an ambient env var (hermetic-tests rule).
+        home: ctx.home,
+        user: "harness-op"
       ]
       |> Keyword.merge(overrides)
 
@@ -674,6 +703,16 @@ defmodule FermixCore.Harness.ManagerTest do
     FakeVendorCli.write!(ctx.stub_dir,
       lines: fixture_lines("codex_exec_success.jsonl"),
       result_text: "codex-final"
+    )
+  end
+
+  # A run that harvested vendor text and then exited non-zero — the shape that
+  # exercises the Manager → Continuation seam for a FAILED run carrying result_text.
+  defp auth_failure_stub(ctx) do
+    FakeVendorCli.write!(ctx.stub_dir,
+      lines: fixture_lines("codex_exec_success.jsonl"),
+      result_text: "Not logged in · Please run /login",
+      exit_code: 1
     )
   end
 

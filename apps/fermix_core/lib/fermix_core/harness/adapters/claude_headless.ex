@@ -205,7 +205,10 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
   defp bare_flag(_params), do: []
 
   # A bare run reads ANTHROPIC_API_KEY only (OAuth/keychain are skipped), so it
-  # must pass that key through; a normal run authenticates via HOME/~/.claude.
+  # must pass that key through. A normal run authenticates against the CLI's own
+  # credential store — a file under HOME on Linux, but the macOS Keychain item
+  # whose account is `$USER` — both of which `Harness.Env` supplies as reserved
+  # identity, so no passthrough name is needed.
   defp env_names(%{bare: true}), do: ["ANTHROPIC_API_KEY"]
   defp env_names(_params), do: []
 

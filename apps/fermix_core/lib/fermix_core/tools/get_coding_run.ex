@@ -67,7 +67,7 @@ defmodule FermixCore.Tools.GetCodingRun do
     with :ok <- Authorization.authorize(name(), context),
          {:ok, run_id} <- Support.required_string(args, "run_id"),
          {:ok, row} <- Ledger.get(run_id, server: Support.repo(context)) do
-      Support.success_json(Support.run_payload(row))
+      Support.success_json(Support.run_payload(row, Support.read_run_text(row)))
     else
       {:error, reason} -> Support.error(reason)
     end

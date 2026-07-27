@@ -118,6 +118,82 @@ defmodule FermixCore.Harness.ContinuationTest do
       assert text =~ "error: boom"
     end
 
+    # Regression: a claude auth failure reaches the ledger as a bare `exit_1` with
+    # an empty diagnostics tail (the vendor reports it as well-formed JSON, which
+    # `EventStream` counts as an event, not a diagnostic). Without the vendor's own
+    # text the agent cannot tell auth from a crash, so it re-launches into the same
+    # wall — which is exactly what happened on 2026-07-26.
+    test "a failed run leads with the vendor's own error text when it has one" do
+      text =
+        Continuation.notice_text(
+          row(%{status: "failed", reason: "exit_1", diagnostics_tail: nil}),
+          "Not logged in · Please run /login"
+        )
+
+      assert text =~ "Not logged in · Please run /login"
+      assert text =~ "reason: exit_1"
+
+      vendor_at = :binary.match(text, "Not logged in") |> elem(0)
+      reason_at = :binary.match(text, "reason: exit_1") |> elem(0)
+      assert vendor_at < reason_at, "the vendor's diagnosis must lead the body"
+    end
+
+    # The context the agent needs to take a stance. Deliberately NOT a router:
+    # both moves are named as legitimate and the agent judges from the failure
+    # text, so no reason has to be classified as retryable or terminal.
+    test "a failed run closes by naming the decision, not by prescribing a branch" do
+      text =
+        Continuation.notice_text(
+          row(%{status: "failed", reason: "exit_1"}),
+          "Not logged in · Please run /login"
+        )
+
+      assert text =~ "check the working tree before redoing anything"
+      assert text =~ "run it again if the cause looks transient"
+      assert text =~ "carry out the work yourself with your ordinary file and shell tools"
+      assert text =~ "tell the owner plainly what failed and what it needs"
+
+      # The completed-run closing must not leak into a failure: "continue the
+      # request" reads as "the work is done, wrap up", which is how a failed run
+      # ends up silently reported as progress.
+      refute text =~ "if it is already satisfied"
+    end
+
+    # The closing must never assert the worktree is untouched. `timeout`,
+    # `output_limit` and `subscriber_stalled` kill a vendor that ran for minutes
+    # inside the real repo, and `artifact_write` means it finished and only the
+    # result file failed — claiming "nothing happened, redo it" would invite a
+    # second implementation on top of a half-applied one.
+    test "a failure that may have written files is told to inspect, not to assume" do
+      for reason <- ["timeout", "output_limit", "subscriber_stalled", "artifact_write"] do
+        text = Continuation.notice_text(row(%{status: "failed", reason: reason}), nil)
+
+        assert text =~ "check the working tree before redoing anything"
+        refute text =~ "produced no work"
+      end
+    end
+
+    # A cloud terminal usually means tracking stopped, not that the task did —
+    # `poll_deadline` leaves it running remotely, so the decision closing (which
+    # sanctions redoing the work) must not appear or the agent races a live task.
+    test "a cloud run never gets the do-it-yourself closing" do
+      text =
+        Continuation.notice_text(
+          row(%{vendor: "codex_cloud", status: "blocked", reason: "poll_deadline"}),
+          nil
+        )
+
+      refute text =~ "carry out the work yourself"
+      assert text =~ "Continue the request this run was for"
+    end
+
+    test "a completed run keeps the continue-the-request closing" do
+      text = Continuation.notice_text(row(), "All tests pass.")
+
+      assert text =~ "Continue the request this run was for"
+      refute text =~ "This run produced no work."
+    end
+
     test "a completed cloud run carries the vendor summary, the task URL, and the diff hint" do
       text =
         Continuation.notice_text(

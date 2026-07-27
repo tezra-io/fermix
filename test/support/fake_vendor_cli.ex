@@ -4,11 +4,12 @@ defmodule FermixTestSupport.FakeVendorCli do
   CLI (`codex` / `claude`) in the coding-harness tests (`Harness.Run`, and later
   `Harness.Manager`).
 
-  `Harness.Run` spawns the vendor binary through `env -i HOME=… PATH=… TERM=… …`
-  (`Harness.Env`), which wipes the environment. So — unlike the compux perl
-  sidecar, which is parameterized by `FAKE_PROTO` in the environment — every
-  behavior flag here is **baked into the generated script as a shell literal**,
-  reaching the stub through the `env -i` barrier without any env or argv channel.
+  `Harness.Run` spawns the vendor binary through
+  `env -i HOME=… PATH=… TERM=… USER=… …` (`Harness.Env`), which wipes the
+  environment. So — unlike the compux perl sidecar, which is parameterized by
+  `FAKE_PROTO` in the environment — every behavior flag here is **baked into the
+  generated script as a shell literal**, reaching the stub through the `env -i`
+  barrier without any env or argv channel.
 
   `write!/2` writes the fixture lines and the stub script under `dir` (a SafeRm
   tmp dir the caller owns) and returns the absolute script path. Options:
@@ -20,6 +21,11 @@ defmodule FermixTestSupport.FakeVendorCli do
     * `:delay_seconds` — integer seconds to pause between lines (default `0`).
     * `:result_text` — when set AND the argv carries `-o <path>` (codex), write
       this string to that path, mirroring codex's `-o` result file (default nil).
+    * `:env_dump_path` — write the stub's own environment to this path before
+      replaying. Being env-blind is what makes this stub deterministic, but it also
+      means it can never notice a WRONG identity value — the 2026-07-26 bug shape,
+      where the child ran fine but resolved the wrong keychain account. This is the
+      one channel that lets a test assert what the child actually received.
   """
 
   @spec write!(String.t(), keyword()) :: String.t()
@@ -40,6 +46,7 @@ defmodule FermixTestSupport.FakeVendorCli do
     hang_after = Keyword.get(opts, :hang_after)
     delay = Keyword.get(opts, :delay_seconds, 0)
     result_text = Keyword.get(opts, :result_text)
+    env_dump_path = Keyword.get(opts, :env_dump_path)
 
     """
     #!/bin/sh
@@ -50,6 +57,9 @@ defmodule FermixTestSupport.FakeVendorCli do
     HANG_AFTER=#{sh_int(hang_after)}
     RESULT_TEXT=#{sh_squote(result_text)}
     FIXTURE=#{sh_squote(fixture_path)}
+    ENV_DUMP=#{sh_squote(env_dump_path)}
+
+    [ -n "$ENV_DUMP" ] && env > "$ENV_DUMP"
 
     out=""
     prev=""

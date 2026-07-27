@@ -243,8 +243,17 @@ defmodule FermixCore.Harness.Run do
 
   defp build_env(state, argv) do
     with {:ok, allowed} <- build_allowed_env(state) do
-      case Env.build(state.plan.binary, argv, allowed, home: home(state), path: path(state)) do
+      case Env.build(state.plan.binary, argv, allowed,
+             home: home(state),
+             path: path(state),
+             user: user(state)
+           ) do
         {:ok, built} -> {:ok, built}
+        # A named reason, not an inspected tuple: this one is an operator-actionable
+        # daemon-environment problem, and `env:{:missing_opt, :user}` in the failure
+        # message would send the reader hunting through Fermix instead of their
+        # service definition.
+        {:error, {:missing_opt, :user}} -> {:error, "failed", "env_missing_user"}
         {:error, reason} -> {:error, "failed", "env:#{inspect(reason)}"}
       end
     end
@@ -258,9 +267,11 @@ defmodule FermixCore.Harness.Run do
   end
 
   # An empty passthrough set (codex always; claude unless `bare`) never touches
-  # Sandbox.Env; only a declared name is resolved, and the reserved
-  # HOME/PATH/TERM that Sandbox.Env's default_env carries are stripped here (they
-  # are supplied separately and rejected by Harness.Env).
+  # Sandbox.Env; only a declared name is resolved. `Map.take/2` keeps just the
+  # declared names, so everything `Sandbox.Env.default_env/0` contributes on its
+  # own (HOME, PATH, USER, LANG, SHELL, TMPDIR, LC_*) is dropped here — the
+  # reserved identity set is supplied separately by `Harness.Env`, which rejects
+  # it in `allowed_env`.
   defp resolve_env_names([]), do: {:ok, %{}}
 
   defp resolve_env_names(names) do
@@ -466,6 +477,31 @@ defmodule FermixCore.Harness.Run do
     case Artifacts.write_result(state.artifacts_dir, text) do
       {:ok, _path} -> {"completed", fields}
       {:error, reason} -> {"failed", artifact_write_fields(state, fields, reason)}
+    end
+  end
+
+  # A failed run's `result_text` is the vendor's own explanation — claude reports
+  # "Not logged in · Please run /login" on its terminal `result` event — and it is
+  # the only actionable diagnosis the run produces. Persist it so the durable
+  # delivery retry (which sees the ledger row, never this process) can read it
+  # back. Unlike a completed run the text is supplementary, not the deliverable,
+  # so a write failure is logged and dropped: it must never overwrite the real
+  # failure reason with `artifact_write`.
+  defp persist_streamed_result(state, status, %{result_text: text} = fields)
+       when is_binary(text) and text != "" do
+    case Artifacts.write_result(state.artifacts_dir, text) do
+      {:ok, _path} ->
+        {status, fields}
+
+      {:error, reason} ->
+        Logger.warning(
+          "harness run #{state.run_id} diagnosis artifact write failed: #{inspect(reason)}"
+        )
+
+        # Same marker `spool_write_failed/2` uses: the in-process continuation still
+        # carries the text, but a retried delivery reads disk and will find nothing,
+        # so the loss has to be visible on the row rather than only in the daemon log.
+        {status, Map.put(fields, :artifact_truncated, true)}
     end
   end
 
@@ -683,6 +719,13 @@ defmodule FermixCore.Harness.Run do
   defp home(state), do: state.home || System.get_env("HOME") || System.user_home!()
   defp path(state), do: state.path || System.get_env("PATH")
 
+  # Identity, resolved the same way as HOME/PATH: from the daemon's own
+  # environment, never from tool args or sandbox config. A daemon with no USER
+  # cannot authenticate a keychain-backed vendor, so `Harness.Env` refuses the run
+  # with `{:missing_opt, :user}` rather than spawning a CLI that will fail with an
+  # opaque "Not logged in".
+  defp user(state), do: state.user || System.get_env("USER")
+
   # --- State construction -------------------------------------------------
 
   defp build_state(args) do
@@ -703,6 +746,7 @@ defmodule FermixCore.Harness.Run do
       runs_root: Map.get(args, :runs_root),
       home: Map.get(args, :home),
       path: Map.get(args, :path),
+      user: Map.get(args, :user),
       command_supervisor: Map.get(args, :command_supervisor, FermixCore.CommandHost.Supervisor),
       wall_clock_ms: Map.get(args, :wall_clock_ms, timeout_minutes(args) * 60_000),
       host_output_max_bytes:

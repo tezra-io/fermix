@@ -8,9 +8,17 @@ defmodule FermixCore.Tools.HarnessSupport do
   # jobs family.
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Consent
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
+
+  # The polled payload carries a diagnosis, not a deliverable — the full result
+  # already lives in `result.txt`, which the payload names via `artifacts_dir`.
+  # Deliberately its own budget: `Continuation`'s notice bound and `Delivery`'s
+  # message bound size a chat message, this one sizes a JSON tool result. They are
+  # not meant to agree.
+  @result_tail_max 4_096
 
   # Closes the execute-time consent refusal so a by-name dispatch never dead-ends
   # (design §23.4): main-agent coding is permitted, merely not preferred.
@@ -150,11 +158,19 @@ defmodule FermixCore.Tools.HarnessSupport do
   @doc """
   The full run payload for `get_coding_run`: the summary plus diagnostics tail,
   usage, exit/framing detail, artifact paths, and durable delivery state.
+
+  `vendor_text` is the run's harvested text (read by the caller through
+  `Artifacts.read_result/1`, so the I/O stays visible at the call site). It is
+  bounded and exposed as `result_tail` because a run polled instead of awaited must
+  still yield its diagnosis: a claude auth failure reaches the ledger as a bare
+  `exit_1` with an empty diagnostics tail, and without this the polling path is the
+  one surface where the vendor's own explanation stays invisible.
   """
-  @spec run_payload(map()) :: map()
-  def run_payload(row) when is_map(row) do
+  @spec run_payload(map(), String.t() | nil) :: map()
+  def run_payload(row, vendor_text \\ nil) when is_map(row) do
     row
     |> run_summary()
+    |> Map.put(:result_tail, bound_text(vendor_text))
     |> Map.merge(%{
       exit_code: Map.get(row, :exit_code),
       framing_errors: Map.get(row, :framing_errors),
@@ -171,6 +187,31 @@ defmodule FermixCore.Tools.HarnessSupport do
       delivered_at: iso(Map.get(row, :delivered_at))
     })
   end
+
+  @doc """
+  Reads `row`'s harvested text off disk for the polling path. Separate from
+  `run_payload/2` so the file read is visible where it happens rather than hidden
+  inside a formatter.
+  """
+  @spec read_run_text(map()) :: String.t() | nil
+  def read_run_text(row) when is_map(row), do: Artifacts.read_result(Map.get(row, :artifacts_dir))
+
+  defp bound_text(nil), do: nil
+  defp bound_text(text) when byte_size(text) <= @result_tail_max, do: text
+  defp bound_text(text), do: utf8_prefix(text, @result_tail_max) <> "\n… [truncated]"
+
+  # A byte-wise cut can land inside a multibyte codepoint, and unlike the chat-bound
+  # siblings this value is `Jason.encode!`d — invalid UTF-8 would raise and take the
+  # whole `get_coding_run` call down, losing the diagnosis it exists to deliver.
+  # Bounded by construction: a UTF-8 codepoint is at most 4 bytes, so at most three
+  # bytes are ever shaved.
+  defp utf8_prefix(text, size) when size > 0 do
+    prefix = binary_part(text, 0, size)
+
+    if String.valid?(prefix), do: prefix, else: utf8_prefix(text, size - 1)
+  end
+
+  defp utf8_prefix(_text, _size), do: ""
 
   defp iso(nil), do: nil
   defp iso(%DateTime{} = value), do: DateTime.to_iso8601(value)
