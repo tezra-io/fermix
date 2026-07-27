@@ -746,12 +746,7 @@ defmodule FermixCore.Harness.Manager do
     )
   end
 
-  defp codex_home_env do
-    case Config.codex_home() do
-      home when is_binary(home) and home != "" -> %{"CODEX_HOME" => home}
-      _absent -> %{}
-    end
-  end
+  defp codex_home_env, do: Identity.vendor_config_env("codex")
 
   defp cloud_home(state), do: state.home || System.get_env("HOME") || System.user_home!()
   defp cloud_path(state), do: state.path || System.get_env("PATH") || "/usr/bin:/bin"

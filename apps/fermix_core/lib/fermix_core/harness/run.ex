@@ -283,16 +283,12 @@ defmodule FermixCore.Harness.Run do
     end
   end
 
-  defp config_env(%{adapter: adapter}) do
-    case adapter.vendor() do
-      "codex" -> path_env("CODEX_HOME", Config.codex_home())
-      "claude" -> path_env("CLAUDE_CONFIG_DIR", Config.claude_config_dir())
-      _other -> %{}
-    end
-  end
-
-  defp path_env(_name, nil), do: %{}
-  defp path_env(name, value) when is_binary(value), do: %{name => value}
+  # Where the vendor keeps its credentials, resolved the same way for detection and
+  # execution (`Harness.Identity`): Fermix's key, else the daemon's own environment,
+  # else the vendor default. Inheriting it matters because an operator who exports
+  # `CLAUDE_CONFIG_DIR` logged in under a different Keychain service name, and a
+  # child that does not see it reads an empty store and reports itself logged out.
+  defp config_env(%{adapter: adapter}), do: Identity.vendor_config_env(adapter.vendor())
 
   defp spawn_stream(state, env) do
     opts = [

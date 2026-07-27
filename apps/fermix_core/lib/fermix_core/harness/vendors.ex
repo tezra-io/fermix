@@ -22,6 +22,7 @@ defmodule FermixCore.Harness.Vendors do
   alias FermixCore.Auth.CodexImport
   alias FermixCore.CommandRunner
   alias FermixCore.Harness.Config
+  alias FermixCore.Harness.Identity
 
   @vendors ~w(codex claude)
   @version_timeout_ms 5_000
@@ -172,12 +173,17 @@ defmodule FermixCore.Harness.Vendors do
     end
   end
 
+  # Through `Harness.Identity` so detection probes the store a run will actually
+  # use: an operator who exports `CODEX_HOME`/`CLAUDE_CONFIG_DIR` keeps credentials
+  # somewhere Fermix's own config never names, and reporting on the default while
+  # running against theirs is how readiness comes out green on a host that refuses.
   defp codex_home(opts) do
-    Keyword.get(opts, :codex_home) || Config.codex_home() || Path.join(home(), ".codex")
+    Keyword.get(opts, :codex_home) || Identity.vendor_config_dir("codex") ||
+      Path.join(home(), ".codex")
   end
 
   defp claude_config_dir(opts) do
-    Keyword.get(opts, :claude_config_dir) || Config.claude_config_dir() ||
+    Keyword.get(opts, :claude_config_dir) || Identity.vendor_config_dir("claude") ||
       Path.join(home(), ".claude")
   end
 
