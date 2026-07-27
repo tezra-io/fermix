@@ -76,10 +76,34 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ "url"
     end
 
+    # Still rejected — `click` is an `act` kind, never a top-level action. The
+    # message now names the call that works instead of stopping at "invalid".
     test "rejects old CLI click action" do
       assert {:ok, result} = Browser.execute(%{"action" => "click"}, @context)
       assert result.success == false
-      assert result.error =~ "Invalid action"
+      assert result.error =~ ~s(`click` is an `act` kind, not an action)
+      assert result.error =~ ~s("action": "act", "kind": "click")
+    end
+
+    # `wait`, `click`, `fill`… are `act` KINDS, not actions. The model reached for
+    # `action: "wait"` after a click in three separate live sessions and got a
+    # dead end every time, because the error named the mistake without naming the
+    # form that works. Same family as dialog_blocked / stale_ref / no_rendered_box.
+    test "an act KIND used as an action names the call that actually works" do
+      assert {:ok, result} = Browser.execute(%{"action" => "wait"}, @context)
+
+      assert result.success == false
+      assert result.error =~ ~s(`wait` is an `act` kind, not an action)
+      assert result.error =~ ~s("action": "act", "kind": "wait")
+    end
+
+    test "an unknown action lists the actions that exist" do
+      assert {:ok, result} = Browser.execute(%{"action" => "destroy"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "navigate"
+      assert result.error =~ "snapshot"
+      assert result.error =~ "act"
     end
 
     test "requires ref and path on upload" do

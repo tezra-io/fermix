@@ -158,6 +158,20 @@ defmodule FermixCore.Browser.BrowserActTest do
     flush_cdp()
   end
 
+  # Chrome serves the Accessibility domain's CACHED tree if it stays enabled,
+  # which lags a navigation/SPA swap — observed live: a snapshot 4s after
+  # lichess navigated to the created game returned the HOMEPAGE tree under the
+  # live game url. Cycling the domain forces a rebuild from the current document.
+  test "snapshot cycles the Accessibility domain so the tree is never stale", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, _} = req(pid, "snapshot")
+
+    assert_receive {:cdp, _, "Accessibility.disable", _}
+    assert_receive {:cdp, _, "Accessibility.enable", _}
+    assert_receive {:cdp, _, "Accessibility.getFullAXTree", _}
+  end
+
   test "fill REPLACES: clears the field via the resolved node before inserting", %{pid: pid} do
     ready(pid)
 

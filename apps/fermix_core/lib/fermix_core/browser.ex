@@ -10,6 +10,10 @@ defmodule FermixCore.Browser do
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
               console dialog cookies storage upload download)
   @profile_actions @actions -- ["doctor", "status"]
+  # The `act` kinds — page interactions, reachable only as `act`'s `kind`. Listed
+  # here so an unknown action that IS one can say so (see `action/1`); the kinds
+  # themselves are validated in `validate_act_args/2`.
+  @act_kinds ~w(click fill type submit press hover get wait click_coords)
 
   @spec actions() :: [String.t()]
   def actions, do: @actions
@@ -61,8 +65,29 @@ defmodule FermixCore.Browser do
 
   defp action(%{"action" => action}) when action in @actions, do: {:ok, action}
 
+  # Name the call that works, not just the mistake. `wait`/`click`/`fill` are `act`
+  # KINDS, and reaching for one as an action is the single most common miss
+  # (observed live three times: `action: "wait"` after a click, each time a dead
+  # end because the error stopped at "invalid"). Same family as dialog_blocked /
+  # stale_ref / no_rendered_box.
+  defp action(%{"action" => action}) when action in @act_kinds do
+    {:error,
+     Error.new(
+       "invalid_action",
+       "`#{action}` is an `act` kind, not an action. Call it as " <>
+         ~s(`"action": "act", "kind": "#{action}"`) <>
+         " with that kind's arguments."
+     )}
+  end
+
   defp action(%{"action" => action}) when is_binary(action) do
-    {:error, Error.new("invalid_action", "Invalid action: #{action}")}
+    {:error,
+     Error.new(
+       "invalid_action",
+       "Invalid action: #{action}. Valid actions: #{Enum.join(@actions, ", ")}. " <>
+         "Page interactions (click, fill, type, submit, press, hover, wait, get, " <>
+         "click_coords) go through `act` as its `kind`."
+     )}
   end
 
   defp action(_args),
