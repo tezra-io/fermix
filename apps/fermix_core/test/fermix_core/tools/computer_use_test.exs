@@ -212,6 +212,8 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert {:ok, result} = ComputerUse.execute(%{"action" => "teleport"}, context)
       assert result.success == false
       assert result.error =~ "invalid action"
+      # The session's one-time input-control probe is setup, not the action.
+      assert_received {:driver_execute, %{"action" => "probe"}}
       refute_received {:driver_execute, _}
     end
   end
@@ -226,6 +228,8 @@ defmodule FermixCore.Tools.ComputerUseTest do
 
       assert result.success == false
       assert result.error =~ "strict"
+      # The session's one-time input-control probe is setup, not the action.
+      assert_received {:driver_execute, %{"action" => "probe"}}
       refute_received {:driver_execute, _}
     end
 

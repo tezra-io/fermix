@@ -300,6 +300,41 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
              Session.classify(session, %{"action" => "left_click", "x" => 900, "y" => 300})
   end
 
+  # The check screenshot rides the same wire as any capture, so it can carry the
+  # cheap-encode hint — a JPEG check is ~an order of magnitude smaller than PNG,
+  # the single largest per-action latency saving on the voice path.
+  test "the crop check asks for a jpeg-quality capture" do
+    session = start_session()
+    {:ok, _} = screenshot(session, %{"action" => "screenshot", "region" => @region})
+
+    {:ok, :auto, click} =
+      Session.classify(session, %{
+        "action" => "left_click",
+        "x" => 180,
+        "y" => 150,
+        "region" => @region
+      })
+
+    {:ok, _} = Session.execute(session, click)
+
+    assert_receive {:driver_execute, %{"action" => "left_click"}}
+    assert_receive {:driver_execute, %{"action" => "screenshot", "jpeg_quality" => quality}}
+    assert is_integer(quality) and quality in 1..100
+  end
+
+  # `elements` with a region answers in that crop's coordinate space, so the next
+  # click must carry the same region — the guard can only enforce that if the
+  # view tracks it. Without this clause, full screenshot -> elements-with-region
+  # -> bare click sailed through and missed.
+  test "elements with a region moves the view to that region" do
+    session = start_session()
+    {:ok, _} = screenshot(session, %{"action" => "screenshot"})
+    {:ok, _} = screenshot(session, %{"action" => "elements", "region" => @region})
+
+    assert {:error, {:region_mismatch, @region}} =
+             Session.classify(session, %{"action" => "left_click", "x" => 180, "y" => 150})
+  end
+
   # The click DID land; reporting an error would make the model retry it (a
   # double click on the real desktop). Report it done, say the check is missing,
   # and leave the view where it was — the model still looks at its last crop.
@@ -332,9 +367,60 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     assert result.image == nil
     assert result.summary =~ "check capture failed"
     assert result.summary =~ "SAME region"
+    # No image came back, so no text may claim the model is looking at one.
+    refute result.summary =~ "MAGNIFIED CROP"
 
     assert {:error, {:region_mismatch, @region}} =
              Session.classify(session, %{"action" => "left_click", "x" => 900, "y" => 400})
+  end
+
+  # Since the pointer warp, a click's cursor lands on target even when macOS is
+  # silently DROPPING the button events (Accessibility not granted): capture works,
+  # input does not, and every action "verifies delivered". The probe reads the
+  # grant state without prompting; a refused mutating action is one loud, typed
+  # error instead of a whole run of no-ops.
+  describe "input-control gate" do
+    defmodule NoInputDriver do
+      @behaviour Compux.Driver
+
+      @impl true
+      def start(_opts), do: {:ok, %{}}
+
+      @impl true
+      def execute(_state, %{"action" => "probe"}),
+        do: {:ok, %{"ok" => true, "screen_capture" => true, "input_control" => false}}
+
+      def execute(_state, _request),
+        do: {:ok, %{"data" => Base.encode64("png"), "mime" => "image/png"}}
+
+      @impl true
+      def stop(_state), do: :ok
+    end
+
+    setup do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: Config.normalize(enabled: true),
+             driver: {NoInputDriver, []},
+             origin: :interactive,
+             session_id: "cua_no_input",
+             agent: "main"
+           ]}
+        )
+
+      %{session: session}
+    end
+
+    test "mutating actions are refused with the recovery named", %{session: session} do
+      assert {:error, {:refused, :input_control_denied}} =
+               Session.classify(session, %{"action" => "left_click", "x" => 10, "y" => 10})
+    end
+
+    test "looking still works without the input grant", %{session: session} do
+      assert {:ok, _result} = screenshot(session, %{"action" => "screenshot"})
+    end
   end
 
   # A click's check screenshot reports where the pointer ACTUALLY is, and the OS puts
@@ -373,6 +459,54 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
 
       refute result.summary =~ "NOT delivered"
       assert result.summary =~ "Cursor at (180,150)"
+    end
+
+    # Retina round-trip: `to_logical` quantizes a crop pixel to an integer logical
+    # point and the cursor read multiplies back, so a perfectly delivered click can
+    # read back off by a pixel or two on a scale-factor-2 display. Exact equality
+    # turned ~3 of 4 zoomed clicks into a false "NOT delivered ... re-send the SAME
+    # action" — a deterministic loop of REAL clicks toggling the UI.
+    test "a cursor within the rounding tolerance still counts as delivered" do
+      result = click_with_cursor(%{"x" => 181, "y" => 149}, %{"x" => 180, "y" => 150})
+
+      refute result.summary =~ "NOT delivered"
+    end
+
+    test "a genuine miss outside the tolerance is still reported" do
+      result = click_with_cursor(%{"x" => 184, "y" => 150}, %{"x" => 180, "y" => 150})
+
+      assert result.summary =~ "NOT delivered at (180,150)"
+    end
+
+    # Drags carry from/to instead of x/y; their delivery evidence is the pointer
+    # resting at the drag's END point. Without a clause for that shape the drag
+    # path silently skipped the delivery note.
+    test "a drag whose pointer never reached the destination is reported" do
+      session =
+        start_supervised!(
+          {Session,
+           [
+             config: Config.normalize(enabled: true),
+             driver: {CursorDriver, [cursor: %{"x" => 20, "y" => 20}]},
+             origin: :interactive,
+             session_id: "cua_drag_delivery",
+             agent: "main"
+           ]}
+        )
+
+      {:ok, _} = screenshot(session, %{"action" => "screenshot", "region" => @region})
+
+      {:ok, :auto, drag} =
+        Session.classify(session, %{
+          "action" => "left_click_drag",
+          "region" => @region,
+          "from" => %{"x" => 100, "y" => 100},
+          "to" => %{"x" => 300, "y" => 300}
+        })
+
+      {:ok, result} = Session.execute(session, drag)
+
+      assert result.summary =~ "NOT delivered at (300,300)"
     end
 
     test "a click the OS put somewhere else is reported as NOT delivered" do
