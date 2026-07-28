@@ -50,7 +50,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
     [
       runtime_contract(),
-      sub_agent_orchestration(),
+      sub_agent_orchestration(opts),
       capability_summary_from_opts(opts),
       plugin_index_from_opts(opts),
       skill_catalog(available_skills, Keyword.get(opts, :trust, :operator))
@@ -92,7 +92,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       - `web_fetch` for the readable text of ONE known URL whose content is in the server HTML.
       - `browser` for JavaScript/dynamic/interactive pages or live data (flight prices, seat maps, dashboards, login, forms) — in its OWN browser instance, not the page/app the user has open on screen (for that, `computer_use`).
       - Never shell-scrape a JS-rendered site (`curl`/`urllib`/`requests` return empty or partial markup — a dead end, not a retry). An empty `web_search`/`web_fetch` result on dynamic content is the signal to switch to `browser`, not to rerun the same tool.
-    - Stay in ONE context per task: don't switch `browser`↔`computer_use` mid-task, and wait for a change with the session you're already in — the browser's `act` wait (`kind: "wait"`) for a page you drive, `computer_use`'s `wait_for_change` for the host screen.
+    - Drive ONE surface per task: don't restart the same work in the other tool's separate session — wait for a change with the session you're already in (the browser's `act` wait for a page you drive, `computer_use`'s `wait_for_change` for the host screen). On a single shared page, structure goes through `browser` and pixels through `computer_use`: that split is one context, not a switch.
     - For reminders, recurring work, cron-style requests, periodic checks, digests, watchers, and "run this later" tasks, use `schedule_job`.
     - For channel-originated jobs that should report back to the same chat, set `delivery_mode` to `origin`; use `none` only for silent/local jobs.
     - Use `expires_at` for temporary scheduled jobs like "for 2 hours" or "until tomorrow"; keep lifecycle timing out of the job task text.
@@ -117,7 +117,24 @@ defmodule FermixCore.Prompt.RuntimeSections do
     end
   end
 
-  defp sub_agent_orchestration do
+  # Rendered only when `subagents` is actually callable on this surface: a whole
+  # section instructing delegation on a session that excludes the delegation
+  # category (voice does) is dead weight in every prompt and an instruction the
+  # model cannot follow. No explicit capability list (text mode) keeps the
+  # section — the registry advertises subagents there.
+  defp sub_agent_orchestration(opts) do
+    case Keyword.fetch(opts, :capabilities) do
+      {:ok, capabilities} ->
+        if Enum.any?(capabilities, &(&1.name == "subagents")),
+          do: sub_agent_orchestration_text(),
+          else: ""
+
+      :error ->
+        sub_agent_orchestration_text()
+    end
+  end
+
+  defp sub_agent_orchestration_text do
     """
     ## Delegate Wide, Think at the Center
     - When a task splits into independent parts, delegate. Use `subagents` to spawn a separate worker for each narrow part and run them in parallel — never hand one worker a multi-part job. You may delegate even if the user did not ask for subagents.

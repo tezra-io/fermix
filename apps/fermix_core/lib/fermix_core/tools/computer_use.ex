@@ -41,9 +41,11 @@ defmodule FermixCore.Tools.ComputerUse do
       "you both watch — has to be on THEIR screen: the `browser` window (visible on a desktop " <>
       "OS) or an app opened with `shell` `open -a`. Never leave a shared activity somewhere " <>
       "only you can see. " <>
-      "AIMING: prefer exact targets where a page or app exposes them (`browser` element " <>
-      "actions, `elements` click points); a canvas — board, map, chart — exposes none by " <>
-      "construction, which is what THIS tool is for, not a reason to stop. " <>
+      "AIMING: prefer exact targets where a surface exposes them (`browser` element " <>
+      "actions, `elements` click points). A board/map/chart exposes no elements, but in " <>
+      "the MANAGED browser it is still a DOM node: `browser` `get field=rect` + " <>
+      "`click_coords` is the deterministic route there; THIS tool's pixels are for every " <>
+      "other surface. " <>
       "A screen-share frame is a LOW-DETAIL awareness image, never a source of click " <>
       "coordinates: take a fresh `screenshot` to aim. " <>
       "ZOOM TO THE WINDOW, not just to small controls. A full-screen capture is downscaled to " <>
@@ -58,19 +60,20 @@ defmodule FermixCore.Tools.ComputerUse do
       "Fermix's own floating voice companion may be visible on that screen — never click it; " <>
       "its controls end the call you are on. If it covers your target, ask the human to move it. " <>
       "`screenshot` to see the screen, then act on it (click, type, key, scroll, drag) using " <>
-      "pixel coordinates from the latest screenshot. For a SMALL or dense target, zoom first: " <>
-      "`screenshot` with a `region` around it, then click/drag with the SAME region using the " <>
-      "coordinates you read in the magnified crop — clicks land far more accurately. Every " <>
+      "pixel coordinates from the latest screenshot. Every " <>
       "mutating action returns a fresh check screenshot — of the SAME magnified crop when a " <>
       "region rode the action, of the full screen otherwise: CHECK it and retry if the " <>
-      "click missed. " <>
+      "click missed. A DELIVERED click that changes nothing is NOT a miss — do not repeat " <>
+      "it; verify the effect through the surface's own structure where it has one (a " <>
+      "`browser` snapshot or `get` for a page that browser drives), and change MECHANISM " <>
+      "— element click, keyboard, the browser's own click — not aim. " <>
       "`inspect` (read-only) reports the UI element under a point — its role and label — so you " <>
       "can confirm you're about to click the right control (e.g., a button labeled \"Delete\") " <>
       "before a consequential action. `elements` (read-only) lists the clickable UI elements — " <>
       "each with a click point — so you target by element instead of guessing pixels; " <>
       "`wait_for_change` blocks until the screen updates (e.g. a page finishes loading) instead " <>
       "of repeated screenshots. Honor " <>
-      "the access mode shown on the `action` parameter: standard confirms before anything " <>
+      "the configured access mode: standard confirms before anything " <>
       "irreversible; open acts autonomously but still confirms a truly dangerous/catastrophic " <>
       "action; strict is look-only."
   end
@@ -339,6 +342,18 @@ defmodule FermixCore.Tools.ComputerUse do
           Tool.error(
             "computer use is in strict (look-only) access — only screenshot, mouse_move, and wait " <>
               "run; this mutating action was refused. Ask the owner to switch access to standard to act."
+          )}, :na}
+
+      # macOS is not delivering synthetic input: the Accessibility grant is missing,
+      # so every click/keystroke would be silently dropped while screenshots keep
+      # working. One typed refusal beats a run of invisible no-ops.
+      {:error, {:refused, :input_control_denied}} ->
+        {{:ok,
+          Tool.error(
+            "macOS is silently dropping synthetic clicks and keystrokes: the Accessibility " <>
+              "permission is not granted, so mutating actions are refused (screenshots still " <>
+              "work). Ask the owner to grant it under System Settings → Privacy & Security → " <>
+              "Accessibility (`fermix doctor` names the entry), then retry."
           )}, :na}
 
       # The human reclaimed the machine with /pause. Stop; do NOT retry (a retry loop

@@ -119,6 +119,15 @@ defmodule FermixCore.ComputerUse.Session do
         origin: origin,
         driver_mod: driver_mod,
         driver_state: driver_state,
+        # Read once at start, never prompted for. Since the pointer warp, a click's
+        # check cursor lands on target even when macOS silently DROPS the button
+        # events (Accessibility not granted — capture works, input does not), so
+        # cursor-on-target is not proof of delivery in that state. The probe is the
+        # one reliable detector; a `false` here turns a whole run of silent no-ops
+        # into one typed refusal per mutating action. Absent/failed probe reads as
+        # available: only the explicit denied state is refused, so drivers that
+        # predate the probe keep working and a broken probe cannot brick looking.
+        input_control?: probe_input_control(driver_mod, driver_state),
         action_count: 0,
         session_id: session_id,
         parent_session: Keyword.get(opts, :parent_session),
@@ -223,11 +232,39 @@ defmodule FermixCore.ComputerUse.Session do
   defp classify_action(params, state) do
     with {:ok, request} <- Protocol.validate(params),
          :ok <- check_budget(state),
+         :ok <- check_input_control(request, state),
          :ok <- check_view_region(request, state) do
       case Safety.gate(request["action"], state.config) do
         :auto -> {:ok, :auto, finalize_request(request, state.config)}
         :refuse -> {:error, {:refused, :strict_mode}}
       end
+    end
+  end
+
+  # Refuse what macOS would silently drop. Read-only actions never need the
+  # input grant, so looking keeps working ungated.
+  defp check_input_control(_request, %{input_control?: true}), do: :ok
+
+  defp check_input_control(request, %{input_control?: false}) do
+    if Protocol.read_only?(request["action"]),
+      do: :ok,
+      else: {:error, {:refused, :input_control_denied}}
+  end
+
+  defp probe_input_control(driver_mod, driver_state) do
+    case driver_mod.execute(driver_state, %{"action" => "probe"}) do
+      {:ok, %{"input_control" => false}} ->
+        false
+
+      {:ok, _probe} ->
+        true
+
+      {:error, reason} ->
+        Logger.warning(
+          "computer-use input-control probe failed (treated as granted): " <> inspect(reason)
+        )
+
+        true
     end
   end
 
@@ -383,37 +420,61 @@ defmodule FermixCore.ComputerUse.Session do
       else: {request, response}
   end
 
+  # JPEG for the check: same pixels the model needs, ~an order of magnitude less
+  # payload than PNG — the single largest per-action latency lever on a voice call.
+  @check_jpeg_quality 85
+
   # The action's own ack (`{"ok": true}`) is discarded: the check screenshot IS
-  # the result the model reads.
+  # the result the model reads. A failed check strips the region from the request
+  # it hands back, so no crop-space notice is stamped on a result that carries no
+  # image (the failure summary names the region recovery itself; the tracked view
+  # stays wherever the model last looked).
   defp take_crop_check(request, state) do
     check = %{
       "action" => "screenshot",
       "region" => request["region"],
-      "display" => request["display"]
+      "display" => request["display"],
+      "jpeg_quality" => @check_jpeg_quality
     }
 
     case state.driver_mod.execute(state.driver_state, check) do
       {:ok, check_response} -> {check, note_delivery(request, check_response)}
-      {:error, reason} -> {request, %{"check_failed" => inspect(reason)}}
+      {:error, reason} -> {Map.delete(request, "region"), %{"check_failed" => inspect(reason)}}
     end
   end
 
-  # The OS puts a synthetic mouse-button event wherever the pointer actually is, so
-  # the check's cursor IS where the click went: cursor != aimed-at proves the click
-  # was not delivered where asked. Observed live 2026-07-26 — 4 of 7 clicks landed on
-  # the PREVIOUS click's point, every one reporting success, which sent the model
-  # re-zooming and re-aiming at coordinates that were already right. A driver that
-  # reports success for an action the OS did not deliver is gaslighting the model.
-  defp note_delivery(%{"x" => x, "y" => y}, response) when is_number(x) and is_number(y) do
-    if delivered_at?(response["cursor"], round(x), round(y)),
-      do: response,
-      else: Map.put(response, "aimed_at", %{"x" => round(x), "y" => round(y)})
-  end
+  # The pointer warp puts the cursor at the target before the button/scroll events
+  # post, so the check's cursor tells where those events went — as long as macOS
+  # delivered them at all. cursor far from aimed-at proves non-delivery (observed
+  # live 2026-07-26: 4 of 7 clicks landed on the PREVIOUS point, all reporting
+  # success). cursor NEAR the target is delivery: the crop→logical→crop round trip
+  # quantizes to integer logical points, so a perfectly delivered click can read
+  # back off by a pixel or two on a scale-factor-2 display — exact equality turned
+  # most Retina clicks into a false "NOT delivered" retry loop of real clicks.
+  # NOTE the converse does not hold: when Accessibility is not granted, macOS
+  # silently drops the button events while the warp still moves the cursor, so an
+  # on-target cursor is NOT proof the page received the click — that state is
+  # caught by the input-control gate at session start, never inferred from here.
+  @delivery_tolerance_px 2
+
+  defp note_delivery(%{"x" => x, "y" => y}, response) when is_number(x) and is_number(y),
+    do: note_delivery_at(response, round(x), round(y))
+
+  # A drag's delivery evidence is the pointer resting at the drag's END point.
+  defp note_delivery(%{"to" => %{"x" => x, "y" => y}}, response)
+       when is_number(x) and is_number(y),
+       do: note_delivery_at(response, round(x), round(y))
 
   defp note_delivery(_request, response), do: response
 
+  defp note_delivery_at(response, x, y) do
+    if delivered_at?(response["cursor"], x, y),
+      do: response,
+      else: Map.put(response, "aimed_at", %{"x" => x, "y" => y})
+  end
+
   defp delivered_at?(%{"x" => cx, "y" => cy}, x, y) when is_integer(cx) and is_integer(cy),
-    do: cx == x and cy == y
+    do: abs(cx - x) <= @delivery_tolerance_px and abs(cy - y) <= @delivery_tolerance_px
 
   defp delivered_at?(_cursor, _x, _y), do: false
 
@@ -442,15 +503,21 @@ defmodule FermixCore.ComputerUse.Session do
       "click/drag/scroll. Without it they are read in full-screen space and will miss."
   end
 
-  # Remember which image the model will be reading next. Only a response that
-  # actually carried pixels changes the answer, and the request that produced
-  # those pixels names their space (`crop_check/3` swaps in the check
-  # screenshot's request for a zoomed mutating action). A full capture clears
-  # the crop — how the model gets back to full-screen coordinates; an
-  # `elements`/`inspect` reply, a failed action, or a failed check leaves the
-  # model looking at whatever it saw last.
+  # Remember which coordinate space the model's next coordinates come from. A
+  # response that carried pixels sets it from its request (`crop_check/3` swaps in
+  # the check screenshot's request for a zoomed mutating action); a full capture
+  # clears the crop — how the model gets back to full-screen coordinates. An
+  # `elements` reply carries no pixels but its click POINTS are in the requested
+  # region's magnified space, so it moves the view the same way a crop screenshot
+  # does — without this, full screenshot → elements-with-region → bare click
+  # sailed past the guard and missed. `inspect`, a failed action, or a failed
+  # check leaves the model looking at whatever it saw last.
   defp track_view_region(state, request, %{"data" => data}) when is_binary(data),
     do: %{state | view_region: request["region"]}
+
+  defp track_view_region(state, %{"action" => "elements", "region" => region}, _response)
+       when is_map(region),
+       do: %{state | view_region: region}
 
   defp track_view_region(state, _request, _response), do: state
 
@@ -510,7 +577,7 @@ defmodule FermixCore.ComputerUse.Session do
      %{
        summary:
          "action performed, but its check capture failed (#{reason}) — take a " <>
-           "`screenshot` to see the result.",
+           "`screenshot` with the SAME region to see the result.",
        image: nil
      }}
   end
