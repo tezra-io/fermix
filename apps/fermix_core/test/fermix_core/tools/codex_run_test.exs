@@ -4,9 +4,13 @@ defmodule FermixCore.Tools.CodexRunTest do
   # `:harness_manager` context seam, so they touch no OS process or real repo.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Tools.CancelCodingRun
   alias FermixCore.Tools.ClaudeCodeRun
   alias FermixCore.Tools.CodexCloudRun
   alias FermixCore.Tools.CodexRun
+  alias FermixCore.Tools.GetCodingRun
+  alias FermixCore.Tools.ListCodingRuns
+  alias FermixCore.Tools.StopTrackingCodingRun
 
   # A stub `Harness.Manager`: the real `Manager.start_run/2` is pointed at this pid
   # via the `:harness_manager` context seam, so it must answer its GenServer
@@ -264,25 +268,42 @@ defmodule FermixCore.Tools.CodexRunTest do
 
   # --- Unapproved advertisement (design §23.4) ------------------------------
 
+  # §23.4 collapses the harness into two states, and the state is a property of
+  # the WHOLE surface: unusable ⇒ nothing harness-shaped is advertised and Fermix
+  # codes with its own tools, silently. Asserting only the run tools let the four
+  # manage tools keep advertising with `approved: false` — a wire that offered
+  # `get_coding_run` while the prompt (which drops the entire :harness category
+  # when unusable) said nothing about the harness at all. Every tool the seeder
+  # can register is listed here so the gate cannot drift per-tool again.
+  @harness_tools [
+    CodexRun,
+    ClaudeCodeRun,
+    CodexCloudRun,
+    GetCodingRun,
+    ListCodingRuns,
+    CancelCodingRun,
+    StopTrackingCodingRun
+  ]
+
   describe "advertise?/1 with consent withheld" do
-    test "all three run tools are hidden when approved is false", ctx do
+    test "no harness tool is advertised when approved is false", ctx do
       Application.put_env(:fermix_core, :harness, enabled: true, approved: false)
       put_both_installed()
       context = attended_context(ctx.cwd, nil)
 
-      refute CodexRun.advertise?(context)
-      refute ClaudeCodeRun.advertise?(context)
-      refute CodexCloudRun.advertise?(context)
+      for tool <- @harness_tools do
+        refute tool.advertise?(context), "#{inspect(tool)} advertised on an unapproved host"
+      end
     end
 
-    test "all three advertise for the same turn once approved is true", ctx do
+    test "every harness tool advertises for the same turn once approved is true", ctx do
       Application.put_env(:fermix_core, :harness, enabled: true, approved: true)
       put_both_installed()
       context = attended_context(ctx.cwd, nil)
 
-      assert CodexRun.advertise?(context)
-      assert ClaudeCodeRun.advertise?(context)
-      assert CodexCloudRun.advertise?(context)
+      for tool <- @harness_tools do
+        assert tool.advertise?(context), "#{inspect(tool)} stayed hidden on an approved host"
+      end
     end
   end
 
