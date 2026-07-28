@@ -184,12 +184,42 @@ defmodule FermixCore.Realtime.OpenAIClient do
           },
           Config.t()
         ) :: [map()]
-  def function_output_events(%{call_id: call_id, output: output} = result, %Config{} = config) do
+  def function_output_events(%{} = result, %Config{} = config) do
+    images = Map.get(result, :images, [])
+
+    function_output_items(result, List.duplicate(nil, length(images))) ++
+      [response_create_event(config)]
+  end
+
+  @doc """
+  A tool result's conversation items WITHOUT the `response.create` trigger.
+
+  The session appends the trigger itself, once, when no other tool call is still
+  in flight: two calls answered in one response each used to append their own
+  trigger, the second was rejected as `conversation_already_has_active_response`,
+  and the response that DID run had snapshotted context before the second result
+  existed — a silent stall until the operator spoke again.
+
+  `image_ids` pairs with `result.images`: a client-assigned id makes a tool
+  screenshot evictable later exactly like a feed frame; `nil` leaves the item
+  id server-assigned (and therefore unevictable — test/back-compat only).
+  """
+  @spec function_output_items(
+          %{
+            required(:call_id) => String.t(),
+            required(:output) => String.t(),
+            optional(:images) => [map()]
+          },
+          [String.t() | nil]
+        ) :: [map()]
+  def function_output_items(%{call_id: call_id, output: output} = result, image_ids)
+      when is_list(image_ids) do
     images = Map.get(result, :images, [])
 
     [function_output_item(call_id, output)] ++
-      Enum.map(images, &image_input_item/1) ++
-      [response_create_event(config)]
+      (images
+       |> Enum.zip(image_ids)
+       |> Enum.map(fn {image, id} -> image_input_item(image, id) end))
   end
 
   defp function_output_item(call_id, output) do
@@ -214,9 +244,9 @@ defmodule FermixCore.Realtime.OpenAIClient do
   # call — bounded by the max-session timer + the computer-use action budget. The
   # screen feed, which appends frames continuously, evicts its own superseded
   # items via `delete_item_event/1`.
-  defp image_input_item(%{mime_type: mime, data: data})
+  defp image_input_item(%{mime_type: mime, data: data}, item_id)
        when is_binary(mime) and is_binary(data) do
-    image_message_item(@image_notice, mime, data, "high", nil)
+    image_message_item(@image_notice, mime, data, "high", item_id)
   end
 
   # No "describe it": this caption rides EVERY frame (dozens per call), so an

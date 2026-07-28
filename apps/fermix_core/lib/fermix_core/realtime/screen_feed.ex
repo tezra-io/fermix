@@ -78,6 +78,17 @@ defmodule FermixCore.Realtime.ScreenFeed do
     GenServer.cast(server, {:speaking, speaking?})
   end
 
+  @doc """
+  Tell the feed whether the model is mid-action (a tool call in flight). While
+  acting, its precision view comes from the action's own check images, so ambient
+  frames of the same screen are pure token cost — capture pauses, and the flip
+  back to false triggers an immediate catch-up frame. A cast, like `set_speaking`.
+  """
+  @spec set_acting(GenServer.server(), boolean()) :: :ok
+  def set_acting(server, acting?) when is_boolean(acting?) do
+    GenServer.cast(server, {:acting, acting?})
+  end
+
   @doc "Stop the feed for `reason`, releasing the capture sidecar."
   @spec stop(GenServer.server(), stop_reason()) :: :ok
   def stop(server, reason \\ :requested) do
@@ -110,6 +121,7 @@ defmodule FermixCore.Realtime.ScreenFeed do
           speaking: @speaking_interval_ms,
           idle: @idle_interval_ms
         }),
+      minute_ms: Keyword.get(opts, :minute_ms, @minute_ms),
       capture: nil,
       seq: 0,
       in_flight: nil,
@@ -118,6 +130,7 @@ defmodule FermixCore.Realtime.ScreenFeed do
       unchanged_streak: 0,
       gated_out: 0,
       speaking?: false,
+      acting?: false,
       strikes: 0,
       frames_sent: 0,
       minute_started_ms: now_ms(),
@@ -138,6 +151,16 @@ defmodule FermixCore.Realtime.ScreenFeed do
   @impl true
   def handle_cast({:speaking, speaking?}, state) do
     {:noreply, %{state | speaking?: speaking?}}
+  end
+
+  # Resuming reschedules an immediate tick so the model's first look after an
+  # action sequence is fresh, not up to an idle interval stale.
+  def handle_cast({:acting, false}, %{acting?: true} = state) do
+    {:noreply, schedule_tick(%{state | acting?: false}, 0)}
+  end
+
+  def handle_cast({:acting, acting?}, state) do
+    {:noreply, %{state | acting?: acting?}}
   end
 
   @impl true
@@ -189,6 +212,13 @@ defmodule FermixCore.Realtime.ScreenFeed do
   end
 
   # ---------------------------------------------------------------- capture loop
+
+  # Mid-action the model's eyes are its own check images; don't spend captures
+  # (or budget) on ambient frames of the same screen. Keep ticking so the pause
+  # ends itself even if the resume cast were ever missed.
+  defp tick(%{acting?: true} = state) do
+    {:noreply, schedule_tick(state, state.intervals.base)}
+  end
 
   defp tick(state) do
     case CaptureHealth.status() do
@@ -259,20 +289,31 @@ defmodule FermixCore.Realtime.ScreenFeed do
   end
 
   defp deliver_or_gate(state, frame, hash, seq) do
-    if hash == state.last_hash or rate_limited?(state),
-      do: gate_frame(state, hash),
-      else: send_frame(state, frame, hash, seq)
+    cond do
+      hash == state.last_hash -> gate_unchanged(state, hash)
+      rate_limited?(state) -> gate_rate_limited(state)
+      true -> send_frame(state, frame, hash, seq)
+    end
   end
 
-  # Unchanged (or over the per-minute ceiling): count it and let the cadence relax.
-  # `last_hash` still advances so a screen that changes then holds still settles.
-  defp gate_frame(state, hash) do
+  # Unchanged: count it and let the cadence relax. `last_hash` advances so a
+  # screen that changes then holds still settles.
+  defp gate_unchanged(state, hash) do
     %{
       state
       | last_hash: hash,
         gated_out: state.gated_out + 1,
         unchanged_streak: state.unchanged_streak + 1
     }
+  end
+
+  # Over the per-minute ceiling but CHANGED: count it, keep the cadence engaged,
+  # and — critically — leave `last_hash` alone. Advancing it here made the feed
+  # permanently blind to a change that happened during the blackout and then held
+  # still (a chess opponent's move): the first capture after the window reopened
+  # hashed equal and was gated as "unchanged" forever.
+  defp gate_rate_limited(state) do
+    %{state | gated_out: state.gated_out + 1, unchanged_streak: 0}
   end
 
   defp send_frame(state, frame, hash, seq) do
@@ -332,13 +373,26 @@ defmodule FermixCore.Realtime.ScreenFeed do
 
   defp continue_after_capture(state), do: schedule_tick(state, next_interval(state))
 
-  defp next_interval(%{speaking?: true, intervals: intervals}), do: intervals.speaking
+  # Once half the minute budget is spent, the cadence floor rises to the
+  # sustainable rate (window / ceiling): the remaining budget spreads across the
+  # remaining window instead of burning in a burst followed by a blind spell.
+  # Early in the window the speaking cadence stays tight, which is what the burst
+  # capacity is FOR.
+  defp next_interval(state) do
+    interval = raw_interval(state)
 
-  defp next_interval(%{unchanged_streak: streak, intervals: intervals})
+    if state.minute_frames >= div(@max_frames_per_min, 2) and within_minute?(state),
+      do: max(interval, div(state.minute_ms, @max_frames_per_min)),
+      else: interval
+  end
+
+  defp raw_interval(%{speaking?: true, intervals: intervals}), do: intervals.speaking
+
+  defp raw_interval(%{unchanged_streak: streak, intervals: intervals})
        when streak >= @idle_after_unchanged,
        do: intervals.idle
 
-  defp next_interval(%{intervals: intervals}), do: intervals.base
+  defp raw_interval(%{intervals: intervals}), do: intervals.base
 
   defp schedule_tick(%{timer: timer} = state, delay) when is_reference(timer) do
     Process.cancel_timer(timer)
@@ -361,7 +415,7 @@ defmodule FermixCore.Realtime.ScreenFeed do
       else: %{state | minute_started_ms: now_ms(), minute_frames: 1}
   end
 
-  defp within_minute?(state), do: now_ms() - state.minute_started_ms < @minute_ms
+  defp within_minute?(state), do: now_ms() - state.minute_started_ms < state.minute_ms
 
   # ---------------------------------------------------------------------- report
 

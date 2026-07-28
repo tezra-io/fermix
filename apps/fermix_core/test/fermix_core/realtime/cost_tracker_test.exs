@@ -124,7 +124,12 @@ defmodule FermixCore.Realtime.CostTrackerTest do
     assert_in_delta tracker.reported.cost_cents, 3_200.0, 0.01
   end
 
-  test "image tokens are attributed to the screen feed as well as the call" do
+  # The provider's reported image tokens are dominated by the model's own
+  # high-detail tool screenshots, so attributing them to the feed charged the
+  # model's precision looks to the feed's budget and closed its ambient eyes as
+  # ":cost" for spend that was not the feed's. Reported image spend bills the
+  # CALL only; the feed's line is counted per sent frame.
+  test "reported image tokens bill the call, never the feed" do
     tracker =
       []
       |> Config.normalize()
@@ -133,23 +138,36 @@ defmodule FermixCore.Realtime.CostTrackerTest do
         "input_token_details" => %{"image_tokens" => 1_000_000, "audio_tokens" => 1_000_000}
       })
 
-    # image in (1M * $5/M) = $5 = 500 cents, and the feed line carries only that
-    assert tracker.feed.image_tokens == 1_000_000
-    assert_in_delta tracker.feed.cost_cents, 500.0, 0.01
-    # the call total also includes the audio: $5 + $32 = $37 = 3_700 cents
+    assert tracker.feed.image_tokens == 0
+    assert tracker.feed.cost_cents == 0.0
+    # the call total includes both: $5 (image) + $32 (audio) = 3_700 cents
     assert_in_delta tracker.reported.cost_cents, 3_700.0, 0.01
   end
 
-  test "the feed stops at its share of the call budget, before the call does" do
-    config = Config.normalize(max_estimated_cost_cents_per_session: 100)
-
-    # 100k image tokens at $5/1M = $0.50 = 50 cents = half of a 100-cent budget
+  test "each sent feed frame grows the feed line at the model's image rate" do
     tracker =
-      config
+      []
+      |> Config.normalize()
       |> CostTracker.new()
-      |> CostTracker.add_reported_usage("resp_1", %{
-        "input_token_details" => %{"image_tokens" => 100_000}
-      })
+      |> CostTracker.add_feed_frame()
+      |> CostTracker.add_feed_frame()
+
+    assert tracker.feed.image_tokens > 0
+    assert tracker.feed.cost_cents > 0.0
+    # two frames cost exactly twice one frame — a fixed per-frame estimate
+    one = CostTracker.add_feed_frame(CostTracker.new(Config.normalize([])))
+    assert_in_delta tracker.feed.cost_cents, one.feed.cost_cents * 2, 1.0e-9
+  end
+
+  test "the feed stops at its share of the call budget, before the call does" do
+    # A tiny budget so a realistic number of frames crosses the feed's share
+    # while the call total stays under its own cap.
+    config = Config.normalize(max_estimated_cost_cents_per_session: 1)
+
+    tracker =
+      Enum.reduce(1..12, CostTracker.new(config), fn _n, tracker ->
+        CostTracker.add_feed_frame(tracker)
+      end)
 
     assert CostTracker.feed_over_budget?(tracker)
     # ...and the CALL itself is still under its cap, so the voice session survives.
@@ -173,6 +191,6 @@ defmodule FermixCore.Realtime.CostTrackerTest do
       })
 
     # mini bills images at $0.80/1M, not the flagship $5/1M
-    assert_in_delta mini.feed.cost_cents, 80.0, 0.01
+    assert_in_delta mini.reported.cost_cents, 80.0, 0.01
   end
 end
