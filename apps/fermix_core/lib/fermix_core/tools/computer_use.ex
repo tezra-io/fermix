@@ -42,10 +42,10 @@ defmodule FermixCore.Tools.ComputerUse do
       "OS) or an app opened with `shell` `open -a`. Never leave a shared activity somewhere " <>
       "only you can see. " <>
       "AIMING: prefer exact targets where a surface exposes them (`browser` element " <>
-      "actions, `elements` click points). A board/map/chart exposes no elements, but in " <>
-      "the MANAGED browser it is still a DOM node: `browser` `get field=rect` + " <>
-      "`click_coords` is the deterministic route there; THIS tool's pixels are for every " <>
-      "other surface. " <>
+      "actions, `elements` click points). `elements` is best-effort accessibility metadata: " <>
+      "an empty result means no accessibility-backed points were exposed, not that visible " <>
+      "content cannot accept pixel interaction. In the MANAGED browser, use `get field=rect` + " <>
+      "`click_coords` for a visible DOM target; THIS tool's pixels are for every other surface. " <>
       "A screen-share frame is a LOW-DETAIL awareness image, never a source of click " <>
       "coordinates: take a fresh `screenshot` to aim. " <>
       "ZOOM TO THE WINDOW, not just to small controls. A full-screen capture is downscaled to " <>
@@ -92,11 +92,13 @@ defmodule FermixCore.Tools.ComputerUse do
         },
         "x" => %{
           "type" => "integer",
-          "description" => "X pixel for click/move/scroll/inspect (screenshot space)"
+          "description" =>
+            "X pixel for click/move/scroll/inspect from the latest coordinate source"
         },
         "y" => %{
           "type" => "integer",
-          "description" => "Y pixel for click/move/scroll/inspect (screenshot space)"
+          "description" =>
+            "Y pixel for click/move/scroll/inspect from the latest coordinate source"
         },
         "display" => %{
           "type" => "integer",
@@ -143,10 +145,10 @@ defmodule FermixCore.Tools.ComputerUse do
           },
           "required" => ["x", "y", "w", "h"],
           "description" =>
-            "Optional zoom: a rectangle {x,y,w,h} in the CURRENT full screenshot's pixel space. " <>
-              "On `screenshot` it returns a magnified crop of that rectangle; on a " <>
-              "click/move/drag/scroll, pass the SAME region and give x,y in the magnified image " <>
-              "to act precisely on a small target."
+            "Optional zoom rectangle {x,y,w,h} in the latest full-screen screenshot's pixel " <>
+              "space. On `screenshot` it returns a magnified crop; on `elements` it returns " <>
+              "points in that crop's transformed space. Pass the SAME region with any " <>
+              "inspect/click/move/drag/scroll that uses coordinates from the crop or those points."
         }
       }
     }
@@ -180,8 +182,9 @@ defmodule FermixCore.Tools.ComputerUse do
   end
 
   defp base_action_description do
-    "The GUI action. Read-only: screenshot, inspect, elements (list the clickable UI " <>
-      "elements with a click point each — prefer this over guessing pixels), " <>
+    "The GUI action. Read-only: screenshot, inspect, elements (best-effort accessibility " <>
+      "click points — prefer usable points over guessing pixels, but an empty result does not " <>
+      "block pixel targeting of visible content), " <>
       "windows (list the open windows, each with a ready-made `region` — use it to " <>
       "crop to the app you are working in instead of squinting at a downscaled " <>
       "whole screen), " <>
@@ -365,18 +368,18 @@ defmodule FermixCore.Tools.ComputerUse do
               "stop and tell them you'll continue when they run /resume."
           )}, :paused}
 
-      # The coordinate-space guard: the last image was a magnified crop, so bare
-      # x,y would be read in full-screen space and land somewhere else. Name the
-      # exact region to re-send so this costs one turn, not a wrong click.
+      # The coordinate-space guard: the latest usable image or element points used
+      # a region, so bare x,y would be read in full-screen space and land elsewhere.
+      # Name the exact region to re-send rather than guessing which source was used.
       {:error, {:region_mismatch, region}} ->
         {{:ok,
           Tool.error(
-            "your last screenshot was a MAGNIFIED CROP of region " <>
-              "#{format_region(region)}, so the x,y you just sent would be read in " <>
-              "full-screen space and miss. Re-send this action with " <>
+            "your latest coordinate source uses region #{format_region(region)}, so the x,y " <>
+              "you just sent would be read in full-screen space and miss. Re-send this action " <>
+              "with " <>
               ~s(`"region": #{format_region(region)}`) <>
-              " and the coordinates you read in the magnified image — or take a " <>
-              "fresh full `screenshot` first and use full-screen coordinates."
+              " and the coordinates from that source — or take a fresh full `screenshot` " <>
+              "first and use full-screen coordinates."
           )}, :na}
 
       {:error, reason} ->

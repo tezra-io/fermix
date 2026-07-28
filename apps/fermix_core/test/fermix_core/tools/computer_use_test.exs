@@ -98,6 +98,21 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert params["properties"]["action"]["enum"] == Protocol.actions()
     end
 
+    test "static guidance treats accessibility metadata as optional pixel targeting help" do
+      params = ComputerUse.parameters()
+      action = params["properties"]["action"]["description"]
+      region = params["properties"]["region"]["description"]
+      x = params["properties"]["x"]["description"]
+
+      assert ComputerUse.description() =~ "best-effort accessibility"
+      assert ComputerUse.description() =~ "pixel"
+      assert action =~ "empty"
+      assert action =~ "pixel"
+      assert region =~ "full-screen"
+      assert region =~ "elements"
+      assert x =~ "latest coordinate source"
+    end
+
     test "failure_modes are tagged maps" do
       assert Enum.all?(ComputerUse.failure_modes(), &match?(%{tag: _, description: _}, &1))
     end
@@ -187,6 +202,26 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.success == true
       assert [%{type: :image, mime_type: "image/png", data: data}] = result.images
       assert data == StubDriver.png()
+    end
+
+    test "a coordinate mismatch names the latest coordinate source", %{
+      session: session,
+      config: config
+    } do
+      region = %{"x" => 10, "y" => 20, "w" => 300, "h" => 200}
+      context = Map.merge(@context, %{computer_use_session: session, computer_use_config: config})
+
+      assert {:ok, screenshot} =
+               ComputerUse.execute(%{"action" => "screenshot", "region" => region}, context)
+
+      assert screenshot.success == true
+
+      assert {:ok, result} =
+               ComputerUse.execute(%{"action" => "left_click", "x" => 10, "y" => 20}, context)
+
+      assert result.success == false
+      assert result.error =~ "latest coordinate source"
+      refute result.error =~ "last screenshot"
     end
 
     test "standard access: a mutating action auto-runs without confirmation", %{

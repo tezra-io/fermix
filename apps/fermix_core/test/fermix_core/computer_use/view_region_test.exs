@@ -34,10 +34,16 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     @behaviour Compux.Driver
 
     @impl true
-    def start(opts), do: {:ok, %{test_pid: Keyword.fetch!(opts, :test_pid)}}
+    def start(opts) do
+      {:ok,
+       %{
+         test_pid: Keyword.fetch!(opts, :test_pid),
+         elements: Keyword.get(opts, :elements, [])
+       }}
+    end
 
     @impl true
-    def execute(%{test_pid: pid}, request) do
+    def execute(%{test_pid: pid, elements: elements}, request) do
       send(pid, {:driver_execute, request})
 
       case request["action"] do
@@ -50,7 +56,13 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
 
         # Only pixel-returning actions move the view; these must not.
         "elements" ->
-          {:ok, %{"elements" => []}}
+          {:ok, %{"elements" => elements}}
+
+        # Mirror compux: `inspect` answers with the element under the point and
+        # carries NO pixels (the catch-all's image reply would make it look like a
+        # coordinate source, which is exactly what it must not be).
+        "inspect" ->
+          {:ok, %{"found" => true, "role" => "AXButton", "title" => "Play"}}
 
         "windows" ->
           {:ok,
@@ -136,14 +148,16 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     def stop(_state), do: :ok
   end
 
-  defp start_session do
+  defp start_session(opts \\ []) do
+    driver_opts = [test_pid: self(), elements: Keyword.get(opts, :elements, [])]
+
     start_supervised!(
       {Session,
        [
          config: Config.normalize(enabled: true),
-         driver: {ImageDriver, [test_pid: self()]},
+         driver: {ImageDriver, driver_opts},
          origin: :interactive,
-         session_id: "cua_view_region",
+         session_id: "cua_view_region_#{System.unique_integer([:positive])}",
          agent: "main"
        ]}
     )
@@ -200,7 +214,7 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     session = start_session()
     {:ok, _} = screenshot(session, %{"action" => "screenshot", "region" => @region})
 
-    for action <- ~w(left_click right_click double_click mouse_move) do
+    for action <- ~w(left_click right_click double_click mouse_move inspect) do
       assert {:error, {:region_mismatch, @region}} =
                Session.classify(session, %{"action" => action, "x" => 10, "y" => 10}),
              "#{action} must be guarded"
@@ -322,17 +336,83 @@ defmodule FermixCore.ComputerUse.ViewRegionTest do
     assert is_integer(quality) and quality in 1..100
   end
 
-  # `elements` with a region answers in that crop's coordinate space, so the next
-  # click must carry the same region — the guard can only enforce that if the
-  # view tracks it. Without this clause, full screenshot -> elements-with-region
-  # -> bare click sailed through and missed.
-  test "elements with a region moves the view to that region" do
-    session = start_session()
+  test "usable regional elements become the coordinate source" do
+    session = start_session(elements: [%{"role" => "AXButton", "x" => 180, "y" => 150}])
     {:ok, _} = screenshot(session, %{"action" => "screenshot"})
-    {:ok, _} = screenshot(session, %{"action" => "elements", "region" => @region})
+
+    {:ok, result} =
+      screenshot(session, %{"action" => "elements", "region" => @region})
+
+    assert result.summary =~ "returned points"
+    refute result.summary =~ "MAGNIFIED CROP"
 
     assert {:error, {:region_mismatch, @region}} =
              Session.classify(session, %{"action" => "left_click", "x" => 180, "y" => 150})
+  end
+
+  # `inspect` answers ABOUT a point the model supplied in the crop's space, and its
+  # next coordinate action must carry the same region. §12b.10 kept this notice on
+  # live evidence: in the failing trace it immediately preceded the one correctly
+  # regioned click of the session. The guard refuses a bare follow-up either way,
+  # but the notice makes that cost zero turns instead of one.
+  test "a regioned inspect still says which space its point was in" do
+    session = start_session()
+    {:ok, _} = screenshot(session, %{"action" => "screenshot", "region" => @region})
+
+    {:ok, result} =
+      screenshot(session, %{"action" => "inspect", "region" => @region, "x" => 10, "y" => 10})
+
+    assert result.image == nil
+    assert result.summary =~ "MAGNIFIED CROP"
+    assert result.summary =~ "SAME region"
+  end
+
+  # It reports no coordinates of its own, so it must never MOVE the view.
+  test "a regioned inspect does not become the coordinate source" do
+    session = start_session()
+    {:ok, _} = screenshot(session, %{"action" => "screenshot"})
+
+    {:ok, _} =
+      screenshot(session, %{"action" => "inspect", "region" => @region, "x" => 10, "y" => 10})
+
+    assert {:ok, :auto, _request} =
+             Session.classify(session, %{"action" => "left_click", "x" => 180, "y" => 150})
+  end
+
+  test "usable bare elements restore full-screen coordinates after a crop" do
+    session = start_session(elements: [%{"role" => "AXButton", "x" => 900, "y" => 400}])
+    {:ok, _} = screenshot(session, %{"action" => "screenshot", "region" => @region})
+    {:ok, _} = screenshot(session, %{"action" => "elements"})
+
+    assert {:ok, :auto, _request} =
+             Session.classify(session, %{"action" => "left_click", "x" => 900, "y" => 400})
+  end
+
+  test "empty regional elements do not replace a full-screen coordinate source" do
+    session = start_session()
+    {:ok, _} = screenshot(session, %{"action" => "screenshot"})
+
+    {:ok, result} =
+      screenshot(session, %{"action" => "elements", "region" => @region})
+
+    assert result.summary =~ "accessibility-backed"
+    assert result.summary =~ "pixel coordinates"
+    refute result.summary =~ "MAGNIFIED CROP"
+
+    assert {:ok, :auto, _request} =
+             Session.classify(session, %{"action" => "left_click", "x" => 900, "y" => 400})
+  end
+
+  test "malformed-only regional elements do not replace the coordinate source" do
+    session = start_session(elements: [%{"role" => "AXButton"}, %{"x" => "bad", "y" => 4}])
+    {:ok, _} = screenshot(session, %{"action" => "screenshot"})
+    {:ok, result} = screenshot(session, %{"action" => "elements", "region" => @region})
+
+    assert result.summary =~ "accessibility-backed"
+    refute result.summary =~ "MAGNIFIED CROP"
+
+    assert {:ok, :auto, _request} =
+             Session.classify(session, %{"action" => "left_click", "x" => 900, "y" => 400})
   end
 
   # The click DID land; reporting an error would make the model retry it (a

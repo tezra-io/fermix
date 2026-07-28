@@ -290,7 +290,7 @@ defmodule FermixCore.ComputerUse.Session do
   # Actions whose x,y are read off the latest image. `scroll` carries optional
   # coordinates too, so it belongs here; keyboard actions never do.
   defp pointer_action?(action)
-       when action in ~w(left_click right_click double_click mouse_move left_click_drag scroll),
+       when action in ~w(left_click right_click double_click mouse_move left_click_drag scroll inspect),
        do: true
 
   defp pointer_action?(_action), do: false
@@ -372,7 +372,11 @@ defmodule FermixCore.ComputerUse.Session do
 
         case normalize_response(view_response) do
           {:ok, result} ->
-            result = result |> annotate_view(view_request) |> Map.put(:courtesy, courtesy)
+            result =
+              result
+              |> annotate_view(view_request, view_response)
+              |> Map.put(:courtesy, courtesy)
+
             {:reply, {:ok, result}, state}
 
           {:error, reason} ->
@@ -486,38 +490,66 @@ defmodule FermixCore.ComputerUse.Session do
       is_map(request["region"])
   end
 
-  # Say which coordinate space the model is reading, at the moment it reads it.
-  # A request carrying a region always yields crop-space content — a capture
-  # returns the crop's pixels, a zoomed mutating action is answered by its
-  # SAME-crop check (`crop_check/3`), and `elements`/`inspect` answer in the
-  # crop's coordinates — so the magnified notice is true wherever it appears.
-  defp annotate_view(result, %{"region" => region}) when is_map(region) do
+  # Describe only coordinate evidence the response actually returned. A regional
+  # image is a magnified coordinate source; regional `elements` metadata is useful
+  # only when it contains click points. Empty metadata must not invent a new view.
+  defp annotate_view(
+         result,
+         %{"action" => "elements", "region" => region},
+         %{"elements" => elements}
+       )
+       when is_map(region) and is_list(elements) do
+    if usable_elements(elements) == [] do
+      result
+    else
+      Map.update!(result, :summary, &(&1 <> " " <> element_region_notice(region)))
+    end
+  end
+
+  # `inspect` returns no coordinates of its own, so it never becomes the view — but
+  # it ANSWERS about a point the model read in the crop, and its next coordinate
+  # action must carry the same region. §12b.10 kept this notice on live evidence:
+  # in the failing trace it immediately preceded the one correctly-regioned click
+  # of the session. The guard refuses a bare follow-up either way; the notice makes
+  # that cost zero turns instead of one.
+  defp annotate_view(result, %{"action" => "inspect", "region" => region}, _response)
+       when is_map(region) do
     Map.update!(result, :summary, &(&1 <> " " <> magnified_notice(region)))
   end
 
-  defp annotate_view(result, _request), do: result
+  defp annotate_view(result, %{"region" => region}, %{"data" => data})
+       when is_map(region) and is_binary(data) do
+    Map.update!(result, :summary, &(&1 <> " " <> magnified_notice(region)))
+  end
+
+  defp annotate_view(result, _request, _response), do: result
 
   defp magnified_notice(%{"x" => x, "y" => y, "w" => w, "h" => h}) do
     "This is a MAGNIFIED CROP of region {x:#{x},y:#{y},w:#{w},h:#{h}} — the x,y you " <>
       "read HERE are in this magnified image, so send the SAME region with your next " <>
-      "click/drag/scroll. Without it they are read in full-screen space and will miss."
+      "inspect/click/drag/scroll. Without it they are read in full-screen space and will miss."
   end
 
-  # Remember which coordinate space the model's next coordinates come from. A
-  # response that carried pixels sets it from its request (`crop_check/3` swaps in
-  # the check screenshot's request for a zoomed mutating action); a full capture
-  # clears the crop — how the model gets back to full-screen coordinates. An
-  # `elements` reply carries no pixels but its click POINTS are in the requested
-  # region's magnified space, so it moves the view the same way a crop screenshot
-  # does — without this, full screenshot → elements-with-region → bare click
-  # sailed past the guard and missed. `inspect`, a failed action, or a failed
-  # check leaves the model looking at whatever it saw last.
+  defp element_region_notice(%{"x" => x, "y" => y, "w" => w, "h" => h}) do
+    "The returned points use the transformed coordinates for region " <>
+      "{x:#{x},y:#{y},w:#{w},h:#{h}} — send the SAME region with any follow-up " <>
+      "inspect/click/drag/scroll based on them."
+  end
+
+  # Remember the latest USABLE coordinate source. Pixel responses always establish
+  # their request's space. `elements` establishes a space only when it returned at
+  # least one valid point: a regional call sets that crop, while a bare call clears
+  # back to full-screen coordinates. Empty or malformed metadata leaves the prior
+  # source intact.
   defp track_view_region(state, request, %{"data" => data}) when is_binary(data),
     do: %{state | view_region: request["region"]}
 
-  defp track_view_region(state, %{"action" => "elements", "region" => region}, _response)
-       when is_map(region),
-       do: %{state | view_region: region}
+  defp track_view_region(state, %{"action" => "elements"} = request, %{"elements" => elements})
+       when is_list(elements) do
+    if usable_elements(elements) == [],
+      do: state,
+      else: %{state | view_region: request["region"]}
+  end
 
   defp track_view_region(state, _request, _response), do: state
 
@@ -654,14 +686,30 @@ defmodule FermixCore.ComputerUse.Session do
 
   defp window_line(_other), do: nil
 
-  defp elements_summary([]), do: "no interactive UI elements found"
-
   defp elements_summary(elements) do
-    lines = elements |> Enum.map(&element_line/1) |> Enum.reject(&is_nil/1)
+    case usable_elements(elements) do
+      [] ->
+        "no accessibility-backed click targets were exposed. Visible content may still " <>
+          "accept pixel interaction: on a page the managed `browser` drives, its " <>
+          "`get field=rect` + `click_coords` hit the same target exactly; anywhere else " <>
+          "use pixel coordinates from the latest screenshot and preserve its region when " <>
+          "cropped."
 
-    "#{length(lines)} interactive element(s) — click at the given x,y:\n" <>
-      Enum.join(lines, "\n")
+      usable ->
+        lines = Enum.map(usable, &element_line/1)
+
+        "#{length(lines)} interactive element(s) — click at the given x,y:\n" <>
+          Enum.join(lines, "\n")
+    end
   end
+
+  defp usable_elements(elements) when is_list(elements),
+    do: Enum.filter(elements, &usable_element?/1)
+
+  defp usable_elements(_elements), do: []
+
+  defp usable_element?(%{"x" => x, "y" => y}) when is_integer(x) and is_integer(y), do: true
+  defp usable_element?(_element), do: false
 
   defp element_line(%{"x" => x, "y" => y} = element) when is_integer(x) and is_integer(y) do
     role = element["role"] || "element"
@@ -671,8 +719,6 @@ defmodule FermixCore.ComputerUse.Session do
       do: "#{role} \"#{label}\" at (#{x},#{y})",
       else: "#{role} at (#{x},#{y})"
   end
-
-  defp element_line(_other), do: nil
 
   defp inspect_summary(%{"found" => false}), do: "no UI element at that point"
 

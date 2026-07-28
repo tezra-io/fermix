@@ -10,6 +10,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.OpenAIClient
   alias FermixCore.Realtime.SessionServer
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
+  alias FermixCore.Tools.ComputerUse
   alias FermixCore.Tools.ScheduleJob
 
   defmodule FakeOpenAIClient do
@@ -77,6 +79,17 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
   end
 
+  defmodule HiddenTool do
+    def advertise?(_context), do: false
+
+    def dynamic_parameters(_context),
+      do: raise("hidden tools must be filtered before schema refresh")
+
+    def execute(_args, context) do
+      {:ok, %{success: true, output: "#{context.agent_name}:hidden", error: nil}}
+    end
+  end
+
   defmodule FakeRecorder do
     def record_exchange(config, device_id, user_text, assistant_text, opts) do
       send(
@@ -132,6 +145,65 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert event.type == "session.update"
     assert event.session.instructions == "prompt"
     assert [%{name: "echo"}] = event.session.tools
+  end
+
+  test "call_start advertises live dynamic capability parameters" do
+    previous = Application.get_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :sandbox, %{SandboxConfig.default() | mode: :strict})
+
+    on_exit(fn -> restore_app_env(:sandbox, previous) end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [Builtin.from_tool_module(ComputerUse)],
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    [tool] = event.session.tools
+
+    assert tool.name == "computer_use"
+    assert tool.parameters["properties"]["action"]["description"] =~ "ACCESS=strict"
+  end
+
+  test "call_start hides context-gated capabilities without removing dispatchability" do
+    task_supervisor = start_supervised!({Task.Supervisor, []}, id: :hidden_tool_task_sup)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [hidden_capability()],
+        task_supervisor: task_supervisor,
+        prompt_loader: fn _opts ->
+          {:ok, %{messages: [%{role: "system", content: "prompt"}], parts: [], accounting: []}}
+        end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+    [event] = FakeOpenAIClient.events(openai)
+    assert event.session.tools == []
+
+    assert :ok =
+             SessionServer.handle_provider_event(server, {
+               :function_call,
+               %{"call_id" => "call-hidden", "name" => "hidden", "arguments" => "{}"}
+             })
+
+    assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "hidden"}}
   end
 
   test "call_start waits for provider session_updated before listening", %{server: server} do
@@ -1101,6 +1173,20 @@ defmodule FermixCore.Realtime.SessionServerTest do
       metadata: %{category: category}
     })
   end
+
+  defp hidden_capability do
+    Capability.new(%{
+      name: "hidden",
+      description: "Hidden test tool.",
+      parameters: %{"type" => "object"},
+      kind: :builtin,
+      executor: {HiddenTool, :execute, []},
+      policy_class: :read_only
+    })
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_app_env(key, value), do: Application.put_env(:fermix_core, key, value)
 
   defp sleepy_capability do
     Capability.new(%{
