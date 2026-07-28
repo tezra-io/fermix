@@ -226,6 +226,24 @@ defmodule FermixCore.AgentLoopTest do
     end)
   end
 
+  # Forwards `[:fermix, :tool, :exec]` to the test process for the miss-path
+  # assertions. Detached on exit so the handler cannot outlive its test.
+  defp attach_tool_exec do
+    test_pid = self()
+    handler_id = "test-tool-exec-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :tool, :exec],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:tool_exec, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
   defp run_loop(opts) do
     defaults = [
       messages: [%{role: "user", content: "hello"}],
@@ -1112,6 +1130,47 @@ defmodule FermixCore.AgentLoopTest do
       assert tool_result.output =~ "not found"
     end
 
+    # A tool call the model made that never reaches a capability used to emit no
+    # telemetry at all, so the turn's trace showed an iteration with no tool row —
+    # the model had called something, and neither the JSONL trace nor Opik said
+    # what. Every miss kind now emits one failed `[:fermix, :tool, :exec]` under
+    # the name the MODEL used, which is the only name a reader can search for.
+    test "an unknown capability emits a failed tool_exec under the requested name",
+         %{registry: registry} do
+      attach_tool_exec()
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "nonexistent", %{"a" => 1})]),
+        turn("Handled missing tool")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry)
+
+      assert_received {:tool_exec, measurements, metadata}
+      assert metadata.tool == "nonexistent"
+      assert metadata.success == false
+      assert metadata.error =~ "not found"
+      assert is_integer(measurements.duration_ms)
+    end
+
+    test "a disallowed tool call emits a failed tool_exec", %{registry: registry} do
+      register_caps(registry, [EchoTool, SpyTool])
+      attach_tool_exec()
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "spy_tool", %{})]),
+        turn("Handled blocked tool")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry, allowed_tools: ["echo"])
+      refute_received :spy_tool_executed
+
+      assert_received {:tool_exec, _measurements, metadata}
+      assert metadata.tool == "spy_tool"
+      assert metadata.success == false
+      assert metadata.error =~ "not available"
+    end
+
     test "blocks disallowed tool calls without executing them", %{registry: registry} do
       register_caps(registry, [EchoTool, SpyTool])
 
@@ -1212,6 +1271,30 @@ defmodule FermixCore.AgentLoopTest do
 
       assert {:ok, result} = run_loop(capability_registry: registry)
       assert result.response == "Recovered"
+    end
+
+    test "unparseable arguments emit a failed tool_exec for the real tool", %{registry: registry} do
+      register_caps(registry, [EchoTool])
+      attach_tool_exec()
+
+      call = %{
+        id: "fc_call_1",
+        call_id: "call_1",
+        name: "echo",
+        arguments: "{bad json"
+      }
+
+      set_mock_responses([
+        turn("", tool_calls: [call]),
+        turn("Recovered")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry)
+
+      assert_received {:tool_exec, _measurements, metadata}
+      assert metadata.tool == "echo"
+      assert metadata.success == false
+      assert is_binary(metadata.error)
     end
   end
 

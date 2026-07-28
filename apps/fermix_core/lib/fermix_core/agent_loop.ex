@@ -24,6 +24,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.Transient
   alias FermixCore.Telemetry
+  alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @max_iterations 25
 
@@ -704,7 +705,7 @@ defmodule FermixCore.AgentLoop do
 
       {:error, reason} ->
         emit_activity(state, {:tool_finish, name})
-        text_result(reason)
+        trace_unexecuted(name, arguments_raw, reason, state)
     end
   end
 
@@ -719,15 +720,36 @@ defmodule FermixCore.AgentLoop do
     if capability_allowed?(name, state.allowed_tools) do
       lookup_and_dispatch(name, arguments, state)
     else
-      text_result("Error: Tool '#{name}' not available")
+      trace_unexecuted(name, arguments, "Error: Tool '#{name}' not available", state)
     end
   end
 
   defp lookup_and_dispatch(name, arguments, state) do
     case Map.fetch(state.capabilities_by_name, name) do
       {:ok, capability} -> dispatch_capability(capability, arguments, state.context)
-      :error -> text_result("Error: Tool '#{name}' not found")
+      :error -> trace_unexecuted(name, arguments, "Error: Tool '#{name}' not found", state)
     end
+  end
+
+  # A tool call the model made that never reached a capability: an unregistered
+  # or policy-filtered name, a name outside this run's `allowed_tools`, or
+  # arguments that would not parse. Each returns its error to the model, and each
+  # used to emit nothing — so the turn's telemetry showed an iteration whose tool
+  # call left no tool row anywhere, in the JSONL trace or in Opik. The reader
+  # could see that the model had called *something* and not what, which is how
+  # two iterations spent calling a withdrawn harness by a guessed name went
+  # unexplained. Routed through the shared emitter (never a hand-rolled
+  # `:telemetry.execute`) so the invariant holds: one tool call by the model,
+  # one `[:fermix, :tool, :exec]` event, recorded under the name the MODEL used —
+  # the only name a reader has to search for. The three messages stay distinct so
+  # the miss kinds do not collapse into one indistinguishable failure.
+  defp trace_unexecuted(name, arguments, message, state) do
+    ToolTelemetry.exec(name, state.context, false, 0,
+      metadata: %{error: message},
+      input: arguments
+    )
+
+    text_result(message)
   end
 
   defp capability_allowed?(_name, nil), do: true

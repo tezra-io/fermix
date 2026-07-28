@@ -16,6 +16,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Turning the coding harness off now hides all of it, not most of it.** With
+  coding agents not approved on a machine, the tools that launch a run were
+  correctly withheld, but the three that inspect run history stayed offered —
+  so the agent was handed harness tools while the prompt, which drops the whole
+  harness section when it is unusable, said nothing about the harness at all.
+  Fermix now withholds every harness tool in that state, exactly as it already
+  did for the run tools. They remain reachable by name, so a run recorded before
+  you withdrew approval can still be read or cancelled on request.
+- **A tool call that never runs is now visible in traces.** When the model called
+  a tool that does not exist, was not allowed for that run, or passed arguments
+  that would not parse, Fermix told the model and recorded nothing — the trace
+  showed a step that called *something*, with no way to see what. Each of these
+  now records a failed tool execution under the name the model used, so it shows
+  up in `~/.fermix/traces` and as a failed span in Opik alongside real calls.
 - **Coding agent runs no longer fail instantly with "Not logged in" on macOS.**
   Fermix starts the vendor CLIs in a wiped environment, and that environment was
   missing the account name. Claude Code looks its macOS Keychain login up by
