@@ -34,6 +34,12 @@ defmodule FermixCore.Realtime.SessionServer do
   # is what `computer_use` screenshots are for, and those still go at `high`.
   @frames_retained 2
   @frame_detail "low"
+  # Tool screenshots get the same treatment: each ~high-detail crop is re-read on
+  # every later response and captioned "this is what is really on screen right
+  # now", so past the newest few they are pure cost AND an active lie (a stale
+  # board claiming to be current). The crop-check pattern only ever needs the
+  # newest; a deliberate look-back takes a fresh capture.
+  @tool_images_retained 2
   # Backpressure for the queued frame path: past this many messages waiting on the
   # socket process, the uplink is behind and the newest frame is worth more than a
   # backlog of stale ones.
@@ -179,6 +185,14 @@ defmodule FermixCore.Realtime.SessionServer do
            screen_feed: nil,
            screen_display: nil,
            screen_frame_items: [],
+           tool_image_items: [],
+           # `response_active?` mirrors the provider's response lifecycle
+           # (response_created → response.done); `needs_response?` records tool
+           # outputs appended while a trigger could not be sent. Together they
+           # make "exactly one response.create per answered batch" hold under
+           # EVERY interleaving of dispatches, completions, and response.done.
+           response_active?: false,
+           needs_response?: false,
            screen_share_resume?: false,
            screen_feed_module: Keyword.get(opts, :screen_feed_module, ScreenFeed),
            screen_feed_opts: Keyword.get(opts, :screen_feed_opts, []),
@@ -391,8 +405,14 @@ defmodule FermixCore.Realtime.SessionServer do
     end
   end
 
+  # NOT forwarded to the companion: the pet treats an `error` frame as terminal
+  # (mic down, call over), which is the wrong response to a non-terminal provider
+  # hiccup on a call that is still live — a benign truncate/delete race was killing
+  # the pet's side mid-game while the daemon session played on. A genuinely
+  # terminal failure reaches the pet through `end_call`/reconnect-exhausted.
   def handle_info({:openai_realtime_error, reason}, state) do
-    notify(state.companion, %{type: "error", reason: reason_to_string(reason)})
+    Logger.warning("realtime: provider transport error: #{reason_to_string(reason)}")
+    RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(reason))
     {:noreply, state}
   end
 
@@ -440,6 +460,18 @@ defmodule FermixCore.Realtime.SessionServer do
 
   def handle_info(:max_session_duration, state) do
     end_call(state, :max_session_duration)
+  end
+
+  # Deferred from `maybe_apply_reported_usage/2`: the reported-usage path runs
+  # inside the provider-event pipeline and cannot return a stop tuple itself.
+  def handle_info({:cost_limit_reached, reason}, state) do
+    notify(state.companion, %{
+      type: "usage",
+      status: "limit_reached",
+      reason: Atom.to_string(reason)
+    })
+
+    end_call(state, reason)
   end
 
   @impl true
@@ -544,8 +576,13 @@ defmodule FermixCore.Realtime.SessionServer do
         # rather than let a late result fire at (or tear down) the new session.
         # The screen feed is suspended for the same reason — its frames and their
         # item ids belong to the conversation that is going away — but flagged to
-        # resume, so the operator does not have to re-ask after a blip.
+        # resume, so the operator does not have to re-ask after a blip. Tool-image
+        # ids are that conversation's too: forget them (nothing to delete — the
+        # items die with the old conversation).
         state = state |> cancel_pending_tool_calls() |> suspend_screen_feed()
+        # The old conversation's items, its in-flight response, and any deferred
+        # trigger all die with it.
+        state = %{state | tool_image_items: [], response_active?: false, needs_response?: false}
         # A socket death can produce BOTH a disconnect notice and an EXIT, so
         # cancel any timer already armed rather than stack a second attempt on top
         # of the first.
@@ -615,7 +652,8 @@ defmodule FermixCore.Realtime.SessionServer do
 
   defp cancel_pending_tool_calls(%{pending_tool_calls: pending} = state) do
     Enum.each(pending, fn {_ref, {task, _call}} -> Task.shutdown(task, :brutal_kill) end)
-    %{state | pending_tool_calls: %{}}
+    # The acting pause must not outlive the calls that justified it.
+    set_screen_feed_acting(%{state | pending_tool_calls: %{}}, false)
   end
 
   defp maybe_send_truncate(_openai_pid, _state, nil), do: :ok
@@ -815,17 +853,22 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp handle_provider_event_internal({:response_created, _event}, state) do
-    %{state | response_started_ms: System.monotonic_time(:millisecond)}
+    %{
+      state
+      | response_started_ms: System.monotonic_time(:millisecond),
+        response_active?: true
+    }
   end
 
   defp handle_provider_event_internal({:response_done, response}, state) do
-    state
+    %{state | response_active?: false}
     |> maybe_emit_provider_call(response)
     |> maybe_notify_cancelled_response(response)
     |> Map.put(:current_item_id, nil)
     |> notify_listening_state()
     |> maybe_apply_reported_usage(response)
     |> maybe_record_exchange()
+    |> flush_deferred_response()
   end
 
   defp handle_provider_event_internal({:error, error}, state) do
@@ -834,10 +877,10 @@ defmodule FermixCore.Realtime.SessionServer do
     else
       # Reported, not fatal. If the error is genuinely terminal OpenAI closes the
       # socket and the disconnect/EXIT clauses handle it as the one reconnect path;
-      # tearing down here instead disarmed that path.
+      # tearing down here instead disarmed that path. No companion `error` frame:
+      # the pet reads that as terminal and shuts its side down mid-call.
       Logger.warning("OpenAI Realtime error: #{inspect(error)}")
       RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
-      notify(state.companion, %{type: "error", reason: reason_to_string(error)})
       state
     end
   end
@@ -860,6 +903,14 @@ defmodule FermixCore.Realtime.SessionServer do
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
         ToolBridge.execute_call(bridge, call)
       end)
+
+    # First call in flight pauses the feed: while acting, the model's eyes are its
+    # own check images, and ambient frames of the same screen are pure token cost.
+    # `finish_tool_turn/1` resumes it when the last pending call is answered.
+    state =
+      if map_size(state.pending_tool_calls) == 0,
+        do: set_screen_feed_acting(state, true),
+        else: state
 
     %{state | pending_tool_calls: Map.put(state.pending_tool_calls, task.ref, {task, call})}
   end
@@ -1026,7 +1077,15 @@ defmodule FermixCore.Realtime.SessionServer do
       @frame_detail
     )
 
-    %{state | screen_frame_items: retained}
+    # The feed's budget line grows HERE, per frame actually sent — never from the
+    # provider's reported image tokens, which are dominated by the model's own
+    # high-detail tool screenshots and used to close the feed for spend that was
+    # not the feed's.
+    %{
+      state
+      | screen_frame_items: retained,
+        usage: CostTracker.add_feed_frame(state.usage)
+    }
   end
 
   # A client-assigned id, so a superseded frame can be evicted by id later without
@@ -1041,6 +1100,15 @@ defmodule FermixCore.Realtime.SessionServer do
       reason_to_string(reason),
       measurements
     )
+
+    # Evict what the dead feed left in context: with no successor frames coming,
+    # nothing would ever supersede these, and they re-bill on every later response
+    # while claiming to be the live screen.
+    state =
+      send_openai_events(
+        state,
+        Enum.map(state.screen_frame_items, &OpenAIClient.delete_item_event/1)
+      )
 
     state = %{state | screen_feed: nil, screen_frame_items: []}
 
@@ -1071,6 +1139,13 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp set_screen_feed_speaking(state, _speaking?), do: state
+
+  defp set_screen_feed_acting(%{screen_feed: pid} = state, acting?) when is_pid(pid) do
+    state.screen_feed_module.set_acting(pid, acting?)
+    state
+  end
+
+  defp set_screen_feed_acting(state, _acting?), do: state
 
   # The feed spends a fixed share of the call's ONE budget. It stops first and the
   # call continues: losing the eyes is recoverable and audible, ending the call is
@@ -1108,14 +1183,14 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp apply_tool_result({:ok, output}, call, state) do
-    state = send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
+    state = state |> append_tool_output(output) |> finish_tool_turn()
     notify(state.companion, %{type: "tool_event", status: "completed", name: tool_name(call)})
     state
   end
 
   defp apply_tool_result({:error, %{call_id: call_id, reason: reason}}, call, state) do
     output = %{call_id: call_id, output: Jason.encode!(%{error: reason_to_string(reason)})}
-    state = send_openai_events(state, OpenAIClient.function_output_events(output, state.config))
+    state = state |> append_tool_output(output) |> finish_tool_turn()
 
     notify(state.companion, %{
       type: "tool_event",
@@ -1125,6 +1200,60 @@ defmodule FermixCore.Realtime.SessionServer do
     })
 
     state
+  end
+
+  # Append the result's items, minting client ids for its screenshots so they can
+  # be EVICTED like feed frames: each retained high-detail crop is re-read (and
+  # re-billed) on every later response, captioned as what is on screen "right
+  # now" — past the newest few that is pure cost and an actively stale claim.
+  defp append_tool_output(state, output) do
+    images = Map.get(output, :images, [])
+    ids = Enum.map(images, fn _image -> mint_tool_image_id() end)
+
+    {retained, evicted} =
+      Enum.split(Enum.reverse(ids) ++ state.tool_image_items, @tool_images_retained)
+
+    events =
+      OpenAIClient.function_output_items(output, ids) ++
+        Enum.map(evicted, &OpenAIClient.delete_item_event/1)
+
+    state = send_openai_events(state, events)
+    %{state | tool_image_items: retained}
+  end
+
+  # ONE `response.create` per answered batch. Two calls answered in one response
+  # each used to send their own trigger: the second was rejected as the
+  # active-response race, and the response that DID run had snapshotted context
+  # before the second result existed — a silent stall until the operator spoke
+  # again. The trigger is therefore deferred while other calls are still in
+  # flight OR while the provider's own response is still active (the calls were
+  # emitted by it; a trigger sent before its response.done is the race itself);
+  # `flush_deferred_response/1` sends it on response.done. The end of the batch
+  # also ends the feed's acting pause: the model is about to look again.
+  defp finish_tool_turn(%{pending_tool_calls: pending} = state) when map_size(pending) > 0 do
+    %{state | needs_response?: true}
+  end
+
+  defp finish_tool_turn(%{response_active?: true} = state) do
+    set_screen_feed_acting(%{state | needs_response?: true}, false)
+  end
+
+  defp finish_tool_turn(state) do
+    state = set_screen_feed_acting(%{state | needs_response?: false}, false)
+    send_openai_events(state, [OpenAIClient.response_create_event(state.config)])
+  end
+
+  defp flush_deferred_response(%{needs_response?: true, pending_tool_calls: pending} = state)
+       when map_size(pending) == 0 do
+    send_openai_events(%{state | needs_response?: false}, [
+      OpenAIClient.response_create_event(state.config)
+    ])
+  end
+
+  defp flush_deferred_response(state), do: state
+
+  defp mint_tool_image_id do
+    "item_ti" <> Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false)
   end
 
   defp handle_active_response_race(error, state) do
@@ -1245,6 +1374,16 @@ defmodule FermixCore.Realtime.SessionServer do
       status: "reported",
       cost_cents: tracker.reported.cost_cents
     })
+
+    # The call ceiling is enforced on REPORTED spend too — previously only the
+    # audio-estimate path checked it, so a call whose real cost crossed the
+    # ceiling kept running until the next audio chunk happened to arrive. The
+    # stop is deferred through the mailbox because this runs inside the
+    # provider-event pipeline, which returns state, not a stop tuple.
+    case CostTracker.enforce_limits(tracker) do
+      :ok -> :ok
+      {:stop, reason} -> send(self(), {:cost_limit_reached, reason})
+    end
 
     enforce_feed_budget(%{state | usage: tracker})
   end
@@ -1417,11 +1556,9 @@ defmodule FermixCore.Realtime.SessionServer do
         clear_transcripts(state)
 
       {:error, reason} ->
-        notify(state.companion, %{
-          type: "error",
-          reason: reason_to_string({:transcript_persist_failed, reason})
-        })
-
+        # Logged, not sent as a companion `error` frame — the pet treats that as
+        # terminal, and a failed transcript write must never end a live call.
+        Logger.warning("realtime: transcript persist failed: #{inspect(reason)}")
         clear_transcripts(state)
     end
   end

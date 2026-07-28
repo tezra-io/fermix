@@ -62,7 +62,7 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
     :ok
   end
 
-  defp start_feed(script \\ []) do
+  defp start_feed(script \\ [], opts \\ []) do
     FakeCapture.script(script)
 
     # Linked to the test process, exactly as the SessionServer links it, so the
@@ -71,11 +71,13 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
     # the shared breaker (the leak that made this file's first run non-hermetic).
     {:ok, feed} =
       ScreenFeed.start_link(
-        owner: self(),
-        display: 0,
-        capture_module: FakeCapture,
-        driver: {:unused, []},
-        intervals: @fast_intervals
+        [
+          owner: self(),
+          display: 0,
+          capture_module: FakeCapture,
+          driver: {:unused, []},
+          intervals: @fast_intervals
+        ] ++ opts
       )
 
     on_exit(fn ->
@@ -83,6 +85,10 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
     end)
 
     feed
+  end
+
+  defp distinct_frames(count) do
+    for n <- 1..count, do: {:ok, %{mime_type: "image/png", data: "frame-#{n}"}}
   end
 
   # `stop/2` exits the feed with `{:shutdown, reason}`, which propagates over the
@@ -204,6 +210,64 @@ defmodule FermixCore.Realtime.ScreenFeedTest do
     assert :ok = ScreenFeed.stop(feed, :requested)
     assert :ok = ScreenFeed.stop(feed, :requested)
     assert_received {:screen_feed, {:stopped, :requested, _}}
+  end
+
+  # A rate-limited CHANGED frame must not advance the change gate: if the board
+  # changes during a budget blackout and then holds still, the first capture after
+  # the window reopens IS the change — advancing `last_hash` while gated made the
+  # feed permanently blind to it (the model waits for a turn it already has).
+  test "a change gated by the rate limit is delivered once the window reopens" do
+    # 20 distinct frames burn the whole per-minute budget; then the screen changes
+    # to "the-move" and holds still. The last script entry repeats forever.
+    script = distinct_frames(20) ++ [{:ok, %{mime_type: "image/png", data: "the-move"}}]
+    detach(start_feed(script, minute_ms: 300))
+
+    for _n <- 1..20 do
+      assert_receive {:screen_feed, {:frame, _frame}}, 2_000
+    end
+
+    # The window reopens (300ms) and the held-still change must arrive.
+    assert_receive {:screen_feed, {:frame, %{data: "the-move"}}}, 3_000
+  end
+
+  # Once half the minute budget is spent, spacing stretches to the sustainable
+  # rate instead of burning the rest in a burst and going blind for the remainder
+  # of the window. The floor only rises — a frame arriving EARLY is the bug.
+  test "budget pressure stretches the cadence instead of bursting into a blackout" do
+    detach(start_feed(distinct_frames(40), minute_ms: 10_000))
+
+    for _n <- 1..10 do
+      assert_receive {:screen_feed, {:frame, _frame}}, 2_000
+    end
+
+    # Sustainable spacing is minute/20 = 500ms; the 11th frame must not arrive
+    # inside the stretched gap.
+    refute_receive {:screen_feed, {:frame, _frame}}, 300
+    assert_receive {:screen_feed, {:frame, _frame}}, 2_000
+  end
+
+  # While the model is mid-action (a tool call in flight), its precision comes
+  # from the action's own check images; ambient frames of the same screen are
+  # pure token cost. The feed pauses capture and catches up immediately after.
+  test "acting pauses the feed and resuming delivers a catch-up frame" do
+    feed = detach(start_feed(distinct_frames(200)))
+    assert_receive {:screen_feed, {:frame, _frame}}, 2_000
+
+    ScreenFeed.set_acting(feed, true)
+    # Drain anything captured before the pause landed, then expect silence.
+    flush_frames()
+    refute_receive {:screen_feed, {:frame, _frame}}, 150
+
+    ScreenFeed.set_acting(feed, false)
+    assert_receive {:screen_feed, {:frame, _frame}}, 2_000
+  end
+
+  defp flush_frames do
+    receive do
+      {:screen_feed, {:frame, _frame}} -> flush_frames()
+    after
+      0 -> :ok
+    end
   end
 
   test "speaking state is accepted without blocking the caller" do

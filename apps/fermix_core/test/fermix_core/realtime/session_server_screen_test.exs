@@ -61,9 +61,12 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     end
 
     def set_speaking(server, speaking?), do: GenServer.cast(server, {:speaking, speaking?})
+    def set_acting(server, acting?), do: GenServer.cast(server, {:acting, acting?})
 
     def refuse(refuse?), do: :persistent_term.put({__MODULE__, :refuse}, refuse?)
     def speaking, do: :persistent_term.get({__MODULE__, :speaking}, nil)
+    # Full history, oldest first — a fast true→false flip must stay observable.
+    def acting_log, do: :persistent_term.get({__MODULE__, :acting}, [])
 
     @impl true
     def init(opts) do
@@ -74,6 +77,12 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     @impl true
     def handle_cast({:speaking, speaking?}, state) do
       :persistent_term.put({__MODULE__, :speaking}, speaking?)
+      {:noreply, state}
+    end
+
+    def handle_cast({:acting, acting?}, state) do
+      log = :persistent_term.get({__MODULE__, :acting}, [])
+      :persistent_term.put({__MODULE__, :acting}, log ++ [acting?])
       {:noreply, state}
     end
 
@@ -123,6 +132,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     FakeProbe.answer(:allow)
     FakeOpenAIClient.set_pending(0)
     :persistent_term.erase({FakeFeed, :speaking})
+    :persistent_term.erase({FakeFeed, :acting})
 
     computer_use = Application.get_env(:fermix_core, :computer_use, [])
     plugins = Application.get_env(:fermix_core, :plugins)
@@ -213,6 +223,15 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
       # `function_call_output` items carry no content parts at all.
       event.item |> Map.get(:content, []) |> Enum.any?(&(&1[:type] == "input_image"))
     end)
+  end
+
+  # Bounded poll on real async state (task completions land as messages to the
+  # SESSION, not to this test process), never a sleep.
+  defp wait_until(fun, deadline_ms \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + deadline_ms
+
+    Stream.repeatedly(fn -> fun.() end)
+    |> Enum.find(fn done? -> done? or System.monotonic_time(:millisecond) >= deadline end)
   end
 
   defp text_parts(openai) do
@@ -395,21 +414,52 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     assert_receive {:DOWN, ^feed_ref, :process, ^feed, _reason}, 500
   end
 
-  test "the feed stops at its budget share while the call continues", %{
-    server: server,
-    openai: openai
-  } do
-    start_sharing(server)
+  # The feed's budget line counts the feed's OWN frames, client-side. The
+  # provider's reported image tokens are dominated by the model's high-detail
+  # tool screenshots — attributing them to the feed closed the model's ambient
+  # eyes as ":cost" for its own precision looks.
+  test "the feed stops at its own budget share while the call continues" do
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        # A tiny budget so a realistic frame count crosses the feed's share.
+        config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        screen_feed_module: FakeFeed,
+        screen_probe: &FakeProbe.run/0,
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
 
-    # 100k image tokens at $5/1M = 50 cents = half of the default 100-cent budget.
+    :ok = SessionServer.call_start(server)
+    :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+    start_sharing(server)
+    openai = SessionServer.openai_pid(server)
+
+    # The model's own tool screenshots (reported image tokens) do NOT close the
+    # feed. 1k tokens = 0.5 cents: over the feed's 0.5-cent share if it were
+    # (wrongly) attributed there, while staying under the 1-cent call ceiling.
     :ok =
       SessionServer.handle_provider_event(
         server,
         {:response_done,
          %{
            "id" => "resp_1",
-           "usage" => %{"input_token_details" => %{"image_tokens" => 100_000}}
+           "usage" => %{"input_token_details" => %{"image_tokens" => 1_000}}
          }}
+      )
+
+    assert is_pid(:sys.get_state(server).screen_feed), "reported image spend is not the feed's"
+
+    # Twelve of the feed's own frames cross the 0.5-cent share of the 1-cent budget.
+    for n <- 1..12, do: send_frame(server, "frame-#{n}")
+
+    :ok =
+      SessionServer.handle_provider_event(
+        server,
+        {:response_done, %{"id" => "r2", "usage" => %{}}}
       )
 
     state = :sys.get_state(server)
@@ -492,6 +542,109 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
     assert_receive {:realtime, %{type: "tool_event", status: "error", reason: reason}}, 1_000
     assert reason =~ "capture_probe_failed"
+  end
+
+  # Two calls answered in one batch used to append two `response.create`s: the
+  # second was rejected as the active-response race, and the response that DID
+  # run had snapshotted context before the second result existed — a silent
+  # stall until the operator spoke again.
+  test "parallel tool results produce one response.create, after the last output", %{
+    server: server,
+    openai: openai
+  } do
+    # The fixture server was built without a task supervisor (no other test
+    # dispatches real tool calls); give the app-named one a live process.
+    start_supervised!({Task.Supervisor, name: FermixCore.Realtime.TaskSupervisor})
+    start_sharing(server)
+
+    baseline =
+      length(Enum.filter(FakeOpenAIClient.events(openai), &(&1[:type] == "response.create")))
+
+    # As in production: the function_call events are emitted by an ACTIVE
+    # response, whose response.done follows them.
+    :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+
+    for {name, id} <- [{"alpha", "c1"}, {"beta", "c2"}] do
+      :ok =
+        SessionServer.handle_provider_event(
+          server,
+          {:function_call, %{"call_id" => id, "name" => name, "arguments" => "{}"}}
+        )
+    end
+
+    :ok = SessionServer.handle_provider_event(server, {:response_done, %{"id" => "r_tools"}})
+
+    batch_outputs = fn events ->
+      Enum.filter(events, &(get_in(&1, [:item, :call_id]) in ["c1", "c2"]))
+    end
+
+    wait_until(fn ->
+      events = FakeOpenAIClient.events(openai)
+      length(batch_outputs.(events)) == 2 and List.last(FakeFeed.acting_log()) == false
+    end)
+
+    events = FakeOpenAIClient.events(openai)
+    creates = Enum.filter(events, &(&1[:type] == "response.create"))
+
+    assert length(batch_outputs.(events)) == 2
+    assert length(creates) - baseline == 1, "exactly one trigger for the batch"
+    # The trigger is the LAST of the batch's events, so it sees both outputs.
+    assert %{type: "response.create"} = List.last(events)
+
+    # The feed paused once for the batch and resumed once at its end. (The
+    # inline screen_share answer before it logs its own resume — take the tail.)
+    assert Enum.take(FakeFeed.acting_log(), 2 * -1) == [true, false]
+  end
+
+  # The pet treats an `error` frame as terminal (mic down, call over); a benign
+  # provider hiccup on a live call must never reach it as one.
+  test "non-terminal provider errors never send the companion an error frame", %{server: server} do
+    :ok =
+      SessionServer.handle_provider_event(
+        server,
+        {:error, %{"error" => %{"message" => "item truncate past audio end"}}}
+      )
+
+    send(server, {:openai_realtime_error, :transient_socket_hiccup})
+
+    assert Process.alive?(server)
+    refute_receive {:realtime, %{type: "error"}}, 100
+  end
+
+  # Reported spend crossing the CALL ceiling must end the call — previously only
+  # the audio-estimate path enforced it.
+  test "reported spend over the call ceiling ends the call loudly" do
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true, max_estimated_cost_cents_per_session: 1),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        screen_feed_module: FakeFeed,
+        screen_probe: &FakeProbe.run/0,
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    :ok = SessionServer.call_start(server)
+    :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+    Process.unlink(server)
+    ref = Process.monitor(server)
+
+    # 100k image tokens = 50 cents, far over the 1-cent ceiling.
+    :ok =
+      SessionServer.handle_provider_event(
+        server,
+        {:response_done,
+         %{
+           "id" => "resp_1",
+           "usage" => %{"input_token_details" => %{"image_tokens" => 100_000}}
+         }}
+      )
+
+    assert_receive {:realtime, %{type: "usage", status: "limit_reached"}}, 1_000
+    assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :cost_limit}}, 1_000
   end
 
   test "the feed dies with the session", %{server: server} do

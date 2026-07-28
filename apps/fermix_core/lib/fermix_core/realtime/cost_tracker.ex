@@ -10,9 +10,11 @@ defmodule FermixCore.Realtime.CostTracker do
 
   Reported usage ACCUMULATES per response, deduplicated by `response.id`: a call
   produces many responses, so overwriting with the latest one (what this module
-  used to do) under-reported a long call by everything that came before. `image`
-  usage is additionally attributed to the screen feed, which is what makes the
-  feed's own budget ceiling (`feed_over_budget?/1`) enforceable.
+  used to do) under-reported a long call by everything that came before. The
+  screen feed's budget line (`feed_over_budget?/1`) is counted separately,
+  client-side per sent frame (`add_feed_frame/1`) — the provider's reported
+  image tokens cannot distinguish a feed frame from the model's own tool
+  screenshots.
   """
 
   alias FermixCore.Realtime.Config
@@ -127,6 +129,35 @@ defmodule FermixCore.Realtime.CostTracker do
     end
   end
 
+  # What one low-detail feed frame costs the feed's budget line, in input tokens.
+  # OpenAI bills a low-detail image at a fixed per-image token count (85 is the
+  # published low-detail figure for the vision-token scheme); an estimate is the
+  # point — the feed's line answers "how much watching has THIS call done", while
+  # true spend (including each retained frame's re-reads) is still bounded by the
+  # call-level ceiling on reported cost.
+  @feed_frame_tokens 85
+
+  @doc """
+  Count one sent feed frame against the feed's budget line.
+
+  Attributed CLIENT-side, per frame actually sent — never from the provider's
+  reported `image_tokens`, which are dominated by the model's own high-detail
+  tool screenshots (~9x a low-detail frame each). Splitting the reported figure
+  charged the model's precision looks to the feed and closed the model's ambient
+  eyes as ":cost" for spend that was not the feed's.
+  """
+  @spec add_feed_frame(t()) :: t()
+  def add_feed_frame(%__MODULE__{} = tracker) do
+    %{
+      tracker
+      | feed: %{
+          image_tokens: tracker.feed.image_tokens + @feed_frame_tokens,
+          cost_cents:
+            tracker.feed.cost_cents + tokens_cents(@feed_frame_tokens, rate(tracker, :image_in))
+        }
+    }
+  end
+
   @doc """
   Whether the screen feed has spent its share of the call budget. The feed stops
   FIRST and the call continues without it — losing the eyes is recoverable and
@@ -155,10 +186,10 @@ defmodule FermixCore.Realtime.CostTracker do
   defp mark_counted(tracker, response_id),
     do: %{tracker | counted_responses: MapSet.put(tracker.counted_responses, response_id)}
 
-  # Image tokens are billed like any other input token, but attributed to the feed
-  # as WELL as the call: retained frames are re-read on every later response, so
-  # the feed's line grows with the real cost of keeping eyes open rather than only
-  # with the instant a frame was sent.
+  # Reported image tokens bill the CALL only. They are not attributed to the feed:
+  # the feed's line is counted client-side per sent frame (`add_feed_frame/1`),
+  # because the reported figure lumps the model's own high-detail tool screenshots
+  # in with the feed's low-detail frames and cannot be split apart here.
   # `cached_tokens` is a SUBSET of the per-modality input totals, split out by
   # `cached_tokens_details`. Subtracting the whole of it from AUDIO alone billed
   # every cached text token twice — once at the full text rate and again at the
@@ -171,8 +202,7 @@ defmodule FermixCore.Realtime.CostTracker do
     output = Map.get(usage, "output_token_details", %{})
 
     cached = cached_split(input, non_negative_int(Map.get(input, "cached_tokens", 0)))
-    image_in = uncached(input, cached, "image_tokens")
-    image_cents = tokens_cents(image_in, rate(tracker, :image_in))
+    image_cents = tokens_cents(uncached(input, cached, "image_tokens"), rate(tracker, :image_in))
 
     total_cents =
       tokens_cents(uncached(input, cached, "audio_tokens"), rate(tracker, :audio_in)) +
@@ -182,7 +212,7 @@ defmodule FermixCore.Realtime.CostTracker do
         tokens_cents(out_tokens(output, "text_tokens"), rate(tracker, :text_out)) +
         image_cents
 
-    %{total_cents: total_cents, image_cents: image_cents, image_tokens: image_in}
+    %{total_cents: total_cents}
   end
 
   # Cached input is billed ONCE, at the cached rate, and the same tokens are
@@ -225,14 +255,7 @@ defmodule FermixCore.Realtime.CostTracker do
   defp out_tokens(output, key), do: non_negative_int(Map.get(output, key, 0))
 
   defp add_costs(tracker, costs) do
-    %{
-      tracker
-      | reported: %{cost_cents: tracker.reported.cost_cents + costs.total_cents},
-        feed: %{
-          image_tokens: tracker.feed.image_tokens + costs.image_tokens,
-          cost_cents: tracker.feed.cost_cents + costs.image_cents
-        }
-    }
+    %{tracker | reported: %{cost_cents: tracker.reported.cost_cents + costs.total_cents}}
   end
 
   defp tokens_cents(tokens, dollars_per_million) do
