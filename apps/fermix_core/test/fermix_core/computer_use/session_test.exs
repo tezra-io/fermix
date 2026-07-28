@@ -245,11 +245,46 @@ defmodule FermixCore.ComputerUse.SessionTest do
       assert result.summary =~ "AXTextField at (50,60)"
     end
 
-    test "an empty elements response reports none found" do
+    test "an empty elements response preserves pixel interaction guidance" do
       session = start_session(driver_opts: [response: %{"ok" => true, "elements" => []}])
       assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
       assert {:ok, result} = Session.execute(session, request)
-      assert %{summary: "no interactive UI elements found", image: nil} = result
+
+      assert result.image == nil
+      assert result.summary =~ "accessibility-backed"
+      assert result.summary =~ "pixel coordinates"
+      refute result.summary =~ "non-interactive"
+    end
+
+    # Empty `elements` is exactly the moment a board/canvas is reached, and the
+    # managed browser has an EXACT route there (`get field=rect` + `click_coords`)
+    # that pixels only approximate. Steering to pixels alone here contradicts the
+    # tool description's own AIMING paragraph at the one moment it matters.
+    test "the empty-elements guidance names the exact browser route before pixels" do
+      session = start_session(driver_opts: [response: %{"ok" => true, "elements" => []}])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.summary =~ "get field=rect"
+      assert result.summary =~ "click_coords"
+      # ...and pixels remain the answer for every other surface.
+      assert result.summary =~ "pixel coordinates"
+    end
+
+    test "a malformed-only elements response uses the empty-result guidance" do
+      response = %{
+        "ok" => true,
+        "elements" => [%{"role" => "AXButton"}, %{"x" => "nope", "y" => 5}]
+      }
+
+      session = start_session(driver_opts: [response: response])
+      assert {:ok, request} = wrap_classify(session, %{"action" => "elements"})
+      assert {:ok, result} = Session.execute(session, request)
+
+      assert result.image == nil
+      assert result.summary =~ "accessibility-backed"
+      assert result.summary =~ "pixel coordinates"
+      refute result.summary =~ "0 interactive element"
     end
 
     test "a malformed elements entry is skipped, never crashed on" do

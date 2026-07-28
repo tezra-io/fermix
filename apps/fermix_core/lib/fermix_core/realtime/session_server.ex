@@ -7,6 +7,7 @@ defmodule FermixCore.Realtime.SessionServer do
 
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
@@ -511,7 +512,8 @@ defmodule FermixCore.Realtime.SessionServer do
       # `screen_share` is a SESSION verb, not a registry capability: it only means
       # anything while this provider session is live, so the session advertises it
       # (and executes it) itself, leaving `ToolBridge` a pure capability bridge.
-      tools = ToolBridge.to_openai_tools(state.capabilities) ++ ScreenShare.tools(state.config)
+      advertised = Advertisement.prepare(state.capabilities, state.tool_context)
+      tools = ToolBridge.to_openai_tools(advertised) ++ ScreenShare.tools(state.config)
       {:ok, OpenAIClient.session_update_event(state.config, instructions, tools)}
     end
   end
