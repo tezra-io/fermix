@@ -30,7 +30,7 @@ defmodule FermixCore.MixProject do
       {:anubis_mcp, "~> 1.6"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
-      {:compux, github: "tezra-io/compux", ref: "9ab40152e1c43e199e78bbd242dabbf7e8b8ac06"},
+      {:compux, github: "tezra-io/compux", ref: "6d7699838c3bf7bd8fcc24c63e34e6d6f670efd0"},
       # Native kill(2) process-group shim used by the command-sweep (ProcessGroup).
       {:fermix_nif, in_umbrella: true},
       {:plug, "~> 1.15", only: :test},
