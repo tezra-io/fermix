@@ -97,6 +97,43 @@ defmodule FermixCore.Tools.BrowserTest do
       assert result.error =~ ~s("action": "act", "kind": "wait")
     end
 
+    # The `wait` funnel (three live sessions reached for it) must not end in a
+    # SECOND dead end: an argument-starved wait died deep in the runtime with the
+    # misleading "Unsupported wait_until value".
+    test "an argument-starved wait names each mode's required argument" do
+      assert {:ok, result} = Browser.execute(%{"action" => "act", "kind" => "wait"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "wait_until"
+      assert result.error =~ "text"
+      assert result.error =~ "no plain-pause mode"
+
+      assert {:ok, starved} =
+               Browser.execute(
+                 %{"action" => "act", "kind" => "wait", "wait_until" => "text"},
+                 @context
+               )
+
+      assert starved.success == false
+      assert starved.error =~ "requires text"
+    end
+
+    test "press without a key names the missing argument" do
+      assert {:ok, result} = Browser.execute(%{"action" => "act", "kind" => "press"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "key"
+      refute result.error =~ "Unsupported act kind"
+    end
+
+    test "get field=rect requires a selector" do
+      assert {:ok, result} =
+               Browser.execute(%{"action" => "act", "kind" => "get", "field" => "rect"}, @context)
+
+      assert result.success == false
+      assert result.error =~ "selector"
+    end
+
     test "an unknown action lists the actions that exist" do
       assert {:ok, result} = Browser.execute(%{"action" => "destroy"}, @context)
 
