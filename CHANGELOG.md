@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-28
+
 ### Added
 
 - **Claude Opus 5 on the Anthropic provider.** `claude-opus-5` joins the model
@@ -14,7 +16,57 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `[fermix_core.providers.anthropic] default_model = "claude-opus-5"`. It rides
   the same adaptive-thinking + `reasoning_effort` wire as Opus 4.8.
 
+- **Voice calls can watch your screen.** Ask a call to watch, look at, or follow
+  along with your screen and it watches that display for the rest of the call —
+  playing a game with you, working through a page you are both reading, helping
+  with an app. Changed frames join the conversation quietly: a still screen sends
+  nothing and a frame never makes the agent speak on its own, so it answers about
+  the screen when you ask instead of narrating it. It rides on computer use (same
+  helper, same macOS Screen Recording permission) and refuses to start rather than
+  streaming blank frames if that permission is missing. Consent is per call:
+  "stop watching" ends it, and hanging up always does. Withhold it entirely with
+  `[fermix_core.realtime] screen_share = false`.
+- **The browser can measure an element.** `act` with `kind: "get"` and
+  `field: "rect"` returns the viewport box of the first `selector` match, in the
+  same coordinate space `click_coords` clicks in — so a board, map, or chart that
+  exposes no clickable elements can still be driven exactly, instead of by
+  guessing pixels.
+- **Computer use can list open windows.** A `windows` action returns each window
+  with a ready-made zoom region, so on a large or ultrawide display the agent
+  crops to the app it is working in instead of spending its whole image budget on
+  desktop it does not care about.
+
 ### Fixed
+
+- **Voice calls were running without their own rules.** The voice-only rules file
+  (`REALTIME.md` — speak briefly, lead with the answer, do not narrate tool use)
+  was never actually loaded into a live call: voice ran on the text agent's prompt
+  instead. That is why calls talked through every step. Editing the file now
+  changes how calls behave, as it was always documented to.
+- **Clicks and drags land where the agent aims.** Two separate defects in the
+  desktop helper: a click could be delivered at the position of the *previous*
+  click while reporting success, and a drag was performed as an instantaneous jump
+  that pages with drag-and-drop never registered as a drag at all. Drags are now
+  performed as real movement with the pointer placed before each event. A click
+  the operating system did not deliver is also reported as such instead of being
+  reported as done.
+- **A voice call is no longer torn down by someone else's cost.** Per-call spend
+  was over-counted several-fold — cached tokens were billed twice and each
+  response re-counted earlier ones — so a short call could hit its cost ceiling
+  and end mid-sentence. Screen-sharing spend is now counted separately from the
+  agent's own screenshots, so precision looks cannot close the eyes that are
+  watching for you.
+- **A hiccup no longer ends a live call.** Routine, recoverable provider errors
+  were being reported to the voice companion as fatal, which shut the microphone
+  down while the call itself was still running. Only genuinely terminal failures
+  end a call now.
+- **Browser errors say how to recover.** A blocked dialog, a stale element handle,
+  an element with no rendered box, and using an `act` kind as a top-level action
+  each ended in a dead end that named the mistake but not the fix. Each now names
+  the call that works. Clicking an element below the fold scrolls it into view
+  first, instead of silently clicking nothing and reporting success, and a page
+  snapshot can no longer return the previous page's contents after a navigation.
+
 
 - **Turning the coding harness off now hides all of it, not most of it.** With
   coding agents not approved on a machine, the tools that launch a run were
