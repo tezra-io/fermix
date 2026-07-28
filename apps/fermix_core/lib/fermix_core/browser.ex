@@ -111,6 +111,16 @@ defmodule FermixCore.Browser do
 
   defp validate_args(_action, _args), do: :ok
 
+  # Wait modes and the argument each one reads. There is deliberately NO
+  # plain-pause mode: "load" matches instantly on an already-complete page, so
+  # offering it as a pause would teach a no-op.
+  @wait_modes %{
+    "text" => "`text` (the substring to wait for in the page text)",
+    "url" => "`text` (the substring to wait for in the url)",
+    "element" => "`ref` or `selector` (the element to wait for)",
+    "load" => "no extra argument"
+  }
+
   defp validate_act_args(kind, args) when kind in ["click", "hover", "submit"] do
     require_string(args, "ref", kind)
   end
@@ -127,12 +137,46 @@ defmodule FermixCore.Browser do
       else: {:error, Error.new("missing_arg", "click_coords requires x and y")}
   end
 
-  defp validate_act_args(kind, _args)
-       when kind in ["press", "wait", "get"],
-       do: :ok
+  defp validate_act_args("press", args), do: require_string(args, "key", "press")
+
+  # Validated HERE so a starved wait gets a teaching error instead of dying deep
+  # in the runtime as the misleading "Unsupported wait_until value" (the exact
+  # path three live sessions hit right after being funneled to `act wait`).
+  defp validate_act_args("wait", %{"wait_until" => mode} = args)
+       when is_map_key(@wait_modes, mode) do
+    case mode do
+      "text" -> require_string(args, "text", "wait_until=text")
+      "url" -> require_string(args, "text", "wait_until=url")
+      "element" -> require_element_target(args)
+      "load" -> :ok
+    end
+  end
+
+  defp validate_act_args("wait", _args) do
+    {:error,
+     Error.new(
+       "missing_arg",
+       "wait requires `wait_until` — one of " <>
+         Enum.map_join(@wait_modes, "; ", fn {mode, arg} -> "#{mode} with #{arg}" end) <>
+         ". There is no plain-pause mode: to pause, wait FOR the thing you expect to change."
+     )}
+  end
+
+  # `rect` reads the geometry of a selector match; without the selector there is
+  # nothing to measure.
+  defp validate_act_args("get", %{"field" => "rect"} = args),
+    do: require_string(args, "selector", "get field=rect")
+
+  defp validate_act_args("get", _args), do: :ok
 
   defp validate_act_args(kind, _args),
     do: {:error, Error.new("invalid_action", "Invalid act kind: #{kind}")}
+
+  defp require_element_target(args) do
+    if is_binary(args["ref"]) or is_binary(args["selector"]),
+      do: :ok,
+      else: {:error, Error.new("missing_arg", "wait_until=element requires `ref` or `selector`")}
+  end
 
   defp require_string(args, key, action) do
     case Map.get(args, key) do

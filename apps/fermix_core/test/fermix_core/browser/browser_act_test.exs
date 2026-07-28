@@ -77,6 +77,26 @@ defmodule FermixCore.Browser.BrowserActTest do
     defp run(_pid, "Runtime.evaluate", %{expression: "location.href"}),
       do: {:ok, %{"result" => %{"value" => "https://example.com/results"}}}
 
+    defp run(_pid, "Runtime.evaluate", %{expression: "window.devicePixelRatio"}),
+      do: {:ok, %{"result" => %{"value" => 2}}}
+
+    defp run(_pid, "Runtime.evaluate", %{expression: expr}) do
+      cond do
+        String.contains?(expr, "getBoundingClientRect") and String.contains?(expr, "missing") ->
+          {:ok, %{"result" => %{"value" => nil}}}
+
+        String.contains?(expr, "getBoundingClientRect") ->
+          {:ok,
+           %{"result" => %{"value" => %{"x" => 40, "y" => 120, "width" => 480, "height" => 480}}}}
+
+        true ->
+          {:ok, %{"result" => %{"value" => nil}}}
+      end
+    end
+
+    defp run(_pid, "Page.captureScreenshot", _params),
+      do: {:ok, %{"data" => Base.encode64("png-bytes")}}
+
     defp run(_pid, _method, _params), do: {:ok, %{}}
 
     defp ax_nodes do
@@ -170,6 +190,53 @@ defmodule FermixCore.Browser.BrowserActTest do
     assert_receive {:cdp, _, "Accessibility.disable", _}
     assert_receive {:cdp, _, "Accessibility.enable", _}
     assert_receive {:cdp, _, "Accessibility.getFullAXTree", _}
+  end
+
+  # A ref below the fold clicked at its box-model center dispatches into nothing
+  # and reports success. Scroll it into view first (a no-op when already visible).
+  test "a ref click scrolls the element into view before reading its box", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, _result} = req(pid, "act", %{"kind" => "click", "ref" => "textbox_1"})
+
+    assert_receive {:cdp, _, "DOM.scrollIntoViewIfNeeded", %{backendNodeId: 42}}
+    assert_receive {:cdp, _, "DOM.getBoxModel", %{backendNodeId: 42}}
+  end
+
+  # The deterministic route onto a canvas-like surface (a chess board): read the
+  # element's geometry, then click square centers with click_coords — same CSS
+  # viewport space, no pixel guessing, no dependency on window position.
+  test "get field=rect returns the first match's viewport box", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, %{"value" => rect}} =
+             req(pid, "act", %{"kind" => "get", "field" => "rect", "selector" => "cg-board"})
+
+    assert rect == %{"x" => 40, "y" => 120, "width" => 480, "height" => 480}
+  end
+
+  test "get field=rect on a selector with no match is a typed not_found", %{pid: pid} do
+    ready(pid)
+
+    assert {:error, error} =
+             req(pid, "act", %{"kind" => "get", "field" => "rect", "selector" => ".missing"})
+
+    assert error.code == "not_found"
+  end
+
+  test "click_coords returns a url receipt like ref clicks do", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, %{"action" => "click_coords", "url" => "https://example.com/results"}} =
+             req(pid, "act", %{"kind" => "click_coords", "x" => 10, "y" => 20})
+  end
+
+  # The two screenshots a model can aim from live in different spaces (CSS
+  # viewport vs device pixels); the ratio is what converts between them.
+  test "screenshot reports the device pixel ratio", %{pid: pid} do
+    ready(pid)
+
+    assert {:ok, %{"device_pixel_ratio" => 2}} = req(pid, "screenshot", %{})
   end
 
   test "fill REPLACES: clears the field via the resolved node before inserting", %{pid: pid} do

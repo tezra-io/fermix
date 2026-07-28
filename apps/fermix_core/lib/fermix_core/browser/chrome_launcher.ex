@@ -282,7 +282,14 @@ defmodule FermixCore.Browser.ChromeLauncher do
       "--disable-component-update",
       "--disable-default-apps",
       "--disable-features=Translate,MediaRouter",
+      # Teardown SIGKILLs Chrome, so every relaunch would otherwise open with a
+      # "Restore pages?" bubble the agent then has to see past (or click away).
+      "--hide-crash-restore-bubble",
       "--password-store=basic",
+      # A fresh profile's first launch on macOS otherwise raises the blocking
+      # "Chrome wants to use your keychain" OS prompt mid-run (harmless flag
+      # elsewhere; Playwright ships it unconditionally too).
+      "--use-mock-keychain",
       "about:blank"
     ]
     |> maybe_headless(headless)

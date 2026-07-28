@@ -53,7 +53,9 @@ defmodule FermixCore.Tools.Browser do
         },
         selector: %{
           type: "string",
-          description: "Reserved selector field for future scoped reads."
+          description:
+            "CSS selector — for `act` `kind=get` `field=rect` (the element to measure) " <>
+              "and `kind=wait` `wait_until=element`."
         },
         kind: %{
           type: "string",
@@ -72,7 +74,10 @@ defmodule FermixCore.Tools.Browser do
         },
         field: %{
           type: "string",
-          description: "Field name for get/storage actions."
+          description:
+            "Field for get/storage: url | title | html | text | count | ready_state | " <>
+              "rect (the viewport box {x,y,width,height} of the first `selector` match, " <>
+              "in the same CSS space click_coords clicks in)."
         },
         value: %{
           type: "string",
@@ -85,11 +90,14 @@ defmodule FermixCore.Tools.Browser do
         },
         x: %{
           type: "number",
-          description: "X coordinate for coordinate actions."
+          description:
+            "X for click_coords, in CSS-pixel page-viewport space (what `get field=rect` " <>
+              "returns) — NOT screen pixels from computer_use, and NOT raw pixels off a " <>
+              "browser screenshot (those are device pixels; divide by its device_pixel_ratio)."
         },
         y: %{
           type: "number",
-          description: "Y coordinate for coordinate actions."
+          description: "Y for click_coords, in the same CSS-pixel page-viewport space as x."
         },
         button: %{
           type: "string",
@@ -160,8 +168,11 @@ defmodule FermixCore.Tools.Browser do
       "and the human share — a board you play on together, a dashboard you both watch. " <>
       "`state` reports `headless`; if it is ever true the human cannot see this window, so say " <>
       "so instead of assuming they are looking at it. A `snapshot` lists only what the page " <>
-      "exposes as elements — a canvas (board, map, chart) exposes none, so act on those by " <>
-      "pixel with `computer_use`; using both on one page is normal."
+      "exposes as elements — a board/map/chart often exposes none, but it is still a DOM " <>
+      "element: read its box with `get field=rect` and click positions inside it with " <>
+      "`click_coords` (same CSS space, deterministic — no window position, no pixel " <>
+      "guessing). `computer_use` pixels are for content OUTSIDE this browser's own window; " <>
+      "using both on one page is normal."
   end
 
   @impl true
