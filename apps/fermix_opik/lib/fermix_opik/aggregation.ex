@@ -24,8 +24,26 @@ defmodule FermixOpik.Aggregation do
   # backstop for a run that died without signalling (e.g. daemon restart).
   @sweep_grace_ms 60_000
 
+  # How long a closed session stays tombstoned (see `closed_sessions`). Long
+  # enough to cover an async emitter that lost the race with its own turn's close
+  # (channel draft-stream seals do, on a fast turn), short enough that the map
+  # cannot grow without bound — the sweep prunes past this age.
+  @closed_session_ttl_ms 600_000
+
   @enforce_keys [:project, :ttl_ms]
-  defstruct project: nil, ttl_ms: 120_000, traces: %{}, sessions: %{}
+  defstruct project: nil,
+            ttl_ms: 120_000,
+            traces: %{},
+            sessions: %{},
+            # session_id => monotonic close time. A span arriving for a session
+            # whose trace already SHIPPED cannot be added to it, and creating a
+            # session for it would mint an empty second root for a turn that is
+            # already complete (observed live: a fast turn whose `stream:open` /
+            # `stream:seal` landed a second after `agent.message` closed the
+            # trace, producing an input/output-less `agent:main` phantom). Such
+            # spans are dropped and counted instead.
+            closed_sessions: %{},
+            dropped_after_close: 0
 
   @type closed :: %{trace: map(), spans: [map()]}
   @type at :: %{at: DateTime.t(), mono: integer()}
@@ -118,8 +136,14 @@ defmodule FermixOpik.Aggregation do
   def apply_event(state, [:fermix, :channel, :stream], meas, meta, at) do
     case Map.get(meta, :phase) do
       :open ->
-        # :open fires on the first edit/block, always during the agent loop, so
-        # the run's session is guaranteed open — safe to create the child span.
+        # :open may be a turn's FIRST exported event, so it must be allowed to
+        # create the session — `attach_if_open` (below) would drop it and lose the
+        # ttfd_ms. Its old claim that the session is therefore "guaranteed open"
+        # was wrong: the draft stream is its own process, and on a fast turn both
+        # :open and :seal can land after `agent.message` already shipped the trace
+        # (observed live). What makes that safe is the `closed_sessions` tombstone
+        # in `place_under`, which drops a span for an already-shipped session
+        # instead of resurrecting it as an empty root.
         add_child_span(state, meta, at, &Mapper.stream_span(meta, meas, &1))
 
       phase when phase in [:block, :seal, :discard] ->
@@ -377,8 +401,18 @@ defmodule FermixOpik.Aggregation do
     end
   end
 
+  # `screen_feed_start`/`_stop` are bookends, not per-frame events: the individual
+  # `frame_sent` events stay out of Opik on purpose (up to 20/minute would bury a
+  # call's real spans), and the stop event's typed `reason` is what a reader needs.
   def apply_event(state, [:fermix, :realtime, phase], meas, meta, at)
-      when phase in [:session_created, :session_updated, :provider_error, :reconnect] do
+      when phase in [
+             :session_created,
+             :session_updated,
+             :provider_error,
+             :reconnect,
+             :screen_feed_start,
+             :screen_feed_stop
+           ] do
     add_child_span(
       state,
       meta,
@@ -398,6 +432,11 @@ defmodule FermixOpik.Aggregation do
           device_id: Map.get(meta, :device_id),
           model: Map.get(meta, :model),
           voice: Map.get(meta, :voice),
+          # WHY the call ended (call_stop / cost_limit / max_session_duration /
+          # provider_disconnected). Without it a teardown was indistinguishable
+          # from a normal hang-up in the trace, which is what let a cost-ceiling
+          # kill masquerade as the operator ending the call.
+          reason: Map.get(meta, :reason),
           input_audio_ms: Map.get(meas, :input_audio_ms),
           input_audio_tokens: Map.get(meas, :input_audio_tokens),
           estimated_cost_cents: Map.get(meas, :estimated_cost_cents),
@@ -457,10 +496,27 @@ defmodule FermixOpik.Aggregation do
           stale?(acc, now_mono, state.ttl_ms),
           do: trace_id
 
-    Enum.reduce(stale, {state, []}, fn trace_id, {st, closed} ->
-      {st, one} = emit_trace(st, trace_id)
-      {st, closed ++ List.wrap(one)}
-    end)
+    {state, closed} =
+      Enum.reduce(stale, {state, []}, fn trace_id, {st, closed} ->
+        {st, one} = emit_trace(st, trace_id)
+        {st, closed ++ List.wrap(one)}
+      end)
+
+    {prune_closed_sessions(state, now_mono), closed}
+  end
+
+  # Tombstones are bounded by age: past the TTL a late span can no longer belong
+  # to that turn, so the entry is dropped and the session id behaves as new again.
+  defp prune_closed_sessions(state, now_mono) do
+    ttl_us = @closed_session_ttl_ms * 1_000
+
+    kept =
+      for {sid, closed_at} <- state.closed_sessions,
+          now_mono - closed_at < ttl_us,
+          into: %{},
+          do: {sid, closed_at}
+
+    %{state | closed_sessions: kept}
   end
 
   defp stale?(%{sweep_floor_mono: floor}, now_mono, _ttl_ms) when is_integer(floor),
@@ -500,6 +556,14 @@ defmodule FermixOpik.Aggregation do
 
   # Attach a child span under `session_id`'s wrapper (creating the run lazily).
   defp place_under(state, nil, _meta, _at, _span_fun), do: {state, []}
+
+  # A span for a session whose trace already shipped: adding it is impossible and
+  # creating a session would mint an empty second root, so drop and count it. Only
+  # ever reached by an emitter that lost the race with its own turn's close.
+  defp place_under(state, session_id, _meta, _at, _span_fun)
+       when is_map_key(state.closed_sessions, session_id) do
+    {%{state | dropped_after_close: state.dropped_after_close + 1}, []}
+  end
 
   defp place_under(state, session_id, meta, at, span_fun) do
     ctx = %{
@@ -701,10 +765,26 @@ defmodule FermixOpik.Aggregation do
             tags: acc.tags
           })
 
-        sessions =
-          for {sid, ref} <- state.sessions, ref.trace_id != trace_id, into: %{}, do: {sid, ref}
+        {closing, sessions} =
+          Map.split_with(state.sessions, fn {_sid, ref} -> ref.trace_id == trace_id end)
 
-        state = %{state | traces: Map.delete(state.traces, trace_id), sessions: sessions}
+        # Tombstone the sessions whose trace just shipped, so a late span is
+        # dropped rather than resurrected into a fresh (empty) root. Stamped with
+        # the trace's last activity, which is what the sweep prunes against.
+        closed_at = acc.last_seen_mono
+
+        closed_sessions =
+          Enum.reduce(closing, state.closed_sessions, fn {sid, _ref}, tombstones ->
+            Map.put(tombstones, sid, closed_at)
+          end)
+
+        state = %{
+          state
+          | traces: Map.delete(state.traces, trace_id),
+            sessions: sessions,
+            closed_sessions: closed_sessions
+        }
+
         {state, %{trace: trace, spans: spans}}
     end
   end

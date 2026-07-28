@@ -39,6 +39,8 @@ defmodule FermixOpik.Reporter do
     [:fermix, :realtime, :session_updated],
     [:fermix, :realtime, :provider_error],
     [:fermix, :realtime, :reconnect],
+    [:fermix, :realtime, :screen_feed_start],
+    [:fermix, :realtime, :screen_feed_stop],
     [:fermix, :realtime, :call_stop],
     [:fermix, :timeout, :expired]
   ]
