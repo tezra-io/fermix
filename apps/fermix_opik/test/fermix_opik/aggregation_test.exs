@@ -25,6 +25,68 @@ defmodule FermixOpik.AggregationTest do
   defp span_named(spans, name), do: Enum.find(spans, &(&1.name == name))
   defp spans_of_type(spans, type), do: Enum.filter(spans, &(&1[:type] == type))
 
+  describe "spans arriving after their trace shipped" do
+    test "a late draft-stream seal is dropped, not turned into an empty second root" do
+      # Observed live: a fast turn closed at 21:50:55 and its `stream:open` /
+      # `stream:seal` landed a second later, minting an input/output-less
+      # `agent:main` phantom root. The draft stream is its own process, so on a
+      # short turn it loses the race with `agent.message`.
+      {state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+          # Both arrive AFTER the close above.
+          {[:fermix, :channel, :stream], %{ttfd_ms: 40},
+           %{channel: "telegram", session_id: "main-1", phase: :open, status: :ok}},
+          {[:fermix, :channel, :stream], %{total_edits: 1, dropped_snapshots: 0},
+           %{channel: "telegram", session_id: "main-1", phase: :seal, status: :ok}}
+        ])
+
+      # Exactly one trace, and no phantom left open behind it.
+      assert [%{trace: trace}] = closed
+      assert trace.name == "agent:main"
+      assert state.traces == %{}
+
+      # Only :open reaches `place_under` (and so the tombstone): :seal is already
+      # filtered by `attach_if_open` upstream. :open cannot use that filter — it
+      # may legitimately be a turn's first event and must be able to create the
+      # session — which is exactly why the tombstone, not an open-session check,
+      # is what closes this hole.
+      assert state.dropped_after_close == 1
+    end
+
+    test "a genuinely new session still opens its own root after another closed" do
+      {state, closed} =
+        run([
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}},
+          {[:fermix, :provider, :call], %{duration_ms: 10},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-2"}}
+        ])
+
+      # The tombstone is per session id — it must not suppress unrelated work.
+      assert length(closed) == 1
+      assert map_size(state.traces) == 1
+      assert state.dropped_after_close == 0
+    end
+
+    test "tombstones are pruned by the sweep so they cannot grow without bound" do
+      {state, _closed} =
+        run([
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert map_size(state.closed_sessions) == 1
+
+      # Well past the tombstone TTL (10 min, monotonic microseconds).
+      {swept, _} = Aggregation.sweep(state, 10_000_000_000)
+      assert swept.closed_sessions == %{}
+    end
+  end
+
   test "draft-stream phases nest as child spans under the turn trace, never as roots" do
     {_state, closed} =
       run([
