@@ -83,7 +83,7 @@ Vendor-CLI **logins are not in the image** — see §5.
 - `dry`, `tests` — no spend: suite validation and the harness unit specs.
 - `mix` — the umbrella ExUnit suite, on Linux.
 
-Reports are rsync'd back into `benchmark/reports/` when the run finishes.
+Reports are rsync'd back into `benchmark/reports/` **whether the tier passes or fails** — the box is destroyed on exit, so a failing run's report would otherwise be lost with it. A failed pull warns rather than passing silently.
 
 ---
 
@@ -94,8 +94,9 @@ Reports are rsync'd back into `benchmark/reports/` when the run finishes.
 ```sh
 ./scripts/vultr-box.sh up
 ./scripts/vultr-box.sh ssh
-#   on the box:
-fermix setup                    # the wizard: channels, plugins, provider keys
+#   on the box — note there is NO `fermix` binary: the umbrella builds no
+#   escript, so the setup wizard exists only in an installed release. Configure
+#   channels/plugins by editing $FERMIX_HOME/config.toml.
 cd /opt/fermix && mix fermix.dev
 
 ./scripts/vultr-box.sh sync     # after editing locally
@@ -159,7 +160,8 @@ Linux at all. That difference is exactly what this box exists to test: a
 |---|---|---|
 | `VULTR_API_KEY` | — | required |
 | `VULTR_REGION` | `atl` | `regions` to list |
-| `VULTR_PLAN` | `vhp-2c-4gb` | `plans` to list |
+| `VULTR_PLAN` | `vc2-4c-8gb` | `plans` to list |
+| Opik (`OPIK_BASE_URL`, `FERMIX_OPIK_BASE_URL`, `OPIK_PROJECT`, + keys) | — | forwarded when set; the graded tiers need a reachable Opik |
 | `VULTR_OS` | `Ubuntu 24.04 LTS x64` | `images` to list |
 | `FERMIX_VULTR_STATE` | `~/.fermix-vultr` | ssh key + tracked ids |
 | `EVAL_PROVIDER` / `EVAL_MODEL` | `openai` / `gpt-5.6-luna` | seeds the disposable home |

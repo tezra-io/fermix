@@ -330,7 +330,7 @@ scripts/vultr-box.sh up                # persistent box; ssh in, `fermix setup` 
 **Full runbook: [`docs/VULTR_BOX.md`](../docs/VULTR_BOX.md)** — setup, every
 command, harness vendor-CLI logins, secrets, cost, limits, troubleshooting.
 
-Defaults are `atl` / `vhp-2c-4gb`; OTP 28 and Elixir 1.19.5 are installed
+Defaults are `atl` / `vc2-4c-8gb`; OTP 28 and Elixir 1.19.5 are installed
 **prebuilt** (Erlang Solutions debs + Elixir's per-OTP zip) and the pins are
 verified before the image is accepted, so a wrong version fails the snapshot
 instead of quietly testing a toolchain we do not ship.

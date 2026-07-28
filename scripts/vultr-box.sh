@@ -9,11 +9,13 @@
 #
 #   vultr-box.sh snapshot   build the base image: prebuilt OTP + Elixir, Rust,
 #                           uv, the coding-harness vendor CLIs (claude, codex),
-#                           plus a warmed deps/ and _build/ so later boxes
-#                           compile incrementally. Refresh it when mix.lock
-#                           moves; app-code drift is handled incrementally.
+#                           plus a warmed deps/ and _build/ so later boxes reuse
+#                           compiled DEPS. App code is always --force compiled
+#                           (see compile_remote). Refresh when mix.lock moves.
 #   vultr-box.sh up         persistent box: sync tree, compile, boot a full daemon.
-#                           SSH in and run `fermix setup` for channels/plugins.
+#                           SSH in to configure channels/plugins (config.toml —
+#                           a source checkout has no `fermix` binary).
+#   vultr-box.sh sync       re-push local edits to the persistent box
 #   vultr-box.sh run        ephemeral box: sync, seed a disposable home, boot, run
 #                           a tier, then ALWAYS destroy. One-shot feature testing.
 #   vultr-box.sh ssh        shell into the persistent box
@@ -43,7 +45,7 @@
 # drift, so pick from your own account rather than from documentation.
 #
 # Env: VULTR_API_KEY (required)
-#      VULTR_REGION (default atl) · VULTR_PLAN (default vhp-2c-4gb) · VULTR_OS
+#      VULTR_REGION (default atl) · VULTR_PLAN (default vc2-4c-8gb) · VULTR_OS
 #      FERMIX_VULTR_STATE · EVAL_PROVIDER · EVAL_MODEL
 #      OPENAI_API_KEY (+ any provider/channel keys you want forwarded)
 #
@@ -57,11 +59,15 @@ KEY_FILE="$STATE_DIR/id_ed25519"
 API="https://api.vultr.com/v2"
 
 REGION="${VULTR_REGION:-atl}"
-# Eval turns wait on model APIs, not CPU, so 2c/4GB is enough; vhp buys newer
-# cores + NVMe, which is where the per-run `mix compile` actually spends time.
-# For a one-off bigger snapshot box: VULTR_PLAN=vc2-4c-8gb ... snapshot — but see
-# the disk guard in boot_box, a snapshot cannot be restored onto a smaller disk.
-PLAN="${VULTR_PLAN:-vhp-2c-4gb}"
+# Eval turns wait on model APIs, not CPU, so 4GB is enough, and 4 cores matches
+# CI (`mix test` runs max_cases 2x cores — 8 there, so a 2-core box halves the
+# concurrency that surfaces timing races). vc2 is the most widely available line;
+# run `plans` for what your region actually offers and override if you want the
+# cheaper 2-core/4GB tier or vhp's newer cores + NVMe (note vhp ids carry an
+# `-amd` suffix and start at 4 cores).
+# A one-off bigger snapshot box works — VULTR_PLAN=... snapshot — but see the
+# disk guard in boot_box: a snapshot cannot be restored onto a smaller disk.
+PLAN="${VULTR_PLAN:-vc2-4c-8gb}"
 OS_NAME="${VULTR_OS:-Ubuntu 24.04 LTS x64}"
 OTP_MAJOR="28"
 ELIXIR_VERSION="1.19.5"
@@ -77,8 +83,26 @@ ACTIVE_TIMEOUT=300
 SSH_TIMEOUT=180
 SNAPSHOT_TIMEOUT=1800
 
+TOP_PID=$$
+trap 'exit 1' TERM INT
+
 log()  { printf '\033[36m[vultr-box]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[31m[vultr-box] %s\033[0m\n' "$*" >&2; exit 1; }
+
+# `exit` inside $( ) ends only the substitution subshell, so a plain `die` let the
+# caller continue with an empty value — observed as a 300s poll against an empty
+# instance id that still exited 0. Signalling the top-level shell makes a failure
+# terminal from any depth; the EXIT trap still reaps. Fallible helpers ALSO publish
+# through OUT rather than stdout (below), so `die` runs in the caller's own shell
+# and stops it outright instead of one command late. macOS is bash 3.2, where
+# `set -e` does not catch these on its own.
+die() {
+  printf '\033[31m[vultr-box] %s\033[0m\n' "$*" >&2
+  kill -TERM "$TOP_PID" 2>/dev/null
+  exit 1
+}
+
+# Return channel for helpers that can fail. Read it immediately after the call.
+OUT=""
 
 require_key() {
   [ -n "${VULTR_API_KEY:-}" ] || die "VULTR_API_KEY is not set (Vultr console → Account → API)"
@@ -90,7 +114,10 @@ require_key() {
 # body the caller would silently parse as empty.
 api() {
   local method="$1" path="$2" body="${3:-}"
-  local -a args=(-sS -X "$method" -H "Authorization: Bearer $VULTR_API_KEY"
+  # Without these the poll caps below are fiction: one hung connection stalls
+  # forever inside a loop that believes it is bounded.
+  local -a args=(-sS --connect-timeout 10 --max-time 60
+                 -X "$method" -H "Authorization: Bearer $VULTR_API_KEY"
                  -w '\n%{http_code}' "$API$path")
   [ -n "$body" ] && args+=(-H 'Content-Type: application/json' -d "$body")
 
@@ -110,19 +137,30 @@ resolve_os_id() {
   id="$(api GET '/os?per_page=500' | jq -r --arg n "$OS_NAME" '.os[] | select(.name==$n) | .id')"
   [ -n "$id" ] || die "no OS named '$OS_NAME'. Available:
 $(api GET '/os?per_page=500' | jq -r '.os[].name' | grep -i ubuntu | sed 's/^/  /')"
-  printf '%s' "$id"
+  OUT="$id"
 }
 
 plan_disk_gb() {
-  api GET '/plans?per_page=500' | jq -r --arg p "$1" '.plans[] | select(.id==$p) | .disk'
+  local disk
+  disk="$(api GET '/plans?per_page=500' | jq -r --arg p "$1" '.plans[] | select(.id==$p) | .disk')"
+  [ -n "$disk" ] || die "no disk size reported for plan '$1'"
+  OUT="$disk"
 }
 
+# A plan that exists globally but not in this region still fails at create time,
+# and the floor here must match cmd_plans (4GB) — an 8GB floor hides exactly the
+# small plans this box is meant to run on.
 verify_plan() {
-  api GET '/plans?per_page=500' | jq -e --arg p "$PLAN" '.plans[] | select(.id==$p)' >/dev/null \
-    || die "unknown VULTR_PLAN '$PLAN'. Candidates with >=8GB:
+  api GET '/plans?per_page=500' | jq -e --arg p "$PLAN" --arg r "$REGION" \
+      '.plans[] | select(.id==$p) | select(.locations | index($r))' >/dev/null \
+    || die "VULTR_PLAN '$PLAN' is not available in region '$REGION'.
+Candidates there (>=4GB, cheapest first) — full list: $(basename "$0") plans
 $(api GET '/plans?per_page=500' \
-    | jq -r '.plans[] | select(.ram>=8192) | "  \(.id)  \(.vcpu_count)vcpu \(.ram)MB $\(.monthly_cost)/mo"' \
-    | head -15)"
+    | jq -r --arg r "$REGION" '.plans[]
+        | select(.locations | index($r)) | select(.ram>=4096)
+        | [.monthly_cost, "  \(.id)  \(.vcpu_count)vcpu \(.ram/1024|floor)GB \(.disk)GB disk \$\(.monthly_cost)/mo"]
+        | @tsv' \
+    | sort -n | cut -f2-)"
 }
 
 ensure_ssh_key() {
@@ -139,7 +177,8 @@ ensure_ssh_key() {
     existing="$(api POST /ssh-keys \
       "$(jq -nc --arg n fermix-vultr-box --arg k "$pub" '{name:$n,ssh_key:$k}')" | jq -r '.ssh_key.id')"
   fi
-  printf '%s' "$existing"
+  [ -n "$existing" ] && [ "$existing" != "null" ] || die "could not register an SSH key with Vultr"
+  OUT="$existing"
 }
 
 # --- instance lifecycle -----------------------------------------------------
@@ -150,13 +189,27 @@ note_pending() { mkdir -p "$STATE_DIR"; printf '%s\n' "$1" >> "$STATE_DIR/pendin
 
 clear_pending() { rm -f "$STATE_DIR/pending.ids"; }
 
+# Deletes directly rather than through `api`: `api` calls `die` on a non-2xx, and
+# `|| true` cannot swallow that — die signals TOP_PID, so one undeletable id would
+# abort the reap and leak every remaining instance, billing. A failed delete here
+# must be reported loudly and the loop must continue.
 reap_pending() {
   [ -f "$STATE_DIR/pending.ids" ] || return 0
-  local id
+  local id code leaked=0
   while read -r id; do
-    [ -n "$id" ] && { log "reaping half-provisioned instance $id"; api DELETE "/instances/$id" >/dev/null || true; }
+    [ -n "$id" ] || continue
+    log "reaping half-provisioned instance $id"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+      -H "Authorization: Bearer ${VULTR_API_KEY:-}" "$API/instances/$id" 2>/dev/null || echo 000)"
+    case "$code" in
+      2*|404) ;;
+      *) leaked=1
+         printf '\033[31m[vultr-box] COULD NOT DELETE %s (HTTP %s) — it is STILL BILLING. Delete it in the Vultr console.\033[0m\n' \
+            "$id" "$code" >&2 ;;
+    esac
   done < "$STATE_DIR/pending.ids"
-  clear_pending
+  [ "$leaked" -eq 0 ] && clear_pending
+  return 0
 }
 
 create_instance() {
@@ -174,15 +227,23 @@ create_instance() {
   id="$(api POST /instances "$payload" | jq -r '.instance.id')"
   [ -n "$id" ] && [ "$id" != "null" ] || die "Vultr returned no instance id"
   note_pending "$id"
-  printf '%s' "$id"
+  OUT="$id"
 }
 
 wait_active() {
-  local id="$1" i status
+  local id="$1" i status ip
+  # Never poll on an empty id: that turned a failed create into 60 rounds of 404.
+  [ -n "$id" ] || die "wait_active called without an instance id"
   log "waiting for the instance to come up (up to ${ACTIVE_TIMEOUT}s)"
   for ((i = 0; i < ACTIVE_TIMEOUT; i += 5)); do
     status="$(api GET "/instances/$id" | jq -r '.instance.server_status')"
-    [ "$status" = "ok" ] && { printf '%s' "$(api GET "/instances/$id" | jq -r '.instance.main_ip')"; return 0; }
+    if [ "$status" = "ok" ]; then
+      ip="$(api GET "/instances/$id" | jq -r '.instance.main_ip')"
+      [ -n "$ip" ] && [ "$ip" != "null" ] && [ "$ip" != "0.0.0.0" ] \
+        || die "instance $id is up but reports no usable IP ('$ip')"
+      OUT="$ip"
+      return 0
+    fi
     sleep 5
   done
   die "instance $id never reached server_status=ok within ${ACTIVE_TIMEOUT}s"
@@ -306,9 +367,13 @@ sync_tree() {
   remote "$ip" "mkdir -p $REMOTE_REPO"
   # .git ships: the dangerous tier's strict preflight requires the eval workspace
   # to be a git snapshot at the same HEAD as the harness checkout.
+  # `.claude/` alone is hundreds of MB of agent worktrees, and heap dumps can carry
+  # process memory. None of it belongs in a snapshot that persists remotely.
   rsync -az --delete \
     --exclude '_build' --exclude 'deps' --exclude 'burrito_out' \
     --exclude 'artifacts' --exclude 'videos' --exclude '.elixir_ls' \
+    --exclude '.claude' --exclude '.agents' --exclude '.pytest_cache' \
+    --exclude '.DS_Store' --exclude 'erl_crash.dump' --exclude '*.dump' \
     -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
     "$REPO_ROOT/" "root@$ip:$REMOTE_REPO/"
 }
@@ -317,10 +382,17 @@ sync_tree() {
 forwarded_env() {
   local name
   for name in OPENAI_API_KEY ANTHROPIC_API_KEY XAI_API_KEY OPENROUTER_API_KEY \
-              EVAL_JUDGE_API_KEY FERMIX_OPIK_API_KEY FERMIX_OPIK_WORKSPACE \
-              OPIK_API_KEY OPIK_WORKSPACE TELEGRAM_BOT_TOKEN; do
-    [ -n "${!name:-}" ] && printf '%s=%q ' "$name" "${!name}"
+              EVAL_JUDGE_API_KEY EVAL_JUDGE_BASE_URL EVAL_JUDGE_MODEL \
+              FERMIX_OPIK_API_KEY FERMIX_OPIK_WORKSPACE FERMIX_OPIK_BASE_URL \
+              OPIK_API_KEY OPIK_WORKSPACE OPIK_BASE_URL OPIK_PROJECT \
+              TELEGRAM_BOT_TOKEN; do
+    if [ -n "${!name:-}" ]; then printf '%s=%q ' "$name" "${!name}"; fi
   done
+  # A function returns its last command's status. With `[ -n .. ] && printf`, an
+  # unset LAST name made this return 1, and `env_prefix="$(forwarded_env)"` then
+  # killed the run under set -e with no message — after the box was already paid
+  # for. `if` returns 0, and this makes it explicit besides.
+  return 0
 }
 
 # Baked into the snapshot so later boxes compile incrementally. deps/ is the
@@ -361,10 +433,13 @@ cmd_snapshot() {
   require_key; verify_plan
   local key os_id id ip snap i status
   trap reap_pending EXIT
-  key="$(ensure_ssh_key)"; os_id="$(resolve_os_id)"
-  log "provisioning a base box ($OS_NAME, $PLAN, $REGION) — Erlang is compiled, expect ~20-30 min"
-  id="$(create_instance "fermix-base" os_id "$os_id" "$key" "$(base_cloud_init | base64 | tr -d '\n')")"
-  ip="$(wait_active "$id")"; wait_ssh "$ip"; wait_cloud_init "$ip"
+  ensure_ssh_key; key="$OUT"
+  resolve_os_id; os_id="$OUT"
+  log "provisioning a base box ($OS_NAME, $PLAN, $REGION)"
+  create_instance "fermix-base" os_id "$os_id" "$key" \
+    "$(base_cloud_init | base64 | tr -d '\n')"; id="$OUT"
+  wait_active "$id"; ip="$OUT"
+  wait_ssh "$ip"; wait_cloud_init "$ip"
   sync_tree "$ip"; warm_build "$ip"
 
   log "snapshotting the provisioned box"
@@ -381,37 +456,54 @@ cmd_snapshot() {
   printf '%s' "$snap" > "$STATE_DIR/snapshot.id"
   # The source disk, so a restore onto a smaller plan is refused up front rather
   # than by the API after a box has already been created and billed.
-  plan_disk_gb "$PLAN" > "$STATE_DIR/snapshot.disk"
+  # plan_disk_gb publishes via OUT and prints nothing; redirecting it wrote an
+  # empty file, and an empty `have` defaulted to 0, so the guard always passed.
+  plan_disk_gb "$PLAN"; printf '%s' "$OUT" > "$STATE_DIR/snapshot.disk"
   destroy_instance "$id"; clear_pending
   log "base snapshot ready: $snap — 'up' and 'run' now restore from it"
 }
 
 snapshot_id() {
   [ -f "$STATE_DIR/snapshot.id" ] || die "no base snapshot yet — run: $(basename "$0") snapshot"
-  cat "$STATE_DIR/snapshot.id"
+  local id
+  id="$(cat "$STATE_DIR/snapshot.id")"
+  [ -n "$id" ] || die "$STATE_DIR/snapshot.id is empty — rebuild with: $(basename "$0") snapshot"
+  OUT="$id"
 }
 
+# Publishes "<id> <ip>" via OUT. Every helper here can die, and each must stop the
+# run at the point of failure rather than hand back an empty string.
 boot_box() {
-  local label="$1" key ip id want have
-  require_key; verify_plan
+  local label="$1" key ip id snap want have
+  # Local preconditions first, so a missing snapshot fails instantly instead of
+  # after a network round trip.
+  require_key
+  snapshot_id; snap="$OUT"
+  verify_plan
   # A snapshot taken on a bigger plan carries that plan's disk and cannot be
   # restored onto a smaller one. Catch it here, not after a box exists.
-  have="$(cat "$STATE_DIR/snapshot.disk" 2>/dev/null || echo 0)"
-  want="$(plan_disk_gb "$PLAN")"
-  [ "${have:-0}" -le "${want:-0}" ] || die \
+  have="$(cat "$STATE_DIR/snapshot.disk" 2>/dev/null || true)"
+  # Fail closed: an absent or non-numeric record means we cannot prove the restore
+  # fits, and defaulting it to 0 would silently pass the check it exists to make.
+  case "$have" in
+    ''|*[!0-9]*) die "$STATE_DIR/snapshot.disk is missing or unreadable — rebuild with: $(basename "$0") snapshot" ;;
+  esac
+  plan_disk_gb "$PLAN"; want="$OUT"
+  [ "$have" -le "$want" ] || die \
     "snapshot was built on a ${have}GB-disk plan; '$PLAN' has only ${want}GB.
 Rebuild it on a plan with disk <= ${want}GB:  VULTR_PLAN=$PLAN $(basename "$0") snapshot"
-  key="$(ensure_ssh_key)"
-  id="$(create_instance "$label" snapshot_id "$(snapshot_id)" "$key")"
-  ip="$(wait_active "$id")"; wait_ssh "$ip"
-  printf '%s %s' "$id" "$ip"
+  ensure_ssh_key; key="$OUT"
+  create_instance "$label" snapshot_id "$snap" "$key"; id="$OUT"
+  wait_active "$id"; ip="$OUT"
+  wait_ssh "$ip"
+  OUT="$id $ip"
 }
 
 cmd_up() {
   [ -f "$STATE_DIR/persistent.id" ] && die "a persistent box already exists ($(cat "$STATE_DIR/persistent.id")) — use ssh, or down first"
   local pair id ip
   trap reap_pending EXIT
-  pair="$(boot_box fermix-dev)"; id="${pair% *}"; ip="${pair#* }"
+  boot_box fermix-dev; pair="$OUT"; id="${pair% *}"; ip="${pair#* }"
   printf '%s' "$id" > "$STATE_DIR/persistent.id"
   printf '%s' "$ip" > "$STATE_DIR/persistent.ip"
   clear_pending   # now tracked as the persistent box; no longer an orphan
@@ -423,8 +515,10 @@ cmd_up() {
   Persistent Linux box ready.
 
     ssh:   $(basename "$0") ssh
-    setup: fermix setup          # wizard — channels, plugins, provider keys
-    start: cd $REMOTE_REPO && mix fermix.dev
+    start:  cd $REMOTE_REPO && mix fermix.dev
+    config: \$FERMIX_HOME/config.toml  (no \`fermix\` binary on a source
+            checkout — the umbrella builds no escript, so the setup wizard is
+            only available from an installed release)
 
   Channels: use a SEPARATE test bot token. Two daemons polling one Telegram
   token collide (409), so do not reuse your production or ~/.fermix-dev token.
@@ -444,11 +538,19 @@ cmd_sync() {
 # failure — that is what makes FERMIX_EVAL_DISPOSABLE=1 an honest attestation.
 cmd_run() {
   local tier="${1:-regression}"
-  local pair ip env_prefix
-  # Set before anything is created: reap_pending is what guarantees the box dies
-  # on every path, including a mid-boot failure or Ctrl-C.
-  trap reap_pending EXIT INT TERM
-  pair="$(boot_box "fermix-run-$tier")"; ip="${pair#* }"
+  local pair ip env_prefix rc=0
+  # Reject an unknown tier BEFORE provisioning: validating it after the box was
+  # created, synced, compiled and booted charged the operator for a typo.
+  case "$tier" in
+    regression|capability|dangerous|dry|tests|mix) ;;
+    *) die "unknown tier '$tier' (regression|capability|dangerous|dry|tests|mix)" ;;
+  esac
+  # EXIT only. Trapping INT/TERM here replaced the global `exit 1` handler with one
+  # that returns, so Ctrl-C reaped the box and then let the script keep running
+  # against the corpse. EXIT still fires when the global handler exits, so the box
+  # is still reaped on every path.
+  trap reap_pending EXIT
+  boot_box "fermix-run-$tier"; pair="$OUT"; ip="${pair#* }"
 
   sync_tree "$ip"; compile_remote "$ip"
   env_prefix="$(forwarded_env)"
@@ -461,8 +563,13 @@ cmd_run() {
 
   case "$tier" in
     regression|capability|dry|tests)
+      # The capability target drops its flags unless these are set, and then
+      # run_capability.py refuses — after the box is already provisioned. True by
+      # construction here: the VM and its seeded home exist only for this run.
       remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO/benchmark && \
-        $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME make $tier" ;;
+        $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME \
+        CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 \
+        make $tier" || rc=$? ;;
     dangerous)
       # A real throwaway VM, so the D5 attestation is true here rather than stretched.
       remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO && \
@@ -470,17 +577,21 @@ cmd_run() {
         cd benchmark && $env_prefix FERMIX_EVAL_HOME=$REMOTE_EVAL_HOME FERMIX_EVAL_DISPOSABLE=1 \
         uv run bin/run_eval.py --dangerous --suite sandbox_verify \
           --scenario assistant_refuses_hardline_shell --profile destructive \
-          --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data" ;;
+          --confirm-daemon-isolated --confirm-isolated-env --confirm-private-data" || rc=$? ;;
     mix)
       # Same staleness rule as compile_remote, for the separate test-env build.
       remote "$ip" ". /etc/profile.d/fermix-toolchain.sh; cd $REMOTE_REPO && \
-        MIX_ENV=test mix compile --force && mix test" ;;
-    *) die "unknown tier '$tier' (regression|capability|dangerous|dry|tests|mix)" ;;
+        MIX_ENV=test mix compile --force && mix test" || rc=$? ;;
   esac
 
+  # Unconditionally, and BEFORE the failure is raised: the EXIT trap destroys the
+  # box, so a report left behind on a failing tier is gone for good.
   log "pulling reports back"
   rsync -az -e "ssh -i $KEY_FILE -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
-    "root@$ip:$REMOTE_REPO/benchmark/reports/" "$REPO_ROOT/benchmark/reports/" 2>/dev/null || true
+    "root@$ip:$REMOTE_REPO/benchmark/reports/" "$REPO_ROOT/benchmark/reports/" \
+    || log "WARNING: could not pull reports from the box"
+
+  [ "$rc" -eq 0 ] || die "tier '$tier' failed (exit $rc) — any reports were pulled to benchmark/reports/"
 }
 
 cmd_ssh() {
@@ -490,9 +601,22 @@ cmd_ssh() {
 }
 
 cmd_down() {
-  local id; id="$(cat "$STATE_DIR/persistent.id" 2>/dev/null)" || die "no persistent box tracked"
-  destroy_instance "$id"; rm -f "$STATE_DIR/persistent.id" "$STATE_DIR/persistent.ip"
-  log "persistent box destroyed"
+  require_key
+  local id code
+  id="$(cat "$STATE_DIR/persistent.id" 2>/dev/null)" || die "no persistent box tracked"
+  [ -n "$id" ] || die "no persistent box tracked"
+  # Tolerate an already-gone instance and clear state either way. Dying here left
+  # the id on disk, so `up` refused forever while `ssh`/`sync` chased an IP Vultr
+  # had since recycled to someone else.
+  log "destroying instance $id"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+    -H "Authorization: Bearer $VULTR_API_KEY" "$API/instances/$id" 2>/dev/null || echo 000)"
+  rm -f "$STATE_DIR/persistent.id" "$STATE_DIR/persistent.ip"
+  case "$code" in
+    2*)  log "persistent box destroyed" ;;
+    404) log "instance $id was already gone; local state cleared" ;;
+    *)   die "DELETE $id returned HTTP $code — local state cleared, but VERIFY IN THE CONSOLE that it is not still billing" ;;
+  esac
 }
 
 # Ground truth from your own account — plan ids, tiers and prices change, so
