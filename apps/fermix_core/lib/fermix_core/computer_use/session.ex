@@ -141,7 +141,16 @@ defmodule FermixCore.ComputerUse.Session do
         # The `region` of the image the model is currently reading coordinates off
         # (nil = the full screen). Set by whatever last returned pixels, and the
         # basis of the coordinate-space guard in `check_view_region/2`.
-        view_region: nil
+        view_region: nil,
+        # The sent pixel size {w, h} of that image, when the last view was a real
+        # capture (nil for an `elements`-established view, which carries no image).
+        # Feeds the wrong-grid tripwire in `check_ambiguous_grid/3`.
+        view_dims: nil,
+        # The badge table of the latest `marks` screenshot (%{region, table}), so a
+        # `mark: N` action resolves to that badge's exact point HERE — the wire
+        # stays x/y-only and the (respawnable) sidecar holds no cross-request
+        # state. Cleared by any marks-less pixel response (`marks_table/2`).
+        marks: nil
       }
 
       Telemetry.session_start(meta(state))
@@ -230,16 +239,56 @@ defmodule FermixCore.ComputerUse.Session do
   defp note_capture_wedge(_reason), do: :ok
 
   defp classify_action(params, state) do
-    with {:ok, request} <- Protocol.validate(params),
+    # Read BEFORE Protocol.validate: validate canonicalizes the request from known
+    # fields, which is also what guarantees the sidecar never sees this flag.
+    confirm_grid? = params["confirm_grid"] == true
+
+    with {:ok, params, mark_resolved?} <- resolve_mark(params, state),
+         {:ok, request} <- Protocol.validate(params),
          :ok <- check_budget(state),
          :ok <- check_input_control(request, state),
-         :ok <- check_view_region(request, state) do
+         :ok <- check_view_region(request, state),
+         :ok <- check_ambiguous_grid(request, confirm_grid? or mark_resolved?, state) do
       case Safety.gate(request["action"], state.config) do
         :auto -> {:ok, :auto, finalize_request(request, state.config)}
         :refuse -> {:error, {:refused, :strict_mode}}
       end
     end
   end
+
+  # M28 B3: a `mark` names a badge from the latest `marks` screenshot; it resolves
+  # to that badge's exact x/y + region HERE, so the click wire stays x/y-only and
+  # the sidecar (deliberately stateless, respawned on wedge/timeout) holds no
+  # cross-request mark table. A resolved mark bypasses the ambiguity tripwire:
+  # its point is copied from the table, not read off an image.
+  defp resolve_mark(%{"mark" => id} = params, state) when is_integer(id) do
+    case state.marks do
+      nil -> {:error, :no_marks}
+      %{region: region, table: table} -> resolve_live_mark(params, id, region, table, state)
+    end
+  end
+
+  defp resolve_mark(%{"mark" => _bad}, _state), do: {:error, :no_marks}
+  defp resolve_mark(params, _state), do: {:ok, params, false}
+
+  defp resolve_live_mark(params, id, region, table, state) do
+    cond do
+      region != state.view_region -> {:error, {:stale_marks, region}}
+      not Map.has_key?(table, id) -> {:error, {:unknown_mark, id, map_size(table)}}
+      true -> {:ok, substitute_mark(params, table[id], region), true}
+    end
+  end
+
+  defp substitute_mark(params, {x, y}, region) do
+    params
+    |> Map.delete("mark")
+    |> Map.put("x", x)
+    |> Map.put("y", y)
+    |> put_mark_region(region)
+  end
+
+  defp put_mark_region(params, nil), do: Map.delete(params, "region")
+  defp put_mark_region(params, region), do: Map.put(params, "region", region)
 
   # Refuse what macOS would silently drop. Read-only actions never need the
   # input grant, so looking keeps working ungated.
@@ -294,6 +343,65 @@ defmodule FermixCore.ComputerUse.Session do
        do: true
 
   defp pointer_action?(_action), do: false
+
+  # The wrong-grid tripwire (M28 A1). Observed live 2026-07-28: reading a 1355x959
+  # magnified crop, the model answered 15 clicks whose coordinates all fit inside
+  # the 482x341 REGION RECTANGLE — it was aiming on the full-screen grid, and the
+  # crop-space contract executed every one ÷2.81 toward the region origin, while
+  # the cursor echo (same space) confirmed each miss as a hit. When a coordinate
+  # is plausible on BOTH live grids — inside the POSITIONED region rect while the
+  # view magnifies >@ambiguity_min_zoom — refuse with the exact conversion instead
+  # of injecting a click that is wrong on one of them. The rect is positioned
+  # (r.x..r.x+r.w): an origin-anchored 0..w test goes blind for any window not at
+  # the screen's top-left. `confirm_grid: true` is the model's "I re-read the
+  # image; these ARE crop pixels" — it executes without re-tripping.
+  @ambiguity_min_zoom 1.5
+
+  defp check_ambiguous_grid(_request, true = _skip_tripwire?, _state), do: :ok
+
+  defp check_ambiguous_grid(request, false, state) do
+    points = action_points(request)
+
+    if ambiguous_grid?(request, points, state),
+      do: {:error, {:ambiguous_coordinates, ambiguity_info(points, state)}},
+      else: :ok
+  end
+
+  defp ambiguous_grid?(_request, [], _state), do: false
+
+  defp ambiguous_grid?(request, points, %{view_region: %{"w" => rw} = region, view_dims: {vw, _}}) do
+    request["region"] == region and vw / rw > @ambiguity_min_zoom and
+      Enum.all?(points, &inside_region_rect?(&1, region))
+  end
+
+  defp ambiguous_grid?(_request, _points, _state), do: false
+
+  # The coordinates a pointer action aims at. A drag is judged by BOTH endpoints —
+  # one endpoint outside the rect already disambiguates the pair.
+  defp action_points(%{"x" => x, "y" => y}) when is_number(x) and is_number(y), do: [{x, y}]
+
+  defp action_points(%{"from" => %{"x" => fx, "y" => fy}, "to" => %{"x" => tx, "y" => ty}}),
+    do: [{fx, fy}, {tx, ty}]
+
+  defp action_points(_request), do: []
+
+  defp inside_region_rect?({x, y}, %{"x" => rx, "y" => ry, "w" => rw, "h" => rh}),
+    do: x >= rx and x <= rx + rw and y >= ry and y <= ry + rh
+
+  defp ambiguity_info(points, %{view_region: region, view_dims: {vw, vh}}) do
+    kz = vw / region["w"]
+
+    %{
+      region: region,
+      view: %{"w" => vw, "h" => vh},
+      kz: kz,
+      points: points,
+      crop_equivalents:
+        Enum.map(points, fn {x, y} ->
+          {round((x - region["x"]) * kz), round((y - region["y"]) * kz)}
+        end)
+    }
+  end
 
   # Coexistence gate (V3 R0): before a DISTURBING action, when courtesy is on, yield
   # to a present human. This is the one place that does the idle I/O — the decision
@@ -438,14 +546,37 @@ defmodule FermixCore.ComputerUse.Session do
       "action" => "screenshot",
       "region" => request["region"],
       "display" => request["display"],
-      "jpeg_quality" => @check_jpeg_quality
+      "jpeg_quality" => @check_jpeg_quality,
+      # M28 B1/B2: the check carries its own coordinate grid AND the executed
+      # point drawn into the image, so the model SEES where its click landed
+      # relative to the target instead of only reading its number echoed back.
+      "rulers" => true
     }
+
+    check = put_annotate_point(check, request)
 
     case state.driver_mod.execute(state.driver_state, check) do
       {:ok, check_response} -> {check, note_delivery(request, check_response)}
       {:error, reason} -> {Map.delete(request, "region"), %{"check_failed" => inspect(reason)}}
     end
   end
+
+  defp put_annotate_point(check, request) do
+    case executed_point(request) do
+      nil -> check
+      {x, y} -> Map.put(check, "annotate_point", %{"x" => x, "y" => y})
+    end
+  end
+
+  # The point the action executed at: the drag destination for drags, x/y
+  # otherwise. Mirrors `note_delivery/2`'s notion of where evidence should be.
+  defp executed_point(%{"x" => x, "y" => y}) when is_number(x) and is_number(y),
+    do: {round(x), round(y)}
+
+  defp executed_point(%{"to" => %{"x" => x, "y" => y}}) when is_number(x) and is_number(y),
+    do: {round(x), round(y)}
+
+  defp executed_point(_request), do: nil
 
   # The pointer warp puts the cursor at the target before the button/scroll events
   # post, so the check's cursor tells where those events went — as long as macOS
@@ -541,17 +672,43 @@ defmodule FermixCore.ComputerUse.Session do
   # least one valid point: a regional call sets that crop, while a bare call clears
   # back to full-screen coordinates. Empty or malformed metadata leaves the prior
   # source intact.
-  defp track_view_region(state, request, %{"data" => data}) when is_binary(data),
-    do: %{state | view_region: request["region"]}
+  defp track_view_region(state, request, %{"data" => data} = response) when is_binary(data) do
+    %{
+      state
+      | view_region: request["region"],
+        view_dims: response_dims(response),
+        marks: marks_table(request["region"], response)
+    }
+  end
 
   defp track_view_region(state, %{"action" => "elements"} = request, %{"elements" => elements})
        when is_list(elements) do
     if usable_elements(elements) == [],
       do: state,
-      else: %{state | view_region: request["region"]}
+      else: %{state | view_region: request["region"], view_dims: nil}
   end
 
   defp track_view_region(state, _request, _response), do: state
+
+  defp response_dims(%{"width" => w, "height" => h}) when is_integer(w) and is_integer(h),
+    do: {w, h}
+
+  defp response_dims(_response), do: nil
+
+  # B3: remember the badge table of a `marks` screenshot, keyed to its view. ANY
+  # marks-less pixel response clears it — the screen those badges described is
+  # gone, and a stale badge click is a wrong-element click.
+  defp marks_table(region, %{"marks" => marks}) when is_list(marks) do
+    table =
+      for %{"id" => id, "x" => x, "y" => y} <- marks,
+          is_integer(id) and is_integer(x) and is_integer(y),
+          into: %{},
+          do: {id, {x, y}}
+
+    %{region: region, table: table}
+  end
+
+  defp marks_table(_region, _response), do: nil
 
   # A response carrying image bytes proves the capture path is healthy — the ONLY
   # thing that clears the breaker (`CaptureHealth`). Deliberately keyed on real
@@ -590,6 +747,11 @@ defmodule FermixCore.ComputerUse.Session do
   defp finalize_request(request, %Config{} = config) do
     request
     |> Map.put_new("display", config.display)
+    # M28 B2: every tool-path capture carries its own coordinate grid (the
+    # sidecar reads this on `screenshot`, `wait_for_change`, and the post-action
+    # check; other actions ignore it). The ambient screen feed never sets it —
+    # `Realtime.ScreenCapture` builds its own request.
+    |> Map.put("rulers", true)
     |> put_screenshot_after(config)
   end
 
@@ -643,8 +805,8 @@ defmodule FermixCore.ComputerUse.Session do
   # An `elements` result is the interactive accessibility elements (role/label + a
   # click point each), surfaced as text so the model can target by element rather
   # than raw pixels. Same untrusted framing as inspect (labels are on-screen data).
-  defp normalize_response(%{"elements" => elements}) when is_list(elements) do
-    {:ok, %{summary: elements_summary(elements), image: nil}}
+  defp normalize_response(%{"elements" => elements} = response) when is_list(elements) do
+    {:ok, %{summary: elements_summary(elements) <> ax_suffix(response), image: nil}}
   end
 
   # A `windows` result is pure metadata (no pixels): the open windows, each with a
@@ -755,9 +917,46 @@ defmodule FermixCore.ComputerUse.Session do
           "screenshot captured."
       end
 
-    "#{change_prefix(response)}#{dims}#{cursor_suffix(response)}#{delivery_suffix(response)} " <>
-      @untrusted_image_notice
+    "#{change_prefix(response)}#{dims}#{cursor_suffix(response)}#{delivery_suffix(response)}" <>
+      "#{marks_suffix(response)}#{ax_suffix(response)} " <> @untrusted_image_notice
   end
+
+  # B3: the mark table rides the summary, so the model answers with a NUMBER —
+  # never a pixel it estimated. An empty table is a loud absence, not silence.
+  defp marks_suffix(%{"marks" => []}),
+    do: " 0 accessibility marks — AX exposed no click targets in this view."
+
+  defp marks_suffix(%{"marks" => marks} = response) when is_list(marks) do
+    lines = marks |> Enum.map(&mark_line/1) |> Enum.reject(&is_nil/1)
+
+    " #{length(lines)} numbered mark(s) badged on the image — act on one by sending " <>
+      "`mark: <id>` instead of x,y:\n" <>
+      Enum.join(lines, "\n") <> truncated_marks_note(response)
+  end
+
+  defp marks_suffix(_response), do: ""
+
+  defp mark_line(%{"id" => id, "x" => x, "y" => y} = mark)
+       when is_integer(id) and is_integer(x) and is_integer(y) do
+    role = mark["role"] || "element"
+    title = mark["title"]
+
+    if is_binary(title) and title != "",
+      do: "mark #{id}: #{role} \"#{title}\" at (#{x},#{y})",
+      else: "mark #{id}: #{role} at (#{x},#{y})"
+  end
+
+  defp mark_line(_mark), do: nil
+
+  defp truncated_marks_note(%{"marks_truncated" => n}) when is_integer(n) and n > 0,
+    do: "\n(#{n} further element(s) not badged — zoom closer for the rest)"
+
+  defp truncated_marks_note(_response), do: ""
+
+  # B4: what accessibility activation did (or why it failed) — an empty element
+  # list must never be silent about its cause again.
+  defp ax_suffix(%{"ax_activation" => note}) when is_binary(note), do: " AX: #{note}."
+  defp ax_suffix(_response), do: ""
 
   # Set only by `note_delivery/2`, when the action's own check proves the pointer is
   # NOT where the action aimed. Stated as a fact plus the recovery: the model must
@@ -777,10 +976,24 @@ defmodule FermixCore.ComputerUse.Session do
 
   # The sidecar reports the cursor position (in sent-image coords) when it's inside
   # the captured region — surface it so the model can reason about drag/hover.
-  defp cursor_suffix(%{"cursor" => %{"x" => x, "y" => y}}) when is_integer(x) and is_integer(y),
-    do: " Cursor at (#{x},#{y})."
+  defp cursor_suffix(%{"cursor" => %{"x" => x, "y" => y}} = response)
+       when is_integer(x) and is_integer(y),
+       do: " Cursor at (#{x},#{y})#{full_screen_equiv(response, x, y)}."
 
   defp cursor_suffix(_other), do: ""
+
+  # M28 A2: on a magnified crop, disclose the cursor's full-screen coordinate too.
+  # A wrong-grid click's echo then stops being self-consistent — the model reads a
+  # full-screen point it can check against its own memory of the frames and the
+  # `windows` list, instead of only its own number reflected back. Derived purely
+  # from the response's region echo + sent width (kz_eff = width / region.w).
+  defp full_screen_equiv(%{"region" => %{"x" => rx, "y" => ry, "w" => rw}, "width" => w}, x, y)
+       when is_integer(w) and is_number(rw) and rw > 0 and w > rw do
+    kz = w / rw
+    " = (#{round(rx + x / kz)},#{round(ry + y / kz)}) on the full screen"
+  end
+
+  defp full_screen_equiv(_response, _x, _y), do: ""
 
   defp emit_lifecycle_end(reason, state) do
     measurements = %{actions: state.action_count, duration_ms: now_ms() - state.started_at}

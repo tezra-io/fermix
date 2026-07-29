@@ -81,7 +81,7 @@ The OpenAI Realtime voice companion (FermixPet) is local and off by default (`[f
 
 ## Computer use (experimental, off by default)
 
-Computer use is experimental and off by default (enabled from the setup Plugins page on Apple Silicon macOS and Linux x86_64); `computer_use` drives the host desktop GUI by screenshot plus mouse/keyboard, its safety `access` posture is derived 1:1 from `[sandbox] mode`, and it is operator-only — never delegated to subagents and never started by an unattended run. Full detail: skill_view(name: "self-knowledge", file: "computer_use").
+Computer use is experimental and off by default (enabled from the setup Plugins page on Apple Silicon macOS and Linux x86_64); `computer_use` drives the host desktop GUI by screenshot plus mouse/keyboard, its safety `access` posture is derived 1:1 from `[sandbox] mode`, and it is operator-only — never delegated to subagents and never started by an unattended run. It refuses a pointer action whose coordinates are plausible on two image grids at once (magnified crop vs full screen) with a typed conversion error instead of guessing which image the model read. Full detail: skill_view(name: "self-knowledge", file: "computer_use").
 
 ## Coding harness
 
