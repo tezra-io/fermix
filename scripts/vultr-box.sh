@@ -317,9 +317,18 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl git rsync jq unzip build-essential pkg-config \\
   libsqlite3-dev ca-certificates gnupg \\
-  autoconf m4 libncurses-dev libssl-dev libwxgtk3.2-dev xsltproc fop
-# mise pins and builds the toolchain; KERL_BUILD_DOCS=no keeps the OTP build lean.
+  autoconf m4 libncurses-dev libssl-dev
+
+# cloud-init runs user-data with NO HOME set, and every installer below derives
+# its install prefix from it — mise died on "HOME: parameter not set" before it
+# fetched a single byte. Nothing after this point works without it.
+export HOME=/root
+
+# Build only what a headless test box uses. Leaving these on pulled a full JRE
+# (fop, for docs already disabled) and wxWidgets for a GUI that never runs.
 export KERL_BUILD_DOCS=no
+export KERL_CONFIGURE_OPTIONS="--without-wx --without-javac --without-odbc \\
+  --without-debugger --without-observer --without-et"
 curl -fsSL https://mise.run | sh
 export PATH="/root/.local/bin:/root/.local/share/mise/shims:\$PATH"
 
