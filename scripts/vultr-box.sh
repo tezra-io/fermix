@@ -7,7 +7,8 @@
 # a push. This provisions a real VM — full root, the artifact you ship, no shim —
 # so they can be seen before one.
 #
-#   vultr-box.sh snapshot   build the base image: prebuilt OTP + Elixir, Rust,
+#   vultr-box.sh snapshot   build the base image: OTP (compiled, ~30-45 min),
+#                           Elixir, Rust,
 #                           uv, the coding-harness vendor CLIs (claude, codex),
 #                           plus a warmed deps/ and _build/ so later boxes reuse
 #                           compiled DEPS. App code is always --force compiled
@@ -45,7 +46,7 @@
 # drift, so pick from your own account rather than from documentation.
 #
 # Env: VULTR_API_KEY (required)
-#      VULTR_REGION (default atl) · VULTR_PLAN (default vc2-4c-8gb) · VULTR_OS
+#      VULTR_REGION (default atl) · VULTR_PLAN (default vc2-2c-4gb) · VULTR_OS
 #      FERMIX_VULTR_STATE · EVAL_PROVIDER · EVAL_MODEL
 #      OPENAI_API_KEY (+ any provider/channel keys you want forwarded)
 #
@@ -59,15 +60,14 @@ KEY_FILE="$STATE_DIR/id_ed25519"
 API="https://api.vultr.com/v2"
 
 REGION="${VULTR_REGION:-atl}"
-# Eval turns wait on model APIs, not CPU, so 4GB is enough, and 4 cores matches
-# CI (`mix test` runs max_cases 2x cores — 8 there, so a 2-core box halves the
-# concurrency that surfaces timing races). vc2 is the most widely available line;
-# run `plans` for what your region actually offers and override if you want the
-# cheaper 2-core/4GB tier or vhp's newer cores + NVMe (note vhp ids carry an
-# `-amd` suffix and start at 4 cores).
-# A one-off bigger snapshot box works — VULTR_PLAN=... snapshot — but see the
-# disk guard in boot_box: a snapshot cannot be restored onto a smaller disk.
-PLAN="${VULTR_PLAN:-vc2-4c-8gb}"
+# Eval turns wait on model APIs rather than CPU, so 2c/4GB carries the tiers.
+# The exception is `run mix`: ExUnit sets max_cases to 2x cores, so this runs 4
+# against CI's 8 and is a poorer bet for reproducing a concurrency/timing race —
+# use VULTR_PLAN=vc2-4c-8gb for that.
+# Build the image on the SAME plan you run on. A snapshot carries its source
+# plan's disk and cannot be restored onto a smaller one (guarded in boot_box), so
+# imaging on a bigger box makes the image unusable here.
+PLAN="${VULTR_PLAN:-vc2-2c-4gb}"
 OS_NAME="${VULTR_OS:-Ubuntu 24.04 LTS x64}"
 OTP_MAJOR="28"
 ELIXIR_VERSION="1.19.5"
@@ -81,7 +81,7 @@ REMOTE_EVAL_HOME="/opt/fermix-eval-home"
 # Bounded waits: every poll has an explicit cap and a loud failure at the cap.
 ACTIVE_TIMEOUT=300
 SSH_TIMEOUT=180
-SNAPSHOT_TIMEOUT=1800
+SNAPSHOT_TIMEOUT=3600   # OTP is compiled during snapshot
 
 TOP_PID=$$
 trap 'exit 1' TERM INT
@@ -259,11 +259,34 @@ wait_ssh() {
   die "no ssh on $ip within ${SSH_TIMEOUT}s"
 }
 
+# The EXIT trap destroys this box, so telling the operator to "ssh in and read the
+# log" was advice they could never take. Pull it while the box still exists.
+capture_cloud_init_log() {
+  local ip="$1" dest="$STATE_DIR/cloud-init-failure.log"
+  remote "$ip" "tail -n 300 /var/log/cloud-init-output.log" > "$dest" 2>/dev/null || true
+  log "provisioning log saved to $dest"
+}
+
+# Polls with a fresh connection each round rather than holding one blocking call
+# open: OTP is compiled here, and a single ssh session would not survive it. Also
+# stops as soon as cloud-init reports a terminal state, instead of waiting out the
+# full ceiling for a box that already failed.
 wait_cloud_init() {
-  log "waiting for cloud-init to finish provisioning (up to ${SNAPSHOT_TIMEOUT}s)"
-  remote "$1" "cloud-init status --wait >/dev/null 2>&1 || true; \
-                test -f /var/lib/fermix-base-ready" \
-    || die "cloud-init did not complete — ssh in and read /var/log/cloud-init-output.log"
+  local ip="$1" i
+  log "waiting for cloud-init (OTP is compiled here — expect ~30-45 min, cap ${SNAPSHOT_TIMEOUT}s)"
+  for ((i = 0; i < SNAPSHOT_TIMEOUT; i += 15)); do
+    if remote "$ip" "test -f /var/lib/fermix-base-ready" 2>/dev/null; then
+      log "provisioning complete"
+      return 0
+    fi
+    if remote "$ip" "cloud-init status 2>/dev/null | grep -qE 'done|error|degraded'" 2>/dev/null; then
+      capture_cloud_init_log "$ip"
+      die "cloud-init finished without producing the ready flag — provisioning failed. See $STATE_DIR/cloud-init-failure.log"
+    fi
+    sleep 15
+  done
+  capture_cloud_init_log "$ip"
+  die "cloud-init did not finish within ${SNAPSHOT_TIMEOUT}s. See $STATE_DIR/cloud-init-failure.log"
 }
 
 destroy_instance() { log "destroying instance $1"; api DELETE "/instances/$1" >/dev/null; }
@@ -271,7 +294,8 @@ destroy_instance() { log "destroying instance $1"; api DELETE "/instances/$1" >/
 remote() {
   local ip="$1"; shift
   ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR -o ConnectTimeout=10 "root@$ip" "$@"
+      -o LogLevel=ERROR -o ConnectTimeout=10 \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=20 "root@$ip" "$@"
 }
 
 # --- provisioning -----------------------------------------------------------
@@ -292,25 +316,22 @@ set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y curl git rsync jq unzip build-essential pkg-config \\
-  libsqlite3-dev ca-certificates gnupg
+  libsqlite3-dev ca-certificates gnupg \\
+  autoconf m4 libncurses-dev libssl-dev libwxgtk3.2-dev xsltproc fop
+# mise pins and builds the toolchain; KERL_BUILD_DOCS=no keeps the OTP build lean.
+export KERL_BUILD_DOCS=no
+curl -fsSL https://mise.run | sh
+export PATH="/root/.local/bin:/root/.local/share/mise/shims:\$PATH"
 
-# Prebuilt OTP ${OTP_MAJOR} (no source build).
-install -d -m 0755 /usr/share/keyrings
-curl -fsSL https://binaries2.erlang-solutions.com/GPG-KEY-pmanager.asc \\
-  | gpg --dearmor -o /usr/share/keyrings/erlang-solutions.gpg
-. /etc/os-release
-echo "deb [signed-by=/usr/share/keyrings/erlang-solutions.gpg] \\
-https://binaries2.erlang-solutions.com/ubuntu/ \${UBUNTU_CODENAME}-esl-erlang-${OTP_MAJOR} contrib" \\
-  > /etc/apt/sources.list.d/erlang-solutions.list
-apt-get update
-apt-get install -y esl-erlang
-
-# Precompiled Elixir, matched to the OTP major.
-curl -fsSL -o /tmp/elixir.zip \\
-  https://github.com/elixir-lang/elixir/releases/download/v${ELIXIR_VERSION}/elixir-otp-${OTP_MAJOR}.zip
-mkdir -p /usr/local/elixir
-unzip -q -o /tmp/elixir.zip -d /usr/local/elixir
-for b in elixir elixirc mix iex; do ln -sf /usr/local/elixir/bin/\$b /usr/local/bin/\$b; done
+# OTP ${OTP_MAJOR} is COMPILED, not prebuilt. Erlang Solutions publishes no
+# noble component past 27 (verified: noble-esl-erlang-28 is a 404) and Ubuntu's
+# own erlang is far older, so there is no prebuilt 28 for this distro. Dropping
+# to 27 would test a toolchain we do not ship, which is worse than not testing —
+# so this pays the build cost ONCE, into the snapshot. Expect ~30-45 min on a
+# 2-core box; every later box restores the image instead of repeating it.
+mise use -g -y erlang@${OTP_MAJOR}
+mise use -g -y elixir@${ELIXIR_VERSION}
+ln -sf /root/.local/share/mise/shims/* /usr/local/bin/ 2>/dev/null || true
 
 curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path
 curl -fsSL https://astral.sh/uv/install.sh | sh
@@ -341,7 +362,7 @@ install -m 0755 "\$codex_bin" /usr/local/bin/codex
 
 # Non-interactive ssh does not source .bashrc, so PATH lives somewhere explicit.
 # /root/.local/bin is where the claude installer drops its symlink.
-echo 'export PATH="/root/.cargo/bin:/root/.local/bin:\$PATH"' > /etc/profile.d/fermix-toolchain.sh
+echo 'export PATH="/root/.cargo/bin:/root/.local/bin:/root/.local/share/mise/shims:\$PATH"' > /etc/profile.d/fermix-toolchain.sh
 chmod 0644 /etc/profile.d/fermix-toolchain.sh
 
 otp="\$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().')"
