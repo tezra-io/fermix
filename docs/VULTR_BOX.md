@@ -47,13 +47,15 @@ export OPENAI_API_KEY=...       # forwarded to the box at run time
 ```
 
 `snapshot` provisions a box, installs the toolchain, warms the build, images it,
-and deletes the box. It is the only slow step.
+and deletes the box. It is the only slow step — budget **~45-60 min**, almost all
+of it compiling OTP. If it fails, the provisioning log is saved to
+`$FERMIX_VULTR_STATE/cloud-init-failure.log` before the box is reaped.
 
 **What lands in the image**
 
 | | Pinned? | Why |
 |---|---|---|
-| OTP 28, Elixir 1.19.5 | yes, **verified** | prebuilt (Erlang Solutions debs + Elixir's per-OTP zip). CI ships these; a mismatch aborts before the image is accepted |
+| OTP 28, Elixir 1.19.5 | yes, **verified** | via `mise`. OTP 28 is **compiled** (~30-45 min): Erlang Solutions publishes no noble component past 27 and Ubuntu's own is older, so no prebuilt 28 exists for this distro. Dropping to 27 would test a toolchain we do not ship. Paid once, into the image; a mismatch aborts before the image is accepted |
 | Rust (rustup), `uv` | no | NIF build; harness |
 | `claude`, `codex` CLIs | no, **presence verified** | the harness must work against what you actually run, so pinning would test a fossil. Override with `CLAUDE_CLI_VERSION` / `CODEX_CLI_VERSION` |
 | warm `deps/` + `_build/` (dev + test) | — | ~214 MB of deps and the Rust NIF, reused instead of rebuilt |
@@ -160,7 +162,7 @@ Linux at all. That difference is exactly what this box exists to test: a
 |---|---|---|
 | `VULTR_API_KEY` | — | required |
 | `VULTR_REGION` | `atl` | `regions` to list |
-| `VULTR_PLAN` | `vc2-4c-8gb` | `plans` to list |
+| `VULTR_PLAN` | `vc2-2c-4gb` | `plans` to list. Image and run on the SAME plan — a snapshot cannot restore onto a smaller disk |
 | Opik (`OPIK_BASE_URL`, `FERMIX_OPIK_BASE_URL`, `OPIK_PROJECT`, + keys) | — | forwarded when set; the graded tiers need a reachable Opik |
 | `VULTR_OS` | `Ubuntu 24.04 LTS x64` | `images` to list |
 | `FERMIX_VULTR_STATE` | `~/.fermix-vultr` | ssh key + tracked ids |
