@@ -19,6 +19,8 @@
 #   vultr-box.sh sync       re-push local edits to the persistent box
 #   vultr-box.sh run        ephemeral box: sync, seed a disposable home, boot, run
 #                           a tier, then ALWAYS destroy. One-shot feature testing.
+#   vultr-box.sh verify     boot a throwaway box from the image and assert every
+#                           pinned dependency is present, then destroy it
 #   vultr-box.sh ssh        shell into the persistent box
 #   vultr-box.sh status     show the tracked snapshot + boxes
 #   vultr-box.sh down       destroy the persistent box
@@ -624,6 +626,56 @@ cmd_run() {
   [ "$rc" -eq 0 ] || die "tier '$tier' failed (exit $rc) — any reports were pulled to benchmark/reports/"
 }
 
+# Boots a throwaway box from the image and asserts what is actually inside it.
+# A snapshot cannot be inspected without running it, and "the build finished" is
+# not the same claim as "every dependency is present and the pinned versions are
+# the ones we ship". Reports every check before failing, so one missing tool does
+# not hide the rest.
+cmd_verify() {
+  local pair ip rc=0
+  trap reap_pending EXIT
+  boot_box fermix-verify; pair="$OUT"; ip="${pair#* }"
+  log "inspecting the image (this box is destroyed on exit)"
+
+  remote "$ip" "bash -s" <<'VERIFY' || rc=$?
+. /etc/profile.d/fermix-toolchain.sh 2>/dev/null || true
+fail=0
+ok()   { printf '  \033[32mok\033[0m   %-22s %s\n' "$1" "$2"; }
+bad()  { printf '  \033[31mFAIL\033[0m %-22s %s\n' "$1" "$2"; fail=1; }
+
+v="$(erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)]),halt().' 2>/dev/null)"
+[ "$v" = "28" ] && ok "erlang/OTP" "$v" || bad "erlang/OTP" "got '${v:-missing}', want 28"
+
+v="$(elixir -v 2>/dev/null | grep -oE 'Elixir [0-9.]+' | head -1)"
+[ "$v" = "Elixir 1.19.5" ] && ok "elixir" "$v" || bad "elixir" "got '${v:-missing}', want Elixir 1.19.5"
+
+for t in mix rustc cargo uv git rsync jq codex; do
+  if command -v "$t" >/dev/null 2>&1; then ok "$t" "$(command -v "$t")"; else bad "$t" "not on PATH"; fi
+done
+if [ -x /root/.local/bin/claude ]; then ok "claude" "/root/.local/bin/claude"; else bad "claude" "missing"; fi
+
+# The warm halves of the image: without these every run pays a cold dep build.
+if [ -d /opt/fermix/deps ] && [ -n "$(ls -A /opt/fermix/deps 2>/dev/null)" ]; then
+  ok "warm deps/" "$(du -sh /opt/fermix/deps 2>/dev/null | cut -f1)"
+else bad "warm deps/" "absent or empty"; fi
+for env in dev test; do
+  if [ -d "/opt/fermix/_build/$env" ]; then
+    ok "warm _build/$env" "$(du -sh "/opt/fermix/_build/$env" 2>/dev/null | cut -f1)"
+  else bad "warm _build/$env" "absent"; fi
+done
+
+# Vendor logins are NOT in the image by design; report, never fail on them.
+[ -f /root/.codex/auth.json ] && echo "  --   codex login          present" \
+                              || echo "  --   codex login          absent (expected: log in on a persistent box)"
+[ -f /root/.claude/.credentials.json ] && echo "  --   claude login         present" \
+                              || echo "  --   claude login         absent (expected: log in on a persistent box)"
+exit "$fail"
+VERIFY
+
+  [ "$rc" -eq 0 ] || die "image verification FAILED — rebuild with: $(basename "$0") snapshot"
+  log "image verified: every pinned dependency present"
+}
+
 cmd_ssh() {
   local ip; ip="$(cat "$STATE_DIR/persistent.ip" 2>/dev/null)" || die "no persistent box — run: $(basename "$0") up"
   exec ssh -i "$KEY_FILE" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -702,11 +754,12 @@ case "${1:-}" in
   up)       cmd_up ;;
   sync)     cmd_sync ;;
   run)      shift; cmd_run "${1:-regression}" ;;
+  verify)   cmd_verify ;;
   ssh)      cmd_ssh ;;
   status)   cmd_status ;;
   plans)    cmd_plans ;;
   regions)  cmd_regions ;;
   images)   cmd_images ;;
   down)     cmd_down ;;
-  *) echo "usage: $(basename "$0") [snapshot|up|sync|run <tier>|ssh|status|plans|regions|images|down]" >&2; exit 2 ;;
+  *) echo "usage: $(basename "$0") [snapshot|verify|up|sync|run <tier>|ssh|status|plans|regions|images|down]" >&2; exit 2 ;;
 esac
