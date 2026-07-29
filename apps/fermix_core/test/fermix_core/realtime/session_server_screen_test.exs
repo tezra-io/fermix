@@ -25,9 +25,27 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
 
+  # A test may register itself under this name to be told about provider events and
+  # feed state changes as they happen, instead of polling for them. Polling here
+  # was a busy loop with no yield, which on a loaded scheduler competed with the
+  # very tool tasks and casts it was waiting for.
+  @observer :screen_test_observer
+
+  defp observe do
+    Process.register(self(), @observer)
+    on_exit(fn -> if Process.whereis(@observer), do: Process.unregister(@observer) end)
+  end
+
   defmodule FakeOpenAIClient do
     def start_link(opts), do: Agent.start_link(fn -> %{opts: opts, events: []} end)
-    def send_event(pid, event), do: Agent.update(pid, &%{&1 | events: &1.events ++ [event]})
+
+    def send_event(pid, event) do
+      if observer = Process.whereis(:screen_test_observer),
+        do: send(observer, {:openai_event, event})
+
+      Agent.update(pid, &%{&1 | events: &1.events ++ [event]})
+    end
+
     def close(pid), do: Agent.stop(pid)
     def events(pid), do: Agent.get(pid, & &1.events)
 
@@ -83,6 +101,10 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     def handle_cast({:acting, acting?}, state) do
       log = :persistent_term.get({__MODULE__, :acting}, [])
       :persistent_term.put({__MODULE__, :acting}, log ++ [acting?])
+
+      if observer = Process.whereis(:screen_test_observer),
+        do: send(observer, {:feed_acting, acting?})
+
       {:noreply, state}
     end
 
@@ -225,14 +247,12 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     end)
   end
 
-  # Bounded poll on real async state (task completions land as messages to the
-  # SESSION, not to this test process), never a sleep.
-  defp wait_until(fun, deadline_ms \\ 5_000) do
-    deadline = System.monotonic_time(:millisecond) + deadline_ms
+  # A short label per provider event, so a failing ordering assertion shows the
+  # actual sequence instead of a bare count.
+  defp event_tag(%{type: "conversation.item.create", item: item}),
+    do: "item:#{item[:type]}/#{item[:call_id] || "-"}"
 
-    Stream.repeatedly(fn -> fun.() end)
-    |> Enum.find(fn done? -> done? or System.monotonic_time(:millisecond) >= deadline end)
-  end
+  defp event_tag(event), do: event[:type]
 
   defp text_parts(openai) do
     openai
@@ -560,6 +580,11 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     baseline =
       length(Enum.filter(FakeOpenAIClient.events(openai), &(&1[:type] == "response.create")))
 
+    # Observe only from here: `start_sharing` is itself an answered tool call and
+    # emits its own trigger, which would otherwise sit in the mailbox and satisfy
+    # the assert below while the batch's real trigger tripped the refute.
+    observe()
+
     # As in production: the function_call events are emitted by an ACTIVE
     # response, whose response.done follows them.
     :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
@@ -578,16 +603,27 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
       Enum.filter(events, &(get_in(&1, [:item, :call_id]) in ["c1", "c2"]))
     end
 
-    wait_until(fn ->
-      events = FakeOpenAIClient.events(openai)
-      length(batch_outputs.(events)) == 2 and List.last(FakeFeed.acting_log()) == false
-    end)
+    # Wait on the event actually under test. The outputs and the feed resume are
+    # both emitted EARLIER in the same code path than the trigger they precede
+    # (`append_tool_output` then `finish_tool_turn`), so waiting on those alone
+    # returned before the trigger existed and read the event log mid-flight —
+    # which is what made this test intermittent under load.
+    assert_receive {:openai_event, %{item: %{call_id: "c1"}}}, 5_000
+    assert_receive {:openai_event, %{item: %{call_id: "c2"}}}, 5_000
+    assert_receive {:openai_event, %{type: "response.create"}}, 5_000
+    # ...and no second one, whichever path emitted it (inline or deferred to
+    # response.done) — that duplicate is the bug this test exists for.
+    refute_receive {:openai_event, %{type: "response.create"}}, 250
 
     events = FakeOpenAIClient.events(openai)
     creates = Enum.filter(events, &(&1[:type] == "response.create"))
 
     assert length(batch_outputs.(events)) == 2
-    assert length(creates) - baseline == 1, "exactly one trigger for the batch"
+
+    assert length(creates) - baseline == 1,
+           "expected exactly one trigger for the batch; creates=#{length(creates)} " <>
+             "baseline=#{baseline} sequence=#{inspect(Enum.map(events, &event_tag/1))}"
+
     # The trigger is the LAST of the batch's events, so it sees both outputs.
     assert %{type: "response.create"} = List.last(events)
 
