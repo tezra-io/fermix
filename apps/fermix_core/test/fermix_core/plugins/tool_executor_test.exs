@@ -4,6 +4,7 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
   # establishes explicitly per the hermetic-config rule.
   use ExUnit.Case, async: false
 
+  alias FermixCore.Plugins.Http.Interpreter
   alias FermixCore.Plugins.ToolExecutor
 
   @calendar_scopes [
@@ -1308,6 +1309,82 @@ defmodule FermixCore.Plugins.ToolExecutorTest do
     case Plug.Conn.get_req_header(conn, "authorization") do
       [value | _] -> value
       [] -> nil
+    end
+  end
+
+  # The size cap has to run on the wire, not on the decoded body. Req's
+  # `decompress_body` step is a *separate* default step from `decode_body`, so
+  # a post-buffer check inspects a body that a compressed payload has already
+  # inflated far past the ceiling.
+  describe "response body ceiling" do
+    test "refuses a body over the transport cap instead of materialising it" do
+      name = setup_scheme_fixture(nil)
+      oversized = String.duplicate("a", Interpreter.max_response_bytes() + 1024)
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"blob" => oversized}))
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_secret_getter: fn _ -> {:ok, "k"} end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
+
+      assert result.success == false
+      assert result.error =~ "size cap"
+    end
+
+    test "a body at the cap still succeeds" do
+      name = setup_scheme_fixture(nil)
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(%{"ok" => true}))
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_secret_getter: fn _ -> {:ok, "k"} end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
+
+      assert result.success == true
+    end
+
+    # Streaming means Req never advertises `accept-encoding`, so a compliant
+    # server sends identity. One that compresses anyway gets a named refusal
+    # rather than a confusing JSON parse failure on gzip bytes.
+    test "a compressed body is refused with a distinct error" do
+      name = setup_scheme_fixture(nil)
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.put_resp_header("content-encoding", "gzip")
+        |> Plug.Conn.send_resp(200, :zlib.gzip(Jason.encode!(%{"ok" => true})))
+      end
+
+      context = %{
+        plugin_url_guard: fn _ -> :ok end,
+        plugin_req_options: [plug: plug],
+        plugin_secret_getter: fn _ -> {:ok, "k"} end
+      }
+
+      assert {:ok, result} =
+               ToolExecutor.execute(%{"id" => "42"}, context, name, scheme_fixture_tool(name))
+
+      assert result.success == false
+      assert result.error =~ "content-encoding"
     end
   end
 end

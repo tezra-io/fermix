@@ -8,6 +8,13 @@ defmodule FermixCore.Tools.MemoryRecall do
   they explicitly request owner/global scope or message history. This is
   narrower than `FermixCore.Memory.Search.query/2`, whose raw API defaults are
   broad for internal callers.
+
+  The `scope` argument is a *request*, not an authorization: `caller_scope/2`
+  resolves the effective scope from the caller and the model's argument can only
+  narrow within it. A scheduled job always reads its own job memory and a guest
+  always reads the conversation it is in, whatever `scope` the model names —
+  otherwise the isolation would be conditioned on the very input it is meant to
+  constrain. Operators and internal callers are unaffected.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -137,12 +144,23 @@ defmodule FermixCore.Tools.MemoryRecall do
   end
 
   defp lexical_search(search, args, context) do
-    if scheduled_job_current_scope?(args, context) do
-      scheduled_job_memory_search(search, args, context)
-    else
-      general_lexical_search(search, args, context)
+    case caller_scope(args, context) do
+      :job -> scheduled_job_memory_search(search, args, context)
+      scope -> general_lexical_search(search, Map.put(args, "scope", scope), context)
     end
   end
+
+  # The data scope of a read is a property of the CALLER, never of the model's
+  # arguments. A scheduled job is pinned to its own job memory and a guest to the
+  # conversation it is actually in, no matter what `scope` the model names.
+  #
+  # Matching `:guest` explicitly — rather than "anything that is not
+  # `:operator`" — is load-bearing: subagent workers have `:source_trust`
+  # stripped (`subagents.ex`), and internal callers may carry no trust at all.
+  # Those keep the model-chosen scope, exactly as before.
+  defp caller_scope(_args, %{conversation_key: {:scheduled_job, _job_id, _run_id}}), do: :job
+  defp caller_scope(_args, %{source_trust: :guest}), do: "current"
+  defp caller_scope(args, _context), do: Map.get(args, "scope", "current")
 
   defp general_lexical_search(search, args, context) do
     opts =
@@ -211,11 +229,6 @@ defmodule FermixCore.Tools.MemoryRecall do
       {:error, reason} ->
         {:ok, Tool.error("memory search failed: #{inspect(reason)}")}
     end
-  end
-
-  defp scheduled_job_current_scope?(args, context) do
-    Map.get(args, "scope", "current") == "current" and
-      match?({:scheduled_job, _job_id, _run_id}, Map.get(context, :conversation_key))
   end
 
   defp run_search(search, opts) do

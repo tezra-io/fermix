@@ -8,6 +8,15 @@ defmodule FermixCore.Tools.CodexRun do
   §23.1): the tool returns the run id immediately and the outcome comes back on
   its own — into this conversation for a chat origin, as durable delivery for a
   scheduled one.
+
+  Posture is the operator's, not the model's. Omitting `sandbox` emits no `-s` at
+  all, so the run inherits `~/.codex/config.toml` — that is the default and the
+  reason harness runs are autonomous without the model asking for anything. The
+  model may still pick a confining level (`workspace-write` writes freely inside
+  the admitted directories without prompting), but `danger-full-access` is
+  refused at the tool boundary; see `HarnessSupport.@boundary_removing`.
+  `profile` remains selectable: it names a posture the operator authored in their
+  own config, which is a different thing from the model inventing one.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -64,8 +73,11 @@ defmodule FermixCore.Tools.CodexRun do
         },
         sandbox: %{
           type: "string",
-          enum: ["read-only", "workspace-write", "danger-full-access"],
-          description: "Codex sandbox mode."
+          enum: ["read-only", "workspace-write"],
+          description:
+            "Codex sandbox mode. Omit to use the operator's configured posture. " <>
+              "`workspace-write` writes freely inside the admitted directories " <>
+              "without prompting."
         },
         add_dirs: %{
           type: "array",

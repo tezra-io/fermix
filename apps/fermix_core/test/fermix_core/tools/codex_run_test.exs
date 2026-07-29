@@ -160,6 +160,69 @@ defmodule FermixCore.Tools.CodexRunTest do
       refute_received {:start_run, _request}
     end
 
+    # The model may choose how much friction the child works under; it may not
+    # choose whether the child has a boundary at all. `workspace-write` keeps
+    # codex's sandbox and stays available; `danger-full-access` voids the cwd and
+    # add_dirs Fermix just admitted through its own sandbox, so it is refused at
+    # the tool boundary before admission.
+    test "the model cannot select danger-full-access", ctx do
+      manager = stub_manager()
+      context = attended_context(ctx.cwd, manager)
+
+      args = ctx.cwd |> run_args() |> Map.put("sandbox", "danger-full-access")
+
+      assert {:ok, %{success: false, error: error}} = CodexRun.execute(args, context)
+      assert error =~ "danger-full-access"
+      refute_received {:start_run, _request}
+    end
+
+    test "the confining sandbox levels still work", ctx do
+      manager = stub_manager(start_run_reply: {:ok, "hr_run00000009"})
+      context = attended_context(ctx.cwd, manager)
+
+      for level <- ["read-only", "workspace-write"] do
+        args = ctx.cwd |> run_args() |> Map.put("sandbox", level)
+        assert {:ok, %{success: true}} = CodexRun.execute(args, context)
+        assert_received {:start_run, _request}
+      end
+    end
+
+    test "omitting sandbox stays the default, inheriting the operator's codex config", ctx do
+      manager = stub_manager(start_run_reply: {:ok, "hr_run00000010"})
+      context = attended_context(ctx.cwd, manager)
+
+      assert {:ok, %{success: true}} = CodexRun.execute(run_args(ctx.cwd), context)
+      assert_received {:start_run, request}
+      refute Map.has_key?(request.params, :sandbox)
+    end
+
+    test "the model cannot skip Claude's permission checks, by either spelling", ctx do
+      manager = stub_manager()
+      context = attended_context(ctx.cwd, manager)
+
+      skip = ctx.cwd |> run_args() |> Map.put("dangerously_skip_permissions", true)
+      assert {:ok, %{success: false, error: skip_error}} = ClaudeCodeRun.execute(skip, context)
+      assert skip_error =~ "dangerously_skip_permissions"
+      refute_received {:start_run, _request}
+
+      # The second path the scan missed: permission_mode reaches the same place.
+      bypass = ctx.cwd |> run_args() |> Map.put("permission_mode", "bypassPermissions")
+      assert {:ok, %{success: false, error: mode_error}} = ClaudeCodeRun.execute(bypass, context)
+      assert mode_error =~ "bypassPermissions"
+      refute_received {:start_run, _request}
+    end
+
+    test "the non-escalating permission modes still work, including auto", ctx do
+      manager = stub_manager(start_run_reply: {:ok, "hr_run00000011"})
+      context = attended_context(ctx.cwd, manager)
+
+      for mode <- ["acceptEdits", "auto", "manual", "dontAsk", "plan"] do
+        args = ctx.cwd |> run_args() |> Map.put("permission_mode", mode)
+        assert {:ok, %{success: true}} = ClaudeCodeRun.execute(args, context)
+        assert_received {:start_run, _request}
+      end
+    end
+
     test "a continuation turn's depth rides into the run request", ctx do
       manager = stub_manager(start_run_reply: {:ok, "hr_run00000004"})
 

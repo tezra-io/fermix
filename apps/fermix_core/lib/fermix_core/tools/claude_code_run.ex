@@ -9,6 +9,13 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
   §23.1): the tool returns the run id immediately and the outcome comes back on
   its own — into this conversation for a chat origin, as durable delivery for a
   scheduled one.
+
+  Posture is the operator's, not the model's. Omitting `permission_mode` emits no
+  flag at all, so the run inherits `~/.claude/settings.json` — that is the
+  default and the reason harness runs are autonomous without the model asking for
+  anything. The model may still trade friction *within* the sandbox
+  (`acceptEdits`, `auto`, …), but the values that delete the sandbox are refused
+  at the tool boundary; see `HarnessSupport.@boundary_removing`.
   """
 
   @behaviour FermixCore.Capabilities.Builtin.Tool
@@ -29,7 +36,6 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
     "permission_mode" => :permission_mode,
     "allowed_tools" => :allowed_tools,
     "disallowed_tools" => :disallowed_tools,
-    "dangerously_skip_permissions" => :dangerously_skip_permissions,
     "append_system_prompt" => :append_system_prompt,
     "append_system_prompt_file" => :append_system_prompt_file,
     "add_dirs" => :add_dirs,
@@ -69,7 +75,13 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
           enum: ["low", "medium", "high", "xhigh", "max"],
           description: "Optional reasoning effort."
         },
-        permission_mode: %{type: "string", description: "Claude Code permission mode."},
+        permission_mode: %{
+          type: "string",
+          enum: ["acceptEdits", "auto", "manual", "dontAsk", "plan"],
+          description:
+            "Claude Code permission mode. Omit to use the operator's configured " <>
+              "posture. `auto` runs with the least friction while keeping the sandbox."
+        },
         allowed_tools: %{
           type: "array",
           items: %{type: "string"},
@@ -79,10 +91,6 @@ defmodule FermixCore.Tools.ClaudeCodeRun do
           type: "array",
           items: %{type: "string"},
           description: "Tool names to disallow."
-        },
-        dangerously_skip_permissions: %{
-          type: "boolean",
-          description: "Skip all permission prompts."
         },
         append_system_prompt: %{
           type: "string",
