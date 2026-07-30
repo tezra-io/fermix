@@ -8,6 +8,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **"I didn't get a response — please try again" is no longer the answer to a
+  request that actually worked.** When a reply from the primary provider was cut
+  off before it finished, Fermix read the silence as a complete answer that
+  happened to be empty: the turn ended with nothing to say, you got a canned retry
+  line, and nothing anywhere recorded a failure. It also lost work that had already
+  succeeded — a finished coding-agent run whose result was being written up came
+  back as that same line. A reply that arrives with nothing in it at all is now
+  treated as the failure it is, so it retries or moves to your next configured
+  provider, and when the provider says *why* it stopped, that reason is recorded
+  instead of discarded. A reply that was cut off partway still comes through:
+  a partial answer is more use than an error, and throwing it away would also
+  strand a turn that had already run tools.
+
 - **Asking a resumed Codex run for a sandbox level no longer fails.** Continuing a
   thread and choosing a sandbox posture in the same call was refused outright,
   because the resume command has no `-s` flag. It does accept the same setting as
