@@ -262,17 +262,29 @@ the payload + summary), the table is cleared by ANY marks-less pixel response (t
 described is gone), and a mark resolved from the table bypasses the A1 tripwire — its point is copied,
 not read off an image.
 
-**B4. Chromium AX activation — deterministic, observable, reversible.** When element enumeration returns
-empty, set `kAXManualAccessibility = true` on the focused app's `AXUIElement` (the ax module already
-holds this handle via `AXFocusedApplication`; the change adds the `AXUIElementSetAttributeValue` extern +
-`kCFBooleanTrue`) and re-enumerate once — unconditionally, no app-family sniffing: on a non-Chromium app
-the set is a harmless unknown-attribute error, which removes fuzzy bundle-name matching entirely. Only on
-a typed `kAXErrorAttributeUnsupported` is `AXEnhancedUserInterface` attempted instead — a deterministic
-criterion, not a preference chain — and it is second choice because it has known layout side effects
-(window managers react to it). The result note names which attribute activated ("AX activated via
-kAXManualAccessibility; 24 elements" / "activation failed: <error>"), and the session **clears the
-attribute it set on teardown** so one enumeration does not leave the user's browser in enhanced-AX mode.
-This revives the deterministic rail that was dead on incident nights 2–3.
+**B4. Accessibility target + activation — REVISED post-ship (compux 0.7.1), on live evidence.** The
+first-shipped form (activate on the `AXFocusedApplication` element) failed in production the same night:
+the focused-application query is unreliable from the spawned sidecar ("no focused application" reproduced
+on a quiet desktop with the signed binary), and during a voice call it resolves to the floating voice
+companion instead of the app on screen — the observed `-25208` (`kAXErrorNotImplemented`) was that
+attribute landing on a non-Chromium app. Live probes on Chrome 150 also showed **both** activation
+attributes refused (`AXManualAccessibility` −25205, `AXEnhancedUserInterface` −25208) while a bounded
+walk rooted at `AXUIElementCreateApplication(pid)` returns the full tree immediately — Chromium switches
+accessibility on for a *querying* AX client and builds its tree lazily. The shipped mechanism therefore:
+(1) resolves the target app **from the window list** — front-to-back candidates (minimized and Window
+Server windows excluded, off-display clipped, enumeration failure a typed note distinct from an empty
+desktop), the frontmost window with **substantial overlap** (≥10% of the request region) winning on
+stacking order so a maximized background window can never beat the window in front of it and a small
+always-on-top panel is never substantial, with raw max overlap only for a sparse desktop (pure
+`select_target`, unit-tested); (2) roots enumeration at that pid's own application element; (3) fires
+**one** typed activation attempt (falling through to `AXEnhancedUserInterface` on both typed rejections)
+**only when the app's tree walked to zero interactive nodes overall** — an app whose elements merely
+fall outside the view has nothing gated, and flipping enhanced-UI mode on it would be a pure side effect;
+(4) settle-polls the re-walk (5×300ms, exiting early once the tree appears); (5) names every outcome in
+the result — which app was read (success included), what activation did, how long the tree took — and
+still **clears any attribute it set on teardown**. Known accepted limitation: an app with no named
+on-screen window (a menu-bar app with an open popover) cannot be resolved from the window list; the old
+query never reached those reliably either, and the typed no-window note says what happened.
 
 **B5. Looser-of-two-budgets sent scale — one grid for everything.** The drafted "replace the long-edge
 cap with a pixel-area budget" was corrected at implementation: a *pure* area budget regresses large
