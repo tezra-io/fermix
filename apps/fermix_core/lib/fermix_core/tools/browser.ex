@@ -165,7 +165,8 @@ defmodule FermixCore.Tools.Browser do
       "On a desktop OS this IS a real window on the user's screen (it only runs headless on a " <>
       "display-less host, or if the operator configured that) — a separate profile from their " <>
       "own Chrome, but one they can see and touch. That makes it the RIGHT tool for a page you " <>
-      "and the human share — a board you play on together, a dashboard you both watch. " <>
+      "and the human share — a page you fill in or review together, a dashboard you both " <>
+      "watch, a game you play together. " <>
       "It also acts on a page the user watches in THEIR OWN browser whenever the page state is " <>
       "SERVER-synced under the same account (a live game, a shared doc): drive it here with " <>
       "exact element rails instead of pixel-aiming at their window — but never for a page " <>
