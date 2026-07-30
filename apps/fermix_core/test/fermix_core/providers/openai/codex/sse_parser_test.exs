@@ -4,8 +4,115 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
 
   describe "parse/1" do
-    test "empty body returns empty output, empty usage, nil model" do
-      assert SSEParser.parse("") == %{"output" => [], "usage" => %{}, "model" => nil}
+    test "empty body returns empty output, empty usage, nil model, and no terminal status" do
+      assert SSEParser.parse("") == %{
+               "output" => [],
+               "usage" => %{},
+               "model" => nil,
+               "status" => nil,
+               "failure" => nil
+             }
+    end
+
+    # `status` is the only thing separating "the stream ended early" from "the
+    # model had nothing to say": both leave output and usage bare, and the caller
+    # renders the second as a valid empty turn.
+    test "a terminal completed event sets status" do
+      sse = """
+      data: {"type":"response.completed","response":{"model":"gpt-5","usage":{"input_tokens":2,"output_tokens":3}}}
+
+      """
+
+      assert SSEParser.parse(sse)["status"] == "completed"
+    end
+
+    test "a terminal event's own status wins over the event name" do
+      sse = """
+      data: {"type":"response.done","response":{"status":"incomplete","model":"gpt-5"}}
+
+      """
+
+      assert SSEParser.parse(sse)["status"] == "incomplete"
+    end
+
+    test "response.failed keeps the server's error payload" do
+      sse = """
+      data: {"type":"response.failed","response":{"status":"failed","error":{"code":"server_error","message":"upstream blew up"}}}
+
+      """
+
+      result = SSEParser.parse(sse)
+      assert result["status"] == "failed"
+      assert result["failure"] == %{"code" => "server_error", "message" => "upstream blew up"}
+      assert result["usage"] == %{}
+    end
+
+    test "response.incomplete keeps its reason" do
+      sse = """
+      data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}
+
+      """
+
+      result = SSEParser.parse(sse)
+      assert result["status"] == "incomplete"
+      assert result["failure"] == %{"reason" => "max_output_tokens"}
+    end
+
+    test "a stream-level error event carries its inline payload" do
+      sse = """
+      data: {"type":"error","code":"rate_limit_exceeded","message":"slow down"}
+
+      """
+
+      result = SSEParser.parse(sse)
+      assert result["status"] == "failed"
+      assert result["failure"] == %{"code" => "rate_limit_exceeded", "message" => "slow down"}
+    end
+
+    # The pairing matters more than either half: a cut stream reports NO terminal
+    # status while still carrying output. `items` fills from output_item.added/.done,
+    # which are independent of `response.completed`, so "no status" must never be
+    # read as "nothing arrived".
+    test "a stream cut after real output reports no terminal status but keeps the output" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","content":[]}}
+
+      data: {"type":"response.output_text.delta","output_index":0,"delta":"partial"}
+
+      """
+
+      result = SSEParser.parse(sse)
+      assert result["status"] == nil
+      assert result["usage"] == %{}
+      assert [%{"type" => "message"}] = result["output"]
+    end
+
+    test "a declared failure after real output keeps both the output and the reason" do
+      sse = """
+      data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","content":[]}}
+
+      data: {"type":"response.output_item.done","output_index":0,"item":{"type":"message","content":[{"type":"output_text","text":"done bit"}]}}
+
+      data: {"type":"response.failed","response":{"status":"failed","error":{"message":"upstream died"}}}
+
+      """
+
+      result = SSEParser.parse(sse)
+      assert result["status"] == "failed"
+      assert result["failure"] == %{"message" => "upstream died"}
+      assert length(result["output"]) == 1
+    end
+
+    # The caller returns this turn, so it must be billed for what it generated.
+    test "an incomplete response's usage is kept, not read as zero" do
+      sse = """
+      data: {"type":"response.incomplete","response":{"status":"incomplete","model":"gpt-5","usage":{"input_tokens":900,"output_tokens":40},"incomplete_details":{"reason":"max_output_tokens"}}}
+
+      """
+
+      result = SSEParser.parse(sse)
+      assert result["usage"] == %{"input_tokens" => 900, "output_tokens" => 40}
+      assert result["model"] == "gpt-5"
     end
 
     test "skips malformed JSON lines and unknown event types without raising" do
