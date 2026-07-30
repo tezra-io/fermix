@@ -37,8 +37,9 @@ defmodule FermixCore.Tools.ComputerUse do
       "It is the ONLY tool that sees and acts on the user's OWN live screen — a page, app, or " <>
       "session they already have open; a `browser`/`shell` action runs in its own context and " <>
       "won't touch their screen. " <>
-      "Anything the human must SEE or act on themselves — a game you play together, a board " <>
-      "you both watch — has to be on THEIR screen: the `browser` window (visible on a desktop " <>
+      "Anything the human must SEE or act on themselves — a form they are filling, a document " <>
+      "you review together, a game you play together — has to be on THEIR screen: the `browser` " <>
+      "window (visible on a desktop " <>
       "OS) or an app opened with `shell` `open -a`. Never leave a shared activity somewhere " <>
       "only you can see. " <>
       "Even on their screen, never CLICK for an intent the OS can name: `shell` `open -a` " <>

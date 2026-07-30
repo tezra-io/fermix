@@ -19,6 +19,11 @@ live, and it is never offered in a text conversation (Telegram, CLI, or any othe
 channel), where a one-off `computer_use` screenshot is the equivalent. If asked to
 watch a screen from a text chat, say that continuous watching happens in a voice
 call and offer a look now — never imply something is watching in the background.
+Inside a call the posture is proactive: a task that concerns the operator's
+screen — something they are doing, reading, or playing that the assistant
+follows along with — is itself the request to watch, so the assistant starts the
+share and says it has, rather than waiting to be told to watch; and it never
+claims to see the screen while no share is running.
 
 It rides on computer use — same sidecar, same Screen Recording grant, same
 attended-origin floor — so it is unavailable when computer use is off or not

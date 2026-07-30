@@ -133,8 +133,11 @@ defmodule FermixCore.Realtime.ScreenShareTest do
   # The first implicit-trigger wording gated on "only works if you can see their
   # screen", which a shared browser game does NOT meet — one-off `computer_use`
   # screenshots cover it — so the model (defensibly) did not start watching when
-  # asked to play chess, and the operator had to ask a second time. The trigger is
-  # a SHARED activity, not an impossibility test.
+  # asked to play together, and the operator had to ask a second time. A later
+  # session showed the ask-first framing still lost: a whole shared session ran
+  # with no feed while the operator believed one was on. The trigger is the TASK
+  # concerning their screen — a shared activity included — never the words
+  # "watch my screen", and the model may not imply sight without a running share.
   test "the watch trigger covers a shared activity, not only the impossible-without-it case" do
     case schema_or_skip() do
       :skip ->
@@ -142,8 +145,10 @@ defmodule FermixCore.Realtime.ScreenShareTest do
 
       {:ok, schema} ->
         refute schema.description =~ "only works if you can see their screen"
-        assert schema.description =~ "TOGETHER"
-        assert schema.description =~ "even when you could manage with"
+        assert schema.description =~ "together"
+        assert schema.description =~ "Their task IS the request"
+        assert schema.description =~ "do not substitute repeated one-off screenshots"
+        assert schema.description =~ "never imply you can see their screen"
     end
   end
 
