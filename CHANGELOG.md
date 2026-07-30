@@ -6,6 +6,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Asking a resumed Codex run for a sandbox level no longer fails.** Continuing a
+  thread and choosing a sandbox posture in the same call was refused outright,
+  because the resume command has no `-s` flag. It does accept the same setting as
+  a config override, so the posture is now honored on both kinds of run. A resumed
+  thread already keeps the posture it was started with, so this matters when you
+  want to *change* it partway through — which is exactly when the refusal used to
+  cost a wasted step. Two parameters are still refused on a resume, each for its
+  own reason, and the message now says which and what to do instead.
+- **Coding-harness parameter errors are readable.** A refused parameter came back
+  as raw internal syntax — `{:param_not_supported_with_resume, :sandbox}` was
+  delivered verbatim in a real run — which reads as a broken Fermix rather than a
+  request the coding CLI cannot serve. Every one of these now states the problem
+  and names the next move, for both Codex and Claude Code: a bad effort or
+  permission mode lists the levels that exist, combining `resume` with `continue`
+  explains why they conflict, and a directory outside the sandbox names the
+  directory and how to grant it instead of printing an internal tag.
+
 ## [0.7.0] - 2026-07-28
 
 ### Added
