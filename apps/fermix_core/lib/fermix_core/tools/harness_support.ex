@@ -267,8 +267,61 @@ defmodule FermixCore.Tools.HarnessSupport do
   defp format_error({:invalid_param, :attempts, value}),
     do: "Invalid parameter: attempts (expected an integer 1-4, got #{inspect(value)})"
 
+  defp format_error({:invalid_param, key, value}),
+    do: "Invalid parameter: #{key} (got #{inspect(value)})"
+
   defp format_error({:invalid_option, key}), do: "Invalid option: #{key}"
   defp format_error({:unknown_param, key}), do: "Unknown parameter: #{key}"
+
+  # The adapters mint typed param refusals, and without a clause here they reached
+  # the model as inspected Elixir (`{:param_not_supported_with_resume, :sandbox}`
+  # was delivered verbatim in a live trace) — unreadable as "the vendor cannot do
+  # this" rather than "Fermix is broken". Each names the next move, since the
+  # caller has to change the call to get anywhere.
+  defp format_error({:param_not_supported_with_resume, key}) do
+    "#{key} cannot be set when resuming a Codex thread — the resume command has no " <>
+      "form for it. Drop #{key} to continue the thread as it stands, or omit `resume` " <>
+      "to start a fresh run with it."
+  end
+
+  defp format_error(:ephemeral_not_resumable) do
+    "An ephemeral run writes no session files, so there is no thread to resume. " <>
+      "Drop `ephemeral` to make this run resumable, or drop `resume` to start fresh."
+  end
+
+  defp format_error({:invalid_sandbox, value}) do
+    "Invalid sandbox mode: #{inspect(value)}. Selectable modes are `read-only` and " <>
+      "`workspace-write`; omit the parameter to use the operator's configured posture."
+  end
+
+  # Claude Code's own three. `--resume` there is a flat option that coexists with
+  # every other flag, so it has no "not supported with resume" class — but it does
+  # mint its own enum and mutual-exclusion refusals, which leaked the same way.
+  defp format_error({:invalid_effort, value}) do
+    "Invalid effort: #{inspect(value)}. Levels are `low`, `medium`, `high`, `xhigh` " <>
+      "and `max`; omit the parameter to use the model's default."
+  end
+
+  defp format_error({:invalid_permission_mode, value}) do
+    "Invalid permission mode: #{inspect(value)}. Modes are `acceptEdits`, `auto`, " <>
+      "`manual`, `dontAsk` and `plan`; omit the parameter to use the operator's " <>
+      "configured posture."
+  end
+
+  defp format_error(:resume_and_continue) do
+    "`resume` names one session and `continue` picks the most recent, so they cannot " <>
+      "be combined. Keep `resume` with the session id, or drop it and use `continue` alone."
+  end
+
+  # Shared by both adapters, and the most reachable of this family: any path-bearing
+  # param (`add_dirs`, `images`, `append_system_prompt_file`) the model names outside
+  # the granted roots lands here. Names the param, then the way to widen the roots —
+  # a bare reason tuple told the model neither.
+  defp format_error({:path_denied, key, reason}),
+    do: "#{key}: #{format_path_reason(reason)}"
+
+  defp format_error(:missing_cwd),
+    do: "A coding run needs a working directory; none was resolved for this call."
 
   # Name the value AND the way forward: the model's next move is to drop the
   # param (inheriting the operator's configured posture), not to guess another
@@ -349,6 +402,20 @@ defmodule FermixCore.Tools.HarnessSupport do
         cloud_task_pointer(task_url)
 
   defp format_error(reason), do: inspect(reason)
+
+  # Only the two denials a harness path param actually produces. The sandbox's
+  # reason set is open, so an unrecognized one still says what happened and which
+  # param — it just cannot name the remedy. (Several tools carry their own private
+  # copy of a fuller ladder; unifying them is its own change, not this one.)
+  defp format_path_reason({:outside_root, path}) do
+    "#{path} is outside the sandbox roots. Call request_directory_access to ask the " <>
+      "owner to approve it, or have them run: fermix grant path #{Path.dirname(path)}"
+  end
+
+  defp format_path_reason({:protected_path, path}),
+    do: "#{path} is protected by the sandbox and cannot be opened to a coding run."
+
+  defp format_path_reason(reason), do: "path denied by the sandbox — #{inspect(reason)}"
 
   defp cloud_task_pointer(url) when is_binary(url) and url != "", do: ": #{url}"
   defp cloud_task_pointer(_url), do: "."

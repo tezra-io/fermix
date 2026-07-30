@@ -7,13 +7,31 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
   --skip-git-repo-check [params] -o <slot> <prompt>`. Verified against codex-cli
   0.144.4 `codex exec --help` / `codex exec resume --help`.
 
-  Schema'd params: `model`, `effort` (rendered as the ONE sanctioned `-c
-  model_reasoning_effort=<v>`, never raw `-c`), `sandbox`, `add_dirs`,
+  Schema'd params: `model`, `effort` (rendered as `-c model_reasoning_effort=<v>`),
+  `sandbox` (`-s`, or `-c sandbox_mode=<v>` on a resume), `add_dirs`,
   `ephemeral`, `profile`, `images`, `output_schema`, `resume`. `ephemeral`
   writes no session files, so it forces `resumable: false` and is rejected with
-  `resume`. The `resume` subcommand does not accept `-C`/`-s`/`--add-dir`/`-p`
-  (verified), so those params fail loud when combined with `resume` rather than
-  being silently dropped.
+  `resume`.
+
+  The `resume` subcommand accepts none of `-C`/`-s`/`--add-dir`/`-p` (verified —
+  clap answers `-s` with "unexpected argument"), but a missing *flag* is not a
+  missing *capability*, and the difference decides whether a param is refused or
+  translated:
+
+    * `sandbox` **is** honored on a resume, as `-c sandbox_mode=<v>` — a typed
+      config override the resume head does accept. Verified live against codex-cli
+      0.145.0: a resumed turn inherits the thread's recorded policy (a resume with
+      no override kept `workspace-write` where the flagless default is
+      `read-only`), and the override beats that inheritance (`sandbox_mode=read-only`
+      on the same thread landed `read-only`). So it is only *needed* to change
+      posture mid-thread — which is exactly when refusing it costs the caller a
+      turn for nothing.
+    * `add_dirs` and `profile` are still refused, each for its own reason.
+      `-c profile=` is rejected by codex outright ("legacy `profile` config is no
+      longer supported"), and the config analogue of `--add-dir`,
+      `sandbox_workspace_write.writable_roots`, **replaces** the operator's
+      configured list where the flag adds to it — honoring it that way could
+      silently narrow a sandbox Fermix cannot read in order to merge.
   """
 
   @behaviour FermixCore.Harness.Adapter
@@ -32,8 +50,12 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
 
   @known_params ~w(model effort sandbox add_dirs ephemeral profile images output_schema resume)a
 
-  # add_dirs/sandbox/profile have no expression on `codex exec resume`.
-  @resume_incompatible ~w(sandbox add_dirs profile)a
+  # No expression on `codex exec resume` — not even a config one (see the
+  # moduledoc: `profile` is rejected outright there, and `writable_roots` replaces
+  # rather than adds). `sandbox` is absent from this list on purpose: its flag is
+  # rejected on resume but its config form is honored, so it is translated in
+  # `sandbox_args/1` rather than refused.
+  @resume_incompatible ~w(add_dirs profile)a
 
   @impl true
   @spec vendor() :: String.t()
@@ -163,6 +185,12 @@ defmodule FermixCore.Harness.Adapters.CodexExec do
 
   defp effort_args(%{effort: bad}), do: {:error, {:invalid_param, :effort, bad}}
   defp effort_args(_params), do: {:ok, []}
+
+  # The resume clause comes first: the resume head rejects `-s`, so the same
+  # posture rides the config override it does accept (moduledoc for the live
+  # verification). One posture, two spellings — not two code paths.
+  defp sandbox_args(%{sandbox: sandbox, resume: _thread_id}) when sandbox in @sandbox_modes,
+    do: {:ok, ["-c", "sandbox_mode=" <> sandbox]}
 
   defp sandbox_args(%{sandbox: sandbox}) when sandbox in @sandbox_modes,
     do: {:ok, ["-s", sandbox]}

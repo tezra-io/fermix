@@ -266,6 +266,78 @@ defmodule FermixCore.Tools.CodexRunTest do
       assert {:ok, %{success: false, error: error}} = CodexRun.execute(run_args(ctx.cwd), context)
       assert error =~ "concurrent-run limit"
     end
+
+    # The adapter's typed param refusals had no rendering, so they reached the
+    # model as inspected Elixir — a live trace shows the model handed
+    # `{:param_not_supported_with_resume, :sandbox}` as the entire error, which
+    # cannot be read as "codex cannot do this" rather than "Fermix is broken".
+    # Every reason the adapter can mint must render as prose naming the next move.
+    test "an adapter param refusal reaches the model as prose, never an Elixir tuple", ctx do
+      cases = [
+        {{:param_not_supported_with_resume, :profile}, ["profile", "resum"]},
+        {:ephemeral_not_resumable, ["ephemeral", "resum"]},
+        {{:invalid_sandbox, "nope"}, ["nope", "read-only"]},
+        {{:invalid_param, :effort, "turbo"}, ["effort", "turbo"]},
+        {:missing_cwd, ["working directory"]}
+      ]
+
+      for {{reason, expected}, index} <- Enum.with_index(cases) do
+        # A distinct child id per case: `stub_manager/1` supervises under the
+        # module name, which collides on the second start inside one test.
+        manager =
+          start_supervised!(
+            Supervisor.child_spec(
+              {StubManager, %{start_run_reply: {:error, reason}, sink: self()}},
+              id: {StubManager, index}
+            )
+          )
+
+        context = attended_context(ctx.cwd, manager)
+
+        assert {:ok, %{success: false, error: error}} =
+                 CodexRun.execute(run_args(ctx.cwd), context)
+
+        refute error =~ "{:", "#{inspect(reason)} leaked an Elixir tuple: #{error}"
+
+        for fragment <- expected do
+          assert error =~ fragment, "#{inspect(reason)} rendered without #{fragment}: #{error}"
+        end
+      end
+    end
+
+    # Claude Code mints its own refusals. It has no resume-incompatibility class —
+    # `claude --resume` is a flat option that coexists with every other flag — but
+    # its enums and its resume/continue exclusion leaked the same raw tuples, and
+    # `path_denied` is shared by both adapters.
+    test "Claude's own param refusals render as prose too", ctx do
+      cases = [
+        {{:invalid_effort, "turbo"}, ["turbo", "xhigh"]},
+        {{:invalid_permission_mode, "yolo"}, ["yolo", "acceptEdits"]},
+        {:resume_and_continue, ["resume", "continue"]},
+        {{:path_denied, :add_dirs, {:outside_root, "/etc/x"}}, ["add_dirs", "/etc/x", "grant"]}
+      ]
+
+      for {{reason, expected}, index} <- Enum.with_index(cases) do
+        manager =
+          start_supervised!(
+            Supervisor.child_spec(
+              {StubManager, %{start_run_reply: {:error, reason}, sink: self()}},
+              id: {StubManager, {:claude, index}}
+            )
+          )
+
+        context = attended_context(ctx.cwd, manager)
+
+        assert {:ok, %{success: false, error: error}} =
+                 ClaudeCodeRun.execute(run_args(ctx.cwd), context)
+
+        refute error =~ "{:", "#{inspect(reason)} leaked an Elixir tuple: #{error}"
+
+        for fragment <- expected do
+          assert error =~ fragment, "#{inspect(reason)} rendered without #{fragment}: #{error}"
+        end
+      end
+    end
   end
 
   # --- First-use consent gate (design §23.3) -------------------------------
