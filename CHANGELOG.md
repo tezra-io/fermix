@@ -6,6 +6,36 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-30
+
+### Added
+
+- **Claude Opus 5 on the Anthropic provider.** `claude-opus-5` joins the model
+  catalog (1M context, 128k output ceiling) and is offered as the best-quality
+  Anthropic choice in the CLI wizard and web setup — set it with
+  `[fermix_core.providers.anthropic] default_model = "claude-opus-5"`. It rides
+  the same adaptive-thinking + `reasoning_effort` wire as Opus 4.8.
+
+- **Voice calls can watch your screen.** Ask a call to watch, look at, or follow
+  along with your screen and it watches that display for the rest of the call —
+  playing a game with you, working through a page you are both reading, helping
+  with an app. Changed frames join the conversation quietly: a still screen sends
+  nothing and a frame never makes the agent speak on its own, so it answers about
+  the screen when you ask instead of narrating it. It rides on computer use (same
+  helper, same macOS Screen Recording permission) and refuses to start rather than
+  streaming blank frames if that permission is missing. Consent is per call:
+  "stop watching" ends it, and hanging up always does. Withhold it entirely with
+  `[fermix_core.realtime] screen_share = false`.
+- **The browser can measure an element.** `act` with `kind: "get"` and
+  `field: "rect"` returns the viewport box of the first `selector` match, in the
+  same coordinate space `click_coords` clicks in — so a board, map, or chart that
+  exposes no clickable elements can still be driven exactly, instead of by
+  guessing pixels.
+- **Computer use can list open windows.** A `windows` action returns each window
+  with a ready-made zoom region, so on a large or ultrawide display the agent
+  crops to the app it is working in instead of spending its whole image budget on
+  desktop it does not care about.
+
 ### Fixed
 
 - **A brief provider hiccup no longer quietly moves your whole turn to a
@@ -52,38 +82,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   permission mode lists the levels that exist, combining `resume` with `continue`
   explains why they conflict, and a directory outside the sandbox names the
   directory and how to grant it instead of printing an internal tag.
-
-## [0.7.0] - 2026-07-28
-
-### Added
-
-- **Claude Opus 5 on the Anthropic provider.** `claude-opus-5` joins the model
-  catalog (1M context, 128k output ceiling) and is offered as the best-quality
-  Anthropic choice in the CLI wizard and web setup — set it with
-  `[fermix_core.providers.anthropic] default_model = "claude-opus-5"`. It rides
-  the same adaptive-thinking + `reasoning_effort` wire as Opus 4.8.
-
-- **Voice calls can watch your screen.** Ask a call to watch, look at, or follow
-  along with your screen and it watches that display for the rest of the call —
-  playing a game with you, working through a page you are both reading, helping
-  with an app. Changed frames join the conversation quietly: a still screen sends
-  nothing and a frame never makes the agent speak on its own, so it answers about
-  the screen when you ask instead of narrating it. It rides on computer use (same
-  helper, same macOS Screen Recording permission) and refuses to start rather than
-  streaming blank frames if that permission is missing. Consent is per call:
-  "stop watching" ends it, and hanging up always does. Withhold it entirely with
-  `[fermix_core.realtime] screen_share = false`.
-- **The browser can measure an element.** `act` with `kind: "get"` and
-  `field: "rect"` returns the viewport box of the first `selector` match, in the
-  same coordinate space `click_coords` clicks in — so a board, map, or chart that
-  exposes no clickable elements can still be driven exactly, instead of by
-  guessing pixels.
-- **Computer use can list open windows.** A `windows` action returns each window
-  with a ready-made zoom region, so on a large or ultrawide display the agent
-  crops to the app it is working in instead of spending its whole image budget on
-  desktop it does not care about.
-
-### Fixed
 
 - **Voice calls were running without their own rules.** The voice-only rules file
   (`REALTIME.md` — speak briefly, lead with the answer, do not narrate tool use)
