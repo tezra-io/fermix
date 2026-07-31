@@ -2450,7 +2450,15 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Provider probe is running."
       assert html =~ "Probe running"
 
+      # The provider and channel probes are INDEPENDENTLY async and land in either
+      # order, so waiting on one and asserting the other is a race: on a loaded
+      # runner the channel probe arrives first and the provider assertion fires
+      # against a view that has not received it yet (observed on macos-arm64 CI,
+      # green on the same commit in another run). Wait for each signal on its own —
+      # the view's state is cumulative, so the last render carries both.
+      render_until(view, "openai gpt-5.5 responded")
       html = render_until(view, "bot @fermix_test authenticated")
+
       assert html =~ "openai gpt-5.5 responded"
       assert html =~ "bot @fermix_test authenticated"
     end
