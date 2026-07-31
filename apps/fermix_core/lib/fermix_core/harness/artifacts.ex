@@ -216,7 +216,7 @@ defmodule FermixCore.Harness.Artifacts do
     if min_free_gb == 0 do
       :ok
     else
-      free_bytes = Keyword.get(opts, :free_bytes, &df_free_bytes/1)
+      free_bytes = Keyword.get(opts, :free_bytes, &df_free_bytes(&1, opts))
       evaluate_free_space(free_bytes.(root), min_free_gb * @bytes_per_gb)
     end
   end
@@ -232,10 +232,16 @@ defmodule FermixCore.Harness.Artifacts do
     {:error, {:artifact_quota, %{kind: :free_space_unknown, reason: reason}}}
   end
 
-  defp df_free_bytes(path) do
+  # `:supervised` is threaded rather than assumed: the daemon spawns `df` under
+  # its `CommandHost` (the default), but `fermix doctor` calls this from a
+  # tree-less CLI process where `CommandRunner.resolve_supervisor!/1` RAISES —
+  # which aborted the whole verb before it printed a single check line, on every
+  # host, because `enabled` defaults true so this probe always ran. `Vendors`
+  # already carries the same seam for its `--version` probe.
+  defp df_free_bytes(path, opts) do
     case System.find_executable("df") do
       nil -> {:error, :df_unavailable}
-      df -> run_df(df, existing_ancestor(path))
+      df -> run_df(df, existing_ancestor(path), opts)
     end
   end
 
@@ -256,8 +262,13 @@ defmodule FermixCore.Harness.Artifacts do
     end
   end
 
-  defp run_df(df, path) do
-    case CommandRunner.run(df, ["-Pk", path], timeout_ms: @df_timeout_ms) do
+  defp run_df(df, path, opts) do
+    run_opts =
+      opts
+      |> Keyword.take([:supervised, :dynamic_supervisor])
+      |> Keyword.put(:timeout_ms, @df_timeout_ms)
+
+    case CommandRunner.run(df, ["-Pk", path], run_opts) do
       {:ok, %{exit: 0, stdout: out}} -> parse_df(out)
       {:ok, %{exit: code}} -> {:error, {:df_failed, code}}
       {:error, reason} -> {:error, reason}

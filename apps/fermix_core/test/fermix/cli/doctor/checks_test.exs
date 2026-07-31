@@ -1056,6 +1056,14 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     }
   end
 
+  # NOTE: every test here injects `quota:`, so none exercises the real
+  # `Artifacts.admission_check/1`. That is deliberate (hermetic), but it is also
+  # why the tree-less abort that killed the whole `doctor` verb was invisible
+  # here — and it cannot be fixed at this level: `mix test` boots the supervision
+  # tree, so a supervised probe always succeeds in this process no matter what
+  # the call site passes. The mechanism is pinned one level down, in
+  # `Harness.ArtifactsTest`, where a dead supervisor name reproduces the CLI's
+  # world for real.
   describe "harness/1" do
     test "skips (nil) when disabled and no vendor CLI is present" do
       assert Checks.harness(
