@@ -8,6 +8,21 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A brief provider hiccup no longer quietly moves your whole turn to a
+  different model.** When the provider you normally use hit a momentary failure
+  — a capacity blip, a dropped connection — Fermix moved straight to your next
+  configured provider on the very first error. That provider is a different
+  model, and whichever one answers keeps the rest of the turn, so a few seconds
+  of trouble could hand an entire conversation or scheduled job to a smaller
+  model for its whole run, still reported as a success, with nothing anywhere
+  saying the model had changed. The original provider is now tried again a few
+  times, with a short growing pause between attempts, before anything moves.
+  Moving on still happens once those retries are spent, so a real outage is
+  still covered, and errors that a retry cannot fix still move on immediately.
+  Scheduled jobs are unchanged for now: they deliberately opt out of this retry
+  and keep their own slower one, so they still move to the next provider on the
+  first hiccup.
+
 - **"I didn't get a response — please try again" is no longer the answer to a
   request that actually worked.** When a reply from the primary provider was cut
   off before it finished, Fermix read the silence as a complete answer that

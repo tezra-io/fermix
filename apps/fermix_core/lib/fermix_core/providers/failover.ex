@@ -98,19 +98,21 @@ defmodule FermixCore.Providers.Failover do
     attempt_with_retry(route, route_key, rest, ctx, tried, 0)
   end
 
-  # Inner loop: bounded same-provider retry for a transient flake — retry THIS
-  # route rather than burn a failover hop or hard-fail. Retry only when the
-  # error is transient AND either it is the network-wide `:connection_unavailable`
-  # (failover can't help — every provider shares the dead local network) OR this
-  # is the last route (nothing to fail over to). Otherwise hand off to the
-  # failover/halt path unchanged.
+  # Inner loop: bounded same-provider retry for a transient flake — exhaust THIS
+  # route before burning a failover hop. Hopping first looks cheaper, but the
+  # next route is a different MODEL, and the agent loop pins the winning route
+  # for the remainder of the tool loop: one capacity blip on the primary then
+  # costs the whole run its model, silently, under a `status: ok`. A transient
+  # is by definition the case a retry clears, so spend the retry budget here and
+  # fail over only once it is gone. Non-transient errors still hand off to the
+  # failover/halt path on the first error, unchanged.
   defp attempt_with_retry(route, route_key, rest, ctx, tried, attempt) do
     case ctx.attempt_fn.(route) do
       {:ok, result} ->
         {:ok, result}
 
       {:error, reason} ->
-        if retry_same?(reason, rest, ctx, attempt) do
+        if retry_same?(reason, ctx, attempt) do
           delay_ms = retry_backoff_ms(ctx, attempt)
 
           Logger.warning(
@@ -127,10 +129,8 @@ defmodule FermixCore.Providers.Failover do
     end
   end
 
-  defp retry_same?(reason, rest, ctx, attempt) do
-    attempt < ctx.max_retries and
-      ctx.retryable_fn.(reason) and
-      (Transient.connection_unavailable?(reason) or rest == [])
+  defp retry_same?(reason, ctx, attempt) do
+    attempt < ctx.max_retries and ctx.retryable_fn.(reason)
   end
 
   defp retry_backoff_ms(ctx, attempt), do: ctx.base_delay_ms * Integer.pow(2, attempt)
