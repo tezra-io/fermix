@@ -570,8 +570,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert_receive {:plugin_auth_started, "google_calendar"}
       assert render(view) =~ "https://auth.example/google_calendar"
 
-      Process.sleep(60)
-      refute render(view) =~ "https://auth.example/google_calendar"
+      # The link is dropped by a 20 ms expiry timer. Sleeping a fixed 60 ms
+      # asserted that this host fired that timer AND re-rendered inside a 3x
+      # margin — on a loaded CI runner it does not, and the refute failed with
+      # the link still on screen. Poll the actual condition instead, bounded.
+      assert render_until_missing(view, "https://auth.example/google_calendar"),
+             "the expired sign-in link is still rendered"
     end
 
     test "the OAuth client modal stays closed until Connect, then opens on credentials", %{
@@ -3164,6 +3168,21 @@ defmodule FermixWebWeb.SetupLiveTest do
     else
       Process.sleep(25)
       render_until(view, expected, attempts - 1)
+    end
+  end
+
+  # The inverse of `render_until/3`: poll until `expected` is GONE. Returns
+  # false once the budget is spent, so the caller still asserts.
+  defp render_until_missing(view, expected, attempts \\ 40)
+
+  defp render_until_missing(_view, _expected, 0), do: false
+
+  defp render_until_missing(view, expected, attempts) do
+    if render(view) =~ expected do
+      Process.sleep(25)
+      render_until_missing(view, expected, attempts - 1)
+    else
+      true
     end
   end
 
